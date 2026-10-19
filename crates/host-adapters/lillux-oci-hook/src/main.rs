@@ -88,11 +88,10 @@ fn reconcile_records(first: LifecycleRecord, second: LifecycleRecord) -> Result<
     {
         bail!("container index and app-root lease disagree on immutable authority");
     }
-    if let Some((a, b)) = first.preparation.as_ref().zip(second.preparation.as_ref()) {
-        if !a.supersedes(b) && !b.supersedes(a) {
+    if let Some((a, b)) = first.preparation.as_ref().zip(second.preparation.as_ref())
+        && !a.supersedes(b) && !b.supersedes(a) {
             bail!("lifecycle indexes disagree on original preparation evidence");
         }
-    }
     let choose_first = if phase_rank(first.phase) == phase_rank(second.phase) {
         match (&first.preparation, &second.preparation) {
             (Some(a), Some(b)) => a.supersedes(b),

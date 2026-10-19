@@ -111,7 +111,7 @@ fn run_content_pin_prepared(
     if schema.excludes_relative_path(Path::new(&target.bare_id)) {
         bail!("project item is beneath a kind-excluded auxiliary directory");
     }
-    let (item_parent, item_name, item_relative, source_format, mut original_file) =
+    let (item_parent, item_name, item_relative, source_format, original_file) =
         open_item_source(&project_root, schema, &target.bare_id)?;
     let ai_root = project_path.join(ryeos_engine::AI_DIR);
     if crate::actions::runtime_owned::is_runtime_owned_file(
@@ -132,7 +132,7 @@ fn run_content_pin_prepared(
     }
     let original_mode = original_observation.permission_mode()?;
     let original = lillux::read_open_regular_file_stable_bounded(
-        &mut original_file,
+        &original_file,
         &original_observation,
         ryeos_engine::item_resolution::MAX_ITEM_SOURCE_BYTES,
     )
@@ -249,7 +249,7 @@ fn run_content_pin_prepared(
         bail!("external content changed during pin authoring; item was not modified");
     }
     let current_original = lillux::read_open_regular_file_stable_bounded(
-        &mut original_file,
+        &original_file,
         &original_observation,
         ryeos_engine::item_resolution::MAX_ITEM_SOURCE_BYTES,
     )?;
@@ -300,9 +300,9 @@ fn run_content_pin_prepared(
                 if !observed.matches_quarantined_incumbent(&expected_observation) {
                     bail!("project item metadata changed before publication");
                 }
-                let mut incumbent = incumbent.try_clone()?;
+                let incumbent = incumbent.try_clone()?;
                 let bytes = lillux::read_open_regular_file_stable_bounded(
-                    &mut incumbent,
+                    &incumbent,
                     &observed,
                     ryeos_engine::item_resolution::MAX_ITEM_SOURCE_BYTES,
                 )?;
@@ -555,7 +555,7 @@ impl ryeos_engine::project_content::AuthoritativeProjectContent for PinnedProjec
         let (parent, name) = self
             .open_parent(relative_path)
             .map_err(Self::engine_error)?;
-        let Some(mut file) = parent
+        let Some(file) = parent
             .open_regular(name, false)
             .map_err(Self::engine_error)?
         else {
@@ -563,7 +563,7 @@ impl ryeos_engine::project_content::AuthoritativeProjectContent for PinnedProjec
         };
         let observation = lillux::observe_open_regular_file(&file).map_err(Self::engine_error)?;
         let bytes =
-            lillux::read_open_regular_file_stable_bounded(&mut file, &observation, max_bytes)
+            lillux::read_open_regular_file_stable_bounded(&file, &observation, max_bytes)
                 .map_err(Self::engine_error)?;
         let digest = lillux::sha256_hex(&bytes);
         if self
@@ -601,9 +601,9 @@ impl ryeos_engine::project_content::AuthoritativeProjectContent for PinnedProjec
                 "project trust document exceeds its byte bound",
             ));
         }
-        let mut descriptor = file.try_clone().map_err(Self::engine_error)?;
+        let descriptor = file.try_clone().map_err(Self::engine_error)?;
         let (digest, _) =
-            lillux::digest_open_regular_file_stable_exact(&mut descriptor, observation.size())
+            lillux::digest_open_regular_file_stable_exact(&descriptor, observation.size())
                 .map_err(Self::engine_error)?;
         parent.ensure_path_binding().map_err(Self::engine_error)?;
         Ok(digest == content_hash)

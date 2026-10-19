@@ -180,11 +180,9 @@ struct RawPutEnvelope {
 }
 
 #[derive(Debug)]
+#[derive(Default)]
 struct BoundedRawEntries(Vec<Box<serde_json::value::RawValue>>);
 
-impl Default for BoundedRawEntries {
-    fn default() -> Self { Self(Vec::new()) }
-}
 
 impl<'de> serde::Deserialize<'de> for BoundedRawEntries {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {

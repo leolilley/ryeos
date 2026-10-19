@@ -86,14 +86,14 @@ pub fn observe_current_publisher_tool() -> anyhow::Result<ObservedPublisherToolI
             metadata.len() == after.len(),
             "running publisher executable changed while it was measured"
         );
-        return Ok(ObservedPublisherToolIdentity {
+        Ok(ObservedPublisherToolIdentity {
             schema: "ryeos.observed_bundle_publisher_tool.v1".to_owned(),
             effective_definition_digest: format!(
                 "{:x}",
                 Sha256::digest(PUBLISHER_TOOL_DEFINITION_V1)
             ),
             artifact_identity_hash,
-        });
+        })
     }
     #[cfg(not(target_os = "linux"))]
     {

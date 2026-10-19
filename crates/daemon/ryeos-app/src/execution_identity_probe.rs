@@ -222,7 +222,7 @@ fn probe_cpu_description() -> (Option<String>, Vec<String>) {
         let Ok(cpuinfo) = std::fs::read_to_string("/proc/cpuinfo") else {
             return (None, Vec::new());
         };
-        return parse_linux_cpuinfo(&cpuinfo);
+        parse_linux_cpuinfo(&cpuinfo)
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -240,11 +240,10 @@ fn parse_linux_cpuinfo(cpuinfo: &str) -> (Option<String>, Vec<String>) {
         };
         let key = key.trim();
         let value = value.trim();
-        if model.is_none() && matches!(key, "model name" | "Processor" | "cpu model") {
-            if !value.is_empty() {
+        if model.is_none() && matches!(key, "model name" | "Processor" | "cpu model")
+            && !value.is_empty() {
                 model = Some(value.to_owned());
             }
-        }
         if matches!(key, "flags" | "Features") {
             features.extend(value.split_ascii_whitespace().map(str::to_owned));
         }

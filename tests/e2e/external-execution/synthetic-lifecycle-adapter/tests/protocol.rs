@@ -4855,7 +4855,7 @@ async fn evaluate_integrate_and_publish_candidate(
     let workflow_chain_root = frozen_session.chain_root_id.clone();
     let service_owner = frozen_session.owner_principal.clone();
     let validated = execute_recorded_service(
-        &state,
+        state,
         &service_owner,
         "service:worker-executions/validate-candidate-closure-and-base",
         serde_json::json!({
@@ -4881,9 +4881,9 @@ async fn evaluate_integrate_and_publish_candidate(
     state
         .state_store
         .write_project_head_ref(
-            &principal_key,
+            principal_key,
             &project_hash,
-            &base_snapshot_hash,
+            base_snapshot_hash,
             &ryeos_app::state_store::NodeIdentitySigner::from_identity(&state.identity),
             &guard,
         )
@@ -4901,7 +4901,7 @@ async fn evaluate_integrate_and_publish_candidate(
         &lillux::sha256_hex(b"external-candidate-e2e-evaluate-c")[..32]
     );
     let evaluator_launch = execute_recorded_service(
-        &state,
+        state,
         &service_owner,
         "service:worker-executions/start-candidate-evaluation",
         serde_json::json!({
@@ -4923,7 +4923,7 @@ async fn evaluate_integrate_and_publish_candidate(
         evaluator_launch.value["chain_root_id"], evaluator_thread_id,
         "candidate evaluator must be an independent root chain"
     );
-    let evaluator_terminal = wait_for_terminal_thread(&state, &evaluator_thread_id).await;
+    let evaluator_terminal = wait_for_terminal_thread(state, &evaluator_thread_id).await;
     if publication == PublicationScenario::StaleBase {
         eprintln!("stale-base fixture: independent C evaluation settled");
     }
@@ -4955,7 +4955,7 @@ async fn evaluate_integrate_and_publish_candidate(
         &lillux::sha256_hex(b"external-candidate-e2e-integrate-d")[..32]
     );
     let qualified_c = execute_recorded_service(
-        &state,
+        state,
         &service_owner,
         "service:worker-executions/qualify-candidate",
         serde_json::json!({
@@ -4979,7 +4979,7 @@ async fn evaluate_integrate_and_publish_candidate(
         .to_owned();
 
     let integration_launch = execute_recorded_service(
-        &state,
+        state,
         &service_owner,
         "service:worker-executions/start-candidate-integration",
         serde_json::json!({
@@ -5003,7 +5003,7 @@ async fn evaluate_integrate_and_publish_candidate(
         .as_str()
         .expect("integration launch returned its exact thread")
         .to_owned();
-    let integration_terminal = wait_for_terminal_thread(&state, &integration_thread_id).await;
+    let integration_terminal = wait_for_terminal_thread(state, &integration_thread_id).await;
     if publication == PublicationScenario::StaleBase {
         eprintln!("stale-base fixture: integration D settled");
     }
@@ -5063,7 +5063,7 @@ async fn evaluate_integrate_and_publish_candidate(
         &lillux::sha256_hex(b"external-candidate-e2e-evaluate-d")[..32]
     );
     let integrated_evaluator_launch = execute_recorded_service(
-        &state,
+        state,
         &service_owner,
         "service:worker-executions/start-candidate-evaluation",
         serde_json::json!({
@@ -5087,7 +5087,7 @@ async fn evaluate_integrate_and_publish_candidate(
         .expect("integrated evaluator launch returned its exact thread")
         .to_owned();
     let integrated_evaluator_terminal =
-        wait_for_terminal_thread(&state, &integrated_evaluator_thread_id).await;
+        wait_for_terminal_thread(state, &integrated_evaluator_thread_id).await;
     if publication == PublicationScenario::StaleBase {
         eprintln!("stale-base fixture: independent D evaluation settled");
     }
@@ -5115,7 +5115,7 @@ async fn evaluate_integrate_and_publish_candidate(
         )
         .unwrap();
     let qualified_d = execute_recorded_service(
-        &state,
+        state,
         &service_owner,
         "service:worker-executions/qualify-candidate",
         serde_json::json!({
@@ -5159,10 +5159,10 @@ async fn evaluate_integrate_and_publish_candidate(
         state
             .state_store
             .advance_project_head_ref(
-                &principal_key,
+                principal_key,
                 &project_hash,
                 &competing_snapshot_hash,
-                &base_snapshot_hash,
+                base_snapshot_hash,
                 &ryeos_app::state_store::NodeIdentitySigner::from_identity(&state.identity),
                 &guard,
             )
@@ -5171,7 +5171,7 @@ async fn evaluate_integrate_and_publish_candidate(
         drop(authority);
 
         let publication_attempt = try_execute_recorded_service(
-            &state,
+            state,
             &service_owner,
             "service:worker-executions/publish",
             serde_json::json!({
@@ -5194,7 +5194,7 @@ async fn evaluate_integrate_and_publish_candidate(
         assert_eq!(
             state
                 .state_store
-                .with_state_db(|db| db.read_project_head(&principal_key, &project_hash))
+                .with_state_db(|db| db.read_project_head(principal_key, &project_hash))
                 .unwrap()
                 .as_deref(),
             Some(competing_snapshot_hash.as_str()),
@@ -5204,7 +5204,7 @@ async fn evaluate_integrate_and_publish_candidate(
     }
 
     let published = execute_recorded_service(
-        &state,
+        state,
         &service_owner,
         "service:worker-executions/publish",
         serde_json::json!({
@@ -5217,7 +5217,7 @@ async fn evaluate_integrate_and_publish_candidate(
     assert_eq!(published.value["snapshot_hash"], integrated_snapshot_hash);
     assert_eq!(published.value["previous_hash"], base_snapshot_hash);
     let publication_replay = execute_recorded_service(
-        &state,
+        state,
         &service_owner,
         "service:worker-executions/publish",
         serde_json::json!({
@@ -5236,7 +5236,7 @@ async fn evaluate_integrate_and_publish_candidate(
     assert_eq!(
         state
             .state_store
-            .with_state_db(|db| db.read_project_head(&principal_key, &project_hash))
+            .with_state_db(|db| db.read_project_head(principal_key, &project_hash))
             .unwrap()
             .as_deref(),
         Some(integrated_snapshot_hash.as_str()),

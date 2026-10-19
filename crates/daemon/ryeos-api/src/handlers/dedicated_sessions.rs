@@ -6203,8 +6203,8 @@ fn repair_approval_outbox_for_session(
         }))
         .map_err(internal)?;
         append_root_fact_once(
-            &state,
-            &session,
+            state,
+            session,
             "hosted_approval.decision_reserved",
             &decision_operation_id,
             json!({
@@ -6240,8 +6240,8 @@ fn repair_approval_outbox_for_session(
             }))
             .map_err(internal)?;
             append_root_fact_once(
-                &state,
-                &session,
+                state,
+                session,
                 "hosted_approval.delivery_contacting",
                 &contacting_operation_id,
                 json!({
@@ -6277,8 +6277,8 @@ fn repair_approval_outbox_for_session(
         }))
         .map_err(internal)?;
         append_root_fact_once(
-            &state,
-            &session,
+            state,
+            session,
             "hosted_approval.delivery_unknown",
             &unknown_operation_id,
             json!({
@@ -6497,7 +6497,7 @@ pub async fn reconcile_candidate_publications(state: Arc<AppState>) -> anyhow::R
                 })?;
             let current = state
                 .state_store
-                .with_state_db(|db| db.read_project_head(&principal_key, &project_hash))?;
+                .with_state_db(|db| db.read_project_head(principal_key, project_hash))?;
             let recovery = classify_candidate_publication_recovery(
                 current.as_deref(),
                 base_snapshot_hash,
@@ -10359,7 +10359,7 @@ async fn publish(
             "idempotent":true,
         }));
     }
-    let project_lock = super::project_apply_snapshot::project_apply_lock(&project_hash);
+    let project_lock = super::project_apply_snapshot::project_apply_lock(project_hash);
     let _project_guard = project_lock.lock_owned().await;
     let pinned = state
         .state_store
@@ -10415,7 +10415,7 @@ async fn publish(
     let signer = ryeos_app::state_store::NodeIdentitySigner::from_identity(&state.identity);
     let current = state
         .state_store
-        .with_state_db(|db| db.read_project_head(&principal_key, &project_hash))
+        .with_state_db(|db| db.read_project_head(principal_key, project_hash))
         .map_err(internal)?;
     if current.as_deref() != Some(candidate) && current.as_deref() != Some(base_snapshot_hash) {
         ryeos_app::authoritative_root_fact::append_once(
@@ -10449,8 +10449,8 @@ async fn publish(
         Ok(())
     } else {
         state.state_store.advance_project_head_ref(
-            &principal_key,
-            &project_hash,
+            principal_key,
+            project_hash,
             candidate,
             base_snapshot_hash,
             &signer,

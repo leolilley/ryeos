@@ -76,25 +76,6 @@ fn collect_view_refs_at(value: &serde_json::Value, out: &mut Vec<String>, at_roo
     }
 }
 
-#[cfg(test)]
-mod view_reference_tests {
-    #[test]
-    fn preview_resolves_inactive_nested_tabs_but_not_embedded_definitions() {
-        let mut refs = Vec::new();
-        super::collect_view_refs(
-            &serde_json::json!({
-                "view_sets": [{"root": {
-                    "type": "group", "active": 0,
-                    "views": ["view:test/active", "view:test/inactive"]
-                }}],
-                "views": {"view:test/embedded": {"body": "view:not-a-dependency"}}
-            }),
-            &mut refs,
-        );
-        assert_eq!(refs, ["view:test/active", "view:test/inactive"]);
-    }
-}
-
 fn surface_diagnostic_message(diag: &ryeos_client_base::surface::SurfaceDiagnostic) -> &str {
     match diag {
         ryeos_client_base::surface::SurfaceDiagnostic::ValidationError { message }
@@ -397,4 +378,23 @@ fn main() {
             exit_with_error(format!("terminal view set failed: {e}"), None);
         }
     });
+}
+
+#[cfg(test)]
+mod view_reference_tests {
+    #[test]
+    fn preview_resolves_inactive_nested_tabs_but_not_embedded_definitions() {
+        let mut refs = Vec::new();
+        super::collect_view_refs(
+            &serde_json::json!({
+                "view_sets": [{"root": {
+                    "type": "group", "active": 0,
+                    "views": ["view:test/active", "view:test/inactive"]
+                }}],
+                "views": {"view:test/embedded": {"body": "view:not-a-dependency"}}
+            }),
+            &mut refs,
+        );
+        assert_eq!(refs, ["view:test/active", "view:test/inactive"]);
+    }
 }

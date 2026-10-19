@@ -451,32 +451,29 @@ pub(super) fn handle_provider_attempt_prepare(
     }
 
     if coordinate.admitted_effect_class.is_some() {
-        match lookup_provider_call(state, &coordinate_key)? {
-            Some((record_hash, record)) => {
-                ensure_provider_call_publication_proof(state, &record_hash, &record)?;
-                publish_provider_call_observation(
-                    state,
-                    &cap.thread_id,
-                    request.turn,
-                    request.attempt_number,
-                    &coordinate_key,
-                    &record.answer_digest,
-                    &record_hash,
-                    ryeos_state::ProviderCallObservationSource::Replay,
-                    ryeos_state::ProviderCallObservationPublication::NotApplicable,
-                    Some(ryeos_state::ProviderCallReplaySource {
-                        produced_by_thread: record.first_observation.produced_by_thread.clone(),
-                        attempt_id: record.first_observation.attempt_id.clone(),
-                    }),
-                )?;
-                return Ok(serde_json::to_value(
-                    ProviderAttemptPrepareResponse::Replay {
-                        record_hash,
-                        answer: record.answer,
-                    },
-                )?);
-            }
-            None => {}
+        if let Some((record_hash, record)) = lookup_provider_call(state, &coordinate_key)? {
+            ensure_provider_call_publication_proof(state, &record_hash, &record)?;
+            publish_provider_call_observation(
+                state,
+                &cap.thread_id,
+                request.turn,
+                request.attempt_number,
+                &coordinate_key,
+                &record.answer_digest,
+                &record_hash,
+                ryeos_state::ProviderCallObservationSource::Replay,
+                ryeos_state::ProviderCallObservationPublication::NotApplicable,
+                Some(ryeos_state::ProviderCallReplaySource {
+                    produced_by_thread: record.first_observation.produced_by_thread.clone(),
+                    attempt_id: record.first_observation.attempt_id.clone(),
+                }),
+            )?;
+            return Ok(serde_json::to_value(
+                ProviderAttemptPrepareResponse::Replay {
+                    record_hash,
+                    answer: record.answer,
+                },
+            )?);
         }
     }
 

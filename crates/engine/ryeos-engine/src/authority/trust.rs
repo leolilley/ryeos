@@ -960,7 +960,7 @@ fn validate_existing_pin(
         ))
     })?;
 
-    let toml_body = lillux::signature::strip_signature_lines(&content);
+    let toml_body = lillux::signature::strip_signature_lines(content);
     let parsed: TrustedKeyToml = toml::from_str(&toml_body).map_err(|e| {
         EngineError::Internal(format!(
             "existing trust doc {} is not valid TOML: {e} \

@@ -2197,13 +2197,13 @@ impl RuntimeDb {
 
     pub fn external_allocation(&self, placement: &str) -> Result<Option<ExternalAllocationRecord>> {
         self.conn.with_sql(|conn| {
-            read(&conn, placement)
+            read(conn, placement)
         })
     }
 
     pub(crate) fn unsettled_external_allocation_placements(&self) -> Result<Vec<String>> {
         self.conn.with_sql(|conn| {
-            validate_current(&conn)?;
+            validate_current(conn)?;
             let mut statement = conn.prepare(
                 "SELECT placement_thread_id FROM external_execution_allocation
              WHERE phase NOT IN ('no_contact','contacted_no_occurrence','terminated')
@@ -2218,7 +2218,7 @@ impl RuntimeDb {
 
     pub(crate) fn recoverable_external_cleanup_placements(&self) -> Result<Vec<String>> {
         self.conn.with_sql(|conn| {
-            validate_current(&conn)?;
+            validate_current(conn)?;
             let mut statement = conn.prepare(
                 "SELECT placement_thread_id FROM external_execution_allocation
              WHERE phase='quarantined' ORDER BY placement_thread_id",
@@ -2237,7 +2237,7 @@ impl RuntimeDb {
         Option<crate::node_config::sections::external_execution::RetainedExternalExecutionBinding>,
     > {
         self.conn.with_sql(|conn| {
-            read_retained_binding(&conn, binding_hash)
+            read_retained_binding(conn, binding_hash)
         })
     }
 
@@ -2326,7 +2326,7 @@ impl RuntimeDb {
             {
                 bail!("external allocation contradicts its retained binding generation");
             }
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             validate_current(&tx)?;
             let binding_json = retained_binding.canonical_json()?;
             let prior: Option<(String, String)> = tx.query_row(
@@ -2456,7 +2456,7 @@ impl RuntimeDb {
         qualification_proof: Option<&crate::state_store::VerifiedExternalQualificationOwner>,
     ) -> Result<ExternalAllocationContactClaim> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let record = read(&tx, placement)?.context("external allocation was not reserved")?;
             if record.reservation.request_digest != request_digest {
                 bail!("external allocation contact changed its request identity");
@@ -2514,7 +2514,7 @@ impl RuntimeDb {
         timing: ExternalObservationTiming,
     ) -> Result<()> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let record = read(&tx, placement)?.context("external allocation is absent")?;
             occurrence.validate(&record.reservation)?;
             if let Some(prior) = &record.occurrence {
@@ -2566,7 +2566,7 @@ impl RuntimeDb {
         timing: ExternalObservationTiming,
     ) -> Result<()> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let record =
                 read(&tx, placement)?.context("external pending observation lost its allocation")?;
             ensure!(
@@ -2593,7 +2593,7 @@ impl RuntimeDb {
         evidence: &ExternalNoOccurrenceEvidence,
     ) -> Result<()> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let record = read(&tx, placement)?.context("external allocation is absent")?;
             evidence.validate(&record.reservation)?;
             if record.phase == ExternalAllocationPhase::ContactedNoOccurrence {
@@ -2685,7 +2685,7 @@ impl RuntimeDb {
         qualification_proof: Option<&crate::state_store::VerifiedExternalQualificationOwner>,
     ) -> Result<bool> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let record = read(&tx, placement)?.context("external allocation is absent")?;
             let occurrence = record
                 .occurrence
@@ -2787,9 +2787,9 @@ impl RuntimeDb {
         placement: &str,
     ) -> Result<Option<ExternalSupervisorActivationRecord>> {
         self.conn.with_sql(|conn| {
-            let record = read(&conn, placement)?.context("external allocation is absent")?;
+            let record = read(conn, placement)?.context("external allocation is absent")?;
             let Some(intent) = read_canonical_evidence::<ExternalSupervisorActivationIntent>(
-                &conn,
+                conn,
                 "external_execution_supervisor_activation_intent",
                 "intent_json",
                 placement,
@@ -2802,7 +2802,7 @@ impl RuntimeDb {
                 .as_ref()
                 .context("external supervisor activation has no occurrence")?;
             intent.validate(&record.reservation, occurrence)?;
-            let retained = read_retained_binding(&conn, &record.reservation.binding_hash)?
+            let retained = read_retained_binding(conn, &record.reservation.binding_hash)?
                 .context("external supervisor activation lost its binding generation")?;
             intent.validate_contract(
                 &record.reservation,
@@ -2810,14 +2810,14 @@ impl RuntimeDb {
                 &retained.backend_contract(),
             )?;
             let relay_bootstrap = relay_bootstrap::read_commitment(
-                &conn,
+                conn,
                 &record.reservation,
                 occurrence,
                 &intent,
                 &retained.backend_contract(),
             )?;
             let observation = read_canonical_evidence::<ExternalSupervisorActivationObservation>(
-                &conn,
+                conn,
                 "external_execution_supervisor_activation_observation",
                 "observation_json",
                 placement,
@@ -2840,7 +2840,7 @@ impl RuntimeDb {
         timing: ExternalObservationTiming,
     ) -> Result<()> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let record = read(&tx, placement)?.context("external allocation is absent")?;
             let occurrence = record
                 .occurrence
@@ -2916,7 +2916,7 @@ impl RuntimeDb {
         intent: &ExternalTerminationIntent,
     ) -> Result<bool> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let record = read(&tx, placement)?.context("external allocation is absent")?;
             let occurrence = record
                 .occurrence
@@ -3024,7 +3024,7 @@ impl RuntimeDb {
         observation: &ExternalTerminalObservation,
     ) -> Result<()> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let record = read(&tx, placement)?.context("external allocation is absent")?;
             let occurrence = record
                 .occurrence
@@ -3111,7 +3111,7 @@ impl RuntimeDb {
     /// that may have been accepted. No contacted phase can become no-contact.
     pub fn cancel_external_allocation(&self, placement: &str) -> Result<()> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let record = read(&tx, placement)?.context("external allocation is absent")?;
             if record.phase.is_settled() {
                 return Ok(());
@@ -3128,7 +3128,7 @@ impl RuntimeDb {
 
     pub fn external_execution_cas_roots(&self) -> Result<Vec<String>> {
         self.conn.with_sql(|conn| {
-            validate_current(&conn)?;
+            validate_current(conn)?;
             let mut statement = conn.prepare(
                 "SELECT placement_thread_id FROM external_execution_allocation
              WHERE phase NOT IN ('no_contact','contacted_no_occurrence','terminated')",
@@ -3139,7 +3139,7 @@ impl RuntimeDb {
             let mut roots = BTreeSet::new();
             for placement in placements {
                 let record =
-                    read(&conn, &placement)?.context("external allocation root is absent")?;
+                    read(conn, &placement)?.context("external allocation root is absent")?;
                 roots.insert(record.reservation.admitted_capsule_hash);
                 roots.insert(record.reservation.base_snapshot_hash);
             }
@@ -3159,7 +3159,7 @@ impl RuntimeDb {
 
     pub fn external_execution_blob_roots(&self) -> Result<Vec<String>> {
         self.conn.with_sql(|conn| {
-            validate_current(&conn)?;
+            validate_current(conn)?;
             let mut statement = conn
                 .prepare("SELECT evidence_blob_hash FROM external_execution_import")?;
             Ok(statement
@@ -3335,7 +3335,7 @@ pub(crate) mod tests {
         let db = crate::runtime_db::test_native::TestRuntime::open(&root.path().join("runtime.sqlite3"));
         let reservation = direct_owner_reservation(&db);
         reservation.validate().unwrap();
-        db.conn.with_sql(|connection| Ok(require_contactable_direct_owner(connection, &reservation)?)).unwrap();
+        db.conn.with_sql(|connection| require_contactable_direct_owner(connection, &reservation)).unwrap();
         for table in [
             "dedicated_session",
             "execution_workspace",
@@ -3372,7 +3372,7 @@ pub(crate) mod tests {
                 .unwrap()
                 .is_none()
         );
-        assert_eq!(db.conn.with_sql(|connection| Ok(read_guard(connection)?)).unwrap(), 0);
+        assert_eq!(db.conn.with_sql(|connection| read_guard(connection)).unwrap(), 0);
     }
 
     #[test]
@@ -3380,7 +3380,7 @@ pub(crate) mod tests {
         let root = tempfile::tempdir().unwrap();
         let db = crate::runtime_db::test_native::TestRuntime::open(&root.path().join("runtime.sqlite3"));
         let original = direct_owner_reservation(&db);
-        assert!(db.conn.with_sql(|connection| Ok(direct_owner_is_contactable(connection, &original)?)).unwrap());
+        assert!(db.conn.with_sql(|connection| direct_owner_is_contactable(connection, &original)).unwrap());
         for mutation in ["chain", "nonce", "epoch", "daemon"] {
             let mut changed = original.clone();
             let ExternalAllocationOwner::DirectThread {
@@ -3398,13 +3398,13 @@ pub(crate) mod tests {
                 "daemon" => launch_owner.daemon_generation_id = "daemon:other".into(),
                 _ => unreachable!(),
             }
-            assert!(db.conn.with_sql(|connection| Ok(require_contactable_direct_owner(connection, &changed)?)).is_err());
-            assert!(!db.conn.with_sql(|connection| Ok(direct_owner_is_contactable(connection, &changed)?)).unwrap());
+            assert!(db.conn.with_sql(|connection| require_contactable_direct_owner(connection, &changed)).is_err());
+            assert!(!db.conn.with_sql(|connection| direct_owner_is_contactable(connection, &changed)).unwrap());
         }
         db.request_thread_stop(&original.placement_thread_id, StopIntent::Cancel)
             .unwrap();
-        assert!(db.conn.with_sql(|connection| Ok(require_contactable_direct_owner(connection, &original)?)).is_err());
-        assert!(!db.conn.with_sql(|connection| Ok(direct_owner_is_contactable(connection, &original)?)).unwrap());
+        assert!(db.conn.with_sql(|connection| require_contactable_direct_owner(connection, &original)).is_err());
+        assert!(!db.conn.with_sql(|connection| direct_owner_is_contactable(connection, &original)).unwrap());
         // A failed authority query is not an ordinary closed transport gate.
         crate::runtime_db::test_native::with_transient(|missing_schema| {
             assert!(direct_owner_is_contactable(missing_schema, &original).is_err());
@@ -3424,8 +3424,8 @@ pub(crate) mod tests {
             .unwrap();
         db.request_thread_stop(&reservation.placement_thread_id, StopIntent::Cancel)
             .unwrap();
-        db.conn.with_sql(|connection| Ok(validate_current(connection)?)).unwrap();
-        assert!(db.conn.with_sql(|connection| Ok(require_contactable_direct_owner(connection, &reservation)?)).is_err());
+        db.conn.with_sql(|connection| validate_current(connection)).unwrap();
+        assert!(db.conn.with_sql(|connection| require_contactable_direct_owner(connection, &reservation)).is_err());
         let ExternalAllocationContactClaim::Reconcile(retained) = db
             .claim_external_allocation_contact(
                 &reservation.placement_thread_id,
@@ -4113,7 +4113,7 @@ pub(crate) mod tests {
             db.external_allocation("T-one").unwrap().unwrap().phase,
             ExternalAllocationPhase::Quarantined
         );
-        assert_eq!(db.conn.with_sql(|connection| Ok(read_guard(connection)?)).unwrap(), 1);
+        assert_eq!(db.conn.with_sql(|connection| read_guard(connection)).unwrap(), 1);
         assert!(
             db.release_credential_profile("P-one", "worker-one")
                 .is_err()
@@ -4367,7 +4367,7 @@ pub(crate) mod tests {
             test_observation_timing(),
         )
         .unwrap();
-        db.conn.with_sql(|connection| Ok(validate_current(connection)?)).unwrap();
+        db.conn.with_sql(|connection| validate_current(connection)).unwrap();
         let mut replaced_intent = intent;
         replaced_intent.activation_request_digest = "6".repeat(64);
         // Keep the nested package commitment consistent with the forged row
@@ -4397,7 +4397,7 @@ pub(crate) mod tests {
                 ],
             )?))
             .unwrap();
-        let error = db.conn.with_sql(|connection| Ok(validate_current(connection)?)).unwrap_err();
+        let error = db.conn.with_sql(|connection| validate_current(connection)).unwrap_err();
         assert!(
             format!("{error:#}")
                 .contains("external supervisor activation request identity changed")
@@ -4428,7 +4428,7 @@ pub(crate) mod tests {
             .unwrap();
         db.settle_external_no_occurrence("T-one", &evidence)
             .unwrap();
-        assert_eq!(db.conn.with_sql(|connection| Ok(read_guard(connection)?)).unwrap(), 0);
+        assert_eq!(db.conn.with_sql(|connection| read_guard(connection)).unwrap(), 0);
         assert_eq!(
             db.external_allocation("T-one").unwrap().unwrap().phase,
             ExternalAllocationPhase::ContactedNoOccurrence
@@ -4480,7 +4480,7 @@ pub(crate) mod tests {
         assert!(db.settle_external_terminal("T-one", &observation).is_err());
         assert!(db.begin_external_termination("T-one", &intent).unwrap());
         assert!(!db.begin_external_termination("T-one", &intent).unwrap());
-        assert_eq!(db.conn.with_sql(|connection| Ok(read_guard(connection)?)).unwrap(), 1);
+        assert_eq!(db.conn.with_sql(|connection| read_guard(connection)).unwrap(), 1);
         let mut mismatches = Vec::new();
         let mut changed = observation.clone();
         changed.binding_hash = "3".repeat(64);
@@ -4499,7 +4499,7 @@ pub(crate) mod tests {
         mismatches.push(changed);
         for changed in mismatches {
             assert!(db.settle_external_terminal("T-one", &changed).is_err());
-            assert_eq!(db.conn.with_sql(|connection| Ok(read_guard(connection)?)).unwrap(), 1);
+            assert_eq!(db.conn.with_sql(|connection| read_guard(connection)).unwrap(), 1);
             assert_eq!(
                 db.conn.with_sql(|connection| Ok(connection.query_row(
                         "SELECT COUNT(*) FROM external_execution_terminal_observation",
@@ -4516,7 +4516,7 @@ pub(crate) mod tests {
         assert!(!db.begin_external_termination("T-one", &intent).unwrap());
         db.settle_external_terminal("T-one", &observation).unwrap();
         db.settle_external_terminal("T-one", &observation).unwrap();
-        assert_eq!(db.conn.with_sql(|connection| Ok(read_guard(connection)?)).unwrap(), 0);
+        assert_eq!(db.conn.with_sql(|connection| read_guard(connection)).unwrap(), 0);
         assert_eq!(
             db.external_allocation("T-one").unwrap().unwrap().phase,
             ExternalAllocationPhase::Terminated
@@ -4853,7 +4853,7 @@ pub(crate) mod tests {
                 [widened],
             )?))
             .unwrap();
-        assert!(db.conn.with_sql(|connection| Ok(validate_current(connection)?)).is_err());
+        assert!(db.conn.with_sql(|connection| validate_current(connection)).is_err());
     }
 
     #[test]
@@ -4872,7 +4872,7 @@ pub(crate) mod tests {
                 ..
             })
         ));
-        assert_eq!(db.conn.with_sql(|connection| Ok(read_guard(connection)?)).unwrap(), 0);
+        assert_eq!(db.conn.with_sql(|connection| read_guard(connection)).unwrap(), 0);
         db.release_credential_profile("P-one", "worker-one")
             .unwrap();
         assert_eq!(
@@ -4934,7 +4934,7 @@ pub(crate) mod tests {
             db.bind_external_allocation("T-one", &wrong, test_observation_timing())
                 .is_err()
         );
-        assert_eq!(db.conn.with_sql(|connection| Ok(read_guard(connection)?)).unwrap(), 1);
+        assert_eq!(db.conn.with_sql(|connection| read_guard(connection)).unwrap(), 1);
     }
 
     #[test]
@@ -4947,18 +4947,18 @@ pub(crate) mod tests {
                 INSERT INTO unknown_execution_authority VALUES(X'FF00');",
             )
             .unwrap();
-            assert!(ensure_resettable(&conn, FIRST_EPOCH).is_err());
-            assert!(ensure_resettable(&conn, FIRST_EPOCH + 1).is_err());
+            assert!(ensure_resettable(conn, FIRST_EPOCH).is_err());
+            assert!(ensure_resettable(conn, FIRST_EPOCH + 1).is_err());
             conn.execute("UPDATE external_execution_guard SET unsettled=0", [])
                 .unwrap();
-            ensure_resettable(&conn, FIRST_EPOCH).unwrap();
+            ensure_resettable(conn, FIRST_EPOCH).unwrap();
             conn.execute("DELETE FROM external_execution_guard", [])
                 .unwrap();
-            assert!(ensure_resettable(&conn, FIRST_EPOCH).is_err());
+            assert!(ensure_resettable(conn, FIRST_EPOCH).is_err());
             conn.execute("DROP TABLE external_execution_guard", [])
                 .unwrap();
-            assert!(ensure_resettable(&conn, FIRST_EPOCH).is_err());
-            ensure_resettable(&conn, FIRST_EPOCH - 1).unwrap();
+            assert!(ensure_resettable(conn, FIRST_EPOCH).is_err());
+            ensure_resettable(conn, FIRST_EPOCH - 1).unwrap();
             Ok(())
         });
     }

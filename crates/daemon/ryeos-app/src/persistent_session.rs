@@ -272,6 +272,12 @@ const RELAY_HEALTH_STOPPED: u8 = 4;
 #[derive(Clone)]
 pub struct PersistentSessionRelayHealthCell(Arc<AtomicU8>);
 
+impl Default for PersistentSessionRelayHealthCell {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PersistentSessionRelayHealthCell {
     pub fn new() -> Self {
         Self(Arc::new(AtomicU8::new(RELAY_HEALTH_LIVE)))
@@ -822,15 +828,14 @@ impl SessionProcess {
         let Some(attempt) = self.begin_retirement()? else {
             return Ok(());
         };
-        if let Some(start) = &self.pooled_start {
-            if start.has_original_trusted_obligation() {
+        if let Some(start) = &self.pooled_start
+            && start.has_original_trusted_obligation() {
                 start.retain_unsettled();
                 return attempt.finish(Err(
                     "ordinary session retirement cannot settle original trusted driver funding"
                         .to_owned(),
                 ));
             }
-        }
         self.observation_sender
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -934,8 +939,8 @@ impl SessionProcess {
 
 impl Drop for SessionProcess {
     fn drop(&mut self) {
-        if let Some(start) = &self.pooled_start {
-            if start.has_original_trusted_obligation() {
+        if let Some(start) = &self.pooled_start
+            && start.has_original_trusted_obligation() {
                 if let Some(running) = self
                     .running
                     .get_mut()
@@ -947,7 +952,6 @@ impl Drop for SessionProcess {
                 start.retain_unsettled();
                 return; // descriptor Drop is not driver/financial settlement
             }
-        }
         if self
             .cleanup_unproved
             .get_mut()
@@ -970,15 +974,13 @@ impl Drop for SessionProcess {
             .get_mut()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take()
-        {
-            if let Err(error) = running.abort_and_reap_checked() {
+            && let Err(error) = running.abort_and_reap_checked() {
                 tracing::error!(%error, "persistent-session drop cleanup could not be proved");
                 if let Some(start) = &self.pooled_start {
                     start.retain_unsettled();
                 }
                 return;
             }
-        }
         let observer = std::mem::take(
             self.cleanup_observer
                 .get_mut()
@@ -991,12 +993,11 @@ impl Drop for SessionProcess {
             }
             return;
         }
-        if let Some(start) = &self.pooled_start {
-            if let Err(error) = start.prove_cleanup() {
+        if let Some(start) = &self.pooled_start
+            && let Err(error) = start.prove_cleanup() {
                 tracing::error!(%error, "original session cleanup remains unsettled");
                 start.retain_unsettled();
             }
-        }
     }
 }
 
@@ -2689,22 +2690,20 @@ fn admit_original_pooled_obligations(
         (&retained.resource_observer, &resource),
         (&retained.retirement_observer, &retirement),
     ] {
-        if let (Some(original), Some(supplied)) = (original, supplied) {
-            if !Arc::ptr_eq(original, supplied) {
+        if let (Some(original), Some(supplied)) = (original, supplied)
+            && !Arc::ptr_eq(original, supplied) {
                 bail!("pooled start substituted an original cleanup obligation");
             }
-        }
     }
     let selected_resource = retained.resource_observer.as_ref().or(resource.as_ref());
     let selected_retirement = retained
         .retirement_observer
         .as_ref()
         .or(retirement.as_ref());
-    if let (Some(resource), Some(retirement)) = (selected_resource, selected_retirement) {
-        if Arc::ptr_eq(resource, retirement) {
+    if let (Some(resource), Some(retirement)) = (selected_resource, selected_retirement)
+        && Arc::ptr_eq(resource, retirement) {
             bail!("one cleanup closure cannot substitute two distinct pooled obligations");
         }
-    }
     // Commit both only after ALL checks; new other-kind owners are not
     // executable when a different original kind makes the call fail.
     if retained.resource_observer.is_none() {
@@ -4737,11 +4736,10 @@ impl PersistentSessionPool {
         if let Some(reason) = prior_unproved {
             cleanup_errors.push(reason);
         }
-        if let Some(reason) = state.cleanup_unproved.as_ref() {
-            if !cleanup_errors.contains(reason) {
+        if let Some(reason) = state.cleanup_unproved.as_ref()
+            && !cleanup_errors.contains(reason) {
                 cleanup_errors.push(reason.clone());
             }
-        }
         if !cleanup_errors.is_empty() {
             let reason = cleanup_errors.join("; ");
             state.cleanup_unproved.get_or_insert_with(|| reason.clone());
@@ -5810,15 +5808,14 @@ fn settle_ready_cleanup(
             };
         }
     }
-    if let Some(owner) = custody.relay_owner.take() {
-        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(owner))).is_err() {
+    if let Some(owner) = custody.relay_owner.take()
+        && std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(owner))).is_err() {
             return ReadyProcessFailure {
                 error: error.context("ordinary relay owner destructor panicked after checked reap"),
                 cleanup_unproved: true,
                 custody: Some(custody),
             };
         }
-    }
     ReadyProcessFailure {
         error,
         cleanup_unproved: false,
@@ -7186,8 +7183,8 @@ mod tests {
             let in_flight =
                 retained.manifest_preparation == OriginalManifestPreparationPhase::UnfundedInFlight;
             drop(retained);
-            if in_flight {
-                if let Some(competing) = competitor.borrow_mut().take() {
+            if in_flight
+                && let Some(competing) = competitor.borrow_mut().take() {
                     // A genuinely supplied second owner, not replacement proof.
                     assert!(
                         start
@@ -7202,7 +7199,6 @@ mod tests {
                             .is_err()
                     );
                 }
-            }
             operation_cancelled()
         };
         assert!(

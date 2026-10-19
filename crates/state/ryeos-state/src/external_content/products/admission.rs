@@ -254,7 +254,7 @@ impl CompactAdmittedProductRecipeFact {
             binding_name: binding.binding_name.clone(),
             recipe_ref: binding.recipe_ref.clone(),
             recipe_raw_content_digest: binding.recipe_raw_content_digest.clone(),
-            purpose: binding.purpose.clone(),
+            purpose: binding.purpose,
             declarations: binding.declarations.clone(),
             declarations_hash: binding.declarations_hash.clone(),
             relationships: CompactProductRelationships {

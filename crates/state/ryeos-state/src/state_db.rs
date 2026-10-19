@@ -3238,9 +3238,8 @@ impl StateDb {
                     // SAFETY: every generation consumer, the current, staged
                     // and retired projections, closed above or earlier; an
                     // offline store published no service consumer.
-                    if let Some(terminal) = unsafe { lease.close_after_consumers(factory) }? {
-                        if !leases.iter().any(|prior| Arc::ptr_eq(prior, &terminal)) { leases.push(terminal); }
-                    }
+                    if let Some(terminal) = unsafe { lease.close_after_consumers(factory) }?
+                        && !leases.iter().any(|prior| Arc::ptr_eq(prior, &terminal)) { leases.push(terminal); }
                 }
             }
             let mut census: Vec<_> = closed_connections.into_iter()
@@ -3370,9 +3369,8 @@ impl StateDb {
             for lease in generation_leases.iter() {
                 // SAFETY: the only generation consumer, the selected
                 // projection, closed above; this store published nothing.
-                if let Some(terminal) = unsafe { lease.close_after_consumers(factory) }? {
-                    if !leases.iter().any(|prior| Arc::ptr_eq(prior, &terminal)) { leases.push(terminal); }
-                }
+                if let Some(terminal) = unsafe { lease.close_after_consumers(factory) }?
+                    && !leases.iter().any(|prior| Arc::ptr_eq(prior, &terminal)) { leases.push(terminal); }
             }
             Ok((terminals, leases, generation_leases))
         })();

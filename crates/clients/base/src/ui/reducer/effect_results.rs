@@ -1249,7 +1249,7 @@ mod tests {
                 )
             })
             .expect("surface source fetch");
-        let effects = core.dispatch(RyeOsEvent::EffectResult {
+        let _effects = core.dispatch(RyeOsEvent::EffectResult {
             result: RyeOsEffectResult {
                 id: effect.id,
                 ok: true,

@@ -667,7 +667,7 @@ fn bind_snapshot_locator_for(
     creation: &BoundSnapshotCreation,
     settings: &SnapshotProductionSettings,
 ) -> Result<RuntimeSnapshotLocator> {
-    let provider_creation_observation = serde_json::to_value(&creation)?;
+    let provider_creation_observation = serde_json::to_value(creation)?;
     let adapter_observation_sha256 = lillux::sha256_hex(
         &ryeos_external_execution_contract::canonical_json(&provider_creation_observation)?,
     );

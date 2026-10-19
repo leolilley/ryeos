@@ -2460,7 +2460,7 @@ impl ryeos_app::bundle_publication::consumer::ConsumerPublicationPolicy
             .state
             .engine
             .node_trust_store
-            .get(&fingerprint)
+            .get(fingerprint)
             .context("release publisher is not node-trusted")?;
         attestation.verify_with_key(&signer.verifying_key)?;
         anyhow::ensure!(

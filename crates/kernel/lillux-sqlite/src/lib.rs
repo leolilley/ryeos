@@ -943,11 +943,10 @@ impl Drop for RetainedOriginalWitnessFile {
         }
         let retired = destination_role_retired(&self.original.inner);
         let removal = self.removal.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(removal) = removal {
-            if retired && removal.phase == OriginalWitnessRemovalPhase::RemovedDurable {
+        if let Some(removal) = removal
+            && retired && removal.phase == OriginalWitnessRemovalPhase::RemovedDurable {
                 drop(removal.get_mut().parent.take());
             }
-        }
     }
 }
 /// Whether the role's descriptor is retired. A busy lock reads as not retired,
@@ -1126,7 +1125,7 @@ impl RetainedOriginalWitnessFile {
             if matches!(original.phase, OriginalWitnessRemovalPhase::UnlinkedPendingSync | OriginalWitnessRemovalPhase::RemovedDurable) {
                 work.debit_steps(2)?;
                 ensure!(retained_parent.entry_no_follow(&self.original.inner.name)?.is_none()
-                    && retained_parent.entry_no_follow(&quarantine)?.is_none(),
+                    && retained_parent.entry_no_follow(quarantine)?.is_none(),
                     "removed witness coordinate reappeared");
                 if original.phase == OriginalWitnessRemovalPhase::UnlinkedPendingSync {
                     work.debit_steps(1)?;
@@ -1152,11 +1151,10 @@ impl RetainedOriginalWitnessFile {
                             PlannedQuarantineStage::PreservedUnexpected => OriginalWitnessRemovalPhase::Conflict,
                             _ => original.phase,
                         };
-                        if let Some(progress) = self.original_removal_progress(original, &work) {
-                            if let Err(callback) = work.retain_original_witness_progress(&progress) {
+                        if let Some(progress) = self.original_removal_progress(original, &work)
+                            && let Err(callback) = work.retain_original_witness_progress(&progress) {
                                 return Err(crate::RefusalSupersedes::superseding(callback, anyhow::Error::new(error)));
                             }
-                        }
                         return Err(anyhow::Error::new(error));
                     }
                 }
@@ -3270,7 +3268,7 @@ impl DrainedSqliteProjection {
                 selected_source: self
                     .stopped_plan
                     .as_ref()
-                    .map(|plan| plan.roles[index].source.clone()),
+                    .map(|plan| plan.roles[index].source),
                 stopped_coordinates,
                 stopped_plan: self.stopped_plan.clone(),
                 quarantine,
@@ -3703,11 +3701,10 @@ impl DrainedSqliteProjection {
         if matches!(
             self.states[role as usize],
             RetirementRoleState::RecoveryRequired
-        ) {
-            if let Some(failure) = &self.role_failures[role as usize].latest {
+        )
+            && let Some(failure) = &self.role_failures[role as usize].latest {
                 return failure.error.clone();
             }
-        }
 
         SqliteRoleMutationError {
             role,
@@ -3720,13 +3717,12 @@ impl DrainedSqliteProjection {
         &mut self,
         role: SqliteRole,
     ) -> std::result::Result<SqliteRoleMutationOutcome, SqliteRoleMutationError> {
-        if self.stopped_plan.is_some() {
-            if let Err(error) = self.validate_stopped_effect_namespace() {
+        if self.stopped_plan.is_some()
+            && let Err(error) = self.validate_stopped_effect_namespace() {
                 let mut failure = self.phase_error(role);
                 failure.message = error.to_string();
                 return Err(failure);
             }
-        }
         use lillux::secure_fs::PlannedQuarantineDisposition;
         let index = role as usize;
         if !self.barriers {
@@ -3791,13 +3787,12 @@ impl DrainedSqliteProjection {
         &mut self,
         role: SqliteRole,
     ) -> std::result::Result<SqliteRoleMutationOutcome, SqliteRoleMutationError> {
-        if self.stopped_plan.is_some() {
-            if let Err(error) = self.validate_stopped_effect_namespace() {
+        if self.stopped_plan.is_some()
+            && let Err(error) = self.validate_stopped_effect_namespace() {
                 let mut failure = self.phase_error(role);
                 failure.message = error.to_string();
                 return Err(failure);
             }
-        }
         use lillux::secure_fs::PlannedQuarantineDisposition;
         let index = role as usize;
         if !self.barriers {
@@ -4116,14 +4111,13 @@ impl BoundSqliteOpenFailure {
         self.close_error.as_ref()
     }
     pub fn retry_close(mut self) -> std::result::Result<(), Self> {
-        if let Some(owner) = self.owner.take() {
-            if let Err(failure) = owner.retry() {
+        if let Some(owner) = self.owner.take()
+            && let Err(failure) = owner.retry() {
                 let BoundSqliteCloseFailure { owner, error } = failure;
                 self.owner = Some(owner);
                 self.close_error = Some(error);
                 return Err(self);
             }
-        }
         Ok(())
     }
 }
@@ -4183,24 +4177,22 @@ impl BoundSqliteConnection {
                 close_error: None,
             });
         }
-        if let Some(production) = production {
-            if let Err(error) = production.checkpoint() {
+        if let Some(production) = production
+            && let Err(error) = production.checkpoint() {
                 return Err(BoundSqliteOpenFailure {
                     error,
                     owner: None,
                     close_error: None,
                 });
             }
-        }
-        if let Some(work) = &sql_work {
-            if let Err(error) = work.require_destination(&runtime) {
+        if let Some(work) = &sql_work
+            && let Err(error) = work.require_destination(&runtime) {
                 return Err(BoundSqliteOpenFailure {
                     error,
                     owner: None,
                     close_error: None,
                 });
             }
-        }
         #[cfg(not(target_os = "linux"))]
         {
             let _ = (runtime, name, mode, lease, sql_work);
@@ -4266,8 +4258,8 @@ impl BoundSqliteConnection {
                 binding: Some(binding),
                 runtime,
             };
-            if let Some(work) = &sql_work {
-                if let Err(error) =
+            if let Some(work) = &sql_work
+                && let Err(error) =
                     install_inspection_sql_work(owned.connection(), &owned.runtime, work.clone())
                 {
                     return Err(BoundSqliteOpenFailure {
@@ -4276,7 +4268,6 @@ impl BoundSqliteConnection {
                         close_error: None,
                     });
                 }
-            }
             if let Err(error) = owned
                 .binding
                 .as_ref()
@@ -4379,8 +4370,8 @@ impl Drop for BoundSqliteConnection {
     // service budget; if that is exhausted the mapping stays recorded and
     // marks the arena refused, so arena release fails closed.
     fn drop(&mut self) {
-        if let Some(connection) = self.connection.take() {
-            if let Err((refused, _error)) = connection.close() {
+        if let Some(connection) = self.connection.take()
+            && let Err((refused, _error)) = connection.close() {
                 // An outstanding SQLite resource must not outlive its VFS
                 // context. Retain both rather than create use-after-free.
                 if let Some(mut binding) = self.binding.take() {
@@ -4388,7 +4379,6 @@ impl Drop for BoundSqliteConnection {
                 }
                 retain_abandoned_sqlite_owner(AbandonedSqliteOwnerKind::BoundConnection, refused);
             }
-        }
         // Binding closes retained host descriptors only after connection close.
     }
 }
@@ -4860,8 +4850,7 @@ mod tests {
         let failure = host.scope(|| {
             captured
                 .drain_sql()
-                .err()
-                .expect("external SHM read lock holds retirement")
+                .expect_err("external SHM read lock holds retirement")
         });
         assert!(matches!(
             failure.error(),
@@ -8516,8 +8505,7 @@ mod stopped_intake_scope_controls {
         // Outside every native scope the stopped create refuses MISUSE
         // before it allocates or claims anything.
         let refused = DrainedSqliteProjection::capture_stopped_projection(Arc::clone(&runtime), plan.clone())
-            .err()
-            .expect("stopped intake outside every native scope refuses");
+            .expect_err("stopped intake outside every native scope refuses");
         assert!(refused.to_string().contains("refused (21)"), "{refused}");
         assert!(matches!(refused.owner(), SqliteProjectionRetirementOwner::UnacquiredStopped { .. }));
         refused.abort().unwrap();
@@ -8652,8 +8640,7 @@ mod stopped_intake_scope_controls {
                 authority.open.store(false, Ordering::Release);
                 captured
             })
-            .err()
-            .expect("the window closed during the intake refuses after it");
+            .expect_err("the window closed during the intake refuses after it");
         assert!(format!("{:#}", refused.error()).contains("test operation window closed"), "{refused}");
         let owner = refused
             .completed_owner()
@@ -8711,15 +8698,13 @@ mod stopped_intake_scope_controls {
                 DrainedSqliteProjection::capture_stopped_projection(Arc::clone(&runtime), plan.clone())
             })
             .unwrap()
-            .err()
-            .expect("the held peer refuses the intake");
+            .expect_err("the held peer refuses the intake");
         let after_first = factory.budget_snapshot().unwrap().cleanup_steps;
         for _ in 0..RETRIES {
             failure = factory
                 .with_original_stopped_intake(|_| failure.retry_stopped_projection(&plan))
                 .unwrap()
-                .err()
-                .expect("the held peer refuses each retry");
+                .expect_err("the held peer refuses each retry");
         }
         let after_retries = factory.budget_snapshot().unwrap().cleanup_steps;
         let intake = after_retries - before;

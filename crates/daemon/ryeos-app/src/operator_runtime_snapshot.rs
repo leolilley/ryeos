@@ -2137,7 +2137,7 @@ fn validate_probe_snapshot_record(
 ) -> Result<()> {
     ensure!(
         record.phase == RuntimeSnapshotPhase::Bound
-            && record.locator.as_ref() == Some(&named)
+            && record.locator.as_ref() == Some(named)
             && record.intent.owner_principal == owner_principal
             && record.intent.owner_principal == proof.evidence.product_coordinate.owner_principal
             && record.intent.provider_id == provider_id

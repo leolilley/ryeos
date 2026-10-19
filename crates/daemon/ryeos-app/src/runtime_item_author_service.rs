@@ -533,9 +533,9 @@ fn write_atomic(
             if observation.full_permission_mode()? & 0o7000 != 0 {
                 bail!("runtime authoring refuses set-id or sticky permission bits");
             }
-            let mut descriptor = file.try_clone()?;
+            let descriptor = file.try_clone()?;
             let bytes = lillux::read_open_regular_file_stable_bounded(
-                &mut descriptor,
+                &descriptor,
                 &observation,
                 ryeos_engine::item_resolution::MAX_ITEM_SOURCE_BYTES,
             )?;
@@ -555,9 +555,9 @@ fn write_atomic(
             if !current_observation.matches_quarantined_incumbent(&observation) {
                 bail!("runtime-authored item metadata changed before publication");
             }
-            let mut current = current.try_clone()?;
+            let current = current.try_clone()?;
             let current = lillux::read_open_regular_file_stable_bounded(
-                &mut current,
+                &current,
                 &current_observation,
                 ryeos_engine::item_resolution::MAX_ITEM_SOURCE_BYTES,
             )?;

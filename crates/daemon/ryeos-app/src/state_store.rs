@@ -2670,7 +2670,7 @@ fn verify_rooted_bundle_member_source_proof(
     ) || owner
         .signer_fingerprint
         .as_ref()
-        .map_or(true, |fingerprint| !trust_store.is_trusted(fingerprint))
+        .is_none_or(|fingerprint| !trust_store.is_trusted(fingerprint))
     {
         bail!("retained Bundle runtime owner is no longer trusted");
     }
@@ -8397,7 +8397,7 @@ impl StateStore {
             .runtime_db
             .get_launch_claim(thread_id)?
             .ok_or_else(|| anyhow!("dedicated workspace contact has no launch owner"))?;
-        if !Self::is_launch_owner_active_locked(&g, &claim.claimed_by) {
+        if !Self::is_launch_owner_active_locked(g, &claim.claimed_by) {
             bail!("dedicated workspace contact requires its active launch owner");
         }
         Self::authorize_thread_workspace_contact_locked(g, thread_id)
@@ -10326,10 +10326,10 @@ impl StateStore {
     #[cfg(any(test, feature = "test-support"))]
     pub fn delete_thread_projection_events_for_test(&self, thread_id: &str) -> Result<usize> {
         let g = self.lock()?;
-        Ok(g.state_db.projection().with_sql(|connection| Ok(connection.execute(
+        g.state_db.projection().with_sql(|connection| Ok(connection.execute(
             "DELETE FROM events WHERE thread_id = ?1",
             rusqlite::params![thread_id],
-        )?))?)
+        )?))
     }
 
     /// Remove the replaceable thread row after its projected events have been
@@ -13473,8 +13473,8 @@ impl StateStore {
                     }
                     Ok(ContinuationCommitReadback::ProvenAbsent) => {}
                 }
-                if local_runtime_seeded {
-                    if let Err(cleanup_error) =
+                if local_runtime_seeded
+                    && let Err(cleanup_error) =
                         self.delete_thread_runtime_locked(&g, &successor.thread_id)
                     {
                         tracing::error!(
@@ -13483,7 +13483,6 @@ impl StateStore {
                             "failed to remove runtime row after atomic running-continuation birth failed"
                         );
                     }
-                }
                 return Err(error);
             }
         };
@@ -15719,7 +15718,8 @@ impl StateStore {
     pub fn thread_list_enrichment(&self, thread_ids: &[String]) -> Result<ThreadListEnrichment> {
         let (facet_rows, graph_node_payloads, follow_waiters, terminal_error_previews) = {
             let g = self.lock()?;
-            let result = (
+            
+            (
                 load_bounded_facets_many(&g, thread_ids)?,
                 queries::current_graph_node_payloads(
                     g.state_db.projection(),
@@ -15738,8 +15738,7 @@ impl StateStore {
                     MAX_THREAD_LIST_ENRICHMENT_THREADS,
                     MAX_THREAD_LIST_ERROR_PREVIEW_BYTES,
                 )?,
-            );
-            result
+            )
         };
         Self::assemble_thread_list_enrichment(
             facet_rows,
@@ -15819,7 +15818,8 @@ impl StateStore {
     ) -> Result<ThreadListEnrichment> {
         let (facet_rows, graph_node_payloads, terminal_error_previews) = {
             let g = self.lock()?;
-            let result = (
+            
+            (
                 load_bounded_facets_many(&g, thread_ids)?,
                 queries::current_graph_node_payloads(
                     g.state_db.projection(),
@@ -15834,8 +15834,7 @@ impl StateStore {
                     MAX_THREAD_LIST_ENRICHMENT_THREADS,
                     MAX_THREAD_LIST_ERROR_PREVIEW_BYTES,
                 )?,
-            );
-            result
+            )
         };
         Self::assemble_thread_list_enrichment(
             facet_rows,
@@ -23566,7 +23565,7 @@ impl StateStore {
         }
         if let Some(expected) = launch_owner {
             let claim = g.runtime_db.get_launch_claim(thread_id)?;
-            if !claim.is_some_and(|claim| claim.claimed_by == expected) {
+            if claim.is_none_or(|claim| claim.claimed_by != expected) {
                 return Ok(None);
             }
         }
@@ -24617,7 +24616,8 @@ mod tests {
             lillux::sha256_hex(lillux::canonical_json(&plan).unwrap().as_bytes());
         let protocol_document = String::new();
         let protocol_hash = lillux::sha256_hex(protocol_document.as_bytes());
-        let capsule = ryeos_state::objects::AdmittedLaunchCapsule {
+        
+        ryeos_state::objects::AdmittedLaunchCapsule {
             schema: ryeos_state::objects::ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION,
             kind: "admitted_launch_capsule".to_owned(),
             exact_program,
@@ -24666,8 +24666,7 @@ mod tests {
             parent_delegation_caps: None,
             runtime_ref: "runtime:fixture".to_owned(),
             executor_ref: "tool:test/executor".to_owned(),
-        };
-        capsule
+        }
     }
 
     #[test]
@@ -31215,7 +31214,7 @@ mod tests {
                 runtime_custody: None,
                 launch_authority:
                     crate::runtime_db::ProcessResourceLaunchAuthority::LocalProcessScope {
-                        allocation: allocation,
+                        allocation,
                         recovery: None,
                     },
             },

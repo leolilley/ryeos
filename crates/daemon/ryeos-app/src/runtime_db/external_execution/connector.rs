@@ -486,7 +486,7 @@ impl RuntimeDb {
         placement: &str,
     ) -> Result<String> {
         self.conn.with_sql(|conn| {
-            Ok(expected_connector(&conn, placement, None)?.capability_generation)
+            Ok(expected_connector(conn, placement, None)?.capability_generation)
         })
     }
 
@@ -495,7 +495,7 @@ impl RuntimeDb {
         placement: &str,
     ) -> Result<Option<ExternalConnectorRecord>> {
         self.conn.with_sql(|conn| {
-            read_connector(&conn, placement)
+            read_connector(conn, placement)
         })
     }
 
@@ -511,7 +511,7 @@ impl RuntimeDb {
                 capability_generation,
             )?;
             validate_sha256("external connector capability", capability_hash)?;
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let mut expected = expected_connector(&tx, placement, Some(capability_hash))?;
             ensure!(
                 expected.capability_generation == capability_generation,
@@ -564,7 +564,7 @@ impl RuntimeDb {
         peer: &lillux::ExactProcessIdentity,
     ) -> Result<bool> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let record =
                 read_connector(&tx, placement)?.context("external connector is not prepared")?;
             ensure!(
@@ -646,7 +646,7 @@ impl RuntimeDb {
     ) -> Result<ExternalConnectorRecord> {
         self.conn.with_sql(|conn| {
             validate_bounded_runtime_text("external connector close reason", reason, 64)?;
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let record = read_connector(&tx, placement)?.context("external connector is absent")?;
             if record.phase == ExternalConnectorPhase::Closed {
                 ensure!(
@@ -1017,7 +1017,7 @@ mod tests {
         expired.execution_deadline_ms = 2;
         expired.expires_at_ms = 3;
         assert!(
-            db.conn.with_sql(|connection| Ok(require_live_released_channel(connection, &binding.placement_thread_id, &expired)?))
+            db.conn.with_sql(|connection| require_live_released_channel(connection, &binding.placement_thread_id, &expired))
                 .is_err()
         );
 
@@ -1073,7 +1073,7 @@ mod tests {
             .unwrap();
         db.conn.with_sql(|connection| Ok(connection.execute_batch(&trigger_sql)?)).unwrap();
         assert!(
-            db.conn.with_sql(|connection| Ok(validate_connectors(connection)?))
+            db.conn.with_sql(|connection| validate_connectors(connection))
                 .unwrap_err()
                 .to_string()
                 .contains("capability generation")

@@ -733,15 +733,13 @@ impl RuntimeDb {
             // allowed to disappear or move while that attempt remains unsettled,
             // even if a later caller presents an otherwise valid launch claim.
             validate_unsettled_scoped_child_lifetime(&tx)?;
-            if let Some(incumbent) = read_scope_lifetime_fence(&tx)? {
-                if incumbent != lifetime {
-                    if !incumbent.has_ended().map_err(anyhow::Error::msg)?
-                        || self.unsettled_process_scope_count(None)? != 0
+            if let Some(incumbent) = read_scope_lifetime_fence(&tx)?
+                && incumbent != lifetime
+                    && (!incumbent.has_ended().map_err(anyhow::Error::msg)?
+                        || self.unsettled_process_scope_count(None)? != 0)
                     {
                         bail!("scoped child reservation crosses an unsettled host-lifetime fence");
                     }
-                }
-            }
             let encoded_lifetime = lillux::canonical_json(&serde_json::to_value(&lifetime)?)?;
             tx.execute(
                 "UPDATE execution_lifetime_fence SET host_lifetime=?1 WHERE singleton=1",
@@ -1169,7 +1167,7 @@ impl RuntimeDb {
         attempt_id: &str,
     ) -> Result<Option<ScopedChildAttemptRecord>> {
         self.conn.with_sql(|conn| {
-            read_scoped_child_attempt(&conn, attempt_id)
+            read_scoped_child_attempt(conn, attempt_id)
         })
     }
 
@@ -1190,7 +1188,7 @@ impl RuntimeDb {
                 .optional()?;
             attempt_id
                 .as_deref()
-                .map(|id| read_scoped_child_attempt(&conn, id))
+                .map(|id| read_scoped_child_attempt(conn, id))
                 .transpose()
                 .map(|record| record.flatten())
         })
@@ -2395,7 +2393,7 @@ mod tests {
         let (initial, recovery, _) = fixture();
         seed_owner(&db, &initial.owner);
         db.reserve_scoped_child_attempt(&initial).unwrap();
-        assert!(db.conn.with_sql(|connection| Ok(read_scope_lifetime_fence(connection)?)).unwrap().is_some());
+        assert!(db.conn.with_sql(|connection| read_scope_lifetime_fence(connection)).unwrap().is_some());
         assert!(
             db.claim_unbound_scoped_child_discard(&initial.attempt_id)
                 .is_err()
@@ -2436,7 +2434,7 @@ mod tests {
             db.complete_unbound_scoped_child_discard(&initial.attempt_id)
                 .is_err()
         );
-        assert!(db.conn.with_sql(|connection| Ok(read_scope_lifetime_fence(connection)?)).unwrap().is_none());
+        assert!(db.conn.with_sql(|connection| read_scope_lifetime_fence(connection)).unwrap().is_none());
     }
 
     #[test]
@@ -2688,7 +2686,7 @@ mod tests {
             .unwrap();
         db.complete_unbound_scoped_child_discard(&first.attempt_id)
             .unwrap();
-        assert!(db.conn.with_sql(|connection| Ok(read_scope_lifetime_fence(connection)?)).unwrap().is_some());
+        assert!(db.conn.with_sql(|connection| read_scope_lifetime_fence(connection)).unwrap().is_some());
         assert_eq!(db.unsettled_process_scope_count(None).unwrap(), 1);
         db.conn.with_sql(|connection| Ok(connection.execute(
                 "DELETE FROM thread_launch_claim WHERE thread_id=?1",
@@ -2699,7 +2697,7 @@ mod tests {
             .unwrap();
         db.complete_unbound_scoped_child_discard(&second.attempt_id)
             .unwrap();
-        assert!(db.conn.with_sql(|connection| Ok(read_scope_lifetime_fence(connection)?)).unwrap().is_none());
+        assert!(db.conn.with_sql(|connection| read_scope_lifetime_fence(connection)).unwrap().is_none());
     }
 
     #[test]

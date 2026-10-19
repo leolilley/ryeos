@@ -903,8 +903,8 @@ pub(super) async fn start(
         &request.allowed_effect_classes,
         request.recover_upstream_session,
     )?;
-    if !recovering {
-        if let (Some(scope), Some(accounting)) =
+    if !recovering
+        && let (Some(scope), Some(accounting)) =
             (cap.accounting_scope.as_ref(), state.accounting.as_ref())
         {
             let request_digest = ryeos_state::objects::canonical_value_digest(&json!({
@@ -936,7 +936,6 @@ pub(super) async fn start(
                 }
             }
         }
-    }
     ryeos_app::private_artifact_home::require_within_default_limit(
         &state.config.runtime_state_dir(),
         &profile.home_id,

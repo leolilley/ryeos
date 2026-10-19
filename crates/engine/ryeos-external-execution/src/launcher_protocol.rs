@@ -1302,8 +1302,8 @@ impl DirectCommandObservation {
                 });
             }
         }
-        if self.stdout.closed && self.stderr.closed {
-            if let Some(target_exit) = self.target_exit {
+        if self.stdout.closed && self.stderr.closed
+            && let Some(target_exit) = self.target_exit {
                 let commitment = |bytes: &[u8]| ExternalCommandOutputCommitment {
                     bytes: bytes.len() as u64,
                     sha256: lillux::sha256_hex(bytes),
@@ -1320,7 +1320,6 @@ impl DirectCommandObservation {
                 self.terminal_sent = true;
                 return Ok(CandidateExecutionOutput::CommandTerminated { observation });
             }
-        }
         // EOF, including EOF following forced cleanup, supplies no target exit.
         Ok(CandidateExecutionOutput::Idle)
     }

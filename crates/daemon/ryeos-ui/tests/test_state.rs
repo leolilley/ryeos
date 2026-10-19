@@ -305,7 +305,7 @@ fn build_app_state(
         thread_auth: Arc::new(ryeos_app::callback_token::ThreadAuthStore::new()),
         controller_lifetime,
         extensions: {
-            let mut ext = ryeos_app::extension_state::ExtensionState::new();
+            let ext = ryeos_app::extension_state::ExtensionState::new();
             ext.insert(std::sync::Arc::new(ryeos_ui::UiState::new()));
             Arc::new(ext)
         },

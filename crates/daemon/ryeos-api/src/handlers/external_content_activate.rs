@@ -687,7 +687,7 @@ fn completed_activation_receipt_is_reusable(
             &cas,
             &component.expected_manifest_hash,
             &consumer,
-            &authority.node_fingerprint,
+            authority.node_fingerprint,
         )?
         else {
             return Ok(false);

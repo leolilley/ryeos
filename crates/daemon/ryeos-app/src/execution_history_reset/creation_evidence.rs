@@ -1412,7 +1412,7 @@ mod tests {
                 DepositLocation::InspectionParent,
                 name.clone(),
                 AbandonedDepositKind::Directory,
-                DepositIdentity::Directory { identity: directory.clone() },
+                DepositIdentity::Directory { identity: directory },
                 true,
             ));
             deposits.push(deposit(DepositLocation::InspectionParent, format!("created.{name}"), AbandonedDepositKind::Witness, wide(u64::MAX), false));

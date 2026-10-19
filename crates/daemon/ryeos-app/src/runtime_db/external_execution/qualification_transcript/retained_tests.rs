@@ -374,22 +374,22 @@ Ok(())
         next.workspace_identity = Some(
             serde_json::from_value(serde_json::json!({"containing_device":1,"inode":123})).unwrap(),
         );
-        self.db.conn.with_sql(|connection| Ok(qualification_local_start::transition(connection, &local, &next)?)).unwrap();
+        self.db.conn.with_sql(|connection| qualification_local_start::transition(connection, &local, &next)).unwrap();
         local = next;
         let mut next = local.clone();
         next.directory_borrow_intent = Some(
             qualification_local_start::QualificationWorkspaceBorrowIntent {
                 workspace_id: workspace_id.clone(),
-                directory_identity: next.workspace_identity.clone().unwrap(),
+                directory_identity: next.workspace_identity.unwrap(),
                 reserved_at_ms: 1,
             },
         );
-        self.db.conn.with_sql(|connection| Ok(qualification_local_start::transition(connection, &local, &next)?)).unwrap();
+        self.db.conn.with_sql(|connection| qualification_local_start::transition(connection, &local, &next)).unwrap();
         local = next;
         let mut next = local.clone();
         next.phase = qualification_local_start::QualificationLocalStartPhase::WorkerAttached;
         next.worker_incarnation_digest = Some(identity.owner_incarnation_digest().unwrap());
-        self.db.conn.with_sql(|connection| Ok(qualification_local_start::transition(connection, &local, &next)?)).unwrap();
+        self.db.conn.with_sql(|connection| qualification_local_start::transition(connection, &local, &next)).unwrap();
         self.db.conn.with_sql(|connection| Ok(connection.execute("INSERT INTO external_qualification_worker_process(placement_thread_id,accepted_root_id,accepted_capsule_hash,qualification_operation_id,qualification_occurrence_id,channel_binding_digest,process_identity_json,daemon_generation_id,phase,attached_at_ms,provider_configuration_json) VALUES(?1,?2,?3,?4,?5,?6,?7,'retained-generation','attached',1,?8)",
             params![placement,owner.coordinate.accepted_root_id,owner.coordinate.accepted_capsule_hash,owner.qualification_operation_id,owner.qualification_occurrence.occurrence_id,digest,canonical(&identity),canonical(&configuration)])?)).unwrap();
         self.db.conn.with_sql(|connection| Ok(connection.execute("INSERT INTO external_qualification_worker_command(placement_thread_id,accepted_root_id,accepted_capsule_hash,qualification_operation_id,qualification_occurrence_id,channel_binding_digest,process_incarnation_digest,setup_request_digest,request_digest,state,reserved_at_ms) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,'reserved',1)",

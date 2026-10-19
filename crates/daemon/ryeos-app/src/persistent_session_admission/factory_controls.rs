@@ -349,7 +349,7 @@ session:
         components: crate::execution_realization::execution_components(state, &resolution)
             .unwrap(),
         properties: crate::execution_realization::execution_properties(
-            &state,
+            state,
             plan.filesystem_authority_ceiling,
             plan.network_authority_ceiling,
             plan.target_requirement.as_ref(),
@@ -360,8 +360,8 @@ session:
     };
     capsule.execution_realization_hash =
         cas.store_object(&realization.to_value().unwrap()).unwrap();
-    let hash = cas.store_object(&capsule.to_value().unwrap()).unwrap();
-    hash
+    
+    cas.store_object(&capsule.to_value().unwrap()).unwrap()
 }
 
 #[test]

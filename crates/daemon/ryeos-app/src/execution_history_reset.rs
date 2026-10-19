@@ -1320,11 +1320,10 @@ impl InspectionControllerCustody {
         }
         if let Some((factory, released)) = &slot.released_reference {
             // A reference refused before any ticket has no census entry.
-            if let Some(terminal) = released.terminal(factory)? {
-                if terminal.ticket().is_some() {
+            if let Some(terminal) = released.terminal(factory)?
+                && terminal.ticket().is_some() {
                     terminals.push(terminal.clone());
                 }
-            }
         }
         Ok(())
     }
@@ -2049,7 +2048,7 @@ fn run_execution_history_reset_owned(
         let permit = inspection_custody.begin_runtime_mutation()
             .map_err(|error| quota_claim.retain_failure(error, QuotaFailurePhase::Admission))?;
         let db = open_original_runtime_db(&config, &runtime_directory, &runtime_directory_lock,
-            &quota_claim, Arc::clone(&native_factory), &inspection_custody,
+            &quota_claim, Arc::clone(&native_factory), inspection_custody,
             options.unreadable_lifetime_fence())
             .map_err(|error| quota_claim.retain_failure(error, QuotaFailurePhase::Acquisition))?;
         // Adopt before the first caller query: later errors transfer the SAME
@@ -2173,7 +2172,7 @@ fn run_execution_history_reset_owned(
     // predecessor replay epochs, even though this command explicitly retires
     // them. The restricted preparation cannot service replay or retire rows.
     let operational_inspection = operational_owner::open_original_operational(
-        &inspection_custody, &quota_claim, &native_factory, &runtime_directory,
+        inspection_custody, &quota_claim, &native_factory, &runtime_directory,
         &runtime_directory_lock, OperationalOwnerPhase::Inspection,
     ).context("admit strict readonly Operational inspection before intent")?;
     let replay_indexes = operational_inspection.report()?;
@@ -2427,7 +2426,7 @@ fn run_execution_history_reset_owned(
         // intent check above. The original claim stays Producing; counters and
         // factory are not renewed between readonly and mutating tickets.
         let mut owner = operational_owner::open_original_operational(
-            &inspection_custody, &quota_claim, &native_factory, &runtime_directory,
+            inspection_custody, &quota_claim, &native_factory, &runtime_directory,
             &runtime_directory_lock, OperationalOwnerPhase::Mutation,
         ).context("admit original Operational mutation after durable intent")?;
         anyhow::ensure!(owner.report()? == replay_indexes,

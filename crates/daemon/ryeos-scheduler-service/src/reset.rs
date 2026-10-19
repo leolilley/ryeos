@@ -1014,8 +1014,8 @@ fn capture_stopped_intake(
     let mut held: Option<std::result::Result<SchedulerDb, SchedulerDbOpenFailure>> = None;
     let mut last_refusal = None;
     for attempt in 0..=HELD_RETRY_ATTEMPTS {
-        if attempt > 0 {
-            if let Err(error) = permit.runtime_directory() {
+        if attempt > 0
+            && let Err(error) = permit.runtime_directory() {
                 retry_notice(
                     "revalidate stopped scheduler intake authority while retaining owner",
                     &error,
@@ -1023,7 +1023,6 @@ fn capture_stopped_intake(
                 last_refusal = Some(error);
                 continue;
             }
-        }
         let refusal = match factory.with_original_stopped_intake(|_| match held.take() {
             None => SchedulerDb::capture_stopped_projection(Arc::clone(runtime), plan.clone()),
             Some(Err(failure)) => failure.retry_stopped_projection(plan),
@@ -1738,7 +1737,7 @@ mod late_source_controls {
             let quarantine = path.join(format!(
                 "scheduler-retirement.role.{generation}.main.quarantine"
             ));
-            if count >= 11 && count <= 12 {
+            if (11..=12).contains(&count) {
                 std::fs::rename(&canonical, &quarantine)?;
             }
             if count >= 13 {

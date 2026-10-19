@@ -1569,13 +1569,12 @@ pub fn refresh_keys_error(binding: &ViewBinding) -> Option<String> {
                 REFRESH_KEYS.join(", ")
             ));
         }
-        if let Some(value) = object.get("after_invoke") {
-            if !view_level || !value.is_boolean() {
+        if let Some(value) = object.get("after_invoke")
+            && (!view_level || !value.is_boolean()) {
                 return Some(format!(
                     "invalid {scope} refresh.after_invoke: only a view-level boolean is supported"
                 ));
             }
-        }
         if object
             .get("on_facet")
             .is_some_and(|value| value.as_str().is_none_or(str::is_empty))

@@ -1107,7 +1107,7 @@ impl ThreadSnapshot {
             )?,
         }
         .context("terminal workspace output result snapshot is missing")?;
-        let policy = match budget.as_deref_mut() {
+        let policy = match budget {
             Some(budget) => crate::project_materialization::load_project_policy_bounded_with_budget(
                 cas,
                 &capture.partition.project_snapshot_policy_hash,

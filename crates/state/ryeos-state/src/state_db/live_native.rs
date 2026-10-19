@@ -2712,9 +2712,8 @@ impl ReleasedLiveStateStartup {
         for lease in self.generation_registry_snapshot()? {
             // SAFETY: the caller supplies actual unpublished startup quiescence;
             // genuine SQL terminal checks precede native effects outside gates.
-            if let Some(receipt) = unsafe { lease.close_after_consumers(factory) }? {
-                if !receipts.iter().any(|actual| Arc::ptr_eq(actual, &receipt)) { receipts.push(receipt); }
-            }
+            if let Some(receipt) = unsafe { lease.close_after_consumers(factory) }?
+                && !receipts.iter().any(|actual| Arc::ptr_eq(actual, &receipt)) { receipts.push(receipt); }
         }
         Ok(receipts)
     }
@@ -2728,9 +2727,8 @@ impl ReleasedLiveStateStartup {
         if let Some(released) = &self.inner.progress.projection_released { terminals.push(released.terminal().clone()); }
         for proof in self.inner.projection_native.iter() { proof.require_original(factory)?; terminals.push(proof.clone()); }
         for reference in self.inner.schema_pending.iter() { reference.terminal().require_original(factory)?; terminals.push(reference.terminal().clone()); }
-        if let Some(released) = &self.inner.progress.schema_released {
-            if let Some(terminal) = released.terminal(factory)? { terminals.push(terminal.clone()); }
-        }
+        if let Some(released) = &self.inner.progress.schema_released
+            && let Some(terminal) = released.terminal(factory)? { terminals.push(terminal.clone()); }
         if let Some(context) = &self.inner.progress.context {
             anyhow::ensure!(Arc::ptr_eq(&context.factory, factory), "foreign startup projection context");
             for terminal in &context.terminals { terminals.push(lillux_sqlite::OriginalNativeConnectionTerminal::Closed(Arc::clone(terminal))); }
@@ -2912,10 +2910,7 @@ impl LiveStateDatabaseOpenFailure {
 }
 impl LiveStateStartupRecoveryFailure {
     pub fn retry(self) -> std::result::Result<ReleasedLiveStateStartup, Self> {
-        let custody = match self.into_custody() {
-            Ok(custody) => custody,
-            Err(this) => return Err(this),
-        };
+        let custody = self.into_custody()?;
         match custody {
             StartupRecoveryCustody::Opening(failure) => failure.close_retained(),
             StartupRecoveryCustody::Closing { factory, progress } => {

@@ -93,6 +93,7 @@ impl NodePolicySection for IsolationPolicySection {
         Ok(Arc::new(policy))
     }
 }
+use std::sync::Arc;
 
 #[cfg(test)]
 mod tests {
@@ -293,4 +294,3 @@ mod tests {
         assert!(refused.contains("`edge` is not declared"), "{refused}");
     }
 }
-use std::sync::Arc;

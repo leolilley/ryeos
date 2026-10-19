@@ -387,11 +387,10 @@ impl InspectionControllerCustody {
                     .as_ref()
                     .context("released schema reference census lacks its factory")?;
                 // A reference refused before any ticket has no census entry.
-                if let Some(terminal) = released.terminal(factory)? {
-                    if terminal.ticket().is_some() {
+                if let Some(terminal) = released.terminal(factory)?
+                    && terminal.ticket().is_some() {
                         terminals.push(terminal.clone());
                     }
-                }
             }
             if let Some(closed) = &slot.closed {
                 terminals.push(closed.terminal());

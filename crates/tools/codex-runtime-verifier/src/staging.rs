@@ -1029,7 +1029,7 @@ pub fn stage_direct_target_probe(
     let guest_cwd = direct_prepared_destination(DIRECT_OCCURRENCE_ID)?.join("guest");
     let command_environment = materialize_command_environment(
         &roots.configurations,
-        &controller_executable,
+        controller_executable,
         &guest_cwd,
         &scenario.command_environment_template_sha256,
     )?;

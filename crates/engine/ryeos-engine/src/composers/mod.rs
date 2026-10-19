@@ -392,14 +392,13 @@ pub(crate) fn field_requirements_for_schema(schema: &KindSchema) -> Vec<Composer
         ComposerFieldSemantics::RootVerbatim
     };
     let mut requirements = Vec::new();
-    if let Some(target) = schema.execution.as_ref().and_then(|e| e.target.as_ref()) {
-        if target.request_format.is_some() {
+    if let Some(target) = schema.execution.as_ref().and_then(|e| e.target.as_ref())
+        && target.request_format.is_some() {
             requirements.push(ComposerFieldRequirement {
                 path: target.path.clone(),
                 semantics: ComposerFieldSemantics::RootVerbatim,
             });
         }
-    }
     if let Some(declaration) = schema
         .execution
         .as_ref()

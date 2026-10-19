@@ -8,7 +8,7 @@ use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::engine::EffectiveItemRequest;
 use ryeos_executor::executor::ServiceAvailability;
 use serde_json::Value;
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
 use crate::handler_context::HandlerContext;
 use crate::handler_error::{HandlerError, HandlerResult};

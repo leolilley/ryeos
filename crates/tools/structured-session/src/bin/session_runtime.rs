@@ -314,8 +314,8 @@ async fn run_session(
         }
         return Ok(terminal_result(thread_id, started));
     }
-    if matches!(&config.mode, WorkerExecutionMode::BoundedTurn { .. }) {
-        if let Some(outcome) = started
+    if matches!(&config.mode, WorkerExecutionMode::BoundedTurn { .. })
+        && let Some(outcome) = started
             .get("bounded_outcome")
             .filter(|value| !value.is_null())
             .cloned()
@@ -355,7 +355,6 @@ async fn run_session(
             };
             return Ok(terminal_result(thread_id, terminal));
         }
-    }
     let mut deadline = if matches!(&config.mode, WorkerExecutionMode::BoundedTurn { .. }) {
         let created_at_ms = started
             .get("created_at_ms")

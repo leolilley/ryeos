@@ -457,15 +457,14 @@ impl ProductQualificationConsumerWorkerRequest {
         if self.schema != PRODUCT_QUALIFICATION_CONSUMER_WORKER_REQUEST_SCHEMA {
             bail!("unsupported qualification Worker request schema");
         }
-        if let Some(profile) = &self.credential_profile_id {
-            if profile.is_empty()
+        if let Some(profile) = &self.credential_profile_id
+            && (profile.is_empty()
                 || profile.len() > 256
                 || profile.trim() != profile
-                || profile.chars().any(char::is_control)
+                || profile.chars().any(char::is_control))
             {
                 bail!("qualification Worker credential profile ID is not canonical and bounded");
             }
-        }
         if let Some(fixture) = &self.fixture {
             fixture.validate()?;
         }
@@ -849,17 +848,16 @@ pub struct ProductQualificationVerifier {
 impl ProductQualificationVerifier {
     pub fn validate(&self) -> anyhow::Result<()> {
         self.artifact_identity.validate()?;
-        if let Some(root) = &self.admitted_project_root {
-            if root.as_os_str()
+        if let Some(root) = &self.admitted_project_root
+            && (root.as_os_str()
                 != std::ffi::OsStr::new(crate::objects::ADMITTED_DIRECT_PROJECT_ROOT)
                 || !matches!(
                     &self.artifact_identity,
                     AdmittedLaunchArtifactIdentity::DirectItemExecutor { .. }
-                )
+                ))
             {
                 bail!("qualification verifier has no canonical direct execution root context");
             }
-        }
         for (label, value) in [
             ("verifier chain root", &self.chain_root_id),
             ("verifier thread", &self.thread_id),

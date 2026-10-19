@@ -23,11 +23,10 @@ mod linux {
             "interactive-vacant-output" => Some(1),
             _ => None,
         };
-        if let Some(fd) = vacant {
-            if unsafe { libc::close(fd) } != 0 {
+        if let Some(fd) = vacant
+            && unsafe { libc::close(fd) } != 0 {
                 return Err("cannot vacate fixture descriptor".into());
             }
-        }
         let deadline = MonotonicDeadline::after(Duration::from_secs(3));
         // SAFETY: dedicated single-threaded executable startup. The parent owns
         // only opposite endpoints; no Rust stdio owners or endpoint aliases.

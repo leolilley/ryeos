@@ -234,11 +234,10 @@ impl ClosedOriginalState {
         for lease in leases {
             // SAFETY: consuming State retirement ended its actual SQL users;
             // the original exclusive CAS frame excludes new generation work.
-            if let Some(receipt) = unsafe { lease.close_after_consumers(&self.factory) }? {
-                if !receipts.iter().any(|actual| Arc::ptr_eq(actual, &receipt)) {
+            if let Some(receipt) = unsafe { lease.close_after_consumers(&self.factory) }?
+                && !receipts.iter().any(|actual| Arc::ptr_eq(actual, &receipt)) {
                     receipts.push(receipt);
                 }
-            }
         }
         Ok(receipts)
     }

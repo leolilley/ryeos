@@ -842,7 +842,7 @@ mod tests {
         let now = i64::try_from(lillux::time::timestamp_millis()).unwrap();
         assert_eq!(used(&db, now).held, 1);
         db.conn
-            .with_sql(|connection| super::super::validate_current(connection))
+            .with_sql(super::super::validate_current)
             .unwrap();
 
         // The second concurrent lease is refused by the node's ceiling of one.
@@ -858,7 +858,7 @@ mod tests {
         db.cancel_external_allocation("T-one").unwrap();
         assert_eq!(used(&db, now).held, 0);
         db.conn
-            .with_sql(|connection| super::super::validate_current(connection))
+            .with_sql(super::super::validate_current)
             .unwrap();
         reserve_session(&db, &plain).unwrap();
     }

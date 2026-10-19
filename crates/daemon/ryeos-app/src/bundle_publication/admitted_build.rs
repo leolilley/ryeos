@@ -272,7 +272,7 @@ impl AdmittedReleaseInput {
             "release input projections disagree with owned payloads"
         );
         anyhow::ensure!(
-            input.requires_binary_build == !input.payloads.is_empty(),
+            input.requires_binary_build != input.payloads.is_empty(),
             "binary-build flag disagrees with owned payloads"
         );
         Ok(input)
@@ -667,7 +667,7 @@ fn inspect_release_input_for_purpose(
     let input = AdmittedReleaseInput {
         schema: RELEASE_INPUT_SCHEMA.to_owned(),
         project_path,
-        authored_manifest: materialize_release_manifest(&project, &bundle_name)?,
+        authored_manifest: materialize_release_manifest(project, &bundle_name)?,
         bundle_name,
         source_snapshot_hash,
         predecessor_generation_hash: None,

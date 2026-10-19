@@ -2116,9 +2116,9 @@ impl SchedulerDb {
             }
             if dry_run {
                 return Ok(SchedulerFireHistoryDiscardReport {
-                    fires: count(&conn, "schedule_fires")?,
-                    outbox_snapshots: count(&conn, "schedule_fire_outbox")?,
-                    cursors: count(&conn, "schedule_cursors")?,
+                    fires: count(conn, "schedule_fires")?,
+                    outbox_snapshots: count(conn, "schedule_fire_outbox")?,
+                    cursors: count(conn, "schedule_cursors")?,
                 });
             }
 
@@ -2190,7 +2190,7 @@ impl SchedulerDb {
     pub fn upsert_spec(&self, rec: &ScheduleSpecRecord) -> Result<()> {
         self.with_sql(|conn| {
             validate_schedule_spec_record(rec)?;
-            upsert_spec_conn(&conn, rec)
+            upsert_spec_conn(conn, rec)
                 .with_context(|| format!("upsert_spec failed for {}", rec.schedule_id))?;
             Ok(())
         })
@@ -2469,7 +2469,7 @@ impl SchedulerDb {
     /// closed and routes startup through the explicit full replay path.
     pub fn fire_projection_is_current(&self) -> Result<bool> {
         self.with_sql(|conn| {
-            fire_projection_is_current_conn(&conn)
+            fire_projection_is_current_conn(conn)
         })
     }
 
@@ -2617,7 +2617,7 @@ impl SchedulerDb {
     pub(crate) fn project_fire_from_journal(&self, rec: &FireRecord) -> Result<()> {
         self.with_sql(|conn| {
             validate_fire_record(rec)?;
-            upsert_fire_conn(&conn, rec)
+            upsert_fire_conn(conn, rec)
                 .with_context(|| format!("project fire from journal failed for {}", rec.fire_id))
         })
     }
@@ -2679,8 +2679,8 @@ impl SchedulerDb {
     /// never rewrites reservation identity, thread id, trigger reason, or the journal.
     pub(crate) fn reclaim_fire(&self, fire_id: &str) -> Result<bool> {
         self.with_sql(|conn| {
-            require_current_fire_projection_conn(&conn)?;
-            let Some(record) = get_fire_conn(&conn, fire_id)? else {
+            require_current_fire_projection_conn(conn)?;
+            let Some(record) = get_fire_conn(conn, fire_id)? else {
                 return Ok(false);
             };
             record.validate()?;
@@ -3039,7 +3039,7 @@ impl SchedulerDb {
         targets: &[ryeos_state::gc::retention::FireRetentionTarget],
     ) -> Result<()> {
         self.with_sql(|conn| {
-            if !fire_projection_is_current_conn(&conn)? {
+            if !fire_projection_is_current_conn(conn)? {
                 anyhow::bail!(
                     "cannot verify retention against an incomplete scheduler fire projection"
                 );
@@ -3053,7 +3053,7 @@ impl SchedulerDb {
                     "cannot verify scheduler fire retention with {pending_outbox} undrained snapshot(s)"
                 );
             }
-            validate_fire_retention_targets_conn(&conn, targets)?;
+            validate_fire_retention_targets_conn(conn, targets)?;
             Ok(())
         })
     }

@@ -50,7 +50,9 @@ pub enum ResumeMode {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[derive(Default)]
 pub enum ResumeDisposition {
+    #[default]
     ContinueProvider,
     ParseRetainedResponse,
     AfterSettledToolBatch { turn: u32 },
@@ -58,11 +60,6 @@ pub enum ResumeDisposition {
     FinalizeDirectiveReturn { outputs: Value },
 }
 
-impl Default for ResumeDisposition {
-    fn default() -> Self {
-        Self::ContinueProvider
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct StartedToolOccurrence {

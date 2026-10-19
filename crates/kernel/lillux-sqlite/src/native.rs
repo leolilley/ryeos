@@ -127,7 +127,7 @@ pub fn native_refusal_is_fact(error: &anyhow::Error) -> bool {
         && error.downcast_ref::<NativeCheckUnobservable>().is_none()
         && error.downcast_ref::<NativeServiceEdgeReached>().is_none()
         && !error.downcast_ref::<FixedHostRefusal>().is_some_and(region_refusal_is_contention)
-        && !error.downcast_ref::<anyhow::Error>().is_some_and(|layered| !native_refusal_is_fact(layered))
+        && error.downcast_ref::<anyhow::Error>().is_none_or(native_refusal_is_fact)
         && !error.chain().any(cause_is_not_fact)
 }
 
@@ -324,11 +324,10 @@ pub(crate) fn native_step_hook(
                 || (debit.0)().is_err()
         }))
         .unwrap_or(true);
-        if refuse {
-            if let Some(refused) = &refused {
+        if refuse
+            && let Some(refused) = &refused {
                 refused.store(true, Ordering::SeqCst);
             }
-        }
         refuse
     }
 }
@@ -978,8 +977,8 @@ impl OriginalProjectionLease {
                         self.native_closed = true;
                     }
                     // Commit real consumption before interpreting status/late failures.
-                    if fd_consumed {
-                        if let Some(registration) = self.inner.get_mut().fork_registration.take() {
+                    if fd_consumed
+                        && let Some(registration) = self.inner.get_mut().fork_registration.take() {
                             match unsafe { registration.unregister_consumed(&fork_guard) } {
                                 Ok(()) => {}
                                 Err(registration) => {
@@ -992,7 +991,6 @@ impl OriginalProjectionLease {
                                 }
                             }
                         }
-                    }
                     ensure!(code == libsqlite3_sys::SQLITE_OK, "projection lease native close refused ({code})");
                 } else {
                     if !self.pin_consumed {
@@ -1459,7 +1457,7 @@ impl OriginalDestinationOutsideCustody {
         let registry = std::cell::RefCell::new(registry);
         let result = crate::original_physical_custody::retain_callback_refusal(&|| {
             // SAFETY: same retained domain owner and actual supervisor registry.
-            unsafe { continuation.borrow_mut().register_shared_roots(&mut **registry.borrow_mut(), prepay) }
+            unsafe { continuation.borrow_mut().register_shared_roots(&mut registry.borrow_mut(), prepay) }
         });
         if result.is_ok() { self.inner.get_mut().roots_registered = true; }
         result
@@ -2184,7 +2182,7 @@ static NATIVE_COMMIT_TABLE: std::sync::RwLock<Option<Weak<NativeCommitTable>>> =
 
 extern "C" fn native_commit_verifier(ticket: std::ffi::c_uint) -> c_int {
     std::panic::catch_unwind(|| verify_native_commit(ticket).is_ok())
-        .map_or(0, |verified| c_int::from(verified))
+        .map_or(0, c_int::from)
 }
 fn verify_native_commit(ticket: u32) -> Result<()> {
     let table = NATIVE_COMMIT_TABLE
@@ -2482,12 +2480,11 @@ impl OriginalNativeFactory {
                 Ok(())
             })()
         };
-        checked.map_err(|error| {
+        checked.inspect_err(|error| {
             // A forked child never writes the parent's latch.
-            if self.require_process().is_ok() && native_refusal_is_fact(&error) {
+            if self.require_process().is_ok() && native_refusal_is_fact(error) {
                 self.authority.refuse_service();
             }
-            error
         })
     }
     fn retain_error(self: &Arc<Self>, error: anyhow::Error) -> OriginalNativeFactoryFailure {
@@ -4430,7 +4427,7 @@ impl ClosedOriginalNativeConnection {
                     );
                 } else {
                     ensure!(
-                        inputs.root.entry_no_follow(&wal_name)?.is_none(),
+                        inputs.root.entry_no_follow(wal_name)?.is_none(),
                         "original generated WAL appeared after close"
                     );
                 }
@@ -4946,8 +4943,8 @@ impl OriginalNativeCloseFailure {
             let _scope = parts.factory.arena()?.scope(true, 0)?;
             // Snapshot from the genuine live Bound keeper before taking it.
             // Failed metadata validation retains the actual Live owner.
-            if parts.bound_identity.is_none() {
-                if let Some(NativeCloseOwner::Live(NativeConnectionBody::Bound(owner))) = slot_peek(&mut parts.owner)
+            if parts.bound_identity.is_none()
+                && let Some(NativeCloseOwner::Live(NativeConnectionBody::Bound(owner))) = slot_peek(&mut parts.owner)
                 {
                     owner
                         .binding
@@ -4956,7 +4953,6 @@ impl OriginalNativeCloseFailure {
                         .validate(owner.connection(), false)?;
                     parts.bound_identity = Some(owner.binding.as_ref().unwrap().main_identity()?);
                 }
-            }
             let owner = slot_take(&mut parts.owner)
                 .context("original native close owner missing")?;
             match owner {
@@ -5296,13 +5292,12 @@ impl OriginalNativeOpenFailure {
             {
                 proof.acknowledge_producer_terminal()?;
             }
-            if let Some(ticket) = parts.ticket {
-                if parts.factory.storage()?.tickets[ticket as usize - 1].load(Ordering::Acquire) != 3 {
+            if let Some(ticket) = parts.ticket
+                && parts.factory.storage()?.tickets[ticket as usize - 1].load(Ordering::Acquire) != 3 {
                     parts.factory.budget.debit_steps(1, true)?;
                     parts.factory.require_original(true)?;
                     parts.factory.mark_closed(ticket, true)?;
                 }
-            }
             if let Some(producer) = &parts.producer {
                 producer.acknowledge_native_terminal()?;
             }
@@ -6458,7 +6453,7 @@ impl NativeResidentState {
             return Err(FixedHostRefusal::Purpose);
         }
         let phase = cell.phase.load(Ordering::Acquire);
-        if !matches!(phase, 0 | 1 | 2 | 3) { return Err(FixedHostRefusal::Busy); }
+        if !matches!(phase, 0..=3) { return Err(FixedHostRefusal::Busy); }
         cell.phase.compare_exchange(phase, 2, Ordering::AcqRel, Ordering::Acquire)
             .map_err(|_| FixedHostRefusal::Busy)?;
         // This ends only the never-installed issuer interval. Actual wrappers
@@ -6484,7 +6479,7 @@ impl NativeResidentState {
         }
         if self.budget.connections_issued.load(Ordering::Acquire) as usize > MAX_NATIVE_CONNECTIONS { return Err(FixedHostRefusal::Provenance); }
         for ticket in &self.factory.tickets[..self.budget.connections_issued.load(Ordering::Acquire) as usize] {
-            if !matches!(ticket.load(Ordering::Acquire), 2 | 3 | 4) { return Err(FixedHostRefusal::TerminalRequired); }
+            if !matches!(ticket.load(Ordering::Acquire), 2..=4) { return Err(FixedHostRefusal::TerminalRequired); }
         }
         let count = self.controls_next.load(Ordering::Acquire) as usize;
         if count > MAX_NATIVE_PRODUCER_CELLS { return Err(FixedHostRefusal::Provenance); }

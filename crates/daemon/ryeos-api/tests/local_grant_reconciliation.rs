@@ -219,7 +219,7 @@ async fn semantic_conversion_borrows_only_the_exact_standalone_lock() {
         &ryeos_node_runtime::state_lock::default_lock_path(other.path()),
     )
     .unwrap();
-    let mut extensions = ryeos_app::extension_state::ExtensionState::new();
+    let extensions = ryeos_app::extension_state::ExtensionState::new();
     extensions.insert(Arc::new(wrong_lock));
     Arc::get_mut(&mut state).unwrap().extensions = Arc::new(extensions);
     assert!(
@@ -232,7 +232,7 @@ async fn semantic_conversion_borrows_only_the_exact_standalone_lock() {
     // The Store's owner already holds this exact lock, as standalone
     // dispatch does; a second acquisition would conflict with it.
     let lock = state_owner.standalone_lock();
-    let mut extensions = ryeos_app::extension_state::ExtensionState::new();
+    let extensions = ryeos_app::extension_state::ExtensionState::new();
     extensions.insert(lock.clone());
     Arc::get_mut(&mut state).unwrap().extensions = Arc::new(extensions);
     assert!(ryeos_node_runtime::state_lock::StateLock::acquire(&lock_path).is_err());

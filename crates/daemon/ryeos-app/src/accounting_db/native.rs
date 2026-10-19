@@ -384,12 +384,11 @@ impl AccountingNativeLedger {
                 }
             },
             LedgerConnection::Opening(mut failure) => {
-                if failure.retained_admission().is_some() {
-                    if let Err(error) = failure.recover_retained_admission() {
+                if failure.retained_admission().is_some()
+                    && let Err(error) = failure.recover_retained_admission() {
                         state.connection = LedgerConnection::Opening(failure);
                         return Err(error.context("accounting ledger admission recovery retained"));
                     }
-                }
                 match failure.retry_close() {
                     Ok(released) => LedgerConnection::Terminal(
                         OriginalNativeConnectionTerminal::Released(released),
@@ -464,13 +463,12 @@ impl AccountingNativeLedger {
                 terminals.push(reference.terminal().clone());
             }
             LedgerReference::Released(released) => {
-                if let Some(terminal) = released.terminal(factory)? {
-                    if !matches!(terminal, OriginalNativeConnectionTerminal::Released(receipt)
+                if let Some(terminal) = released.terminal(factory)?
+                    && !matches!(terminal, OriginalNativeConnectionTerminal::Released(receipt)
                         if receipt.native_ticket().is_none())
                     {
                         terminals.push(terminal.clone());
                     }
-                }
             }
             LedgerReference::Unused(_) => {}
             _ => bail!("accounting schema reference is not at a closed native phase"),
@@ -519,13 +517,12 @@ impl AccountingNativeLedger {
         match reference {
             LedgerReference::Closed(reference) => terminals.push(reference.terminal().clone()),
             LedgerReference::Released(released) => {
-                if let Ok(Some(terminal)) = released.terminal(factory) {
-                    if !matches!(terminal, OriginalNativeConnectionTerminal::Released(receipt)
+                if let Ok(Some(terminal)) = released.terminal(factory)
+                    && !matches!(terminal, OriginalNativeConnectionTerminal::Released(receipt)
                         if receipt.native_ticket().is_none())
                     {
                         terminals.push(terminal.clone());
                     }
-                }
             }
             other => drop(other),
         }

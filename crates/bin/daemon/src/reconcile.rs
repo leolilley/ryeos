@@ -3272,24 +3272,21 @@ fn assert_abandoned_workspace_contacts_settled(
         {
             ryeos_app::process::assert_reaped_process_group_absent(&identity)?;
         }
-        if let Some(claim) = state.state_store.get_launch_claim(thread_id)? {
-            if workspace.launch_owner.as_deref() != Some(claim.claimed_by.as_str())
-                || state.state_store.is_launch_owner_active(&claim.claimed_by)
+        if let Some(claim) = state.state_store.get_launch_claim(thread_id)?
+            && (workspace.launch_owner.as_deref() != Some(claim.claimed_by.as_str())
+                || state.state_store.is_launch_owner_active(&claim.claimed_by))
             {
                 anyhow::bail!("workspace has an active or replacement launch owner");
             }
-        }
         if let Some(identity) = state
             .state_store
             .get_thread(thread_id)?
             .and_then(|thread| thread.runtime.process_identity)
-        {
-            if execution_liveness(&identity) != IdentityLiveness::DeadOrStale
-                || !dead_identity_safe_to_clear(&identity, thread_id)
+            && (execution_liveness(&identity) != IdentityLiveness::DeadOrStale
+                || !dead_identity_safe_to_clear(&identity, thread_id))
             {
                 anyhow::bail!("workspace root process death is unproved");
             }
-        }
     }
     // During Constructing this is the held creator, not the root target. Once
     // dedicated attachment hands off the view it is the separately owned

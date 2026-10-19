@@ -668,7 +668,7 @@ fn fixture() -> Result<Fixture> {
         &signer,
     )?;
     let target = lillux::platform::current_binary_target()?;
-    let executable = bundle.join(".ai/bin").join(&target).join("fixture-checker");
+    let executable = bundle.join(".ai/bin").join(target).join("fixture-checker");
     fs::create_dir_all(executable.parent().unwrap())?;
     // The executable is never run. Its real bytes are captured through the
     // Bundle executor owner so current identity checks use an exact artifact.

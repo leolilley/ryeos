@@ -307,6 +307,7 @@ pub struct EnvelopeRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[derive(Default)]
 pub struct AggregateExecutionLimits {
     /// Whole execution-tree wall-clock window. The daemon converts this
     /// relative limit into one durable absolute deadline when it mints the
@@ -330,15 +331,6 @@ impl AggregateExecutionLimits {
     }
 }
 
-impl Default for AggregateExecutionLimits {
-    fn default() -> Self {
-        Self {
-            duration_seconds: 0,
-            worker_executions: 0,
-            provider_contacts: 0,
-        }
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

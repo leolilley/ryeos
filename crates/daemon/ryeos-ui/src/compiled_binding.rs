@@ -382,14 +382,13 @@ impl SessionCompiledUiBinding {
                 .affordances
                 .get(&self.binding.surface.canonical_ref),
         );
-        if self.binding.surface_route.is_none() {
-            if let Some(input) = surface_fields
+        if self.binding.surface_route.is_none()
+            && let Some(input) = surface_fields
                 .get_mut("input")
                 .and_then(Value::as_object_mut)
             {
                 input.remove("route");
             }
-        }
 
         if let Some(views) = surface_fields
             .get_mut("views")
@@ -402,15 +401,14 @@ impl SessionCompiledUiBinding {
                 sanitize_sources(fields, self.binding.sources.get(view_ref));
                 sanitize_affordances(fields, self.binding.affordances.get(view_ref));
                 let retained = self.binding.affordances.get(view_ref);
-                if let Some(input) = fields.get_mut("input").and_then(Value::as_object_mut) {
-                    if input
+                if let Some(input) = fields.get_mut("input").and_then(Value::as_object_mut)
+                    && input
                         .get("submit")
                         .and_then(Value::as_str)
                         .is_some_and(|id| !retained.is_some_and(|items| items.contains_key(id)))
                     {
                         input.remove("submit");
                     }
-                }
             }
         }
         Ok(surface)

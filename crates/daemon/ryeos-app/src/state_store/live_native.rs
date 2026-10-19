@@ -1999,30 +1999,26 @@ impl ReleasedLiveStateStoreStartup {
         prepay: &dyn Fn(u64, u64) -> Result<()>,
     ) -> Result<()> {
         let progress = self.progress.get_mut();
-        if let Some(state) = progress.state_physical.take() {
-            if let Err((state, error)) = state.into_exhausted(registry, prepay) {
+        if let Some(state) = progress.state_physical.take()
+            && let Err((state, error)) = state.into_exhausted(registry, prepay) {
                 progress.state_physical = Some(state);
                 return Err(error);
             }
-        }
-        if let Some(operational) = progress.operational_physical.take() {
-            if let Err((operational, error)) = operational.into_exhausted(registry) {
+        if let Some(operational) = progress.operational_physical.take()
+            && let Err((operational, error)) = operational.into_exhausted(registry) {
                 progress.operational_physical = Some(operational);
                 return Err(error);
             }
-        }
-        if let Some(runtime) = progress.runtime_outside.take() {
-            if let Err((runtime, error)) = runtime.into_exhausted() {
+        if let Some(runtime) = progress.runtime_outside.take()
+            && let Err((runtime, error)) = runtime.into_exhausted() {
                 progress.runtime_outside = Some(runtime);
                 return Err(error);
             }
-        }
-        if let Some(runtime) = progress.runtime_released_outside.take() {
-            if let Err((runtime, error)) = runtime.into_exhausted() {
+        if let Some(runtime) = progress.runtime_released_outside.take()
+            && let Err((runtime, error)) = runtime.into_exhausted() {
                 progress.runtime_released_outside = Some(runtime);
                 return Err(error);
             }
-        }
         Ok(())
     }
 
@@ -2077,10 +2073,8 @@ impl ReleasedLiveStateStoreStartup {
         if let Some(database) = scheduler_unopened_database {
             database.exhaust();
         }
-        for reference in [scheduler_unopened_schema_reference, runtime_unopened_schema_reference] {
-            if let Some(reference) = reference {
-                reference.exhaust();
-            }
+        for reference in [scheduler_unopened_schema_reference, runtime_unopened_schema_reference].into_iter().flatten() {
+            reference.exhaust();
         }
         drop(runtime_schema_source_parts);
         drop(runtime_schema_unused_inputs);
@@ -2583,22 +2577,20 @@ impl ReleasedLiveStateStoreStartup {
             && operational_sql_custody.iter().filter(|slot| slot.is_some()).count() <= 1,
             "failed Store packet provenance exceeds one Runtime and one Operational producer collection");
         let original = original.as_ref().context("actual failed Store parent facade absent")?;
-        if let Some(outside) = runtime_outside.as_mut() {
-            if runtime_sql_custody[0].is_none() {
+        if let Some(outside) = runtime_outside.as_mut()
+            && runtime_sql_custody[0].is_none() {
                 let quote = quote_store_packet_vector_handoff();
                 registry.prepay_transfer(prepay, quote.bytes, quote.steps)?;
                 let packets = unsafe { outside.take_original_sql_custody() }?;
                 runtime_sql_custody[0] = Some(packets);
             }
-        }
-        if let Some(outside) = runtime_released_outside.as_mut() {
-            if runtime_sql_custody[1].is_none() {
+        if let Some(outside) = runtime_released_outside.as_mut()
+            && runtime_sql_custody[1].is_none() {
                 let quote = quote_store_packet_vector_handoff();
                 registry.prepay_transfer(prepay, quote.bytes, quote.steps)?;
                 let packets = unsafe { outside.take_original_sql_custody() }?;
                 runtime_sql_custody[1] = Some(packets);
             }
-        }
         for (raw, parts) in runtime_sql_custody.iter_mut().zip(runtime_packet_parts.iter_mut()) {
             super::live_outside::prepare_original_packet_parts(raw, parts, factory, aggregate,
                 super::live_outside::OriginalPacketSourceKind::Runtime, prepay)?;
@@ -2834,25 +2826,23 @@ impl ReleasedLiveStateStoreStartup {
         anyhow::ensure!(!(runtime_closed.is_some() || runtime_outside.is_some())
             || !(runtime_released.is_some() || runtime_released_outside.is_some()),
             "failed-start Store retains conflicting original Runtime sources");
-        if runtime_outside.is_none() {
-            if let Some(source) = runtime_closed.take() {
+        if runtime_outside.is_none()
+            && let Some(source) = runtime_closed.take() {
                 match source.into_live_outside_custody(factory, aggregate, prepay) {
                     Ok(outside) => *runtime_outside = Some(outside),
                     Err((source, error)) => { *runtime_closed = Some(source); return Err(error); }
                 }
             }
-        }
         if let Some(outside) = runtime_outside {
             outside.advance_native_sources(factory, aggregate, prepay)?;
         }
-        if runtime_released_outside.is_none() {
-            if let Some(source) = runtime_released.take() {
+        if runtime_released_outside.is_none()
+            && let Some(source) = runtime_released.take() {
                 match source.into_live_outside_custody(factory, aggregate, prepay) {
                     Ok(outside) => *runtime_released_outside = Some(outside),
                     Err((source, error)) => { *runtime_released = Some(source); return Err(error); }
                 }
             }
-        }
         if let Some(outside) = runtime_released_outside {
             outside.advance_native_sources(factory, aggregate, prepay)?;
         }
@@ -3002,9 +2992,8 @@ impl ReleasedLiveStateStoreStartup {
         if let Some(closed) = &self.progress.state_closed { terminals.extend(closed.native_terminals()?); }
         if let Some(released) = &self.progress.state_released { terminals.extend(released.native_terminals(factory)?); }
         if let Some(released) = &self.progress.operational_released { terminals.extend(released.native_terminals(factory)?); }
-        if let Some(released) = &self.progress.schema_released {
-            if let Some(terminal) = released.terminal(factory)? { terminals.push(terminal.clone()); }
-        }
+        if let Some(released) = &self.progress.schema_released
+            && let Some(terminal) = released.terminal(factory)? { terminals.push(terminal.clone()); }
         for terminal in &terminals { terminal.require_original(factory)?; }
         Ok(terminals)
     }
@@ -3060,9 +3049,8 @@ impl ReleasedLiveStateStoreStartup {
             let mut terminals = Vec::new();
             if let Some(closed) = &p.runtime_closed { terminals.extend(closed.native_terminals()?); }
             if let Some(released) = &p.runtime_released { terminals.extend(released.native_terminals(&factory)?); }
-            if let Some(released) = &p.schema_released {
-                if let Some(terminal) = released.terminal(&factory)? { terminals.push(terminal.clone()); }
-            }
+            if let Some(released) = &p.schema_released
+                && let Some(terminal) = released.terminal(&factory)? { terminals.push(terminal.clone()); }
             for terminal in &terminals { terminal.require_original(&factory)?; }
             Ok(terminals)
         })();

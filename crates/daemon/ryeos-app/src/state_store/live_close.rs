@@ -577,18 +577,16 @@ impl ClosedLiveStateStore {
         prepay: &dyn Fn(u64, u64) -> Result<()>,
     ) -> Result<()> {
         let progress = self.progress_mut();
-        if let Some(state) = progress.state_physical.take() {
-            if let Err((state, error)) = state.into_exhausted(registry, prepay) {
+        if let Some(state) = progress.state_physical.take()
+            && let Err((state, error)) = state.into_exhausted(registry, prepay) {
                 progress.state_physical = Some(state);
                 return Err(error);
             }
-        }
-        if let Some(runtime) = progress.runtime_outside.take() {
-            if let Err((runtime, error)) = runtime.into_exhausted() {
+        if let Some(runtime) = progress.runtime_outside.take()
+            && let Err((runtime, error)) = runtime.into_exhausted() {
                 progress.runtime_outside = Some(runtime);
                 return Err(error);
             }
-        }
         Ok(())
     }
 
@@ -1402,10 +1400,7 @@ impl LiveStateStoreCloseFailure {
     /// owner has transferred, only the retained close retry is permitted.
     pub fn into_unstarted(self) -> std::result::Result<Arc<StateStore>, Self> {
         if self.inner.is_foreign() || self.inner.factory.require_original_process().is_err() { return Err(self); }
-        let (error, factory, custody) = match self.into_parts() {
-            Ok(parts) => parts,
-            Err(this) => return Err(this),
-        };
+        let (error, factory, custody) = self.into_parts()?;
         let custody = custody.into_inner().unwrap_or_else(|p| p.into_inner());
         match custody {
             StoreCloseCustody::Shared(store) => Ok(store),
@@ -1416,10 +1411,7 @@ impl LiveStateStoreCloseFailure {
 
     pub fn retry(self) -> std::result::Result<ClosedLiveStateStore, Self> {
         if self.inner.is_foreign() || self.inner.factory.require_original_process().is_err() { return Err(self); }
-        let (error, factory, custody) = match self.into_parts() {
-            Ok(parts) => parts,
-            Err(this) => return Err(this),
-        };
+        let (error, factory, custody) = self.into_parts()?;
         advance_close(factory, custody.into_inner().unwrap_or_else(|p| p.into_inner()), Some(error))
     }
 }

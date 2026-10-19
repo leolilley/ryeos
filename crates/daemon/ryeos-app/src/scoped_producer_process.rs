@@ -415,7 +415,7 @@ impl ScopedProducerProcessRegistry {
         }
         if let Err(error) = child.authority.workspace().ensure_path_binding() {
             return Err(ScopedProducerInsertError {
-                error: error.into(),
+                error,
                 child,
             });
         }

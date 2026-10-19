@@ -715,8 +715,7 @@ mod tests {
         let timer = lillux::time::MonotonicTimer::start();
         let relay = relay
             .finish_after_codex_stop(MonotonicDeadline::after(Duration::from_millis(20)))
-            .err()
-            .expect("stalled provider unexpectedly completed");
+            .expect_err("stalled provider unexpectedly completed");
         drop(relay);
         assert!(timer.elapsed() < Duration::from_secs(1));
     }

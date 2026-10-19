@@ -3123,7 +3123,7 @@ fn plant_target_abort_state(
     target_authority.ensure_guard(&target_guard)?;
     let target_signer = NodeIdentitySigner::from_identity(&daemon_identity(state_path)?);
     store.write_project_head_ref(
-        &project_principal_key,
+        project_principal_key,
         &target_project_hash,
         &target_project_head_hash,
         &target_signer,
@@ -3140,7 +3140,7 @@ fn plant_target_abort_state(
         subject_digest: &subject_digest,
         checkpoint_manifest_hash: &source.operation.checkpoint_manifest_hash,
         upstream_session_id: "upstream-session:handoff-fixture",
-        project_principal_key: &project_principal_key,
+        project_principal_key: project_principal_key,
         project_hash: &target_project_hash,
         target_project_head_hash: &target_project_head_hash,
     })?;
@@ -4597,14 +4597,13 @@ fn build_handoff_measurement_record(
         link_count = link_count.saturating_add(u64::try_from(
             links.object_hashes.len() + links.blob_hashes.len() + links.large_object_hashes.len(),
         )?);
-        if let Some((schema, version)) = object_schema_version(&value) {
-            if let Some(previous) = object_schema_versions.insert(schema.clone(), version) {
+        if let Some((schema, version)) = object_schema_version(&value)
+            && let Some(previous) = object_schema_versions.insert(schema.clone(), version) {
                 anyhow::ensure!(
                     previous == version,
                     "measured closure mixed versions for schema `{schema}`"
                 );
             }
-        }
         total_bytes = total_bytes.saturating_add(bytes);
         largest_entry_bytes = largest_entry_bytes.max(bytes);
         if target_before_transfer.contains_key(&("objects".to_owned(), hash.clone())) {
@@ -4704,14 +4703,13 @@ fn build_abort_payload_measurement_record(
                     + links.blob_hashes.len()
                     + links.large_object_hashes.len(),
             )?);
-            if let Some((schema, version)) = object_schema_version(&value) {
-                if let Some(previous) = object_schema_versions.insert(schema.clone(), version) {
+            if let Some((schema, version)) = object_schema_version(&value)
+                && let Some(previous) = object_schema_versions.insert(schema.clone(), version) {
                     anyhow::ensure!(
                         previous == version,
                         "abort closure mixed versions for schema `{schema}`"
                     );
                 }
-            }
         }
         if target_present.contains(&(entry.is_blob, entry.hash.as_str())) {
             target_present_entries = target_present_entries.saturating_add(1);

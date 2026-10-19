@@ -85,11 +85,10 @@ impl ConsumerObservationFailure {
     pub fn settle(mut self) -> std::result::Result<anyhow::Error, Self> {
         let active = self.active_deadline;
         let cleanup = self.cleanup_deadline;
-        if let Some(mut app) = self.app.take() {
-            if app.stop_until(active, cleanup).is_err() {
+        if let Some(mut app) = self.app.take()
+            && app.stop_until(active, cleanup).is_err() {
                 self.app = Some(app);
             }
-        }
         if let Some(launch) = self.launch.take() {
             match launch.settle(cleanup) {
                 Ok(error) => {

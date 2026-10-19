@@ -67,13 +67,12 @@ pub fn open_live(host: &TestNativeHost, path: &Path) -> RuntimeDb {
             // Release the refused acquisition into the census before
             // failing, so the host still releases its arena.
             let message = format!("{failure:#}");
-            if let Ok(released) = failure.retry_close() {
-                if let Ok(terminals) = released.native_terminals(host.factory()) {
+            if let Ok(released) = failure.retry_close()
+                && let Ok(terminals) = released.native_terminals(host.factory()) {
                     for terminal in terminals {
                         host.retain_terminal(terminal);
                     }
                 }
-            }
             panic!("live Runtime refused under the gate: {message}")
         }
     }
@@ -358,13 +357,12 @@ impl Drop for TestRuntime {
         // A failed test still closes its store into the census, so the
         // arena is released for the tests after it. A refusal here is left
         // to the host's own leak report rather than a second panic.
-        if let Ok(closed) = db.close_original_runtime(Arc::clone(host.factory())) {
-            if let Ok(terminals) = closed.native_terminals() {
+        if let Ok(closed) = db.close_original_runtime(Arc::clone(host.factory()))
+            && let Ok(terminals) = closed.native_terminals() {
                 for terminal in terminals {
                     host.retain_terminal(terminal);
                 }
             }
-        }
         drop(host);
     }
 }

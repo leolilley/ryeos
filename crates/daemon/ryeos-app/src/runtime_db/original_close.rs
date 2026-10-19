@@ -664,11 +664,10 @@ impl OriginalRuntimeOutsideHostContext {
 
         let fields = self.fields_mut();
         fields.registrations = std::array::from_fn(|_| None);
-        if let OriginalRuntimeOutsideSemantics::Refused { unused_parts, .. } = &mut fields.semantics {
-            if let Some(parts) = unused_parts.as_mut() {
+        if let OriginalRuntimeOutsideSemantics::Refused { unused_parts, .. } = &mut fields.semantics
+            && let Some(parts) = unused_parts.as_mut() {
                 parts.fields_mut().registration = None;
             }
-        }
         fields.shared_directory_identity = None;
         fields.retired_roots_consumed = true;
         Ok(())

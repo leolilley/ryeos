@@ -915,7 +915,7 @@ impl RuntimeDb {
         placement: &str,
     ) -> Result<Option<QualificationLocalStartRecord>> {
         self.conn.with_sql(|conn| {
-            read_local_start(&conn, placement)
+            read_local_start(conn, placement)
         })
     }
 
@@ -933,7 +933,7 @@ impl RuntimeDb {
         proof: &crate::state_store::VerifiedExternalQualificationOwner,
     ) -> Result<QualificationLocalStartRecord> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let current = read_local_start(&tx, placement)?
                 .context("Q credential claim has no original start")?;
             ensure!(
@@ -1004,7 +1004,7 @@ impl RuntimeDb {
         placement: &str,
     ) -> Result<QualificationLocalStartRecord> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let record = require_live_credential_start_tx(&tx, placement)?;
             tx.commit()?;
             Ok(record)
@@ -1019,7 +1019,7 @@ impl RuntimeDb {
         placement: &str,
     ) -> Result<QualificationLocalStartRecord> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let current = read_local_start(&tx, placement)?
                 .context("Q credential release has no original start")?;
             let Some(custody) = &current.credential_custody else {
@@ -1068,7 +1068,7 @@ impl RuntimeDb {
         proof: &crate::state_store::VerifiedExternalQualificationOwner,
     ) -> Result<QualificationLocalStartRecord> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let allocation =
                 read(&tx, placement)?.context("qualification local spawn lost allocation")?;
             require_new_owner(&tx, &allocation.reservation, None, Some(proof))?;
@@ -1095,7 +1095,7 @@ impl RuntimeDb {
         proof: &crate::state_store::VerifiedExternalQualificationOwner,
     ) -> Result<()> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let allocation =
                 read(&tx, placement)?.context("qualification Worker release lost allocation")?;
             require_new_owner(&tx, &allocation.reservation, None, Some(proof))?;
@@ -1134,7 +1134,7 @@ impl RuntimeDb {
         placement: &str,
     ) -> Result<QualificationLocalStartRecord> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let current = read_local_start(&tx, placement)?
                 .context("qualification workspace borrow lost its start")?;
             ensure!(
@@ -1176,7 +1176,7 @@ impl RuntimeDb {
         runtime_cache_root: &std::path::Path,
     ) -> Result<QualificationLocalStartRecord> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             ensure!(
                 read_local_start(&tx, placement)?.is_none(),
                 "qualification local start already reserved"
@@ -1283,7 +1283,7 @@ impl RuntimeDb {
         identity: lillux::PinnedDirectoryIdentity,
     ) -> Result<QualificationLocalStartRecord> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let current = read_local_start(&tx, placement)?
                 .context("qualification private workspace lost its reservation")?;
             ensure!(
@@ -1309,7 +1309,7 @@ impl RuntimeDb {
     ) -> Result<QualificationLocalStartRecord> {
         self.conn.with_sql(|conn| {
             validate_bounded_runtime_text("Q local cleanup reason", reason, 1024)?;
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let current = read_local_start(&tx, placement)?
                 .context("qualification local cleanup has no start")?;
             ensure!(
@@ -1357,7 +1357,7 @@ impl RuntimeDb {
         require_unregistered_precreate: bool,
     ) -> Result<QualificationLocalStartRecord> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let current = read_local_start(&tx, &expected.placement_thread_id)?
                 .context("qualification cleanup lost its retained start")?;
             ensure!(
@@ -1420,7 +1420,7 @@ impl RuntimeDb {
         expected: &QualificationLocalStartRecord,
     ) -> Result<()> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let current = read_local_start(&tx, &expected.placement_thread_id)?
                 .context("qualification workspace removal lost its original row")?;
             ensure!(
@@ -1441,7 +1441,7 @@ impl RuntimeDb {
     ) -> Result<QualificationLocalStartRecord> {
         self.conn.with_sql(|conn| {
             cleanup_cas(
-                &conn,
+                conn,
                 expected,
                 QualificationLocalStartPhase::CleanupIntent,
                 QualificationLocalStartPhase::WorkspaceRemoved,
@@ -1459,7 +1459,7 @@ impl RuntimeDb {
     ) -> Result<QualificationLocalStartRecord> {
         self.conn.with_sql(|conn| {
             cleanup_cas(
-                &conn,
+                conn,
                 expected,
                 QualificationLocalStartPhase::WorkspaceRemoved,
                 QualificationLocalStartPhase::StateRemoved,
@@ -1477,7 +1477,7 @@ impl RuntimeDb {
     ) -> Result<QualificationLocalStartRecord> {
         self.conn.with_sql(|conn| {
             cleanup_cas(
-                &conn,
+                conn,
                 expected,
                 QualificationLocalStartPhase::StateRemoved,
                 QualificationLocalStartPhase::Closed,
@@ -1793,7 +1793,7 @@ mod tests {
                 current.qualification_operation_id, current.qualification_occurrence_id,
                 current.channel_binding_digest, canonical(&current).unwrap()]).unwrap();
         assert_eq!(
-            read_local_start(&conn, &current.placement_thread_id).unwrap(),
+            read_local_start(conn, &current.placement_thread_id).unwrap(),
             Some(current.clone())
         );
         current
@@ -1861,12 +1861,12 @@ mod tests {
     fn credential_check_borrows_outer_transaction_without_renewing_original_generation() {
         crate::runtime_db::test_native::with_transient(|conn| {
             let original = fixture_retained_credential_journal(conn);
-            let claimed = claim_fixture_credential(&conn, &original);
+            let claimed = claim_fixture_credential(conn, &original);
             assert_eq!(
-                read_local_start(&conn, &claimed.placement_thread_id).unwrap(),
+                read_local_start(conn, &claimed.placement_thread_id).unwrap(),
                 Some(claimed.clone())
             );
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate).unwrap();
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate).unwrap();
             require_live_credential_custody(&tx, &claimed).unwrap();
             // This fixture's original daemon is intentionally stale. The borrowed
             // check must reach that semantic fence, rather than fail a nested BEGIN.
@@ -1887,9 +1887,9 @@ mod tests {
             require_historical_credential_custody(&tx, &claimed).unwrap();
             assert!(require_live_credential_custody(&tx, &claimed).is_err());
             tx.rollback().unwrap();
-            require_live_credential_custody(&conn, &claimed).unwrap();
+            require_live_credential_custody(conn, &claimed).unwrap();
             assert_eq!(
-                read_local_start(&conn, &claimed.placement_thread_id).unwrap(),
+                read_local_start(conn, &claimed.placement_thread_id).unwrap(),
                 Some(claimed)
             );
             Ok(())
@@ -1900,10 +1900,10 @@ mod tests {
     fn revocation_fences_fresh_use_without_erasing_historical_q_custody() {
         crate::runtime_db::test_native::with_transient(|conn| {
             let current = fixture_journal(conn);
-            let claimed = claim_fixture_credential(&conn, &current);
+            let claimed = claim_fixture_credential(conn, &current);
             conn.execute("UPDATE credential_profile SET state='revoking',credential_generation=2,authority_revision=2", []).unwrap();
-            require_historical_credential_custody(&conn, &claimed).unwrap();
-            assert!(require_live_credential_custody(&conn, &claimed).is_err());
+            require_historical_credential_custody(conn, &claimed).unwrap();
+            assert!(require_live_credential_custody(conn, &claimed).is_err());
             for sql in [
                 "UPDATE credential_profile SET lock_owner=NULL",
                 "UPDATE credential_profile SET state='revoked',lock_owner=NULL",
@@ -1912,7 +1912,7 @@ mod tests {
             ] {
                 assert!(conn.execute(sql, []).is_err(), "{sql}");
             }
-            require_local_processes_settled(&conn, &claimed).unwrap();
+            require_local_processes_settled(conn, &claimed).unwrap();
             let mut released = claimed.clone();
             released.credential_custody.as_mut().unwrap().released_at_ms = Some(1);
             let tx = conn.unchecked_transaction().unwrap();
@@ -1920,12 +1920,12 @@ mod tests {
             tx.execute("UPDATE credential_profile SET lock_owner=NULL", [])
                 .unwrap();
             tx.commit().unwrap();
-            require_historical_credential_custody(&conn, &released).unwrap();
+            require_historical_credential_custody(conn, &released).unwrap();
             // Historical cleanup must not clear a successor's lock or demand the
             // original generation still be active after a completed release.
             conn.execute("UPDATE credential_profile SET state='active',credential_generation=3,authority_revision=3,lock_owner='successor'", []).unwrap();
-            require_historical_credential_custody(&conn, &released).unwrap();
-            assert!(transition(&conn, &released, &claimed).is_err());
+            require_historical_credential_custody(conn, &released).unwrap();
+            assert!(transition(conn, &released, &claimed).is_err());
             assert_eq!(
                 conn.query_row("SELECT lock_owner FROM credential_profile", [], |row| {
                     row.get::<_, String>(0)
@@ -1947,7 +1947,7 @@ mod tests {
         ] {
             crate::runtime_db::test_native::with_transient(|conn| {
                 let reserved = fixture_journal(conn);
-                let mut current = claim_fixture_credential(&conn, &reserved);
+                let mut current = claim_fixture_credential(conn, &reserved);
                 for next_phase in [
                     QualificationLocalStartPhase::CleanupIntent,
                     QualificationLocalStartPhase::WorkspaceRemoved,
@@ -1955,7 +1955,7 @@ mod tests {
                     QualificationLocalStartPhase::Closed,
                 ] {
                     if current.phase == release_phase {
-                        require_local_processes_settled(&conn, &current).unwrap();
+                        require_local_processes_settled(conn, &current).unwrap();
                         let mut released = current.clone();
                         released.credential_custody.as_mut().unwrap().released_at_ms = Some(1);
                         let tx = conn.unchecked_transaction().unwrap();
@@ -1965,7 +1965,7 @@ mod tests {
                         tx.commit().unwrap();
                         // A pre-release snapshot is stale after this CAS. Resuming
                         // cleanup must use the newly retained canonical row.
-                        assert!(transition(&conn, &current, &released).is_err());
+                        assert!(transition(conn, &current, &released).is_err());
                         current = released;
                     }
                     let mut next = current.clone();
@@ -1991,11 +1991,11 @@ mod tests {
                         }
                         _ => unreachable!(),
                     }
-                    transition(&conn, &current, &next).unwrap();
+                    transition(conn, &current, &next).unwrap();
                     current = next;
                 }
                 assert_eq!(current.phase, QualificationLocalStartPhase::Closed);
-                require_historical_credential_custody(&conn, &current).unwrap();
+                require_historical_credential_custody(conn, &current).unwrap();
                 Ok(())
             });
         }
@@ -2005,7 +2005,7 @@ mod tests {
     fn uncertain_directory_borrow_and_live_connector_prevent_credential_release() {
         crate::runtime_db::test_native::with_transient(|conn| {
             let current = fixture_journal(conn);
-            let claimed = claim_fixture_credential(&conn, &current);
+            let claimed = claim_fixture_credential(conn, &current);
             let mut released = claimed.clone();
             released.credential_custody.as_mut().unwrap().released_at_ms = Some(1);
             conn.execute(
@@ -2013,25 +2013,25 @@ mod tests {
                 [&claimed.placement_thread_id],
             )
             .unwrap();
-            assert!(require_local_processes_settled(&conn, &claimed).is_err());
-            assert!(transition(&conn, &claimed, &released).is_err());
+            assert!(require_local_processes_settled(conn, &claimed).is_err());
+            assert!(transition(conn, &claimed, &released).is_err());
             conn.execute("UPDATE external_execution_connector SET state='closed'", [])
                 .unwrap();
             let mut ready = claimed.clone();
             ready.phase = QualificationLocalStartPhase::WorkspaceReady;
             ready.workspace_identity = Some(directory_identity(2));
-            transition(&conn, &claimed, &ready).unwrap();
+            transition(conn, &claimed, &ready).unwrap();
             let mut borrowed = ready.clone();
             borrowed.directory_borrow_intent = Some(QualificationWorkspaceBorrowIntent {
                 workspace_id: ready.workspace_id.clone(),
                 directory_identity: ready.workspace_identity.unwrap(),
                 reserved_at_ms: 1,
             });
-            transition(&conn, &ready, &borrowed).unwrap();
+            transition(conn, &ready, &borrowed).unwrap();
             let mut released = borrowed.clone();
             released.credential_custody.as_mut().unwrap().released_at_ms = Some(1);
-            assert!(require_local_processes_settled(&conn, &borrowed).is_err());
-            assert!(transition(&conn, &borrowed, &released).is_err());
+            assert!(require_local_processes_settled(conn, &borrowed).is_err());
+            assert!(transition(conn, &borrowed, &released).is_err());
             Ok(())
         });
     }
@@ -2043,7 +2043,7 @@ mod tests {
             let mut ready = current.clone();
             ready.phase = QualificationLocalStartPhase::WorkspaceReady;
             ready.workspace_identity = Some(directory_identity(2));
-            transition(&conn, &current, &ready).unwrap();
+            transition(conn, &current, &ready).unwrap();
             current = ready;
             let mut borrowed = current.clone();
             borrowed.directory_borrow_intent = Some(QualificationWorkspaceBorrowIntent {
@@ -2051,8 +2051,8 @@ mod tests {
                 directory_identity: current.workspace_identity.unwrap(),
                 reserved_at_ms: 1,
             });
-            transition(&conn, &current, &borrowed).unwrap();
-            assert!(transition(&conn, &borrowed, &borrowed).is_err());
+            transition(conn, &current, &borrowed).unwrap();
+            assert!(transition(conn, &borrowed, &borrowed).is_err());
             let mut replaced = borrowed.clone();
             replaced.workspace_identity = Some(directory_identity(3));
             replaced
@@ -2060,10 +2060,10 @@ mod tests {
                 .as_mut()
                 .unwrap()
                 .directory_identity = directory_identity(3);
-            assert!(transition(&conn, &borrowed, &replaced).is_err());
+            assert!(transition(conn, &borrowed, &replaced).is_err());
             let mut skipped = borrowed.clone();
             skipped.phase = QualificationLocalStartPhase::WorkspaceRemoved;
-            assert!(transition(&conn, &borrowed, &skipped).is_err());
+            assert!(transition(conn, &borrowed, &skipped).is_err());
             Ok(())
         });
     }
@@ -2122,25 +2122,25 @@ mod tests {
     fn canary_journal_requires_append_once_intent_before_binding_and_never_clears_it() {
         crate::runtime_db::test_native::with_transient(|conn| {
             let initial = fixture_journal(conn);
-            let current = claim_fixture_credential(&conn, &initial);
+            let current = claim_fixture_credential(conn, &initial);
             let (intent, binding) = canary_stage_fixture(&current);
             let mut reserved = current.clone();
             reserved.controller_canary_intent = Some(intent);
-            transition(&conn, &current, &reserved).unwrap();
-            assert!(transition(&conn, &reserved, &reserved).is_err());
-            assert!(transition(&conn, &reserved, &current).is_err());
+            transition(conn, &current, &reserved).unwrap();
+            assert!(transition(conn, &reserved, &reserved).is_err());
+            assert!(transition(conn, &reserved, &current).is_err());
             let mut substituted = reserved.clone();
             substituted
                 .controller_canary_intent
                 .as_mut()
                 .unwrap()
                 .guest_input_identity = "e".repeat(64);
-            assert!(transition(&conn, &reserved, &substituted).is_err());
+            assert!(transition(conn, &reserved, &substituted).is_err());
             let mut bound = reserved.clone();
             bound.controller_canary_binding = Some(binding);
-            transition(&conn, &reserved, &bound).unwrap();
-            assert!(transition(&conn, &bound, &bound).is_err());
-            assert!(transition(&conn, &bound, &reserved).is_err());
+            transition(conn, &reserved, &bound).unwrap();
+            assert!(transition(conn, &bound, &bound).is_err());
+            assert!(transition(conn, &bound, &reserved).is_err());
             // Neither stripping the required-null field nor changing one mirrored
             // SQL column can erase or replace the original append-only commitment.
             assert!(conn.execute("UPDATE external_qualification_local_start SET record_json=json_remove(record_json,'$.controller_canary_intent')",[]).is_err());
@@ -2161,10 +2161,10 @@ mod tests {
             assert_eq!(encoded, canonical(&bound).unwrap());
             // Unsuccessful preparation is still cleanable before any directory
             // borrow. No missing terminal observation may strand proven-safe cleanup.
-            require_local_processes_settled(&conn, &bound).unwrap();
+            require_local_processes_settled(conn, &bound).unwrap();
             let mut released = bound.clone();
             released.credential_custody.as_mut().unwrap().released_at_ms = Some(1);
-            transition(&conn, &bound, &released).unwrap();
+            transition(conn, &bound, &released).unwrap();
             let mut late = released.clone();
             late.controller_canary_terminal = Some(QControllerCanaryEvidence {
                 schema: 1,
@@ -2176,7 +2176,7 @@ mod tests {
                     .clone(),
                 binding: bound.controller_canary_binding.clone().unwrap(),
             });
-            assert!(transition(&conn, &released, &late).is_err());
+            assert!(transition(conn, &released, &late).is_err());
             Ok(())
         });
     }

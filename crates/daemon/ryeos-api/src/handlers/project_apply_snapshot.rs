@@ -1172,9 +1172,9 @@ fn observe_surface_content(
                     if total_bytes > limits.max_total_blob_bytes {
                         anyhow::bail!("managed surface exceeds its total-byte bound");
                     }
-                    let mut file = file;
+                    let file = file;
                     let (blob_hash, metadata) = lillux::digest_open_regular_file_stable_exact(
-                        &mut file,
+                        &file,
                         observation.size(),
                     )?;
                     files.push(SurfaceContentFile {
@@ -1411,9 +1411,7 @@ fn settle_apply_job(
         phase: phase.to_owned(),
         roots: None,
         heads: Some(
-            (job_state == SyncJobState::Completed)
-                .then(|| vec![operation.target_snapshot_hash.clone()])
-                .unwrap_or_default(),
+            if job_state == SyncJobState::Completed { vec![operation.target_snapshot_hash.clone()] } else { Default::default() },
         ),
         uploaded_hashes: job.uploaded_hashes,
         fetched_hashes: job.fetched_hashes,
@@ -2127,7 +2125,7 @@ async fn recover_apply_job(
                 (SyncJobState::Completed, "recovered_committed", "committed")
             }
             ApplyRecoveryDecision::Rollback => {
-                if let Some((parent, transaction, name)) = transaction.as_ref() {
+                if let Some((_parent, _transaction, _name)) = transaction.as_ref() {
                     if let Some(journal) = journal.as_ref() {
                         if !live_journal_surfaces_match(&project, &journal.surfaces, false)? {
                             let workspace =
@@ -3638,14 +3636,14 @@ schedules:
         session.prepare().unwrap();
         session.finalize().unwrap();
         drop(session);
-        let alpha_before = observe(&*db, "project-alpha");
+        let alpha_before = observe(&db, "project-alpha");
         assert!(alpha_before.0.is_some() && alpha_before.1.is_some());
-        assert_eq!(observe(&*db, "project-bravo"), (None, None));
+        assert_eq!(observe(&db, "project-bravo"), (None, None));
 
         // The interrupted apply: images captured, journal published, the
         // schedule effects applied, and the process gone before finalization.
         let transaction_id = "9b0d3f2a-6c41-4e57-8a1e-2f3c4d5e6f70";
-        let workspace = StagingDirectory::create(&project_directory, transaction_id).unwrap();
+        let workspace = StagingDirectory::create(project_directory, transaction_id).unwrap();
         let key = [11_u8; 32];
         let mut session = service.acquire_project_schedules().await.unwrap();
         session
@@ -3673,8 +3671,8 @@ schedules:
         .unwrap();
         session.prepare().unwrap();
         drop(session);
-        assert_eq!(observe(&*db, "project-alpha"), (None, None));
-        assert!(observe(&*db, "project-bravo").0.is_some());
+        assert_eq!(observe(&db, "project-alpha"), (None, None));
+        assert!(observe(&db, "project-bravo").0.is_some());
         service.close_after_shutdown_drain().unwrap();
         drop(service);
         host.settle_shared(db);
@@ -3698,8 +3696,8 @@ schedules:
             .unwrap();
         session.restore().unwrap();
         drop(session);
-        assert_eq!(observe(&*db, "project-alpha"), alpha_before);
-        assert_eq!(observe(&*db, "project-bravo"), (None, None));
+        assert_eq!(observe(&db, "project-alpha"), alpha_before);
+        assert_eq!(observe(&db, "project-bravo"), (None, None));
         assert!(service.try_acquire_project_schedules().unwrap().is_some());
         service.close_after_shutdown_drain().unwrap();
         drop(service);
@@ -3722,7 +3720,7 @@ schedules:
         let host = &rig.host;
         let (db, service) = rig.open(true);
         let request = |label: &str, id: &str| rig.request(label, id);
-        let observe = |id: &str| rig.observe(&*db, id);
+        let observe = |id: &str| rig.observe(&db, id);
 
         let mut session = service.acquire_project_schedules().await.unwrap();
         session.plan(request("deployed", "project-alpha")).unwrap();

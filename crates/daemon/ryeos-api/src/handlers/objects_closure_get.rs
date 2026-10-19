@@ -236,6 +236,19 @@ fn encoded_len(raw_len: u64) -> u64 {
     raw_len.saturating_add(2) / 3 * 4
 }
 
+pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
+    service_ref: "service:objects/closure/get",
+    endpoint: "objects.closure.get",
+    availability: ServiceAvailability::DaemonOnly,
+    required_caps: &["ryeos.execute.service.objects/closure/get"],
+    handler: |params, _ctx, state| {
+        Box::pin(async move {
+            let req: Request = crate::handler_error::parse_request(params)?;
+            handle(req, state).await
+        })
+    },
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -292,16 +305,3 @@ mod tests {
         assert!(admitted_blob_entry_read_bound(&hash, 1024, 1024, 1, false).is_err());
     }
 }
-
-pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
-    service_ref: "service:objects/closure/get",
-    endpoint: "objects.closure.get",
-    availability: ServiceAvailability::DaemonOnly,
-    required_caps: &["ryeos.execute.service.objects/closure/get"],
-    handler: |params, _ctx, state| {
-        Box::pin(async move {
-            let req: Request = crate::handler_error::parse_request(params)?;
-            handle(req, state).await
-        })
-    },
-};

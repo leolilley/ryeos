@@ -275,8 +275,8 @@ impl Walker {
         )
         .await;
 
-        if let Some(observation) = &observation {
-            if let Err(observation_error) = self
+        if let Some(observation) = &observation
+            && let Err(observation_error) = self
                 .emit_dispatch_observation(graph_run_id, current, step, observation)
                 .await
             {
@@ -292,7 +292,6 @@ impl Walker {
                     )
                     .await;
             }
-        }
 
         // A cost-bearing child that then errored (or whose assign
         // failed) still spent tokens — account for it.

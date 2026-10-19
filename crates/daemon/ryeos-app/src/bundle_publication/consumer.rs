@@ -210,13 +210,13 @@ impl CurrentConsumerPublicationPolicy {
         Ok(Self {
             namespace: namespace.to_owned(),
             publisher_fingerprint: catalog.publisher_fingerprint.clone(),
-            publisher_key: publisher.verifying_key.clone(),
+            publisher_key: publisher.verifying_key,
             generation_claim: catalog.generation_claim.clone(),
             set_claim: catalog.set_claim.clone(),
             catalog_claim: catalog.catalog_publication_claim.clone(),
             publication_policy: catalog.policy.clone(),
             operator_fingerprint: operator_fingerprint.to_owned(),
-            operator_key: operator.verifying_key.clone(),
+            operator_key: operator.verifying_key,
             release_proof_policy,
         })
     }

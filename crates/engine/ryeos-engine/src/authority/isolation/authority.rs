@@ -624,7 +624,7 @@ impl IsolationReadOnlyMountAuthority {
         Ok(Self {
             source_path,
             destination,
-            source: lillux::sealed_memfd(c"ryeos-runtime-configuration", &bytes)
+            source: lillux::sealed_memfd(c"ryeos-runtime-configuration", bytes)
                 .map_err(anyhow::Error::msg)?,
             scope: IsolationReadOnlyMountScope::RuntimeConfiguration,
         })

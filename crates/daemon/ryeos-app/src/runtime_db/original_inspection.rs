@@ -331,11 +331,10 @@ impl OriginalInspectionCustody {
         };
         let attempted = match body {
             NativeBody::Open(mut owner) => {
-                if owner.retained_admission().is_some() {
-                    if owner.recover_retained_admission().is_err() {
+                if owner.retained_admission().is_some()
+                    && owner.recover_retained_admission().is_err() {
                         return Err(Self { factory, body: Some(NativeBody::Open(owner)), reference });
                     }
-                }
                 owner.retry_close()
                     .map(OriginalNativeConnectionTerminal::Released)
                     .map_err(NativeBody::Open)

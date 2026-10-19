@@ -814,7 +814,7 @@ fn prove_unguarded(
         &root,
         &terminal,
         has_continuation,
-        &request,
+        request,
         &context.fingerprint,
     )?;
     let capsule_hash = terminal
@@ -877,7 +877,7 @@ fn prove_unguarded(
     require_reproducible_current_verifier_lane(&admitted_resolution.composed.derived, true)?;
     let (root_selectors, verifier_root_selections) = retained_verifier_root_selections(
         sealed.product_selections(),
-        &admitted_resolution,
+        admitted_resolution,
         &policy_source.policy.subject_declaration_id,
     )?;
     if !root_selectors.is_empty() {
@@ -887,7 +887,7 @@ fn prove_unguarded(
                 authority,
                 guard,
                 limits,
-                &admitted_resolution,
+                admitted_resolution,
                 sealed.resolution_subject_authority(),
                 &context.fingerprint,
                 &root_selectors,
@@ -911,7 +911,7 @@ fn prove_unguarded(
             project_context_resolver,
             pinned_admission: None,
         },
-        Some(&admitted_resolution),
+        Some(admitted_resolution),
     )?;
     // A direct Tool's executable source is a first-class admitted closure.
     // Validate it against the Engine reconstructed from the verifier's exact
@@ -920,7 +920,7 @@ fn prove_unguarded(
     let _retained_source = crate::source_closure_admission::recover_source_closure(
         state,
         current_verifier.request_engine.as_ref(),
-        &admitted_resolution,
+        admitted_resolution,
     )?;
     let current_artifact_identity = &current_verifier.artifact_identity;
     let admitted_parameters_digest = sealed.admitted_parameters_digest()?;
@@ -992,7 +992,7 @@ fn prove_unguarded(
         context,
         &terminal,
         &capsule,
-        &admitted_resolution,
+        admitted_resolution,
         &current_verifier,
         &purpose.execution_view()?,
         project_context_resolver,
@@ -1153,7 +1153,7 @@ fn match_retained_verifier_root_selections(
     Option<ResolvedExternalProductSelections>,
 )> {
     ryeos_state::external_content::products::composition::validate_product_selection_inputs(
-        &inputs.to_vec(),
+        inputs,
     )?;
     let mut selectors = Vec::with_capacity(inputs.len());
     for input in inputs {
@@ -3743,7 +3743,7 @@ impl CurrentBundleProducerRecipe {
 pub(super) fn resolve_current_bundle_verifier_identity_for_evidence(
     state: &AppState,
     authority: &ryeos_state::PinnedStateAuthority,
-    limits: ryeos_state::object_closure::ObjectClosureLimits,
+    _limits: ryeos_state::object_closure::ObjectClosureLimits,
     context: &HandlerContext,
     verifier_ref: &str,
     verifier_parameters: &serde_json::Value,
@@ -3786,7 +3786,7 @@ pub(super) fn resolve_current_bundle_verifier_identity_for_evidence(
     }
     let (_, retained_selections) = retained_verifier_root_selections(
         sealed.product_selections(),
-        &admitted_resolution,
+        admitted_resolution,
         &evidence.policy_source.policy.subject_declaration_id,
     )?;
     if retained_selections != evidence.verifier_root_selections {
@@ -3806,7 +3806,7 @@ pub(super) fn resolve_current_bundle_verifier_identity_for_evidence(
             project_context_resolver,
             pinned_admission: None,
         },
-        Some(&admitted_resolution),
+        Some(admitted_resolution),
     )
 }
 

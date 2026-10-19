@@ -1394,7 +1394,7 @@ async fn verify_target_launch(
         bail!("accepted target launch is not exactly owner-bound to its returned thread");
     }
     let thread_id = expected_thread_id;
-    let thread = client.threads_get(&thread_id).await?;
+    let thread = client.threads_get(thread_id).await?;
     if thread.pointer("/thread/item_ref").and_then(Value::as_str) != Some(compiled.driver.as_str())
         || thread
             .pointer("/thread/project_authority/base_snapshot_hash")

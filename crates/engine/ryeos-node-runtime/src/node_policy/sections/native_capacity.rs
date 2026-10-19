@@ -164,11 +164,10 @@ impl NativeRenewalEnvelope {
     pub fn validate(&self) -> std::result::Result<(), NativeCapacityPolicyRefusal> {
         // The booleans are independent of the bound: `maximum_epochs: 1` with
         // both paths disabled is a legitimate "one epoch, ever" statement.
-        if let Some(bound) = self.maximum_epochs {
-            if bound == 0 || bound > i64::MAX as u64 {
+        if let Some(bound) = self.maximum_epochs
+            && (bound == 0 || bound > i64::MAX as u64) {
                 return Err(NativeCapacityPolicyRefusal::Renewal);
             }
-        }
         Ok(())
     }
 }

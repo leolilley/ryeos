@@ -307,7 +307,7 @@ impl SealedResolvedItem {
         pinned_capsule_root.set_mode(0o700)?;
         pinned_capsule_root.ensure_path_binding()?;
         let source_name = std::ffi::OsStr::new("subject.source");
-        let mut materialized_source_file =
+        let materialized_source_file =
             match pinned_capsule_root.open_regular(source_name, false)? {
                 Some(existing) => existing,
                 None => match pinned_capsule_root.atomic_create_regular(
@@ -328,7 +328,7 @@ impl SealedResolvedItem {
             .context("admitted launch capsule source length exceeds u64")?;
         let (materialized_source_hash, materialized_source_metadata) =
             lillux::digest_open_regular_file_stable_exact(
-                &mut materialized_source_file,
+                &materialized_source_file,
                 expected_source_len,
             )?;
         if materialized_source_hash != self.content_hash

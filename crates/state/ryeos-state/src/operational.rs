@@ -3040,7 +3040,7 @@ impl OperationalDb {
                         sync_job_from_row,
                     )?;
                     let mut jobs = Vec::new();
-                    while let Some(row) = rows.next() {
+                    for row in rows {
                         jobs.push(row?);
                     }
                     jobs
@@ -3059,7 +3059,7 @@ impl OperationalDb {
                     let mut rows =
                         stmt.query_map(rusqlite::params![operation_type, limit], sync_job_from_row)?;
                     let mut jobs = Vec::new();
-                    while let Some(row) = rows.next() {
+                    for row in rows {
                         jobs.push(row?);
                     }
                     jobs
@@ -3111,7 +3111,7 @@ impl OperationalDb {
                         sync_job_from_row,
                     )?;
                     let mut jobs = Vec::new();
-                    while let Some(row) = rows.next() {
+                    for row in rows {
                         jobs.push(row?);
                     }
                     jobs
@@ -3130,7 +3130,7 @@ impl OperationalDb {
                     let mut rows =
                         stmt.query_map(rusqlite::params![operation_type, limit], sync_job_from_row)?;
                     let mut jobs = Vec::new();
-                    while let Some(row) = rows.next() {
+                    for row in rows {
                         jobs.push(row?);
                     }
                     jobs
@@ -3183,7 +3183,7 @@ impl OperationalDb {
                         sync_job_from_row,
                     )?;
                     let mut jobs = Vec::new();
-                    while let Some(row) = rows.next() {
+                    for row in rows {
                         jobs.push(row?);
                     }
                     jobs
@@ -3204,7 +3204,7 @@ impl OperationalDb {
                         sync_job_from_row,
                     )?;
                     let mut jobs = Vec::new();
-                    while let Some(row) = rows.next() {
+                    for row in rows {
                         jobs.push(row?);
                     }
                     jobs

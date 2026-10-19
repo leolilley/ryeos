@@ -291,7 +291,7 @@ fn payload_and_aggregate_feature_tampering_are_rejected() {
         vec![payload("web", "rye-parser-yaml-document", &[])],
         &[],
     );
-    let admitted = AdmittedReleaseInput::from_value_with_ownership(&valid, &owner).expect("parser input is valid");
+    let _admitted = AdmittedReleaseInput::from_value_with_ownership(&valid, &owner).expect("parser input is valid");
 
     let mut tampered_payload = valid.clone();
     tampered_payload["payloads"][0]["required_features"] = json!(["core-handlers"]);

@@ -681,7 +681,7 @@ impl<'de> Deserialize<'de> for SchedulerRetirementResolutionObservation {
             source: wire.source.into(),
             selected_source: wire.selected_source,
             stopped_plan: wire.stopped_plan,
-            stopped_coordinates: stopped_coordinates,
+            stopped_coordinates,
             quarantine_name: wire.quarantine_name,
             purge_name: wire.purge_name,
             original_failure: wire.original_failure,

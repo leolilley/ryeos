@@ -2791,15 +2791,14 @@ pub async fn execute_command(
         command_kind,
         &request_digest,
         &payload,
-    )? {
-        if authoritative_settled_command_replay(state, &initial, &record)? {
+    )?
+        && authoritative_settled_command_replay(state, &initial, &record)? {
             return Ok(json!({
                 "command_sequence": record.command_sequence,
                 "state": record.state,
                 "result": record.result,
             }));
         }
-    }
     let _root_operation = crate::hosted_operation::begin_hosted_root_operation_async(
         &state.state_store,
         &initial.placement_thread_id,
@@ -4348,14 +4347,12 @@ pub fn command_observation(
             turn_id,
             completed_turn_id,
         } = serde_json::from_value(value.clone())?
-        {
-            if expected == "idle" && next == "turn_running" && completed_turn_id.is_none() {
+            && expected == "idle" && next == "turn_running" && completed_turn_id.is_none() {
                 let turn_id =
                     turn_id.ok_or_else(|| anyhow!("authoritative turn start has no turn id"))?;
                 validate_hosted_turn_id("authoritative turn-start id", &turn_id)?;
                 turn_ids.push(turn_id);
             }
-        }
     }
     if turn_ids.len() > 1 {
         bail!("one hosted command started more than one turn");
@@ -4627,15 +4624,14 @@ fn validate_next_bounded_attempt(
 ) -> Result<()> {
     let (_, session_settled, session_contact) = canonical_bounded_attempts(session_attempts)?;
     let (_, _, turn_contact) = canonical_bounded_attempts(turn_attempts)?;
-    if let Some(sequence) = command_sequence {
-        if session_attempts
+    if let Some(sequence) = command_sequence
+        && session_attempts
             .iter()
             .chain(turn_attempts.iter())
             .any(|(_, record, _)| record.command_sequence >= sequence)
         {
             bail!("bounded command reservation does not follow its predecessor ledger");
         }
-    }
     let (prior_count, prior_contact) = match step {
         "session-start" => {
             if !turn_attempts.is_empty() {

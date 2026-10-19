@@ -161,16 +161,15 @@ impl ComposeRetainedProductsRequest {
         if canonical.to_string() != self.consumer_ref || canonical.suffix.is_some() {
             bail!("product composition requires an exact canonical consumer ref");
         }
-        if let Some(project) = &self.project_context {
-            if !lillux::valid_hash(&project.snapshot_hash)
+        if let Some(project) = &self.project_context
+            && (!lillux::valid_hash(&project.snapshot_hash)
                 || project
                     .snapshot_hash
                     .bytes()
-                    .any(|b| b.is_ascii_uppercase())
+                    .any(|b| b.is_ascii_uppercase()))
             {
                 bail!("product composition context requires an exact canonical snapshot");
             }
-        }
         if self.maximum_bytes == 0 {
             bail!("product composition requires a positive aggregate import bound");
         }

@@ -456,15 +456,13 @@ impl ProductProducerRecipe {
             maximum_total_bytes,
             maximum_frames,
         } = &self.stdin_source
-        {
-            if !(1..=MAX_PRODUCER_INTERACTIVE_FRAME_BYTES).contains(maximum_frame_bytes)
+            && (!(1..=MAX_PRODUCER_INTERACTIVE_FRAME_BYTES).contains(maximum_frame_bytes)
                 || !(1..=MAX_PRODUCER_INTERACTIVE_TOTAL_BYTES).contains(maximum_total_bytes)
                 || !(1..=MAX_PRODUCER_INTERACTIVE_FRAMES).contains(maximum_frames)
-                || u64::from(*maximum_frame_bytes) > *maximum_total_bytes
+                || u64::from(*maximum_frame_bytes) > *maximum_total_bytes)
             {
                 bail!("producer interactive input exceeds signed structural bounds");
             }
-        }
         if let Some(ingress) = &self.loopback_ingress {
             ingress.validate()?;
             if !matches!(

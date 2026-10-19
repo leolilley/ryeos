@@ -617,11 +617,10 @@ pub fn publish_catalog(
             &request.authenticated_principal,
         )?;
     stage.ensure_publication_contract(&publication_key, request.expected_current.as_deref())?;
-    if let Some(target) = stage.admitted_target_hash() {
-        if target != request.candidate_attestation_hash {
+    if let Some(target) = stage.admitted_target_hash()
+        && target != request.candidate_attestation_hash {
             bail!("catalog upload session is already admitted for another publication target");
         }
-    }
     stage.protect_cas_closure(
         &guard,
         closure.object_hashes.iter().map(String::as_str),

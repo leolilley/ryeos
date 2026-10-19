@@ -381,7 +381,7 @@ impl RuntimeDb {
         operation_id: &str,
     ) -> Result<Option<RuntimeSnapshotStageRecord>> {
         self.conn.with_sql(|conn| {
-            read(&conn, operation_id)
+            read(conn, operation_id)
         })
     }
 
@@ -390,7 +390,7 @@ impl RuntimeDb {
         intent: &RuntimeSnapshotStageIntent,
     ) -> Result<RuntimeSnapshotStageRecord> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let parent = super::runtime_snapshot::read(&tx, &intent.parent_operation_id)?
                 .context("snapshot upload has no retained parent")?;
             intent.validate_for(&parent.intent, None)?;
@@ -445,7 +445,7 @@ impl RuntimeDb {
         intent_digest: &str,
     ) -> Result<RuntimeSnapshotStageClaim> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let record = read(&tx, operation_id)?.context("snapshot upload was not reserved")?;
             ensure!(
                 record.intent.stage == RuntimeSnapshotStage::Upload
@@ -499,7 +499,7 @@ impl RuntimeDb {
         intent: &RuntimeSnapshotStageIntent,
     ) -> Result<RuntimeSnapshotStageRecord> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             ensure!(
                 intent.stage == RuntimeSnapshotStage::Create,
                 "only create may use this claim"
@@ -575,7 +575,7 @@ impl RuntimeDb {
         intent_digest: &str,
     ) -> Result<RuntimeSnapshotStageClaim> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let record = read(&tx, operation_id)?.context("snapshot create was not reserved")?;
             ensure!(
                 record.intent.stage == RuntimeSnapshotStage::Create
@@ -627,7 +627,7 @@ impl RuntimeDb {
         deadline_exceeded: bool,
     ) -> Result<RuntimeSnapshotStageRecord> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let record = read(&tx, &result.create_operation_id)?
                 .context("snapshot create has no attempt claim")?;
             ensure!(
@@ -729,7 +729,7 @@ impl RuntimeDb {
         intent_digest: &str,
     ) -> Result<RuntimeSnapshotStageRecord> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let record = read(&tx, operation_id)?.context("snapshot create is absent")?;
             ensure!(
                 record.intent.stage == RuntimeSnapshotStage::Create
@@ -763,7 +763,7 @@ impl RuntimeDb {
         deadline_exceeded: bool,
     ) -> Result<RuntimeSnapshotStageRecord> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let record = read(&tx, &receipt.upload_operation_id)?
                 .context("snapshot upload has no attempt claim")?;
             let parent = super::runtime_snapshot::read(&tx, &record.intent.parent_operation_id)?
@@ -838,7 +838,7 @@ impl RuntimeDb {
         intent_digest: &str,
     ) -> Result<RuntimeSnapshotStageRecord> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let record = read(&tx, operation_id)?.context("snapshot upload is absent")?;
             ensure!(
                 record.intent.stage == RuntimeSnapshotStage::Upload
@@ -1052,7 +1052,7 @@ mod tests {
                 .unwrap(),
             RuntimeSnapshotStageClaim::Accepted(_)
         ));
-        db.conn.with_sql(|connection| Ok(validate_current(connection)?)).unwrap();
+        db.conn.with_sql(|connection| validate_current(connection)).unwrap();
     }
 
     #[test]
@@ -1082,7 +1082,7 @@ mod tests {
                 .unwrap(),
             RuntimeSnapshotStageClaim::Reconcile(_)
         ));
-        db.conn.with_sql(|connection| Ok(validate_current(connection)?)).unwrap();
+        db.conn.with_sql(|connection| validate_current(connection)).unwrap();
     }
 
     #[test]
@@ -1155,7 +1155,7 @@ mod tests {
             .unwrap(),
             RuntimeSnapshotStageClaim::Reconcile(_)
         ));
-        db.conn.with_sql(|connection| Ok(validate_current(connection)?)).unwrap();
+        db.conn.with_sql(|connection| validate_current(connection)).unwrap();
     }
 
     #[test]
@@ -1206,7 +1206,7 @@ mod tests {
                 .unwrap(),
             bound,
         );
-        db.conn.with_sql(|connection| Ok(validate_current(connection)?)).unwrap();
+        db.conn.with_sql(|connection| validate_current(connection)).unwrap();
     }
 
     #[test]
@@ -1250,7 +1250,7 @@ mod tests {
             super::super::runtime_snapshot::RuntimeSnapshotPhase::Reserved
         );
         assert!(parent_record.locator.is_none());
-        db.conn.with_sql(|connection| Ok(validate_current(connection)?)).unwrap();
+        db.conn.with_sql(|connection| validate_current(connection)).unwrap();
     }
 
     #[test]

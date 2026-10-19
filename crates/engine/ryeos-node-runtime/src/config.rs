@@ -149,7 +149,7 @@ impl Config {
                 .app_root
                 .unwrap_or(Self::default_app_root()?));
         }
-        Ok(Self::default_app_root()?)
+        Self::default_app_root()
     }
 
     pub fn load(sources: &ConfigSources) -> Result<Self> {

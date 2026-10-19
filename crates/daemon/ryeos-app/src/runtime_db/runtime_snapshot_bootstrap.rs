@@ -371,7 +371,7 @@ impl RuntimeDb {
             for (operation_id, root) in rows {
                 require_lifecycle_root(&root)?;
                 ensure!(
-                    read(&conn, &operation_id)?
+                    read(conn, &operation_id)?
                         .as_ref()
                         .and_then(|record| record.lifecycle_artifacts_root.as_deref())
                         == Some(root.as_str()),
@@ -392,7 +392,7 @@ impl RuntimeDb {
                 "SELECT binding_json FROM runtime_snapshot_bootstrap_authority WHERE operation_id=?1",
                 [operation_id], |row| row.get(0),
             ).optional()?;
-            raw.map(|raw| validate_retained_binding(&conn, operation_id, &raw))
+            raw.map(|raw| validate_retained_binding(conn, operation_id, &raw))
                 .transpose()
         })
     }
@@ -402,7 +402,7 @@ impl RuntimeDb {
         observation: &RuntimeSnapshotBootstrapReadinessObservation,
     ) -> Result<SnapshotBootstrapRecord> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let record = read(&tx, &observation.operation_id)?
                 .context("bootstrap readiness has no retained source")?;
             ensure!(
@@ -454,7 +454,7 @@ impl RuntimeDb {
         operation_id: &str,
     ) -> Result<Option<SnapshotBootstrapRecord>> {
         self.conn.with_sql(|conn| {
-            read(&conn, operation_id)
+            read(conn, operation_id)
         })
     }
 
@@ -476,7 +476,7 @@ impl RuntimeDb {
     ) -> Result<SnapshotBootstrapRecord> {
         self.conn.with_sql(|conn| {
             require_lifecycle_root(root_hash)?;
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let record = read(&tx, operation_id)?.context("bootstrap was not reserved")?;
             if let Some(existing) = &record.lifecycle_artifacts_root {
                 ensure!(
@@ -518,7 +518,7 @@ impl RuntimeDb {
         binding: Option<&crate::node_config::sections::runtime_snapshot_production::RetainedRuntimeSnapshotProductionBinding>,
     ) -> Result<SnapshotBootstrapRecord> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             if let Some(existing) = read(&tx, &intent.operation_id)? {
                 ensure!(
                     existing.intent == *intent,
@@ -567,7 +567,7 @@ impl RuntimeDb {
         operation_id: &str,
     ) -> Result<SnapshotBootstrapAttemptClaim> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let record = read(&tx, operation_id)?.context("bootstrap was not reserved")?;
             ensure!(
                 record.lifecycle_artifacts_root.is_some(),
@@ -625,7 +625,7 @@ impl RuntimeDb {
         now: i64,
     ) -> Result<SnapshotBootstrapRecord> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let record = read(&tx, &occurrence.operation_id)?.context("bootstrap attempt is absent")?;
             occurrence.validate_for(&record.intent)?;
             if matches!(
@@ -675,7 +675,7 @@ impl RuntimeDb {
         operation_id: &str,
     ) -> Result<SnapshotBootstrapRecord> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let record = read(&tx, operation_id)?.context("bootstrap attempt is absent")?;
             ensure!(
                 matches!(

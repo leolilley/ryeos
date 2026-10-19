@@ -4229,8 +4229,8 @@ impl lillux_sqlite::SqliteInspectionCopyWork for OriginalCopyWork {
             .clone();
         let mut selected = None;
         for store in 0..2 {
-            if let Some(root) = &roots[store] {
-                if root.is_same_directory(destination)?
+            if let Some(root) = &roots[store]
+                && root.is_same_directory(destination)?
                     && self.claim._source_roots[store].is_same_directory(source)?
                 {
                     let names = super::inspection_plan::role_names(
@@ -4243,7 +4243,6 @@ impl lillux_sqlite::SqliteInspectionCopyWork for OriginalCopyWork {
                         );
                     }
                 }
-            }
         }
         self.claim.enter_production(
             OriginalProducerKind::Copy(

@@ -1434,14 +1434,13 @@ impl ProjectScheduleSession for ProjectScheduleSessionImpl {
         if self.phase == SessionPhase::Finalized {
             return Ok(());
         }
-        if self.phase != SessionPhase::Prepared {
-            if !matches!(
+        if self.phase != SessionPhase::Prepared
+            && !matches!(
                 self.phase,
                 SessionPhase::RecoveryPrepared | SessionPhase::RecoveryRequired
             ) {
                 anyhow::bail!("project schedule session cannot finalize in its current phase");
             }
-        }
         let recovery = self
             .recovery
             .as_ref()

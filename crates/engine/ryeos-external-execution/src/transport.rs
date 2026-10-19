@@ -579,8 +579,8 @@ impl<R: ExternalSupervisorRuntime, T: ExternalExecutionChannelTransport>
         if matches!(
             &dispatched.outcome,
             ExternalOwnerFrameOutcome::Acknowledgement
-        ) {
-            if let ExecutionChannelPayload::Acknowledge {
+        )
+            && let ExecutionChannelPayload::Acknowledge {
                 peer_frame_sequence,
                 peer_frame_digest,
                 application: ryeos_state::external_execution::ExecutionFrameApplication::Applied,
@@ -602,7 +602,6 @@ impl<R: ExternalSupervisorRuntime, T: ExternalExecutionChannelTransport>
                     self.command_terminated_applied = true;
                 }
             }
-        }
         let is_partial = matches!(
             dispatched.outcome,
             ExternalOwnerFrameOutcome::Application(SupervisorApplicationOutcome::Partial)

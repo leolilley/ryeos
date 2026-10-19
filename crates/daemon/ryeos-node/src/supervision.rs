@@ -437,13 +437,12 @@ pub fn exec_host_service(app_root: &Path) -> Result<std::convert::Infallible> {
         let upgrade = service.upgrade_intent()?;
         require_launch_allowed(service.desired_state()?, upgrade.as_ref())?;
         let executable = service.installed_daemon()?;
-        if let Some(intent) = upgrade {
-            if executable.digest_stable_exact(&executable.observation()?)?
+        if let Some(intent) = upgrade
+            && executable.digest_stable_exact(&executable.observation()?)?
                 != intent.expected_daemon_sha256
             {
                 bail!("service launch image differs from the restoring installation generation");
             }
-        }
         let root = service
             .binding
             .runtime
@@ -1066,11 +1065,10 @@ fn require_launch_allowed(desired: DesiredState, upgrade: Option<&UpgradeIntent>
     if desired != DesiredState::Up {
         bail!("host service desired state is down");
     }
-    if let Some(intent) = upgrade {
-        if intent.phase != UpgradePhase::RestoreReady || intent.desired != DesiredState::Up {
+    if let Some(intent) = upgrade
+        && (intent.phase != UpgradePhase::RestoreReady || intent.desired != DesiredState::Up) {
             bail!("host service startup is inhibited by an unfinished installation");
         }
-    }
     Ok(())
 }
 

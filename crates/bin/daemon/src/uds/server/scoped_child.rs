@@ -428,7 +428,7 @@ fn handle_blocking(
             &admitted_stdin,
             &attempt,
             &grant.isolation_class,
-            cap.expires_at.clone(),
+            cap.expires_at,
         )?;
         let retained = state
             .state_store
@@ -460,8 +460,7 @@ fn handle_blocking(
                 #[cfg(feature = "handoff-test-support")]
                 if retained.phase
                     == ryeos_app::runtime_db::scoped_child_attempt::ScopedChildPhase::Reserved
-                {
-                    if let Some(gate) = state.extensions.get::<
+                    && let Some(gate) = state.extensions.get::<
                         ryeos_app::scoped_producer_start::test_support::ReservedAttemptGate,
                     >() {
                         let key = ryeos_app::scoped_producer_authority::ScopedProducerAuthorityKey::new(
@@ -470,7 +469,6 @@ fn handle_blocking(
                         )?;
                         gate.note_resume_pending(&key, &retained.initial.attempt_id)?;
                     }
-                }
                 if !matches!(
                     retained.phase,
                     ryeos_app::runtime_db::scoped_child_attempt::ScopedChildPhase::Reserved
@@ -507,7 +505,7 @@ fn handle_blocking(
         return ryeos_app::scoped_producer_observe::observe_scoped_producer(
             state,
             &key,
-            cap.expires_at.clone(),
+            cap.expires_at,
         );
     }
 

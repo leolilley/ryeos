@@ -139,7 +139,7 @@ pub fn verify_retained_bundle_payload_proof(
     let signed_ref = std::str::from_utf8(&proof.signed_manifest_ref)?;
     let verified_ref = crate::executor_resolution::verify_signed_executor_manifest_ref(
         signed_ref,
-        |fingerprint| (fingerprint == identity.signer_fingerprint).then(|| verifier.clone()),
+        |fingerprint| (fingerprint == identity.signer_fingerprint).then_some(*verifier),
         TrustClass::TrustedBundle,
     )?;
     anyhow::ensure!(
@@ -193,7 +193,7 @@ pub fn verify_retained_bundle_payload_proof(
         &proof.selected_item_ref,
         &proof.item_source_object,
         &proof.signed_sidecar,
-        &|fingerprint| (fingerprint == identity.signer_fingerprint).then(|| verifier.clone()),
+        &|fingerprint| (fingerprint == identity.signer_fingerprint).then_some(*verifier),
     )?;
     anyhow::ensure!(
         sidecar_signer == identity.signer_fingerprint,
@@ -1871,7 +1871,7 @@ fn verify_item_source_sidecar_bytes(
     trusted_verifying_key: &impl Fn(&str) -> Option<VerifyingKey>,
 ) -> Result<String, EngineError> {
     let signed =
-        std::str::from_utf8(&signed_bytes).map_err(|error| EngineError::BinSidecarInvalid {
+        std::str::from_utf8(signed_bytes).map_err(|error| EngineError::BinSidecarInvalid {
             bin: bin_name.to_string(),
             reason: format!("{} is not UTF-8: {error}", sidecar_path.display()),
         })?;

@@ -320,7 +320,7 @@ pub(crate) async fn pin_live_daemon(env: &LocalLifecycleEnv) -> Result<LiveDaemo
         let Some(pinned) = pinned else {
             continue;
         };
-        return Ok(pinned?);
+        return pinned;
     }
     Err(anyhow::anyhow!(
         "cannot stop: no configured socket had a verifiable live ryeosd peer"

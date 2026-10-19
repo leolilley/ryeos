@@ -504,7 +504,7 @@ impl RuntimeDb {
         placement: &str,
     ) -> Result<Option<QualificationGuestScratchRecord>> {
         self.conn.with_sql(|conn| {
-            read_scratch(&conn, placement)
+            read_scratch(conn, placement)
         })
     }
 
@@ -521,14 +521,14 @@ impl RuntimeDb {
         program_digest: &str,
     ) -> Result<bool> {
         self.conn.with_sql(|conn| {
-            let Some(record) = read_scratch(&conn, placement)? else {
+            let Some(record) = read_scratch(conn, placement)? else {
                 return Ok(false);
             };
             if record.phase != QualificationGuestScratchPhase::Closed {
                 return Ok(false);
             }
             let allocation =
-                read(&conn, placement)?.context("closed Q scratch lost its settled allocation")?;
+                read(conn, placement)?.context("closed Q scratch lost its settled allocation")?;
             let ExternalAllocationOwner::QualificationCandidate(owner) = &allocation.reservation.owner
             else {
                 bail!("closed Q scratch changed its qualification owner");
@@ -540,7 +540,7 @@ impl RuntimeDb {
                     && owner.program.digest()? == program_digest,
                 "closed Q scratch does not prove this exact completed transport"
             );
-            require_completed_transport_tx(&conn, &allocation.reservation)?;
+            require_completed_transport_tx(conn, &allocation.reservation)?;
             Ok(true)
         })
     }
@@ -555,7 +555,7 @@ impl RuntimeDb {
         original_parent: &lillux::PinnedDirectory,
     ) -> Result<QualificationGuestScratchRecord> {
         self.conn.with_sql(|conn| {
-            retire_absent_reserved(&conn, expected, original_parent)
+            retire_absent_reserved(conn, expected, original_parent)
         })
     }
 
@@ -571,7 +571,7 @@ impl RuntimeDb {
         callback_launch_owner: Option<&str>,
     ) -> Result<QualificationGuestScratchRecord> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             if let Some(launch_owner) = callback_launch_owner {
                 super::super::restored_verifier_attempt::require_current_callback_launch(
                     &tx,
@@ -643,7 +643,7 @@ impl RuntimeDb {
         expected: &QualificationGuestScratchRecord,
     ) -> Result<QualificationGuestScratchRecord> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let current = read_scratch(&tx, &expected.placement_thread_id)?
                 .context("Q guest scratch lost its reservation")?;
             ensure!(
@@ -677,7 +677,7 @@ impl RuntimeDb {
         expected: &QualificationGuestScratchRecord,
     ) -> Result<QualificationGuestScratchRecord> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let current = read_scratch(&tx, &expected.placement_thread_id)?
                 .context("Q guest scratch cleanup lost its original row")?;
             ensure!(
@@ -718,7 +718,7 @@ impl RuntimeDb {
         expected: &QualificationGuestScratchRecord,
     ) -> Result<QualificationGuestScratchRecord> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let current = read_scratch(&tx, &expected.placement_thread_id)?
                 .context("Q guest scratch removal lost its original row")?;
             ensure!(
@@ -744,7 +744,7 @@ impl RuntimeDb {
         expected: &QualificationGuestScratchRecord,
     ) -> Result<QualificationGuestScratchRecord> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let current = read_scratch(&tx, &expected.placement_thread_id)?
                 .context("Q guest scratch close lost its original row")?;
             ensure!(
@@ -857,7 +857,7 @@ mod tests {
         );
         crate::runtime_db::test_native::read_existing(&root.path().join("scratch.sqlite3"), |reopened| {
             ensure!(
-                read_scratch(&reopened, &record.placement_thread_id)? == Some(record.clone()),
+                read_scratch(reopened, &record.placement_thread_id)? == Some(record.clone()),
                 "Reserved intent disappeared across restart"
             );
             ensure!(
@@ -866,13 +866,13 @@ mod tests {
                     .is_err(),
                 "restart adopted a path as original descriptor custody"
             );
-            let closed = retire_absent_reserved(&reopened, &record, &parent)?;
+            let closed = retire_absent_reserved(reopened, &record, &parent)?;
             ensure!(
                 closed.phase == QualificationGuestScratchPhase::Closed
                     && closed.cleanup_basis
                         == Some(QualificationGuestScratchCleanupBasis::NoAllocation)
-                    && read_scratch(&reopened, &record.placement_thread_id)? == Some(closed.clone())
-                    && retire_absent_reserved(&reopened, &record, &parent).is_err(),
+                    && read_scratch(reopened, &record.placement_thread_id)? == Some(closed.clone())
+                    && retire_absent_reserved(reopened, &record, &parent).is_err(),
                 "absent precreation scratch did not close exactly once"
             );
             Ok(())
@@ -887,8 +887,8 @@ mod tests {
         crate::runtime_db::test_native::read_existing(&root.path().join("scratch.sqlite3"), |conn| {
             let child = parent.create_child(OsStr::new(&record.placement_thread_id), 0o700)?;
             ensure!(
-                retire_absent_reserved(&conn, &record, &parent).is_err()
-                    && read_scratch(&conn, &record.placement_thread_id)? == Some(record.clone()),
+                retire_absent_reserved(conn, &record, &parent).is_err()
+                    && read_scratch(conn, &record.placement_thread_id)? == Some(record.clone()),
                 "precreation recovery adopted a present child"
             );
             drop(child);
@@ -898,8 +898,8 @@ mod tests {
                 [&record.placement_thread_id],
             )?;
             ensure!(
-                retire_absent_reserved(&conn, &record, &parent).is_err()
-                    && read_scratch(&conn, &record.placement_thread_id)? == Some(record),
+                retire_absent_reserved(conn, &record, &parent).is_err()
+                    && read_scratch(conn, &record.placement_thread_id)? == Some(record),
                 "precreation recovery erased a later local owner"
             );
             Ok(())
@@ -924,9 +924,9 @@ mod tests {
             let mut created = reserved.clone();
             created.phase = QualificationGuestScratchPhase::Created;
             created.updated_at_ms = 2;
-            transition(&conn, &reserved, &created)?;
+            transition(conn, &reserved, &created)?;
             ensure!(
-                read(&conn, &created.placement_thread_id)?.is_none()
+                read(conn, &created.placement_thread_id)?.is_none()
                     && Arc::ptr_eq(&registry.borrow_guest_scratch(&created)?, &custody),
                 "Created scratch lost its original pre-allocation custody"
             );
@@ -934,8 +934,8 @@ mod tests {
             intent.phase = QualificationGuestScratchPhase::CleanupIntent;
             intent.cleanup_basis = Some(QualificationGuestScratchCleanupBasis::NoAllocation);
             intent.updated_at_ms = 3;
-            require_cleanup_basis(&conn, &intent)?;
-            transition(&conn, &created, &intent)?;
+            require_cleanup_basis(conn, &intent)?;
+            transition(conn, &created, &intent)?;
             ensure!(
                 conn.execute(
                     "INSERT INTO external_execution_allocation(placement_thread_id,reservation_json)
@@ -950,7 +950,7 @@ mod tests {
             // The unlink committed but the journal update did not. Only this
             // daemon's retained original guard can retry the physical proof.
             ensure!(
-                read_scratch(&conn, &intent.placement_thread_id)? == Some(intent.clone()),
+                read_scratch(conn, &intent.placement_thread_id)? == Some(intent.clone()),
                 "lost removal ACK advanced the journal"
             );
             ensure!(
@@ -963,12 +963,12 @@ mod tests {
             removed.phase = QualificationGuestScratchPhase::Removed;
             removed.removed_at_ms = Some(4);
             removed.updated_at_ms = 4;
-            transition(&conn, &intent, &removed)?;
+            transition(conn, &intent, &removed)?;
             let mut closed = removed.clone();
             closed.phase = QualificationGuestScratchPhase::Closed;
             closed.closed_at_ms = Some(5);
             closed.updated_at_ms = 5;
-            transition(&conn, &removed, &closed)?;
+            transition(conn, &removed, &closed)?;
             registry.release_closed_guest_scratch(&closed)?;
             ensure!(
                 registry.borrow_guest_scratch(&closed).is_err(),

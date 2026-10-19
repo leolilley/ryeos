@@ -197,7 +197,7 @@ impl RuntimeDb {
         operation_id: &str,
     ) -> Result<Option<QualificationTerminationRecord>> {
         self.conn.with_sql(|conn| {
-            read(&conn, operation_id)
+            read(conn, operation_id)
         })
     }
 
@@ -216,7 +216,7 @@ impl RuntimeDb {
         >,
     ) -> Result<QualificationTerminationRecord> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             require_consumer_termination_admission(&tx, intent, admission)?;
             if let Some(existing) = read(&tx, &intent.operation_id)? {
                 ensure!(
@@ -268,7 +268,7 @@ impl RuntimeDb {
         >,
     ) -> Result<QualificationTerminationClaim> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let record =
                 read(&tx, operation_id)?.context("qualification termination was not reserved")?;
             require_consumer_termination_admission(&tx, &record.intent, admission)?;
@@ -310,7 +310,7 @@ impl RuntimeDb {
         operation_id: &str,
     ) -> Result<QualificationTerminationRecord> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let record =
                 read(&tx, operation_id)?.context("qualification termination attempt is absent")?;
             if record.phase == QualificationTerminationPhase::Quarantined {
@@ -339,7 +339,7 @@ impl RuntimeDb {
         observation: &RuntimeSnapshotQualificationTerminalObservation,
     ) -> Result<QualificationTerminationRecord> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let record = read(&tx, &observation.operation_id)?
                 .context("qualification termination attempt is absent")?;
             observation.validate_for(&record.intent)?;

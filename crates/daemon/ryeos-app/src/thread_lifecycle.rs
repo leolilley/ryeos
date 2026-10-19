@@ -3232,15 +3232,14 @@ impl RootExecutionAdmission {
 
     pub fn ensure_matches_request(&self, request: &ResolvedExecutionRequest) -> Result<()> {
         self.validate()?;
-        if let Some(purpose) = &self.qualification {
-            if ryeos_state::objects::canonical_value_digest(&request.parameters)?
+        if let Some(purpose) = &self.qualification
+            && (ryeos_state::objects::canonical_value_digest(&request.parameters)?
                 != purpose.admitted_parameters_digest
                 || request.target_site_id.is_some()
-                || request.launch_mode != "wait"
+                || request.launch_mode != "wait")
             {
                 bail!("qualification verifier request differs from its sealed purpose");
             }
-        }
         if !same_plan_context(&self.plan_context, &request.plan_context) {
             let mismatches = plan_context_mismatches(&self.plan_context, &request.plan_context);
             let project_context_detail = if mismatches.contains(&"project_context") {
@@ -8636,8 +8635,7 @@ mod tests {
                 binding.execution_workspace(),
                 binding.subject_resolution_authority(),
             )
-            .err()
-            .expect("scratch must still be refused as projectless resolution authority");
+            .expect_err("scratch must still be refused as projectless resolution authority");
         assert!(
             error
                 .to_string()

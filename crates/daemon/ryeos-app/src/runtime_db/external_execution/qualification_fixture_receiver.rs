@@ -307,7 +307,7 @@ impl RuntimeDb {
         stage_id: &str,
     ) -> Result<QualificationFixtureReceiverRecord> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let current = channel::prepare_qualification_scope_settlement_tx(
                 &tx,
                 &plan.evidence.binding.placement_thread_id,
@@ -327,7 +327,7 @@ impl RuntimeDb {
         custody: Option<&VerifiedQualificationFixtureCustody>,
     ) -> Result<RetainedExternalQualificationScopeSettlement> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let placement = &plan.evidence.binding.placement_thread_id;
             let current = channel::prepare_qualification_scope_settlement_tx(&tx, placement, true)?
                 .context("Q settlement disappeared before application")?;
@@ -350,17 +350,14 @@ impl RuntimeDb {
                 _ => bail!("Q settlement lacks exact verified controller fixture custody"),
             }
             let frame = &current.evidence.settlement;
-            match journal::claim_application(
+            if let journal::ApplicationClaim::Revoked = journal::claim_application(
                 &tx,
                 &channel::NodeJournalOwner,
                 placement,
                 frame.frame().direction,
                 frame.frame().sequence,
                 frame.digest(),
-            )? {
-                journal::ApplicationClaim::Revoked => bail!("Q settlement was revoked"),
-                _ => {}
-            }
+            )? { bail!("Q settlement was revoked") }
             journal::finish_application(
                 &tx,
                 &channel::NodeJournalOwner,
@@ -379,7 +376,7 @@ impl RuntimeDb {
         placement: &str,
     ) -> Result<Option<QualificationScopeSettlementPlan>> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Deferred)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Deferred)?;
             let Some(allocation) = read(&tx, placement)? else {
                 return Ok(None);
             };
@@ -405,7 +402,7 @@ impl RuntimeDb {
 
     pub(crate) fn q_fixture_receiver_custody_required(&self, placement: &str) -> Result<bool> {
         self.conn.with_sql(|conn| {
-            let Some(allocation) = read(&conn, placement)? else {
+            let Some(allocation) = read(conn, placement)? else {
                 return Ok(false);
             };
             let ExternalAllocationOwner::QualificationCandidate(owner) = &allocation.reservation.owner
@@ -430,8 +427,8 @@ impl RuntimeDb {
                 );
                 return Ok(false);
             }
-            let binding = load_binding(&conn, placement)?;
-            Ok(!revoked(&conn, &binding.digest()?)?)
+            let binding = load_binding(conn, placement)?;
+            Ok(!revoked(conn, &binding.digest()?)?)
         })
     }
 }
@@ -565,22 +562,22 @@ mod tests {
         crate::runtime_db::test_native::with_transient(|conn| {
             let record = receiver_fixture(conn);
             assert!(
-                read_record(&conn, &record.placement_thread_id)
+                read_record(conn, &record.placement_thread_id)
                     .unwrap()
                     .is_none()
             );
-            assert_eq!(bind_stage_record(&conn, &record).unwrap(), record);
+            assert_eq!(bind_stage_record(conn, &record).unwrap(), record);
             assert_eq!(
-                read_record(&conn, &record.placement_thread_id).unwrap(),
+                read_record(conn, &record.placement_thread_id).unwrap(),
                 Some(record.clone())
             );
             // An interrupted CAS import leaves the original named stage reserved;
             // a new caller's empty stage never replaces it.
             let mut retry = record.clone();
             retry.stage_id = "upload-new-empty".into();
-            assert_eq!(bind_stage_record(&conn, &retry).unwrap(), record);
+            assert_eq!(bind_stage_record(conn, &retry).unwrap(), record);
             retry.reference.blob_hash = "1".repeat(64);
-            assert!(bind_stage_record(&conn, &retry).is_err());
+            assert!(bind_stage_record(conn, &retry).is_err());
             assert!(
                 conn.execute(
                     "UPDATE external_qualification_fixture_receiver SET stage_id='upload-substituted'",
@@ -604,7 +601,7 @@ mod tests {
                 [],
             )
             .unwrap();
-            let verified = read_record(&conn, &record.placement_thread_id)
+            let verified = read_record(conn, &record.placement_thread_id)
                 .unwrap()
                 .unwrap();
             assert_eq!(verified.verified_at_ms, Some(123));
@@ -622,7 +619,7 @@ mod tests {
                 )
                 .is_err()
             );
-            assert_eq!(bind_stage_record(&conn, &record).unwrap(), verified);
+            assert_eq!(bind_stage_record(conn, &record).unwrap(), verified);
             Ok(())
         });
     }
@@ -634,16 +631,16 @@ mod tests {
             // Signed transport may have committed its pending native frame before
             // the completion ACK or EOF application arrives. No receiver intent
             // means no normal-ready joins may be demanded during cold discovery.
-            assert!(receiver_validation_placements(&conn).unwrap().is_empty());
+            assert!(receiver_validation_placements(conn).unwrap().is_empty());
             conn.execute(
                 "UPDATE external_execution_frame SET application='claimed'",
                 [],
             )
             .unwrap();
-            assert!(receiver_validation_placements(&conn).unwrap().is_empty());
-            bind_stage_record(&conn, &record).unwrap();
+            assert!(receiver_validation_placements(conn).unwrap().is_empty());
+            bind_stage_record(conn, &record).unwrap();
             assert_eq!(
-                receiver_validation_placements(&conn).unwrap(),
+                receiver_validation_placements(conn).unwrap(),
                 vec![record.placement_thread_id]
             );
             Ok(())
@@ -656,7 +653,7 @@ mod tests {
             )
             .unwrap();
             assert_eq!(
-                receiver_validation_placements(&conn).unwrap(),
+                receiver_validation_placements(conn).unwrap(),
                 vec![record.placement_thread_id]
             );
             // Applied-without-intent is discovered for rejection by full validation.

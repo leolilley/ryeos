@@ -221,7 +221,7 @@ impl RuntimeDb {
         proof: &crate::state_store::VerifiedExternalQualificationOwner,
     ) -> Result<QualificationLocalStartRecord> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let current = read_local_start(&tx, &expected.placement_thread_id)?
                 .context("Q canary lost original start")?;
             ensure!(
@@ -300,7 +300,7 @@ impl RuntimeDb {
         proof: &crate::state_store::VerifiedExternalQualificationOwner,
     ) -> Result<QualificationLocalStartRecord> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let current = read_local_start(&tx, &expected.placement_thread_id)?
                 .context("Q canary bind lost start")?;
             ensure!(
@@ -347,7 +347,7 @@ impl RuntimeDb {
     ) -> Result<QualificationLocalStartRecord> {
         self.conn.with_sql(|conn| {
             evidence.validate()?;
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let current = read_local_start(&tx, &expected.placement_thread_id)?
                 .context("Q terminal canary lost local start")?;
             ensure!(

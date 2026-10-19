@@ -903,7 +903,7 @@ impl RuntimeDb {
                 RelayDirection::GuestToController,
                 None,
             )?;
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             require_live_relay_bootstrap(&tx, &intent, bootstrap)?;
             require_placement_bootstrap(&tx, &intent)?;
             let inbound = read_transfer(&tx, &intent)?
@@ -1002,7 +1002,7 @@ impl RuntimeDb {
                     && bytes.len() as u64 <= bootstrap.controller.relay()?.maximum_file_bytes,
                 "external relay semantic response exceeds signed file bound"
             );
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             require_live_relay_bootstrap(&tx, &intent, bootstrap)?;
             let inbound = read_transfer(&tx, &intent)?
                 .context("external relay semantic commit lost accepted request")?;
@@ -1049,7 +1049,7 @@ impl RuntimeDb {
     ) -> Result<Vec<u8>> {
         self.conn.with_sql(|conn| {
             bootstrap.validate()?;
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Deferred)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Deferred)?;
             let transfer_bytes: Option<Vec<u8>> = tx
                 .query_row(
                     "SELECT canonical_bytes FROM external_execution_relay_transfer
@@ -1104,7 +1104,7 @@ impl RuntimeDb {
                 intent.direction == RelayDirection::GuestToController,
                 "external relay predecessor must be a guest request"
             );
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Deferred)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Deferred)?;
             require_live_relay_allocation(&tx, intent)?;
             let record = read_transfer(&tx, intent)?
                 .context("external relay has no exact predecessor request")?;
@@ -1171,7 +1171,7 @@ impl RuntimeDb {
                 "external relay slot differs from sealed bootstrap"
             );
             intent.validate()?;
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             require_live_relay_bootstrap(&tx, intent, bootstrap)?;
             require_placement_bootstrap(&tx, intent)?;
             if let Some(bytes) = outbound {
@@ -1221,7 +1221,7 @@ impl RuntimeDb {
         intent: &RelayTransferIntent,
     ) -> Result<RelayTransferRecord> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             require_live_relay_allocation(&tx, intent)?;
             let prior =
                 read_transfer(&tx, intent)?.context("external relay has no durable transfer owner")?;
@@ -1266,7 +1266,7 @@ impl RuntimeDb {
                 intent.direction == RelayDirection::ControllerToGuest,
                 "external relay upload requires a controller response"
             );
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             require_live_relay_allocation(&tx, intent)?;
             let prior =
                 read_transfer(&tx, intent)?.context("external relay has no durable transfer owner")?;
@@ -1325,7 +1325,7 @@ impl RuntimeDb {
                 self.quarantine_external_relay_transfer(intent)?;
                 anyhow::bail!("external relay upload readback differs from precommitted response");
             }
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             require_live_relay_allocation(&tx, intent)?;
             let prior =
                 read_transfer(&tx, intent)?.context("external relay has no durable transfer owner")?;
@@ -1386,7 +1386,7 @@ impl RuntimeDb {
         intent: &RelayTransferIntent,
     ) -> Result<RelayTransferRecord> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let prior =
                 read_transfer(&tx, intent)?.context("external relay quarantine lost transfer")?;
             if prior.phase != RelayTransferPhase::Quarantined {

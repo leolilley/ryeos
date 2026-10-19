@@ -375,14 +375,13 @@ pub fn bind_command_input(
         }
     }
     let mut input = source.map(load_input).transpose()?;
-    if input.is_none() && binding.is_some_and(|b| b.single_json_object_arg) && residual.len() == 1 {
-        if let Ok(value) = serde_json::from_str::<Value>(&residual[0])
+    if input.is_none() && binding.is_some_and(|b| b.single_json_object_arg) && residual.len() == 1
+        && let Ok(value) = serde_json::from_str::<Value>(&residual[0])
             && value.is_object()
         {
             input = Some(value);
             residual.clear();
         }
-    }
     if let Some(mut input) = input {
         if command.forms.is_empty() {
             if command.project.is_some() {

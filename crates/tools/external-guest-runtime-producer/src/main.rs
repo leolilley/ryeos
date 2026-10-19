@@ -264,6 +264,6 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(produce(&source, &project, &root, &profile()).is_err());
-        assert!(project.path().join(PRODUCTS_NAME).exists() == false);
+        assert!(!project.path().join(PRODUCTS_NAME).exists());
     }
 }

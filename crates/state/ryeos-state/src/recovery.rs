@@ -46,7 +46,7 @@ const MAX_RECOVERY_RECORD_BYTES: u64 = 1024 * 1024;
 // explicitly here rather than pretending they consume the CAS blob allowance.
 const MAX_STAGING_ROOTS: usize = crate::object_closure::REMOTE_CLOSURE_MAX_OBJECTS
     + crate::object_closure::REMOTE_CLOSURE_MAX_BLOBS
-    + crate::objects::MAX_LARGE_CONTENT_MANIFEST_ENTRIES as usize
+    + crate::objects::MAX_LARGE_CONTENT_MANIFEST_ENTRIES
     + 2; // completed manifest and publication binding during settlement
 // A canonical hash array element costs at most 67 bytes. Retain the existing
 // small-record envelope for metadata; never widen unrelated recovery journals.
@@ -1299,12 +1299,11 @@ impl DurableCasUploadStage {
         self.ensure_active()?;
         self.recovery.ensure_guard(cas_mutation_guard)?;
         validate_hash("durable staged large-object root", hash)?;
-        if self.record.large_object_hashes.insert(hash.to_owned()) {
-            if let Err(error) = self.persist_record(&self.record) {
+        if self.record.large_object_hashes.insert(hash.to_owned())
+            && let Err(error) = self.persist_record(&self.record) {
                 self.record.large_object_hashes.remove(hash);
                 return Err(error);
             }
-        }
         Ok(())
     }
 
@@ -1528,24 +1527,22 @@ impl DurableCasUploadStage {
     fn protect_object_hash_admitted(&mut self, hash: &str) -> Result<()> {
         self.ensure_active()?;
         validate_hash("durable staged object root", hash)?;
-        if self.record.object_hashes.insert(hash.to_string()) {
-            if let Err(error) = self.persist_record(&self.record) {
+        if self.record.object_hashes.insert(hash.to_string())
+            && let Err(error) = self.persist_record(&self.record) {
                 self.record.object_hashes.remove(hash);
                 return Err(error);
             }
-        }
         Ok(())
     }
 
     fn protect_blob_hash_admitted(&mut self, hash: &str) -> Result<()> {
         self.ensure_active()?;
         validate_hash("durable staged blob root", hash)?;
-        if self.record.blob_hashes.insert(hash.to_string()) {
-            if let Err(error) = self.persist_record(&self.record) {
+        if self.record.blob_hashes.insert(hash.to_string())
+            && let Err(error) = self.persist_record(&self.record) {
                 self.record.blob_hashes.remove(hash);
                 return Err(error);
             }
-        }
         Ok(())
     }
 }
@@ -1674,12 +1671,11 @@ impl StagedCasRootLease {
         ensure_staging_publication_certain(&self.publication_uncertain)?;
         self.recovery.ensure_guard(cas_mutation_guard)?;
         validate_hash("staged CAS object root", hash)?;
-        if self.record.object_hashes.insert(hash.to_string()) {
-            if let Err(error) = self.persist_record(&self.record) {
+        if self.record.object_hashes.insert(hash.to_string())
+            && let Err(error) = self.persist_record(&self.record) {
                 self.record.object_hashes.remove(hash);
                 return Err(error);
             }
-        }
         Ok(())
     }
 
@@ -1691,12 +1687,11 @@ impl StagedCasRootLease {
         ensure_staging_publication_certain(&self.publication_uncertain)?;
         self.recovery.ensure_guard(cas_mutation_guard)?;
         validate_hash("staged CAS blob root", hash)?;
-        if self.record.blob_hashes.insert(hash.to_string()) {
-            if let Err(error) = self.persist_record(&self.record) {
+        if self.record.blob_hashes.insert(hash.to_string())
+            && let Err(error) = self.persist_record(&self.record) {
                 self.record.blob_hashes.remove(hash);
                 return Err(error);
             }
-        }
         Ok(())
     }
 
@@ -1708,12 +1703,11 @@ impl StagedCasRootLease {
         ensure_staging_publication_certain(&self.publication_uncertain)?;
         self.recovery.ensure_guard(cas_mutation_guard)?;
         validate_hash("staged large-object root", hash)?;
-        if self.record.large_object_hashes.insert(hash.to_owned()) {
-            if let Err(error) = self.persist_record(&self.record) {
+        if self.record.large_object_hashes.insert(hash.to_owned())
+            && let Err(error) = self.persist_record(&self.record) {
                 self.record.large_object_hashes.remove(hash);
                 return Err(error);
             }
-        }
         Ok(())
     }
 

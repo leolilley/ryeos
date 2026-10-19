@@ -560,10 +560,10 @@ impl ExternalPlacementBackendContract {
             matches!(self.workload, ExternalWorkloadBinding::DirectCommand {}),
             "direct startup budget requires an ordinary-command binding"
         );
-        Ok(u64::from(self.contact_timeout_seconds)
+        u64::from(self.contact_timeout_seconds)
             .checked_add(u64::from(self.observation_timeout_seconds))
             .and_then(|seconds| seconds.checked_mul(1_000))
-            .context("external direct startup budget overflow")?)
+            .context("external direct startup budget overflow")
     }
 }
 

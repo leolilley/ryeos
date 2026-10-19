@@ -24,8 +24,6 @@ use ryeos_node::lifecycle_marker;
 use ryeosd::config::{self, Cli, Config};
 #[cfg(feature = "scheduling")]
 use ryeosd::scheduler;
-#[cfg(feature = "scheduling")]
-use ryeosd::scheduler::db::SchedulerDb;
 use ryeosd::{bootstrap, reconcile, uds};
 
 mod composition_native;
@@ -1847,9 +1845,8 @@ impl DaemonSelectedComposition {
             #[cfg(feature = "scheduling")]
             if let Some(scheduler) = &self.native_sources.scheduler_native_terminals() { terminals.extend(scheduler.iter().cloned()); }
             #[cfg(feature = "scheduling")]
-            if let Some(released) = &self.scheduler_recovered_schema {
-                if let Some(terminal) = released.terminal(&native)? { terminals.push(terminal.clone()); }
-            }
+            if let Some(released) = &self.scheduler_recovered_schema
+                && let Some(terminal) = released.terminal(&native)? { terminals.push(terminal.clone()); }
             if let Some(ledger) = &self.accounting_native {
                 terminals.extend(ledger.native_terminals(&native)?);
             }
@@ -2248,11 +2245,10 @@ impl DaemonSelectedComposition {
     }
 
     fn observe_native_controls(&self) {
-        if let Some(factory) = &self.native_factory {
-            if let Ok(mut observation) = self.native_control_observation.try_lock() {
+        if let Some(factory) = &self.native_factory
+            && let Ok(mut observation) = self.native_control_observation.try_lock() {
                 *observation = Some(factory.producer_control_census());
             }
-        }
     }
 
     fn close_after_run(&mut self) {
@@ -4078,7 +4074,7 @@ async fn run(
                 thread_auth,
                 controller_lifetime: Arc::clone(&operator_state_lease),
                 extensions: {
-                    let mut ext = ryeos_app::extension_state::ExtensionState::new();
+                    let ext = ryeos_app::extension_state::ExtensionState::new();
                     #[cfg(feature = "scheduling")]
                     if let Some((_, _, scheduler_service)) = &scheduler_runtime {
                         ext.insert(scheduler_service.clone());
@@ -4217,7 +4213,7 @@ async fn run(
             }
             let recovered_project_applies =
                 ryeos_api::handlers::project_apply_snapshot::recover_durable_project_snapshot_applies(
-                    &app_state,
+                    app_state,
                 )
                 .await
                 .context("recover interrupted project snapshot applies")?;
@@ -4338,7 +4334,7 @@ async fn run(
                 ryeos_node::StartupPhase::ReconcilingThreads,
                 "recovering predecessor external candidate executions",
             )?;
-            recover_external_candidates_before_ready(&app_state)
+            recover_external_candidates_before_ready(app_state)
                 .await
                 .context("recover predecessor external candidate executions")?;
             startup.phase(
@@ -4361,7 +4357,7 @@ async fn run(
             .await
             .context("reconcile hosted candidate publications")?;
             let active_reconcile = reconcile::reconcile_active_threads_after_latched_stop(
-                &app_state,
+                app_state,
                 latched_drain.as_ref(),
             )
             .await?;
@@ -4386,12 +4382,12 @@ async fn run(
             // bound listener.
             // LOAD-BEARING ORDER: settle cancellation tombstones before follow
             // reconciliation can classify an admitted-but-unlaunched child for relaunch.
-            ryeos_app::cascade::repair_cancelled_window_members(&app_state)?;
+            ryeos_app::cascade::repair_cancelled_window_members(app_state)?;
             startup.phase(
                 ryeos_node::StartupPhase::ReconcilingFollow,
                 "reconciling suspended follow execution state",
             )?;
-            let follow_actions = reconcile::reconcile_follow(&app_state)?;
+            let follow_actions = reconcile::reconcile_follow(app_state)?;
             if ryeosd::shutdown_requested() {
                 tracing::info!("startup shutdown requested after follow reconciliation");
                 return Ok(());
@@ -7610,7 +7606,7 @@ async fn run_service_standalone(
         thread_auth: Arc::new(ryeos_app::callback_token::ThreadAuthStore::new()),
         controller_lifetime: Arc::new(standalone_state_lock.retain()),
         extensions: {
-            let mut extensions = ryeos_app::extension_state::ExtensionState::new();
+            let extensions = ryeos_app::extension_state::ExtensionState::new();
             extensions.insert(Arc::new(
                 ryeos_api::project_deploy::ProjectScheduleRecoveryOwners::default(),
             ));

@@ -2335,7 +2335,7 @@ impl IsolationRuntime {
         }
         #[cfg(target_os = "linux")]
         let executable = {
-            let mut source = source;
+            let source = source;
             let before =
                 lillux::require_effective_user_owned_regular(&source).map_err(|error| {
                     refused(format!("admitted command source is not protected: {error}"))
@@ -2351,7 +2351,7 @@ impl IsolationRuntime {
             let observation = lillux::observe_open_regular_file(&source)
                 .map_err(|error| refused(format!("observe admitted command source: {error}")))?;
             let content =
-                lillux::read_open_regular_file_stable_bounded(&mut source, &observation, max_bytes)
+                lillux::read_open_regular_file_stable_bounded(&source, &observation, max_bytes)
                     .map_err(|error| {
                         refused(format!(
                             "read admitted command source {}: {error}",
@@ -4074,13 +4074,11 @@ impl IsolationRuntime {
                 | IsolationReadOnlyMountScope::OriginalProductManifest(_) => {
                     if let IsolationReadOnlyMountScope::OriginalProductManifest(role) =
                         external.scope()
-                    {
-                        if destination != role.destination() {
+                        && destination != role.destination() {
                             return Err(refused(
                                 "original product manifest has a non-role destination".into(),
                             ));
                         }
-                    }
                     ryeos_state::objects::validate_session_runtime_configuration_destination(
                         destination.to_str().ok_or_else(|| {
                             refused("runtime configuration destination is not UTF-8".into())
@@ -6750,7 +6748,7 @@ fn read_regular_file_bytes_limited(
 fn read_regular_file_handle_limited(
     kind: &str,
     path: &Path,
-    mut file: std::fs::File,
+    file: std::fs::File,
     max_bytes: u64,
 ) -> Result<(Vec<u8>, lillux::OpenRegularFileObservation), EngineError> {
     let observation = lillux::observe_open_regular_file(&file).map_err(|error| {
@@ -6766,7 +6764,7 @@ fn read_regular_file_handle_limited(
             observation.size()
         )));
     }
-    let content = lillux::read_open_regular_file_stable_bounded(&mut file, &observation, max_bytes)
+    let content = lillux::read_open_regular_file_stable_bounded(&file, &observation, max_bytes)
         .map_err(|error| refused(format!("{kind} {} cannot be read: {error}", path.display())))?;
     Ok((content, observation))
 }

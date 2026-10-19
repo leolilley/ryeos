@@ -354,7 +354,7 @@ fn service_descriptor_table_matches_api_handlers() {
         "failed to parse API handler service refs"
     );
 
-    let workspace = workspace_root();
+    let _workspace = workspace_root();
     for service_ref in services {
         let bare = service_ref
             .strip_prefix("service:")

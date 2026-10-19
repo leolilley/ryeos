@@ -1229,8 +1229,8 @@ impl LiveExternalCandidateSupervisor {
         // before anything else happens. Its candidate is launched only by the
         // owner's Release, which the controller sends after admitting the
         // report; this handshake dispatches no owner frame.
-        if let Some(report) = runtime.capability_report_frame() {
-            if let Err(error) = lease_handshake(
+        if let Some(report) = runtime.capability_report_frame()
+            && let Err(error) = lease_handshake(
                 &mut transport,
                 runtime.binding(),
                 runtime.ready_frame().as_bytes(),
@@ -1244,7 +1244,6 @@ impl LiveExternalCandidateSupervisor {
                 ));
                 return Err(native.refuse("live guest journal", error, journal.close()));
             }
-        }
         let driver = match ExternalCandidateTransportDriver::try_new(runtime, transport) {
             Ok(driver) => driver,
             Err((runtime, transport, error)) => {
@@ -1818,7 +1817,7 @@ mod tests {
                 destination: host.destination(),
                 retain: &retain,
             };
-            work(&*host, &native)
+            work(&host, &native)
         };
         ryeos_state::test_support::release_shared_test_host(host);
         result

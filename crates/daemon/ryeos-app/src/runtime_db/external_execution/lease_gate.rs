@@ -28,7 +28,7 @@ impl RuntimeDb {
     ) -> Result<()> {
         admission.validate()?;
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let held: Option<(String, Option<Vec<u8>>, Option<Vec<u8>>)> = tx
                 .query_row(
                     "SELECT state,held_ready_frame,held_report_frame
@@ -117,7 +117,7 @@ impl RuntimeDb {
             "lease refusal reason is empty or exceeds 1024 bytes"
         );
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let state: Option<String> = tx
                 .query_row(
                     "SELECT state FROM external_execution_lease WHERE placement_thread_id=?1",
@@ -139,8 +139,8 @@ impl RuntimeDb {
                     )?;
                 }
             }
-            if let Some(allocation) = read(&tx, placement)? {
-                if !allocation.phase.is_settled() {
+            if let Some(allocation) = read(&tx, placement)?
+                && !allocation.phase.is_settled() {
                     tx.execute(
                         "UPDATE external_execution_allocation SET phase=?2,updated_at_ms=?3
                           WHERE placement_thread_id=?1",
@@ -155,7 +155,6 @@ impl RuntimeDb {
                         ],
                     )?;
                 }
-            }
             tx.commit()?;
             Ok(true)
         })

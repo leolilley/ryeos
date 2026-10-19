@@ -80,7 +80,7 @@ impl ServiceRefusalLatch {
                 && !self.fact_woken.swap(true, Ordering::SeqCst);
             if first || first_fact {
                 // A panicking wake is contained; the latch stays set.
-                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| wake()));
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(wake));
             }
         }
     }
@@ -789,7 +789,7 @@ impl LiveNativeFactory {
             .spawn(move || {
                 // A refused clock wait fails closed: the edge latches at once.
                 if latch.edge.sleep_until_before_edge(margin).is_ok() {
-                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| on_margin()));
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(on_margin));
                 }
                 let _ = latch.edge.sleep_until_before_edge(std::time::Duration::ZERO);
                 latch.latch(service_refusal::WINDOW_EDGE);

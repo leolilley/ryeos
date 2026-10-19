@@ -705,13 +705,13 @@ impl DefinitionDiffBuilder {
         if left == right || !self.visit() {
             return;
         }
-        let left = left.map(|value| self.public_string(value)).or_else(|| {
+        let left = left.map(|value| self.public_string(value)).or({
             Some(DefinitionValueSummary {
                 value_type: DefinitionValueType::Null,
                 public_scalar: None,
             })
         });
-        let right = right.map(|value| self.public_string(value)).or_else(|| {
+        let right = right.map(|value| self.public_string(value)).or({
             Some(DefinitionValueSummary {
                 value_type: DefinitionValueType::Null,
                 public_scalar: None,
@@ -840,7 +840,7 @@ impl DefinitionDiffBuilder {
             }
             let left_value = left_by_id
                 .get(id)
-                .map(|entry| serde_json::to_value(entry))
+                .map(serde_json::to_value)
                 .transpose()
                 .map_err(|error| {
                     EffectiveDefinitionDigestError(format!(
@@ -849,7 +849,7 @@ impl DefinitionDiffBuilder {
                 })?;
             let right_value = right_by_id
                 .get(id)
-                .map(|entry| serde_json::to_value(entry))
+                .map(serde_json::to_value)
                 .transpose()
                 .map_err(|error| {
                     EffectiveDefinitionDigestError(format!(
@@ -1034,9 +1034,9 @@ impl DefinitionDiffBuilder {
     }
 }
 
-fn group_contributors<'a>(
-    contributors: &'a [DefinitionContributor],
-) -> BTreeMap<(String, String), Vec<&'a DefinitionContributor>> {
+fn group_contributors(
+    contributors: &[DefinitionContributor],
+) -> BTreeMap<(String, String), Vec<&DefinitionContributor>> {
     let mut grouped = BTreeMap::new();
     for contributor in contributors {
         grouped
@@ -1050,9 +1050,9 @@ fn group_contributors<'a>(
     grouped
 }
 
-fn group_edges<'a>(
-    edges: &'a [DefinitionReferenceEdge],
-) -> BTreeMap<(String, String, String), Vec<&'a DefinitionReferenceEdge>> {
+fn group_edges(
+    edges: &[DefinitionReferenceEdge],
+) -> BTreeMap<(String, String, String), Vec<&DefinitionReferenceEdge>> {
     let mut grouped = BTreeMap::new();
     for edge in edges {
         grouped

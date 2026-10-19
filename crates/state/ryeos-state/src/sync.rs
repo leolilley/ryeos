@@ -455,7 +455,7 @@ pub fn reconcile_export_pinned(
     let mut total_blob_bytes = 0_u64;
 
     for hash in missing_objects {
-        let data = load_export_object_bytes(&cas, &hash)
+        let data = load_export_object_bytes(cas, &hash)
             .with_context(|| format!("read bounded reconciled chain object {hash}"))?;
         total_object_bytes = total_object_bytes.checked_add(u64::try_from(data.len())?)
             .context("reconciled object byte count overflow")?;

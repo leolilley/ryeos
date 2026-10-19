@@ -189,8 +189,7 @@ impl ExternalLargeContentManifestObject {
                                     entry.path
                                 )
                             })?;
-                            if chunk_size < MIN_LARGE_CONTENT_CHUNK_BYTES
-                                || chunk_size > MAX_LARGE_CONTENT_CHUNK_BYTES
+                            if !(MIN_LARGE_CONTENT_CHUNK_BYTES..=MAX_LARGE_CONTENT_CHUNK_BYTES).contains(&chunk_size)
                                 || !chunk_size.is_power_of_two()
                             {
                                 anyhow::bail!(
@@ -287,14 +286,10 @@ impl ExternalLargeContentManifestObject {
                 self.total_bytes
             );
         }
-        super::validate_internal_symlink_graph(self.entries.iter().filter_map(|entry| {
-            (entry.kind == super::ExternalContentManifestEntryKind::Symlink).then(|| {
-                (
+        super::validate_internal_symlink_graph(self.entries.iter().filter(|&entry| (entry.kind == super::ExternalContentManifestEntryKind::Symlink)).map(|entry| (
                     entry.path.as_str(),
                     entry.target.as_deref().expect("validated target"),
-                )
-            })
-        }))?;
+                )))?;
         super::external_content_manifest::validate_manifest_tree_namespace(
             self.entries
                 .iter()

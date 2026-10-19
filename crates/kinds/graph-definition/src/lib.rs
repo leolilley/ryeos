@@ -722,7 +722,7 @@ fn validate_node(name: &str, node: &GraphNode, config: &GraphConfig) -> Result<(
                     ExpressionCondition::Expression(source) => {
                         ryeos_expression::compile_expression_for(
                             source,
-                            &format!("nodes.{name}.next.when"),
+                            format!("nodes.{name}.next.when"),
                             &ryeos_expression::CompilationLimits::default(),
                         )
                         .map_err(|error| anyhow!(error))?;

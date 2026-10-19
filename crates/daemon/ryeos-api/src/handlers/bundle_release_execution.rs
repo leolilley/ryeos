@@ -835,8 +835,8 @@ pub(crate) async fn execute_protected_qualification(
 
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1800);
     loop {
-        if let Some(thread) = state.threads.get_thread(&thread_id)? {
-            if ryeos_state::objects::ThreadStatus::from_str_lossy(&thread.status).is_some_and(
+        if let Some(thread) = state.threads.get_thread(&thread_id)?
+            && ryeos_state::objects::ThreadStatus::from_str_lossy(&thread.status).is_some_and(
                 |status| {
                     status.is_terminal() && status != ryeos_state::objects::ThreadStatus::Continued
                 },
@@ -849,7 +849,6 @@ pub(crate) async fn execute_protected_qualification(
                         .map(|terminal| (thread.status.clone(), terminal)))
                 });
             }
-        }
         anyhow::ensure!(
             tokio::time::Instant::now() < deadline,
             "protected release qualification did not reach a terminal within 30 minutes; query launch/status for {launch_id}"
@@ -1229,11 +1228,9 @@ mod tests {
                 .state_store
                 .launch_planning_status(&launch_id, &context.fingerprint)
                 .unwrap()
-            {
-                if status.status == "failed" && !staged_contains_snapshot() {
+                && status.status == "failed" && !staged_contains_snapshot() {
                     break status;
                 }
-            }
             assert!(
                 tokio::time::Instant::now() < deadline,
                 "protected refusal did not settle and release the staged snapshot"

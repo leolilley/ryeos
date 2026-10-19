@@ -4502,7 +4502,7 @@ mod tests {
                     &hash,
                     changed["total_bytes"].as_u64().unwrap(),
                 );
-                let error = resolve(&resolution).err().expect("member must be refused");
+                let error = resolve(&resolution).expect_err("member must be refused");
                 assert!(
                     error.to_string().contains(expected),
                     "{kind}/{field}: {error:#}"
@@ -4743,8 +4743,7 @@ mod tests {
                 .unwrap(),
                 limit,
             )
-            .err()
-            .expect("unavailable large-object bytes must not become identity authority");
+            .expect_err("unavailable large-object bytes must not become identity authority");
             assert_eq!(
                 error
                     .to_string()
@@ -5380,7 +5379,7 @@ execution:
         assert_eq!(
             lillux::sha256_hex(
                 lillux::canonical_json(
-                    &serde_json::to_value(&portable_direct_plan(admitted)).unwrap()
+                    &serde_json::to_value(portable_direct_plan(admitted)).unwrap()
                 )
                 .unwrap()
                 .as_bytes()

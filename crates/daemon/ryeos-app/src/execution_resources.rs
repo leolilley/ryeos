@@ -998,9 +998,7 @@ pub fn settle_process_resource_operations_with_accounting(
         .map(|binding| accounting.resource_operation_state(binding.operation_id.as_str()))
         .collect::<anyhow::Result<Vec<_>>>()?;
     let retains_unknown_advisory_liability = end.is_none()
-        && states
-            .iter()
-            .any(|state| *state == ryeos_accounting::ResourceBudgetState::AdvisoryIssued);
+        && states.contains(&ryeos_accounting::ResourceBudgetState::AdvisoryIssued);
     accounting.mark_resource_owner_cleanup_proved(
         owner_gate_id.as_str(),
         owner_incarnation.as_str(),

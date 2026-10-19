@@ -695,7 +695,7 @@ mod tests {
     #[test]
     fn unarmed_open_is_refused_with_misuse() {
         let _serial = crate::test_host::serial_guard();
-        let refused = rusqlite::Connection::open_in_memory().err().expect("unarmed open refused");
+        let refused = rusqlite::Connection::open_in_memory().expect_err("unarmed open refused");
         assert_eq!(refused.sqlite_error_code(), Some(rusqlite::ErrorCode::ApiMisuse), "{refused}");
     }
 

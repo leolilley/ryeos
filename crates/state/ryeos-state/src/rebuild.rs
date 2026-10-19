@@ -33,7 +33,7 @@ struct LocalProjectionCasReader<'a> {
 
 impl ProjectionCasObjectReader for LocalProjectionCasReader<'_> {
     fn get_object(&mut self, hash: &str) -> Result<Option<Value>> {
-        Ok(self.cas.get_object(hash)?)
+        self.cas.get_object(hash)
     }
 }
 
@@ -45,9 +45,9 @@ struct BoundedProjectionCasReader<'a> {
 
 impl ProjectionCasObjectReader for BoundedProjectionCasReader<'_> {
     fn get_object(&mut self, hash: &str) -> Result<Option<Value>> {
-        Ok(self
+        self
             .budget
-            .get_object(self.cas, hash, self.limits.max_object_bytes)?)
+            .get_object(self.cas, hash, self.limits.max_object_bytes)
     }
 }
 

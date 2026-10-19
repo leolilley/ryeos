@@ -418,7 +418,7 @@ fn verify_retained_executor_source(
     let signed_ref = std::str::from_utf8(signed_manifest_ref)?;
     let verified_ref = ryeos_engine::executor_resolution::verify_signed_executor_manifest_ref(
         signed_ref,
-        |fingerprint| (fingerprint == signer.signer_fingerprint).then(|| key.clone()),
+        |fingerprint| (fingerprint == signer.signer_fingerprint).then_some(key),
         TrustClass::TrustedBundle,
     )?;
     ensure!(

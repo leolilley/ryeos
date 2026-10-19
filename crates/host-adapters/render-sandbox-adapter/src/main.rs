@@ -1002,11 +1002,9 @@ fn allocate(
             if error
                 .downcast_ref::<HttpError>()
                 .is_some_and(|error| error.contact_state() == ContactState::NoRequestSent)
-            {
-                if provider_spec.allocation_no_occurrence_proof_enabled() {
+                && provider_spec.allocation_no_occurrence_proof_enabled() {
                     return allocation_no_occurrence(common, reservation, settings);
                 }
-            }
             // The POST may have committed. Do not retry or search the broad list.
             return pending();
         }

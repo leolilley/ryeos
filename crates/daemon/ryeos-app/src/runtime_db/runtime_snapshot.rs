@@ -282,7 +282,7 @@ impl RuntimeDb {
         operation_id: &str,
     ) -> Result<Option<RuntimeSnapshotRecord>> {
         self.conn.with_sql(|conn| {
-            read(&conn, operation_id)
+            read(conn, operation_id)
         })
     }
 
@@ -293,7 +293,7 @@ impl RuntimeDb {
     ) -> Result<RuntimeSnapshotRecord> {
         self.conn.with_sql(|conn| {
             intent.validate()?;
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             if let Some(existing) = read(&tx, &intent.operation_id)? {
                 ensure!(
                     existing.intent == *intent,
@@ -374,7 +374,7 @@ impl RuntimeDb {
         intent_digest: &str,
     ) -> Result<RuntimeSnapshotAttemptClaim> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let record = read(&tx, operation_id)?.context("runtime snapshot was not reserved")?;
             ensure!(
                 record.intent.digest()? == intent_digest,
@@ -443,7 +443,7 @@ impl RuntimeDb {
         observed_at_ms: i64,
     ) -> Result<RuntimeSnapshotRecord> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let record =
                 read(&tx, &locator.operation_id)?.context("runtime snapshot has no attempt claim")?;
             locator.validate_for(&record.intent)?;
@@ -506,7 +506,7 @@ impl RuntimeDb {
         observation: &RuntimeSnapshotReadinessObservation,
     ) -> Result<RuntimeSnapshotRecord> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let record = read(&tx, &observation.operation_id)?
                 .context("runtime snapshot readiness has no retained operation")?;
             ensure!(
@@ -554,7 +554,7 @@ impl RuntimeDb {
         intent_digest: &str,
     ) -> Result<RuntimeSnapshotRecord> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let record = read(&tx, operation_id)?.context("runtime snapshot attempt is absent")?;
             ensure!(
                 record.intent.digest()? == intent_digest,
@@ -730,7 +730,7 @@ mod tests {
             db.bind_runtime_snapshot_locator(&changed_locator, false)
                 .is_err()
         );
-        db.conn.with_sql(|connection| Ok(validate_current(connection)?)).unwrap();
+        db.conn.with_sql(|connection| validate_current(connection)).unwrap();
     }
 
     #[test]
@@ -789,7 +789,7 @@ mod tests {
             size_bytes: 4096,
         };
         assert!(db.bind_runtime_snapshot_readiness(&readiness).is_err());
-        db.conn.with_sql(|connection| Ok(validate_current(connection)?)).unwrap();
+        db.conn.with_sql(|connection| validate_current(connection)).unwrap();
     }
 
     #[test]
@@ -812,7 +812,7 @@ mod tests {
             db.quarantine_runtime_snapshot_attempt(&intent.operation_id, &digest)
                 .is_err()
         );
-        db.conn.with_sql(|connection| Ok(validate_current(connection)?)).unwrap();
+        db.conn.with_sql(|connection| validate_current(connection)).unwrap();
     }
 
     #[test]
@@ -831,6 +831,6 @@ mod tests {
         assert_eq!(record.locator, Some(locator));
         assert_eq!(record.runner_deadline_exceeded, Some(false));
         assert_eq!(record.completion_at_ms, Some(intent.attempt_deadline_ms));
-        db.conn.with_sql(|connection| Ok(validate_current(connection)?)).unwrap();
+        db.conn.with_sql(|connection| validate_current(connection)).unwrap();
     }
 }

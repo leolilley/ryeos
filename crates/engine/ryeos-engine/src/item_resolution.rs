@@ -998,7 +998,8 @@ mod tests {
         let unselected = resolve_item_full(&all, &schema, &ref_).unwrap();
         assert!(unselected.winner_path.starts_with(&early));
 
-        for selection in [RegisteredBundleSelection::Only] {
+        {
+            let selection = RegisteredBundleSelection::Only;
             let selected = select_registered_bundle(&registered, "chosen", selection).unwrap();
             let roots = ResolutionRoots::from_registered(None, &selected);
             let result = resolve_item_full(&roots, &schema, &ref_).unwrap();
@@ -1064,7 +1065,8 @@ mod tests {
                 canonical_root: PathBuf::from("/bundles/two"),
             },
         ];
-        for selection in [RegisteredBundleSelection::Only] {
+        {
+            let selection = RegisteredBundleSelection::Only;
             assert!(matches!(
                 select_registered_bundle(&registered, "absent", selection),
                 Err(EngineError::RegisteredBundleSelectionRefused {

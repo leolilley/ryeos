@@ -1945,6 +1945,34 @@ fn validate_relative_path(value: &str) -> anyhow::Result<()> {
     ryeos_state::objects::validate_canonical_project_relative_path(value)
 }
 
+fn open_directory_relative(
+    base: &lillux::PinnedDirectory,
+    relative: &str,
+) -> anyhow::Result<lillux::PinnedDirectory> {
+    let mut current = base.try_clone()?;
+    for component in relative.split('/') {
+        let child = current
+            .open_child_directory(OsStr::new(component))?
+            .ok_or_else(|| anyhow::anyhow!("external-content source directory is unavailable"))?;
+        current.ensure_open_child_same_mount(&child)?;
+        current = child;
+    }
+    Ok(current)
+}
+
+fn open_file_parent<'a>(
+    base: &lillux::PinnedDirectory,
+    relative: &'a str,
+) -> anyhow::Result<(lillux::PinnedDirectory, &'a str)> {
+    let (parent, name) = relative.rsplit_once('/').unwrap_or(("", relative));
+    let parent = if parent.is_empty() {
+        base.try_clone()?
+    } else {
+        open_directory_relative(base, parent)?
+    };
+    Ok((parent, name))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2405,32 +2433,4 @@ mod tests {
             .is_err()
         );
     }
-}
-
-fn open_directory_relative(
-    base: &lillux::PinnedDirectory,
-    relative: &str,
-) -> anyhow::Result<lillux::PinnedDirectory> {
-    let mut current = base.try_clone()?;
-    for component in relative.split('/') {
-        let child = current
-            .open_child_directory(OsStr::new(component))?
-            .ok_or_else(|| anyhow::anyhow!("external-content source directory is unavailable"))?;
-        current.ensure_open_child_same_mount(&child)?;
-        current = child;
-    }
-    Ok(current)
-}
-
-fn open_file_parent<'a>(
-    base: &lillux::PinnedDirectory,
-    relative: &'a str,
-) -> anyhow::Result<(lillux::PinnedDirectory, &'a str)> {
-    let (parent, name) = relative.rsplit_once('/').unwrap_or(("", relative));
-    let parent = if parent.is_empty() {
-        base.try_clone()?
-    } else {
-        open_directory_relative(base, parent)?
-    };
-    Ok((parent, name))
 }

@@ -488,7 +488,7 @@ fn run_in_directory(
     active: MonotonicDeadline,
     cleanup: MonotonicDeadline,
 ) -> Result<()> {
-    let request_bytes = read_fixed(&root, "guest-request.json", 64 * 1024)?;
+    let request_bytes = read_fixed(root, "guest-request.json", 64 * 1024)?;
     let request: Request = serde_json::from_slice(&request_bytes)?;
     ensure!(
         request.schema == "test.routed_guest.v1"
@@ -538,9 +538,9 @@ fn run_in_directory(
     let tools = scratch.create_child(OsStr::new("tools"), 0o700)?;
     let runtime_views = scratch.create_child(OsStr::new("runtime-views"), 0o700)?;
     let tmpdir = runtime_views.create_child(OsStr::new("TMPDIR"), 0o700)?;
-    stage(&child(&root, "runtime")?, &runtime, &request.runtime)?;
-    stage(&child(&root, "tools")?, &tools, &request.tools)?;
-    let candidate = child(&root, "candidate")?;
+    stage(&child(root, "runtime")?, &runtime, &request.runtime)?;
+    stage(&child(root, "tools")?, &tools, &request.tools)?;
+    let candidate = child(root, "candidate")?;
     let state_root = scratch.create_child(OsStr::new("cas-state"), 0o700)?;
     let authority = ryeos_state::private_cas::open_private_scratch_cas(&state_root)
         .context("initialize private verifier CAS")?;
@@ -706,8 +706,8 @@ pub(crate) fn run_prepared_protocol(
         let mut output_offset = 0;
         loop {
             ensure!(!active.has_elapsed(), "guest scenario expired");
-            if applied_launch.is_none() {
-                if let Some(receipt) = held
+            if applied_launch.is_none()
+                && let Some(receipt) = held
                     .try_observe_applied_launch()
                     .map_err(anyhow::Error::msg)?
                 {
@@ -719,7 +719,6 @@ pub(crate) fn run_prepared_protocol(
                     );
                     applied_launch = Some(receipt);
                 }
-            }
             if pending.is_empty() {
                 let mut bytes = [0; CHUNK];
                 match input.try_read_chunk(&mut bytes, Some(active)) {
@@ -734,7 +733,7 @@ pub(crate) fn run_prepared_protocol(
                             std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
                         ) =>
                     {
-                        ()
+                        
                     }
                     Err(e) => return Err(e).context("read controller protocol"),
                 }
@@ -762,7 +761,7 @@ pub(crate) fn run_prepared_protocol(
                             std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
                         ) =>
                     {
-                        ()
+                        
                     }
                     Err(e) => return Err(e.into()),
                 }
@@ -785,7 +784,7 @@ pub(crate) fn run_prepared_protocol(
                             std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
                         ) =>
                     {
-                        ()
+                        
                     }
                     Err(e) => return Err(e.into()),
                 }
@@ -808,7 +807,7 @@ pub(crate) fn run_prepared_protocol(
                             std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
                         ) =>
                     {
-                        ()
+                        
                     }
                     Err(e) => return Err(e).context("write controller protocol"),
                 }
@@ -821,7 +820,7 @@ pub(crate) fn run_prepared_protocol(
                         std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
                     ) =>
                 {
-                    ()
+                    
                 }
                 Err(e) => return Err(e.into()),
             }

@@ -145,7 +145,7 @@ impl OriginalNativeRegionOwner {
             if crate::foreign_process(process) { return Err(FixedHostRefusal::Process); }
             if generation == 0 { return Err(FixedHostRefusal::Provenance); }
             let quote = original_native_region_layout()?;
-            if bytes < quote.layout.size() || storage.as_ptr() as usize % quote.layout.align() != 0
+            if bytes < quote.layout.size() || !(storage.as_ptr() as usize).is_multiple_of(quote.layout.align())
                 || (storage.as_ptr() as usize).checked_add(bytes).is_none() { return Err(FixedHostRefusal::Layout); }
             let header = storage.cast::<RegionHeader>();
             let payload = unsafe { NonNull::new_unchecked(storage.as_ptr().add(quote.payload_offset).cast::<NativeResidentState>()) };

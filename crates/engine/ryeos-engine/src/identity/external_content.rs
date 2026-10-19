@@ -308,11 +308,10 @@ impl ExternalContentDeclaration {
         for exclusion in &self.exclude {
             validate_exclude_pattern(exclusion)?;
         }
-        if let Some(hint) = &self.metadata_hint {
-            if hint.is_empty() || hint.len() > 255 || hint.chars().any(char::is_control) {
+        if let Some(hint) = &self.metadata_hint
+            && (hint.is_empty() || hint.len() > 255 || hint.chars().any(char::is_control)) {
                 anyhow::bail!("external content metadata hint is not canonical");
             }
-        }
         Ok(())
     }
 }

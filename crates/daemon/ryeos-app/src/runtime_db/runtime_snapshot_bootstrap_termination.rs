@@ -230,7 +230,7 @@ impl RuntimeDb {
             // Persist the scan position with the selection itself. A wall-clock
             // window can repeatedly skip later sources when one provider pass
             // exceeds the recovery beat; a retained cursor cannot.
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let cursor: String = tx.query_row(
                 "SELECT last_operation_id FROM runtime_snapshot_bootstrap_recovery_cursor WHERE singleton=1",
                 [],
@@ -244,12 +244,12 @@ impl RuntimeDb {
                 let mut statement = tx.prepare(&format!(
                     "SELECT b.operation_id {DUE_SOURCE_SQL} AND b.operation_id > ?2 ORDER BY b.operation_id LIMIT ?3"
                 ))?;
-                let selected = statement
+                
+                statement
                     .query_map(params![now_ms, &cursor, 64_i64], |row| {
                         row.get::<_, String>(0)
                     })?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                selected
+                    .collect::<rusqlite::Result<Vec<_>>>()?
             };
             if ids.len() < 64 && !cursor.is_empty() {
                 let remaining = 64_i64 - i64::try_from(ids.len())?;
@@ -299,7 +299,7 @@ impl RuntimeDb {
         operation_id: &str,
     ) -> Result<Option<BootstrapTerminationRecord>> {
         self.conn.with_sql(|conn| {
-            read(&conn, operation_id)
+            read(conn, operation_id)
         })
     }
 
@@ -308,7 +308,7 @@ impl RuntimeDb {
         intent: &RuntimeSnapshotBootstrapTerminationIntent,
     ) -> Result<BootstrapTerminationRecord> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             if let Some(existing) = read(&tx, &intent.operation_id)? {
                 if existing.intent != *intent {
                     let mut same_core = existing.intent.clone();
@@ -401,7 +401,7 @@ impl RuntimeDb {
         operation_id: &str,
     ) -> Result<BootstrapTerminationClaim> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let record = read(&tx, operation_id)?.context("bootstrap termination was not reserved")?;
             match record.phase {
                 BootstrapTerminationPhase::Terminal => {
@@ -437,7 +437,7 @@ impl RuntimeDb {
         operation_id: &str,
     ) -> Result<BootstrapTerminationRecord> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let record = read(&tx, operation_id)?.context("bootstrap termination attempt absent")?;
             ensure!(
                 matches!(
@@ -466,7 +466,7 @@ impl RuntimeDb {
         observation: &RuntimeSnapshotBootstrapTerminalObservation,
     ) -> Result<BootstrapTerminationRecord> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let record = read(&tx, &observation.operation_id)?
                 .context("bootstrap termination attempt absent")?;
             observation.validate_for(&record.intent)?;

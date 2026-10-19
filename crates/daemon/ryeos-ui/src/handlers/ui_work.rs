@@ -138,14 +138,13 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
         if owner_principal_id != caller.principal_id() {
             continue;
         }
-        if let Some(project_root) = project_root.as_ref() {
-            if !placements
+        if let Some(project_root) = project_root.as_ref()
+            && !placements
                 .iter()
                 .any(|placement| placement.thread.project_root.as_deref() == project_root.to_str())
             {
                 continue;
             }
-        }
         let attention = attention_by_chain
             .remove(&chain_root_id)
             .unwrap_or_default()
@@ -554,6 +553,44 @@ fn candidate_tree_changes(
     }))
 }
 
+pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
+    service_ref: "service:ui/ryeos-ui/work/list",
+    endpoint: "ui.ryeos.work.list",
+    availability: ServiceAvailability::DaemonOnly,
+    required_caps: &[],
+    handler: |params, ctx, state| Box::pin(async move { handle(params, ctx, state).await }),
+};
+
+pub const ATTENTION_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
+    service_ref: "service:ui/ryeos-ui/work/attention",
+    endpoint: "ui.ryeos.work.attention",
+    availability: ServiceAvailability::DaemonOnly,
+    required_caps: &[],
+    handler: |params, ctx, state| {
+        Box::pin(async move { handle_attention(params, ctx, state).await })
+    },
+};
+
+pub const APPROVAL_HISTORY_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
+    service_ref: "service:ui/ryeos-ui/work/approval-history",
+    endpoint: "ui.ryeos.work.approval-history",
+    availability: ServiceAvailability::DaemonOnly,
+    required_caps: &[],
+    handler: |params, ctx, state| {
+        Box::pin(async move { handle_approval_history(params, ctx, state).await })
+    },
+};
+
+pub const CANDIDATE_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
+    service_ref: "service:ui/ryeos-ui/work/candidate",
+    endpoint: "ui.ryeos.work.candidate",
+    availability: ServiceAvailability::DaemonOnly,
+    required_caps: &[],
+    handler: |params, ctx, state| {
+        Box::pin(async move { handle_candidate(params, ctx, state).await })
+    },
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -603,41 +640,3 @@ mod tests {
         assert_eq!(changes["files"][1]["change"], "deleted");
     }
 }
-
-pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
-    service_ref: "service:ui/ryeos-ui/work/list",
-    endpoint: "ui.ryeos.work.list",
-    availability: ServiceAvailability::DaemonOnly,
-    required_caps: &[],
-    handler: |params, ctx, state| Box::pin(async move { handle(params, ctx, state).await }),
-};
-
-pub const ATTENTION_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
-    service_ref: "service:ui/ryeos-ui/work/attention",
-    endpoint: "ui.ryeos.work.attention",
-    availability: ServiceAvailability::DaemonOnly,
-    required_caps: &[],
-    handler: |params, ctx, state| {
-        Box::pin(async move { handle_attention(params, ctx, state).await })
-    },
-};
-
-pub const APPROVAL_HISTORY_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
-    service_ref: "service:ui/ryeos-ui/work/approval-history",
-    endpoint: "ui.ryeos.work.approval-history",
-    availability: ServiceAvailability::DaemonOnly,
-    required_caps: &[],
-    handler: |params, ctx, state| {
-        Box::pin(async move { handle_approval_history(params, ctx, state).await })
-    },
-};
-
-pub const CANDIDATE_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
-    service_ref: "service:ui/ryeos-ui/work/candidate",
-    endpoint: "ui.ryeos.work.candidate",
-    availability: ServiceAvailability::DaemonOnly,
-    required_caps: &[],
-    handler: |params, ctx, state| {
-        Box::pin(async move { handle_candidate(params, ctx, state).await })
-    },
-};

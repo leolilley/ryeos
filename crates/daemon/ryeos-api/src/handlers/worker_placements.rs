@@ -522,11 +522,9 @@ pub async fn prepare(
         .state_store
         .with_state_db(|db| db.get_sync_job(&job_id))
         .map_err(internal)?
-    {
-        if let Some(response) = classify_existing_target_prepare(&state, &req, &existing)? {
+        && let Some(response) = classify_existing_target_prepare(&state, &req, &existing)? {
             return Ok(response);
         }
-    }
 
     let source_client = RemoteClient::from_remote_cfg(&state, &source_remote.remote);
     let mut roots = vec![
@@ -2447,11 +2445,9 @@ pub async fn reconcile_observed_target_handoff_attachments_before_detachment(
                 if let Some(session) = state
                     .state_store
                     .dedicated_session(&operation.successor_placement_thread_id)?
-                {
-                    if session.worker_instance_id.is_some() || session.worker_boot_epoch.is_some() {
+                    && (session.worker_instance_id.is_some() || session.worker_boot_epoch.is_some()) {
                         bail!("target handoff attached a worker without durable progress");
                     }
-                }
                 continue;
             };
             let progress = WorkerSessionHandoffProgress::from_value(result)?;

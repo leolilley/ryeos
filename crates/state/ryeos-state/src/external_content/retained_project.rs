@@ -259,7 +259,7 @@ fn verify_blob(cas: &lillux::CasStore, file: &ProjectFile) -> anyhow::Result<()>
     if size != file.size {
         bail!("retained blob size disagrees with ProjectFile");
     }
-    let (digest, _) = lillux::digest_open_regular_file_stable_exact(&mut input, size)?;
+    let (digest, _) = lillux::digest_open_regular_file_stable_exact(&input, size)?;
     if digest != file.blob_hash {
         bail!("retained blob failed content verification");
     }

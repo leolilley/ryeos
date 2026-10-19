@@ -486,10 +486,10 @@ enum TurnObservation {
     },
 }
 
-fn prepare_progress_delta<'a>(
-    raw: &'a serde_json::Value,
+fn prepare_progress_delta(
+    raw: &serde_json::Value,
     wire_max_bytes: u32,
-) -> Result<(String, String, &'a serde_json::Value)> {
+) -> Result<(String, String, &serde_json::Value)> {
     ensure!(
         (1..=MAX_QUALIFICATION_WORKER_FINAL_BYTES as u32).contains(&wire_max_bytes),
         "Q Worker Delta has no selected signed wire maximum"
@@ -581,9 +581,9 @@ impl RuntimeDb {
         placement: &str,
     ) -> Result<Option<QualificationWorkerCommandRecord>> {
         self.conn.with_sql(|conn| {
-            let record = read_command(&conn, placement)?;
+            let record = read_command(conn, placement)?;
             if let Some(record) = &record {
-                require_owner(&conn, record)?;
+                require_owner(conn, record)?;
             }
             Ok(record)
         })
@@ -604,7 +604,7 @@ impl RuntimeDb {
                 setup_request_digest != request_digest,
                 "Q setup and turn request digests must differ"
             );
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let allocation = read(&tx, placement)?.context("Q command lost its allocation")?;
             ensure!(
                 allocation.phase == ExternalAllocationPhase::Bound,
@@ -720,7 +720,7 @@ impl RuntimeDb {
         proof: &crate::state_store::VerifiedExternalQualificationOwner,
     ) -> Result<()> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let record = read_command(&tx, placement)?.context("Q command was not reserved")?;
             ensure!(
                 record.phase == QualificationWorkerCommandPhase::Reserved
@@ -792,7 +792,7 @@ impl RuntimeDb {
         proof: &crate::state_store::VerifiedExternalQualificationOwner,
     ) -> Result<()> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let record = read_command(&tx, placement)?.context("Q command was not reserved")?;
             ensure!(
                 record.phase == QualificationWorkerCommandPhase::SetupSettled
@@ -883,7 +883,7 @@ impl RuntimeDb {
                 "Q setup Final exceeds its signed wire bound"
             );
             let digest = lillux::sha256_hex(bytes.as_bytes());
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let record = read_command(&tx, placement)?.context("Q setup Final has no command")?;
             require_owner(&tx, &record)?;
             let process_state: String = tx.query_row(
@@ -934,7 +934,7 @@ impl RuntimeDb {
         setup_request_digest: &str,
     ) -> Result<QualificationWorkerCommandRecord> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let record = read_command(&tx, placement)?.context("Q setup send has no command")?;
             require_owner(&tx, &record)?;
             ensure!(
@@ -979,7 +979,7 @@ impl RuntimeDb {
     ) -> Result<QualificationWorkerCommandRecord> {
         self.conn.with_sql(|conn| {
             let (canonical, digest, _) = prepare_progress_delta(delta, max_frame_bytes)?;
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let record = read_command(&tx, placement)?.context("Q Worker Delta has no command")?;
             require_owner(&tx, &record)?;
             let process_state: String = tx.query_row(
@@ -1059,7 +1059,7 @@ impl RuntimeDb {
                 "Q Worker turn id is not bounded"
             );
             let observation_digest = ryeos_state::objects::canonical_value_digest(observation)?;
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let record = read_command(&tx, placement)?.context("Q Worker turn has no command")?;
             require_owner(&tx, &record)?;
             let process_state: String = tx.query_row(
@@ -1167,7 +1167,7 @@ impl RuntimeDb {
                 "Q Worker Final exceeds selected signed wire bound"
             );
             let digest = lillux::sha256_hex(bytes.as_bytes());
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let record = read_command(&tx, placement)?.context("Q Worker Final has no command")?;
             require_owner(&tx, &record)?;
             let process_state: String = tx.query_row(
@@ -1238,7 +1238,7 @@ impl RuntimeDb {
         request_digest: &str,
     ) -> Result<QualificationWorkerCommandRecord> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let record = read_command(&tx, placement)?.context("Q Worker send has no command")?;
             require_owner(&tx, &record)?;
             ensure!(
@@ -1279,7 +1279,7 @@ impl RuntimeDb {
         placement: &str,
     ) -> Result<QualificationWorkerCommandRecord> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let record = read_command(&tx, placement)?.context("Q Worker command is absent")?;
             require_owner(&tx, &record)?;
             ensure!(

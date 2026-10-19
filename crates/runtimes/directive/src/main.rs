@@ -481,8 +481,8 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
         let mut resume_state =
             resume::load_resume_state(&callback, resume_id, carry_turns, resume_mode).await?;
 
-        if !same_thread_resume {
-            if let Err(e) = callback
+        if !same_thread_resume
+            && let Err(e) = callback
                 .append_runtime_event(
                     RuntimeEventType::ThreadContinued,
                     json!({"previous_thread_id": resume_id}),
@@ -495,7 +495,6 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
                     "callback append_event(thread_continued) failed"
                 );
             }
-        }
 
         // Operator follow-up: emit the new stimulus as a `cognition_in` AFTER
         // folding the chain (so the replay does not double-count it), then seed

@@ -629,7 +629,7 @@ fn resource_owner_startup_reconciliation_retries_settlement_after_cleanup() {
             runtime_custody: None,
             launch_authority:
                 ryeos_app::runtime_db::ProcessResourceLaunchAuthority::LocalProcessScope {
-                    allocation: allocation,
+                    allocation,
                     recovery: Some(recovery),
                 },
         })

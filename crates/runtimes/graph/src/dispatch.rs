@@ -1,4 +1,3 @@
-use ryeos_runtime::graph_result::GraphResult;
 use std::collections::BTreeMap;
 
 use serde::Deserialize;
@@ -429,15 +428,14 @@ pub async fn dispatch_action(
 fn callback_child_thread_identity(thread: &Value) -> (Option<String>, Option<String>) {
     match thread.get("recorded") {
         Some(Value::Bool(false)) => return (None, None),
-        Some(Value::Bool(true)) => {
+        Some(Value::Bool(true))
             if thread
                 .get("thread_id")
                 .and_then(Value::as_str)
                 .is_some_and(|thread_id| thread_id.starts_with("svc-"))
-            {
+            => {
                 return (None, None);
             }
-        }
         Some(_) => {
             return (
                 None,

@@ -1135,8 +1135,8 @@ impl<'a> RetirementJournal<'a> {
                 signed_names.push(display.to_string());
                 continue;
             }
-            if let Some(generation) = journal_record_generation(&display)? {
-                if let Some(operation_id) = retired.get(&generation) {
+            if let Some(generation) = journal_record_generation(&display)?
+                && let Some(operation_id) = retired.get(&generation) {
                     // Skipped, but only as this node's signed record of the
                     // listed generation: a forged file refuses here, at
                     // admission, never later.
@@ -1145,7 +1145,6 @@ impl<'a> RetirementJournal<'a> {
                     signed_names.push(display.to_string());
                     continue;
                 }
-            }
             // A begun fire-history retirement is finished by the next
             // retirement completion; it must be this node's signed intent.
             if display.starts_with(FIRES_PREFIX) {
@@ -1226,7 +1225,7 @@ impl<'a> RetirementJournal<'a> {
             .filter(|(_, values)| values.contains(&COMPLETE_SEQUENCE))
             .map(|(generation, _)| generation.clone())
             .collect::<std::collections::BTreeSet<_>>();
-        for ((generation, _, _), _) in &resolution_files {
+        for (generation, _, _) in resolution_files.keys() {
             ensure!(
                 generation_intents.contains_key(generation),
                 "scheduler resolution artifact lacks a generation intent"
@@ -1841,11 +1840,10 @@ impl<'a> RetirementJournal<'a> {
                     [role_index(record.role)]
                 .current
                 .clone();
-                if *sequence < 6 {
-                    if let Some(identity) = &mut expected_identity {
+                if *sequence < 6
+                    && let Some(identity) = &mut expected_identity {
                         identity.content_sha256 = None;
                     }
-                }
                 let bytes = read_signed_bytes(runtime, &name)?;
                 ensure!(
                     record.generation == generation
@@ -2249,11 +2247,10 @@ impl<'a> RetirementJournal<'a> {
             let mut expected = self.generation_intent.stopped_intake_plan()?.roles[index]
                 .current
                 .clone();
-            if self.next_sequence < 6 {
-                if let Some(identity) = &mut expected {
+            if self.next_sequence < 6
+                && let Some(identity) = &mut expected {
                     identity.content_sha256 = None;
                 }
-            }
             ensure!(
                 role == SchedulerRetirementRole::ALL[index]
                     && phase == expected_phase
@@ -3049,11 +3046,10 @@ fn validate_stopped_intake_prefix(
     let plan = intent.stopped_intake_plan()?;
     for record in records.iter().take(9) {
         let mut expected = plan.roles[role_index(record.role)].current.clone();
-        if record.sequence < 6 {
-            if let Some(identity) = &mut expected {
+        if record.sequence < 6
+            && let Some(identity) = &mut expected {
                 identity.content_sha256 = None;
             }
-        }
         ensure!(
             record.role_identity == expected,
             "recovery child phase differs from its authenticated current remaining source"
@@ -5447,7 +5443,7 @@ pub(crate) mod compact_native_projection_controls {
                     let source = lillux_sqlite::StoppedSqliteRoleSource::Quarantine {
                         generation: [1; 16],
                     };
-                    native.stopped_plan.as_mut().unwrap().roles[0].source = source.clone();
+                    native.stopped_plan.as_mut().unwrap().roles[0].source = source;
                     native.selected_source = Some(source);
                 }
             }
@@ -5793,11 +5789,10 @@ pub(crate) mod late_recovery_controls {
                 _ => anyhow::bail!("fixture exceeds dense phase protocol"),
             };
             let mut role_identity = sources[role_index(role)].current.clone();
-            if sequence < 6 {
-                if let Some(identity) = &mut role_identity {
+            if sequence < 6
+                && let Some(identity) = &mut role_identity {
                     identity.content_sha256 = None;
                 }
-            }
             let record = SchedulerRetirementRecord {
                 schema: 1,
                 purpose: ryeos_scheduler_contract::SCHEDULER_RETIREMENT_PURPOSE.to_owned(),

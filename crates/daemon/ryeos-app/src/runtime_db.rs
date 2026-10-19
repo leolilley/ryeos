@@ -7078,13 +7078,12 @@ fn ensure_scope_lifetime_resettable_with(
     if let Some(discard) = decide_unreadable_lifetime_fence(conn, fence)? {
         return Ok(Some(discard));
     }
-    if let Some(lifetime) = read_scope_lifetime_fence(conn)? {
-        if !lifetime.has_ended().map_err(anyhow::Error::msg)? {
+    if let Some(lifetime) = read_scope_lifetime_fence(conn)?
+        && !lifetime.has_ended().map_err(anyhow::Error::msg)? {
             bail!(
                 "execution-history reset retains unsettled process-scope lifetime authority; settle all workspaces with the owning runtime before upgrading, or end that host lifetime; restarting only the daemon is not cleanup proof"
             );
         }
-    }
     Ok(None)
 }
 
@@ -8349,7 +8348,7 @@ pub(crate) fn create_sqlite_inspection_copy(
         let mut receipts = Vec::with_capacity(planned.len());
         for (name, expected) in &planned {
             let receipt =
-                copy_sqlite_file_for_inspection(source, &working, name, *expected, work.as_ref())?;
+                copy_sqlite_file_for_inspection(source, working, name, *expected, work.as_ref())?;
             receipts.push((name.clone(), receipt));
             #[cfg(all(test, target_os = "linux"))]
             if receipts.len() == 1 {
@@ -8407,10 +8406,10 @@ pub(crate) fn create_sqlite_inspection_copy(
             .try_clone()
             .context("duplicate completed SQLite inspection directory")
     })();
-    return match copied {
+    match copied {
         Ok(working) => Ok((working, lease)),
         Err(error) => Err(SqliteInspectionCopyCustodyError::retain(error, lease)),
-    };
+    }
 }
 
 fn ensure_runtime_directory_binding(directory: &lillux::PinnedDirectory) -> Result<()> {
@@ -8750,7 +8749,7 @@ fn prune_launch_planning(conn: &Connection, now_ms: i64) -> Result<()> {
         })?;
         for row in rows {
             let (evaluation, pending) = row?;
-            for encoded in evaluation.into_iter().chain(pending.into_iter()) {
+            for encoded in evaluation.into_iter().chain(pending) {
                 let value: Value = serde_json::from_str(&encoded)
                     .context("decode retained candidate integration reservation")?;
                 let evaluation = value.get("candidate_evaluation").unwrap_or(&value);
@@ -9806,7 +9805,7 @@ impl RuntimeDb {
                 validate_bounded_runtime_text(label, value, 256)?;
             }
             let now = lillux::time::timestamp_millis() as i64;
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
                 .context("begin credential-profile creation")?;
             let prior = tx
                 .query_row(
@@ -10150,7 +10149,7 @@ impl RuntimeDb {
                 .authority_revision
                 .checked_add(1)
                 .context("credential authority revision overflow during terminal reconciliation")?;
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
                 .context("begin terminal credential-profile authority reconciliation")?;
             let evidence = {
                 let mut statement = tx.prepare(
@@ -10479,7 +10478,7 @@ impl RuntimeDb {
         self.conn.with_sql(|conn| {
             validate_bounded_runtime_text("credential reservation id", reservation_id, 256)?;
             Self::credential_profile_reservation_from_connection(
-                &conn,
+                conn,
                 "reservation_id=?1",
                 reservation_id,
             )
@@ -10497,7 +10496,7 @@ impl RuntimeDb {
                 256,
             )?;
             Self::credential_profile_reservation_from_connection(
-                &conn,
+                conn,
                 "successor_thread_id=?1",
                 successor_thread_id,
             )
@@ -11187,7 +11186,7 @@ impl RuntimeDb {
     ) -> Result<()> {
         self.conn.with_sql(|conn| {
             require_bounded_route_idle(
-                &conn,
+                conn,
                 placement_thread_id,
                 i64::try_from(worker_boot_epoch)?,
                 command_kind,
@@ -11306,7 +11305,7 @@ impl RuntimeDb {
                 payload,
             )?;
             let Some(existing) =
-                read_dedicated_command_by_key(&conn, placement_thread_id, idempotency_key)?
+                read_dedicated_command_by_key(conn, placement_thread_id, idempotency_key)?
             else {
                 return Ok(None);
             };
@@ -11332,7 +11331,7 @@ impl RuntimeDb {
         self.conn.with_sql(|conn| {
             validate_bounded_runtime_text("command placement thread id", placement_thread_id, 256)?;
             validate_bounded_runtime_text("command idempotency key", idempotency_key, 256)?;
-            read_dedicated_command_by_key(&conn, placement_thread_id, idempotency_key)
+            read_dedicated_command_by_key(conn, placement_thread_id, idempotency_key)
         })
     }
 
@@ -11359,7 +11358,7 @@ impl RuntimeDb {
                 .optional()?;
             idempotency_key
                 .map(|idempotency_key| {
-                    read_dedicated_command_by_key(&conn, placement_thread_id, &idempotency_key)?
+                    read_dedicated_command_by_key(conn, placement_thread_id, &idempotency_key)?
                         .ok_or_else(|| anyhow!("selected dedicated command disappeared"))
                 })
                 .transpose()
@@ -11385,7 +11384,7 @@ impl RuntimeDb {
                 .collect::<std::result::Result<Vec<_>, _>>()?;
             keys.into_iter()
                 .map(|idempotency_key| {
-                    read_dedicated_command_by_key(&conn, placement_thread_id, &idempotency_key)?
+                    read_dedicated_command_by_key(conn, placement_thread_id, &idempotency_key)?
                         .ok_or_else(|| anyhow!("listed dedicated command disappeared"))
                 })
                 .collect()
@@ -11549,7 +11548,7 @@ impl RuntimeDb {
             identities
                 .into_iter()
                 .map(|(placement_thread_id, idempotency_key)| {
-                    read_dedicated_command_by_key(&conn, &placement_thread_id, &idempotency_key)?
+                    read_dedicated_command_by_key(conn, &placement_thread_id, &idempotency_key)?
                         .ok_or_else(|| anyhow!("listed dedicated command outbox row disappeared"))
                 })
                 .collect()
@@ -13594,11 +13593,10 @@ impl RuntimeDb {
             let scope_json = lillux::canonical_json(&serde_json::to_value(&reservation)?)?;
             let lifetime = allocation.host_lifetime().map_err(anyhow::Error::msg)?;
             let tx = conn.unchecked_transaction()?;
-            if let Some(incumbent) = read_scope_lifetime_fence(&tx)? {
-                if incumbent != lifetime && !incumbent.has_ended().map_err(anyhow::Error::msg)? {
+            if let Some(incumbent) = read_scope_lifetime_fence(&tx)?
+                && incumbent != lifetime && !incumbent.has_ended().map_err(anyhow::Error::msg)? {
                     bail!("scope reservation requires retirement of the previous host-lifetime fence");
                 }
-            }
             let encoded_lifetime = lillux::canonical_json(&serde_json::to_value(&lifetime)?)?;
             tx.execute(
                 "UPDATE execution_lifetime_fence SET host_lifetime=?1 WHERE singleton=1",
@@ -15457,7 +15455,7 @@ impl RuntimeDb {
     pub fn launch_planning_by_id(&self, launch_id: &str) -> Result<Option<LaunchPlanningRecord>> {
         self.conn.with_sql(|conn| {
             read_launch_planning(
-                &conn,
+                conn,
                 "SELECT launch_id, reserved_thread_id, requested_by, daemon_generation_id,
                     state, bound_thread_id, outcome_code
                FROM launch_planning WHERE launch_id = ?1",
@@ -15472,7 +15470,7 @@ impl RuntimeDb {
     ) -> Result<Option<LaunchPlanningRecord>> {
         self.conn.with_sql(|conn| {
             read_launch_planning(
-                &conn,
+                conn,
                 "SELECT launch_id, reserved_thread_id, requested_by, daemon_generation_id,
                     state, bound_thread_id, outcome_code
                FROM launch_planning WHERE reserved_thread_id = ?1",
@@ -15787,7 +15785,7 @@ impl RuntimeDb {
         self.conn.with_sql(|conn| {
             validate_new_hook_dispatch(seed)?;
             let now = lillux::time::timestamp_millis() as i64;
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let inserted = tx.execute(
                 "INSERT OR IGNORE INTO hook_dispatch_ledger(
                 dispatch_key, seed_version, chain_root_id, caller_thread_id, event, hook_id,
@@ -15974,7 +15972,7 @@ impl RuntimeDb {
                     Ok::<_, anyhow::Error>(operation)
                 })
                 .transpose()?;
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             tx.execute(
                 "INSERT INTO runtime_action_intent(
                 operation_id, chain_root_id, first_caller_thread_id, mode,
@@ -16099,7 +16097,7 @@ impl RuntimeDb {
     ) -> Result<()> {
         self.conn.with_sql(|conn| {
             let encoded = encode_current_project_authority(child_project_authority)?;
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let changed = tx.execute(
                 "UPDATE runtime_action_intent
                 SET child_project_authority=?2
@@ -16161,7 +16159,7 @@ impl RuntimeDb {
             let authority = encode_current_project_authority(child_project_authority)?;
             let metadata = encode_current_launch_metadata(launch_metadata)?;
             let events = serde_json::to_string(initial_events)?;
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             tx.execute(
                 "UPDATE runtime_action_intent
              SET child_project_authority=?2, admitted_launch_capsule_hash=?3,
@@ -16408,7 +16406,7 @@ impl RuntimeDb {
             if expected.is_empty() {
                 bail!("runtime workspace-operation transition has no expected phase");
             }
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let (access, phase, input_snapshot_hash): (String, String, Option<String>) = tx
                 .query_row(
                     "SELECT workspace_access, workspace_operation_phase,
@@ -16494,7 +16492,7 @@ impl RuntimeDb {
     ) -> Result<()> {
         self.conn.with_sql(|conn| {
             generation.validate()?;
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             tx.execute(
                 "UPDATE runtime_action_intent
                 SET workspace_input_snapshot_hash=?2,
@@ -16681,7 +16679,7 @@ impl RuntimeDb {
             }
             let response_hash = lillux::sha256_hex(&response_json);
             let now = lillux::time::timestamp_millis() as i64;
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             type ExistingHookDispatch = (
                 String,
                 String,
@@ -17367,7 +17365,7 @@ impl RuntimeDb {
             }
             let encoded = encode_current_launch_metadata(launch_metadata)
                 .context("encode imported thread launch metadata")?;
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             tx.execute(
                 "INSERT INTO thread_runtime (
                 thread_id, chain_root_id, pid, pgid, metadata, launch_metadata
@@ -17443,7 +17441,7 @@ impl RuntimeDb {
             let launch_metadata = encode_current_launch_metadata(launch_metadata)
                 .context("encode in-process birth launch metadata")?;
             let now = lillux::time::timestamp_millis() as i64;
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let reservations: i64 = tx.query_row(
                 "SELECT COUNT(*) FROM in_process_handler_reservation",
                 [],
@@ -17529,7 +17527,7 @@ impl RuntimeDb {
 
     fn discard_pending_in_process_handler_birth_unchecked(&self, thread_id: &str) -> Result<bool> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let phase = tx
                 .query_row(
                     "SELECT phase FROM in_process_handler_reservation WHERE thread_id = ?1",
@@ -18838,13 +18836,12 @@ impl RuntimeDb {
             }
             let encoded_lifetime = lillux::canonical_json(&serde_json::to_value(&lifetime)?)?;
             let tx = conn.unchecked_transaction()?;
-            if let Some(incumbent) = read_scope_lifetime_fence(&tx)? {
-                if incumbent != lifetime && !incumbent.has_ended().map_err(anyhow::Error::msg)? {
+            if let Some(incumbent) = read_scope_lifetime_fence(&tx)?
+                && incumbent != lifetime && !incumbent.has_ended().map_err(anyhow::Error::msg)? {
                     bail!(
                         "resource scope reservation requires retirement of the previous host-lifetime fence"
                     );
                 }
-            }
             tx.execute(
                 "UPDATE execution_lifetime_fence SET host_lifetime=?1 WHERE singleton=1",
                 [&encoded_lifetime],
@@ -18872,11 +18869,10 @@ impl RuntimeDb {
             let encoded_lifetime = lillux::canonical_json(&serde_json::to_value(&lifetime)?)?;
             let encoded = lillux::canonical_json(&serde_json::to_value(reservation)?)?;
             let tx = conn.unchecked_transaction()?;
-            if let Some(incumbent) = read_scope_lifetime_fence(&tx)? {
-                if incumbent != lifetime && !incumbent.has_ended().map_err(anyhow::Error::msg)? {
+            if let Some(incumbent) = read_scope_lifetime_fence(&tx)?
+                && incumbent != lifetime && !incumbent.has_ended().map_err(anyhow::Error::msg)? {
                     bail!("thread scope intent requires retirement of previous host lifetime");
                 }
-            }
             let eligible: i64 = tx.query_row(
                 "SELECT COUNT(*) FROM thread_launch_claim c JOIN thread_runtime t ON t.thread_id=c.thread_id
               WHERE c.thread_id=?1 AND c.claimed_by=?2 AND t.stop_requested_at_ms IS NULL
@@ -19180,7 +19176,7 @@ impl RuntimeDb {
     ) -> Result<()> {
         self.conn.with_sql(|conn| {
             clear_process_resource_owner(
-                &conn,
+                conn,
                 "pooled_session",
                 owner_coordinate,
                 process_identity,
@@ -19199,7 +19195,7 @@ impl RuntimeDb {
     ) -> Result<ProcessResourceCleanupEvidence> {
         self.conn.with_sql(|conn| {
             prove_process_resource_owner_cleanup(
-                &conn,
+                conn,
                 "pooled_session",
                 owner_coordinate,
                 process_identity,
@@ -19216,7 +19212,7 @@ impl RuntimeDb {
     ) -> Result<ProcessResourceCleanupEvidence> {
         self.conn.with_sql(|conn| {
             prove_process_resource_owner_cleanup(
-                &conn,
+                conn,
                 "thread",
                 thread_id,
                 process_identity,
@@ -19233,7 +19229,7 @@ impl RuntimeDb {
     ) -> Result<ProcessResourceCleanupEvidence> {
         self.conn.with_sql(|conn| {
             prove_process_resource_owner_cleanup(
-                &conn,
+                conn,
                 "dedicated_worker",
                 worker_instance_id,
                 process_identity,
@@ -19249,7 +19245,7 @@ impl RuntimeDb {
     ) -> Result<()> {
         self.conn.with_sql(|conn| {
             consume_resource_owner_release_fence(
-                &conn,
+                conn,
                 "pooled_session",
                 owner_coordinate,
                 process_identity,
@@ -19264,7 +19260,7 @@ impl RuntimeDb {
     ) -> Result<()> {
         self.conn.with_sql(|conn| {
             consume_resource_owner_release_fence(
-                &conn,
+                conn,
                 "dedicated_worker",
                 worker_instance_id,
                 process_identity,
@@ -20589,7 +20585,7 @@ impl RuntimeDb {
             ) {
                 bail!("retained workspace recovery requires ready, active, or freezing state");
             }
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
                 .context("begin retained workspace owner transfer")?;
             let claim_owner: Option<String> = tx
                 .query_row(
@@ -20743,7 +20739,7 @@ impl RuntimeDb {
     ) -> Result<()> {
         self.conn.with_sql(|conn| {
             generation.validate()?;
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
                 .context("begin atomic frozen workspace binding")?;
             let claim_owner: Option<String> = tx
                 .query_row(
@@ -22984,7 +22980,7 @@ mod tests {
                 INSERT INTO unknown_execution_authority VALUES(X'FF00');",
             )
             .unwrap();
-            ensure_scope_lifetime_resettable(&conn, SCOPE_LIFETIME_FENCE_FIRST_EPOCH).unwrap();
+            ensure_scope_lifetime_resettable(conn, SCOPE_LIFETIME_FENCE_FIRST_EPOCH).unwrap();
             let current = lillux::ProcessHostLifetime::capture_current().unwrap();
             let raw = lillux::canonical_json(&serde_json::to_value(&current).unwrap()).unwrap();
             conn.execute(
@@ -22993,12 +22989,12 @@ mod tests {
             )
             .unwrap();
             assert!(
-                ensure_scope_lifetime_resettable(&conn, SCOPE_LIFETIME_FENCE_FIRST_EPOCH)
+                ensure_scope_lifetime_resettable(conn, SCOPE_LIFETIME_FENCE_FIRST_EPOCH)
                     .unwrap_err()
                     .to_string()
                     .contains("restarting only the daemon")
             );
-            assert_eq!(read_scope_lifetime_fence(&conn).unwrap(), Some(current));
+            assert_eq!(read_scope_lifetime_fence(conn).unwrap(), Some(current));
             let before: Vec<u8> = conn
                 .query_row(
                     "SELECT opaque FROM unknown_execution_authority",
@@ -23016,17 +23012,17 @@ mod tests {
                 [&ended],
             )
             .unwrap();
-            ensure_scope_lifetime_resettable(&conn, SCOPE_LIFETIME_FENCE_FIRST_EPOCH).unwrap();
+            ensure_scope_lifetime_resettable(conn, SCOPE_LIFETIME_FENCE_FIRST_EPOCH).unwrap();
 
             conn.execute("UPDATE execution_lifetime_fence SET host_lifetime='{}'", [])
                 .unwrap();
-            assert!(ensure_scope_lifetime_resettable(&conn, SCOPE_LIFETIME_FENCE_FIRST_EPOCH).is_err());
+            assert!(ensure_scope_lifetime_resettable(conn, SCOPE_LIFETIME_FENCE_FIRST_EPOCH).is_err());
             conn.execute("DELETE FROM execution_lifetime_fence", [])
                 .unwrap();
-            assert!(ensure_scope_lifetime_resettable(&conn, SCOPE_LIFETIME_FENCE_FIRST_EPOCH).is_err());
+            assert!(ensure_scope_lifetime_resettable(conn, SCOPE_LIFETIME_FENCE_FIRST_EPOCH).is_err());
             conn.execute("DROP TABLE execution_lifetime_fence", [])
                 .unwrap();
-            assert!(ensure_scope_lifetime_resettable(&conn, SCOPE_LIFETIME_FENCE_FIRST_EPOCH).is_err());
+            assert!(ensure_scope_lifetime_resettable(conn, SCOPE_LIFETIME_FENCE_FIRST_EPOCH).is_err());
             Ok(())
         });
     }
@@ -23912,20 +23908,20 @@ mod tests {
                     .unwrap(),
             );
         }
-        let witness = db.conn.with_sql(|connection| Ok(read_scope_lifetime_fence(connection)?)).unwrap();
+        let witness = db.conn.with_sql(|connection| read_scope_lifetime_fence(connection)).unwrap();
         assert!(witness.is_some());
         let (first, reserved) = &retirements[0];
         db.complete_closed_worker_scope_retirement(first, reserved)
             .unwrap();
         db.complete_closed_worker_scope_retirement(first, reserved)
             .unwrap();
-        assert_eq!(db.conn.with_sql(|connection| Ok(read_scope_lifetime_fence(connection)?)).unwrap(), witness);
+        assert_eq!(db.conn.with_sql(|connection| read_scope_lifetime_fence(connection)).unwrap(), witness);
         assert_eq!(db.unsettled_process_scope_count(None).unwrap(), 1);
         let (second, reserved) = &retirements[1];
         db.complete_closed_worker_scope_retirement(second, reserved)
             .unwrap();
         assert_eq!(db.unsettled_process_scope_count(None).unwrap(), 0);
-        assert!(db.conn.with_sql(|connection| Ok(read_scope_lifetime_fence(connection)?)).unwrap().is_none());
+        assert!(db.conn.with_sql(|connection| read_scope_lifetime_fence(connection)).unwrap().is_none());
     }
 
     fn check_dedicated_worker_attachment(
@@ -24012,13 +24008,13 @@ mod tests {
                     .is_err()
             );
             assert!(
-                db.conn.with_sql(|connection| Ok(read_scope_lifetime_fence(connection)?)).unwrap().is_none(),
+                db.conn.with_sql(|connection| read_scope_lifetime_fence(connection)).unwrap().is_none(),
                 "failed reservation must roll back the coarse fence as well as the session"
             );
             db.reserve_dedicated_worker_scope("T-one", "worker-one", 1, &allocation)
                 .unwrap();
             assert_eq!(
-                db.conn.with_sql(|connection| Ok(read_scope_lifetime_fence(connection)?)).unwrap(),
+                db.conn.with_sql(|connection| read_scope_lifetime_fence(connection)).unwrap(),
                 Some(allocation.host_lifetime().unwrap())
             );
             assert!(db.worker_process("worker-one").unwrap().is_none());
@@ -24554,7 +24550,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(completed.state, ScopeRetirementState::Retired);
-        assert!(db.conn.with_sql(|connection| Ok(read_scope_lifetime_fence(connection)?)).unwrap().is_none());
+        assert!(db.conn.with_sql(|connection| read_scope_lifetime_fence(connection)).unwrap().is_none());
         db.fixture_discard_all_thread_history(true).unwrap();
         assert_eq!(
             db.inspect_chain_recovery_pins("T-one", &[])
@@ -28996,7 +28992,7 @@ mod tests {
             runtime_custody,
             launch_authority:
                 crate::runtime_db::ProcessResourceLaunchAuthority::LocalProcessScope {
-                    allocation: allocation,
+                    allocation,
                     recovery: Some(recovery),
                 },
         };
@@ -29177,7 +29173,7 @@ mod tests {
             runtime_custody: None,
             launch_authority:
                 crate::runtime_db::ProcessResourceLaunchAuthority::LocalProcessScope {
-                    allocation: allocation,
+                    allocation,
                     recovery: None,
                 },
         };
@@ -29558,11 +29554,11 @@ mod tests {
         let mut dedicated = resource_process_identity(202, 202, "gpu-1", 2);
         reserve_test_resource_process(&db, "dedicated_worker", "worker-occurrence", &mut dedicated)
             .unwrap();
-        db.conn.with_sql(|connection| Ok(attach_process_resource_owner(connection,
+        db.conn.with_sql(|connection| attach_process_resource_owner(connection,
             "dedicated_worker",
             "worker-occurrence",
             &dedicated,
-        )?))
+        ))
         .unwrap();
         db.consume_dedicated_resource_owner_release_fence("worker-occurrence", &dedicated)
             .unwrap();
@@ -32161,7 +32157,7 @@ mod tests {
                 )?))
                 .unwrap();
         }
-        db.conn.with_sql(|connection| Ok(prune_launch_planning(connection, 24 * 60 * 60 * 1_000 + 2)?)).unwrap();
+        db.conn.with_sql(|connection| prune_launch_planning(connection, 24 * 60 * 60 * 1_000 + 2)).unwrap();
         assert!(db.launch_planning_by_id("L-bound").unwrap().is_some());
 
         db.fixture_delete_chain_runtime("T-bound", &["T-bound".to_string()])

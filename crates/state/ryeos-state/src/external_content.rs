@@ -312,7 +312,7 @@ impl ExternalContentBlobSink for DigestOnlyExternalContentSink {
         if expected_size > MAX_CAPTURE_FILE_BYTES {
             anyhow::bail!("external content file {path} exceeds {MAX_CAPTURE_FILE_BYTES} bytes");
         }
-        let (digest, _) = lillux::digest_open_regular_file_stable_exact(&mut file, expected_size)
+        let (digest, _) = lillux::digest_open_regular_file_stable_exact(&file, expected_size)
             .with_context(|| format!("digest exact external content file {path}"))?;
         Ok((digest, expected_size))
     }
@@ -639,7 +639,7 @@ fn capture_large_directory(
                 directory.ensure_open_regular_same_mount(&file)?;
                 let before = lillux::observe_open_regular_file(&file)
                     .with_context(|| format!("inspect large-content file {path}"))?;
-                if !before.matches_directory_entry(&entry) {
+                if !before.matches_directory_entry(entry) {
                     anyhow::bail!("large-content file {path} changed identity during traversal");
                 }
                 let size = before.size();
@@ -700,7 +700,7 @@ fn capture_large_directory(
                 lillux::ensure_open_regular_file_unchanged(&file, &before)
                     .with_context(|| format!("large-content file {path} changed during capture"))?;
                 directory
-                    .ensure_entry_observation(&entry)
+                    .ensure_entry_observation(entry)
                     .with_context(|| {
                         format!(
                             "large-content file {path} changed namespace binding during capture"
@@ -978,7 +978,7 @@ fn capture_directory(
                 directory.ensure_open_regular_same_mount(&file)?;
                 let before = lillux::observe_open_regular_file(&file)
                     .with_context(|| format!("inspect external content file {path}"))?;
-                if !before.matches_directory_entry(&entry) {
+                if !before.matches_directory_entry(entry) {
                     anyhow::bail!("external content file {path} changed inode during capture");
                 }
                 let size = before.size();

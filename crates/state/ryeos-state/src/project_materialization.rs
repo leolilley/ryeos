@@ -556,7 +556,7 @@ fn observe_materialized_tree(
                 );
             }
             let (blob_hash, metadata) = lillux::digest_open_regular_file_stable_exact(
-                &mut file,
+                &file,
                 expected_file.size,
             )?;
             let normalized_mode = lillux::normalized_portable_regular_mode(&metadata)?;

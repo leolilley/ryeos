@@ -437,7 +437,7 @@ fn observe_owned_scoped_producer(
         .min(callback_deadline.remaining());
     if wait == Duration::ZERO {
         let abort = child.process.abort_and_reap_checked();
-        let settlement = settle_cleanup_only(state, &record);
+        let settlement = settle_cleanup_only(state, record);
         bail!(
             "scoped producer observation deadline elapsed; abort={abort:?}; cleanup={settlement:?}"
         );
@@ -479,13 +479,13 @@ fn observe_owned_scoped_producer(
     }
     let (result, receipt) = match ScopedChildNaturalEmptyReceipt::observe(
         child.process,
-        &record,
+        record,
         wait,
     ) {
         Ok(observed) => observed,
         Err(running) => {
             let abort = running.abort_and_reap_checked();
-            let settlement = settle_cleanup_only(state, &record);
+            let settlement = settle_cleanup_only(state, record);
             bail!(
                 "scoped producer did not prove natural scope emptiness; abort={abort:?}; cleanup={settlement:?}"
             );
@@ -586,7 +586,7 @@ fn observe_owned_scoped_producer(
         Ok(())
     })();
     if let Err(error) = observed {
-        let settlement = settle_cleanup_only(state, &record);
+        let settlement = settle_cleanup_only(state, record);
         return Err(error.context(format!(
             "scoped natural observation could not commit; cleanup={settlement:?}"
         )));

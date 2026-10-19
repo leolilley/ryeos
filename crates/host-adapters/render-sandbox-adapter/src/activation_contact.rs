@@ -214,7 +214,7 @@ impl RenderContact<'_> {
         response
             .body
             .take(MAX_CONNECT_RESPONSE_BYTES as u64 + 1)
-            .read_to_end(&mut *bytes)
+            .read_to_end(&mut bytes)
             .map_err(|_| anyhow::anyhow!("Render token mint body is unreadable"))?;
         ensure!(
             !bytes.is_empty() && bytes.len() <= MAX_CONNECT_RESPONSE_BYTES,

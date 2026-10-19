@@ -808,9 +808,9 @@ impl OutsideOriginalOperationalCustody {
                 && self.inner.sql_custody.is_empty() && metadata.inner.schema_native_failure.is_none()
                 && metadata.inner.schema_sources.iter().all(|source| source.terminal.is_none())
                 && metadata.inner.references.original_source_count() == 0
-                && (&metadata.inner._initialization_retirement).is_some(),
+                && metadata.inner._initialization_retirement.is_some(),
                 "normalized Operational context retains native sources or changed factory");
-            (&metadata.inner._initialization_retirement).as_ref()
+            metadata.inner._initialization_retirement.as_ref()
                 .expect("checked Operational retirement receipt")
                 .require_factory_witness(&Arc::downgrade(factory))?;
             return Ok(());
@@ -1190,7 +1190,7 @@ impl OutsideOriginalOperationalCustody {
             && metadata.inner.references.original_source_count() == 0
             && metadata.inner._marker.is_none(),
             "live Operational metadata retains an unconsumed native or marker source");
-        (&metadata.inner._initialization_retirement).as_ref()
+        metadata.inner._initialization_retirement.as_ref()
             .context("live Operational initialization disposition absent")?
             .require_factory_witness(&metadata.inner.factory)?;
         let quote = quote_operational_live_metadata_retirement(

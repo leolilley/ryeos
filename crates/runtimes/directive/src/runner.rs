@@ -1298,12 +1298,11 @@ impl Runner {
                     // Limits already passed above, so a turn WILL start — a fold
                     // here is always answered. Resume-critical: a poll error stops
                     // the loop rather than answering with input we may have dropped.
-                    if self.resume_active_provider_turn.is_none() {
-                        if let Err(e) = self.poll_pending_input().await {
+                    if self.resume_active_provider_turn.is_none()
+                        && let Err(e) = self.poll_pending_input().await {
                             state = State::RecoveryRequired { error: e };
                             continue;
                         }
-                    }
                     State::CallingProvider
                 }
 

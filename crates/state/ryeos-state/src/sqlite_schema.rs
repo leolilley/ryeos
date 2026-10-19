@@ -830,11 +830,10 @@ impl NativeSchemaSqlReferenceFailure {
             NativeSchemaReferenceCustody::BeforeOpen(None) =>
                 return Err(retain(NativeSchemaReferenceCustody::BeforeOpen(None), error, _definition)),
             NativeSchemaReferenceCustody::Open(mut failure) => {
-                if failure.retained_admission().is_some() {
-                    if let Err(refusal) = failure.recover_retained_admission() {
+                if failure.retained_admission().is_some()
+                    && let Err(refusal) = failure.recover_retained_admission() {
                         return Err(retain(NativeSchemaReferenceCustody::Open(failure), lillux_sqlite::RefusalSupersedes::superseding(refusal, error), _definition));
                     }
-                }
                 match failure.retry_close() {
                     Ok(proof) => Some(lillux_sqlite::OriginalNativeConnectionTerminal::Released(proof)),
                     Err(failure) => return Err(retain(NativeSchemaReferenceCustody::Open(failure), error, _definition)),
@@ -851,11 +850,10 @@ impl NativeSchemaSqlReferenceFailure {
             NativeSchemaReferenceCustody::Terminal(terminal) => Some(terminal),
         };
         // The actual terminal remains retained on any validation refusal.
-        if let Some(proof) = &terminal {
-            if proof.require_original(&factory).is_err() {
+        if let Some(proof) = &terminal
+            && proof.require_original(&factory).is_err() {
                 return Err(retain(NativeSchemaReferenceCustody::Terminal(terminal.expect("actual terminal")), error, _definition));
             }
-        }
         // The refusal is preserved, never converted into successful schema work.
         Ok(ReleasedNativeSchemaSqlReference::new(factory, terminal,
             unused_transient_inputs, error, _definition))

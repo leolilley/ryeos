@@ -252,10 +252,10 @@ pub fn inspect_project_snapshot_transfer(
         entries.push(serde_json::json!({"kind":"object","hash":hash,"bytes":bytes}));
     }
     for hash in &closure.blob_hashes {
-        let (mut file, bytes) = cas
+        let (file, bytes) = cas
             .open_blob(hash)?
             .ok_or_else(|| anyhow::anyhow!("base snapshot blob {hash} is missing"))?;
-        let (outcome, _) = lillux::digest_open_regular_file_stable_exact(&mut file, bytes)?;
+        let (outcome, _) = lillux::digest_open_regular_file_stable_exact(&file, bytes)?;
         anyhow::ensure!(
             outcome == *hash,
             "base snapshot blob {hash} changed content address"

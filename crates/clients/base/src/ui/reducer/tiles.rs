@@ -80,12 +80,11 @@ impl RyeOsCore {
         {
             return;
         }
-        if let Some(view_set) = self.view_sets.iter_mut().find(|view_set| view_set.id == id) {
-            if view_set.title != title {
+        if let Some(view_set) = self.view_sets.iter_mut().find(|view_set| view_set.id == id)
+            && view_set.title != title {
                 view_set.title = title.to_owned();
                 self.bump_generation();
             }
-        }
     }
 
     /// Duplicate presentation composition without duplicating mounted

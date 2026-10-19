@@ -2465,15 +2465,14 @@ fn parse_raw_objects_get_response(
                 if (entry.kind == "blob") != entry.data.is_some() || entry.value.is_some() {
                     bail!("objects/get returned an invalid blob entry shape");
                 }
-                if let Some(data) = &entry.data {
-                    if data.get().len()
+                if let Some(data) = &entry.data
+                    && data.get().len()
                         > base64_json_string_max_len(
                             crate::handlers::objects_get::MAX_INLINE_BLOB_BYTES,
                         )?
                     {
                         bail!("remote inline blob exceeds the endpoint byte ceiling");
                     }
-                }
             }
             _ => bail!("objects/get returned an unsupported entry kind"),
         }

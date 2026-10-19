@@ -794,11 +794,10 @@ impl OriginalNativeAdmissionAuthority for OfflineAdmission {
         }
         ensure!(cleanup || !self.closed.load(Ordering::Acquire), "offline native admission closed");
         let checked = self.authority.checkpoint(cleanup);
-        if let Err(error) = &checked {
-            if crate::native_refusal_is_fact(error) {
+        if let Err(error) = &checked
+            && crate::native_refusal_is_fact(error) {
                 self.refuse_service();
             }
-        }
         checked
     }
     fn require_runtime_binding(&self, runtime: &PinnedDirectory) -> Result<()> {

@@ -1129,9 +1129,8 @@ impl ReleasedLiveOperationalStartup {
         if let Some(references) = &self.progress().custody.references {
             terminals.extend(references.native_terminals(factory)?);
         }
-        if let Some(released) = &self.progress().schema_released {
-            if let Some(terminal) = released.terminal(factory)? { terminals.push(terminal.clone()); }
-        }
+        if let Some(released) = &self.progress().schema_released
+            && let Some(terminal) = released.terminal(factory)? { terminals.push(terminal.clone()); }
         for terminal in &terminals { terminal.require_original(factory)?; }
         Ok(terminals)
     }
@@ -1241,10 +1240,7 @@ impl LiveOperationalOpenFailure {
 }
 impl LiveOperationalStartupRecoveryFailure {
     pub fn retry(self) -> std::result::Result<ReleasedLiveOperationalStartup, Self> {
-        let custody = match self.into_custody() {
-            Ok(custody) => custody,
-            Err(this) => return Err(this),
-        };
+        let custody = self.into_custody()?;
         match custody {
             OperationalStartupRecoveryCustody::Opening(failure) => failure.close_retained(),
             OperationalStartupRecoveryCustody::Closing { factory, progress } => {
@@ -1303,14 +1299,13 @@ fn advance_operational_startup_close(progress: OperationalStartupCloseProgress)
         }
     }
     if let Some(mut failure) = progress.get_mut().parts_mut().custody.acquisition.take() {
-        if failure.retained_admission().is_some() {
-            if let Err(error) = failure.recover_retained_admission() {
+        if failure.retained_admission().is_some()
+            && let Err(error) = failure.recover_retained_admission() {
                 progress.get_mut().parts_mut().custody.acquisition = Some(failure);
                 let prior = progress.get_mut().parts_mut().prior_refusal.take();
                 progress.get_mut().parts_mut().prior_refusal = Some(startup_refusal_over_prior(error, prior));
                 return Err(retain(progress));
             }
-        }
         match failure.retry_close() {
             Ok(released) => progress.get_mut().parts_mut().released = Some(released),
             Err(failure) => { progress.get_mut().parts_mut().custody.acquisition = Some(failure); return Err(retain(progress)); }

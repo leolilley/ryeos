@@ -282,14 +282,14 @@ pub fn capture_signed_bundle_source_manifest(
         after_shebang: false,
     };
     let signature =
-        crate::item_resolution::parse_signature_header(&raw, &envelope).ok_or_else(|| {
+        crate::item_resolution::parse_signature_header(raw, &envelope).ok_or_else(|| {
             EngineError::Internal(format!(
                 "runtime source-bundle manifest is unsigned: {}",
                 manifest_path.display()
             ))
         })?;
     let (trust_class, _) =
-        crate::trust::verify_item_signature(&raw, &signature, &envelope, node_trust_store)
+        crate::trust::verify_item_signature(raw, &signature, &envelope, node_trust_store)
             .map_err(|error| {
                 EngineError::Internal(format!(
                     "verify runtime source-bundle manifest {}: {error}",
@@ -385,7 +385,7 @@ fn validate_runtime_source_bundle_manifest_body(
     signer_fingerprint: &str,
     source_description: &str,
 ) -> Result<SignedBundleManifestIdentity, EngineError> {
-    let manifest_value: serde_yaml::Value = serde_yaml::from_str(&body).map_err(|error| {
+    let manifest_value: serde_yaml::Value = serde_yaml::from_str(body).map_err(|error| {
         EngineError::Internal(format!(
             "parse runtime source-bundle manifest {}: {error}",
             source_description
@@ -1301,7 +1301,7 @@ fn build_plan_with_execution_root(
     plan_env.insert("RYEOS_ITEM_KIND".to_owned(), resolved.kind.clone());
     plan_env.insert("RYEOS_ITEM_REF".to_owned(), canonical_ref.clone());
     let execution_project_root =
-        logical_project_root.unwrap_or_else(|| match &ctx.project_context {
+        logical_project_root.unwrap_or(match &ctx.project_context {
             crate::contracts::ProjectContext::LocalPath { path } => Some(path.as_path()),
             crate::contracts::ProjectContext::None
             | crate::contracts::ProjectContext::SnapshotHash { .. }
@@ -1395,7 +1395,7 @@ fn build_plan_with_execution_root(
     // lookup remains under its separate admitted project authority. Give the
     // runtime compiler the same root already exposed in RYEOS_PROJECT_ROOT so
     // cwd and typed project-path inputs can be relocated with the direct plan.
-    let runtime_execution_root = logical_project_root.unwrap_or_else(|| {
+    let runtime_execution_root = logical_project_root.unwrap_or({
         if matches!(
             &ctx.project_context,
             crate::contracts::ProjectContext::SnapshotHash { .. }

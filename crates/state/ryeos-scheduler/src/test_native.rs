@@ -353,11 +353,10 @@ impl Drop for TestSchedulerDb {
         let (Some(db), Some(host)) = (self.db.take(), self.host.take()) else {
             return;
         };
-        if let Err(error) = settle_shared_on_host(&host, db) {
-            if !std::thread::panicking() {
+        if let Err(error) = settle_shared_on_host(&host, db)
+            && !std::thread::panicking() {
                 panic!("test scheduler store did not settle into the census: {error:#}");
             }
-        }
         release_shared_test_host(host);
     }
 }

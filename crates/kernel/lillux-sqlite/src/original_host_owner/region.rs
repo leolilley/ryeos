@@ -173,8 +173,8 @@ impl NativeHostRegion {
                 Err(failure) => { self.seal_failure = Some(failure); anyhow::bail!("native host region seal custody transfer refused"); }
             }
         }
-        if self.exclusion.is_none() {
-            if let Some(owner) = &self.owner {
+        if self.exclusion.is_none()
+            && let Some(owner) = &self.owner {
                 owner.begin_close()?;
                 drop(self.budget.take());
                 owner.retire_pending()?;
@@ -188,7 +188,6 @@ impl NativeHostRegion {
                     }
                 }
             }
-        }
         if let Some(exclusion) = &mut self.exclusion {
             ensure!(Some(exclusion.original_generation()?) == self.generation,
                 "native host region release selects foreign generation");

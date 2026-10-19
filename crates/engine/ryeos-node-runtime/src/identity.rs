@@ -415,13 +415,13 @@ fn load_verified_authorized_key_from_directory(
     node_identity: &NodeIdentity,
 ) -> Result<Option<VerifiedAuthorizedKeyGrant>> {
     let name = format!("{fingerprint}.toml");
-    let Some(mut file) = directory.open_regular(std::ffi::OsStr::new(&name), false)? else {
+    let Some(file) = directory.open_regular(std::ffi::OsStr::new(&name), false)? else {
         directory.ensure_path_binding()?;
         return Ok(None);
     };
     let observation = lillux::observe_open_regular_file(&file)?;
     let bytes =
-        lillux::read_open_regular_file_stable_bounded(&mut file, &observation, 1024 * 1024)?;
+        lillux::read_open_regular_file_stable_bounded(&file, &observation, 1024 * 1024)?;
     directory.ensure_regular_entry_matches(std::ffi::OsStr::new(&name), Some(&file))?;
     directory.ensure_path_binding()?;
     let raw = std::str::from_utf8(&bytes).context("authorized-key grant is not UTF-8")?;

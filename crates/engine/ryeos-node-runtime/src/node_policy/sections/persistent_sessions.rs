@@ -128,6 +128,7 @@ impl NodePolicySection for PersistentSessionPolicySection {
         Ok(Arc::new(record))
     }
 }
+use std::sync::Arc;
 
 #[cfg(test)]
 mod tests {
@@ -174,4 +175,3 @@ mod tests {
         assert!(PersistentSessionPolicy::disabled().validate().is_ok());
     }
 }
-use std::sync::Arc;

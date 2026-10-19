@@ -72,8 +72,8 @@ impl Walker {
                 .project_observations
                 .extend(project_observations.iter().cloned());
         }
-        if let Some(observation) = observation {
-            if let Err(error) = self
+        if let Some(observation) = observation
+            && let Err(error) = self
                 .emit_dispatch_observation(graph_run_id, current, step, &observation)
                 .await
             {
@@ -89,7 +89,6 @@ impl Walker {
                     )
                     .await;
             }
-        }
 
         // State mutation: `assign` was already evaluated in
         // run_action_body (a failure there became a node error

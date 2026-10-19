@@ -668,8 +668,8 @@ fn validate_structured_session_profile(profile: &StructuredSessionProfile) -> Re
             bail!("structured-session reply HTTP path contradicts its transport");
         }
     }
-    if let Some(workload_client) = &profile.workload_client {
-        if workload_client
+    if let Some(workload_client) = &profile.workload_client
+        && workload_client
             .cli_endpoint_env
             .as_deref()
             .is_some_and(|endpoint| {
@@ -678,7 +678,6 @@ fn validate_structured_session_profile(profile: &StructuredSessionProfile) -> Re
         {
             bail!("structured-session workload-client endpoint environment is not current");
         }
-    }
     if profile.configuration_authority != ConfigurationAuthority::ImmutableArgv {
         bail!("structured-session configuration authority is not immutable argv");
     }
@@ -1611,11 +1610,11 @@ fn verify_runtime_configuration(
     Ok(())
 }
 
-fn external_realization_root<'a>(
-    external_root: &'a std::path::Path,
+fn external_realization_root(
+    external_root: &std::path::Path,
     mount_root: ryeos_state::objects::ExternalContentMountRoot,
     delivery: ryeos_state::objects::ExternalRealizationDelivery,
-) -> Result<&'a std::path::Path> {
+) -> Result<&std::path::Path> {
     match delivery {
         ryeos_state::objects::ExternalRealizationDelivery::FixedNamespace => {
             Ok(mount_root.root(Some(external_root))?)
@@ -1946,11 +1945,11 @@ fn resolve_session_process_environment_with_delivery(
                         destinations,
                     } => directory.verified_writable_mount_namespace_path(&destinations[&name])?,
                 };
-                let value = path
+                
+                path
                     .to_str()
                     .ok_or_else(|| anyhow!("runtime-view path is not UTF-8"))?
-                    .to_owned();
-                value
+                    .to_owned()
             }
             ryeos_state::objects::SessionProcessEnvironmentValue::RealizationPath {
                 realization_id,

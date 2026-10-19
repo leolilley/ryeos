@@ -1010,9 +1010,8 @@ impl ClosedLiveState {
             // SQL terminals were checked above. The outer Store supervisor
             // drains execution before transferring State; no active facade is
             // handed out by this closed owner. Effects run outside the mutex.
-            if let Some(terminal) = unsafe { lease.close_after_consumers(&context.factory) }? {
-                if !terminals.iter().any(|prior| Arc::ptr_eq(prior, &terminal)) { terminals.push(terminal); }
-            }
+            if let Some(terminal) = unsafe { lease.close_after_consumers(&context.factory) }?
+                && !terminals.iter().any(|prior| Arc::ptr_eq(prior, &terminal)) { terminals.push(terminal); }
         }
         Ok(terminals)
     }

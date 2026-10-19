@@ -803,7 +803,7 @@ fn load_canonical_object_for_upload(
     if lillux::canonical_json_bounded(&value, maximum)?.as_slice() != bytes.as_slice() {
         anyhow::bail!("local CAS upload object {hash} is not canonical JSON");
     }
-    Ok(RawObjectUpload::from_canonical_bytes(hash.to_owned(), bytes)?)
+    RawObjectUpload::from_canonical_bytes(hash.to_owned(), bytes)
 }
 
 fn object_put_envelope_bytes(

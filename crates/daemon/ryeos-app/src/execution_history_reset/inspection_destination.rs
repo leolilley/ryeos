@@ -111,6 +111,13 @@ pub(super) fn validate_destinations(
     Ok(())
 }
 
+pub(super) fn disposition_name(operation_id: &str) -> String {
+    format!("disposed.{operation_id}")
+}
+pub(super) fn released_name(operation_id: &str) -> String {
+    format!("released.{operation_id}")
+}
+
 #[cfg(test)]
 mod controls {
     use super::*;
@@ -139,11 +146,4 @@ mod controls {
         changed[0].directory_name = "../foreign".into();
         assert!(validate_destinations(&changed, &operation, &sources).is_err());
     }
-}
-
-pub(super) fn disposition_name(operation_id: &str) -> String {
-    format!("disposed.{operation_id}")
-}
-pub(super) fn released_name(operation_id: &str) -> String {
-    format!("released.{operation_id}")
 }

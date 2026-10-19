@@ -1086,7 +1086,8 @@ mod tests {
             let declarations: Vec<ryeos_engine::external_content::ExternalContentDeclaration> =
                 serde_json::from_value(worker["external_content"].clone()).unwrap();
 
-            for node_profile in ["full"] {
+            {
+                let node_profile = "full";
                 let profile_path = repository
                     .join("bundles/.ai/node/init/profiles")
                     .join(format!("{node_profile}.yaml"));

@@ -281,7 +281,7 @@ impl RuntimeDb {
         placement: &str,
     ) -> Result<Option<qualification_fixture_receiver::QualificationScopeSettlementPlan>> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Deferred)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Deferred)?;
             let plan = prepare_qualification_scope_settlement_tx(&tx, placement, true)?;
             tx.commit()?;
             Ok(plan)
@@ -297,8 +297,8 @@ impl RuntimeDb {
         placement: &str,
     ) -> Result<Option<RetainedExternalRuntimeApplied>> {
         self.conn.with_sql(|conn| {
-            let binding = load_binding(&conn, placement)?;
-            NodeJournalOwner.require_owner(&conn, &binding)?;
+            let binding = load_binding(conn, placement)?;
+            NodeJournalOwner.require_owner(conn, &binding)?;
             let digest = binding.digest()?;
             let mut statement = conn.prepare(
                 "SELECT sequence,frame_digest,frame_json,application
@@ -352,7 +352,7 @@ impl RuntimeDb {
         placement: &str,
     ) -> Result<Option<(ExternalAllocationRecord, ExternalDirectOutput)>> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let Some(output) = normal_settlement_output_tx(&tx, placement)? else {
                 tx.commit()?;
                 return Ok(None);
@@ -391,7 +391,7 @@ impl RuntimeDb {
         placement: &str,
     ) -> Result<Option<ExternalDirectOutput>> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let Some((result, frames)) = retained_external_direct_output(&tx, placement)? else {
                 return Ok(None);
             };
@@ -433,7 +433,7 @@ impl RuntimeDb {
         placement: &str,
     ) -> Result<Option<ExternalDirectOutput>> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let output = complete_applied_direct_output_tx(&tx, placement)?;
             tx.commit()?;
             Ok(output)
@@ -448,7 +448,7 @@ impl RuntimeDb {
         placement: &str,
     ) -> Result<Option<ExternalDirectOutput>> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let output = normal_settlement_output_tx(&tx, placement)?;
             tx.commit()?;
             Ok(output)
@@ -464,7 +464,7 @@ impl RuntimeDb {
         current_launch_owner: &str,
     ) -> Result<ExternalDirectOutput> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let output = normal_settlement_output_tx(&tx, placement)?
                 .context("external direct finalization lacks complete normal settlement")?;
             let record = read(&tx, placement)?.context("external direct allocation absent")?;
@@ -526,7 +526,7 @@ impl RuntimeDb {
                         .any(|byte| byte.is_ascii_uppercase()),
                 "external quiesce completion coordinate is not canonical"
             );
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let binding = load_binding(&tx, placement)?;
             require_structured_session_channel(&binding)?;
             NodeJournalOwner.require_owner(&tx, &binding)?;
@@ -591,7 +591,7 @@ impl RuntimeDb {
         signing_key: &lillux::crypto::SigningKey,
     ) -> Result<AuthenticatedExecutionFrame> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let binding = load_binding(&tx, placement)?;
             ensure!(
                 matches!(
@@ -766,7 +766,7 @@ impl RuntimeDb {
                 None => return Ok(None),
             };
             require_structured_session_channel(&binding)?;
-            NodeJournalOwner.require_owner(&conn, &binding)?;
+            NodeJournalOwner.require_owner(conn, &binding)?;
             let binding_digest = binding.digest()?;
             let retained: Option<(String, Option<String>, String, String, String)> = conn
                 .query_row(
@@ -839,7 +839,7 @@ impl RuntimeDb {
         placement: &str,
     ) -> Result<ExternalProtocolOutputClaim> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let binding = load_binding(&tx, placement)?;
             require_session_protocol_channel(&binding)?;
             NodeJournalOwner.require_owner(&tx, &binding)?;
@@ -987,7 +987,7 @@ impl RuntimeDb {
                     binding.placement_thread_id == placement,
                     "external import target changed its channel placement"
                 );
-                NodeJournalOwner.require_owner(&conn, &binding)?;
+                NodeJournalOwner.require_owner(conn, &binding)?;
                 let verified = SignedExecutionFrame::decode_and_verify(
                     wire.as_bytes(),
                     &binding,
@@ -1022,10 +1022,10 @@ impl RuntimeDb {
                     "external import target has ambiguous applied quiescence"
                 );
                 if application == "pending" {
-                    let allocation = read(&conn, &placement)?
+                    let allocation = read(conn, &placement)?
                         .context("external import target lost its allocation")?;
                     if allocation.phase != ExternalAllocationPhase::Bound
-                        || revoked(&conn, &binding.digest()?)?
+                        || revoked(conn, &binding.digest()?)?
                     {
                         continue;
                     }
@@ -1050,7 +1050,7 @@ impl RuntimeDb {
         wire: &[u8],
     ) -> Result<bool> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let result = journal::record_revocation(&tx, &NodeJournalOwner, placement, wire)?;
             tx.commit()?;
             Ok(result)
@@ -1059,8 +1059,8 @@ impl RuntimeDb {
 
     pub fn external_execution_revoked(&self, placement: &str) -> Result<bool> {
         self.conn.with_sql(|conn| {
-            let binding = load_binding(&conn, placement)?;
-            revoked(&conn, &binding.digest()?)
+            let binding = load_binding(conn, placement)?;
+            revoked(conn, &binding.digest()?)
         })
     }
 
@@ -1073,7 +1073,7 @@ impl RuntimeDb {
         authority: &ryeos_state::PinnedStateAuthority,
     ) -> Result<()> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             retain_external_candidate_import_tx(&tx, placement, verified, authority)?;
             tx.commit()?;
             Ok(())
@@ -1092,7 +1092,7 @@ impl RuntimeDb {
         seal_digest: &str,
     ) -> Result<ExternalCandidateImportClaim> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let binding = load_binding(&tx, placement)?;
             require_structured_session_channel(&binding)?;
             NodeJournalOwner.require_owner(&tx, &binding)?;
@@ -1325,7 +1325,7 @@ impl RuntimeDb {
         authority: &ryeos_state::PinnedStateAuthority,
     ) -> Result<()> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let binding = load_binding(&tx, placement)?;
             ensure!(
                 binding.digest()? == plan.binding.digest()?,
@@ -1383,7 +1383,7 @@ impl RuntimeDb {
             binding.validate()?;
             let digest = binding.digest()?;
             let canonical = lillux::canonical_json(&serde_json::to_value(binding)?)?;
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let allocation =
                 read(&tx, &binding.placement_thread_id)?.context("external allocation absent")?;
             require_retained_channel_allocation(&tx, binding, &allocation)?;
@@ -1439,7 +1439,7 @@ impl RuntimeDb {
     /// Return the exact public binding; never return an activation secret.
     pub fn external_execution_channel(&self, placement: &str) -> Result<ExecutionChannelBinding> {
         self.conn.with_sql(|conn| {
-            load_binding(&conn, placement)
+            load_binding(conn, placement)
         })
     }
 
@@ -1454,7 +1454,7 @@ impl RuntimeDb {
                 |row| row.get(0),
             )?;
             if exists {
-                Ok(Some(load_binding(&conn, placement)?))
+                Ok(Some(load_binding(conn, placement)?))
             } else {
                 Ok(None)
             }
@@ -1465,7 +1465,7 @@ impl RuntimeDb {
     /// false is an exact duplicate, never permission to forward bytes again.
     pub fn record_external_execution_frame(&self, placement: &str, wire: &[u8]) -> Result<bool> {
         self.conn.with_sql(|conn| {
-            let binding = load_binding(&conn, placement)?;
+            let binding = load_binding(conn, placement)?;
             let verified = SignedExecutionFrame::decode_and_verify(
                 wire,
                 &binding,
@@ -1475,7 +1475,7 @@ impl RuntimeDb {
                 // Independent commit: a subsequent gap/fork cannot undo revocation.
                 self.record_external_execution_revocation(placement, wire)?;
             }
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             if matches!(verified.frame().payload, ExecutionChannelPayload::Release) {
                 // Only the readiness owner can mint Release with a live startup
                 // cap. Transport may acknowledge/replay an exact retained frame,
@@ -1512,7 +1512,7 @@ impl RuntimeDb {
                 !matches!(payload, ExecutionChannelPayload::Release),
                 "external release requires the readiness owner"
             );
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let frame = journal::author_frame(
                 &tx,
                 &NodeJournalOwner,
@@ -1570,7 +1570,7 @@ impl RuntimeDb {
         qualification_proof: Option<&crate::state_store::VerifiedExternalQualificationOwner>,
     ) -> Result<Option<AuthenticatedExecutionFrame>> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let binding = load_binding(&tx, placement)?;
             let binding_digest = binding.digest()?;
             let ready_rows = {
@@ -1747,11 +1747,11 @@ impl RuntimeDb {
         signing_key: &lillux::crypto::SigningKey,
     ) -> Result<AuthenticatedExecutionFrame> {
         self.conn.with_sql(|conn| {
-            let first = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let first = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let frame = ensure_owner_revocation_tx(&first, placement, signing_key)?;
             first.commit()?;
 
-            let second = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let second = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             journal::append_frame(
                 &second,
                 &NodeJournalOwner,
@@ -1772,7 +1772,7 @@ impl RuntimeDb {
     ) -> Result<Vec<journal::PendingExecutionFrame>> {
         self.conn.with_sql(|conn| {
             journal::pending_transport_frames(
-                &conn,
+                conn,
                 &NodeJournalOwner,
                 placement,
                 ChannelDirection::OwnerToSupervisor,
@@ -1796,7 +1796,7 @@ impl RuntimeDb {
         byte_limit: usize,
     ) -> Result<ExternalSupervisorExchange> {
         self.conn.with_sql(|conn| {
-            let binding = load_binding(&conn, placement)?;
+            let binding = load_binding(conn, placement)?;
             let verified = SignedExecutionFrame::decode_and_verify(
                 wire,
                 &binding,
@@ -1807,7 +1807,7 @@ impl RuntimeDb {
             }
             let sequence = verified.frame().sequence;
             let digest = verified.digest().to_owned();
-            let first = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let first = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             // Recovery first closes the source transcript around any cancellation
             // whose sticky commit survived a lost ordinary append. The peer may now
             // acknowledge that exact sequence; never mint a replacement for it.
@@ -1832,7 +1832,7 @@ impl RuntimeDb {
             // append/acknowledgement fails. A failed response grants no peer receipt.
             first.commit()?;
 
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             append_retained_owner_revocation_tx(&tx, placement)?;
             if matches!(
                 verified.frame().payload,
@@ -1925,7 +1925,7 @@ impl RuntimeDb {
         digest: &str,
     ) -> Result<bool> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let result = journal::claim_application(
                 &tx,
                 &NodeJournalOwner,
@@ -1949,8 +1949,8 @@ impl RuntimeDb {
         digest: &str,
     ) -> Result<()> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
-            let result = journal::finish_application(
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+            journal::finish_application(
                 &tx,
                 &NodeJournalOwner,
                 placement,
@@ -1959,7 +1959,7 @@ impl RuntimeDb {
                 digest,
             )?;
             tx.commit()?;
-            Ok(result)
+            Ok(())
         })
     }
 }
@@ -2194,7 +2194,7 @@ impl RuntimeDb {
         placement: &str,
     ) -> Result<bool> {
         self.conn.with_sql(|conn| {
-            has_qualification_normal_termination_intent(&conn, placement)
+            has_qualification_normal_termination_intent(conn, placement)
         })
     }
 
@@ -2206,7 +2206,7 @@ impl RuntimeDb {
         placement: &str,
     ) -> Result<()> {
         self.conn.with_sql(|conn| {
-            require_external_qualification_normal_terminal_tx(&conn, placement)
+            require_external_qualification_normal_terminal_tx(conn, placement)
         })
     }
 }
@@ -2781,7 +2781,7 @@ impl JournalOwner for NodeJournalOwner {
 
     fn require_owner(&self, conn: &Connection, binding: &ExecutionChannelBinding) -> Result<()> {
         let placement = &binding.placement_thread_id;
-        let allocation = read(conn, &placement)?.context("orphan external channel")?;
+        let allocation = read(conn, placement)?.context("orphan external channel")?;
         require_retained_channel_allocation(conn, binding, &allocation)
     }
 
@@ -3133,7 +3133,7 @@ pub(super) mod tests {
             .external_allocation(&binding.placement_thread_id)
             .unwrap()
             .unwrap();
-        db.conn.with_sql(|connection| Ok(require_retained_channel_allocation(connection, &binding, &allocation)?)).unwrap();
+        db.conn.with_sql(|connection| require_retained_channel_allocation(connection, &binding, &allocation)).unwrap();
         for coordinate in [
             "runtime",
             "snapshot",
@@ -3161,7 +3161,7 @@ pub(super) mod tests {
             }
             changed.validate().unwrap();
             assert!(
-                db.conn.with_sql(|connection| Ok(require_retained_channel_allocation(connection, &changed, &allocation)?)).is_err(),
+                db.conn.with_sql(|connection| require_retained_channel_allocation(connection, &changed, &allocation)).is_err(),
                 "{coordinate} changed retained channel authority"
             );
         }
@@ -3238,9 +3238,9 @@ pub(super) mod tests {
         let path = root.path().join("runtime.sqlite3");
         let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         let (allocation, binding) = direct_channel_coordinates(&db);
-        db.conn.with_sql(|connection| Ok(require_retained_channel_allocation(connection, &binding, &allocation)?)).unwrap();
+        db.conn.with_sql(|connection| require_retained_channel_allocation(connection, &binding, &allocation)).unwrap();
         assert!(db.register_external_execution_channel(&binding).is_err());
-        assert!(db.conn.with_sql(|connection| Ok(NodeJournalOwner.require_owner(connection, &binding)?)).is_err());
+        assert!(db.conn.with_sql(|connection| NodeJournalOwner.require_owner(connection, &binding)).is_err());
         assert!(require_structured_session_channel(&binding).is_err());
         for coordinate in [
             "program",
@@ -3283,13 +3283,13 @@ pub(super) mod tests {
                 _ => unreachable!(),
             }
             assert!(
-                db.conn.with_sql(|connection| Ok(require_retained_channel_allocation(connection, &changed, &allocation)?)).is_err(),
+                db.conn.with_sql(|connection| require_retained_channel_allocation(connection, &changed, &allocation)).is_err(),
                 "{coordinate} changed retained direct authority"
             );
         }
         let mut changed = allocation.clone();
         changed.reservation.timeout_seconds += 1;
-        assert!(db.conn.with_sql(|connection| Ok(require_retained_channel_allocation(connection, &binding, &changed)?)).is_err());
+        assert!(db.conn.with_sql(|connection| require_retained_channel_allocation(connection, &binding, &changed)).is_err());
         let mut changed = allocation.clone();
         let ExternalAllocationOwner::DirectThread { program, .. } = &mut changed.reservation.owner
         else {
@@ -3298,7 +3298,7 @@ pub(super) mod tests {
         let mut encoded = serde_json::to_value(&*program).unwrap();
         encoded["projection"]["endpoint_binding_digest"] = "7".repeat(64).into();
         *program = serde_json::from_value(encoded).unwrap();
-        assert!(db.conn.with_sql(|connection| Ok(require_retained_channel_allocation(connection, &binding, &changed)?)).is_err());
+        assert!(db.conn.with_sql(|connection| require_retained_channel_allocation(connection, &binding, &changed)).is_err());
         db.fixture_release_thread_launch_claim(&binding.placement_thread_id, "direct-claim")
             .unwrap();
         db.fixture_claim_thread_launch(
@@ -3309,14 +3309,14 @@ pub(super) mod tests {
         .unwrap();
         db.request_thread_stop(&binding.placement_thread_id, StopIntent::Cancel)
             .unwrap();
-        assert!(!db.conn.with_sql(|connection| Ok(direct_owner_is_contactable(connection, &allocation.reservation)?)).unwrap());
+        assert!(!db.conn.with_sql(|connection| direct_owner_is_contactable(connection, &allocation.reservation)).unwrap());
         drop(db);
         let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         // Current-owner loss cannot erase exact cleanup/history ownership.
-        db.conn.with_sql(|connection| Ok(require_retained_channel_allocation(connection, &binding, &allocation)?)).unwrap();
+        db.conn.with_sql(|connection| require_retained_channel_allocation(connection, &binding, &allocation)).unwrap();
         let mut quarantined = allocation.clone();
         quarantined.phase = ExternalAllocationPhase::Quarantined;
-        db.conn.with_sql(|connection| Ok(require_retained_channel_allocation(connection, &binding, &quarantined)?)).unwrap();
+        db.conn.with_sql(|connection| require_retained_channel_allocation(connection, &binding, &quarantined)).unwrap();
     }
 
     fn direct_bound_channel_fixture(
@@ -3329,7 +3329,7 @@ pub(super) mod tests {
         let (allocation, binding) = direct_channel_coordinates(db);
         let reservation = &allocation.reservation;
         let occurrence = allocation.occurrence.as_ref().unwrap();
-        let retained = db.conn.with_sql(|connection| Ok(read_retained_binding(connection, &reservation.binding_hash)?))
+        let retained = db.conn.with_sql(|connection| read_retained_binding(connection, &reservation.binding_hash))
             .unwrap()
             .unwrap();
         // Isolate downstream ownership transitions without pretending that the
@@ -3548,11 +3548,11 @@ pub(super) mod tests {
             .author_external_owner_revocation(placement, &owner)
             .unwrap();
         assert_eq!(
-            db.conn.with_sql(|connection| Ok(journal::pending_terminal_revocation_frame(connection,
+            db.conn.with_sql(|connection| journal::pending_terminal_revocation_frame(connection,
                 &NodeJournalOwner,
                 placement,
                 ChannelDirection::OwnerToSupervisor
-            )?))
+            ))
             .unwrap()
             .unwrap()
             .digest(),
@@ -3560,7 +3560,7 @@ pub(super) mod tests {
         );
         drop(db);
         let db = crate::runtime_db::test_native::TestRuntime::open(&path);
-        db.conn.with_sql(|connection| Ok(NodeJournalOwner.require_owner(connection, &binding)?)).unwrap();
+        db.conn.with_sql(|connection| NodeJournalOwner.require_owner(connection, &binding)).unwrap();
         assert!(
             db.pending_external_owner_transport_frames(placement, 8, 64 * 1024)
                 .unwrap()
@@ -3806,7 +3806,7 @@ pub(super) mod tests {
             let path = root.path().join("runtime.sqlite3");
             let db = crate::runtime_db::test_native::TestRuntime::open(&path);
             let (binding, owner, terminal, digest) =
-                direct_output_fixture_with_exit(&db, exit.clone());
+                direct_output_fixture_with_exit(&db, exit);
             let placement = &binding.placement_thread_id;
             let intent = direct_termination_intent(&db, placement);
             assert!(
@@ -3849,7 +3849,7 @@ pub(super) mod tests {
                     .unwrap()
                     .is_none()
             );
-            assert!(!db.conn.with_sql(|connection| Ok(revoked(connection, &binding.digest().unwrap())?)).unwrap());
+            assert!(!db.conn.with_sql(|connection| revoked(connection, &binding.digest().unwrap())).unwrap());
             db.conn.with_mutable_sql(|connection| {
 let tx = Transaction::new_unchecked(connection, TransactionBehavior::Immediate).unwrap();
             journal::require_direct_command_complete_observation(
@@ -3913,7 +3913,7 @@ Ok(())
                     .urgent_revocation
                     .is_none()
             );
-            assert!(!db.conn.with_sql(|connection| Ok(revoked(connection, &binding.digest().unwrap())?)).unwrap());
+            assert!(!db.conn.with_sql(|connection| revoked(connection, &binding.digest().unwrap())).unwrap());
             // Existing cleanup intent is historical reconciliation, independent
             // of the reservation's original execution claim.
             assert!(!db.begin_external_termination(placement, &intent).unwrap());
@@ -4022,7 +4022,7 @@ Ok(())
                 // its separately durable sticky Cancel. Complete output must
                 // not rehabilitate this first-intent window into normal work.
                 db.cancel_external_allocation(placement).unwrap();
-                assert!(!db.conn.with_sql(|connection| Ok(revoked(connection, &binding.digest().unwrap())?)).unwrap());
+                assert!(!db.conn.with_sql(|connection| revoked(connection, &binding.digest().unwrap())).unwrap());
                 assert!(
                     db.begin_external_termination(placement, &intent)
                         .unwrap_err()
@@ -4368,7 +4368,7 @@ Ok(())
                 .unwrap();
             assert!(acknowledged.incoming_new);
             assert!(acknowledged.urgent_revocation.is_none());
-            db.conn.with_sql(|connection| Ok(validate_channels(connection)?)).unwrap();
+            db.conn.with_sql(|connection| validate_channels(connection)).unwrap();
         }
     }
 
@@ -4469,7 +4469,7 @@ Ok(())
             repeated.urgent_revocation.unwrap().digest(),
             cancel.digest()
         );
-        db.conn.with_sql(|connection| Ok(validate_channels(connection)?)).unwrap();
+        db.conn.with_sql(|connection| validate_channels(connection)).unwrap();
     }
 
     #[test]
@@ -4511,7 +4511,7 @@ Ok(())
                 .to_string()
                 .contains("fixture acknowledgement failure")
         );
-        let cancel = db.conn.with_sql(|connection| Ok(retained_owner_revocation(connection, placement)?))
+        let cancel = db.conn.with_sql(|connection| retained_owner_revocation(connection, placement))
             .unwrap()
             .unwrap();
         assert_eq!(db.conn.with_sql(|connection| Ok(connection.query_row("SELECT COUNT(*) FROM external_execution_frame WHERE direction='owner_to_supervisor'", [],
@@ -4525,7 +4525,7 @@ Ok(())
             .unwrap();
         assert!(!retry.incoming_new);
         assert_eq!(retry.urgent_revocation.unwrap().digest(), cancel.digest());
-        db.conn.with_sql(|connection| Ok(validate_channels(connection)?)).unwrap();
+        db.conn.with_sql(|connection| validate_channels(connection)).unwrap();
     }
 
     #[test]
@@ -5007,7 +5007,7 @@ Ok(())
                 .is_some_and(|sql| sql.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy))),
             "{error:#}"
         );
-        assert_eq!(owner_frames(&*db), 0);
+        assert_eq!(owner_frames(&db), 0);
         // The refusal latched nothing: once the holder is gone, the same
         // owner authors its one first release.
         let release = db
@@ -5019,7 +5019,7 @@ Ok(())
             .unwrap()
             .expect("the retried first release is authored");
         assert!(matches!(release.frame().payload, ExecutionChannelPayload::Release));
-        assert_eq!(owner_frames(&*db), 1);
+        assert_eq!(owner_frames(&db), 1);
     }
 
     #[test]
@@ -5655,7 +5655,7 @@ Ok(())
             )?))
             .unwrap();
         assert_eq!(application, "pending");
-        db.conn.with_sql(|connection| Ok(validate_channels(connection)?)).unwrap();
+        db.conn.with_sql(|connection| validate_channels(connection)).unwrap();
     }
 
     #[test]
@@ -5925,7 +5925,7 @@ Ok(())
             db.external_allocation(placement).unwrap().unwrap().phase,
             ExternalAllocationPhase::Quarantined
         );
-        assert_eq!(db.conn.with_sql(|connection| Ok(read_guard(connection)?)).unwrap(), 1);
+        assert_eq!(db.conn.with_sql(|connection| read_guard(connection)).unwrap(), 1);
     }
 
     #[test]
@@ -6016,8 +6016,8 @@ Ok(())
             db.record_external_execution_revocation(placement, &different)
                 .is_err()
         );
-        db.conn.with_sql(|connection| Ok(validate_channels(connection)?)).unwrap();
-        assert_eq!(db.conn.with_sql(|connection| Ok(read_guard(connection)?)).unwrap(), 1);
+        db.conn.with_sql(|connection| validate_channels(connection)).unwrap();
+        assert_eq!(db.conn.with_sql(|connection| read_guard(connection)).unwrap(), 1);
         assert!(
             db.release_credential_profile("P-channel", "worker-channel")
                 .is_err()
@@ -6116,7 +6116,7 @@ Ok(())
                 .contains(&candidate)
         );
         assert!(db.external_execution_blob_roots().unwrap().is_empty());
-        assert_eq!(db.conn.with_sql(|connection| Ok(read_guard(connection)?)).unwrap(), 1);
+        assert_eq!(db.conn.with_sql(|connection| read_guard(connection)).unwrap(), 1);
     }
 
     #[test]
@@ -6848,8 +6848,8 @@ Ok(())
             .unwrap();
         drop(db);
         let db = crate::runtime_db::test_native::TestRuntime::open(&path);
-        db.conn.with_sql(|connection| Ok(validate_channels(connection)?)).unwrap();
-        assert_eq!(db.conn.with_sql(|connection| Ok(read_guard(connection)?)).unwrap(), 1);
+        db.conn.with_sql(|connection| validate_channels(connection)).unwrap();
+        assert_eq!(db.conn.with_sql(|connection| read_guard(connection)).unwrap(), 1);
     }
 
     #[test]
@@ -6921,7 +6921,7 @@ Ok(())
         );
         db.finish_external_frame_application(placement, direction, 3, &quiesce_digest)
             .unwrap();
-        db.conn.with_sql(|connection| Ok(validate_channels(connection)?)).unwrap();
+        db.conn.with_sql(|connection| validate_channels(connection)).unwrap();
     }
 
     #[test]
@@ -6984,7 +6984,7 @@ Ok(())
             &digest,
         )
         .unwrap();
-        db.conn.with_sql(|connection| Ok(validate_channels(connection)?)).unwrap();
+        db.conn.with_sql(|connection| validate_channels(connection)).unwrap();
     }
 
     #[test]
@@ -7062,12 +7062,12 @@ Ok(())
         );
         db.record_external_execution_frame(placement, &stopped)
             .unwrap();
-        assert_eq!(db.conn.with_sql(|connection| Ok(read_guard(connection)?)).unwrap(), 1);
+        assert_eq!(db.conn.with_sql(|connection| read_guard(connection)).unwrap(), 1);
         assert!(
             db.release_credential_profile("P-channel", "worker-channel")
                 .is_err()
         );
-        db.conn.with_sql(|connection| Ok(validate_channels(connection)?)).unwrap();
+        db.conn.with_sql(|connection| validate_channels(connection)).unwrap();
     }
 
     #[test]
@@ -7186,11 +7186,11 @@ Ok(())
         let cancel = db
             .author_external_owner_revocation(placement, &owner)
             .unwrap();
-        let urgent = db.conn.with_sql(|connection| Ok(journal::pending_terminal_revocation_frame(connection,
+        let urgent = db.conn.with_sql(|connection| journal::pending_terminal_revocation_frame(connection,
             &NodeJournalOwner,
             placement,
             ChannelDirection::OwnerToSupervisor,
-        )?))
+        ))
         .unwrap()
         .unwrap();
         assert_eq!(urgent.digest(), cancel.digest());
@@ -7199,7 +7199,7 @@ Ok(())
                 .unwrap()
                 .is_empty()
         );
-        db.conn.with_sql(|connection| Ok(validate_channels(connection)?)).unwrap();
+        db.conn.with_sql(|connection| validate_channels(connection)).unwrap();
     }
 
     #[test]
@@ -7333,11 +7333,11 @@ Ok(())
             .unwrap();
         assert!(pending.is_empty());
         assert_eq!(
-            db.conn.with_sql(|connection| Ok(journal::pending_terminal_revocation_frame(connection,
+            db.conn.with_sql(|connection| journal::pending_terminal_revocation_frame(connection,
                 &NodeJournalOwner,
                 placement,
                 ChannelDirection::OwnerToSupervisor,
-            )?))
+            ))
             .unwrap()
             .unwrap()
             .digest(),
@@ -7437,7 +7437,7 @@ Ok(())
         );
         assert!(drained_retry.outbound.is_empty());
         assert!(drained_retry.urgent_revocation.is_none());
-        db.conn.with_sql(|connection| Ok(validate_channels(connection)?)).unwrap();
+        db.conn.with_sql(|connection| validate_channels(connection)).unwrap();
     }
 
     #[test]
@@ -7561,7 +7561,7 @@ Ok(())
                 .contains("external native observation was already retained"),
             "{duplicate_error:#}"
         );
-        db.conn.with_sql(|connection| Ok(validate_channels(connection)?)).unwrap();
+        db.conn.with_sql(|connection| validate_channels(connection)).unwrap();
         drop(db);
         let reopened = crate::runtime_db::test_native::TestRuntime::open(&root.path().join("runtime.sqlite3"));
         assert_eq!(
@@ -7694,6 +7694,6 @@ Ok(())
             )?))
             .unwrap();
         assert_eq!(release_application, "applied");
-        db.conn.with_sql(|connection| Ok(validate_channels(connection)?)).unwrap();
+        db.conn.with_sql(|connection| validate_channels(connection)).unwrap();
     }
 }

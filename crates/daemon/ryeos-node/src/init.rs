@@ -1885,10 +1885,10 @@ fn verify_trusted_seed_yaml(content: &str, path: &Path, trust_store: &TrustStore
         suffix: None,
         after_shebang: false,
     };
-    let header = ryeos_engine::item_resolution::parse_signature_header(&content, &envelope)
+    let header = ryeos_engine::item_resolution::parse_signature_header(content, &envelope)
         .with_context(|| format!("seed YAML {} has no valid signature", path.display()))?;
     let (trust_class, _) =
-        ryeos_engine::trust::verify_item_signature(&content, &header, &envelope, trust_store)
+        ryeos_engine::trust::verify_item_signature(content, &header, &envelope, trust_store)
             .with_context(|| format!("verify seed YAML signature {}", path.display()))?;
     if trust_class != TrustClass::Trusted {
         bail!(

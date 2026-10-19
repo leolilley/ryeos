@@ -305,8 +305,8 @@ fn capture_guarded(
                 .context("workspace-output product has no terminal output capture")?;
             let (import, partition_identity) = import_workspace_output_product(
                 &state,
-                &authority,
-                &guard,
+                authority,
+                guard,
                 limits,
                 &operator,
                 &coordinate,
@@ -357,12 +357,12 @@ fn capture_guarded(
         .acquire_with_timeout(crate::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
         .map_err(|error| anyhow::anyhow!("cannot acquire product publication permit: {error}"))?;
     let published = publish_product_witness(
-        &authority,
+        authority,
         &coordinate,
         &attestation,
         limits,
         &signer,
-        &guard,
+        guard,
     )?;
     // Publication owns the witness/manifest closure. Settle only this capture's
     // upload; later consumer binding uses a fresh stage, not this capability.
@@ -372,7 +372,7 @@ fn capture_guarded(
     let settled = (|| -> anyhow::Result<()> {
         let mut stage = authority
             .require_recovery()?
-            .open_durable_cas_upload_admitted(&guard, &import.staging_id, &operator)?;
+            .open_durable_cas_upload_admitted(guard, &import.staging_id, &operator)?;
         stage.ensure_publication_contract(
             &ryeos_state::DurableCasPublicationKey::external_content_import(
                 &import.request_digest,
@@ -380,11 +380,11 @@ fn capture_guarded(
             None,
         )?;
         stage.protect_cas_closure(
-            &guard,
+            guard,
             [published.witness.attestation_hash.as_str()],
             std::iter::empty(),
         )?;
-        stage.finish_admitted(&guard, &published.witness.attestation_hash)?;
+        stage.finish_admitted(guard, &published.witness.attestation_hash)?;
         Ok(())
     })();
     if let Err(error) = settled {
@@ -470,11 +470,11 @@ fn load_capture_source(
     }
     let recipe = admitted_product_recipe(&capsule, &request.recipe_binding)?;
     let (root_producer, _) = super::product_build::verified_root_producer(
-        &state,
+        state,
         &request.chain_root_id,
         &request.thread_id,
         &request.recipe_binding,
-        &guard,
+        guard,
     )?;
 
     Ok(ProductCaptureSource {

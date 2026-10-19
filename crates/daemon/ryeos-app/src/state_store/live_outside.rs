@@ -472,8 +472,8 @@ impl OriginalPacketPartsProgress {
             ensure!(census.failure_fact_recorded && self.held.parts.is_none() && self.held.raw.is_none()
                 && self.held.authority.is_none() && self.held.destination.is_none()
                 && self.held.destination_retirement.is_none() && self.held.refusal.is_none()
-                && self.held.bound.is_none() && (&self.held.metadata_pin_inputs).is_none()
-                && (&self.held.metadata_pin_receipts).iter().all(Option::is_none)
+                && self.held.bound.is_none() && self.held.metadata_pin_inputs.is_none()
+                && self.held.metadata_pin_receipts.iter().all(Option::is_none)
                 && self.bound_root_receipt_consumed
                 && (!self.requires_destination && !self.destination_consumed
                     || self.requires_destination && self.destination_consumed)
@@ -914,8 +914,8 @@ impl OriginalPacketPartsProgress {
         ensure!(matches!(self.metadata_pin_phase,
             PacketMetadataPinPhase::ConsumedAbsent | PacketMetadataPinPhase::Consumed(_)),
             "retired packet source evidence precedes metadata-pin receipts");
-        ensure!((&self.held.metadata_pin_inputs).is_none()
-            && (&self.held.metadata_pin_receipts).iter().all(Option::is_none),
+        ensure!(self.held.metadata_pin_inputs.is_none()
+            && self.held.metadata_pin_receipts.iter().all(Option::is_none),
             "retired packet source evidence retains metadata-pin retirement custody");
 
         let parts = self.held.parts.as_ref()
@@ -930,7 +930,7 @@ impl OriginalPacketPartsProgress {
         // acquisition error is diagnostic data, not a cleanup owner. The
         // producer keeps native owners in separate typed fields, all checked
         // above, so this fact is the retained terminal disposition.
-        let mut parts = std::mem::replace(&mut self.held.get_mut().parts, None)
+        let mut parts = self.held.get_mut().parts.take()
             .expect("validated retired packet parts remain present");
         let failure = self.held.optional_source_census.as_ref()
             .expect("validated retired packet census remains present")
@@ -938,18 +938,18 @@ impl OriginalPacketPartsProgress {
         drop(parts.original_error.take());
         drop(parts);
 
-        let mut bound = std::mem::replace(&mut self.held.get_mut().bound, None);
+        let mut bound = self.held.get_mut().bound.take();
         if let Some(bound) = bound.as_mut() {
-            drop(std::mem::replace(&mut bound.held.get_mut().root, None));
-            drop(std::mem::replace(&mut bound.held.get_mut().inspection, None));
+            drop(bound.held.get_mut().root.take());
+            drop(bound.held.get_mut().inspection.take());
         }
         drop(bound);
-        drop(std::mem::replace(&mut self.held.get_mut().authority, None));
-        drop(std::mem::replace(&mut self.held.get_mut().destination, None));
-        drop(std::mem::replace(&mut self.held.get_mut().destination_retirement, None));
-        drop(std::mem::replace(&mut self.held.get_mut().metadata_pin_inputs, None));
-        drop(std::mem::replace(&mut self.held.get_mut().metadata_pin_receipts, [None, None]));
-        drop(std::mem::replace(&mut self.held.get_mut().raw, None));
+        drop(self.held.get_mut().authority.take());
+        drop(self.held.get_mut().destination.take());
+        drop(self.held.get_mut().destination_retirement.take());
+        drop(self.held.get_mut().metadata_pin_inputs.take());
+        drop(std::mem::take(&mut self.held.get_mut().metadata_pin_receipts));
+        drop(self.held.get_mut().raw.take());
         self.held.get_mut().scheduler_handoff = None;
         self.held.get_mut().optional_source_census.as_mut()
             .expect("validated retired packet census remains present")
@@ -1104,8 +1104,8 @@ impl UnopenedSchedulerDatabaseProgress {
         factory.require_original_process()?;
         aggregate.require_original(factory)?;
         if self.held.authority_joined {
-            anyhow::ensure!(self.held.root.is_none() && (&self.held.authority).is_none()
-                && (&self.held.inspection).is_none() && self.held.registration.is_some(),
+            anyhow::ensure!(self.held.root.is_none() && self.held.authority.is_none()
+                && self.held.inspection.is_none() && self.held.registration.is_some(),
                 "completed unopened scheduler source retains conflicting custody");
             return Ok(());
         }
@@ -1119,10 +1119,10 @@ impl UnopenedSchedulerDatabaseProgress {
                 name.as_os_str() == std::ffi::OsStr::new("scheduler.sqlite3"))
             && self.held.mode == Some(lillux_sqlite::OriginalNativeBoundMode::OpenOrCreate)
             && self.held.domain == Some(lillux_sqlite::OriginalNativeDomain::NodeScheduler)
-            && (&self.held.inspection).is_none(),
+            && self.held.inspection.is_none(),
             "unopened scheduler source changed its fixed live coordinate");
         expected_store.require_unopened_native_authority(authority, factory)?;
-        if let Some(root) = (&self.held.root).as_ref() {
+        if let Some(root) = self.held.root.as_ref() {
             expected_store.require_unopened_scheduler_bound_input(root, authority, factory)?;
             self.root_identity_checked = true;
         } else {
@@ -1150,7 +1150,7 @@ impl UnopenedSchedulerDatabaseProgress {
             factory.require_original_process()?;
             aggregate.require_original(factory)?;
             expected_store.require_unopened_scheduler_bound_input(
-                (&self.held.root).as_ref().context("unopened scheduler root disappeared after funding")?,
+                self.held.root.as_ref().context("unopened scheduler root disappeared after funding")?,
                 authority, factory,
             )?;
             let root = self.held.get_mut().root.take()
@@ -1176,7 +1176,7 @@ impl UnopenedSchedulerDatabaseProgress {
         factory.require_original_process()?;
         aggregate.require_original(factory)?;
         expected_store.require_unopened_native_authority(authority, factory)?;
-        let authority = (&mut self.held.get_mut().authority).take()
+        let authority = self.held.get_mut().authority.take()
             .context("unopened scheduler Store authority disappeared")?;
         drop(authority);
         self.held.get_mut().name.take();
@@ -1189,8 +1189,8 @@ impl UnopenedSchedulerDatabaseProgress {
     pub(super) fn is_joined(&self) -> bool {
         !self.held.is_foreign() && self.held.authority_joined
             && self.held.root.is_none() && self.held.name.is_none() && self.held.mode.is_none()
-            && self.held.domain.is_none() && (&self.held.authority).is_none()
-            && (&self.held.inspection).is_none() && self.held.registration.is_some()
+            && self.held.domain.is_none() && self.held.authority.is_none()
+            && self.held.inspection.is_none() && self.held.registration.is_some()
     }
 }
 
@@ -1280,11 +1280,11 @@ impl UnopenedNativeTransientProgress {
         anyhow::ensure!(self.expected_domain == expected_domain,
             "unused native schema progress changed its fixed caller purpose");
         if self.held.joined {
-            anyhow::ensure!(self.held.domain.is_none() && (&self.held.authority).is_none(),
+            anyhow::ensure!(self.held.domain.is_none() && self.held.authority.is_none(),
                 "joined unused native schema input retains source custody");
             return Ok(());
         }
-        let authority = (&self.held.authority).as_ref()
+        let authority = self.held.authority.as_ref()
             .context("unused native schema authority absent")?;
         anyhow::ensure!(self.held.domain == Some(expected_domain),
             "unused native schema input changed its fixed native role");
@@ -1293,7 +1293,7 @@ impl UnopenedNativeTransientProgress {
         factory.require_original_process()?;
         aggregate.require_original(factory)?;
         expected_store.require_unopened_native_authority(authority, factory)?;
-        let authority = (&mut self.held.get_mut().authority).take()
+        let authority = self.held.get_mut().authority.take()
             .context("unused native schema authority disappeared")?;
         drop(authority);
         self.held.get_mut().domain.take();
@@ -1303,7 +1303,7 @@ impl UnopenedNativeTransientProgress {
 
     pub(super) fn is_joined(&self) -> bool {
         !self.held.is_foreign() && self.held.joined
-            && self.held.domain.is_none() && (&self.held.authority).is_none()
+            && self.held.domain.is_none() && self.held.authority.is_none()
     }
 }
 
@@ -2324,10 +2324,10 @@ impl LiveStateStoreOutsideCustody {
         lillux_sqlite::original_physical_custody::retain_callback_refusal(&|| {
             match &mut **store_source.borrow_mut() {
                 LiveStateStoreOutsideSource::Closed(store) =>
-                    store.advance_scheduler_packet_parts(&mut **source.borrow_mut(), factory,
+                    store.advance_scheduler_packet_parts(&mut source.borrow_mut(), factory,
                         aggregate, prepay, handoff.clone()),
                 LiveStateStoreOutsideSource::FailedStartup(store) =>
-                    store.advance_scheduler_packet_parts(&mut **source.borrow_mut(), factory,
+                    store.advance_scheduler_packet_parts(&mut source.borrow_mut(), factory,
                         aggregate, prepay, handoff.clone()),
             }
         })
@@ -2360,10 +2360,10 @@ impl LiveStateStoreOutsideCustody {
         lillux_sqlite::original_physical_custody::retain_callback_refusal(&|| {
             match &mut **store_source.borrow_mut() {
                 LiveStateStoreOutsideSource::Closed(store) =>
-                    store.advance_unopened_scheduler_database(&mut **source.borrow_mut(), factory,
+                    store.advance_unopened_scheduler_database(&mut source.borrow_mut(), factory,
                         aggregate, prepay, handoff_id.clone()),
                 LiveStateStoreOutsideSource::FailedStartup(store) =>
-                    store.advance_unopened_scheduler_database(&mut **source.borrow_mut(), factory,
+                    store.advance_unopened_scheduler_database(&mut source.borrow_mut(), factory,
                         aggregate, prepay, handoff_id.clone()),
             }
         })
@@ -2404,7 +2404,7 @@ impl LiveStateStoreOutsideCustody {
         lillux_sqlite::original_physical_custody::retain_callback_refusal(&|| {
             match &mut **store_source.borrow_mut() {
                 LiveStateStoreOutsideSource::Closed(store) =>
-                    store.advance_unopened_accounting_transient(&mut **source.borrow_mut(), factory, aggregate, prepay),
+                    store.advance_unopened_accounting_transient(&mut source.borrow_mut(), factory, aggregate, prepay),
                 LiveStateStoreOutsideSource::FailedStartup(_) => {
                     ensure!(source.borrow().is_none(),
                         "accounting ledger input cannot precede the live Store it was issued from");
@@ -2429,9 +2429,9 @@ impl LiveStateStoreOutsideCustody {
         lillux_sqlite::original_physical_custody::retain_callback_refusal(&|| {
             match &mut **store_source.borrow_mut() {
                 LiveStateStoreOutsideSource::Closed(store) =>
-                    store.advance_unopened_scheduler_transient(&mut **source.borrow_mut(), factory, aggregate, prepay),
+                    store.advance_unopened_scheduler_transient(&mut source.borrow_mut(), factory, aggregate, prepay),
                 LiveStateStoreOutsideSource::FailedStartup(store) =>
-                    store.advance_unopened_scheduler_transient(&mut **source.borrow_mut(), factory, aggregate, prepay),
+                    store.advance_unopened_scheduler_transient(&mut source.borrow_mut(), factory, aggregate, prepay),
             }
         })
     }
@@ -2452,9 +2452,9 @@ impl LiveStateStoreOutsideCustody {
         lillux_sqlite::original_physical_custody::retain_callback_refusal(&|| {
             match &mut **store_source.borrow_mut() {
                 LiveStateStoreOutsideSource::Closed(store) =>
-                    store.advance_scheduler_admission_sources(&mut **source.borrow_mut(), factory, aggregate, prepay),
+                    store.advance_scheduler_admission_sources(&mut source.borrow_mut(), factory, aggregate, prepay),
                 LiveStateStoreOutsideSource::FailedStartup(store) =>
-                    store.advance_scheduler_admission_sources(&mut **source.borrow_mut(), factory, aggregate, prepay),
+                    store.advance_scheduler_admission_sources(&mut source.borrow_mut(), factory, aggregate, prepay),
             }
         })
     }
@@ -2950,7 +2950,7 @@ impl LiveStateStoreOutsideCustody {
         if let Err(error) = self.require_original_process() {
             return Err((owner, error));
         }
-        unsafe { (&mut self.held.get_mut().source).register_finalizer_directory_source(owner, prepay) }
+        unsafe { self.held.get_mut().source.register_finalizer_directory_source(owner, prepay) }
     }
 
     /// # Safety
@@ -2968,7 +2968,7 @@ impl LiveStateStoreOutsideCustody {
         if let Err(error) = self.require_original_process() {
             return Err((owner, error));
         }
-        unsafe { (&mut self.held.get_mut().source).register_finalizer_control_record_source(owner, prepay) }
+        unsafe { self.held.get_mut().source.register_finalizer_control_record_source(owner, prepay) }
     }
 
     pub fn require_finalizer_source_membership(
@@ -2977,7 +2977,7 @@ impl LiveStateStoreOutsideCustody {
         prepay: &dyn Fn(u64, u64) -> Result<()>,
     ) -> Result<lillux_sqlite::original_physical_custody::OriginalPhysicalSourceIdentity> {
         self.require_original_process()?;
-        (&mut self.held.get_mut().source).require_finalizer_source_membership(registration, prepay)
+        self.held.get_mut().source.require_finalizer_source_membership(registration, prepay)
     }
 
     /// # Safety
@@ -2986,7 +2986,7 @@ impl LiveStateStoreOutsideCustody {
     /// bounded registry transition.
     pub unsafe fn seal_finalizer_physical_inventory(&mut self) -> Result<()> {
         self.require_original_process()?;
-        unsafe { (&mut self.held.get_mut().source).seal_finalizer_physical_inventory() }
+        unsafe { self.held.get_mut().source.seal_finalizer_physical_inventory() }
     }
 
     /// # Safety
@@ -2997,12 +2997,12 @@ impl LiveStateStoreOutsideCustody {
         prepay: &dyn Fn(u64, u64) -> Result<()>,
     ) -> Result<()> {
         self.require_original_process()?;
-        unsafe { (&mut self.held.get_mut().source).prepare_finalizer_descriptor_owners(prepay) }
+        unsafe { self.held.get_mut().source.prepare_finalizer_descriptor_owners(prepay) }
     }
 
     pub fn finalizer_non_account_descriptors_retired(&mut self) -> Result<bool> {
         self.require_original_process()?;
-        (&mut self.held.get_mut().source).finalizer_non_account_descriptors_retired()
+        self.held.get_mut().source.finalizer_non_account_descriptors_retired()
     }
 
     /// # Safety
@@ -3018,7 +3018,7 @@ impl LiveStateStoreOutsideCustody {
         ) -> Result<Arc<lillux_sqlite::OriginalOutsideFinalizerFileRetirementInputs>>,
     ) -> Result<()> {
         self.require_original_process()?;
-        unsafe { (&mut self.held.get_mut().source).retire_finalizer_non_account_descriptors(prepay, issue_inputs) }
+        unsafe { self.held.get_mut().source.retire_finalizer_non_account_descriptors(prepay, issue_inputs) }
     }
 
     /// # Safety
@@ -3030,7 +3030,7 @@ impl LiveStateStoreOutsideCustody {
         prepay: &dyn Fn(u64, u64) -> Result<()>,
     ) -> Result<()> {
         self.require_original_process()?;
-        unsafe { (&mut self.held.get_mut().source).retire_settled_store_exclusion_alias(admission_alias, prepay) }
+        unsafe { self.held.get_mut().source.retire_settled_store_exclusion_alias(admission_alias, prepay) }
     }
 
     #[cfg(target_os = "linux")]
@@ -3040,7 +3040,7 @@ impl LiveStateStoreOutsideCustody {
         prepay: &dyn Fn(u64, u64) -> Result<()>,
     ) -> Result<()> {
         self.require_original_process()?;
-        unsafe { (&mut self.held.get_mut().source).retire_finalizer_operator_targets(deadline, prepay) }
+        unsafe { self.held.get_mut().source.retire_finalizer_operator_targets(deadline, prepay) }
     }
 
     #[cfg(target_os = "linux")]
@@ -3053,7 +3053,7 @@ impl LiveStateStoreOutsideCustody {
         ) -> Result<Arc<lillux_sqlite::OriginalOutsideFinalizerFileRetirementInputs>>,
     ) -> Result<()> {
         self.require_original_process()?;
-        unsafe { (&mut self.held.get_mut().source).retire_finalizer_operator_parent_descriptor(prepay, issue_inputs) }
+        unsafe { self.held.get_mut().source.retire_finalizer_operator_parent_descriptor(prepay, issue_inputs) }
     }
 
     /// Checks only original-process custody. It does not authorize physical

@@ -763,8 +763,8 @@ impl WorkloadClientResponseFrame {
         if let WorkloadClientOutcome::Dispatched { response } = &self.outcome {
             response.dispatch.validate()?;
         }
-        if let WorkloadClientOutcome::Failed { code, message, .. } = &self.outcome {
-            if code.is_empty()
+        if let WorkloadClientOutcome::Failed { code, message, .. } = &self.outcome
+            && (code.is_empty()
                 || code.len() > MAX_WORKLOAD_CLIENT_ERROR_CODE_BYTES
                 || !code.bytes().all(|byte| {
                     byte.is_ascii_lowercase()
@@ -772,11 +772,10 @@ impl WorkloadClientResponseFrame {
                         || matches!(byte, b'_' | b'-')
                 })
                 || message.len() > MAX_WORKLOAD_CLIENT_ERROR_MESSAGE_BYTES
-                || message.bytes().any(|byte| byte == 0)
+                || message.bytes().any(|byte| byte == 0))
             {
                 anyhow::bail!("workload-client error is not canonical");
             }
-        }
         let encoded = serde_json::to_vec(self)?;
         if encoded.is_empty() || encoded.len() > MAX_WORKLOAD_CLIENT_FRAME_BYTES {
             anyhow::bail!("workload-client response exceeds its byte bound");

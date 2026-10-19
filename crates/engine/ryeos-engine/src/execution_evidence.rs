@@ -392,8 +392,8 @@ fn validate_project_response(
             }
             None => None,
         };
-        if let Some(scoped) = scoped_attempt {
-            if scoped.attempt_id.len() != 71
+        if let Some(scoped) = scoped_attempt
+            && (scoped.attempt_id.len() != 71
                 || !scoped.attempt_id.starts_with("scoped-")
                 || !scoped.attempt_id[7..]
                     .bytes()
@@ -405,13 +405,12 @@ fn validate_project_response(
                     .bytes()
                     .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
                 || !lillux::valid_hash(&scoped.observation_object_hash)
-                || !calls.is_empty()
+                || !calls.is_empty())
             {
                 return Err(EngineError::Internal(
                     "execution evidence scoped attempt coordinate is not canonical or mixes managed calls".to_owned(),
                 ));
             }
-        }
         if calls.iter().any(|call| {
             !lillux::valid_hash(&call.operation_id)
                 || !lillux::valid_hash(&call.action_digest)

@@ -1311,7 +1311,7 @@ fn require_zero_participant_lane(
 fn prove_participant(
     state: &AppState,
     authority: &ryeos_state::PinnedStateAuthority,
-    limits: ryeos_state::object_closure::ObjectClosureLimits,
+    _limits: ryeos_state::object_closure::ObjectClosureLimits,
     history_limits: ExecutionEvidenceLimitsWire,
     context: &HandlerContext,
     parent: &ThreadSnapshot,
