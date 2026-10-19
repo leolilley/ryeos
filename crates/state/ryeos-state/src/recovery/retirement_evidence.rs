@@ -12,7 +12,7 @@
 //! until the owner's release or reset. No age-out exists: dropping a fence
 //! could pin another chain's unreleased closure forever.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 
 use anyhow::{Context, Result};
@@ -201,10 +201,16 @@ impl RecoveryStore {
 
     /// Closure manifests that must stay rooted: every fence without a release.
     pub fn unreleased_retirement_manifest_roots(&self) -> Result<BTreeSet<String>> {
+        Ok(self.unreleased_retired_chains()?.into_values().collect())
+    }
+
+    /// Every fenced chain whose closure is not yet released, with the manifest
+    /// its fence binds. The release pass walks these owners.
+    pub fn unreleased_retired_chains(&self) -> Result<BTreeMap<String, String>> {
         let Some(directory) = self.fence_directory()? else {
-            return Ok(BTreeSet::new());
+            return Ok(BTreeMap::new());
         };
-        let mut roots = BTreeSet::new();
+        let mut roots = BTreeMap::new();
         let mut fences = Vec::new();
         let mut released = BTreeSet::new();
         for name in directory.entry_names()? {
@@ -228,18 +234,22 @@ impl RecoveryStore {
                         && identity_digest(&record.chain_root_id)? == digest,
                     "retired chain fence {text} is not self-consistent"
                 );
-                fences.push((digest.to_string(), record.manifest_hash));
+                fences.push((
+                    digest.to_string(),
+                    record.chain_root_id,
+                    record.manifest_hash,
+                ));
             } else {
                 anyhow::bail!("unexpected retirement fence entry: {text}");
             }
         }
-        let fenced: BTreeSet<&String> = fences.iter().map(|(digest, _)| digest).collect();
+        let fenced: BTreeSet<&String> = fences.iter().map(|(digest, _, _)| digest).collect();
         if let Some(orphan) = released.iter().find(|digest| !fenced.contains(digest)) {
             anyhow::bail!("retired chain release {orphan} exists without its fence");
         }
-        for (digest, manifest_hash) in &fences {
+        for (digest, chain_root_id, manifest_hash) in &fences {
             if !released.contains(digest) {
-                roots.insert(manifest_hash.clone());
+                roots.insert(chain_root_id.clone(), manifest_hash.clone());
             }
         }
         Ok(roots)
@@ -965,7 +975,7 @@ mod tests {
         {
             let lock = f.lock("M");
             f.store
-                .prepare_set(&lock, "M", None, &"ab".repeat(32))
+                .prepare_remove(&lock, "M", &"ab".repeat(32))
                 .unwrap();
         }
         let err = f.release("X", &["M"]).unwrap_err();
