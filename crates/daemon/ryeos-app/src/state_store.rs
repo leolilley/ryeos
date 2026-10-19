@@ -5715,19 +5715,23 @@ impl StateStore {
         lease_authority: Arc<dyn lillux_sqlite::OriginalNativeProjectionLeaseAuthority>,
         deadline: lillux::time::MonotonicDeadline,
     ) -> Result<Self> {
-        Self::new_in_process_native_with_bundle_admission_trust(
-            app_root,
-            runtime_state_dir,
-            runtime_db_path,
-            signer,
-            write_barrier,
-            head_trust,
-            BundleAdmissionTrust::unbound(),
-            exclusion,
-            factory,
-            lease_authority,
-            deadline,
-        )
+        // SAFETY: the caller upholds the contract of this constructor, which is
+        // the same contract the bound constructor requires.
+        unsafe {
+            Self::new_in_process_native_with_bundle_admission_trust(
+                app_root,
+                runtime_state_dir,
+                runtime_db_path,
+                signer,
+                write_barrier,
+                head_trust,
+                BundleAdmissionTrust::unbound(),
+                exclusion,
+                factory,
+                lease_authority,
+                deadline,
+            )
+        }
     }
 
     /// [`Self::new_in_process_native`] bound to the Bundle admission trust a
@@ -14913,8 +14917,7 @@ impl StateStore {
     where
         F: Fn(&[String]) -> Result<u64>,
     {
-        let result =
-            self.recover_pending_terminal_chain_removals_with(now, dry_run, &pin_count);
+        let result = self.recover_pending_terminal_chain_removals_with(now, dry_run, &pin_count);
         match self
             .lock()
             .and_then(|g| Ok(g.state_db.pending_chain_transitions()?.len()))
