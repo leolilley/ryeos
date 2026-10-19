@@ -184,6 +184,59 @@ class Case(unittest.TestCase):
                 self.assertEqual(rc, 2)
                 self.assertEqual(fake.requests, [])
 
+    def test_standard_image_only_with_image_repo_standard(self):
+        std = "ghcr.io/leolilley/ryeos-standard@sha256:" + "c" * 64
+        fake = Fake({})
+        rc, _ = self.run_main(self.deploy_argv(image=std), fake)
+        self.assertEqual((rc, fake.requests), (2, []))
+        fake = Fake({})
+        rc, _ = self.run_main(self.deploy_argv("--image-repo", "standard"), fake)
+        self.assertEqual((rc, fake.requests), (2, []))
+        fake = Fake({})
+        rc, _ = self.run_main(self.deploy_argv("--image-repo", "standard", image="ghcr.io/other/x@sha256:" + "c" * 64), fake)
+        self.assertEqual((rc, fake.requests), (2, []))
+        payload = CTL.build_payload(CTL.parser().parse_args(
+            self.deploy_argv("--image-repo", "standard", image=std)), "own-1", None)
+        self.assertEqual(payload["image"]["imagePath"], std)
+
+    def test_farm_guard_holds_with_standard_image(self):
+        std = "ghcr.io/leolilley/ryeos-standard@sha256:" + "c" * 64
+        for name in ("ryeos-r9-farm", "ryeos-r9-snap-track"):
+            fake = Fake({})
+            rc, _ = self.run_main(self.deploy_argv("--image-repo", "standard", name=name, image=std), fake)
+            self.assertEqual((rc, fake.requests), (2, []))
+
+    def test_no_disk_omits_disk(self):
+        fake = Fake(deploy_routes(["live"]))
+        rc, log = self.run_main(self.deploy_argv("--no-disk", "--owner-email", "a@b.c"), fake)
+        self.assertEqual(rc, 0, log)
+        self.assertNotIn("disk", json.loads(fake.methods("POST")[0][2])["serviceDetails"])
+        payload = CTL.build_payload(CTL.parser().parse_args(self.deploy_argv()), "own-1", None)
+        self.assertIn("disk", payload["serviceDetails"])
+
+    def test_name_prefix_rule(self):
+        CTL.require_prefix("ryeos-r9-a")
+        CTL.require_prefix("ryeos-f5r-s9-a")
+        for bad in ("ryeos-r8-a", "r9-ryeos-a", "ryeos-r9"):
+            with self.assertRaises(CTL.Refusal):
+                CTL.require_prefix(bad)
+        std = "ghcr.io/leolilley/ryeos-standard@sha256:" + "c" * 64
+        fake = Fake({})
+        rc, _ = self.run_main(self.deploy_argv("--image-repo", "standard", name="other-r9-x", image=std), fake)
+        self.assertEqual((rc, fake.requests), (2, []))
+
+    def test_status_ready_path(self):
+        svc = {"id": "srv-a", "name": "ryeos-r9-a",
+               "serviceDetails": {"url": SVC_URL, "healthCheckPath": "/_ryeos/ready"}}
+        routes = {("GET", "/services/srv-a"): [(200, svc)],
+                  ("GET", "/services/srv-a/deploys?limit=1"): [(200, [])],
+                  ("GET", SVC_URL + "/other"): [(200, {})]}
+        fake = Fake(routes)
+        rc, log = self.run_main(["status", "--service-id", "srv-a", "--ready-path", "/other"], fake)
+        self.assertEqual(rc, 0, log)
+        out = json.loads(log[log.index("{"):])
+        self.assertEqual((out["healthCheckPath"], out["ready"]["status"]), ("/_ryeos/ready", 200))
+
     def test_same_name_service_refuses(self):
         routes = deploy_routes(["live"])
         routes[("GET", f"/services?name={NAME}&ownerId=own-1")] = [(200, [{"service": {"id": "srv-old", "name": NAME}}])]
