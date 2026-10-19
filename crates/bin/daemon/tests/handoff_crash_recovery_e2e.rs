@@ -3545,13 +3545,15 @@ async fn launch_and_checkpoint_portable_worker(
         ),
     });
     let (status, launch) = daemon.post_json("/execute/launch", launch_body).await?;
-    anyhow::ensure!(
-        matches!(
-            status,
-            reqwest::StatusCode::OK | reqwest::StatusCode::ACCEPTED
-        ),
-        "portable worker launch returned {status}: {launch}"
-    );
+    if !matches!(
+        status,
+        reqwest::StatusCode::OK | reqwest::StatusCode::ACCEPTED
+    ) {
+        let stderr = daemon.drain_stderr_nonblocking().await;
+        anyhow::bail!(
+            "portable worker launch returned {status}: {launch}\n--- daemon stderr ---\n{stderr}"
+        );
+    }
     let chain_root_id = launch
         .get("thread_id")
         .or_else(|| launch.get("chain_root_id"))
