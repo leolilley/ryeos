@@ -164,7 +164,7 @@ class OciHookContractTests(unittest.TestCase):
         self.assertIn("process_root.open_directory", cgroup)
         self.assertIn("libc::fchown", cgroup)
         self.assertIn("host cgroup root", cgroup)
-        self.assertIn("retire_ended_oci_controller", cgroup)
+        self.assertIn("retire_ended_oci_scopes", cgroup)
         self.assertIn("retire_empty_oci_descendants", cgroup)
         self.assertIn("adopt_prepared_oci_controller", cgroup)
         self.assertIn("OciLifecycleIntent", lifecycle)
