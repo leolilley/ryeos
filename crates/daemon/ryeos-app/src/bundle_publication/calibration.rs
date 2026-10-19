@@ -7,7 +7,9 @@
 use anyhow::{Context as _, bail};
 use ryeos_state::{objects::Attestation, signer::Signer};
 use serde::{Deserialize, Serialize};
-use ryeos_node_runtime::calibration_policy::{CalibrationProductSelection, CalibrationEnvironmentSelection, CalibrationEnvironmentProduct, CalibrationEnvironmentKind, CalibrationTerminal, CalibrationEnvironmentUse, CalibrationEnvironmentEvidence, validate_calibration_hash};
+use ryeos_node_runtime::calibration_policy::{
+    CalibrationEnvironmentEvidence, CalibrationEnvironmentSelection, validate_calibration_hash,
+};
 
 pub const AUTHORITY_CALIBRATION_SCHEMA: &str = "ryeos.bundle_publication_authority_calibration.v3";
 pub const AUTHORITY_CALIBRATION_CLAIM: &str = "bundle_publication_authority_calibration_v3";
@@ -271,6 +273,10 @@ impl AuthorityCalibrationEvidence {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ryeos_node_runtime::calibration_policy::{
+        CalibrationEnvironmentKind, CalibrationEnvironmentProduct, CalibrationEnvironmentUse,
+        CalibrationProductSelection, CalibrationTerminal,
+    };
     use ryeos_state::signer::Signer;
 
     fn hash(byte: char) -> String {

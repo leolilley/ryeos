@@ -15,8 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use super::creation_evidence::{CreatedDirectoryRecord, evidence_name};
 use super::inspection_destination::{
-    InspectionAccountingRequirement, InspectionDestinationPlan, OriginalInspectionMode,
-    OriginalInspectionPlan, destination_plans, validate_destinations,
+    InspectionDestinationPlan, OriginalInspectionMode, OriginalInspectionPlan, destination_plans, validate_destinations,
 };
 use super::inspection_plan::{
     InspectionSourcePlan, OperationalSourcePins, OperationalSourcePlan, capture_sources,
@@ -2263,7 +2262,7 @@ pub(super) struct OriginalInspectionSlot {
     pub(super) purpose: String,
     pub(super) directory_name: String,
     pub(super) expected_present: [bool; 4],
-    pub(super) accounting: InspectionAccountingRequirement,
+    #[cfg(test)]
     pub(super) never_started: bool,
 }
 impl OriginalQuotaClaim {
@@ -2713,7 +2712,7 @@ impl OriginalProductionSeal {
             expected_present: std::array::from_fn(|role| {
                 self.claim.record.sources[index].roles[role].is_some()
             }),
-            accounting: self.claim.record.inspection.accounting[index].clone(),
+            #[cfg(test)]
             never_started: self.never_started[index],
         })
     }
@@ -2831,9 +2830,6 @@ impl OriginalQuotaClaim {
             .as_ref()
             .and_then(std::sync::Weak::upgrade)
             .context("original copy issuer absent; no replacement issue")
-    }
-    pub(super) fn inspection_plan(&self) -> &OriginalInspectionPlan {
-        &self.record.inspection
     }
     pub(super) fn seal_production(
         self: &Arc<Self>,
@@ -3094,6 +3090,7 @@ impl OriginalQuotaClaim {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn operation_id(&self) -> &str {
         &self.record.operation_id
     }
@@ -3735,6 +3732,7 @@ impl std::fmt::Debug for CreatedEvidenceFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CreatedEvidenceFailure")
             .field("error", &self.error)
+            .field("retained_evidence_bytes", &self.evidence.signed.len())
             .finish_non_exhaustive()
     }
 }
@@ -4850,6 +4848,7 @@ fn validate_aggregate(records: &[OfflineResetQuota], quota: &OfflineResetQuota) 
 #[cfg(test)]
 mod clock_controls {
     use super::*;
+    use super::super::inspection_destination::InspectionAccountingRequirement;
     use lillux::PinnedDirectory;
 
     struct SealDuringPhysicalCopy {

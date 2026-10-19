@@ -299,7 +299,9 @@ pub(super) fn verified_root_producer(
     )?;
     let cas = authority.cas_store()?;
     let large_store = authority.large_object_store()?;
-    let limits = state
+    // Refuses an absent or invalid closure policy before this traversal; the
+    // capsule loads below use their fixed protocol ceiling, not these limits.
+    state
         .node_policy
         .require::<NodeObjectClosurePolicy>()?
         .closure_limits()?;

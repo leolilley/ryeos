@@ -1217,7 +1217,9 @@ fn verify_retained_remote_consumer(
     remote: &ryeos_state::external_content::products::qualification::ProductQualificationRemoteConsumerProof,
     history_limits: ExecutionEvidenceLimitsWire,
 ) -> anyhow::Result<()> {
-    let limits = state
+    // Refuses an absent or invalid closure policy before this traversal; the
+    // capsule loads below use their fixed protocol ceiling, not these limits.
+    state
         .node_policy
         .require::<ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
         .closure_limits()?;
@@ -1612,7 +1614,9 @@ pub(in crate::operator_external_content) fn verify_current(
         // fresh admission must still find the exact settled local attempt and
         // committed observation. Reuse issuance corroboration so a copied
         // proof cannot stand in for a missing or different journal record.
-        let limits = state
+        // Refuses an absent or invalid closure policy before this traversal; the
+        // capsule loads below use their fixed protocol ceiling, not these limits.
+        state
             .node_policy
             .require::<ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
             .closure_limits()?;
@@ -1691,7 +1695,9 @@ pub(in crate::operator_external_content) fn verify_current(
         {
             bail!("qualification participant's current request or inputs changed");
         }
-        let limits = state
+        // Refuses an absent or invalid closure policy before this traversal; the
+        // capsule loads below use their fixed protocol ceiling, not these limits.
+        state
             .node_policy
             .require::<ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
             .closure_limits()?;

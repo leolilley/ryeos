@@ -2977,16 +2977,6 @@ pub struct AccountingDb {
     anchor: Arc<AccountingAnchor>,
     hard_admission: AtomicBool,
     credential_binding_key: [u8; CREDENTIAL_BINDING_KEY_LEN],
-    holders: LedgerHolders,
-}
-
-/// Descriptors held beside the SQL owner. The bound native VFS owns the
-/// database, WAL and directory binding itself, so the native ledger keeps
-/// only its initialization marker.
-enum LedgerHolders {
-    Native {
-        _initialization_marker: File,
-    },
 }
 
 impl AccountingDb {
@@ -3781,10 +3771,9 @@ impl AccountingDb {
         } else {
             AccountingAnchor::open_or_init(runtime_directory.path(), &site_id, epoch)?
         });
-        let marker_file = match marker {
-            Some(marker) => marker,
-            None => write_initialized_marker(runtime_directory)?,
-        };
+        if marker.is_none() {
+            write_initialized_marker(runtime_directory)?;
+        }
         let credential_binding_key =
             load_or_create_credential_binding_key(runtime_directory, established_epoch)?;
         let db = AccountingDb {
@@ -3795,9 +3784,6 @@ impl AccountingDb {
             anchor,
             hard_admission: AtomicBool::new(true),
             credential_binding_key,
-            holders: LedgerHolders::Native {
-                _initialization_marker: marker_file,
-            },
         };
         Ok(db)
     }

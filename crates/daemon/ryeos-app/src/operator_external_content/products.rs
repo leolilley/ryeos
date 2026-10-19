@@ -236,7 +236,7 @@ fn capture_guarded(
     }
     if source.is_none() {
         *source = Some(load_capture_source(
-            &state, &context, &request, authority, guard, limits,
+            &state, &context, &request, authority, guard,
         )?);
     }
     let source = source
@@ -405,7 +405,6 @@ fn load_capture_source(
     request: &ProductRequest,
     authority: &ryeos_state::PinnedStateAuthority,
     guard: &ryeos_state::CasMutationGuard,
-    limits: ryeos_state::object_closure::ObjectClosureLimits,
 ) -> anyhow::Result<ProductCaptureSource> {
     authority.ensure_guard(guard)?;
     let (thread, _, _) = state

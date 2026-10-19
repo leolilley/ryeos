@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use lillux::crypto::SigningKey;
-use ryeos_node_runtime::registry::{BundleRegistryMutationLock, BundleRegistryReadLock};
+use ryeos_node_runtime::registry::BundleRegistryMutationLock;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -499,6 +499,7 @@ fn valid_bundle_name(name: &str) -> bool {
 mod tests {
     use super::*;
     use rand::rngs::OsRng;
+    use ryeos_node_runtime::registry::BundleRegistryReadLock;
 
     #[test]
     fn first_registry_reader_establishes_shared_writer_anchor() {

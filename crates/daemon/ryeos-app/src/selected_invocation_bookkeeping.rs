@@ -56,9 +56,6 @@ impl std::fmt::Debug for SelectedBorrowTicket {
 
 impl SelectedBorrowTicket {
     pub fn invocation(&self) -> &SelectedTicket { &self.ticket }
-    pub(crate) fn claim_identity(&self) -> (&str, &str, &str) {
-        (&self.ticket.thread, &self.ticket.claim, &self.ticket.owner)
-    }
 }
 
 impl PartialEq for SelectedTicket {

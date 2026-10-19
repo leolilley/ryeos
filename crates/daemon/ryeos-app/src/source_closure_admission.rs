@@ -1470,8 +1470,6 @@ composer: handler:ryeos/core/identity
 
 #[cfg(test)]
 mod directory_source_tests {
-    use super::*;
-
     #[test]
     fn actual_source_cas_authority_refuses_foreign_original_guard() {
         let first = tempfile::tempdir().unwrap();
@@ -1531,7 +1529,6 @@ impl SourceClosureStore for RetainedSourceClosureStore {
 
 #[cfg(test)]
 mod retained_current_worker_source_controls {
-    use super::*;
     fn plan(resolution: &ryeos_engine::resolution::ResolutionOutput,
         engine: &ryeos_engine::engine::Engine) -> ryeos_engine::contracts::ExecutionPlan {
         let (ordinary, current) = engine.kinds.get("worker").unwrap().execution.as_ref().unwrap()

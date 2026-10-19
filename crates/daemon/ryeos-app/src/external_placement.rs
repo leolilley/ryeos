@@ -8516,7 +8516,7 @@ pub mod test_support {
         ExternalSupervisorActivationIntent, ExternalSupervisorActivationObservation,
         external_supervisor_activation_request_digest,
     };
-    use crate::vault::{NodeVault as _, SealedEnvelopeVault};
+    use crate::vault::SealedEnvelopeVault;
 
     #[allow(clippy::type_complexity)]
     fn installed_artifact_coordinates(

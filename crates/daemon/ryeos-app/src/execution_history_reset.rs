@@ -2532,7 +2532,7 @@ fn run_execution_history_reset_owned(
         native_factory: Some(&native_factory),
     };
     let mut scheduler_retirement_attempt = None;
-    let mut scheduler_retirement = match participant {
+    let scheduler_retirement = match participant {
         Some(participant) => {
             // Revalidate actual phase and exclusion before service entry too.
             permit.runtime_directory()?;
@@ -3120,7 +3120,7 @@ fn inspect_scheduler_fire_journals(runtime_directory: &lillux::PinnedDirectory) 
 /// Preserve the actual signed claim as well as its original issued work for
 /// production-gate controls. This test-only path is not a synthetic issuer.
 #[cfg(test)]
-pub(super) fn fixture_inspection_claim(
+fn fixture_inspection_claim(
     directory: &lillux::PinnedDirectory,
     namespace: &lillux::PinnedDirectoryLock,
     db_target: &Path,

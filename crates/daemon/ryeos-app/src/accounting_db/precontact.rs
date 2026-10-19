@@ -957,6 +957,7 @@ mod tests {
     }
 
     /// Run `operation` on the ledger's own native connection.
+    #[cfg(test)]
     fn sql<T>(db: &AccountingDb, operation: impl FnOnce(&Connection) -> T) -> T {
         db.with_conn(|conn| Ok(operation(conn))).unwrap()
     }

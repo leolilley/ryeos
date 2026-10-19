@@ -119,7 +119,7 @@ pub(crate) struct ComposeInputs<'a> {
 /// The single non-test constructor of a placement binding document. The
 /// schema, network policy, storage policy and cleanup proof follow from the
 /// transport; the digest of the settings is derived, never supplied.
-pub(crate) fn compose_binding_document(inputs: ComposeInputs<'_>) -> Result<BindingDocument> {
+pub(super) fn compose_binding_document(inputs: ComposeInputs<'_>) -> Result<BindingDocument> {
     let ComposeInputs {
         program,
         controller_transport,

@@ -750,7 +750,7 @@ pub fn cleanup_qualification_local_worker(
     crate::hosted_operation::with_qualification_occurrence_contact(
         &initial.qualification_operation_id,
         || {
-            let mut current = state
+            let current = state
                 .state_store
                 .qualification_local_start(placement)?
                 .context("Q local cleanup lost its original start")?;
@@ -766,7 +766,8 @@ pub fn cleanup_qualification_local_worker(
                 || {
                     // Credential retirement can succeed even when this daemon has
                     // lost original disposable-directory descriptors after restart.
-                    current = release_qualification_worker_credential_custody(state, placement)?;
+                    let mut current =
+                        release_qualification_worker_credential_custody(state, placement)?;
                     if current.phase == QualificationLocalStartPhase::Closed {
                         state
                             .qualification_workspace_custody

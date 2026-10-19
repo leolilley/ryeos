@@ -155,15 +155,6 @@ pub(super) struct OperationPublicationFailure {
     phase: PublicationPhase,
 }
 
-impl OperationPublicationFailure {
-    pub(super) fn phase(&self) -> PublicationPhase {
-        self.phase
-    }
-    pub(super) fn operation(&self) -> &Arc<OriginalOperation> {
-        &self.operation
-    }
-}
-
 impl std::fmt::Debug for OperationPublicationFailure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -192,11 +183,6 @@ impl std::error::Error for OperationPublicationFailure {
 }
 
 impl OriginalOperation {
-    #[cfg(test)]
-    pub(super) fn retains_quota_claim(&self, claim: &Arc<OriginalQuotaClaim>) -> bool {
-        self.require_quota_claim(claim).is_ok()
-    }
-
     /// Live mutation must run under the exact funded claim bound to this
     /// operation. Signed cold evidence alone cannot renew a resource owner or
     /// attach a fresh allocation to the old operation's effects.
