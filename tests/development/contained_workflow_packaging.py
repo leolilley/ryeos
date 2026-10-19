@@ -26,7 +26,12 @@ class ContainedWorkflowPackagingTests(unittest.TestCase):
         self.assertNotIn("package-bundle-artifact.sh", docker_stage(release, "compiled-publication"))
         self.assertIn("PUBLISHER_DEV_TRUST.toml", docker_stage(release, "development-publication"))
         self.assertIn("--from=published", docker_stage(release, "bundle-artifact"))
-        self.assertIn("--from=published", docker_stage(release, "ryeos-hosted-workflow"))
+        # Runtime stages take the selected publication so development
+        # candidates can be built; the default stays the official one and
+        # only the artifact packaging is pinned to it.
+        self.assertIn("ARG PUBLICATION_STAGE=published", release)
+        self.assertIn("--from=composition-publication", docker_stage(release, "ryeos-hosted-workflow"))
+        self.assertNotIn("--from=development-publication", docker_stage(release, "ryeos-hosted-workflow"))
         dev = (ROOT / "docker-bake.contained-dev.hcl").read_text()
         self.assertIn('CONTAINED_PUBLICATION_STAGE = "development-publication"', dev)
         self.assertNotIn("type=registry", dev)
@@ -76,7 +81,7 @@ class ContainedWorkflowPackagingTests(unittest.TestCase):
         self.assertRegex(profile, r"(?m)^\s+mode: enforce$")
         self.assertIn("implementation: linux-lillux", profile)
         self.assertIn("proc_filesystem: pid_namespace_nested", profile)
-        self.assertIn("version: 7", profile)
+        self.assertIn("version: 10", profile)
         self.assertIn("trusted_process_group_sessions: false", profile)
         self.assertNotIn("trusted_process_group_sessions: true", profile)
         self.assertNotIn("mode: unconfigured", profile)
