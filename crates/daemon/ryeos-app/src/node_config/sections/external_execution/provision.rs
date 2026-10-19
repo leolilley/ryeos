@@ -2,23 +2,56 @@
 //!
 //! The installed, node-signed binding names the owner, generation, backend and
 //! account the credential belongs to, so the operator supplies only the secret.
+//! Two sections carry a credential: the external-execution placement binding
+//! and the runtime snapshot production binding, each with its own owner.
 //! Provisioning is insert-only: the same secret again is a no-op and a
 //! different secret for an existing generation is refused. A new secret needs
 //! a newly composed binding generation. Reports never carry the secret or the
 //! physical vault key.
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Result, ensure};
 use serde::Serialize;
 use zeroize::Zeroizing;
 
-use super::{
-    BindingDocument, InstalledExternalExecutionBinding, SECTION_NAME, binding_digest,
-    capacity_owner,
-};
+use super::SECTION_NAME;
+use super::compose::{load_node_identity, read_installed_binding};
+use crate::node_config::sections::runtime_snapshot_production;
+use crate::vault::placement::PlacementCredentialAccess;
 use crate::vault::{NodeVault as _, SealedEnvelopeVault};
 
 /// Largest accepted provider secret, matching the protected document bound.
 pub const MAX_PLACEMENT_SECRET_BYTES: usize = 128 * 1024;
+
+/// Which installed binding a credential belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProvisionSection {
+    ExternalExecution,
+    RuntimeSnapshotProduction,
+}
+
+impl ProvisionSection {
+    /// Section directory name, as the operator spells it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::ExternalExecution => SECTION_NAME,
+            Self::RuntimeSnapshotProduction => runtime_snapshot_production::SECTION_NAME,
+        }
+    }
+
+    pub fn parse(name: &str) -> Result<Self> {
+        match name {
+            n if n == SECTION_NAME => Ok(Self::ExternalExecution),
+            n if n == runtime_snapshot_production::SECTION_NAME => {
+                Ok(Self::RuntimeSnapshotProduction)
+            }
+            other => anyhow::bail!(
+                "--section must be `{}` or `{}`, not `{other}`",
+                SECTION_NAME,
+                runtime_snapshot_production::SECTION_NAME
+            ),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -39,6 +72,7 @@ impl ProvisionOutcome {
 /// Coordinates of the provisioned credential. No secret, no physical key.
 #[derive(Debug, Clone, Serialize)]
 pub struct ProvisionReport {
+    pub section: String,
     pub binding_id: String,
     pub owner: String,
     pub generation: String,
@@ -47,11 +81,27 @@ pub struct ProvisionReport {
     pub outcome: ProvisionOutcome,
 }
 
-/// Provision `secret` for the installed binding `binding_id` under `app_root`.
-/// Works whether or not the daemon is running; the vault store lock serializes
-/// writers and the daemon reads the credential when it next needs it.
+/// Provision `secret` for the installed external-execution binding
+/// `binding_id` under `app_root`. Works whether or not the daemon is running;
+/// the vault store lock serializes writers and the daemon reads the
+/// credential when it next needs it.
 pub fn provision_installed_placement_credential(
     app_root: &std::path::Path,
+    binding_id: &str,
+    secret: &Zeroizing<String>,
+) -> Result<ProvisionReport> {
+    provision_installed_credential(
+        app_root,
+        ProvisionSection::ExternalExecution,
+        binding_id,
+        secret,
+    )
+}
+
+/// Provision `secret` for the installed binding `binding_id` of `section`.
+pub fn provision_installed_credential(
+    app_root: &std::path::Path,
+    section: ProvisionSection,
     binding_id: &str,
     secret: &Zeroizing<String>,
 ) -> Result<ProvisionReport> {
@@ -63,116 +113,72 @@ pub fn provision_installed_placement_credential(
         secret.len() <= MAX_PLACEMENT_SECRET_BYTES,
         "placement credential secret exceeds {MAX_PLACEMENT_SECRET_BYTES} bytes"
     );
-    let binding = read_installed_binding(app_root, binding_id)?;
-    // Reverify the exact signed source, document, capacity owner and digest
-    // before opening a vault that may perform recovery writes.
-    binding.retained_generation()?;
-    let access = binding.credential_access()?;
+    let identity = load_node_identity(app_root)?;
+    let (access, owner, generation, backend, account) = match section {
+        ProvisionSection::ExternalExecution => {
+            let binding = read_installed_binding(app_root, binding_id, &identity)?;
+            // Reverify the exact signed source, document, capacity owner and
+            // digest before opening a vault that may perform recovery writes.
+            binding.retained_generation()?;
+            let (owner, generation, backend, account) = binding.credential_coordinates();
+            (
+                binding.credential_access()?,
+                owner,
+                generation,
+                backend,
+                account,
+            )
+        }
+        ProvisionSection::RuntimeSnapshotProduction => {
+            let binding = runtime_snapshot_production::compose::installed_production_binding(
+                app_root, binding_id, &identity,
+            )?;
+            binding.retained_generation()?;
+            let (owner, generation, backend, account) = binding.credential_coordinates()?;
+            (
+                binding.credential_access()?,
+                owner,
+                generation,
+                backend,
+                account,
+            )
+        }
+    };
+    let outcome = store_secret(app_root, &access, secret)?;
+    Ok(ProvisionReport {
+        section: section.name().to_owned(),
+        binding_id: binding_id.to_owned(),
+        owner,
+        generation,
+        backend,
+        account,
+        outcome,
+    })
+}
+
+fn store_secret(
+    app_root: &std::path::Path,
+    access: &PlacementCredentialAccess,
+    secret: &Zeroizing<String>,
+) -> Result<ProvisionOutcome> {
     let vault = SealedEnvelopeVault::load(app_root)?;
-    let outcome = if vault.placement_credential(&access).is_ok() {
+    let outcome = if vault.placement_credential(access).is_ok() {
         ProvisionOutcome::AlreadyPresent
     } else {
         ProvisionOutcome::Inserted
     };
     let value = access.encode_secret(secret);
-    vault.provision_placement_credential(&access, value.as_str())?;
-    Ok(ProvisionReport {
-        binding_id: binding.id.clone(),
-        owner: binding.capacity_owner.clone(),
-        generation: binding.document.credential_generation.clone(),
-        backend: binding.document.backend.clone(),
-        account: binding.document.account.clone(),
-        outcome,
-    })
-}
-
-/// Read and verify the installed binding the way the node-config loader does:
-/// bounded no-follow read, trusted signature, current-node signer, then the
-/// same document parse and validation.
-fn read_installed_binding(
-    app_root: &std::path::Path,
-    binding_id: &str,
-) -> Result<InstalledExternalExecutionBinding> {
-    ensure!(
-        !binding_id.is_empty()
-            && binding_id.len() <= 128
-            && !binding_id.starts_with('.')
-            && binding_id
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.')),
-        "external-execution binding id is invalid"
-    );
-    let path = app_root
-        .join(ryeos_engine::AI_DIR)
-        .join("node")
-        .join(SECTION_NAME)
-        .join(format!("{binding_id}.yaml"));
-    let Some(bytes) = lillux::read_optional_regular_file_bounded_no_follow(
-        &path,
-        ryeos_node_runtime::node_document::MAX_ITEM_BYTES,
-    )
-    .with_context(|| format!("read external-execution binding {}", path.display()))?
-    else {
-        bail!("external-execution binding `{binding_id}` is not installed");
-    };
-    let content = std::str::from_utf8(&bytes).context("external-execution binding is not UTF-8")?;
-    let identity = ryeos_node_runtime::identity::NodeIdentity::load(
-        &app_root
-            .join(ryeos_engine::AI_DIR)
-            .join("node/identity/private_key.pem"),
-    )?;
-    let envelope = ryeos_engine::contracts::SignatureEnvelope {
-        prefix: "#".into(),
-        suffix: None,
-        after_shebang: false,
-    };
-    let header = ryeos_engine::item_resolution::parse_signature_header(content, &envelope)
-        .context("external-execution binding has no valid signature line")?;
-    ensure!(
-        header.signer_fingerprint == identity.fingerprint(),
-        "external-execution binding must be signed by the current node {}; got {}",
-        identity.fingerprint(),
-        header.signer_fingerprint
-    );
-    let trust = ryeos_engine::trust::TrustStore::from_signers(vec![
-        ryeos_engine::trust::TrustedSigner {
-            fingerprint: identity.fingerprint().to_owned(),
-            verifying_key: *identity.verifying_key(),
-            label: None,
-        },
-    ]);
-    let (class, _) =
-        ryeos_engine::trust::verify_item_signature(content, &header, &envelope, &trust)
-            .context("verify external-execution binding signature")?;
-    ensure!(
-        class == ryeos_engine::contracts::TrustClass::Trusted,
-        "external-execution binding signature is not trusted"
-    );
-    let body: serde_json::Value = serde_yaml::from_str(
-        &ryeos_node_runtime::node_config_source::strip_signature(content),
-    )
-    .context("parse external-execution binding body")?;
-    let document: BindingDocument =
-        serde_json::from_value(body).context("invalid external placement binding")?;
-    document.validate()?;
-    let signer = identity.fingerprint().to_owned();
-    let digest = binding_digest(binding_id, &signer, content)?;
-    let capacity_owner = capacity_owner(&signer, &document)?;
-    Ok(InstalledExternalExecutionBinding {
-        id: binding_id.to_owned(),
-        document,
-        signed_source: content.into(),
-        signer,
-        signer_verifying_key: identity.verifying_key().to_bytes(),
-        digest,
-        capacity_owner,
-    })
+    vault.provision_placement_credential(access, value.as_str())?;
+    Ok(outcome)
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::{BindingDocument, InstalledExternalExecutionBinding};
     use super::*;
-    use crate::vault::placement::PlacementCredentialAccess;
+    use crate::node_config::sections::runtime_snapshot_production::compose::{
+        ProductionComposeRequest, ProductionLimits, compose_with_facts, tests as production_tests,
+    };
 
     const ID: &str = "fixture-binding";
 
@@ -304,9 +310,8 @@ mod tests {
     #[test]
     fn missing_or_malformed_binding_is_refused() {
         let node = node();
-        let error =
-            provision_installed_placement_credential(node.root.path(), ID, &secret("x"))
-                .unwrap_err();
+        let error = provision_installed_placement_credential(node.root.path(), ID, &secret("x"))
+            .unwrap_err();
         assert!(error.to_string().contains("is not installed"), "{error:#}");
         for bad in ["", "../escape", "a/b", ".hidden"] {
             assert!(
@@ -322,13 +327,10 @@ mod tests {
         let node = node();
         install(&node, &node.identity, &fixture_document());
         assert!(
-            provision_installed_placement_credential(node.root.path(), ID, &secret(""))
-                .is_err()
+            provision_installed_placement_credential(node.root.path(), ID, &secret("")).is_err()
         );
         let oversize = secret(&"x".repeat(MAX_PLACEMENT_SECRET_BYTES + 1));
-        assert!(
-            provision_installed_placement_credential(node.root.path(), ID, &oversize).is_err()
-        );
+        assert!(provision_installed_placement_credential(node.root.path(), ID, &oversize).is_err());
         let exact = secret(&"x".repeat(MAX_PLACEMENT_SECRET_BYTES));
         provision_installed_placement_credential(node.root.path(), ID, &exact).unwrap();
     }
@@ -348,5 +350,101 @@ mod tests {
         assert_ne!(old.generation, new.generation);
         assert_eq!(read_back(&node, &old), "old");
         assert_eq!(read_back(&node, &new), "new");
+    }
+
+    fn install_production(node: &Node) {
+        let lock = ryeos_node_runtime::state_lock::StateLock::acquire(
+            &ryeos_node_runtime::state_lock::default_lock_path(node.root.path()),
+        )
+        .unwrap();
+        compose_with_facts(
+            ProductionComposeRequest {
+                app_root: node.root.path(),
+                state_lock: &lock,
+                id: ID.into(),
+                external_binding_id: "operator".into(),
+                snapshot_spec: production_tests::SPEC.to_vec(),
+                sandbox_group_id: "sbg-exact".into(),
+                region: "oregon".into(),
+                source_plan: "standard".into(),
+                limits: ProductionLimits::default(),
+            },
+            &node.identity,
+            production_tests::facts(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_production_binding_provisions_under_its_own_owner() {
+        let node = node();
+        install_production(&node);
+        let report = provision_installed_credential(
+            node.root.path(),
+            ProvisionSection::RuntimeSnapshotProduction,
+            ID,
+            &secret("producer-secret"),
+        )
+        .unwrap();
+        assert_eq!(report.section, "runtime_snapshot_production");
+        assert_eq!(report.outcome, ProvisionOutcome::Inserted);
+        assert_eq!(report.backend, "render-sandbox-early-access");
+        // The read-back builds its access from the reported coordinates, so a
+        // drifting owner formula would not find the stored secret.
+        assert_eq!(read_back(&node, &report), "producer-secret");
+        let again = provision_installed_credential(
+            node.root.path(),
+            ProvisionSection::RuntimeSnapshotProduction,
+            ID,
+            &secret("producer-secret"),
+        )
+        .unwrap();
+        assert_eq!(again.outcome, ProvisionOutcome::AlreadyPresent);
+        let error = provision_installed_credential(
+            node.root.path(),
+            ProvisionSection::RuntimeSnapshotProduction,
+            ID,
+            &secret("changed"),
+        )
+        .unwrap_err();
+        assert!(immutable(&error), "{error:#}");
+        let rendered = format!("{report:?}{}", serde_json::to_string(&report).unwrap());
+        assert!(!rendered.contains("producer-secret"));
+    }
+
+    #[test]
+    fn sections_do_not_resolve_each_others_bindings() {
+        let node = node();
+        install_production(&node);
+        let error = provision_installed_placement_credential(node.root.path(), ID, &secret("x"))
+            .unwrap_err();
+        assert!(error.to_string().contains("is not installed"), "{error:#}");
+        install(&node, &node.identity, &fixture_document());
+        std::fs::remove_dir_all(
+            node.root
+                .path()
+                .join(".ai/node/runtime_snapshot_production"),
+        )
+        .unwrap();
+        let error = provision_installed_credential(
+            node.root.path(),
+            ProvisionSection::RuntimeSnapshotProduction,
+            ID,
+            &secret("x"),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("is not installed"), "{error:#}");
+    }
+
+    #[test]
+    fn section_names_parse_exactly() {
+        for section in [
+            ProvisionSection::ExternalExecution,
+            ProvisionSection::RuntimeSnapshotProduction,
+        ] {
+            assert_eq!(ProvisionSection::parse(section.name()).unwrap(), section);
+        }
+        let error = ProvisionSection::parse("bundle").unwrap_err().to_string();
+        assert!(error.contains("--section must be"), "{error}");
     }
 }

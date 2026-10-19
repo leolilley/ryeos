@@ -21,6 +21,8 @@
 //!   - `ryeos node host setup` — one-time administrator-owned host association
 //!   - `ryeos node external-execution compose` — compose and install a node-signed external placement binding on a stopped node
 //!   - `ryeos node external-execution provision-credential` — provision the placement credential an installed binding names into the node vault
+//!   - `ryeos node external-execution snapshot-compose` — compose and install a node-signed runtime snapshot production binding on a stopped node
+//!   - `ryeos node external-execution snapshot-qualification-compose` — compose and install a node-signed snapshot qualification binding on a stopped node
 //!
 //! `ryeos identity` is local as a bootstrap affordance: remote
 //! operators need to copy their node public key before the daemon is running.
@@ -106,6 +108,20 @@ const LOCAL_COMMANDS: &[LocalCommandDescriptor] = &[
     LocalCommandDescriptor {
         tokens: &["node", "external-execution", "provision-credential"],
         summary: "Store the placement credential for an installed binding, read from stdin",
+        category: "lifecycle",
+    },
+    LocalCommandDescriptor {
+        tokens: &["node", "external-execution", "snapshot-compose"],
+        summary: "Compose and sign a stopped node's runtime snapshot production binding",
+        category: "lifecycle",
+    },
+    LocalCommandDescriptor {
+        tokens: &[
+            "node",
+            "external-execution",
+            "snapshot-qualification-compose",
+        ],
+        summary: "Compose and sign a stopped node's runtime snapshot qualification binding",
         category: "lifecycle",
     },
     LocalCommandDescriptor {
@@ -223,7 +239,9 @@ pub async fn try_dispatch(
             run_node_capacity_reissue_command(&argv[3..], console).map_err(map_local_err)?;
             Ok(true)
         }
-        ("node", Some("external-execution")) if argv.get(2).map(String::as_str) == Some("compose") => {
+        ("node", Some("external-execution"))
+            if argv.get(2).map(String::as_str) == Some("compose") =>
+        {
             crate::lifecycle_external_compose::run_external_compose(&argv[3..], console)
                 .map_err(map_local_err)?;
             Ok(true)
@@ -231,8 +249,28 @@ pub async fn try_dispatch(
         ("node", Some("external-execution"))
             if argv.get(2).map(String::as_str) == Some("provision-credential") =>
         {
-            crate::lifecycle_external_credential::run_external_provision_credential(&argv[3..], console)
+            crate::lifecycle_external_credential::run_external_provision_credential(
+                &argv[3..],
+                console,
+            )
+            .map_err(map_local_err)?;
+            Ok(true)
+        }
+        ("node", Some("external-execution"))
+            if argv.get(2).map(String::as_str) == Some("snapshot-compose") =>
+        {
+            crate::lifecycle_external_snapshot_compose::run_snapshot_compose(&argv[3..], console)
                 .map_err(map_local_err)?;
+            Ok(true)
+        }
+        ("node", Some("external-execution"))
+            if argv.get(2).map(String::as_str) == Some("snapshot-qualification-compose") =>
+        {
+            crate::lifecycle_external_snapshot_compose::run_snapshot_qualification_compose(
+                &argv[3..],
+                console,
+            )
+            .map_err(map_local_err)?;
             Ok(true)
         }
         ("node", Some("reset")) if argv.get(2).map(String::as_str) == Some("execution-history") => {
@@ -324,7 +362,6 @@ struct NodeHostSetupArgs {
     /// Finite enclosing task ceiling for the node and its worker scopes.
     #[arg(long)]
     node_processes: u32,
-
 }
 
 fn run_node_host_setup_command(argv: &[String], _console: &crate::tty::Console) -> Result<()> {
@@ -427,11 +464,12 @@ fn run_node_policy_generation_reset_command(
         return Ok(());
     };
     args.validate()?;
-    let config = ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
-        app_root: args.app_root,
-        ..Default::default()
-    })
-    .context("load local node location for policy-generation reset")?;
+    let config =
+        ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
+            app_root: args.app_root,
+            ..Default::default()
+        })
+        .context("load local node location for policy-generation reset")?;
     let report = ryeos_node::run_init(&ryeos_node::InitOptions {
         app_root: config.app_root,
         bind: None,
@@ -492,11 +530,12 @@ fn run_node_policy_apply_command(argv: &[String], console: &crate::tty::Console)
     let Some(args) = parse_or_render_help::<NodePolicyApplyArgs>(argv, console)? else {
         return Ok(());
     };
-    let config = ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
-        app_root: args.app_root,
-        ..Default::default()
-    })
-    .context("load local node location for policy apply")?;
+    let config =
+        ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
+            app_root: args.app_root,
+            ..Default::default()
+        })
+        .context("load local node location for policy apply")?;
     let _state_lock = ryeos_node_runtime::state_lock::StateLock::acquire(
         &ryeos_node_runtime::state_lock::default_lock_path(&config.app_root),
     )
@@ -597,11 +636,12 @@ fn run_node_replay_reset_command(argv: &[String], console: &crate::tty::Console)
     if !args.confirm {
         anyhow::bail!("resetting predecessor replay indexes requires --confirm");
     }
-    let config = ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
-        app_root: args.app_root,
-        ..Default::default()
-    })
-    .context("load local node configuration for replay-index reset")?;
+    let config =
+        ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
+            app_root: args.app_root,
+            ..Default::default()
+        })
+        .context("load local node configuration for replay-index reset")?;
     let _state_lock = ryeos_node_runtime::state_lock::StateLock::acquire(
         &ryeos_node_runtime::state_lock::default_lock_path(&config.app_root),
     )
@@ -681,11 +721,12 @@ fn run_node_external_content_reset_command(
     if !args.dry_run && !args.confirm {
         anyhow::bail!("resetting predecessor external-content bindings requires --confirm");
     }
-    let config = ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
-        app_root: args.app_root,
-        ..Default::default()
-    })
-    .context("load local node configuration for external-content binding reset")?;
+    let config =
+        ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
+            app_root: args.app_root,
+            ..Default::default()
+        })
+        .context("load local node configuration for external-content binding reset")?;
     let state_lock = ryeos_node_runtime::state_lock::StateLock::acquire(
         &ryeos_node_runtime::state_lock::default_lock_path(&config.app_root),
     )
@@ -744,11 +785,12 @@ fn run_node_auth_reset_command(argv: &[String], console: &crate::tty::Console) -
     if !args.confirm {
         anyhow::bail!("resetting every authorized key requires --confirm");
     }
-    let config = ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
-        app_root: args.app_root,
-        ..Default::default()
-    })
-    .context("load local node configuration for authorization reset")?;
+    let config =
+        ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
+            app_root: args.app_root,
+            ..Default::default()
+        })
+        .context("load local node configuration for authorization reset")?;
     let _state_lock = ryeos_node_runtime::state_lock::StateLock::acquire(
         &ryeos_node_runtime::state_lock::default_lock_path(&config.app_root),
     )
@@ -756,8 +798,9 @@ fn run_node_auth_reset_command(argv: &[String], console: &crate::tty::Console) -
 
     let node = ryeos_node_runtime::identity::NodeIdentity::load(&config.node_signing_key_path)
         .context("load node identity for authorization reset")?;
-    let operator = ryeos_node_runtime::identity::NodeIdentity::load(&config.operator_signing_key_path)
-        .context("load operator identity for authorization reset")?;
+    let operator =
+        ryeos_node_runtime::identity::NodeIdentity::load(&config.operator_signing_key_path)
+            .context("load operator identity for authorization reset")?;
     let parent = config
         .authorized_keys_dir
         .parent()
@@ -863,7 +906,10 @@ struct ExecutionHistoryScratchArgs {
     json: bool,
 }
 
-fn run_execution_history_scratch_command(argv: &[String], console: &crate::tty::Console) -> Result<()> {
+fn run_execution_history_scratch_command(
+    argv: &[String],
+    console: &crate::tty::Console,
+) -> Result<()> {
     let Some(args) = parse_or_render_help::<ExecutionHistoryScratchArgs>(argv, console)? else {
         return Ok(());
     };
@@ -898,7 +944,11 @@ fn run_execution_history_scratch_command(argv: &[String], console: &crate::tty::
         }
     };
     let mut status = crate::tty::StatusBanner::new(
-        if report.left.is_empty() { crate::tty::Tone::Success } else { crate::tty::Tone::Warning },
+        if report.left.is_empty() {
+            crate::tty::Tone::Success
+        } else {
+            crate::tty::Tone::Warning
+        },
         if report.dry_run {
             "EXECUTION HISTORY SCRATCH PREVIEW"
         } else {
@@ -907,7 +957,14 @@ fn run_execution_history_scratch_command(argv: &[String], console: &crate::tty::
     );
     status.detail = Some(report.app_root.display().to_string());
     status.rows = vec![
-        crate::tty::Row::key_value(if report.dry_run { "would remove" } else { "removed" }, list(&report.removed)),
+        crate::tty::Row::key_value(
+            if report.dry_run {
+                "would remove"
+            } else {
+                "removed"
+            },
+            list(&report.removed),
+        ),
         crate::tty::Row::key_value(
             "left in place",
             if report.left.is_empty() {
@@ -921,13 +978,17 @@ fn run_execution_history_scratch_command(argv: &[String], console: &crate::tty::
         ),
         crate::tty::Row::key_value(
             "retired discard marker",
-            report
-                .retired_marker_schema
-                .map_or_else(|| "none".to_owned(), |schema| format!("schema {schema} cleared")),
+            report.retired_marker_schema.map_or_else(
+                || "none".to_owned(),
+                |schema| format!("schema {schema} cleared"),
+            ),
         ),
         crate::tty::Row::key_value(
             "active operation kept",
-            report.active_operation.clone().unwrap_or_else(|| "none".to_owned()),
+            report
+                .active_operation
+                .clone()
+                .unwrap_or_else(|| "none".to_owned()),
         ),
     ];
     console.success(&status)?;
@@ -1008,20 +1069,27 @@ impl ExecutionHistoryResetArgs {
 /// registrations; an installed scheduler service that does not resolve or is
 /// not trusted refuses the reset.
 fn scheduler_selected_by_installed_composition(app_root: Option<PathBuf>) -> Result<bool> {
-    let config = ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
-        app_root,
-        ..Default::default()
-    })
-    .context("load local node location for scheduler selection")?;
+    let config =
+        ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
+            app_root,
+            ..Default::default()
+        })
+        .context("load local node location for scheduler selection")?;
     let snapshot = crate::node_descriptors::load_verified_snapshot(&config.app_root)
         .context("load verified node composition for scheduler selection")?;
     let bundle_roots = crate::effective_metadata::snapshot_bundle_roots(&snapshot);
-    let engine =
-        crate::effective_metadata::build_effective_item_engine(&config.app_root, None, &bundle_roots)
-            .context("build installed-composition engine for scheduler selection")?;
+    let engine = crate::effective_metadata::build_effective_item_engine(
+        &config.app_root,
+        None,
+        &bundle_roots,
+    )
+    .context("build installed-composition engine for scheduler selection")?;
     // A build that cannot run a selected scheduler refuses.
-    ryeos_api::scheduler_selection::resolve_scheduler_selection(&engine, cfg!(feature = "scheduling"))
-        .context("derive scheduler selection from the installed composition")
+    ryeos_api::scheduler_selection::resolve_scheduler_selection(
+        &engine,
+        cfg!(feature = "scheduling"),
+    )
+    .context("derive scheduler selection from the installed composition")
 }
 
 fn run_execution_history_reset_command(
@@ -1046,7 +1114,8 @@ fn run_execution_history_reset_command(
                     to,
                 },
             ),
-        discard_unreadable_lifetime_fence_after_reboot: args.discard_unreadable_lifetime_fence_after_reboot,
+        discard_unreadable_lifetime_fence_after_reboot: args
+            .discard_unreadable_lifetime_fence_after_reboot,
     };
     let mut progress =
         crate::tty::ExecutionHistoryResetProgress::new(!args.json, console.capabilities());
@@ -1671,20 +1740,37 @@ fn capacity_reissue_banner(
     let mut banner = if report.already_applied {
         let mut banner = crate::tty::StatusBanner::new(
             crate::tty::Tone::Neutral,
-            format!("ALREADY RE-ISSUED: epoch {} → {}", report.from_epoch, report.to_epoch),
+            format!(
+                "ALREADY RE-ISSUED: epoch {} → {}",
+                report.from_epoch, report.to_epoch
+            ),
         );
-        banner.detail = Some("the account already carries this re-issuance; nothing new was written".to_owned());
+        banner.detail = Some(
+            "the account already carries this re-issuance; nothing new was written".to_owned(),
+        );
         banner
     } else {
         crate::tty::StatusBanner::new(
             crate::tty::Tone::Success,
-            format!("CAPACITY RE-ISSUED: epoch {} → {}", report.from_epoch, report.to_epoch),
+            format!(
+                "CAPACITY RE-ISSUED: epoch {} → {}",
+                report.from_epoch, report.to_epoch
+            ),
         )
     };
-    banner.rows.push(crate::tty::Row::key_value("app root", app_root.display().to_string()));
-    banner.rows.push(crate::tty::Row::key_value("document", report.document_digest.clone()));
+    banner.rows.push(crate::tty::Row::key_value(
+        "app root",
+        app_root.display().to_string(),
+    ));
+    banner.rows.push(crate::tty::Row::key_value(
+        "document",
+        report.document_digest.clone(),
+    ));
     if let Some(settled) = &report.settled_incarnation {
-        banner.rows.push(crate::tty::Row::key_value("settled incarnation", settled.clone()));
+        banner.rows.push(crate::tty::Row::key_value(
+            "settled incarnation",
+            settled.clone(),
+        ));
     }
     banner.rows.push(crate::tty::Row::text(
         "restart inhibition is not cleared; run `ryeos node allow-restart` when the cause is resolved",
@@ -2154,8 +2240,9 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
     // 5. Verified node config + per-bundle doctor. Requires init; degrades to
     //    n/a rather than piling failures onto an uninitialized node.
     if initialized {
-        let isolation = ryeos_node_runtime::engine_init::load_locked_registered_isolation(&config.app_root)
-            .map_err(|error| error.to_string());
+        let isolation =
+            ryeos_node_runtime::engine_init::load_locked_registered_isolation(&config.app_root)
+                .map_err(|error| error.to_string());
         let snapshot = match &isolation {
             Ok(runtime) => crate::node_descriptors::load_verified_snapshot_with_trust(
                 &config.app_root,
@@ -2293,7 +2380,9 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
 /// Doctor row for the native-capacity account: healthy with its summary,
 /// a warning with the cure when the allowance is spent and the signed policy
 /// lets the operator re-issue, a failure when it does not.
-fn native_capacity_check(app_root: &std::path::Path) -> ryeos_core_tools::actions::doctor::CheckResult {
+fn native_capacity_check(
+    app_root: &std::path::Path,
+) -> ryeos_core_tools::actions::doctor::CheckResult {
     use ryeos_core_tools::actions::doctor::{FAIL, NA, OK, WARN};
     match ryeos_node::native_capacity::inspect_capacity_account(app_root) {
         Ok(None) => check(
@@ -2301,9 +2390,11 @@ fn native_capacity_check(app_root: &std::path::Path) -> ryeos_core_tools::action
             NA,
             serde_json::json!({ "note": "no capacity issuance; `ryeos init` issues it" }),
         ),
-        Ok(Some(summary)) if summary.incarnations_remaining > 0 => {
-            check("native_capacity", OK, serde_json::json!({ "account": summary }))
-        }
+        Ok(Some(summary)) if summary.incarnations_remaining > 0 => check(
+            "native_capacity",
+            OK,
+            serde_json::json!({ "account": summary }),
+        ),
         Ok(Some(summary)) if summary.renewal.operator_reissue => check(
             "native_capacity",
             WARN,
@@ -2436,19 +2527,29 @@ fn inspect_capability_report(
 /// still holds now, checked from this shell: a swap-absent basis ends with
 /// any later `swapon`, and a swap limit can be lifted. The shell's cgroup can
 /// differ from the daemon's, so a swap-limit answer describes this shell.
-fn residency_now(report: &ryeos_node::capability_report::NodeCapabilityReport) -> serde_json::Value {
-    let Some(proof) = report.established_residency.as_ref().or(report.host.residency.as_ref()) else {
+fn residency_now(
+    report: &ryeos_node::capability_report::NodeCapabilityReport,
+) -> serde_json::Value {
+    let Some(proof) = report
+        .established_residency
+        .as_ref()
+        .or(report.host.residency.as_ref())
+    else {
         return serde_json::Value::Null;
     };
     match proof.confirm_swap_unreachable() {
         Ok(()) => serde_json::json!({ "holds": true, "name": proof.capability_name() }),
-        Err(reason) => serde_json::json!({ "holds": false, "name": proof.capability_name(), "reason": reason }),
+        Err(reason) => {
+            serde_json::json!({ "holds": false, "name": proof.capability_name(), "reason": reason })
+        }
     }
 }
 
 /// The app root's storage as the report recorded it, with the decision on
 /// durable storage.
-fn app_root_storage_json(report: &ryeos_node::capability_report::NodeCapabilityReport) -> serde_json::Value {
+fn app_root_storage_json(
+    report: &ryeos_node::capability_report::NodeCapabilityReport,
+) -> serde_json::Value {
     use lillux::process_control::STORAGE_DURABLE_ROOT;
     serde_json::json!({
         "facts": report.host.app_root_storage,
@@ -2462,9 +2563,14 @@ fn app_root_storage_json(report: &ryeos_node::capability_report::NodeCapabilityR
 
 /// One line for the app root's storage: the grade and basis that prove it
 /// durable, or the reason nothing does.
-fn app_root_storage_line(report: &ryeos_node::capability_report::NodeCapabilityReport) -> (String, crate::tty::Tone) {
+fn app_root_storage_line(
+    report: &ryeos_node::capability_report::NodeCapabilityReport,
+) -> (String, crate::tty::Tone) {
     use lillux::process_control::STORAGE_DURABLE_ROOT;
-    match (report.provided.get(STORAGE_DURABLE_ROOT), report.missing.get(STORAGE_DURABLE_ROOT)) {
+    match (
+        report.provided.get(STORAGE_DURABLE_ROOT),
+        report.missing.get(STORAGE_DURABLE_ROOT),
+    ) {
         (Some(evidence), _) => (
             format!("durable ({}): {}", evidence.source.as_str(), evidence.basis),
             crate::tty::Tone::Secondary,
@@ -2482,10 +2588,18 @@ fn decision_line(
 ) -> (String, crate::tty::Tone) {
     match (report.provided.get(name), report.missing.get(name)) {
         (Some(evidence), _) => (
-            format!("{name} ({} by {}): {}", evidence.source.as_str(), evidence.provider, evidence.basis),
+            format!(
+                "{name} ({} by {}): {}",
+                evidence.source.as_str(),
+                evidence.provider,
+                evidence.basis
+            ),
             crate::tty::Tone::Secondary,
         ),
-        (None, Some(reason)) => (format!("{name} missing: {reason}"), crate::tty::Tone::Warning),
+        (None, Some(reason)) => (
+            format!("{name} missing: {reason}"),
+            crate::tty::Tone::Warning,
+        ),
         (None, None) => (format!("{name} not decided"), crate::tty::Tone::Warning),
     }
 }
@@ -2515,8 +2629,14 @@ fn capability_section(
         "profile",
         composition.profile.as_deref().unwrap_or("unrecorded"),
     ));
-    section.rows.push(crate::tty::Row::key_value("host class", &composition.host_class));
-    section.rows.push(crate::tty::Row::key_value("bundles", &composition.bundles.join(", ")));
+    section.rows.push(crate::tty::Row::key_value(
+        "host class",
+        &composition.host_class,
+    ));
+    section.rows.push(crate::tty::Row::key_value(
+        "bundles",
+        &composition.bundles.join(", "),
+    ));
     section.rows.push(crate::tty::Row::key_value(
         "compiled features",
         &if composition.compiled_features.is_empty() {
@@ -2525,36 +2645,65 @@ fn capability_section(
             composition.compiled_features.join(", ")
         },
     ));
-    section.rows.push(crate::tty::Row::key_value("daemon binary", &report.daemon_digest));
+    section.rows.push(crate::tty::Row::key_value(
+        "daemon binary",
+        &report.daemon_digest,
+    ));
     let (storage, storage_tone) = app_root_storage_line(report);
-    section.rows.push(crate::tty::Row::key_value("app root storage", &storage).with_tone(storage_tone));
+    section
+        .rows
+        .push(crate::tty::Row::key_value("app root storage", &storage).with_tone(storage_tone));
     for (key, name) in [
-        ("durable state", lillux::process_control::PERSISTENCE_DURABLE_STATE),
-        ("credential home", ryeos_node::capability_report::CREDENTIAL_PRIVATE_HOME),
+        (
+            "durable state",
+            lillux::process_control::PERSISTENCE_DURABLE_STATE,
+        ),
+        (
+            "credential home",
+            ryeos_node::capability_report::CREDENTIAL_PRIVATE_HOME,
+        ),
     ] {
         let (text, tone) = decision_line(report, name);
-        section.rows.push(crate::tty::Row::key_value(key, &text).with_tone(tone));
+        section
+            .rows
+            .push(crate::tty::Row::key_value(key, &text).with_tone(tone));
     }
     let exposure = &report.exposure;
     section.rows.push(crate::tty::Row::key_value(
         "listeners",
-        &if exposure.listeners.is_empty() { "none".to_owned() } else { exposure.listeners.join(", ") },
+        &if exposure.listeners.is_empty() {
+            "none".to_owned()
+        } else {
+            exposure.listeners.join(", ")
+        },
     ));
     let ingress = match (&exposure.ingress, &exposure.ingress_unattested) {
         (Some(evidence), _) => format!("{}: {}", evidence.source.as_str(), evidence.basis),
-        (None, reason) => format!("unattested: {}", reason.as_deref().unwrap_or("no reason recorded")),
+        (None, reason) => format!(
+            "unattested: {}",
+            reason.as_deref().unwrap_or("no reason recorded")
+        ),
     };
-    section.rows.push(crate::tty::Row::key_value("ingress", &ingress));
+    section
+        .rows
+        .push(crate::tty::Row::key_value("ingress", &ingress));
     let generation = match check.map(|check| &check.detail["current"]) {
         Some(serde_json::Value::Bool(true)) => "current".to_owned(),
-        Some(serde_json::Value::Object(detail)) => match (detail.get("stale"), detail.get("error")) {
-            (Some(reason), _) => format!("stale: {}; start the node to refresh it", reason.as_str().unwrap_or("unknown")),
+        Some(serde_json::Value::Object(detail)) => match (detail.get("stale"), detail.get("error"))
+        {
+            (Some(reason), _) => format!(
+                "stale: {}; start the node to refresh it",
+                reason.as_str().unwrap_or("unknown")
+            ),
             (None, Some(error)) => format!("unknown: {}", error.as_str().unwrap_or("unknown")),
             (None, None) => "unknown".to_owned(),
         },
         _ => "unknown".to_owned(),
     };
-    section.rows.push(crate::tty::Row::key_value("report", &format!("{} ({generation})", report.generated_at)));
+    section.rows.push(crate::tty::Row::key_value(
+        "report",
+        &format!("{} ({generation})", report.generated_at),
+    ));
     let basis_name = |proof: &lillux::process_control::ResidencyProof| {
         proof.capability_name().unwrap_or("an unknown basis")
     };
@@ -2562,25 +2711,49 @@ fn capability_section(
     // it still holds is checked again now.
     let residency = match (&report.established_residency, &report.host.residency) {
         (Some(proof), _) => {
-            format!("{} (established, as of startup): {}", basis_name(proof), proof.basis())
+            format!(
+                "{} (established, as of startup): {}",
+                basis_name(proof),
+                proof.basis()
+            )
         }
         (None, Some(proof)) => {
-            format!("{} (planned before reservation, as of startup): {}", basis_name(proof), proof.basis())
+            format!(
+                "{} (planned before reservation, as of startup): {}",
+                basis_name(proof),
+                proof.basis()
+            )
         }
-        (None, None) => report.host.residency_refusal.clone().unwrap_or_else(|| "not proven".to_owned()),
+        (None, None) => report
+            .host
+            .residency_refusal
+            .clone()
+            .unwrap_or_else(|| "not proven".to_owned()),
     };
-    section.rows.push(crate::tty::Row::key_value("residency", &residency));
-    if let Some(proof) = report.established_residency.as_ref().or(report.host.residency.as_ref()) {
+    section
+        .rows
+        .push(crate::tty::Row::key_value("residency", &residency));
+    if let Some(proof) = report
+        .established_residency
+        .as_ref()
+        .or(report.host.residency.as_ref())
+    {
         let (now, tone) = match proof.confirm_swap_unreachable() {
-            Ok(()) => (format!("{} still holds", basis_name(proof)), crate::tty::Tone::Secondary),
+            Ok(()) => (
+                format!("{} still holds", basis_name(proof)),
+                crate::tty::Tone::Secondary,
+            ),
             Err(reason) => (
                 format!("{} no longer holds: {reason}", basis_name(proof)),
                 crate::tty::Tone::Warning,
             ),
         };
         section.rows.push(
-            crate::tty::Row::key_value("residency now", &format!("{now} (checked from this shell)"))
-                .with_tone(tone),
+            crate::tty::Row::key_value(
+                "residency now",
+                &format!("{now} (checked from this shell)"),
+            )
+            .with_tone(tone),
         );
     }
     let host = &report.host;
@@ -2591,7 +2764,10 @@ fn capability_section(
             refusal.as_deref().unwrap_or("no reason recorded")
         ),
     };
-    section.rows.push(crate::tty::Row::key_value("enclosure exit", &enclosure_exit));
+    section.rows.push(crate::tty::Row::key_value(
+        "enclosure exit",
+        &enclosure_exit,
+    ));
     // What a restart-generation witness recorded by this node can decide.
     let witness = match (report.generation.cgroup_enclosure, &host.enclosure_exit) {
         (Some(inode), Some(evidence)) => format!(
@@ -2603,15 +2779,26 @@ fn capability_section(
             .to_owned(),
         (None, _) => "boot only; the node is not the whole of a container enclosure".to_owned(),
     };
-    section.rows.push(crate::tty::Row::key_value("generation witness", &witness));
+    section
+        .rows
+        .push(crate::tty::Row::key_value("generation witness", &witness));
     let floor = &report.floor;
-    let floor_tone = if floor.admitted { crate::tty::Tone::Success } else { crate::tty::Tone::Failure };
+    let floor_tone = if floor.admitted {
+        crate::tty::Tone::Success
+    } else {
+        crate::tty::Tone::Failure
+    };
     section.rows.push(
         crate::tty::Row::key_value(
             "requires",
             &format!(
                 "{} — {}",
-                floor.requires.iter().map(floor_entry_text).collect::<Vec<_>>().join(", "),
+                floor
+                    .requires
+                    .iter()
+                    .map(floor_entry_text)
+                    .collect::<Vec<_>>()
+                    .join(", "),
                 if floor.admitted { "met" } else { "NOT met" }
             ),
         )
@@ -2627,18 +2814,27 @@ fn capability_section(
             .is_some_and(|entry| lillux::process_control::met_by_strongest(entry, &met.name));
         let proof = format!("from {} ({})", met.provider, met.source.as_str());
         let (text, tone) = if strongest {
-            (format!("  met {label} by {} {proof}", met.name), crate::tty::Tone::Secondary)
+            (
+                format!("  met {label} by {} {proof}", met.name),
+                crate::tty::Tone::Secondary,
+            )
         } else {
             (
-                format!("  met {label} by {} {proof}, a weaker grade it names", met.name),
+                format!(
+                    "  met {label} by {} {proof}, a weaker grade it names",
+                    met.name
+                ),
                 crate::tty::Tone::Warning,
             )
         };
-        section.rows.push(crate::tty::Row::text(text).with_tone(tone));
+        section
+            .rows
+            .push(crate::tty::Row::text(text).with_tone(tone));
     }
     for (name, reason) in &floor.unmet {
         section.rows.push(
-            crate::tty::Row::text(format!("  unmet {name}: {reason}")).with_tone(crate::tty::Tone::Failure),
+            crate::tty::Row::text(format!("  unmet {name}: {reason}"))
+                .with_tone(crate::tty::Tone::Failure),
         );
     }
     for (name, evidence) in &report.provided {
@@ -3015,7 +3211,11 @@ fn render_lifecycle_status(console: &crate::tty::Console, status: &LifecycleStat
                 .push(crate::tty::Row::key_value("detail", &diagnostics.message));
             banner
         }
-        LifecycleStatus::Stopped { app_root, capacity, capacity_error } => {
+        LifecycleStatus::Stopped {
+            app_root,
+            capacity,
+            capacity_error,
+        } => {
             let mut banner = crate::tty::StatusBanner::new(
                 crate::tty::Tone::Neutral,
                 "INITIALIZED, STOPPED — RUN: RYEOS START",
@@ -3033,7 +3233,11 @@ fn render_lifecycle_status(console: &crate::tty::Console, status: &LifecycleStat
             banner
         }
         LifecycleStatus::Running {
-            metadata, ready_at, capacity, capacity_error, ..
+            metadata,
+            ready_at,
+            capacity,
+            capacity_error,
+            ..
         } => {
             let mut banner = crate::tty::StatusBanner::new(crate::tty::Tone::Success, "RUNNING");
             for (key, value) in ryeos_node::status::capacity_status_rows(
@@ -3198,10 +3402,16 @@ mod tests {
         let lock_path = ryeos_node_runtime::state_lock::default_lock_path(root.path());
         let held = ryeos_node_runtime::state_lock::StateLock::acquire(&lock_path).unwrap();
         let console = crate::tty::Console::new(crate::tty::TerminalCapabilities::plain(80));
-        let argv: Vec<String> = ["--app-root", root.path().to_str().unwrap(), "--reason", "unit", "--json"]
-            .into_iter()
-            .map(String::from)
-            .collect();
+        let argv: Vec<String> = [
+            "--app-root",
+            root.path().to_str().unwrap(),
+            "--reason",
+            "unit",
+            "--json",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
         // What a running daemon holds is exactly this lock: the command refuses
         // before it reads a key or opens the account.
         let error = run_node_capacity_reissue_command(&argv, &console).unwrap_err();
@@ -3209,7 +3419,12 @@ mod tests {
             format!("{error:#}").contains("requires the node to be stopped"),
             "{error:#}"
         );
-        assert!(!root.path().join(".ai/config/onboarding/native-capacity-reissuance.json").exists());
+        assert!(
+            !root
+                .path()
+                .join(".ai/config/onboarding/native-capacity-reissuance.json")
+                .exists()
+        );
         drop(held);
         // With the lock free, the next refusal is the absent operator key of an
         // uninitialized root; nothing about capacity has been touched.
@@ -3229,22 +3444,44 @@ mod tests {
         };
         let banner = capacity_reissue_banner(std::path::Path::new("/srv/node"), &report);
         assert_eq!(banner.heading, "CAPACITY RE-ISSUED: epoch 3 → 4");
-        let value = |key: &str| banner.rows.iter()
-            .find(|row| row.key.as_deref() == Some(key))
-            .map(|row| row.value.clone())
-            .unwrap_or_else(|| panic!("no {key} row"));
+        let value = |key: &str| {
+            banner
+                .rows
+                .iter()
+                .find(|row| row.key.as_deref() == Some(key))
+                .map(|row| row.value.clone())
+                .unwrap_or_else(|| panic!("no {key} row"))
+        };
         assert_eq!(value("document"), "d".repeat(64));
         assert_eq!(value("settled incarnation"), "e".repeat(64));
-        assert!(banner.rows.iter().any(|row| row.key.is_none() && row.value.contains("allow-restart")));
-        let applied = capacity_reissue_banner(std::path::Path::new("/srv/node"),
-            &ryeos_node::native_capacity::ReissueReport { already_applied: true, settled_incarnation: None, ..report });
+        assert!(
+            banner
+                .rows
+                .iter()
+                .any(|row| row.key.is_none() && row.value.contains("allow-restart"))
+        );
+        let applied = capacity_reissue_banner(
+            std::path::Path::new("/srv/node"),
+            &ryeos_node::native_capacity::ReissueReport {
+                already_applied: true,
+                settled_incarnation: None,
+                ..report
+            },
+        );
         assert_eq!(applied.heading, "ALREADY RE-ISSUED: epoch 3 → 4");
-        assert!(applied.rows.iter().all(|row| row.key.as_deref() != Some("settled incarnation")));
+        assert!(
+            applied
+                .rows
+                .iter()
+                .all(|row| row.key.as_deref() != Some("settled incarnation"))
+        );
     }
 
     #[test]
     fn doctor_renders_composition_storage_and_exposure_rows() {
-        use lillux::process_control::{CapabilityEvidence, HostFacts, ProofSource, STORAGE_DURABLE_ROOT};
+        use lillux::process_control::{
+            CapabilityEvidence, HostFacts, ProofSource, STORAGE_DURABLE_ROOT,
+        };
         use ryeos_node::capability_report::{
             FloorAdmission, NodeCapabilityReport, NodeComposition, NodeExposure, ReportGeneration,
             SignedNodeCapabilityReport,
@@ -3263,7 +3500,10 @@ mod tests {
             node_fingerprint: "fixture".to_owned(),
             daemon_digest: "sha256:abc".to_owned(),
             generated_at: "fixture".to_owned(),
-            generation: ReportGeneration { boot_id: "fixture".to_owned(), cgroup_enclosure: None },
+            generation: ReportGeneration {
+                boot_id: "fixture".to_owned(),
+                cgroup_enclosure: None,
+            },
             subject: "node".to_owned(),
             composition: NodeComposition {
                 profile: Some("hosted-node".to_owned()),
@@ -3305,18 +3545,36 @@ mod tests {
         };
         let section = capability_section(Some(&signed), None);
         assert_eq!(row(&section, "host class"), "hosted");
-        assert_eq!(row(&section, "compiled features"), "model-provider-setup, scheduling");
+        assert_eq!(
+            row(&section, "compiled features"),
+            "model-provider-setup, scheduling"
+        );
         assert_eq!(row(&section, "daemon binary"), "sha256:abc");
-        assert!(row(&section, "app root storage").starts_with("not durable: the app root /data/app is on overlay"));
+        assert!(
+            row(&section, "app root storage")
+                .starts_with("not durable: the app root /data/app is on overlay")
+        );
         assert_eq!(
             row(&section, "durable state"),
             "persistence:durable_state missing: no persistent disk; 24 h hard lifetime (fixture)"
         );
-        assert_eq!(row(&section, "credential home"), "credential:private_home not decided");
+        assert_eq!(
+            row(&section, "credential home"),
+            "credential:private_home not decided"
+        );
         assert_eq!(row(&section, "listeners"), "[::]:8080");
-        assert_eq!(row(&section, "ingress"), "unattested: no provider attests what fronts this listener");
+        assert_eq!(
+            row(&section, "ingress"),
+            "unattested: no provider attests what fronts this listener"
+        );
         let json = app_root_storage_json(&report);
-        assert!(json["decision"]["missing"].as_str().unwrap().contains("overlay"), "{json}");
+        assert!(
+            json["decision"]["missing"]
+                .as_str()
+                .unwrap()
+                .contains("overlay"),
+            "{json}"
+        );
 
         let mut durable = report;
         durable.missing.clear();
@@ -3336,7 +3594,10 @@ mod tests {
             signature: signed.signature,
         };
         let section = capability_section(Some(&signed), None);
-        assert_eq!(row(&section, "app root storage"), "durable (measured): ext4 at /data, durable by mount");
+        assert_eq!(
+            row(&section, "app root storage"),
+            "durable (measured): ext4 at /data, durable by mount"
+        );
         assert_eq!(row(&section, "listeners"), "none");
     }
 
@@ -3405,13 +3666,8 @@ mod tests {
     #[test]
     fn init_takes_a_host_class_only_with_a_node_profile() {
         use clap::Parser as _;
-        let parsed = InitArgs::try_parse_from([
-            "--node-profile",
-            "core",
-            "--host-class",
-            "hosted",
-        ])
-        .unwrap();
+        let parsed =
+            InitArgs::try_parse_from(["--node-profile", "core", "--host-class", "hosted"]).unwrap();
         assert_eq!(parsed.host_class.as_deref(), Some("hosted"));
         assert!(InitArgs::try_parse_from(["--host-class", "hosted"]).is_err());
     }
