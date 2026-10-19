@@ -191,7 +191,7 @@ impl RuntimeDb {
                 "snapshot qualification source is not ready"
             );
             intent.validate_for(&source.intent, locator)?;
-            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            let now = lillux::time::timestamp_millis();
             ensure!(
                 intent.attempt_deadline_ms > now
                     && intent.attempt_deadline_ms.saturating_sub(now) <= 300_000,
@@ -230,7 +230,7 @@ impl RuntimeDb {
                 }
                 SnapshotQualificationPhase::Reserved => {}
             }
-            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            let now = lillux::time::timestamp_millis();
             ensure!(
                 now < record.intent.attempt_deadline_ms,
                 "snapshot qualification deadline expired"
@@ -276,7 +276,7 @@ impl RuntimeDb {
                 ),
                 "snapshot qualification occurrence did not follow attempt"
             );
-            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            let now = lillux::time::timestamp_millis();
             let changed = tx.execute(
                 "UPDATE runtime_snapshot_qualification SET phase='occurrence_bound',occurrence_json=?2,updated_at_ms=?3
              WHERE operation_id=?1 AND phase IN ('attempt_pending','quarantined')",
@@ -309,7 +309,7 @@ impl RuntimeDb {
                 record.phase == SnapshotQualificationPhase::AttemptPending,
                 "snapshot qualification quarantine requires pending attempt"
             );
-            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            let now = lillux::time::timestamp_millis();
             tx.execute(
                 "UPDATE runtime_snapshot_qualification SET phase='quarantined',updated_at_ms=?2
              WHERE operation_id=?1 AND phase='attempt_pending'",
@@ -376,7 +376,7 @@ pub(crate) mod tests {
         RestoredVerifierAttemptIntent,
         RestoredVerifierAdapterObservation,
     ) {
-        let now = i64::try_from(lillux::time::timestamp_millis()).unwrap();
+        let now = lillux::time::timestamp_millis();
         let mut source = RuntimeSnapshotIntent {
             schema: RUNTIME_SNAPSHOT_INTENT_SCHEMA,
             operation_id: String::new(),
@@ -562,7 +562,7 @@ pub(crate) mod tests {
     fn qualified_sandbox_create_has_one_durable_contact_attempt() {
         let (db, source, locator, readiness, intent, occurrence, verifier, observation) =
             retained_owner_measurement_fixture();
-        let now = i64::try_from(lillux::time::timestamp_millis()).unwrap();
+        let now = lillux::time::timestamp_millis();
         let invocation = ryeos_external_execution_contract::restored_runtime_measurement::ConsumerVerificationInputSelection {
             scenario_id: "codex-runtime".into(),
             qualification_operation_id: intent.operation_id.clone(),
@@ -803,7 +803,7 @@ pub(crate) mod tests {
         // Storage-owner fixture only: this deliberately bypasses root
         // admission and does not authorize provider contact or qualification.
         // The already terminated occurrence must remain readable as evidence.
-        let now = i64::try_from(lillux::time::timestamp_millis()).unwrap();
+        let now = lillux::time::timestamp_millis();
         let consumer_input_blob_hash = "f".repeat(64);
         assert!(db.conn.with_sql(|connection| Ok(connection.execute(
             "INSERT INTO restored_verifier_attempt

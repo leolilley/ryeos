@@ -1346,7 +1346,7 @@ mod tests {
     fn lifecycle(
         artifact: &str,
     ) -> std::sync::Arc<dyn crate::external_placement::ExternalPlacementBackend> {
-        installed::CoordinateOnlyBackend::new(
+        installed::CoordinateOnlyBackend::shared(
             RENDER_BACKEND_ID,
             artifact,
             SETTINGS_SCHEMA,

@@ -16698,7 +16698,7 @@ impl StateStore {
         self.lock()?.runtime_db.activate_external_lease_record(
             placement,
             activation,
-            i64::try_from(lillux::time::timestamp_millis())?,
+            lillux::time::timestamp_millis(),
         )
     }
 
@@ -16712,7 +16712,7 @@ impl StateStore {
         self.lock()?.runtime_db.hold_external_lease_ready_frame(
             placement,
             frame,
-            i64::try_from(lillux::time::timestamp_millis())?,
+            lillux::time::timestamp_millis(),
         )
     }
 
@@ -16726,7 +16726,7 @@ impl StateStore {
         self.lock()?.runtime_db.hold_external_lease_report_frame(
             placement,
             frame,
-            i64::try_from(lillux::time::timestamp_millis())?,
+            lillux::time::timestamp_millis(),
         )
     }
 
@@ -16740,7 +16740,7 @@ impl StateStore {
         self.lock()?.runtime_db.admit_external_lease_with_ready(
             placement,
             admission,
-            i64::try_from(lillux::time::timestamp_millis())?,
+            lillux::time::timestamp_millis(),
         )
     }
 
@@ -16755,7 +16755,7 @@ impl StateStore {
         self.lock()?.runtime_db.refuse_external_lease_and_cancel(
             placement,
             reason,
-            i64::try_from(lillux::time::timestamp_millis())?,
+            lillux::time::timestamp_millis(),
         )
     }
 
@@ -16772,7 +16772,7 @@ impl StateStore {
             .refuse_activated_external_lease_and_cancel(
                 placement,
                 reason,
-                i64::try_from(lillux::time::timestamp_millis())?,
+                lillux::time::timestamp_millis(),
             )
     }
 
@@ -21811,7 +21811,6 @@ impl StateStore {
         let deleted =
             g.runtime_db
                 .release_thread_launch_claim(&selected_permit, thread_id, claim_id)?;
-        drop(selected_permit);
         if deleted {
             // Same Store guard owns this set: no lock, allocation or fallible
             // acknowledgment separates durable deletion and exact retirement.
@@ -21833,7 +21832,7 @@ impl StateStore {
         let _permit = self.acquire_write_permit()?;
         let mut g = self.lock()?;
         // Occupancy refusal precedes every LostOwner/Exhausted shortcut.
-        let selected_permit = self.selected_mutation_permit(
+        self.selected_mutation_permit(
             &g,
             SelectedMutationOperation::Rotate(
                 thread_id,
@@ -21867,9 +21866,8 @@ impl StateStore {
         if g.active_launch_owners.contains(&next_active_owner) {
             bail!("rotated launch owner collides with an active daemon owner");
         }
-        // Finish the immutable permit borrow before reserving the Store-owned
-        // set, then revalidate occupancy under this unchanged guard.
-        drop(selected_permit);
+        // Reserve the Store-owned set, then revalidate occupancy under this
+        // unchanged guard.
         g.active_launch_owners
             .try_reserve(1)
             .map_err(|error| anyhow!("cannot reserve replacement active owner: {error}"))?;
@@ -21894,7 +21892,6 @@ impl StateStore {
                 max_attempts,
                 &next_owner,
             )?;
-        drop(selected_permit);
         if matches!(
             &outcome,
             runtime_db::RuntimeRecoveryClaimRotation::Rotated { .. }
@@ -25841,7 +25838,6 @@ mod tests {
                 .release_thread_launch_claim(&permit, "T", "claim")
                 .unwrap()
         );
-        drop(permit);
         drop(g);
         test_native::with_store_host(|host| runtime_db::test_native::retire(host, other_db));
     }
@@ -26638,7 +26634,7 @@ mod tests {
             .unwrap()
             .owner;
         let binding=crate::node_config::sections::external_execution::RetainedExternalExecutionBinding::test_fixture();
-        let now = i64::try_from(lillux::time::timestamp_millis()).unwrap();
+        let now = lillux::time::timestamp_millis();
         ExternalAllocationReservation {
             schema: runtime_db::external_execution::EXTERNAL_ALLOCATION_RESERVATION_SCHEMA,
             placement_thread_id: thread.into(),
@@ -28332,7 +28328,7 @@ mod tests {
                 "P-project-fence",
                 "credential-enrollment:project-fence",
                 "credential-login:project-fence",
-                i64::try_from(lillux::time::timestamp_millis()).unwrap() + 60_000,
+                lillux::time::timestamp_millis() + 60_000,
             )
             .expect("begin credential enrollment");
         let credential_generation = store

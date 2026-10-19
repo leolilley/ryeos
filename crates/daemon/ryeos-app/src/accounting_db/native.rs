@@ -737,10 +737,10 @@ impl AccountingNativeLedger {
             .is_ok_and(|state| holders_taken(&state))
     }
 
-    /// Move both terminals out for a test host's census, ending this owner's
+    /// Take both terminals out for a test host's census, ending this owner's
     /// factory alias. Production takes outside sources instead.
     #[cfg(test)]
-    pub(super) fn into_test_terminals(&self) -> Result<Vec<OriginalNativeConnectionTerminal>> {
+    pub(super) fn take_test_terminals(&self) -> Result<Vec<OriginalNativeConnectionTerminal>> {
         let mut state = self.lock_custody_state()?;
         let mut terminals = Vec::with_capacity(2);
         match std::mem::replace(&mut state.connection, LedgerConnection::Taken) {
@@ -828,7 +828,7 @@ mod tests {
             2,
             "the ledger and its schema reference each hold one ticket"
         );
-        for terminal in ledger.into_test_terminals().expect("ledger terminals") {
+        for terminal in ledger.take_test_terminals().expect("ledger terminals") {
             host.retain_terminal(terminal);
         }
     }
@@ -1071,7 +1071,7 @@ mod tests {
             1
         );
         for terminal in ledger
-            .into_test_terminals()
+            .take_test_terminals()
             .expect("refused ledger terminals")
         {
             host.retain_terminal(terminal);

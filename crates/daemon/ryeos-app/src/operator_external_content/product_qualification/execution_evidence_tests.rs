@@ -117,7 +117,7 @@ fn direct_settlement_requires_one_signed_terminal_digest() {
     };
     let exact = event(json!({"process_settlement_witness_digest":"a".repeat(64)}));
     assert_eq!(
-        signed_terminal_process_settlement_digest(&[exact.clone()]).unwrap(),
+        signed_terminal_process_settlement_digest(std::slice::from_ref(&exact)).unwrap(),
         "a".repeat(64)
     );
     assert!(signed_terminal_process_settlement_digest(&[]).is_err());

@@ -2397,7 +2397,7 @@ mod tests {
         db.reserve_scoped_child_attempt(&initial).unwrap();
         assert!(
             db.conn
-                .with_sql(|connection| read_scope_lifetime_fence(connection))
+                .with_sql(read_scope_lifetime_fence)
                 .unwrap()
                 .is_some()
         );
@@ -2446,7 +2446,7 @@ mod tests {
         );
         assert!(
             db.conn
-                .with_sql(|connection| read_scope_lifetime_fence(connection))
+                .with_sql(read_scope_lifetime_fence)
                 .unwrap()
                 .is_none()
         );
@@ -2726,7 +2726,7 @@ mod tests {
             .unwrap();
         assert!(
             db.conn
-                .with_sql(|connection| read_scope_lifetime_fence(connection))
+                .with_sql(read_scope_lifetime_fence)
                 .unwrap()
                 .is_some()
         );
@@ -2745,7 +2745,7 @@ mod tests {
             .unwrap();
         assert!(
             db.conn
-                .with_sql(|connection| read_scope_lifetime_fence(connection))
+                .with_sql(read_scope_lifetime_fence)
                 .unwrap()
                 .is_none()
         );

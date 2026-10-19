@@ -2826,7 +2826,7 @@ impl JournalOwner for NodeJournalOwner {
             if !retained {
                 allocation
                     .reservation
-                    .require_startup_time(i64::try_from(lillux::time::timestamp_millis())?)?;
+                    .require_startup_time(lillux::time::timestamp_millis())?;
             }
         }
         let retained_noninput_observation =
@@ -4477,9 +4477,7 @@ pub(super) mod tests {
                 .unwrap();
             assert!(acknowledged.incoming_new);
             assert!(acknowledged.urgent_revocation.is_none());
-            db.conn
-                .with_sql(|connection| validate_channels(connection))
-                .unwrap();
+            db.conn.with_sql(validate_channels).unwrap();
         }
     }
 
@@ -4583,9 +4581,7 @@ pub(super) mod tests {
             repeated.urgent_revocation.unwrap().digest(),
             cancel.digest()
         );
-        db.conn
-            .with_sql(|connection| validate_channels(connection))
-            .unwrap();
+        db.conn.with_sql(validate_channels).unwrap();
     }
 
     #[test]
@@ -4646,9 +4642,7 @@ pub(super) mod tests {
             .unwrap();
         assert!(!retry.incoming_new);
         assert_eq!(retry.urgent_revocation.unwrap().digest(), cancel.digest());
-        db.conn
-            .with_sql(|connection| validate_channels(connection))
-            .unwrap();
+        db.conn.with_sql(validate_channels).unwrap();
     }
 
     #[test]
@@ -4892,7 +4886,7 @@ pub(super) mod tests {
     }
 
     fn wait_past_startup(reservation: &ExternalAllocationReservation) {
-        let now = i64::try_from(lillux::time::timestamp_millis()).unwrap();
+        let now = lillux::time::timestamp_millis();
         lillux::time::sleep(lillux::time::Duration::from_millis(
             u64::try_from((reservation.startup_deadline_ms - now).max(0)).unwrap() + 1,
         ));
@@ -5851,9 +5845,7 @@ pub(super) mod tests {
             })
             .unwrap();
         assert_eq!(application, "pending");
-        db.conn
-            .with_sql(|connection| validate_channels(connection))
-            .unwrap();
+        db.conn.with_sql(validate_channels).unwrap();
     }
 
     #[test]
@@ -6136,12 +6128,7 @@ pub(super) mod tests {
             db.external_allocation(placement).unwrap().unwrap().phase,
             ExternalAllocationPhase::Quarantined
         );
-        assert_eq!(
-            db.conn
-                .with_sql(|connection| read_guard(connection))
-                .unwrap(),
-            1
-        );
+        assert_eq!(db.conn.with_sql(read_guard).unwrap(), 1);
     }
 
     #[test]
@@ -6232,15 +6219,8 @@ pub(super) mod tests {
             db.record_external_execution_revocation(placement, &different)
                 .is_err()
         );
-        db.conn
-            .with_sql(|connection| validate_channels(connection))
-            .unwrap();
-        assert_eq!(
-            db.conn
-                .with_sql(|connection| read_guard(connection))
-                .unwrap(),
-            1
-        );
+        db.conn.with_sql(validate_channels).unwrap();
+        assert_eq!(db.conn.with_sql(read_guard).unwrap(), 1);
         assert!(
             db.release_credential_profile("P-channel", "worker-channel")
                 .is_err()
@@ -6340,12 +6320,7 @@ pub(super) mod tests {
                 .contains(&candidate)
         );
         assert!(db.external_execution_blob_roots().unwrap().is_empty());
-        assert_eq!(
-            db.conn
-                .with_sql(|connection| read_guard(connection))
-                .unwrap(),
-            1
-        );
+        assert_eq!(db.conn.with_sql(read_guard).unwrap(), 1);
     }
 
     #[test]
@@ -7092,15 +7067,8 @@ pub(super) mod tests {
             .unwrap();
         drop(db);
         let db = crate::runtime_db::test_native::TestRuntime::open(&path);
-        db.conn
-            .with_sql(|connection| validate_channels(connection))
-            .unwrap();
-        assert_eq!(
-            db.conn
-                .with_sql(|connection| read_guard(connection))
-                .unwrap(),
-            1
-        );
+        db.conn.with_sql(validate_channels).unwrap();
+        assert_eq!(db.conn.with_sql(read_guard).unwrap(), 1);
     }
 
     #[test]
@@ -7172,9 +7140,7 @@ pub(super) mod tests {
         );
         db.finish_external_frame_application(placement, direction, 3, &quiesce_digest)
             .unwrap();
-        db.conn
-            .with_sql(|connection| validate_channels(connection))
-            .unwrap();
+        db.conn.with_sql(validate_channels).unwrap();
     }
 
     #[test]
@@ -7237,9 +7203,7 @@ pub(super) mod tests {
             &digest,
         )
         .unwrap();
-        db.conn
-            .with_sql(|connection| validate_channels(connection))
-            .unwrap();
+        db.conn.with_sql(validate_channels).unwrap();
     }
 
     #[test]
@@ -7321,19 +7285,12 @@ pub(super) mod tests {
         );
         db.record_external_execution_frame(placement, &stopped)
             .unwrap();
-        assert_eq!(
-            db.conn
-                .with_sql(|connection| read_guard(connection))
-                .unwrap(),
-            1
-        );
+        assert_eq!(db.conn.with_sql(read_guard).unwrap(), 1);
         assert!(
             db.release_credential_profile("P-channel", "worker-channel")
                 .is_err()
         );
-        db.conn
-            .with_sql(|connection| validate_channels(connection))
-            .unwrap();
+        db.conn.with_sql(validate_channels).unwrap();
     }
 
     #[test]
@@ -7474,9 +7431,7 @@ pub(super) mod tests {
                 .unwrap()
                 .is_empty()
         );
-        db.conn
-            .with_sql(|connection| validate_channels(connection))
-            .unwrap();
+        db.conn.with_sql(validate_channels).unwrap();
     }
 
     #[test]
@@ -7720,9 +7675,7 @@ pub(super) mod tests {
         );
         assert!(drained_retry.outbound.is_empty());
         assert!(drained_retry.urgent_revocation.is_none());
-        db.conn
-            .with_sql(|connection| validate_channels(connection))
-            .unwrap();
+        db.conn.with_sql(validate_channels).unwrap();
     }
 
     #[test]
@@ -7857,9 +7810,7 @@ pub(super) mod tests {
                 .contains("external native observation was already retained"),
             "{duplicate_error:#}"
         );
-        db.conn
-            .with_sql(|connection| validate_channels(connection))
-            .unwrap();
+        db.conn.with_sql(validate_channels).unwrap();
         drop(db);
         let reopened =
             crate::runtime_db::test_native::TestRuntime::open(&root.path().join("runtime.sqlite3"));
@@ -7997,8 +7948,6 @@ pub(super) mod tests {
             })
             .unwrap();
         assert_eq!(release_application, "applied");
-        db.conn
-            .with_sql(|connection| validate_channels(connection))
-            .unwrap();
+        db.conn.with_sql(validate_channels).unwrap();
     }
 }

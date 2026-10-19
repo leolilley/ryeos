@@ -904,7 +904,7 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        let now = i64::try_from(lillux::time::timestamp_millis()).unwrap();
+        let now = lillux::time::timestamp_millis();
         assert_eq!(used(&db, now).held, 0);
     }
 
@@ -942,7 +942,7 @@ mod tests {
         // Replay reserves nothing twice.
         db.reserve_external_lease_allocation(&first, &binding, &charge_of(60))
             .unwrap();
-        let now = i64::try_from(lillux::time::timestamp_millis()).unwrap();
+        let now = lillux::time::timestamp_millis();
         assert_eq!(used(&db, now).held, 1);
         db.conn.with_sql(super::super::validate_current).unwrap();
 

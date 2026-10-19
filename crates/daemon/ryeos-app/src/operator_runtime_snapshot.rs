@@ -161,7 +161,7 @@ fn bootstrap_source_checked(
     let (bootstrap_profile_digest, provider_spec_digest) = state
         .external_placement_backends
         .bootstrap_source_profile(binding)?;
-    let now = i64::try_from(lillux::time::timestamp_millis())?;
+    let now = lillux::time::timestamp_millis();
     let mut intent = RuntimeSnapshotBootstrapIntent {
         schema: BOOTSTRAP_INTENT_SCHEMA,
         operation_id: String::new(),
@@ -387,7 +387,7 @@ fn fetch_bootstrap_source_readiness(
                 "bootstrap readiness exceeded its contact deadline"
             );
             observation.validate_for(&request)?;
-            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            let now = lillux::time::timestamp_millis();
             ensure!(
                 observation.observed_at_ms <= now
                     && now.saturating_sub(observation.observed_at_ms) <= 60_000
@@ -465,7 +465,7 @@ fn terminate_retained_bootstrap_source(
         provider_id: source.intent.provider_id.clone(),
         provider_group_id: source.intent.provider_group_id.clone(),
         provider_spec_digest: source.intent.provider_spec_digest.clone(),
-        attempt_deadline_ms: i64::try_from(lillux::time::timestamp_millis())?
+        attempt_deadline_ms: lillux::time::timestamp_millis()
             .checked_add(60_000)
             .context("bootstrap termination deadline overflow")?,
     };
@@ -576,7 +576,7 @@ pub struct BootstrapSourceCleanupRecovery {
 pub fn recover_bootstrap_source_cleanups(
     state: &AppState,
 ) -> Result<BootstrapSourceCleanupRecovery> {
-    let now_ms = i64::try_from(lillux::time::timestamp_millis())?;
+    let now_ms = lillux::time::timestamp_millis();
     let sources = state.state_store.recoverable_bootstrap_sources(now_ms)?;
     let mut report = BootstrapSourceCleanupRecovery {
         discovered: sources.len(),
@@ -3429,7 +3429,7 @@ mod tests {
                 base64::engine::general_purpose::STANDARD.encode(root_key.to_bytes())
             ),
         };
-        let now = i64::try_from(lillux::time::timestamp_millis()).unwrap();
+        let now = lillux::time::timestamp_millis();
         let mut intent = RuntimeSnapshotIntent {
             schema: RUNTIME_SNAPSHOT_INTENT_SCHEMA,
             operation_id: String::new(),

@@ -1329,7 +1329,11 @@ impl OriginalRuntimeAcquisitionOutsideCustody {
             Arc::ptr_eq(authority, canonical_parent),
             "unused Runtime source selects different actual canonical parent"
         );
-        if original.registration.is_none() {
+        if let Some(registration) = original.registration.as_ref() {
+            let quote = quote_runtime_membership(registry, 1)?;
+            registry.prepay_transfer(prepay, quote.bytes, quote.steps)?;
+            registry.require_membership(registration)?;
+        } else {
             let root = original
                 .root
                 .as_ref()
@@ -1346,10 +1350,6 @@ impl OriginalRuntimeAcquisitionOutsideCustody {
                     return Err(error);
                 }
             }
-        } else {
-            let quote = quote_runtime_membership(registry, 1)?;
-            registry.prepay_transfer(prepay, quote.bytes, quote.steps)?;
-            registry.require_membership(original.registration.as_ref().unwrap())?;
         }
         // SAME canonical parent remains borrowed/retained throughout. Actual
         // root already retained by the registry before this duplicate ends.

@@ -220,7 +220,7 @@ impl GatePorts for StatePorts<'_> {
             .activation
             .as_ref()
             .context("an activated lease record carries its activation")?;
-        let now_ms = i64::try_from(lillux::time::timestamp_millis())?;
+        let now_ms = lillux::time::timestamp_millis();
         let remaining_ms = u64::try_from(activation.ready_deadline_ms.saturating_sub(now_ms))?;
         ensure!(
             remaining_ms > 0,

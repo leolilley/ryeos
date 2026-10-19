@@ -443,7 +443,7 @@ fn reserve_process_resources(
             reservation.allocation_limit
         );
     }
-    let now_ms = i64::try_from(lillux::time::timestamp_millis())?;
+    let now_ms = lillux::time::timestamp_millis();
     conn.execute(
         "INSERT INTO process_resource_reservation (
             reservation_id, owner_kind, owner_coordinate, reservation, created_at_ms, updated_at_ms
@@ -664,7 +664,7 @@ fn attach_process_resource_owner(
             "exclusive resource allocation count {total} exceeds node-policy ceiling {allocation_limit}"
         );
     }
-    let now_ms = i64::try_from(lillux::time::timestamp_millis())?;
+    let now_ms = lillux::time::timestamp_millis();
     conn.execute(
         "INSERT INTO process_resource_owner (
             owner_incarnation, owner_kind, owner_coordinate, process_identity,
@@ -760,7 +760,7 @@ fn prove_process_resource_owner_cleanup(
             owner_coordinate,
             encoded,
             encoded_evidence,
-            i64::try_from(lillux::time::timestamp_millis())?,
+            lillux::time::timestamp_millis(),
         ],
     )?;
     if changed == 1 {
@@ -807,7 +807,7 @@ fn consume_resource_owner_release_fence(
             owner_kind,
             owner_coordinate,
             encoded,
-            i64::try_from(lillux::time::timestamp_millis())?,
+            lillux::time::timestamp_millis(),
         ],
     )?;
     if changed == 1 {
@@ -19076,7 +19076,7 @@ impl RuntimeDb {
             tx.execute(
                 "INSERT INTO thread_process_scope_reservation (thread_id, launch_owner, reservation, created_at_ms, updated_at_ms)
               VALUES (?1, ?2, ?3, ?4, ?4)",
-                params![reservation.thread_id, reservation.launch_owner, encoded, i64::try_from(lillux::time::timestamp_millis())?],
+                params![reservation.thread_id, reservation.launch_owner, encoded, lillux::time::timestamp_millis()],
             )?;
             tx.commit().context("commit thread scope intent")
         })
@@ -19165,7 +19165,7 @@ impl RuntimeDb {
                     reservation.thread_id,
                     reservation.launch_owner,
                     encoded,
-                    i64::try_from(lillux::time::timestamp_millis())?
+                    lillux::time::timestamp_millis()
                 ],
             )?;
             if changed != 1 {
@@ -19200,7 +19200,7 @@ impl RuntimeDb {
               WHERE thread_id=?1 AND launch_owner=?2 AND reservation=?3
                 AND EXISTS(SELECT 1 FROM thread_launch_claim WHERE thread_id=?1 AND claimed_by=?2)
                 AND EXISTS(SELECT 1 FROM thread_runtime WHERE thread_id=?1 AND stop_requested_at_ms IS NULL AND process_identity IS NULL)",
-                params![thread_id, launch_owner, expected, bound, i64::try_from(lillux::time::timestamp_millis())?],
+                params![thread_id, launch_owner, expected, bound, lillux::time::timestamp_millis()],
             )?;
             if changed != 1 {
                 bail!("thread scope binding was not committed exactly once")
@@ -19256,7 +19256,7 @@ impl RuntimeDb {
                     owner_coordinate,
                     expected,
                     bound,
-                    i64::try_from(lillux::time::timestamp_millis())?,
+                    lillux::time::timestamp_millis(),
                 ],
             )?;
             if changed != 1 {
@@ -24169,10 +24169,7 @@ mod tests {
                     .unwrap(),
             );
         }
-        let witness = db
-            .conn
-            .with_sql(|connection| read_scope_lifetime_fence(connection))
-            .unwrap();
+        let witness = db.conn.with_sql(read_scope_lifetime_fence).unwrap();
         assert!(witness.is_some());
         let (first, reserved) = &retirements[0];
         db.complete_closed_worker_scope_retirement(first, reserved)
@@ -24180,9 +24177,7 @@ mod tests {
         db.complete_closed_worker_scope_retirement(first, reserved)
             .unwrap();
         assert_eq!(
-            db.conn
-                .with_sql(|connection| read_scope_lifetime_fence(connection))
-                .unwrap(),
+            db.conn.with_sql(read_scope_lifetime_fence).unwrap(),
             witness
         );
         assert_eq!(db.unsettled_process_scope_count(None).unwrap(), 1);
@@ -24192,7 +24187,7 @@ mod tests {
         assert_eq!(db.unsettled_process_scope_count(None).unwrap(), 0);
         assert!(
             db.conn
-                .with_sql(|connection| read_scope_lifetime_fence(connection))
+                .with_sql(read_scope_lifetime_fence)
                 .unwrap()
                 .is_none()
         );
@@ -24286,7 +24281,7 @@ mod tests {
             );
             assert!(
                 db.conn
-                    .with_sql(|connection| read_scope_lifetime_fence(connection))
+                    .with_sql(read_scope_lifetime_fence)
                     .unwrap()
                     .is_none(),
                 "failed reservation must roll back the coarse fence as well as the session"
@@ -24294,9 +24289,7 @@ mod tests {
             db.reserve_dedicated_worker_scope("T-one", "worker-one", 1, &allocation)
                 .unwrap();
             assert_eq!(
-                db.conn
-                    .with_sql(|connection| read_scope_lifetime_fence(connection))
-                    .unwrap(),
+                db.conn.with_sql(read_scope_lifetime_fence).unwrap(),
                 Some(allocation.host_lifetime().unwrap())
             );
             assert!(db.worker_process("worker-one").unwrap().is_none());
@@ -24889,7 +24882,7 @@ mod tests {
         assert_eq!(completed.state, ScopeRetirementState::Retired);
         assert!(
             db.conn
-                .with_sql(|connection| read_scope_lifetime_fence(connection))
+                .with_sql(read_scope_lifetime_fence)
                 .unwrap()
                 .is_none()
         );

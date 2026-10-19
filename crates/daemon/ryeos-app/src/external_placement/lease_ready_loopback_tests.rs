@@ -369,7 +369,7 @@ impl Drop for Guest {
 }
 
 fn now_ms() -> i64 {
-    i64::try_from(lillux::time::timestamp_millis()).unwrap()
+    lillux::time::timestamp_millis()
 }
 
 fn budget() -> ExternalLeaseBudget {

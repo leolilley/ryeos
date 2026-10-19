@@ -232,7 +232,7 @@ impl RuntimeDb {
                 .as_ref()
                 .context("qualification termination source has no occurrence")?;
             intent.validate_for(&qualification.intent, occurrence)?;
-            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            let now = lillux::time::timestamp_millis();
             ensure!(
                 intent.attempt_deadline_ms > now
                     && intent.attempt_deadline_ms.saturating_sub(now) <= 300_000,
@@ -282,7 +282,7 @@ impl RuntimeDb {
                 }
                 QualificationTerminationPhase::Reserved => {}
             }
-            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            let now = lillux::time::timestamp_millis();
             ensure!(
                 now < record.intent.attempt_deadline_ms,
                 "qualification termination deadline expired"
@@ -319,7 +319,7 @@ impl RuntimeDb {
                 record.phase == QualificationTerminationPhase::AttemptPending,
                 "qualification termination quarantine requires pending attempt"
             );
-            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            let now = lillux::time::timestamp_millis();
             tx.execute(
                 "UPDATE runtime_snapshot_qualification_termination SET phase='quarantined',updated_at_ms=?2
              WHERE operation_id=?1 AND phase='attempt_pending'",
@@ -357,7 +357,7 @@ impl RuntimeDb {
                 ),
                 "qualification termination had no claimed provider contact"
             );
-            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            let now = lillux::time::timestamp_millis();
             tx.execute(
                 "UPDATE runtime_snapshot_qualification_termination SET phase='terminal',observation_json=?2,updated_at_ms=?3
              WHERE operation_id=?1 AND phase IN ('attempt_pending','quarantined')",

@@ -695,7 +695,7 @@ pub(super) fn require_current_start(
     require_contactable_qualification_owner(conn, &allocation.reservation)?;
     let channel = load_binding(conn, &record.placement_thread_id)?;
     ensure!(
-        i64::try_from(lillux::time::timestamp_millis())? < channel.execution_deadline_ms,
+        lillux::time::timestamp_millis() < channel.execution_deadline_ms,
         "qualification local start exceeded its released channel deadline"
     );
     let state: String = conn.query_row(
@@ -763,7 +763,7 @@ pub(super) fn transition(
 }
 
 pub(super) fn now_after(current: &QualificationLocalStartRecord) -> Result<i64> {
-    Ok(i64::try_from(lillux::time::timestamp_millis())?.max(current.updated_at_ms))
+    Ok(lillux::time::timestamp_millis().max(current.updated_at_ms))
 }
 
 pub(super) fn require_local_processes_settled(
@@ -1206,7 +1206,7 @@ impl RuntimeDb {
                 && channel.execution_binding_hash == allocation.reservation.binding_hash
                 && matches!(channel.execution_mode, ryeos_state::external_execution::ExternalExecutionMode::QualificationStructuredSession {})
                 && channel.candidate_export_max_bytes == 0
-                && i64::try_from(lillux::time::timestamp_millis())? < channel.execution_deadline_ms,
+                && lillux::time::timestamp_millis() < channel.execution_deadline_ms,
                 "qualification local start requires released zero-export Q channel");
             ensure!(
                 tx.query_row("SELECT NOT EXISTS(SELECT 1 FROM external_execution_connector WHERE placement_thread_id=?1)",
@@ -1234,7 +1234,7 @@ impl RuntimeDb {
             let state_root = runtime_cache_root
                 .join("qualification-local")
                 .join(&workspace_id);
-            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            let now = lillux::time::timestamp_millis();
             let record = QualificationLocalStartRecord {
                 placement_thread_id: placement.to_owned(),
                 accepted_root_id: owner.coordinate.accepted_root_id.clone(),

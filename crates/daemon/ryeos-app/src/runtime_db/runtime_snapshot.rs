@@ -338,7 +338,7 @@ impl RuntimeDb {
             } else {
                 300_000
             };
-            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            let now = lillux::time::timestamp_millis();
             ensure!(
                 intent.attempt_deadline_ms > now
                     && intent.attempt_deadline_ms.saturating_sub(now) <= maximum_window_ms,
@@ -400,7 +400,7 @@ impl RuntimeDb {
                 staged_count == 0,
                 "runtime snapshot has a separately retained mutation stage"
             );
-            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            let now = lillux::time::timestamp_millis();
             ensure!(
                 now < record.intent.attempt_deadline_ms,
                 "runtime snapshot attempt deadline expired"
@@ -430,7 +430,7 @@ impl RuntimeDb {
         locator: &RuntimeSnapshotLocator,
         deadline_exceeded: bool,
     ) -> Result<RuntimeSnapshotRecord> {
-        let observed_at_ms = i64::try_from(lillux::time::timestamp_millis())?;
+        let observed_at_ms = lillux::time::timestamp_millis();
         self.bind_runtime_snapshot_locator_at(locator, deadline_exceeded, observed_at_ms)
     }
 
@@ -529,7 +529,7 @@ impl RuntimeDb {
                 tx.commit()?;
                 return Ok(record);
             }
-            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            let now = lillux::time::timestamp_millis();
             let changed = tx.execute(
                 "UPDATE runtime_snapshot_operation SET readiness_json=?2,updated_at_ms=?3
              WHERE operation_id=?1 AND phase='bound' AND readiness_json IS NULL",
@@ -566,7 +566,7 @@ impl RuntimeDb {
                 record.phase == RuntimeSnapshotPhase::AttemptPending,
                 "runtime snapshot quarantine requires pending attempt"
             );
-            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            let now = lillux::time::timestamp_millis();
             tx.execute(
                 "UPDATE runtime_snapshot_operation SET phase='quarantined',updated_at_ms=?2
              WHERE operation_id=?1 AND phase='attempt_pending'",
@@ -588,7 +588,7 @@ mod tests {
     };
 
     fn intent() -> RuntimeSnapshotIntent {
-        let now = i64::try_from(lillux::time::timestamp_millis()).unwrap();
+        let now = lillux::time::timestamp_millis();
         let mut intent = RuntimeSnapshotIntent {
             schema: RUNTIME_SNAPSHOT_INTENT_SCHEMA,
             operation_id: String::new(),
@@ -729,9 +729,7 @@ mod tests {
             db.bind_runtime_snapshot_locator(&changed_locator, false)
                 .is_err()
         );
-        db.conn
-            .with_sql(|connection| validate_current(connection))
-            .unwrap();
+        db.conn.with_sql(validate_current).unwrap();
     }
 
     #[test]
@@ -790,9 +788,7 @@ mod tests {
             size_bytes: 4096,
         };
         assert!(db.bind_runtime_snapshot_readiness(&readiness).is_err());
-        db.conn
-            .with_sql(|connection| validate_current(connection))
-            .unwrap();
+        db.conn.with_sql(validate_current).unwrap();
     }
 
     #[test]
@@ -815,9 +811,7 @@ mod tests {
             db.quarantine_runtime_snapshot_attempt(&intent.operation_id, &digest)
                 .is_err()
         );
-        db.conn
-            .with_sql(|connection| validate_current(connection))
-            .unwrap();
+        db.conn.with_sql(validate_current).unwrap();
     }
 
     #[test]
@@ -836,8 +830,6 @@ mod tests {
         assert_eq!(record.locator, Some(locator));
         assert_eq!(record.runner_deadline_exceeded, Some(false));
         assert_eq!(record.completion_at_ms, Some(intent.attempt_deadline_ms));
-        db.conn
-            .with_sql(|connection| validate_current(connection))
-            .unwrap();
+        db.conn.with_sql(validate_current).unwrap();
     }
 }

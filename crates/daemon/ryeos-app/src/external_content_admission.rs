@@ -1123,7 +1123,6 @@ fn admit_declarations_in_publication(
         reused_blobs,
         "admitted external content realization"
     );
-    drop(sink);
     drop(_permit);
     drop(guard);
 

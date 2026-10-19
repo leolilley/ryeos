@@ -2482,7 +2482,7 @@ pub fn authenticate_external_channel_bootstrap(
         .context("external channel attachment lost its binding generation")?;
     let contract = retained.backend_contract();
     let program = retained_external_channel_program(state, &allocation.reservation, &retained)?;
-    let now = i64::try_from(lillux::time::timestamp_millis())?;
+    let now = lillux::time::timestamp_millis();
     let attach_deadline = allocation
         .reservation
         .contact_deadline_ms
@@ -3158,7 +3158,7 @@ pub fn attach_external_execution_channel(
         &program,
         &contract,
         supervisor_public_key,
-        i64::try_from(lillux::time::timestamp_millis())?,
+        lillux::time::timestamp_millis(),
         lillux::sha256_hex(&nonce),
     )?;
     state
@@ -5007,7 +5007,7 @@ impl<'a> ExternalPlacementOwner<'a> {
                 prior.reservation.startup_deadline_ms,
             )
         } else {
-            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            let now = lillux::time::timestamp_millis();
             (
                 now,
                 now.checked_add(i64::from(contract.contact_timeout_seconds) * 1000)
@@ -5343,7 +5343,7 @@ impl<'a> ExternalPlacementOwner<'a> {
             );
             expected
         } else {
-            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            let now = lillux::time::timestamp_millis();
             let contact_deadline_ms = now
                 .checked_add(i64::from(contract.contact_timeout_seconds) * 1_000)
                 .context("external placement contact deadline overflow")?;
@@ -5785,7 +5785,7 @@ pub fn prepare_external_qualification_start_for_invocation<'a>(
         "admitted_adapter_request_base64": &admitted_adapter_request_base64,
     }))?;
     let startup_budget_ms = qualification_startup_budget_ms(&contract)?;
-    let now = i64::try_from(lillux::time::timestamp_millis())?;
+    let now = lillux::time::timestamp_millis();
     let reservation = ExternalAllocationReservation {
         schema: EXTERNAL_ALLOCATION_RESERVATION_SCHEMA,
         placement_thread_id: placement.clone(),
@@ -8055,7 +8055,7 @@ fn admit_session_lease(
         session_deadline()?,
         charge.lifetime_seconds,
         margin_seconds,
-        i64::try_from(lillux::time::timestamp_millis())?,
+        lillux::time::timestamp_millis(),
     )?;
     let admitted = backend.admit_lease(
         &inputs,
@@ -8843,7 +8843,7 @@ pub mod test_support {
                 "ordinary external fixture has no closed signed candidate disposition"
             ),
         };
-        let now = i64::try_from(lillux::time::timestamp_millis())?;
+        let now = lillux::time::timestamp_millis();
         let reservation = ExternalAllocationReservation {
             schema: EXTERNAL_ALLOCATION_RESERVATION_SCHEMA,
             placement_thread_id: placement_thread_id.to_owned(),
@@ -8867,7 +8867,7 @@ pub mod test_support {
             startup_deadline_ms: now
                 .checked_add(60_000)
                 .context("fixture startup deadline overflow")?,
-            contact_deadline_ms: i64::try_from(lillux::time::timestamp_millis())?
+            contact_deadline_ms: lillux::time::timestamp_millis()
                 .checked_add(30_000)
                 .context("ordinary external fixture contact deadline overflow")?,
         };
@@ -9317,7 +9317,7 @@ pub mod test_support {
             "program":&program,
             "backend_contract":&contract,
         }))?;
-        let now = i64::try_from(lillux::time::timestamp_millis())?;
+        let now = lillux::time::timestamp_millis();
         let reservation = ExternalAllocationReservation {
             schema: EXTERNAL_ALLOCATION_RESERVATION_SCHEMA,
             placement_thread_id: placement_thread_id.clone(),
@@ -9635,7 +9635,7 @@ pub mod test_support {
             .dedicated_session(placement)?
             .context("composed completion lost its dedicated session")?;
         let worker_instance_id = "worker-external-composed-controller";
-        let now = i64::try_from(lillux::time::timestamp_millis())?;
+        let now = lillux::time::timestamp_millis();
         state
             .state_store
             .attach_worker_process(&WorkerProcessRecord {
@@ -10379,7 +10379,7 @@ mod tests {
         let channel_authority = ExternalChannelAuthority::test_fixture(&"3".repeat(64));
         let channel_owner_public_key = channel_authority.owner_public_key();
         let channel_bootstrap_capability_hash = channel_authority.bootstrap_capability_hash();
-        let now = i64::try_from(lillux::time::timestamp_millis()).unwrap();
+        let now = lillux::time::timestamp_millis();
         let reservation = ExternalAllocationReservation {
             schema: EXTERNAL_ALLOCATION_RESERVATION_SCHEMA,
             placement_thread_id: "T-one".into(),
@@ -10401,7 +10401,7 @@ mod tests {
             timeout_seconds: 60,
             startup_started_at_ms: now,
             startup_deadline_ms: now + 60_000,
-            contact_deadline_ms: i64::try_from(lillux::time::timestamp_millis()).unwrap() + 60_000,
+            contact_deadline_ms: lillux::time::timestamp_millis() + 60_000,
         };
         db.reserve_external_allocation(&reservation, &binding)
             .unwrap();
@@ -10447,7 +10447,7 @@ mod tests {
         let store = Arc::clone(store_owner.store());
         let binding = RetainedExternalExecutionBinding::test_fixture();
         let channel_authority = ExternalChannelAuthority::test_fixture(&"3".repeat(64));
-        let now = i64::try_from(lillux::time::timestamp_millis()).unwrap();
+        let now = lillux::time::timestamp_millis();
         let reservation = ExternalAllocationReservation {
             schema: EXTERNAL_ALLOCATION_RESERVATION_SCHEMA,
             placement_thread_id: "T-one".into(),
@@ -10469,7 +10469,7 @@ mod tests {
             timeout_seconds: 60,
             startup_started_at_ms: now,
             startup_deadline_ms: now + startup_ms,
-            contact_deadline_ms: i64::try_from(lillux::time::timestamp_millis()).unwrap() + 60_000,
+            contact_deadline_ms: lillux::time::timestamp_millis() + 60_000,
         };
         store
             .install_external_placement_test_fixture(&reservation, &binding)
@@ -12192,7 +12192,7 @@ mod tests {
             provider_observation_digest: "f".repeat(64),
         };
         let supervisor = lillux::crypto::SigningKey::from_bytes(&[63; 32]);
-        let now = i64::try_from(lillux::time::timestamp_millis()).unwrap();
+        let now = lillux::time::timestamp_millis();
         let binding = ryeos_state::external_execution::ExecutionChannelBinding {
             schema: ryeos_state::external_execution::EXECUTION_CHANNEL_BINDING_SCHEMA,
             execution_mode:
@@ -12255,7 +12255,7 @@ mod tests {
                 &supervisor.verifying_key(),
             )
             .unwrap(),
-            i64::try_from(lillux::time::timestamp_millis()).unwrap(),
+            lillux::time::timestamp_millis(),
             "8".repeat(64),
         )
         .unwrap();
@@ -12332,7 +12332,7 @@ mod tests {
                 &supervisor.verifying_key(),
             )
             .unwrap(),
-            i64::try_from(lillux::time::timestamp_millis()).unwrap(),
+            lillux::time::timestamp_millis(),
             "8".repeat(64),
         )
         .unwrap();
@@ -13615,7 +13615,7 @@ mod tests {
             .unwrap();
         let candidate_program = program();
         let supervisor = lillux::crypto::SigningKey::from_bytes(&[63; 32]);
-        let now = i64::try_from(lillux::time::timestamp_millis()).unwrap();
+        let now = lillux::time::timestamp_millis();
         let channel = ryeos_state::external_execution::ExecutionChannelBinding {
             schema: ryeos_state::external_execution::EXECUTION_CHANNEL_BINDING_SCHEMA,
             execution_mode:

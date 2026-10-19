@@ -654,9 +654,11 @@ mod tests {
         {
             let (_first_owner, first) =
                 crate::state::test_support::build(first_root.path()).unwrap();
-            let mut prior = ReplayIndex::default();
-            prior.initialized = true;
-            prior.verified_through = Some(42);
+            let prior = ReplayIndex {
+                initialized: true,
+                verified_through: Some(42),
+                ..ReplayIndex::default()
+            };
             put_index(&first, thread_id, prior);
             let retained = take_index(&first, thread_id);
             assert!(retained.initialized);

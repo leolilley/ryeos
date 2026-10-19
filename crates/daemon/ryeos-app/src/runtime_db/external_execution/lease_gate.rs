@@ -319,7 +319,7 @@ mod tests {
                 guest_package_sha256: "4".repeat(64),
                 ready_deadline_ms,
             },
-            i64::try_from(now).unwrap(),
+            now,
         )
         .unwrap();
         Fixture {
@@ -365,7 +365,7 @@ mod tests {
     }
 
     fn deadline_far() -> i64 {
-        i64::try_from(lillux::time::timestamp_millis()).unwrap() + 600_000
+        lillux::time::timestamp_millis() + 600_000
     }
 
     #[test]
@@ -475,7 +475,7 @@ mod tests {
     fn an_overdue_activated_lease_is_refused_and_no_longer_overdue() {
         let fixture = activated_lease(1);
         let db = &fixture.db;
-        let now = i64::try_from(lillux::time::timestamp_millis()).unwrap();
+        let now = lillux::time::timestamp_millis();
         let overdue = db.overdue_external_lease_records(now).unwrap();
         assert_eq!(overdue.len(), 1);
         db.refuse_external_lease_and_cancel(

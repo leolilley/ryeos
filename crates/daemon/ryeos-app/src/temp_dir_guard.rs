@@ -39,9 +39,9 @@ thread_local! {
 #[derive(Default)]
 enum FiniteScratchRemoval {
     #[default]
-    RootPresent,
-    RootRemovedPendingSync,
-    RootRemovedSynced,
+    Present,
+    RemovedPendingSync,
+    RemovedSynced,
 }
 
 struct PinnedRemoval {
@@ -546,7 +546,7 @@ impl TempDirGuard {
         let mut native_receipt =
             Self::lock_original_cleanup(&self.finite_native_receipt, deadline)?;
         match *removal {
-            FiniteScratchRemoval::RootPresent => {
+            FiniteScratchRemoval::Present => {
                 pinned.root.ensure_path_binding()?;
                 Self::require_original_cleanup_window(deadline)?;
                 if let Some(budget) = budget {
@@ -568,7 +568,7 @@ impl TempDirGuard {
                         *native_receipt = Some(Arc::new(receipt));
                         // Record the native effect BEFORE any subsequent
                         // deadline/ack failure. Retry never removes this name.
-                        *removal = FiniteScratchRemoval::RootRemovedSynced;
+                        *removal = FiniteScratchRemoval::RemovedSynced;
                     }
                     Ok(None) => anyhow::bail!(
                         "original pinned scratch remained nonempty; cleanup is unproved"
@@ -582,7 +582,7 @@ impl TempDirGuard {
                                     == lillux::secure_fs::EmptyChildRemovalStage::RemovedPendingSync
                                 {
                                     *native_pending = Some(failure.clone());
-                                    *removal = FiniteScratchRemoval::RootRemovedPendingSync;
+                                    *removal = FiniteScratchRemoval::RemovedPendingSync;
                                 }
                                 Err(anyhow::Error::new(failure))
                             }
@@ -597,7 +597,7 @@ impl TempDirGuard {
                     );
                 }
             }
-            FiniteScratchRemoval::RootRemovedPendingSync => {
+            FiniteScratchRemoval::RemovedPendingSync => {
                 // Absence is only an observation joined to this retained
                 // actual rmdir stage; it never constructs a removal owner.
                 anyhow::ensure!(
@@ -610,9 +610,9 @@ impl TempDirGuard {
                 })?;
                 let receipt = original.retry_sync()?;
                 *native_receipt = Some(receipt);
-                *removal = FiniteScratchRemoval::RootRemovedSynced;
+                *removal = FiniteScratchRemoval::RemovedSynced;
             }
-            FiniteScratchRemoval::RootRemovedSynced => {}
+            FiniteScratchRemoval::RemovedSynced => {}
         }
         Self::require_original_cleanup_window(deadline)?;
         anyhow::ensure!(
@@ -753,7 +753,7 @@ impl TempDirGuard {
         let leases = Self::lock_original_cleanup(&self.leases, deadline)?;
         anyhow::ensure!(
             view.is_none()
-                && matches!(*phase, FiniteScratchRemoval::RootRemovedSynced)
+                && matches!(*phase, FiniteScratchRemoval::RemovedSynced)
                 && path.is_none()
                 && leases.is_empty(),
             "original finite removal has not completed"
@@ -1500,7 +1500,7 @@ mod tests {
             assert!(guard.path().is_some());
             assert!(matches!(
                 *guard.finite_removal.lock().unwrap(),
-                FiniteScratchRemoval::RootRemovedSynced
+                FiniteScratchRemoval::RemovedSynced
             ));
             if replace {
                 std::fs::create_dir(&path).unwrap();
@@ -1531,7 +1531,7 @@ mod tests {
         );
         assert!(matches!(
             *guard.finite_removal.lock().unwrap(),
-            FiniteScratchRemoval::RootPresent
+            FiniteScratchRemoval::Present
         ));
         std::fs::remove_file(path.join("foreign")).unwrap();
         // A projectless workspace is created with its control directory;
@@ -1582,7 +1582,7 @@ mod tests {
         );
         assert!(matches!(
             *guard.finite_removal.lock().unwrap(),
-            FiniteScratchRemoval::RootRemovedSynced
+            FiniteScratchRemoval::RemovedSynced
         ));
     }
 

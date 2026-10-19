@@ -38,7 +38,7 @@ fn with_reset_host<T>(
         issued as usize, recorded,
         "every issued ticket reaches the census"
     );
-    drop(host.release());
+    let _ = host.release();
     value
 }
 

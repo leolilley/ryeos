@@ -897,7 +897,6 @@ impl ClosedLiveStateStore {
         // handler controls and signer; none owns a descriptor.
         drop(_projection_health);
         drop(_barrier);
-        drop(_attachment_closed);
         drop(_attached);
         drop(_live_workers);
         drop(_selected);

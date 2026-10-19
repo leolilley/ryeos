@@ -353,7 +353,7 @@ pub(super) fn read_consumer_prerequisite(
     let qualification =
         super::runtime_snapshot_qualification::read(conn, qualification_operation_id)?
             .context("consumer verification qualification is absent")?;
-    let now = i64::try_from(lillux::time::timestamp_millis())?;
+    let now = lillux::time::timestamp_millis();
     require_live_occurrence(conn, &qualification, now)?;
     Ok(record)
 }
@@ -542,7 +542,7 @@ impl RuntimeDb {
                 ),
                 "consumer observation did not follow a contact claim"
             );
-            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            let now = lillux::time::timestamp_millis();
             let changed = tx.execute(
                 "UPDATE restored_verifier_attempt SET phase='observed',observation_json=?2,updated_at_ms=?3
              WHERE operation_id=?1 AND phase IN ('attempt_pending','quarantined')",
@@ -582,7 +582,7 @@ impl RuntimeDb {
             require_live_occurrence(
                 &tx,
                 &qualification,
-                i64::try_from(lillux::time::timestamp_millis())?,
+                lillux::time::timestamp_millis(),
             )?;
             tx.commit()?;
             Ok(qualification)
@@ -700,7 +700,7 @@ impl RuntimeDb {
             } else {
                 intent.validate_for(&source.intent, locator, &qualification.intent, occurrence)?;
             }
-            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            let now = lillux::time::timestamp_millis();
             require_live_occurrence(&tx, &qualification, now)?;
             ensure!(
                 intent.attempt_deadline_ms > now
@@ -768,7 +768,7 @@ impl RuntimeDb {
                 tx.commit()?;
                 return Ok(RestoredVerifierAttemptClaim::Reconcile(record));
             }
-            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            let now = lillux::time::timestamp_millis();
             ensure!(
                 now < record.intent.attempt_deadline_ms,
                 "restored verifier deadline expired"
@@ -809,7 +809,7 @@ impl RuntimeDb {
                 record.phase == RestoredVerifierAttemptPhase::AttemptPending,
                 "restored verifier quarantine requires pending attempt"
             );
-            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            let now = lillux::time::timestamp_millis();
             tx.execute(
                 "UPDATE restored_verifier_attempt SET phase='quarantined',updated_at_ms=?2
              WHERE operation_id=?1 AND phase='attempt_pending'",
@@ -875,7 +875,7 @@ impl RuntimeDb {
                 &qualification.intent,
                 occurrence,
             )?;
-            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            let now = lillux::time::timestamp_millis();
             let changed = tx.execute(
                 "UPDATE restored_verifier_attempt SET phase='observed',observation_json=?2,updated_at_ms=?3
              WHERE operation_id=?1 AND phase IN ('attempt_pending','quarantined')",

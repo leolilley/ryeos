@@ -16,6 +16,6 @@ pub(super) fn establish(
         issued as usize == recorded,
         "every seeding ticket reaches the census"
     );
-    drop(host.release());
+    let _ = host.release();
     Ok(())
 }

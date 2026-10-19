@@ -1203,8 +1203,8 @@ mod tests {
         assert!(
             build_source_evidence(
                 &changed,
-                &[recipe.clone()],
-                &[bundle.clone()],
+                std::slice::from_ref(&recipe),
+                std::slice::from_ref(&bundle),
                 &signer_keys,
                 &proof
             )

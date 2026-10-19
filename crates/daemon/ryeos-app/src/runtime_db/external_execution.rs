@@ -925,7 +925,7 @@ fn fence_external_observation_timing(
     record: &ExternalAllocationRecord,
     timing: ExternalObservationTiming,
 ) -> Result<()> {
-    let now = i64::try_from(lillux::time::timestamp_millis())?;
+    let now = lillux::time::timestamp_millis();
     let quarantine = match timing {
         ExternalObservationTiming::Cleanup => true,
         ExternalObservationTiming::Startup {
@@ -1046,7 +1046,7 @@ impl ExternalAllocationReservation {
     pub(crate) fn startup_deadline(&self) -> Result<lillux::time::MonotonicDeadline> {
         // Durable recovery follows the existing wall-clock convention. This
         // projection does not claim monotonic continuity across a restart.
-        let now = i64::try_from(lillux::time::timestamp_millis())?;
+        let now = lillux::time::timestamp_millis();
         self.require_startup_time(now)?;
         Ok(lillux::time::MonotonicDeadline::after(
             lillux::time::Duration::from_millis(u64::try_from(self.startup_deadline_ms - now)?),
@@ -2027,7 +2027,7 @@ fn require_contactable_qualification_owner(
     super::restored_verifier_attempt::require_live_occurrence(
         conn,
         &qualification,
-        i64::try_from(lillux::time::timestamp_millis())?,
+        lillux::time::timestamp_millis(),
     )?;
     Ok(())
 }
@@ -2056,7 +2056,7 @@ fn qualification_owner_is_contactable(
         .created_at_ms
         .checked_add(i64::from(qualification.intent.maximum_lifetime_seconds) * 1000)
         .context("external qualification occurrence lifetime overflow")?;
-    let now = i64::try_from(lillux::time::timestamp_millis())?;
+    let now = lillux::time::timestamp_millis();
     Ok(!terminated && now >= qualification.created_at_ms && now < expires_at)
 }
 
@@ -2343,7 +2343,7 @@ impl RuntimeDb {
                             retained_binding.digest(),
                             retained_binding.capacity_owner(),
                             binding_json,
-                            i64::try_from(lillux::time::timestamp_millis())?
+                            lillux::time::timestamp_millis()
                         ],
                     )?;
                 }
@@ -2371,7 +2371,7 @@ impl RuntimeDb {
             if read_guard(&tx)? >= 256 {
                 bail!("node external allocation ceiling reached");
             }
-            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            let now = lillux::time::timestamp_millis();
             reservation.require_startup_time(now)?;
             if now >= reservation.contact_deadline_ms
                 || reservation.contact_deadline_ms.saturating_sub(now) > 300_000
@@ -2482,7 +2482,7 @@ impl RuntimeDb {
                 _ => unreachable!("settled external phase returned before owner validation"),
             }
             require_new_owner(&tx, &record.reservation, direct_proof, qualification_proof)?;
-            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            let now = lillux::time::timestamp_millis();
             record.reservation.require_startup_time(now)?;
             if now >= record.reservation.contact_deadline_ms {
                 bail!("external allocation contact deadline expired");
@@ -2552,7 +2552,7 @@ impl RuntimeDb {
              SET occurrence_json=?2,phase=CASE WHEN phase='quarantined' THEN phase ELSE 'bound' END,updated_at_ms=?3
              WHERE placement_thread_id=?1",
                 params![placement, lillux::canonical_json(&serde_json::to_value(occurrence)?)?,
-                    i64::try_from(lillux::time::timestamp_millis())?],
+                    lillux::time::timestamp_millis()],
             )?;
             fence_external_observation_timing(&tx, &record, timing)?;
             tx.commit()?;
@@ -2628,7 +2628,7 @@ impl RuntimeDb {
                 "UPDATE external_execution_allocation
              SET phase='contacted_no_occurrence',updated_at_ms=?2
              WHERE placement_thread_id=?1",
-                params![placement, i64::try_from(lillux::time::timestamp_millis())?],
+                params![placement, lillux::time::timestamp_millis()],
             )?;
             let settled = read(&tx, placement)?.context("settled allocation disappeared")?;
             validate_lifecycle_evidence(&tx, &settled)?;
@@ -2755,7 +2755,7 @@ impl RuntimeDb {
                 ),
             }
             channel::require_current_execution_owner(&tx, &record.reservation)?;
-            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            let now = lillux::time::timestamp_millis();
             record.reservation.require_startup_time(now)?;
             ensure!(
                 now < intent.attachment_deadline_ms,
@@ -3008,7 +3008,7 @@ impl RuntimeDb {
                 tx.execute(
                     "UPDATE external_execution_allocation
                  SET phase='quarantined',updated_at_ms=?2 WHERE placement_thread_id=?1",
-                    params![placement, i64::try_from(lillux::time::timestamp_millis())?],
+                    params![placement, lillux::time::timestamp_millis()],
                 )?;
             }
             tx.commit()?;
@@ -3097,7 +3097,7 @@ impl RuntimeDb {
             tx.execute(
                 "UPDATE external_execution_allocation
              SET phase='terminated',updated_at_ms=?2 WHERE placement_thread_id=?1",
-                params![placement, i64::try_from(lillux::time::timestamp_millis())?],
+                params![placement, lillux::time::timestamp_millis()],
             )?;
             let settled = read(&tx, placement)?.context("settled allocation disappeared")?;
             validate_lifecycle_evidence(&tx, &settled)?;
@@ -3119,7 +3119,7 @@ impl RuntimeDb {
             tx.execute(
                 "UPDATE external_execution_allocation SET phase=?2,updated_at_ms=?3 WHERE placement_thread_id=?1",
                 params![placement, if record.phase == ExternalAllocationPhase::Reserved {"no_contact"} else {"quarantined"},
-                    i64::try_from(lillux::time::timestamp_millis())?],
+                    lillux::time::timestamp_millis()],
             )?;
             tx.commit()?;
             Ok(())
@@ -3180,7 +3180,7 @@ pub(crate) mod tests {
             .unwrap();
         let launch_owner = db.get_launch_claim(placement).unwrap().unwrap().owner;
         let binding = crate::node_config::sections::external_execution::RetainedExternalExecutionBinding::test_fixture();
-        let now = i64::try_from(lillux::time::timestamp_millis()).unwrap();
+        let now = lillux::time::timestamp_millis();
         ExternalAllocationReservation {
             schema: EXTERNAL_ALLOCATION_RESERVATION_SCHEMA,
             placement_thread_id: placement.into(),
@@ -3386,12 +3386,7 @@ pub(crate) mod tests {
                 .unwrap()
                 .is_none()
         );
-        assert_eq!(
-            db.conn
-                .with_sql(|connection| read_guard(connection))
-                .unwrap(),
-            0
-        );
+        assert_eq!(db.conn.with_sql(read_guard).unwrap(), 0);
     }
 
     #[test]
@@ -3465,9 +3460,7 @@ pub(crate) mod tests {
             .unwrap();
         db.request_thread_stop(&reservation.placement_thread_id, StopIntent::Cancel)
             .unwrap();
-        db.conn
-            .with_sql(|connection| validate_current(connection))
-            .unwrap();
+        db.conn.with_sql(validate_current).unwrap();
         assert!(
             db.conn
                 .with_sql(|connection| require_contactable_direct_owner(connection, &reservation))
@@ -3488,7 +3481,7 @@ pub(crate) mod tests {
         let pins = db
             .inspect_chain_recovery_pins(
                 &reservation.placement_thread_id,
-                &[reservation.placement_thread_id.clone()],
+                std::slice::from_ref(&reservation.placement_thread_id),
             )
             .unwrap();
         assert_eq!(pins.external_allocation_obligations, 1);
@@ -3627,7 +3620,7 @@ pub(crate) mod tests {
             })
             .unwrap();
         let binding = crate::node_config::sections::external_execution::RetainedExternalExecutionBinding::test_fixture();
-        let now = i64::try_from(lillux::time::timestamp_millis()).unwrap();
+        let now = lillux::time::timestamp_millis();
         ExternalAllocationReservation {
             schema: EXTERNAL_ALLOCATION_RESERVATION_SCHEMA,
             placement_thread_id: placement,
@@ -3652,7 +3645,7 @@ pub(crate) mod tests {
             timeout_seconds: 60,
             startup_started_at_ms: now,
             startup_deadline_ms: now + 60_000,
-            contact_deadline_ms: i64::try_from(lillux::time::timestamp_millis()).unwrap() + 60_000,
+            contact_deadline_ms: lillux::time::timestamp_millis() + 60_000,
         }
     }
 
@@ -3994,7 +3987,7 @@ pub(crate) mod tests {
                     ExternalAllocationContactClaim::Contact(_)
                 ));
             }
-            let now = i64::try_from(lillux::time::timestamp_millis()).unwrap();
+            let now = lillux::time::timestamp_millis();
             lillux::time::sleep(lillux::time::Duration::from_millis(
                 u64::try_from((reserved.startup_deadline_ms - now).max(0)).unwrap() + 1,
             ));
@@ -4191,12 +4184,7 @@ pub(crate) mod tests {
             db.external_allocation("T-one").unwrap().unwrap().phase,
             ExternalAllocationPhase::Quarantined
         );
-        assert_eq!(
-            db.conn
-                .with_sql(|connection| read_guard(connection))
-                .unwrap(),
-            1
-        );
+        assert_eq!(db.conn.with_sql(read_guard).unwrap(), 1);
         assert!(
             db.release_credential_profile("P-one", "worker-one")
                 .is_err()
@@ -4455,9 +4443,7 @@ pub(crate) mod tests {
             test_observation_timing(),
         )
         .unwrap();
-        db.conn
-            .with_sql(|connection| validate_current(connection))
-            .unwrap();
+        db.conn.with_sql(validate_current).unwrap();
         let mut replaced_intent = intent;
         replaced_intent.activation_request_digest = "6".repeat(64);
         // Keep the nested package commitment consistent with the forged row
@@ -4490,10 +4476,7 @@ pub(crate) mod tests {
                 ],
             )?))
             .unwrap();
-        let error = db
-            .conn
-            .with_sql(|connection| validate_current(connection))
-            .unwrap_err();
+        let error = db.conn.with_sql(validate_current).unwrap_err();
         assert!(
             format!("{error:#}")
                 .contains("external supervisor activation request identity changed")
@@ -4525,12 +4508,7 @@ pub(crate) mod tests {
             .unwrap();
         db.settle_external_no_occurrence("T-one", &evidence)
             .unwrap();
-        assert_eq!(
-            db.conn
-                .with_sql(|connection| read_guard(connection))
-                .unwrap(),
-            0
-        );
+        assert_eq!(db.conn.with_sql(read_guard).unwrap(), 0);
         assert_eq!(
             db.external_allocation("T-one").unwrap().unwrap().phase,
             ExternalAllocationPhase::ContactedNoOccurrence
@@ -4582,12 +4560,7 @@ pub(crate) mod tests {
         assert!(db.settle_external_terminal("T-one", &observation).is_err());
         assert!(db.begin_external_termination("T-one", &intent).unwrap());
         assert!(!db.begin_external_termination("T-one", &intent).unwrap());
-        assert_eq!(
-            db.conn
-                .with_sql(|connection| read_guard(connection))
-                .unwrap(),
-            1
-        );
+        assert_eq!(db.conn.with_sql(read_guard).unwrap(), 1);
         let mut mismatches = Vec::new();
         let mut changed = observation.clone();
         changed.binding_hash = "3".repeat(64);
@@ -4606,12 +4579,7 @@ pub(crate) mod tests {
         mismatches.push(changed);
         for changed in mismatches {
             assert!(db.settle_external_terminal("T-one", &changed).is_err());
-            assert_eq!(
-                db.conn
-                    .with_sql(|connection| read_guard(connection))
-                    .unwrap(),
-                1
-            );
+            assert_eq!(db.conn.with_sql(read_guard).unwrap(), 1);
             assert_eq!(
                 db.conn
                     .with_sql(|connection| Ok(connection.query_row(
@@ -4629,12 +4597,7 @@ pub(crate) mod tests {
         assert!(!db.begin_external_termination("T-one", &intent).unwrap());
         db.settle_external_terminal("T-one", &observation).unwrap();
         db.settle_external_terminal("T-one", &observation).unwrap();
-        assert_eq!(
-            db.conn
-                .with_sql(|connection| read_guard(connection))
-                .unwrap(),
-            0
-        );
+        assert_eq!(db.conn.with_sql(read_guard).unwrap(), 0);
         assert_eq!(
             db.external_allocation("T-one").unwrap().unwrap().phase,
             ExternalAllocationPhase::Terminated
@@ -4995,11 +4958,7 @@ pub(crate) mod tests {
                 )?)
             })
             .unwrap();
-        assert!(
-            db.conn
-                .with_sql(|connection| validate_current(connection))
-                .is_err()
-        );
+        assert!(db.conn.with_sql(validate_current).is_err());
     }
 
     #[test]
@@ -5019,12 +4978,7 @@ pub(crate) mod tests {
                 ..
             })
         ));
-        assert_eq!(
-            db.conn
-                .with_sql(|connection| read_guard(connection))
-                .unwrap(),
-            0
-        );
+        assert_eq!(db.conn.with_sql(read_guard).unwrap(), 0);
         db.release_credential_profile("P-one", "worker-one")
             .unwrap();
         assert_eq!(
@@ -5091,12 +5045,7 @@ pub(crate) mod tests {
             db.bind_external_allocation("T-one", &wrong, test_observation_timing())
                 .is_err()
         );
-        assert_eq!(
-            db.conn
-                .with_sql(|connection| read_guard(connection))
-                .unwrap(),
-            1
-        );
+        assert_eq!(db.conn.with_sql(read_guard).unwrap(), 1);
     }
 
     #[test]

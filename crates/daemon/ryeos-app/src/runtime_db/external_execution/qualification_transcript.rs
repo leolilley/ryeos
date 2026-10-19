@@ -317,7 +317,7 @@ impl RuntimeDb {
                 tx.commit()?;
                 return Ok(existing);
             }
-            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            let now = lillux::time::timestamp_millis();
             ensure!(
                 tx.execute(
                     "INSERT INTO external_qualification_worker_transcript

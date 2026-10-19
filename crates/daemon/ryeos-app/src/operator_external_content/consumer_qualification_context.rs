@@ -7,7 +7,6 @@
 //! product that qualification itself uses, and emits them as data. It writes no
 //! node state: the staged content publication is dropped unpublished.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use anyhow::{Context as _, bail};
@@ -189,6 +188,7 @@ fn resolve_relationship(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::fs;
 
     use anyhow::{Result, ensure};

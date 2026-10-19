@@ -544,7 +544,7 @@ impl RuntimeDb {
                 }),
                 "qualification Worker has no fresh prepared connector"
             );
-            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            let now = lillux::time::timestamp_millis();
             let record = QualificationWorkerProcessRecord {
                 placement_thread_id: placement.to_owned(),
                 accepted_root_id: owner.coordinate.accepted_root_id.clone(),
@@ -612,7 +612,7 @@ impl RuntimeDb {
                 "qualification Worker death proof changed its exact process incarnation"
             );
             require_retained_process_owner(&tx, &current)?;
-            let now = i64::try_from(lillux::time::timestamp_millis())?.max(current.attached_at_ms);
+            let now = lillux::time::timestamp_millis().max(current.attached_at_ms);
             ensure!(
                 tx.execute(
                     "UPDATE external_qualification_worker_process

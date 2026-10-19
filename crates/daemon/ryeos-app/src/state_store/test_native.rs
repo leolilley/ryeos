@@ -101,7 +101,7 @@ fn with_shared_host_release(record: impl FnOnce(&TestNativeHost)) {
         if std::thread::panicking() {
             drop(host);
         } else {
-            drop(host.release());
+            let _ = host.release();
         }
     }
 }

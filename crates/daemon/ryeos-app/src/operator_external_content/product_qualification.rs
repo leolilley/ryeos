@@ -5433,7 +5433,7 @@ mod tests {
         };
         let subject = "subject";
         let (selectors, proved) = match_retained_verifier_root_selections(
-            &[root.clone()],
+            std::slice::from_ref(&root),
             Some(retained.clone()),
             subject,
         )
@@ -5451,7 +5451,10 @@ mod tests {
             subject,
         )
         .is_err());
-        assert!(match_retained_verifier_root_selections(&[root.clone()], None, subject).is_err());
+        assert!(
+            match_retained_verifier_root_selections(std::slice::from_ref(&root), None, subject)
+                .is_err()
+        );
         assert!(
             match_retained_verifier_root_selections(&[], Some(retained.clone()), subject).is_err()
         );

@@ -319,7 +319,7 @@ impl RuntimeDb {
                         existing.phase == BootstrapTerminationPhase::Reserved,
                         "contacted bootstrap termination cannot renew its deadline"
                     );
-                    let now = i64::try_from(lillux::time::timestamp_millis())?;
+                    let now = lillux::time::timestamp_millis();
                     ensure!(
                         intent.attempt_deadline_ms > existing.intent.attempt_deadline_ms
                             && intent.attempt_deadline_ms > now
@@ -352,7 +352,7 @@ impl RuntimeDb {
                 [&intent.bootstrap_operation_id],
                 |row| row.get(0),
             )?;
-            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            let now = lillux::time::timestamp_millis();
             match intent.mode {
                 BootstrapCleanupMode::TerminateOnce => ensure!(
                     unsettled_snapshots == 0,
@@ -412,7 +412,7 @@ impl RuntimeDb {
                 }
                 BootstrapTerminationPhase::Reserved => {}
             }
-            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            let now = lillux::time::timestamp_millis();
             ensure!(
                 now < record.intent.attempt_deadline_ms
                     && record.intent.attempt_deadline_ms.saturating_sub(now) <= 300_000,
@@ -445,7 +445,7 @@ impl RuntimeDb {
                 "bootstrap termination attempt is not uncertain"
             );
             if record.phase == BootstrapTerminationPhase::AttemptPending {
-                let now = i64::try_from(lillux::time::timestamp_millis())?;
+                let now = lillux::time::timestamp_millis();
                 tx.execute(
                     "UPDATE runtime_snapshot_bootstrap_termination SET phase='quarantined',updated_at_ms=?2
                  WHERE operation_id=?1 AND phase='attempt_pending'",
@@ -483,7 +483,7 @@ impl RuntimeDb {
                 ),
                 "bootstrap termination was not contacted"
             );
-            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            let now = lillux::time::timestamp_millis();
             let changed = tx.execute(
                 "UPDATE runtime_snapshot_bootstrap_termination SET phase='terminal',observation_json=?2,updated_at_ms=?3
              WHERE operation_id=?1 AND phase IN ('attempt_pending','quarantined')",
@@ -539,7 +539,7 @@ mod tests {
         RuntimeSnapshotBootstrapIntent,
         RuntimeSnapshotBootstrapOccurrence,
     ) {
-        let now = i64::try_from(lillux::time::timestamp_millis()).unwrap();
+        let now = lillux::time::timestamp_millis();
         let mut intent = RuntimeSnapshotBootstrapIntent {
             schema: BOOTSTRAP_INTENT_SCHEMA,
             operation_id: String::new(),
@@ -595,7 +595,7 @@ mod tests {
             provider_id: source.provider_id.clone(),
             provider_group_id: source.provider_group_id.clone(),
             provider_spec_digest: source.provider_spec_digest.clone(),
-            attempt_deadline_ms: i64::try_from(lillux::time::timestamp_millis()).unwrap() + 60_000,
+            attempt_deadline_ms: lillux::time::timestamp_millis() + 60_000,
         };
         intent.operation_id = intent.derived_operation_id().unwrap();
         intent
@@ -616,7 +616,7 @@ mod tests {
             occurrence_id: occurrence.occurrence_id.clone(),
             provider_response_sha256: "c".repeat(64),
             observed_created_at: created_at.clone(),
-            observed_at_ms: i64::try_from(lillux::time::timestamp_millis()).unwrap(),
+            observed_at_ms: lillux::time::timestamp_millis(),
         };
         db.bind_snapshot_bootstrap_readiness(&observed).unwrap();
         let mut snapshot = ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotIntent {
@@ -639,7 +639,7 @@ mod tests {
             controller_public_root: format!("ed25519:{}", base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [3u8; 32])),
             upload_sha256: "d".repeat(64),
             upload_bytes: 1024,
-            attempt_deadline_ms: i64::try_from(lillux::time::timestamp_millis()).unwrap() + 60_000,
+            attempt_deadline_ms: lillux::time::timestamp_millis() + 60_000,
         };
         snapshot.operation_id = snapshot.derived_operation_id().unwrap();
         snapshot
@@ -669,7 +669,7 @@ mod tests {
     fn recovery_selects_only_due_or_already_reserved_exact_sources() {
         let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
         let (source, occurrence) = source(&db, false);
-        let now = i64::try_from(lillux::time::timestamp_millis()).unwrap();
+        let now = lillux::time::timestamp_millis();
         assert!(db.recoverable_bootstrap_sources(now).unwrap().is_empty());
         assert_eq!(
             db.recoverable_bootstrap_sources(
@@ -689,7 +689,7 @@ mod tests {
     #[test]
     fn recovery_rotates_past_permanently_uncertain_oldest_sources() {
         let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
-        let now = i64::try_from(lillux::time::timestamp_millis()).unwrap();
+        let now = lillux::time::timestamp_millis();
         let created = chrono::Utc::now().to_rfc3339();
         let mut all = std::collections::BTreeSet::new();
         for index in 0..65 {
@@ -868,8 +868,7 @@ mod tests {
         let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
         let (source_intent, occurrence) = source(&db, false);
         let mut original = termination(&source_intent, &occurrence);
-        original.attempt_deadline_ms =
-            i64::try_from(lillux::time::timestamp_millis()).unwrap() + 200;
+        original.attempt_deadline_ms = lillux::time::timestamp_millis() + 200;
         db.reserve_bootstrap_termination(&original).unwrap();
         lillux::time::sleep(lillux::time::Duration::from_millis(220));
         assert!(
@@ -877,8 +876,7 @@ mod tests {
                 .is_err()
         );
         let mut renewed = original.clone();
-        renewed.attempt_deadline_ms =
-            i64::try_from(lillux::time::timestamp_millis()).unwrap() + 60_000;
+        renewed.attempt_deadline_ms = lillux::time::timestamp_millis() + 60_000;
         assert_eq!(
             renewed.derived_operation_id().unwrap(),
             original.operation_id

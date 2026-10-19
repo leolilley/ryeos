@@ -171,7 +171,7 @@ fn refusal_of<T>(result: Result<T>) -> String {
 }
 
 fn now_ms() -> i64 {
-    i64::try_from(lillux::time::timestamp_millis()).unwrap()
+    lillux::time::timestamp_millis()
 }
 
 /// A deadline ten seconds away, which the fixture binding's 60s lease

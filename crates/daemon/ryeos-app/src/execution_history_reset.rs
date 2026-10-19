@@ -340,7 +340,7 @@ impl SchedulerResetPreview<'_> {
                 *self.inspection_closed.borrow_mut() = Some(Arc::clone(closed));
                 closed
                     .require_original()
-                    .and_then(|()| accounting)
+                    .and(accounting)
                     .map(Some)
                     .map_err(|error| {
                         self.quota_claim.retain_failure(
@@ -2890,7 +2890,6 @@ fn run_execution_history_reset_owned(
             )?;
         }
     }
-    drop(permit);
     operational_db
         .close(Arc::clone(&native_factory))
         .context("close original Operational mutation before terminal census")?;
@@ -3026,7 +3025,6 @@ fn run_execution_history_reset_owned(
         &state_acknowledgement,
         operation.reference(),
     )?;
-    drop(final_ack_authority);
     // Every mutation is acknowledged. End only the borrowed mutation
     // authority; the policy owner, the StateLock and the claim's StateLock
     // lease stay held until this function returns.
@@ -4627,7 +4625,7 @@ mod tests {
             lillux_sqlite::OriginalNativeDomain::NodeScheduler,
             sql,
         );
-        drop(host.release());
+        let _ = host.release();
     }
 
     #[cfg(target_os = "linux")]
