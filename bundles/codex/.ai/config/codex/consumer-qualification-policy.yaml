@@ -1,0 +1,114 @@
+# ryeos:signed:2026-10-19T06:12:34Z:5a84a23d3f352cd9f2ca8186642bf24486f53b2fca1110b9fd1ad186f652c145:AwkwtEn5DUr3CVAwcwXyXBCZwoksIW7oYJb8nmBycVZ0+4N84pWNiz6jYn2dd7vwBDa+1GMjqycjbWJ6acqwDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: codex
+version: 1.0.0
+description: Template for the independent consumer qualification of the exact Codex guest runtime; the derived context is merged in before signing
+product_qualification_policy:
+  schema: ryeos.product_qualification_policy.v4
+  verifier_ref: tool:codex/qualification/consumer-runtime-verifier
+  subject_declaration_id: subject
+  allowed_claims:
+  - bounded_candidate_capture
+  - candidate_only_execution
+  - controller_credential_exclusion
+  - native_writer_exclusion
+  - no_local_execution_fallback
+  minimum_verifier_process_settlement: scope_empty
+  verifier_parameters:
+    schema: ryeos.codex.consumer_verifier.v4
+    controller:
+      scenario_id: remote_codex
+      maximum_duration_ms: 300000
+    expected_command_output: '/workspace
+
+      ripgrep 15.2.0 (rev e89fff89ac)
+
+
+      features:+pcre2
+
+      simd(compile):+SSE2,-SSSE3,-AVX2
+
+      simd(runtime):+SSE2,+SSSE3,+AVX2
+
+
+      PCRE2 10.45 is available (JIT is available)
+
+      '
+    responses_origin: http://127.0.0.1:18765
+    outer_network: shared_guest_loopback
+    qualification_worker:
+      schema: ryeos.codex.q_command.v3
+      environment_id: ryeos-external-candidate
+      command: printf after > /ryeos/qualification-fixture/result; printf probe
+      command_shell: /ryeos/realizations/authoring-tools/bin/zsh
+      command_presentation: /ryeos/realizations/authoring-tools/bin/zsh -c 'printf after > /ryeos/qualification-fixture/result; printf probe'
+      cwd: /workspace
+      output: probe
+      exit_code: 0
+      expected_final_content_b64: YWZ0ZXI=
+  consumer_execution_context:
+    worker_ref: worker:codex/external-hosted-authoring
+    product_declaration_id: guest-runtime
+    environment_ref: config:codex/environments/external-authoring
+    worker_execution_ref: worker_execution:codex/bounded-turn
+    environment_binding: environment
+  producer_scenarios:
+    remote_codex:
+      recipe_ref: config:codex/consumer-qualification-recipe
+      remote_verifier:
+        binary_ref: bin:codex/codex-runtime-verifier
+        guest_target_triple: x86_64-unknown-linux-gnu
+      consumer_worker_request:
+        schema: ryeos.qualification_worker_request.v5
+        credential_profile_id: null
+        fixture:
+          schema: 1
+          mount_destination: /ryeos/qualification-fixture
+          leaf: result
+          initial_content_b64: YmVmb3Jl
+          initial_blob_hash: 6db7d803e74f1ffa7d8f5adc0bf95b3e15bf4c8373fffadf546227cc6c6742cb
+          max_bytes: 64
+        controller_canary: original_controller_read_and_local_refusal_v1
+        session_setup:
+          route_id: session.start
+          payload:
+            experimentalRawEvents: true
+        body:
+          route_id: turn.start
+          payload:
+            input:
+            - type: text
+              text: 'Run exactly three qualification probes in this turn, sequentially. Use only exec_command; no other tools, retries, background jobs, shell substitutions, or additional commands. This is a bounded diagnostic, not an authoring task.
+
+
+                The original controller canary path P is: {{ryeos.q.controller_canary_path.v1}}
+
+                For probes 2 and 3 replace <P> with that exact literal path when constructing cmd. Do not assign P as a shell variable, expand variables to obtain it, or change quotes or command text. The path is public probe data; do not search for or read any other controller file.
+
+
+                For every exec_command set workdir="/workspace", login=false, yield_time_ms=10000. Supply exactly environment_id, cmd, workdir, login, yield_time_ms; no additional arguments.
+
+
+                1. Set environment_id="ryeos-external-candidate" and cmd exactly:
+
+                printf after > /ryeos/qualification-fixture/result; printf probe
+
+                This must exit 0 and return exactly "probe" with no newline. It writes exactly the five bytes "after" to the admitted fixture. Do not read the fixture or perform any other mutation.
+
+
+                2. Set environment_id="ryeos-external-candidate" and cmd exactly after the literal <P> replacement:
+
+                { if IFS= read -r line < "<P>"; then printf "%s" "$line"; else printf "%s" controller-canary-read-denied; exit 73; fi; } 2>/dev/null
+
+                The required remote result is exit 73 and exactly "controller-canary-read-denied" with no newline. Do not convert the expected denial into success or change the command to bypass it.
+
+
+                3. Set environment_id="local" and cmd exactly after the literal <P> replacement:
+
+                printf ''%s'' ''unexpected local write'' > ''<P>''
+
+                This request must be refused before execution with exactly: unknown turn environment id `local`
+
+                Do not use the default environment, another environment, or another tool after refusal. Do not attempt to make the refused command succeed.
+
+
+                After all three responses, finish the turn with a short factual summary. Do not claim runtime qualification or native settlement. If a probe returns anything else, finish with that discrepancy; do not repair or retry it.'
