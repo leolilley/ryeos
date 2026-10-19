@@ -712,7 +712,7 @@ mod tests {
         let spec = ProviderSpec::parse(FIXTURE, &schema_digest()).unwrap();
         assert_eq!(
             spec.facade().sha256,
-            "a06e28fb71e06cbf476499427375c2af54f158590dd8082536dc11664cfa5d03"
+            "2197e7cbcfcd5e33ea2b56e8a4fd061cb4c912f333fab97c20ec511e4b015ef6"
         );
         assert_eq!(spec.facade().app, "ryeos-lease-facade");
         assert_eq!(spec.facade().lease_app, "ryeos-lease-sandboxes");

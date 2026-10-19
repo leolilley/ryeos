@@ -45,16 +45,38 @@ class FakeStream:
         return self.text
 
 
-class FakeFile(contextlib.AbstractContextManager):
-    def __init__(self, sandbox, path, append=False):
-        self.sandbox, self.path, self.append = sandbox, path, append
+class FakeStdin:
+    def __init__(self, process):
+        self.process = process
 
-    def write(self, data):
-        old = self.sandbox.files.get(self.path, b'') if self.append else b''
-        self.sandbox.files[self.path] = old + data
+    def write(self, text):
+        self.process.chunks.append(text)
 
-    def __exit__(self, *exc):
-        return False
+    def drain(self):
+        pass
+
+    def write_eof(self):
+        self.process.finish()
+
+
+class FakeWriteProcess(FakeProcess):
+    """An exec running a fixed `base64 -d >[>] "$1"` script fed over stdin."""
+
+    def __init__(self, sandbox, argv):
+        super().__init__(0)
+        self.sandbox, self.argv, self.chunks = sandbox, argv, []
+        self.stdin = FakeStdin(self)
+
+    def finish(self):
+        text = ''.join(self.chunks)
+        self.sandbox.stdins.append((self.argv, text))
+        if 'sh' in self.sandbox.fail_exec:
+            self.code = 1
+            return
+        data = base64.b64decode(text, validate=True)
+        path = self.argv[4]
+        old = self.sandbox.files.get(path, b'') if self.argv[2].startswith('base64 -d >>') else b''
+        self.sandbox.files[path] = old + data
 
 
 class FakeSandbox:
@@ -68,6 +90,7 @@ class FakeSandbox:
         self.dirs = set()
         self.files = {}
         self.execs = []
+        self.stdins = []
         self.tag_history = []
         self.fail_set_tags = False
         self.stuck = False
@@ -93,6 +116,9 @@ class FakeSandbox:
         self.execs.append(argv)
         code = 0
         out = ''
+        if argv[:2] == ('sh', '-c'):
+            assert argv[2] in ('base64 -d > "$1"', 'base64 -d >> "$1"') and argv[3] == 'sh' and len(argv) == 5
+            return FakeWriteProcess(self, argv)
         if argv[0] in self.fail_exec:
             code = 1
         elif argv[:2] == ('mkdir', '-p'):
@@ -115,10 +141,6 @@ class FakeSandbox:
         elif argv[:2] == ('test', '-d'):
             code = 0 if argv[2] in self.dirs else 1
         return FakeProcess(code, out)
-
-    def open(self, path, mode):
-        assert mode in ('wb', 'ab')
-        return FakeFile(self, path, append=mode == 'ab')
 
 
 class FakeProvider:
@@ -710,7 +732,8 @@ class FacadeTest(unittest.TestCase):
         sandbox = self.provider.by_id[out['sandbox_id']]
         self.assertEqual(sandbox.files, {'/ryeos/guest/entrypoint': data})
         self.assertEqual(sandbox.execs, [
-            ('mkdir', '/ryeos/upload.claimed'), ('chmod', '0755', '/ryeos/guest/entrypoint'),
+            ('mkdir', '/ryeos/upload.claimed'),
+            ('sh', '-c', 'base64 -d > "$1"', 'sh', '/ryeos/guest/entrypoint'), ('chmod', '0755', '/ryeos/guest/entrypoint'),
             ('mkdir', '/ryeos/upload.done')])
         self.assertEqual([t.get('ryeos_upload') for t in sandbox.tag_history[1:]], ['claimed', body['sha256']])
         self.refused(self.facade.handle_upload, body, 'upload_already_claimed')
@@ -756,6 +779,30 @@ class FacadeTest(unittest.TestCase):
                                                  'sha256': hashlib.sha256(b'x').hexdigest()}, 'guest_step_failed')
         self.refused(self.facade.handle_run_once, {'sandbox_id': out['sandbox_id'], 'stdin_b64': ''}, 'upload_not_complete')
 
+    def test_files_are_written_over_exec_stdin_with_fixed_argv(self):
+        out, sandbox = self.uploaded(b'guest')
+        sid = out['sandbox_id']
+        self.assertEqual(self.staged(sid, 'a', 0, b'abc')[0], 200)
+        self.assertEqual(self.staged(sid, 'a', 3, b'\x00\xffd')[0], 200)
+        self.assertEqual(self.facade.handle_stage_seal(self.seal_body(sid, 'a', b'abc\x00\xffd'))[0], 200)
+        self.assertEqual(self.facade.handle_run_once({'sandbox_id': sid, 'stdin_b64': b64(b'in')})[0], 200)
+        writes = [(argv, text) for argv, text in sandbox.stdins]
+        self.assertEqual(writes, [
+            (('sh', '-c', 'base64 -d > "$1"', 'sh', '/ryeos/guest/entrypoint'), b64(b'guest')),
+            (('sh', '-c', 'base64 -d >> "$1"', 'sh', '/ryeos/stage/a'), b64(b'abc')),
+            (('sh', '-c', 'base64 -d >> "$1"', 'sh', '/ryeos/stage/a'), b64(b'\x00\xffd')),
+            (('sh', '-c', 'base64 -d > "$1"', 'sh', '/ryeos/run.stdin'), b64(b'in')),
+        ])
+        self.assertEqual(sandbox.files['/ryeos/stage/a'], b'abc\x00\xffd')
+
+    def test_nonzero_write_exit_is_refused(self):
+        out = self.created()
+        sandbox = self.provider.by_id[out['sandbox_id']]
+        sandbox.fail_exec.add('sh')
+        self.refused(self.facade.handle_upload, {'sandbox_id': out['sandbox_id'], 'content_b64': b64(b'x'),
+                                                 'sha256': hashlib.sha256(b'x').hexdigest()}, 'guest_step_failed')
+        self.assertEqual(sandbox.files, {})
+
     # Run once
 
     def test_run_once_releases_the_guest_with_documented_stdin(self):
@@ -768,9 +815,9 @@ class FacadeTest(unittest.TestCase):
                          (True, ['/ryeos/guest/entrypoint'], '/ryeos/run.stdin'))
         self.assertEqual((run['stdin_bytes'], run['stdin_sha256']), (len(stdin), hashlib.sha256(stdin).hexdigest()))
         self.assertEqual(sandbox.files['/ryeos/run.stdin'], stdin)
-        self.assertEqual(sandbox.execs[-4:], [
-            ('test', '-d', '/ryeos/upload.done'), ('test', '-d', '/ryeos/stage-claim'),
-            ('mkdir', '/ryeos/run.claimed'), ('mkdir', '/ryeos/run.go')])
+        self.assertEqual(sandbox.execs[-5:], [
+            ('test', '-d', '/ryeos/upload.done'), ('test', '-d', '/ryeos/stage-claim'), ('mkdir', '/ryeos/run.claimed'),
+            ('sh', '-c', 'base64 -d > "$1"', 'sh', '/ryeos/run.stdin'), ('mkdir', '/ryeos/run.go')])
         self.assertEqual(sandbox.tags['ryeos_run'], run['stdin_sha256'])
         self.refused(self.facade.handle_run_once, {'sandbox_id': out['sandbox_id'], 'stdin_b64': ''}, 'run_once_already_claimed')
         sandbox.dirs.discard('/ryeos/run.claimed')
@@ -935,15 +982,16 @@ class FacadeTest(unittest.TestCase):
         sid = out['sandbox_id']
         sandbox = self.provider.by_id[sid]
         self.assertEqual(self.staged(sid, 'a', 0, b'abc')[0], 200)
-        real_open = sandbox.open
+        real_exec = sandbox.exec
 
-        def racing_open(path, mode):
-            sandbox.dirs.add('/ryeos/stage/a.sealing')
-            return real_open(path, mode)
+        def racing_exec(*argv):
+            if argv[:2] == ('sh', '-c'):
+                sandbox.dirs.add('/ryeos/stage/a.sealing')
+            return real_exec(*argv)
 
-        sandbox.open = racing_open
+        sandbox.exec = racing_exec
         self.refused(self.facade.handle_stage, self.staged_body(sid, 'a', 3, b'def'), 'guest_step_failed')
-        sandbox.open = real_open
+        sandbox.exec = real_exec
         self.refused(self.facade.handle_stage, self.staged_body(sid, 'a', 6, b'x'), 'slot_sealed')
 
     def test_stage_seal_claim_released_on_refusal_and_blocks_chunks_while_held(self):
