@@ -642,7 +642,7 @@ impl ExternalMaterializationCache {
         lock.lock_exclusive()?;
 
         let generation = match root.open_child_directory(OsStr::new(manifest_hash))? {
-            Some(existing) => match verify_materialized_tree(cas, &existing, closure.manifest()) {
+            Some(existing) => match verify_materialized_tree(&existing, closure.manifest()) {
                 Ok(()) => existing,
                 Err(error) => {
                     tracing::warn!(
@@ -656,7 +656,7 @@ impl ExternalMaterializationCache {
             },
             None => self.build_generation(cas, &root, closure)?,
         };
-        verify_materialized_tree(cas, &generation, closure.manifest())?;
+        verify_materialized_tree(&generation, closure.manifest())?;
 
         let leases = root.open_or_create_child(OsStr::new(".leases"), 0o700)?;
         let lease =
@@ -751,7 +751,6 @@ impl ExternalMaterializationCache {
         let generation = match root.open_child_directory(OsStr::new(manifest_hash))? {
             Some(existing) => {
                 match verify_large_materialized_tree(
-                    cas,
                     &existing,
                     manifest,
                     LargeMaterializationVerification::SharedObjects(&large_sources),
@@ -785,7 +784,6 @@ impl ExternalMaterializationCache {
             )?,
         };
         verify_large_materialized_tree(
-            cas,
             &generation,
             manifest,
             LargeMaterializationVerification::SharedObjects(&large_sources),
@@ -894,7 +892,6 @@ impl ExternalMaterializationCache {
                 }
             }
             verify_large_materialized_tree(
-                cas,
                 &staging,
                 manifest,
                 LargeMaterializationVerification::SharedObjects(large_sources),
@@ -956,7 +953,7 @@ impl ExternalMaterializationCache {
                     }
                 }
             }
-            verify_materialized_tree(cas, &staging, closure.manifest())?;
+            verify_materialized_tree(&staging, closure.manifest())?;
             root.rename_child_directory_noreplace(
                 &staging_name,
                 OsStr::new(manifest_hash),
@@ -1695,7 +1692,6 @@ fn bind_external_realization_set_with(
                     },
                     |staging| {
                         verify_large_materialized_tree(
-                            &cas,
                             staging,
                             &manifest,
                             LargeMaterializationVerification::PrivateDigest,
@@ -1706,7 +1702,6 @@ fn bind_external_realization_set_with(
                             ExternalContentKind::Tree,
                             lillux::PinnedDirectoryEntry::Directory(directory),
                         ) => verify_large_materialized_tree(
-                            &cas,
                             directory,
                             &manifest,
                             LargeMaterializationVerification::PrivateDigest,
@@ -1789,12 +1784,12 @@ fn bind_external_realization_set_with(
                         private_budget.expect("private binding has a budget"),
                     )
                 },
-                |staging| verify_materialized_tree(&cas, staging, closure.manifest()),
+                |staging| verify_materialized_tree(staging, closure.manifest()),
                 |existing| match (entry.kind, existing) {
                     (
                         ExternalContentKind::Tree,
                         lillux::PinnedDirectoryEntry::Directory(directory),
-                    ) => verify_materialized_tree(&cas, directory, closure.manifest()),
+                    ) => verify_materialized_tree(directory, closure.manifest()),
                     (ExternalContentKind::File, lillux::PinnedDirectoryEntry::Regular(file)) => {
                         let expected = expected_file.ok_or_else(|| {
                             anyhow::anyhow!("file-shaped realization has no canonical file entry")
@@ -2201,7 +2196,7 @@ pub(crate) fn restore_workspace_output_tree(
             let generation =
                 cache.materialize_with(&cas, &closure, ExternalContentKind::Tree, repair)?;
             copy_materialized_tree(&generation.root, target, closure.manifest(), budget)?;
-            verify_materialized_tree(&cas, target, closure.manifest())?;
+            verify_materialized_tree(target, closure.manifest())?;
         }
         ryeos_state::external_content::products::ProductStorage::LargeContent => {
             let value = ryeos_state::object_closure::load_exact_cas_object_with_cas(
@@ -2224,7 +2219,6 @@ pub(crate) fn restore_workspace_output_tree(
             // hardlinks. The existing private-copy budget owns reflink/copy.
             copy_large_materialized_tree(&generation.root, target, &manifest, budget)?;
             verify_large_materialized_tree(
-                &cas,
                 target,
                 &manifest,
                 LargeMaterializationVerification::PrivateDigest,
@@ -2292,7 +2286,6 @@ enum LargeMaterializationVerification<'a> {
 }
 
 fn verify_large_materialized_tree(
-    cas: &lillux::CasStore,
     root: &lillux::PinnedDirectory,
     manifest: &ryeos_state::objects::ExternalLargeContentManifestObject,
     verification: LargeMaterializationVerification<'_>,
@@ -2303,7 +2296,7 @@ fn verify_large_materialized_tree(
         .map(|entry| (entry.path.as_str(), entry))
         .collect::<BTreeMap<_, _>>();
     let mut observed = Vec::with_capacity(expected.len());
-    verify_large_materialized_directory(cas, root, "", &expected, &verification, &mut observed)?;
+    verify_large_materialized_directory(root, "", &expected, &verification, &mut observed)?;
     observed.sort();
     let expected_paths = expected.keys().copied().collect::<Vec<_>>();
     if observed.iter().map(String::as_str).collect::<Vec<_>>() != expected_paths {
@@ -2313,7 +2306,6 @@ fn verify_large_materialized_tree(
 }
 
 fn verify_large_materialized_directory(
-    cas: &lillux::CasStore,
     directory: &lillux::PinnedDirectory,
     prefix: &str,
     expected: &BTreeMap<&str, &ryeos_state::objects::ExternalLargeContentManifestEntry>,
@@ -2342,7 +2334,6 @@ fn verify_large_materialized_directory(
                     .open_child_directory(&actual.name)?
                     .ok_or_else(|| anyhow::anyhow!("materialized directory {path} disappeared"))?;
                 verify_large_materialized_directory(
-                    cas,
                     &child,
                     &path,
                     expected,
@@ -2367,7 +2358,7 @@ fn verify_large_materialized_directory(
                 if let Some(blob_hash) = entry.blob_hash.as_deref() {
                     file.rewind()?;
                     let (digest, _) =
-                        lillux::digest_open_regular_file_stable_exact(&mut file, expected_size)?;
+                        lillux::digest_open_regular_file_stable_exact(&file, expected_size)?;
                     if digest != blob_hash {
                         anyhow::bail!("materialized CAS file {path} contradicts its manifest");
                     }
@@ -2390,10 +2381,8 @@ fn verify_large_materialized_directory(
                         }
                     } else {
                         file.rewind()?;
-                        let (digest, _) = lillux::digest_open_regular_file_stable_exact(
-                            &mut file,
-                            expected_size,
-                        )?;
+                        let (digest, _) =
+                            lillux::digest_open_regular_file_stable_exact(&file, expected_size)?;
                         if digest != file_sha256 {
                             anyhow::bail!(
                                 "materialized executable {path} contradicts its large object"
@@ -2422,7 +2411,6 @@ fn verify_large_materialized_directory(
 }
 
 fn verify_materialized_tree(
-    cas: &lillux::CasStore,
     root: &lillux::PinnedDirectory,
     manifest: &ryeos_state::objects::ExternalContentManifestObject,
 ) -> anyhow::Result<()> {
@@ -2432,7 +2420,7 @@ fn verify_materialized_tree(
         .map(|entry| (entry.path.as_str(), entry))
         .collect::<BTreeMap<_, _>>();
     let mut observed = Vec::with_capacity(expected.len());
-    verify_materialized_directory(cas, root, "", &expected, &mut observed)?;
+    verify_materialized_directory(root, "", &expected, &mut observed)?;
     observed.sort();
     let expected_paths = expected.keys().copied().collect::<Vec<_>>();
     if observed.iter().map(String::as_str).collect::<Vec<_>>() != expected_paths {
@@ -2442,7 +2430,6 @@ fn verify_materialized_tree(
 }
 
 fn verify_materialized_directory(
-    cas: &lillux::CasStore,
     directory: &lillux::PinnedDirectory,
     prefix: &str,
     expected: &BTreeMap<&str, &ryeos_state::objects::ExternalContentManifestEntry>,
@@ -2469,7 +2456,7 @@ fn verify_materialized_directory(
                 let child = directory
                     .open_child_directory(&actual.name)?
                     .ok_or_else(|| anyhow::anyhow!("materialized directory {path} disappeared"))?;
-                verify_materialized_directory(cas, &child, &path, expected, observed)?;
+                verify_materialized_directory(&child, &path, expected, observed)?;
             }
             ryeos_state::objects::ExternalContentManifestEntryKind::File => {
                 if actual.entry_type != lillux::PinnedEntryType::Regular {
@@ -2480,7 +2467,7 @@ fn verify_materialized_directory(
                     .ok_or_else(|| anyhow::anyhow!("materialized file {path} disappeared"))?;
                 file.rewind()?;
                 let (digest, metadata) = lillux::digest_open_regular_file_stable_exact(
-                    &mut file,
+                    &file,
                     entry.size.expect("validated file entry has a size"),
                 )?;
                 if Some(digest.as_str()) != entry.blob_hash.as_deref()
@@ -2728,10 +2715,10 @@ mod tests {
             |staging| {
                 copy_materialized_tree(&generation.root, staging, closure.manifest(), &budget)
             },
-            |staging| verify_materialized_tree(&cas, staging, closure.manifest()),
+            |staging| verify_materialized_tree(staging, closure.manifest()),
             |existing| match existing {
                 lillux::PinnedDirectoryEntry::Directory(directory) => {
-                    verify_materialized_tree(&cas, directory, closure.manifest())
+                    verify_materialized_tree(directory, closure.manifest())
                 }
                 lillux::PinnedDirectoryEntry::Regular(_) => {
                     anyhow::bail!("tree realization destination is a regular file")
@@ -2750,10 +2737,10 @@ mod tests {
             |staging| {
                 copy_materialized_tree(&generation.root, staging, closure.manifest(), &budget)
             },
-            |staging| verify_materialized_tree(&cas, staging, closure.manifest()),
+            |staging| verify_materialized_tree(staging, closure.manifest()),
             |existing| match existing {
                 lillux::PinnedDirectoryEntry::Directory(directory) => {
-                    verify_materialized_tree(&cas, directory, closure.manifest())
+                    verify_materialized_tree(directory, closure.manifest())
                 }
                 lillux::PinnedDirectoryEntry::Regular(_) => {
                     anyhow::bail!("tree realization destination is a regular file")
@@ -2784,10 +2771,10 @@ mod tests {
             |staging| {
                 copy_materialized_tree(&generation.root, staging, closure.manifest(), &budget)
             },
-            |staging| verify_materialized_tree(&cas, staging, closure.manifest()),
+            |staging| verify_materialized_tree(staging, closure.manifest()),
             |existing| match existing {
                 lillux::PinnedDirectoryEntry::Directory(directory) => {
-                    verify_materialized_tree(&cas, directory, closure.manifest())
+                    verify_materialized_tree(directory, closure.manifest())
                 }
                 lillux::PinnedDirectoryEntry::Regular(_) => {
                     anyhow::bail!("tree realization destination is a regular file")
@@ -2949,7 +2936,6 @@ mod tests {
             |staging| copy_large_materialized_tree(&generation.root, staging, &manifest, &budget),
             |staging| {
                 verify_large_materialized_tree(
-                    &cas,
                     staging,
                     &manifest,
                     LargeMaterializationVerification::PrivateDigest,
@@ -2958,7 +2944,6 @@ mod tests {
             |existing| match existing {
                 lillux::PinnedDirectoryEntry::Directory(directory) => {
                     verify_large_materialized_tree(
-                        &cas,
                         directory,
                         &manifest,
                         LargeMaterializationVerification::PrivateDigest,
@@ -3040,7 +3025,7 @@ mod tests {
             |staging| {
                 copy_materialized_tree(&generation.root, staging, closure.manifest(), &budget)
             },
-            |staging| verify_materialized_tree(&cas, staging, closure.manifest()),
+            |staging| verify_materialized_tree(staging, closure.manifest()),
             |existing| match existing {
                 lillux::PinnedDirectoryEntry::Regular(file) => {
                     let expected = closure
@@ -3078,7 +3063,7 @@ mod tests {
             |staging| {
                 copy_materialized_tree(&generation.root, staging, closure.manifest(), &budget)
             },
-            |staging| verify_materialized_tree(&cas, staging, closure.manifest()),
+            |staging| verify_materialized_tree(staging, closure.manifest()),
             |existing| match existing {
                 lillux::PinnedDirectoryEntry::Regular(file) => {
                     let expected = closure
@@ -3112,7 +3097,7 @@ mod tests {
             |staging| {
                 copy_materialized_tree(&generation.root, staging, closure.manifest(), &budget)
             },
-            |staging| verify_materialized_tree(&cas, staging, closure.manifest()),
+            |staging| verify_materialized_tree(staging, closure.manifest()),
             |existing| match existing {
                 lillux::PinnedDirectoryEntry::Regular(file) => {
                     let expected = closure

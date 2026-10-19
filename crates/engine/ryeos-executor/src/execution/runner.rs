@@ -1287,7 +1287,7 @@ fn prepare_owned_workspace_after_thread_birth(
                         let identity =
                             ryeos_app::process::capture_execution_process_identity_from_pidfd(
                                 i64::from(held.pid()),
-                                Some(i64::from(held.pgid())),
+                                Some(held.pgid()),
                                 held.pidfd(),
                             )
                             .map_err(|error| error.to_string())?;
@@ -4018,10 +4018,10 @@ fn validate_process_inputs_outside_workspace_outputs(
 ) -> Result<()> {
     partition.validate()?;
     let mut mounts = super::external_content::admitted_realization_mounts(resolution)?;
-    if source_placement == super::source_closure::SourceMountPlacement::Project {
-        if let Some(source) = super::source_closure::admitted_source_mount(state, resolution)? {
-            mounts.push(source);
-        }
+    if source_placement == super::source_closure::SourceMountPlacement::Project
+        && let Some(source) = super::source_closure::admitted_source_mount(state, resolution)?
+    {
+        mounts.push(source);
     }
     for mount in mounts {
         let mount = Path::new(&mount);
@@ -4293,16 +4293,15 @@ pub(crate) fn prepare_process_inputs(
                 prepare_sparse_input_mount_target(root, relative, kind)?;
             }
         }
-        if source_placement == super::source_closure::SourceMountPlacement::Project {
-            if let Some(relative) =
+        if source_placement == super::source_closure::SourceMountPlacement::Project
+            && let Some(relative) =
                 super::source_closure::admitted_source_mount(state, retained_resolution)?
-            {
-                prepare_sparse_input_mount_target(
-                    root,
-                    &relative,
-                    ryeos_engine::external_content::ExternalContentKind::Tree,
-                )?;
-            }
+        {
+            prepare_sparse_input_mount_target(
+                root,
+                &relative,
+                ryeos_engine::external_content::ExternalContentKind::Tree,
+            )?;
         }
     }
     if let Some(budget) = budget.as_ref() {
@@ -5405,7 +5404,7 @@ pub async fn run_and_wait(
             Path::new(ryeos_app::thread_lifecycle::ADMITTED_DIRECT_PROJECT_ROOT);
         prepared_plan
             .relocate_project_for_spawn(Some(admitted_project_root), Some(&effective_path))
-            .map_err(|error| guard.fail_before_spawn(error.into()))?;
+            .map_err(|error| guard.fail_before_spawn(error))?;
     }
     if matches!(
         &params.resolved.plan_context.project_context,
@@ -5603,13 +5602,13 @@ pub async fn run_and_wait(
                 9,
                 "RYEOS_SCOPED_RELAY_FD",
             )
-            .map_err(|error| guard.fail_before_spawn(error.into()))?;
+            .map_err(|error| guard.fail_before_spawn(error))?;
             (Some(parent), vec![target])
         } else {
             (None, Vec::new())
         };
         let workspace = lillux::PinnedDirectory::open(&effective_path)
-            .map_err(|error| guard.fail_before_spawn(error.into()))?
+            .map_err(|error| guard.fail_before_spawn(error))?
             .ok_or_else(|| {
                 guard.fail_before_spawn(anyhow::anyhow!(
                     "scoped producer private workspace is absent"
@@ -6428,7 +6427,7 @@ pub async fn run_detached(
             Path::new(ryeos_app::thread_lifecycle::ADMITTED_DIRECT_PROJECT_ROOT);
         prepared_plan
             .relocate_project_for_spawn(Some(admitted_project_root), Some(&effective_path))
-            .map_err(|error| guard.fail_before_spawn(error.into()))?;
+            .map_err(|error| guard.fail_before_spawn(error))?;
     }
     if matches!(
         &params.resolved.plan_context.project_context,
@@ -8988,11 +8987,11 @@ async fn run_existing_recovered_thread(
         params.provenance.project_authority(),
         ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration { .. }
     ) && effective_path != params.provenance.effective_path()
-        && !params
+        && params
             .resolved
             .root_admission
             .as_ref()
-            .is_some_and(|admission| admission.qualification_purpose().is_some())
+            .is_none_or(|admission| admission.qualification_purpose().is_none())
     {
         params.resolved.plan_context.project_context = ProjectContext::LocalPath {
             path: effective_path.clone(),
@@ -9080,7 +9079,7 @@ async fn run_existing_recovered_thread(
     if effective_project_root.is_some() {
         prepared_plan
             .relocate_project_for_spawn(effective_project_root, Some(&process_path))
-            .map_err(|error| guard.fail_before_spawn(error.into()))?;
+            .map_err(|error| guard.fail_before_spawn(error))?;
     }
     effective_path = process_path;
     if let Some(lifeline) = process_input_lifeline {
