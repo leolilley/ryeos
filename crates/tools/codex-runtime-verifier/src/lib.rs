@@ -35,8 +35,8 @@ use anyhow::{Context as _, Result, ensure};
 use ryeos_external_execution_contract::LifecycleCapability;
 use ryeos_state::external_content::products::producer_recipe::{
     ProducerCwdSource, ProducerEnvironmentBinding, ProducerEnvironmentSource,
-    ProducerExecutableSource, ProducerPreparedImmutableFile, ProducerStdinSource,
-    ProductProducerRecipe,
+    ProducerExecutableSource, ProducerLoopbackIngress, ProducerPreparedImmutableFile,
+    ProducerResourceBounds, ProducerStdinSource, ProductProducerRecipe,
 };
 use ryeos_state::external_execution::admission::{
     ExternalCandidateProcFilesystem, ExternalCandidateQualificationUse,
@@ -603,6 +603,109 @@ stream_max_retries = 0
     .replace("{ORIGIN}", origin)
 }
 
+/// The finite direct Codex producer recipe a scenario must bind: the admitted
+/// subject realization's `bin/codex`, the strict app-server argv, the prepared
+/// home files and the loopback ingress derived from the responses origin.
+/// Resource bounds carry the qualified precedent; callers that compare
+/// recipes ignore them.
+pub fn expected_direct_recipe(
+    subject_manifest_hash: &str,
+    codex_sha256: &str,
+    scripted_baseline_sha256: &str,
+    origin: &str,
+) -> Result<ProductProducerRecipe> {
+    let ingress = origin
+        .strip_prefix("http://")
+        .context("direct producer origin is not HTTP")?;
+    Ok(ProductProducerRecipe {
+        schema: "ryeos.product_producer_recipe.v6".into(),
+        executable_source: ProducerExecutableSource::AdmittedRealizationMember {
+            realization_id: "subject".into(),
+            manifest_hash: subject_manifest_hash.into(),
+            relative_path: "bin/codex".into(),
+            executable_sha256: codex_sha256.into(),
+        },
+        argv: [
+            "--strict-config",
+            "-c",
+            "check_for_update_on_startup=false",
+            "app-server",
+        ]
+        .map(String::from)
+        .into(),
+        stdin_source: ProducerStdinSource::InteractiveVerifierChannel {
+            maximum_frame_bytes: 64 * 1024,
+            maximum_total_bytes: 1024 * 1024,
+            maximum_frames: 128,
+        },
+        cwd_source: ProducerCwdSource::PreparedDirectory {
+            id: staging::DIRECT_OCCURRENCE_ID.into(),
+        },
+        environment_sources: vec![ProducerEnvironmentSource::AdmittedRealizations],
+        environment_bindings: BTreeMap::from([
+            (
+                "CODEX_HOME".into(),
+                ProducerEnvironmentBinding::PreparedDirectory {
+                    id: staging::DIRECT_HOME_ID.into(),
+                },
+            ),
+            (
+                "HOME".into(),
+                ProducerEnvironmentBinding::PreparedDirectory {
+                    id: staging::DIRECT_HOME_ID.into(),
+                },
+            ),
+            (
+                "PATH".into(),
+                ProducerEnvironmentBinding::Literal {
+                    value: String::new(),
+                },
+            ),
+            (
+                "LANG".into(),
+                ProducerEnvironmentBinding::Literal { value: "C".into() },
+            ),
+            (
+                "LC_ALL".into(),
+                ProducerEnvironmentBinding::Literal { value: "C".into() },
+            ),
+        ]),
+        prepared_immutable_files: vec![
+            ProducerPreparedImmutableFile {
+                prepared_directory_id: staging::DIRECT_HOME_ID.into(),
+                leaf_name: "config.toml".into(),
+                maximum_bytes: 65536,
+                expected_sha256: scripted_baseline_sha256.into(),
+            },
+            ProducerPreparedImmutableFile {
+                prepared_directory_id: staging::DIRECT_HOME_ID.into(),
+                leaf_name: "environments.toml".into(),
+                maximum_bytes: 65536,
+                expected_sha256: staging::direct_command_environment_sha256()?,
+            },
+        ],
+        loopback_ingress: Some(ProducerLoopbackIngress {
+            address: ingress.into(),
+        }),
+        bounds: ProducerResourceBounds {
+            maximum_wall_time_ms: 170000,
+            maximum_stdout_bytes: 6291456,
+            maximum_stderr_bytes: 1048576,
+            maximum_memory_bytes: 2147483648,
+            maximum_processes: 64,
+        },
+    })
+}
+
+/// sha256 hex of the two files the direct recipe pins in the prepared home:
+/// the scripted `config.toml` for this origin, then `environments.toml`.
+pub fn prepared_file_digests(origin: &str) -> Result<(String, String)> {
+    Ok((
+        lillux::sha256_hex(expected_scripted_baseline(origin).as_bytes()),
+        staging::direct_command_environment_sha256()?,
+    ))
+}
+
 impl SelectedInput {
     pub fn subject_manifest_hash(&self) -> &str {
         &self.subject_manifest_hash
@@ -952,86 +1055,25 @@ impl Parameters {
         }
         self.configuration.requirement.validate()?;
         self.configuration.expected_producer_recipe.validate()?;
+        let expected = expected_direct_recipe(
+            &self.configuration.subject_manifest_hash,
+            &self.configuration.codex_sha256,
+            &self.configuration.scripted_baseline_sha256,
+            &self.configuration.responses_origin,
+        )?;
         let direct = &self.configuration.expected_producer_recipe;
-        let expected_bindings = BTreeMap::from([
-            (
-                "CODEX_HOME".into(),
-                ProducerEnvironmentBinding::PreparedDirectory {
-                    id: staging::DIRECT_HOME_ID.into(),
-                },
-            ),
-            (
-                "HOME".into(),
-                ProducerEnvironmentBinding::PreparedDirectory {
-                    id: staging::DIRECT_HOME_ID.into(),
-                },
-            ),
-            (
-                "PATH".into(),
-                ProducerEnvironmentBinding::Literal {
-                    value: String::new(),
-                },
-            ),
-            (
-                "LANG".into(),
-                ProducerEnvironmentBinding::Literal { value: "C".into() },
-            ),
-            (
-                "LC_ALL".into(),
-                ProducerEnvironmentBinding::Literal { value: "C".into() },
-            ),
-        ]);
-        let expected_immutable_files = vec![
-            ProducerPreparedImmutableFile {
-                prepared_directory_id: staging::DIRECT_HOME_ID.into(),
-                leaf_name: "config.toml".into(),
-                maximum_bytes: 65536,
-                expected_sha256: self.configuration.scripted_baseline_sha256.clone(),
-            },
-            ProducerPreparedImmutableFile {
-                prepared_directory_id: staging::DIRECT_HOME_ID.into(),
-                leaf_name: "environments.toml".into(),
-                maximum_bytes: 65536,
-                expected_sha256: staging::direct_command_environment_sha256()?,
-            },
-        ];
-        let expected_ingress = self
-            .configuration
-            .responses_origin
-            .strip_prefix("http://")
-            .context("direct producer origin is not HTTP")?;
+        // Resource bounds are an authoring choice of the signed recipe, not
+        // part of the finite target identity, so every other field is exact.
         ensure!(
-            direct.executable_source
-                == ProducerExecutableSource::AdmittedRealizationMember {
-                    realization_id: "subject".into(),
-                    manifest_hash: self.configuration.subject_manifest_hash.clone(),
-                    relative_path: "bin/codex".into(),
-                    executable_sha256: self.configuration.codex_sha256.clone(),
-                }
-                && direct.argv
-                    == [
-                        "--strict-config",
-                        "-c",
-                        "check_for_update_on_startup=false",
-                        "app-server"
-                    ]
-                && direct.stdin_source
-                    == ProducerStdinSource::InteractiveVerifierChannel {
-                        maximum_frame_bytes: 64 * 1024,
-                        maximum_total_bytes: 1024 * 1024,
-                        maximum_frames: 128,
-                    }
-                && direct.cwd_source
-                    == ProducerCwdSource::PreparedDirectory {
-                        id: staging::DIRECT_OCCURRENCE_ID.into(),
-                    }
-                && direct.environment_sources == [ProducerEnvironmentSource::AdmittedRealizations]
-                && direct.environment_bindings == expected_bindings
-                && direct.prepared_immutable_files == expected_immutable_files
-                && direct
-                    .loopback_ingress
-                    .as_ref()
-                    .is_some_and(|ingress| ingress.address == expected_ingress),
+            direct.schema == expected.schema
+                && direct.executable_source == expected.executable_source
+                && direct.argv == expected.argv
+                && direct.stdin_source == expected.stdin_source
+                && direct.cwd_source == expected.cwd_source
+                && direct.environment_sources == expected.environment_sources
+                && direct.environment_bindings == expected.environment_bindings
+                && direct.prepared_immutable_files == expected.prepared_immutable_files
+                && direct.loopback_ingress == expected.loopback_ingress,
             "expected producer recipe differs from the finite direct Codex target"
         );
         ensure!(
@@ -1182,6 +1224,56 @@ mod tests {
     use serde_json::json;
     use std::io::Write as _;
     use std::os::unix::fs::PermissionsExt as _;
+
+    /// Parse the `product_producer_recipe` body of a signed config document,
+    /// dropping the leading `# ryeos:signed:` line.
+    fn recipe_from_signed_yaml(text: &str) -> ProductProducerRecipe {
+        let body = match text.split_once('\n') {
+            Some((first, rest)) if first.starts_with("# ryeos:signed:") => rest,
+            _ => text,
+        };
+        let document: serde_yaml::Value = serde_yaml::from_str(body).unwrap();
+        let recipe = document.get("product_producer_recipe").unwrap();
+        ProductProducerRecipe::from_value(serde_json::to_value(recipe).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn prepared_file_digests_are_stable_for_the_routing_origin() {
+        let (config, environments) = prepared_file_digests("http://127.0.0.1:18765").unwrap();
+        println!("config.toml sha256 = {config}");
+        println!("environments.toml sha256 = {environments}");
+        for hash in [&config, &environments] {
+            assert_eq!(hash.len(), 64);
+            assert!(hash.bytes().all(|b| b.is_ascii_hexdigit()));
+        }
+        assert_eq!(
+            config,
+            lillux::sha256_hex(expected_scripted_baseline("http://127.0.0.1:18765").as_bytes())
+        );
+    }
+
+    #[test]
+    fn expected_direct_recipe_round_trips_through_signed_yaml() {
+        let origin = "http://127.0.0.1:18765";
+        let (config, _) = prepared_file_digests(origin).unwrap();
+        let manifest = "ab".repeat(32);
+        let codex = "cd".repeat(32);
+        let recipe = expected_direct_recipe(&manifest, &codex, &config, origin).unwrap();
+        let yaml = format!(
+            "# ryeos:signed:2026-10-19T00:00:00Z:{}:sig:fp\n{}",
+            "0".repeat(64),
+            serde_yaml::to_string(&serde_json::json!({
+                "product_producer_recipe": serde_json::to_value(&recipe).unwrap()
+            }))
+            .unwrap()
+        );
+        assert_eq!(recipe_from_signed_yaml(&yaml), recipe);
+        assert_eq!(
+            recipe.loopback_ingress.as_ref().unwrap().address,
+            "127.0.0.1:18765"
+        );
+        assert!(expected_direct_recipe(&manifest, &codex, &config, "https://x:1").is_err());
+    }
 
     #[test]
     fn production_codex_closure_refuses_shape_and_identity_changes() {
