@@ -166,7 +166,7 @@ assert_rejected ryeos_bundle_set_cargo_features unknown ryeosd
 for forbidden in codex render-sandbox opencode web browser ryeos-ui; do
   assert_rejected contains "$forbidden" "${local_inference[@]}"
 done
-[[ "${release_artifacts[*]}" == "core central-auth scheduling knowledge directive graph ryeos-docs environment-qualification web browser ryeos-ui codex render-sandbox opencode local-inference bundle-source bundle-release" ]]
+[[ "${release_artifacts[*]}" == "core central-auth scheduling knowledge directive graph ryeos-docs environment-qualification web browser ryeos-ui codex render-sandbox modal-sandbox opencode local-inference bundle-source bundle-release" ]]
 [[ "${release_authority[*]}" == "core graph environment-qualification bundle-release" ]]
 for forbidden in central-auth scheduling knowledge directive ryeos-docs web browser ryeos-ui codex opencode render-sandbox; do
   assert_rejected contains "$forbidden" "${release_authority[@]}"
@@ -440,6 +440,8 @@ static_package_cases=(
   'ryeos-external-candidate-launcher|ryeos-external-candidate-launcher'
   'ryeos-external-candidate-supervisor|ryeos-external-candidate-supervisor'
   'ryeos-render-sandbox-lifecycle-adapter|ryeos-render-sandbox-lifecycle-adapter'
+  'modal-guest-launcher|ryeos-modal-guest-launcher'
+  'ryeos-modal-sandbox-lifecycle-adapter|ryeos-modal-sandbox-lifecycle-adapter'
   'ryeos-external-guest-runtime-producer|ryeos-external-guest-runtime-producer'
   'ryeos-codex-external-configuration|ryeos-codex-external-configuration'
   'ryeos-codex-guest-runtime-producer|ryeos-codex-guest-runtime-producer'

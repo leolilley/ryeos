@@ -251,6 +251,7 @@ BROWSER="$ROOT/bundles/browser"
 RYEOS_UI="$ROOT/bundles/ryeos-ui"
 CODEX="$ROOT/bundles/codex"
 RENDER_SANDBOX="$ROOT/bundles/render-sandbox"
+MODAL_SANDBOX="$ROOT/bundles/modal-sandbox"
 OPENCODE="$ROOT/bundles/opencode"
 LOCAL_INFERENCE="$ROOT/bundles/local-inference"
 ENV_QUALIFICATION="$ROOT/bundles/environment-qualification"
@@ -416,7 +417,8 @@ case "$BUNDLE_SET" in
           ryeos-codex-guest-runtime-producer \
           ryeos-codex-runtime-verifier \
           ryeos-external-candidate-launcher ryeos-external-candidate-supervisor \
-          ryeos-external-guest-restoration-verifier ryeos-render-sandbox-lifecycle-adapter)
+          ryeos-external-guest-restoration-verifier ryeos-render-sandbox-lifecycle-adapter \
+          modal-guest-launcher ryeos-modal-sandbox-lifecycle-adapter)
     ;;
   central-host)
     pkgs=(lillux ryeosd ryeos-directive-runtime ryeos-graph-runtime ryeos-knowledge-runtime \
@@ -502,6 +504,8 @@ build_static_external_candidate_supervisor=0
 build_static_external_guest_restoration_verifier=0
 build_static_external_guest_runtime_producer=0
 build_static_render_sandbox_lifecycle_adapter=0
+build_static_modal_guest_launcher=0
+build_static_modal_sandbox_lifecycle_adapter=0
 build_static_codex_external_configuration=0
 build_static_codex_guest_runtime_producer=0
 build_static_codex_runtime_verifier=0
@@ -517,6 +521,8 @@ for p in "${pkgs[@]}"; do
     ryeos-external-guest-restoration-verifier) build_static_external_guest_restoration_verifier=1 ;;
     ryeos-external-guest-runtime-producer) build_static_external_guest_runtime_producer=1 ;;
     ryeos-render-sandbox-lifecycle-adapter) build_static_render_sandbox_lifecycle_adapter=1 ;;
+    modal-guest-launcher) build_static_modal_guest_launcher=1 ;;
+    ryeos-modal-sandbox-lifecycle-adapter) build_static_modal_sandbox_lifecycle_adapter=1 ;;
     ryeos-codex-external-configuration) build_static_codex_external_configuration=1 ;;
     ryeos-codex-guest-runtime-producer) build_static_codex_guest_runtime_producer=1 ;;
     ryeos-codex-runtime-verifier) build_static_codex_runtime_verifier=1 ;;
@@ -584,6 +590,8 @@ static_build_labels=()
 (( build_static_external_guest_restoration_verifier == 1 )) && static_build_labels+=(ryeos-external-guest-restoration-verifier)
 (( build_static_external_guest_runtime_producer == 1 )) && static_build_labels+=(ryeos-external-guest-runtime-producer)
 (( build_static_render_sandbox_lifecycle_adapter == 1 )) && static_build_labels+=(ryeos-render-sandbox-lifecycle-adapter)
+(( build_static_modal_guest_launcher == 1 )) && static_build_labels+=(modal-guest-launcher)
+(( build_static_modal_sandbox_lifecycle_adapter == 1 )) && static_build_labels+=(ryeos-modal-sandbox-lifecycle-adapter)
 (( build_static_codex_external_configuration == 1 )) && static_build_labels+=(ryeos-codex-external-configuration)
 (( build_static_codex_guest_runtime_producer == 1 )) && static_build_labels+=(ryeos-codex-guest-runtime-producer)
 (( build_static_codex_runtime_verifier == 1 )) && static_build_labels+=(ryeos-codex-runtime-verifier)
@@ -627,6 +635,10 @@ if bundle_in_set render-sandbox; then
   require_static_payload "$PAYLOAD_STAGE/render-sandbox/ryeos-external-candidate-supervisor"
   require_static_payload "$PAYLOAD_STAGE/render-sandbox/ryeos-external-guest-restoration-verifier"
   require_static_payload "$PAYLOAD_STAGE/render-sandbox/ryeos-render-sandbox-lifecycle-adapter"
+fi
+if bundle_in_set modal-sandbox; then
+  require_static_payload "$PAYLOAD_STAGE/modal-sandbox/ryeos-modal-guest-launcher"
+  require_static_payload "$PAYLOAD_STAGE/modal-sandbox/ryeos-modal-sandbox-lifecycle-adapter"
 fi
 prepare_bundle_trees
 
@@ -712,6 +724,7 @@ publish_bundle browser "$BROWSER" "signed manifests"
 publish_bundle ryeos-ui "$RYEOS_UI" "signed manifests" "$DIRECTIVE" "$GRAPH" "$KNOWLEDGE"
 publish_bundle codex "$CODEX" "signed manifests" "$GRAPH" "$KNOWLEDGE"
 publish_bundle render-sandbox "$RENDER_SANDBOX" "signed lifecycle profile" "$GRAPH"
+publish_bundle modal-sandbox "$MODAL_SANDBOX" "signed lifecycle profile" "$GRAPH"
 publish_bundle opencode "$OPENCODE" "signed manifests" "$KNOWLEDGE"
 publish_bundle local-inference "$LOCAL_INFERENCE" "signed manifests" "$DIRECTIVE" "$GRAPH" "$KNOWLEDGE"
 publish_bundle bundle-release "$RELEASE_BUNDLE" "signed release-authoring contracts" "$GRAPH"

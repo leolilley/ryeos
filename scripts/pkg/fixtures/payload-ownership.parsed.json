@@ -278,6 +278,27 @@
     ]
    },
    {
+    "bundle_name": "modal-sandbox",
+    "bundle_sets": [
+     "release-artifacts"
+    ],
+    "host_features": [],
+    "payloads": [
+     {
+      "binary": "ryeos-modal-guest-launcher",
+      "build_class": "static",
+      "cargo_features": [],
+      "cargo_package": "modal-guest-launcher"
+     },
+     {
+      "binary": "ryeos-modal-sandbox-lifecycle-adapter",
+      "build_class": "static",
+      "cargo_features": [],
+      "cargo_package": "ryeos-modal-sandbox-lifecycle-adapter"
+     }
+    ]
+   },
+   {
     "bundle_name": "render-sandbox",
     "bundle_sets": [
      "f5r-controller",
