@@ -21,15 +21,15 @@ use anyhow::{Context as _, Result, ensure};
 use base64::Engine as _;
 use lillux::network::{NetworkCancellation, NetworkContext};
 use ryeos_external_execution_contract::{
-    LIFECYCLE_ADAPTER_EXECUTABLE_FD_ENV, LIFECYCLE_ADAPTER_PROTOCOL, LIFECYCLE_HOSTS_FD_ENV,
-    LIFECYCLE_HOSTS_SHA256_ENV, LIFECYCLE_NETWORK_POLICY_SHA256_ENV,
-    LIFECYCLE_PROVIDER_SPEC_FD_ENV, LIFECYCLE_PROVIDER_SPEC_SHA256_ENV, LIFECYCLE_REQUEST_FD_ENV,
-    LIFECYCLE_RESOLVER_FD_ENV, LIFECYCLE_RESOLVER_SHA256_ENV, LIFECYCLE_SETTINGS_FD_ENV, LIFECYCLE_SIGNED_ASSIGNMENT_FD_ENV,
-    LIFECYCLE_SIGNED_IMPORT_FD_ENV,
-    LifecycleAdapterInspectionRequest, LifecycleAdapterInspectionResponse,
-    LifecycleAdapterRequest, LifecycleAdapterResponse, LifecycleArtifactInspection,
-    LifecycleArtifactRole, MAX_LIFECYCLE_PROVIDER_SPEC_BYTES, MAX_LIFECYCLE_REQUEST_BYTES,
-    canonical_json, from_json_slice_strict,
+    LIFECYCLE_ADAPTER_EXECUTABLE_FD_ENV, LIFECYCLE_ADAPTER_PROTOCOL,
+    LIFECYCLE_GUEST_RUNTIME_FD_ENV, LIFECYCLE_HOSTS_FD_ENV, LIFECYCLE_HOSTS_SHA256_ENV,
+    LIFECYCLE_NETWORK_POLICY_SHA256_ENV, LIFECYCLE_PROVIDER_SPEC_FD_ENV,
+    LIFECYCLE_PROVIDER_SPEC_SHA256_ENV, LIFECYCLE_REQUEST_FD_ENV, LIFECYCLE_RESOLVER_FD_ENV,
+    LIFECYCLE_RESOLVER_SHA256_ENV, LIFECYCLE_SETTINGS_FD_ENV, LIFECYCLE_SIGNED_ASSIGNMENT_FD_ENV,
+    LIFECYCLE_SIGNED_IMPORT_FD_ENV, LifecycleAdapterInspectionRequest,
+    LifecycleAdapterInspectionResponse, LifecycleAdapterRequest, LifecycleAdapterResponse,
+    LifecycleArtifactInspection, LifecycleArtifactRole, MAX_LIFECYCLE_PROVIDER_SPEC_BYTES,
+    MAX_LIFECYCLE_REQUEST_BYTES, canonical_json, from_json_slice_strict,
 };
 use ryeos_remote_lease_core::{
     operation_deadline, read_credential, read_sealed_env, request_deadline, write_response,
@@ -157,7 +157,8 @@ fn inspect(adapter: &lillux::InheritedDescriptorAuthority) -> Result<()> {
         u64::try_from(provider_spec_bytes.len())? == request.provider_spec.bytes,
         "provider spec size differs from the inspection declaration"
     );
-    let provider_spec = parse_provider_spec_bytes(&provider_spec_bytes, &request.provider_spec.digest)?;
+    let provider_spec =
+        parse_provider_spec_bytes(&provider_spec_bytes, &request.provider_spec.digest)?;
     let effective_capabilities = provider_spec.effective_capabilities();
     ensure!(
         !effective_capabilities.is_empty()
@@ -256,6 +257,9 @@ fn operate() -> Result<()> {
     } = &request
     {
         require_declared_activation(&provider_spec)?;
+        provider_spec.require_guest_runtime_descriptor(
+            std::env::var_os(LIFECYCLE_GUEST_RUNTIME_FD_ENV).is_some(),
+        )?;
         deadline = request_deadline(activation.attachment_deadline_ms, deadline)?;
         // SAFETY: the trusted lifecycle runner installed each of these
         // descriptors exactly once for this operation.
@@ -263,15 +267,19 @@ fn operate() -> Result<()> {
     } else {
         ensure!(
             std::env::var_os(LIFECYCLE_SIGNED_IMPORT_FD_ENV).is_none()
-                && std::env::var_os(LIFECYCLE_SIGNED_ASSIGNMENT_FD_ENV).is_none(),
-            "signed guest import or assignment was supplied outside first activation"
+                && std::env::var_os(LIFECYCLE_SIGNED_ASSIGNMENT_FD_ENV).is_none()
+                && std::env::var_os(LIFECYCLE_GUEST_RUNTIME_FD_ENV).is_none(),
+            "signed guest import, assignment or runtime was supplied outside first activation"
         );
         None
     };
     if let LifecycleAdapterRequest::Allocate { reservation, .. } = &request {
         deadline = request_deadline(reservation.contact_deadline_ms, deadline)?;
     }
-    if matches!(&request, LifecycleAdapterRequest::ReconcileAllocation { .. }) {
+    if matches!(
+        &request,
+        LifecycleAdapterRequest::ReconcileAllocation { .. }
+    ) {
         ensure!(
             provider_spec.reconciles_allocation(),
             "signed Modal provider spec does not declare allocation reconciliation"
@@ -313,7 +321,9 @@ fn operate() -> Result<()> {
         LifecycleAdapterRequest::ReconcileAllocation {
             common,
             reservation,
-        } => lease_ops::reconcile_allocation(&client, &context, common, reservation, &egress_policy),
+        } => {
+            lease_ops::reconcile_allocation(&client, &context, common, reservation, &egress_policy)
+        }
         LifecycleAdapterRequest::Terminate {
             common,
             occurrence,
@@ -380,7 +390,10 @@ fn require_declared_activation(spec: &ProviderSpec) -> Result<()> {
 
 fn validate_settings(settings: &Settings) -> Result<()> {
     ensure!(settings.schema == 1, "unsupported settings schema");
-    ensure!(valid_workspace(&settings.workspace), "invalid Modal workspace");
+    ensure!(
+        valid_workspace(&settings.workspace),
+        "invalid Modal workspace"
+    );
     ensure!(valid_lease_set(&settings.lease_set), "invalid lease set");
     validate_tls_roots(&settings.tls_roots_der_base64)
 }
@@ -605,6 +618,8 @@ mod tests {
                 activation_request_digest: "4".repeat(64),
                 supervisor_runtime_hash: "5".repeat(64),
                 launcher_artifact_hash: "6".repeat(64),
+                guest_runtime_artifact_hash: Some("7".repeat(64)),
+                guest_runtime_artifact_bytes: Some(1),
                 attachment_deadline_ms: 1,
                 execution_timeout_seconds: 1,
                 post_execution_timeout_seconds: 1,

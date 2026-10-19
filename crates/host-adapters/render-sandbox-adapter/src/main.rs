@@ -1790,6 +1790,8 @@ mod offline_fixture_tests {
             activation_request_digest: digest('1'),
             supervisor_runtime_hash: digest('2'),
             launcher_artifact_hash: digest('3'),
+            guest_runtime_artifact_hash: None,
+            guest_runtime_artifact_bytes: None,
             attachment_deadline_ms,
             execution_timeout_seconds: 60,
             post_execution_timeout_seconds: 120,

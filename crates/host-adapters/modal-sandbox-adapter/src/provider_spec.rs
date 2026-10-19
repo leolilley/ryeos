@@ -511,6 +511,16 @@ impl ProviderSpec {
         self.operations.activate_supervisor == OperationDecl::activate_supervisor()
     }
 
+    /// The guest runtime descriptor belongs to the staged activation
+    /// sequence: it must arrive exactly when the signed spec declares it.
+    pub fn require_guest_runtime_descriptor(&self, supplied: bool) -> Result<()> {
+        ensure!(
+            supplied == self.declares_activation(),
+            "guest runtime descriptor differs from the signed activation declaration"
+        );
+        Ok(())
+    }
+
     pub fn reconciles_allocation(&self) -> bool {
         self.operations.reconcile_allocation == OperationDecl::reconcile_allocation()
     }
@@ -545,6 +555,10 @@ impl ProviderSpec {
         }
         if self.declares_activation() {
             capabilities.insert(LifecycleCapability::SupervisorActivation);
+            // Staging uploads the runtime the controller seals for this
+            // activation, so the provider admits the guest runtime itself
+            // rather than relying on a prior qualification.
+            capabilities.insert(LifecycleCapability::IndependentGuestRuntimeAdmission);
         }
         capabilities
     }
@@ -938,9 +952,18 @@ mod tests {
         let spec = parse_value(&fixture_value()).unwrap();
         assert!(!spec.guest_activation_declared());
         assert!(!spec.effective_capabilities().contains(&LifecycleCapability::SupervisorActivation));
+        assert!(
+            !spec
+                .effective_capabilities()
+                .contains(&LifecycleCapability::IndependentGuestRuntimeAdmission)
+        );
         let spec = parse_value(&declared_value()).unwrap();
         assert!(spec.guest_activation_declared());
         assert!(spec.effective_capabilities().contains(&LifecycleCapability::SupervisorActivation));
+        assert!(
+            spec.effective_capabilities()
+                .contains(&LifecycleCapability::IndependentGuestRuntimeAdmission)
+        );
         assert_eq!(
             spec.guest_channel_profile().unwrap(),
             GuestChannelProfile::UnsupportedPending
@@ -953,6 +976,16 @@ mod tests {
             spec.guest_channel_profile().unwrap(),
             GuestChannelProfile::ControllerRelayedFrames
         );
+    }
+
+    #[test]
+    fn the_runtime_descriptor_is_required_exactly_when_activation_is_declared() {
+        let undeclared = parse_value(&fixture_value()).unwrap();
+        assert!(undeclared.require_guest_runtime_descriptor(true).is_err());
+        undeclared.require_guest_runtime_descriptor(false).unwrap();
+        let declared = parse_value(&declared_value()).unwrap();
+        assert!(declared.require_guest_runtime_descriptor(false).is_err());
+        declared.require_guest_runtime_descriptor(true).unwrap();
     }
 
     #[test]
