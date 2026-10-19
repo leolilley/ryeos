@@ -1,0 +1,22 @@
+# Secret-scan policy for the commit scan in CI. Everything listed here was
+# reviewed: vendored SQLite sources, the development publisher key that is
+# public by design, and test fixtures whose "keys" are placeholders.
+title = "ryeos"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "reviewed non-secrets"
+paths = [
+  '''^vendor/''',
+  '''^\.dev-keys/PUBLISHER_DEV\.pem$''',
+  '''^scripts/dev/test-.*\.py$''',
+  '''^crates/.*/tests/.*\.rs$''',
+  '''^bundles/local-inference/\.ai/workers/local-inference/lib/local-tinygrad-gnu/tokenizer\.py$''',
+  '''^bundles/local-inference/\.ai/workers/local-inference/lib/local-tinygrad-gnu/cuda_lifecycle/nvml_qualification\.md$''',
+]
+regexes = [
+  '''id=publisher-key,src=''',
+  '''Sec-WebSocket-Key: ''',
+]
