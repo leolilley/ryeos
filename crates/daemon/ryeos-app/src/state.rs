@@ -185,6 +185,8 @@ pub struct IsolationStatus {
 
 #[derive(Debug, Serialize)]
 pub struct StatusResponse {
+    /// Identity of the node serving this response, not a selected remote node.
+    pub node_id: String,
     pub version: String,
     /// Git revision the binary was built from. Injected at build time
     /// (`RYEOS_VCS_REF`) or derived from the local git short SHA; `"unknown"`
@@ -294,6 +296,7 @@ impl AppState {
             .projection_health()
             .observe_pending_transitions(pending_head_transitions.pending);
         Ok(StatusResponse {
+            node_id: self.identity.fingerprint().to_owned(),
             version: self.daemon_build.version.to_string(),
             revision: self.daemon_build.revision.to_string(),
             build_date: self.daemon_build.build_date.to_string(),
@@ -571,5 +574,21 @@ pub struct PinnedCasRead {
 impl PinnedCasRead {
     pub fn cas(&self) -> &lillux::CasStore {
         &self.cas
+    }
+}
+
+#[cfg(test)]
+mod status_identity_tests {
+    #[test]
+    fn status_names_the_serving_node_not_its_endpoint() {
+        let root = tempfile::tempdir().unwrap();
+        let (_store, state) = super::test_support::build(root.path()).unwrap();
+        let status = state.status().unwrap();
+        assert_eq!(status.node_id, state.identity.fingerprint());
+        assert_ne!(status.node_id, state.config.bind.to_string());
+        assert_eq!(
+            serde_json::to_value(status).unwrap()["node_id"],
+            state.identity.fingerprint()
+        );
     }
 }

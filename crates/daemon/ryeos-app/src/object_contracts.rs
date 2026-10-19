@@ -1,21 +1,55 @@
 //! Application composition for durable CAS object contracts owned above state.
 
 use ryeos_state::object_closure::{
-    ObjectContractRegistration, RegisteredObjectEdge, RegisteredObjectExpectation,
-    RegisteredObjectLinks,
+    EventPayloadContractRegistration, ObjectContractRegistration, RegisteredObjectEdge,
+    RegisteredObjectExpectation, RegisteredObjectLinks,
 };
 use serde_json::Value;
 use std::sync::OnceLock;
 
+/// Outcome of the single process-wide object-contract installation.
+static OBJECTS: OnceLock<Result<(), String>> = OnceLock::new();
+
+/// Selectors of the event contracts the single process-wide event
+/// installation registered, or the refusal it produced.
+static EVENTS: OnceLock<Result<Vec<&'static str>, String>> = OnceLock::new();
+
+/// Ensure the application object contracts are installed. This never touches
+/// the event-contract set: that belongs to the composition root and is
+/// installed separately, so calling this first cannot foreclose it.
 pub fn install() -> anyhow::Result<()> {
-    static INSTALLED: OnceLock<Result<(), String>> = OnceLock::new();
-    INSTALLED
-        .get_or_init(|| install_once().map_err(|error| error.to_string()))
+    OBJECTS
+        .get_or_init(|| install_objects().map_err(|error| error.to_string()))
         .clone()
         .map_err(anyhow::Error::msg)
 }
 
-fn install_once() -> anyhow::Result<()> {
+/// Install the application object contracts together with the domain event
+/// payload contracts the composition root owns. The event set installs once
+/// per process: repeating the same selector set is accepted, a different one
+/// is refused rather than merged or replaced.
+pub fn install_with_event_contracts(
+    events: Vec<EventPayloadContractRegistration>,
+) -> anyhow::Result<()> {
+    install()?;
+    let mut requested: Vec<&'static str> = events.iter().map(|event| event.event_type).collect();
+    requested.sort_unstable();
+    let installed = EVENTS
+        .get_or_init(|| {
+            ryeos_state::object_closure::install_event_payload_contracts(events)
+                .map(|()| requested.clone())
+                .map_err(|error| error.to_string())
+        })
+        .clone()
+        .map_err(anyhow::Error::msg)?;
+    anyhow::ensure!(
+        installed == requested,
+        "application event contracts were already installed with a different selector set"
+    );
+    Ok(())
+}
+
+fn install_objects() -> anyhow::Result<()> {
     ryeos_state::object_closure::install_object_contracts(vec![
         registration(
             ryeos_bundle_publication_contract::BUNDLE_CATALOG_PUBLICATION_KIND,
@@ -380,6 +414,36 @@ mod tests {
     use serde_json::json;
     fn hash(byte: char) -> String {
         std::iter::repeat_n(byte, 64).collect()
+    }
+
+    fn accept_any_event(_: &Value) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn no_event_links(_: &Value) -> Result<RegisteredObjectLinks, String> {
+        Ok(RegisteredObjectLinks::default())
+    }
+
+    fn event_set(selector: &'static str) -> Vec<EventPayloadContractRegistration> {
+        vec![EventPayloadContractRegistration {
+            event_type: selector,
+            validate: accept_any_event,
+            links: no_event_links,
+        }]
+    }
+
+    #[test]
+    fn bare_install_leaves_event_set_open_and_a_different_set_is_refused() {
+        install().unwrap();
+        install_with_event_contracts(event_set("contract.first_consumer.event.v1")).unwrap();
+        install().unwrap();
+        install_with_event_contracts(event_set("contract.first_consumer.event.v1")).unwrap();
+        let refused = install_with_event_contracts(event_set("contract.second_consumer.event.v1"))
+            .unwrap_err();
+        assert!(refused.to_string().contains("different selector set"));
+        let installed = ryeos_state::object_closure::current_event_payload_selectors();
+        assert!(installed.contains(&"contract.first_consumer.event.v1"));
+        assert!(!installed.contains(&"contract.second_consumer.event.v1"));
     }
 
     #[test]

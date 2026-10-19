@@ -4147,6 +4147,26 @@ fn persisted_event_from_authoritative(
     })
 }
 
+fn execution_event_candidate_matches(
+    candidate: &PersistedEventRecord,
+    signed: &PersistedEventRecord,
+) -> bool {
+    // `event_id` is a rebuildable SQLite row coordinate, not part of the
+    // signed event. Every fact and braid coordinate a consumer reads must
+    // agree with the authenticated object.
+    candidate.event_hash == signed.event_hash
+        && candidate.chain_root_id == signed.chain_root_id
+        && candidate.chain_seq == signed.chain_seq
+        && candidate.thread_id == signed.thread_id
+        && candidate.thread_seq == signed.thread_seq
+        && candidate.event_type == signed.event_type
+        && candidate.storage_class == signed.storage_class
+        && candidate.ts == signed.ts
+        && candidate.prev_chain_event_hash == signed.prev_chain_event_hash
+        && candidate.prev_thread_event_hash == signed.prev_thread_event_hash
+        && candidate.payload == signed.payload
+}
+
 fn persisted_event_storage_class(
     durability: ryeos_state::objects::EventDurability,
 ) -> Result<&'static str> {
@@ -23994,6 +24014,153 @@ impl StateStore {
         })
     }
 
+    /// Locate a recent bounded thread page for an execution Field. The rows
+    /// remain projection candidates until the caller authenticates them from
+    /// the fixed signed thread history. This deliberately takes only the store
+    /// lock and reads SQL rows: it never touches CAS, so it holds no CAS guard.
+    pub fn recent_thread_events(
+        &self,
+        chain_root_id: &str,
+        thread_id: &str,
+        through_seq: Option<i64>,
+        limit: usize,
+        max_serialized_bytes: usize,
+    ) -> Result<PersistedEventPage> {
+        let g = self.lock()?;
+        let page = queries::recent_thread_events_bounded(
+            g.state_db.projection(),
+            chain_root_id,
+            thread_id,
+            through_seq,
+            limit,
+            max_serialized_bytes,
+        )?;
+        drop(g);
+        let events = page
+            .rows
+            .into_iter()
+            .map(persisted_event_from_projection_row)
+            .collect::<Result<Vec<_>>>()?;
+        Ok(PersistedEventPage {
+            events,
+            has_more: page.has_more,
+        })
+    }
+
+    /// Capture one opaque, signed-head-derived endpoint for bounded history
+    /// reads. The chain lock and CAS guard are held only during this capture.
+    pub fn capture_thread_event_read_anchor(
+        &self,
+        chain_root_id: &str,
+        thread_id: &str,
+    ) -> Result<Option<ryeos_state::AuthoritativeThreadEventReadAnchor>> {
+        let guard = self.state_authority.acquire_shared_guard()?;
+        let g = self.lock()?;
+        g.state_db
+            .capture_thread_event_read_anchor(chain_root_id, thread_id, &guard)
+            .context("capture authoritative thread event read anchor")
+    }
+
+    /// Read one newest-first bounded slice from a fixed authenticated endpoint.
+    /// `progress: None` starts at the anchor tip; a returned `Some` token means
+    /// the authenticated interval is incomplete, never that an event is absent.
+    pub fn read_thread_event_page(
+        &self,
+        anchor: &ryeos_state::AuthoritativeThreadEventReadAnchor,
+        progress: Option<&ryeos_state::AuthoritativeThreadEventReadProgress>,
+        max_events: u64,
+        max_bytes: u64,
+    ) -> Result<ryeos_state::AuthoritativeThreadEventReadPage> {
+        let guard = self.state_authority.acquire_shared_guard()?;
+        let g = self.lock()?;
+        g.state_db
+            .read_thread_event_page(anchor, progress, max_events, max_bytes, &guard)
+            .context("read bounded authoritative thread event page")
+    }
+
+    /// Authenticate one bounded projection-located execution page against
+    /// fixed signed thread histories. Projection fields are only search
+    /// coordinates: every returned record is rebuilt from CAS, and a
+    /// contradictory projected field refuses the whole page. The per-thread
+    /// history walk advances in small pages without a guessed seat/history
+    /// lifetime ceiling or a lock held across the complete walk.
+    pub fn authenticate_execution_event_candidates(
+        &self,
+        chain_root_id: &str,
+        candidates: &[PersistedEventRecord],
+    ) -> Result<Vec<PersistedEventRecord>> {
+        const MAX_CANDIDATES: usize = 2_000;
+        const MAX_CANDIDATE_BYTES: usize = 4 * 1024 * 1024;
+        const PAGE_EVENTS: u64 = 64;
+        const PAGE_BYTES: u64 = 2 * 1024 * 1024;
+
+        if candidates.len() > MAX_CANDIDATES {
+            bail!("execution event candidate page exceeds its item bound");
+        }
+        let mut encoded_bytes = 0usize;
+        let mut by_thread = BTreeMap::<&str, BTreeMap<&str, usize>>::new();
+        for (index, candidate) in candidates.iter().enumerate() {
+            encoded_bytes = encoded_bytes
+                .checked_add(serde_json::to_vec(candidate)?.len())
+                .ok_or_else(|| anyhow!("execution event candidate byte count overflow"))?;
+            if encoded_bytes > MAX_CANDIDATE_BYTES {
+                bail!("execution event candidate page exceeds its byte bound");
+            }
+            let Some(hash) = candidate.event_hash.as_deref() else {
+                bail!("execution event candidate has no CAS hash");
+            };
+            if candidate.chain_root_id != chain_root_id
+                || candidate.thread_id.is_empty()
+                || candidate.chain_seq < 1
+                || candidate.thread_seq < 1
+                || !lillux::valid_hash(hash)
+                || hash.bytes().any(|byte| byte.is_ascii_uppercase())
+                || by_thread
+                    .entry(&candidate.thread_id)
+                    .or_default()
+                    .insert(hash, index)
+                    .is_some()
+            {
+                bail!("execution event candidate has contradictory coordinates");
+            }
+        }
+        let mut authenticated = vec![None; candidates.len()];
+        for (thread_id, pending) in &mut by_thread {
+            let anchor = self
+                .capture_thread_event_read_anchor(chain_root_id, thread_id)?
+                .ok_or_else(|| anyhow!("execution event candidate thread is absent"))?;
+            let mut progress = None;
+            loop {
+                let page = self.read_thread_event_page(
+                    &anchor,
+                    progress.as_ref(),
+                    PAGE_EVENTS,
+                    PAGE_BYTES,
+                )?;
+                for (hash, event) in page.events {
+                    if let Some(index) = pending.remove(hash.as_str()) {
+                        let signed = persisted_event_from_authoritative(hash, event)?;
+                        if !execution_event_candidate_matches(&candidates[index], &signed) {
+                            bail!("execution event projection contradicts signed content");
+                        }
+                        authenticated[index] = Some(signed);
+                    }
+                }
+                progress = page.progress;
+                if progress.is_none() || pending.is_empty() {
+                    break;
+                }
+            }
+            if !pending.is_empty() {
+                bail!("execution event candidate is absent from signed thread history");
+            }
+        }
+        authenticated
+            .into_iter()
+            .map(|record| record.ok_or_else(|| anyhow!("execution event proof is incomplete")))
+            .collect()
+    }
+
     pub fn chain_event_navigation(
         &self,
         chain_root_id: &str,
@@ -24761,6 +24928,163 @@ mod tests {
         let mut malformed = row;
         malformed.payload = b"invalid JSON".to_vec();
         assert!(persisted_event_from_projection_row(malformed).is_err());
+    }
+
+    fn append_indexed(
+        store: &TestStateStore,
+        thread_id: &str,
+        count: usize,
+    ) -> Vec<PersistedEventRecord> {
+        let authored = (0..count)
+            .map(|index| NewEventRecord {
+                event_type: "test.history.event".into(),
+                storage_class: "indexed".into(),
+                payload: json!({"index": index}),
+            })
+            .collect::<Vec<_>>();
+        store
+            .append_events(thread_id, thread_id, &authored)
+            .expect("append events")
+    }
+
+    #[test]
+    fn anchored_page_reads_ignore_later_appends_and_refuse_unbounded_work() {
+        let store = test_store();
+        let thread_id = "T-anchored-page";
+        store
+            .create_thread_for_test(&thread_record(thread_id, thread_id))
+            .unwrap();
+        append_indexed(&store, thread_id, 2);
+        let anchor = store
+            .capture_thread_event_read_anchor(thread_id, thread_id)
+            .unwrap()
+            .expect("thread anchor exists");
+        let (tip_hash, tip_seq) = anchor.tip().expect("anchor has a tip");
+        let tip_hash = tip_hash.to_owned();
+        let later = append_indexed(&store, thread_id, 1);
+        let later_hash = later[0].event_hash.clone().unwrap();
+
+        assert!(
+            store
+                .read_thread_event_page(&anchor, None, 0, 1024)
+                .is_err()
+        );
+        assert!(store.read_thread_event_page(&anchor, None, 1, 0).is_err());
+        assert!(store.read_thread_event_page(&anchor, None, 1, 1).is_err());
+
+        let mut progress = None;
+        let mut observed = Vec::new();
+        loop {
+            let page = store
+                .read_thread_event_page(&anchor, progress.as_ref(), 1, 1024 * 1024)
+                .unwrap();
+            assert!(page.events.len() <= 1);
+            observed.extend(page.events.into_iter().map(|(hash, _)| hash));
+            progress = page.progress;
+            if progress.is_none() {
+                break;
+            }
+        }
+        assert_eq!(observed.len() as u64, tip_seq);
+        assert_eq!(observed.first(), Some(&tip_hash));
+        assert!(!observed.contains(&later_hash));
+        assert!(
+            store
+                .capture_thread_event_read_anchor(thread_id, "T-absent-thread")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn recent_thread_events_decode_through_the_durability_helper() {
+        let store = test_store();
+        let thread_id = "T-recent-events";
+        store
+            .create_thread_for_test(&thread_record(thread_id, thread_id))
+            .unwrap();
+        let appended = append_indexed(&store, thread_id, 3);
+        let page = store
+            .recent_thread_events(thread_id, thread_id, None, 2, 1024 * 1024)
+            .unwrap();
+        assert!(page.has_more);
+        assert_eq!(page.events.len(), 2);
+        assert!(
+            page.events
+                .iter()
+                .all(|event| event.storage_class == "indexed")
+        );
+        assert_eq!(page.events[1].event_hash, appended[2].event_hash);
+        assert!(
+            store
+                .recent_thread_events(thread_id, thread_id, None, 0, 1024)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn execution_candidate_proof_returns_signed_records_across_bounded_pages() {
+        let store = test_store();
+        let thread_id = "T-execution-candidate-page";
+        store
+            .create_thread_for_test(&thread_record(thread_id, thread_id))
+            .unwrap();
+        let records = append_indexed(&store, thread_id, 70);
+        let candidates = vec![records[0].clone(), records[69].clone(), records[35].clone()];
+        let authenticated = store
+            .authenticate_execution_event_candidates(thread_id, &candidates)
+            .unwrap();
+        assert_eq!(authenticated.len(), candidates.len());
+        for (candidate, signed) in candidates.iter().zip(&authenticated) {
+            assert!(execution_event_candidate_matches(candidate, signed));
+        }
+        assert_eq!(authenticated[0].payload["index"], 0);
+        assert_eq!(authenticated[1].payload["index"], 69);
+        assert_eq!(authenticated[2].payload["index"], 35);
+    }
+
+    #[test]
+    fn execution_candidate_proof_refuses_contradicted_or_malformed_candidates() {
+        let store = test_store();
+        let thread_id = "T-execution-candidate-refusal";
+        store
+            .create_thread_for_test(&thread_record(thread_id, thread_id))
+            .unwrap();
+        let candidate = append_indexed(&store, thread_id, 1).remove(0);
+        let refuses = |mutate: &dyn Fn(&mut PersistedEventRecord)| {
+            let mut changed = candidate.clone();
+            mutate(&mut changed);
+            store
+                .authenticate_execution_event_candidates(thread_id, &[changed])
+                .is_err()
+        };
+        assert!(!refuses(&|_| {}));
+        assert!(refuses(
+            &|c| c.payload["index"] = json!("projection-forgery")
+        ));
+        assert!(refuses(&|c| c.thread_id = "T-foreign".into()));
+        assert!(refuses(&|c| c.chain_root_id = "T-foreign".into()));
+        assert!(refuses(&|c| c.storage_class = "journal".into()));
+        assert!(refuses(&|c| c.ts = "2001-01-01T00:00:00Z".into()));
+        assert!(refuses(&|c| c.event_hash = None));
+        assert!(refuses(&|c| c.event_hash = Some("A".repeat(64))));
+        assert!(refuses(&|c| c.event_hash = Some("c".repeat(64))));
+        assert!(refuses(&|c| c.chain_seq = 0));
+        // The same hash named twice in one thread is contradictory input.
+        assert!(
+            store
+                .authenticate_execution_event_candidates(
+                    thread_id,
+                    &[candidate.clone(), candidate.clone()]
+                )
+                .is_err()
+        );
+        let too_many = vec![candidate; 2_001];
+        assert!(
+            store
+                .authenticate_execution_event_candidates(thread_id, &too_many)
+                .is_err()
+        );
     }
 
     #[test]
