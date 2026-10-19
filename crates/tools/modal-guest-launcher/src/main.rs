@@ -17,7 +17,7 @@ use std::process::ExitCode;
 use anyhow::{Context as _, Result, ensure};
 use ryeos_external_execution_contract::guest_import_authorization::MAX_SIGNED_GUEST_OCCURRENCE_ASSIGNMENT_BYTES;
 
-use launch::{Layout, launch, refuse_unprobed_account_transition};
+use launch::{Layout, launch, require_administrator_start};
 
 const GUEST_ROOT: &str = "/ryeos";
 
@@ -59,7 +59,7 @@ fn run() -> Result<i32> {
     launch(
         &Layout::new(GUEST_ROOT),
         &assignment,
-        &refuse_unprobed_account_transition,
+        &require_administrator_start,
         &mut run_owner,
     )
 }

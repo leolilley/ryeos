@@ -60,11 +60,19 @@ impl Layout {
     }
 }
 
-/// The single refusal point for switching the sandbox account. The live
-/// account facts are not yet probed, so no launch proceeds to the owner; a
-/// later change replaces this function and nothing else.
-pub fn refuse_unprobed_account_transition(_profile: &GuestOwnerRuntimeProfile) -> Result<()> {
-    anyhow::bail!("guest account transition is not supported yet")
+/// The account gate. The occurrence owner must start as the sandbox
+/// administrator: it hands the activation roots to the profile's account and
+/// then drops to it itself (clearing groups, setting no-new-privs, setting
+/// every uid and gid), so the launcher never changes ids. Any start that is
+/// already the guest account, or whose account is not an exact non-root
+/// coordinate, is refused because the owner could then not grant or drop.
+pub fn require_administrator_start(profile: &GuestOwnerRuntimeProfile) -> Result<()> {
+    profile.account.validate()?;
+    ensure!(
+        profile.account.require_current_process().is_err(),
+        "launcher is already the guest account; the owner must start as administrator"
+    );
+    Ok(())
 }
 
 /// One member the runtime archive must contain, in this order.
@@ -574,7 +582,7 @@ mod tests {
         let result = launch(
             &Layout::new(fixture.root.path()),
             &fixture.assignment,
-            &refuse_unprobed_account_transition,
+            &|_| anyhow::bail!("account transition refused"),
             &mut |_, _| {
                 *calls.borrow_mut() += 1;
                 Ok(0)
@@ -583,6 +591,26 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(*calls.borrow(), 0);
         assert!(!fixture.root.path().join("activation").exists());
+    }
+
+    #[test]
+    fn administrator_gate_accepts_the_fixture_profile_and_passes_the_exact_argv() {
+        let fixture = fixture();
+        let calls = RefCell::new(Vec::new());
+        let result = launch(
+            &Layout::new(fixture.root.path()),
+            &fixture.assignment,
+            &require_administrator_start,
+            &mut |program, args| {
+                calls
+                    .borrow_mut()
+                    .push((program.to_path_buf(), args.to_vec()));
+                Ok(0)
+            },
+        );
+        assert_eq!(result.unwrap(), 0);
+        assert_eq!(calls.borrow().len(), 1);
+        assert_eq!(calls.borrow()[0].1.len(), 2);
     }
 
     #[test]

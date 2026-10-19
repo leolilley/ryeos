@@ -1750,6 +1750,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "modal-guest-launcher"
+version = "0.5.102"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "lillux",
+ "ryeos-external-execution",
+ "ryeos-external-execution-contract",
+ "serde_json",
+ "tar",
+ "tempfile",
+]
+
+[[package]]
 name = "moka"
 version = "0.12.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
