@@ -132,6 +132,18 @@ hand_app_root_to_node_account() {
   fi
 }
 
+# Log the owner, mode and name of each existing path given, so a refusal that
+# turns on a directory mode is explained by the service log alone. A missing
+# path is skipped, never an error.
+log_path_modes() {
+  local path
+  for path in "$@"; do
+    if [[ -e "$path" ]]; then
+      echo "[entrypoint] $(stat -c '%a %U:%G %n' -- "$path" 2>&1 || true)"
+    fi
+  done
+}
+
 # Re-execute this script as the node account before any ryeos command. As
 # root: own /data and the app root for the node account (the platform mounts
 # the volume root-owned on every boot, so this is per boot, not per image),
@@ -163,6 +175,9 @@ run_as_node_account() {
   chown -h "$NODE_UID:$NODE_GID" /data
   hand_app_root_to_node_account /data/app
   echo "[entrypoint] /data handed to the node account $NODE_UID:$NODE_GID; dropping root"
+  log_path_modes /data /data/app
+  echo "[entrypoint] umask $(umask)"
+  echo "[entrypoint] /data mount: $(awk '$2=="/data" {print $1, $3, $4}' /proc/self/mounts 2>&1 || true)"
   local -a cap_args=(--inh-caps=-all)
   # Some hosted sandboxes refuse changes to the capability bounding set. The
   # uid change already empties the effective and permitted sets, and
@@ -452,6 +467,7 @@ main() {
   if [[ ! -e /data/app/.ai/bundles && ! -L /data/app/.ai/bundles ]]; then
     echo "[entrypoint] installed bundle generation absent; seeding from substrate image"
     collect_baked_publisher_trust_args /opt/ryeos
+    log_path_modes /data/app/.ai/node /data/app/.ai/node/native-capacity
     build_ryeos_init_args /opt/ryeos /data/app "$effective_bind"
     ryeos "${INIT_ARGS[@]}" "${TRUST_ARGS[@]}"
   else
