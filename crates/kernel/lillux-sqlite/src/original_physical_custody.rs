@@ -1386,9 +1386,7 @@ mod tests {
                         owner: owner.clone(),
                         work: std::sync::Mutex::new(32),
                     });
-                    let inputs = unsafe {
-                        crate::OriginalOutsideFinalizerFileRetirementInputs::issued(owner, authority)?
-                    };
+                    let inputs = crate::OriginalOutsideFinalizerFileRetirementInputs::issued(owner, authority)?;
                     Ok(Arc::new(inputs))
                 },
             ).unwrap();
@@ -1413,9 +1411,7 @@ mod tests {
                         owner: owner.clone(),
                         work: std::sync::Mutex::new(32),
                     });
-                    let inputs = unsafe {
-                        crate::OriginalOutsideFinalizerFileRetirementInputs::issued(owner, authority)?
-                    };
+                    let inputs = crate::OriginalOutsideFinalizerFileRetirementInputs::issued(owner, authority)?;
                     Ok(Arc::new(inputs))
                 },
             ).unwrap();
@@ -1446,9 +1442,7 @@ mod tests {
                         owner: owner.clone(),
                         work: std::sync::Mutex::new(32),
                     });
-                    let inputs = unsafe {
-                        crate::OriginalOutsideFinalizerFileRetirementInputs::issued(owner, authority)?
-                    };
+                    let inputs = crate::OriginalOutsideFinalizerFileRetirementInputs::issued(owner, authority)?;
                     Ok(Arc::new(inputs))
                 },
             ).unwrap();
@@ -1483,9 +1477,7 @@ mod tests {
                 &|_, owner| {
                     issue_count.fetch_add(1, Ordering::SeqCst);
                     let authority = Arc::new(FixtureCloseLateRefusal { owner: owner.clone() });
-                    let inputs = unsafe {
-                        crate::OriginalOutsideFinalizerFileRetirementInputs::issued(owner, authority)?
-                    };
+                    let inputs = crate::OriginalOutsideFinalizerFileRetirementInputs::issued(owner, authority)?;
                     Ok(Arc::new(inputs))
                 },
             )

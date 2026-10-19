@@ -1397,6 +1397,7 @@ pub(crate) struct SelectedCgroupPreparation {
 }
 
 impl SelectedCgroupPreparation {
+    #[cfg(test)]
     pub(crate) fn planned(
         name: &str,
         expected_parent: PinnedDirectoryIdentity,

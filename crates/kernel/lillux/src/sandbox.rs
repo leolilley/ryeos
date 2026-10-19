@@ -1320,7 +1320,7 @@ pub fn prepare_linux_sandbox_from_sealed_source(
 }
 
 fn prepare_linux_sandbox_inner(
-    mut request: LinuxSandboxRequest,
+    request: LinuxSandboxRequest,
     stdio: Option<&[std::fs::File; 3]>,
     private_source: Option<&LinuxSealedPrivateSourceFilesystem>,
 ) -> Result<HeldLinuxSandboxProcess, String> {

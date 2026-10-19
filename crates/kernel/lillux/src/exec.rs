@@ -2706,8 +2706,7 @@ impl InheritedDescriptorAuthority {
 #[cfg(all(test, target_os = "linux"))]
 mod write_sealed_regular_tests {
     use super::*;
-    use std::io::{Seek as _, SeekFrom, Write as _};
-    use std::os::fd::{AsRawFd as _, FromRawFd as _};
+    use std::io::{Seek as _, SeekFrom};
 
     #[test]
     fn opaque_sealed_data_query_preserves_owner_cursor_and_nonexecutable_role() {
@@ -12144,7 +12143,7 @@ fn lib_spawn_with_stdio(
 fn lib_spawn_with_stdio_custody(
     request: SubprocessRequest,
     inherit_stdio: bool,
-    #[cfg(target_os = "linux")] mut attachment_gate: Option<AttachmentWorkerGate>,
+    #[cfg(target_os = "linux")] attachment_gate: Option<AttachmentWorkerGate>,
     #[cfg(not(target_os = "linux"))] _attachment_gate: Option<()>,
     process_scope: Option<crate::ProcessScope>,
     account: Option<&crate::ControllerAccount>,
@@ -17921,7 +17920,6 @@ mod native_terminal_existing_wait_tests {
         );
 
         writer_file.write_all(&frame[split..]).unwrap();
-        drop(writer_file);
         drop(writer);
         running = match selected_wait(running, Duration::from_secs(3)) {
             SelectedNativeTerminalWaitOutcome::Collected(owner) => owner,
@@ -18089,7 +18087,7 @@ mod native_terminal_existing_wait_tests {
         let (running, writer, frame) = selected_live_child_with_testimony("0.15");
         let split = frame.len() / 2;
         writer.file().write_all(&frame[..split]).unwrap();
-        let mut running = match running.wait_for_natural_exit(Duration::ZERO) {
+        let running = match running.wait_for_natural_exit(Duration::ZERO) {
             Err(owner) => owner,
             Ok(_) => panic!("ordinary wait accepted an incomplete selected channel"),
         };

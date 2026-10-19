@@ -1,7 +1,7 @@
 //! Privileged original native owner. Signed issuance remains the host's job;
 //! no decoded quota or observed allocation count can construct a safe factory.
 use crate::{
-    BoundSqliteCloseOwner, BoundSqliteConnection, BoundSqliteOpenFailure, ClosedSqliteInspection,
+    BoundSqliteConnection, BoundSqliteOpenFailure, ClosedSqliteInspection,
     ReadonlySqliteCloseFailure, ReadonlySqliteCopy, ReadonlySqliteOpenFailure,
     ReleasedSqliteInspection, SqliteCopyLease, SqliteInspectionProductionPermit,
     SqliteInspectionSqlWork, SqliteInspectionProductionKind,
@@ -7002,7 +7002,7 @@ mod process_held_tests {
     struct Parts {
         process: u32,
         native_ok: bool,
-        observed: Observed,
+        _observed: Observed,
     }
     fn settled(parts: &Parts) -> bool {
         process_held_here(parts.process, || parts.native_ok)
@@ -7017,7 +7017,7 @@ mod process_held_tests {
         let before = count();
         drop(lillux::custody::Held::new(
             KIND,
-            Parts { process: std::process::id(), native_ok: true, observed: Observed(dropped.clone()) },
+            Parts { process: std::process::id(), native_ok: true, _observed: Observed(dropped.clone()) },
             settled));
         assert!(dropped.load(Ordering::Acquire));
         assert_eq!(count(), before);
@@ -7027,7 +7027,7 @@ mod process_held_tests {
             let dropped = Arc::new(AtomicBool::new(false));
             let before = count();
             drop(lillux::custody::Held::new(
-                KIND, Parts { process, native_ok, observed: Observed(dropped.clone()) }, settled));
+                KIND, Parts { process, native_ok, _observed: Observed(dropped.clone()) }, settled));
             assert!(!dropped.load(Ordering::Acquire));
             assert_eq!(count(), before + 1);
         }
