@@ -256,10 +256,17 @@ jobs:
 
       - name: Place scratch on the attached volume
         # The durable-root probe refuses an app root on a virtual machine's
-        # root disk. Hosted runners mount a separate disk at /mnt.
+        # root disk.
+        # On the current hosted image /mnt shares the root disk, so a
+        # loop-mounted ext4 volume stands in for an attached disk: the node
+        # judges durability by the mount being distinct from /.
         run: |
+          sudo fallocate -l 6G /var/tmp/ryeos-volume.img
+          sudo mkfs.ext4 -q -F /var/tmp/ryeos-volume.img
           sudo mkdir -p /mnt/ryeos-tmp
+          sudo mount -o loop /var/tmp/ryeos-volume.img /mnt/ryeos-tmp
           sudo chown "$(id -u):$(id -g)" /mnt/ryeos-tmp
+          findmnt --target /mnt/ryeos-tmp
           echo "TMPDIR=/mnt/ryeos-tmp" >> "$GITHUB_ENV"
 
       - name: Run workspace gate
@@ -371,10 +378,17 @@ jobs:
 
       - name: Place scratch on the attached volume
         # The durable-root probe refuses an app root on a virtual machine's
-        # root disk. Hosted runners mount a separate disk at /mnt.
+        # root disk.
+        # On the current hosted image /mnt shares the root disk, so a
+        # loop-mounted ext4 volume stands in for an attached disk: the node
+        # judges durability by the mount being distinct from /.
         run: |
+          sudo fallocate -l 6G /var/tmp/ryeos-volume.img
+          sudo mkfs.ext4 -q -F /var/tmp/ryeos-volume.img
           sudo mkdir -p /mnt/ryeos-tmp
+          sudo mount -o loop /var/tmp/ryeos-volume.img /mnt/ryeos-tmp
           sudo chown "$(id -u):$(id -g)" /mnt/ryeos-tmp
+          findmnt --target /mnt/ryeos-tmp
           echo "TMPDIR=/mnt/ryeos-tmp" >> "$GITHUB_ENV"
 
       - name: Run crash recovery qualification
