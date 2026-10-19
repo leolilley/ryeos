@@ -44,10 +44,6 @@ const ACCOUNTING_PUBLISHER_STOP_BOUND: Duration = process::ACCOUNTING_PUBLISHER_
 const BUNDLE_PUBLISHER_URL_ENV: &str = "RYEOS_BUNDLE_PUBLISHER_URL";
 const BUNDLE_PUBLISHER_BEARER_ENV: &str = "RYEOS_BUNDLE_PUBLISHER_BEARER";
 
-/// Quote the one-time StateLock owner conversion retained by the consuming
-/// native finalizer. The lock target and registry registration are charged by
-/// their own physical-custody owners.
-
 fn configured_bundle_publisher(
     policy: &ryeos_node_runtime::node_policy::sections::bundle_publication::BundlePublicationPolicy,
 ) -> Result<Option<Arc<dyn ryeos_app::bundle_publication::producer::BundlePublisherAuthority>>> {
@@ -1439,9 +1435,6 @@ impl DaemonSelectedComposition {
         Ok(())
     }
 
-    /// Drop the previous stop's latched-drain facts after reconciliation
-    /// applied them. The only write that removes them.
-
     /// Durably record the facts a latched drain deferred to the next start,
     /// as this run's provisional exit, before the cleanup chain. A refused
     /// write holds: the resume re-arm cannot be deferred without it.
@@ -1748,16 +1741,13 @@ impl DaemonSelectedComposition {
             .native_settled_reservation
             .take()
             .context("settled native reservation absent before final consumption")?;
-        let finalized = match settled.into_finalized() {
-            Ok(finalized) => finalized,
+        match settled.into_finalized() {
+            Ok(_finalized) => {}
             Err((settled, error)) => {
                 self.native_settled_reservation = Some(settled);
                 return Err(error);
             }
-        };
-        // Only a non-owning release record remains; no account, clock,
-        // registry or descriptor survives the final consumption above.
-        drop(finalized);
+        }
         #[cfg(target_os = "linux")]
         {
             self.native_operator_lock_registered = false;

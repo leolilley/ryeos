@@ -591,7 +591,7 @@ requires:
         PORTABLE_CREDENTIAL_PROFILE_ID,
         lock_id,
         login_id,
-        i64::try_from(lillux::time::timestamp_millis())? + 60_000,
+        lillux::time::timestamp_millis() + 60_000,
     )?;
     store.complete_credential_enrollment(
         PORTABLE_CREDENTIAL_PROFILE_ID,
@@ -3103,7 +3103,7 @@ fn plant_target_abort_state(
         TARGET_CREDENTIAL_PROFILE_ID,
         enrollment_lock,
         login_id,
-        i64::try_from(lillux::time::timestamp_millis())? + 60_000,
+        lillux::time::timestamp_millis() + 60_000,
     )?;
     let credential_generation = store.complete_credential_enrollment(
         TARGET_CREDENTIAL_PROFILE_ID,
@@ -3141,7 +3141,7 @@ fn plant_target_abort_state(
         subject_digest: &subject_digest,
         checkpoint_manifest_hash: &source.operation.checkpoint_manifest_hash,
         upstream_session_id: "upstream-session:handoff-fixture",
-        project_principal_key: project_principal_key,
+        project_principal_key,
         project_hash: &target_project_hash,
         target_project_head_hash: &target_project_head_hash,
     })?;

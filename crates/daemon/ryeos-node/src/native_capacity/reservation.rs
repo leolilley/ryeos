@@ -174,9 +174,8 @@ fn live_physical_registration_bounds(tickets: u32) -> Result<LivePhysicalRegistr
     let state_projection_attempts = usize::try_from(tickets)?
         .checked_mul(3)
         .context("State projection registration bound overflow")?;
-    let generated_state_root_attempts = usize::try_from(
-        ryeos_state::state_db::maximum_state_destination_leaves(tickets)?,
-    )?;
+    let generated_state_root_attempts =
+        ryeos_state::state_db::maximum_state_destination_leaves(tickets)?;
 
     Ok(LivePhysicalRegistrationBounds {
         normal_state: owner_registration_bound(
@@ -2596,20 +2595,16 @@ impl SettledLiveNative {
                 .take(),
         );
         drop(original.budget.take());
-        drop(
-            original
-                .raw_budget
-                .get_mut()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take(),
-        );
-        drop(
-            original
-                .region
-                .get_mut()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take(),
-        );
+        original
+            .raw_budget
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        original
+            .region
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
         drop(original.seal_failure.take());
         drop(
             original
@@ -2620,12 +2615,12 @@ impl SettledLiveNative {
         );
         // Disposed exclusion, released mapping and spent credit are plain
         // post-release records; none closes or unmaps anything on drop.
-        drop(original.release_exclusion.take());
+        original.release_exclusion.take();
         drop(original.host_storage.take());
-        drop(original.host_release_credit.take());
+        original.host_release_credit.take();
         drop(original.late.take());
         // The settled claim is a plain copied observation; nothing to settle.
-        drop(original.rollover_claim.take());
+        original.rollover_claim.take();
         let released = original
             .released
             .take()

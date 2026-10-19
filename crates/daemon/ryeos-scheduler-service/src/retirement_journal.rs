@@ -1326,8 +1326,7 @@ impl<'a> RetirementJournal<'a> {
                         candidate == generation && *index == role_i
                     })
                     .collect::<Vec<_>>();
-                let mut expected_ordinal = 0u8;
-                for ((_, _, ordinal), files) in slots {
+                for (((_, _, ordinal), files), expected_ordinal) in slots.into_iter().zip(0u8..) {
                     ensure!(
                         *ordinal == expected_ordinal && files.intent.is_some(),
                         "interrupted scheduler resolution ordinal has a gap/orphan"
@@ -1430,7 +1429,6 @@ impl<'a> RetirementJournal<'a> {
                         outcome,
                         outcome_sha256,
                     });
-                    expected_ordinal += 1;
                     if files.outcome.is_none() {
                         break;
                     }
@@ -4136,12 +4134,11 @@ mod terminal_scanner_controls {
             }
             let mut previous = None;
             let count = if generation == &parent { 9 } else { 28 };
-            for sequence in 0..count {
-                let (role, phase) = if sequence == 27 {
-                    (SchedulerRetirementRole::Main, Phase::Complete)
-                } else {
-                    expected[sequence]
-                };
+            let steps = expected.iter().copied().chain(std::iter::once((
+                SchedulerRetirementRole::Main,
+                Phase::Complete,
+            )));
+            for (sequence, (role, phase)) in steps.take(count).enumerate() {
                 let record = SchedulerRetirementRecord {
                     schema: 1,
                     purpose: ryeos_scheduler_contract::SCHEDULER_RETIREMENT_PURPOSE.to_owned(),

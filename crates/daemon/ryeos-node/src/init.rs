@@ -448,11 +448,11 @@ pub struct InitProgress {
 ///      its capability floor needs durable app-root storage the host lacks
 ///   4. Operator key (load-or-create at `<app_root>/.ai/config/keys/signing/private_key.pem`)
 ///   5. Node key (load-or-create at `<app_root>/.ai/node/identity/private_key.pem`)
-///   5b. Self-trust both keys (write signed `<fp>.toml` into user trust dir)
-///   6. Discover bundles in `source_dir` — scan for child dirs containing `.ai/`
-///   7. Install each discovered bundle + write registration record
-///   8. Vault X25519 keypair
-///   9. Post-init trust verification
+///   6. Self-trust both keys (write signed `<fp>.toml` into user trust dir)
+///   7. Discover bundles in `source_dir` — scan for child dirs containing `.ai/`
+///   8. Install each discovered bundle + write registration record
+///   9. Vault X25519 keypair
+///   10. Post-init trust verification
 pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
     run_init_with_progress(opts, |_| Ok(()))
 }

@@ -39,7 +39,7 @@ pub struct ScheduleDeployPlan {
     declared: usize,
 }
 
-struct ProjectContext {
+pub(crate) struct ProjectContext {
     request: Arc<ProjectScheduleDeployRequest>,
     app_root: PathBuf,
     db: Arc<ScheduleDb>,
@@ -228,7 +228,7 @@ pub(crate) fn validate_declarations_for_test(
     Ok(load_desired_schedules(staging_root, project_path)?.len())
 }
 
-pub fn plan(ctx: &ProjectContext) -> Result<ScheduleDeployPlan> {
+pub(crate) fn plan(ctx: &ProjectContext) -> Result<ScheduleDeployPlan> {
     let desired = load_desired_schedules(
         ctx.request.staging_root.as_path(),
         ctx.request.project_path.as_path(),
