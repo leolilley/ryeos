@@ -5,6 +5,7 @@
 //! wasm-bindgen, or any platform-specific I/O.
 
 pub mod atlas;
+pub mod diagnostic;
 pub mod effective_surface;
 pub mod ids;
 pub mod layout;
