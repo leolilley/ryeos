@@ -757,17 +757,6 @@ pub fn collect_object_closure_with_cas_and_limits(
     collect_object_closure_from_source(ClosureCas::Pinned(cas), roots, limits, &mut check, false)
 }
 
-/// Collect a bounded closure from one pinned CAS authority while preserving
-/// the caller's cancellation or deadline check at each traversal step.
-pub(crate) fn collect_object_closure_with_cas_and_limits_and_check(
-    cas: &lillux::CasStore,
-    roots: impl IntoIterator<Item = String>,
-    limits: ObjectClosureLimits,
-    check: &mut dyn FnMut() -> anyhow::Result<()>,
-) -> anyhow::Result<ObjectClosureReport> {
-    collect_object_closure_from_source(ClosureCas::Pinned(cas), roots, limits, check, false)
-}
-
 pub(crate) fn collect_object_closure_with_cas_and_limits_and_check_and_verify(
     cas: &lillux::CasStore,
     roots: impl IntoIterator<Item = String>,

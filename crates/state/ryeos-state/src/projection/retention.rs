@@ -263,7 +263,6 @@ mod tests {
 
     #[test]
     fn deadline_uses_whole_chain_terminal_time() {
-        let temp = tempfile::tempdir().unwrap();
         let db = crate::test_support::TestProjection::open();
         let root = ThreadSnapshotBuilder::new(
             "T-root",

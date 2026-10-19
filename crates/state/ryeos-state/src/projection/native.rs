@@ -661,9 +661,6 @@ impl RecoveredOriginalProjectionDurability {
     pub fn terminal(&self) -> Arc<ClosedOriginalNativeConnection> {
         self.proof.closed()
     }
-    pub(crate) fn proof(&self) -> &Arc<DurableOriginalProjection> {
-        &self.proof
-    }
 }
 
 #[cfg(all(test, feature = "test-support"))]

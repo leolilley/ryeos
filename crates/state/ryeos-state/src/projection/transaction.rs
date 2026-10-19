@@ -41,8 +41,6 @@ impl ProjectionDb {
 
 #[cfg(test)]
 mod tests {
-    use super::ProjectionDb;
-
     #[test]
     fn commit_failure_rolls_back_and_leaves_connection_usable() {
         let db = crate::test_support::TestProjection::open();

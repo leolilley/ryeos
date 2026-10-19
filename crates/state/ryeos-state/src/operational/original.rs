@@ -1729,9 +1729,7 @@ mod outside_quote_tests {
                         owner: Arc::clone(&owner),
                         remaining: AtomicU64::new(64),
                     });
-                    let inputs = unsafe {
-                        OriginalOutsideFinalizerFileRetirementInputs::issued(owner, authority)?
-                    };
+                    let inputs = OriginalOutsideFinalizerFileRetirementInputs::issued(owner, authority)?;
                     Ok(Arc::new(inputs))
                 },
             ).unwrap();
@@ -1864,11 +1862,6 @@ impl OutsideOriginalOperationalCustody {
         self.inner.require_exhausted_holders()
     }
 
-    /// Consumption after `require_exhausted`: the exhausted frame's own Drop
-    /// releases every slot normally.
-    pub(crate) fn exhaust(self) {
-        drop(self);
-    }
 }
 #[cfg(test)]
 mod outside_custody_drop_tests {

@@ -216,9 +216,6 @@ impl OriginalGenerationLease {
         factory.require_original_process()?;
         Ok(factory)
     }
-    pub(crate) fn identity(&self) -> (u64, u64) {
-        self.identity
-    }
     pub(crate) fn require_active(&self, factory: &Arc<OriginalNativeFactory>) -> Result<()> {
         self.require_coordinate(factory)?;
         let custody = self

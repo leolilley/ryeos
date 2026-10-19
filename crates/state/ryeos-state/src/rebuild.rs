@@ -1347,6 +1347,7 @@ fn validate_publication_history(
 /// as durable temporary GC roots, including descendants omitted from an
 /// incremental payload because they were already present locally. The caller
 /// must retain the authority's mutation guard for the complete verification.
+#[cfg(test)]
 pub(crate) fn verified_repair_closure_with_cas(
     cas: &lillux::CasStore,
     chain_root_id: &str,
@@ -1772,6 +1773,7 @@ fn rebuild_chain_delta(
     rebuild_chain_delta_with_observer(projection, &cas, chain_root_id, from_hash, to_hash, None)
 }
 
+#[cfg(test)]
 fn rebuild_chain_delta_with_observer(
     projection: &ProjectionDb,
     cas: &lillux::CasStore,
@@ -1916,16 +1918,6 @@ fn rebuild_chain_delta_with_reader<R: ProjectionCasObjectReader>(
     Ok(report)
 }
 
-/// Load an exact, canonical ChainState from CAS for projection replay.
-fn load_chain_state(
-    cas: &lillux::CasStore,
-    hash: &str,
-    expected_chain_root_id: &str,
-) -> Result<ChainState> {
-    let mut reader = LocalProjectionCasReader { cas };
-    load_chain_state_with_reader(&mut reader, hash, expected_chain_root_id)
-}
-
 fn load_chain_state_with_reader<R: ProjectionCasObjectReader>(
     reader: &mut R,
     hash: &str,
@@ -1957,12 +1949,6 @@ fn load_chain_state_with_reader<R: ProjectionCasObjectReader>(
         );
     }
     Ok(state)
-}
-
-/// Load an exact, canonical thread snapshot from CAS.
-fn load_thread_snapshot(cas: &lillux::CasStore, hash: &str) -> Result<ThreadSnapshot> {
-    let mut reader = LocalProjectionCasReader { cas };
-    load_thread_snapshot_with_reader(&mut reader, hash)
 }
 
 fn load_thread_snapshot_with_reader<R: ProjectionCasObjectReader>(
@@ -2001,16 +1987,6 @@ struct ReplayThreadCursor {
     next_sequence: u64,
 }
 
-fn walk_and_project_events_with_observer(
-    projection: &ProjectionDb,
-    cas: &lillux::CasStore,
-    head_state: &ChainState,
-    observer: Option<&dyn ProjectionRecoveryObserver>,
-) -> Result<usize> {
-    let mut reader = LocalProjectionCasReader { cas };
-    walk_and_project_events_with_reader(projection, &mut reader, head_state, observer)
-}
-
 fn walk_and_project_events_with_reader<R: ProjectionCasObjectReader>(
     projection: &ProjectionDb,
     reader: &mut R,
@@ -2038,6 +2014,7 @@ fn walk_and_project_events_from(
     walk_and_project_events_from_with_observer(projection, &cas, head_state, stop_state, None)
 }
 
+#[cfg(test)]
 fn walk_and_project_events_from_with_observer(
     projection: &ProjectionDb,
     cas: &lillux::CasStore,
@@ -2184,15 +2161,6 @@ fn walk_and_project_events_from_with_reader<R: ProjectionCasObjectReader>(
             events.push(event);
         }
     }
-}
-
-fn load_thread_event(
-    cas: &lillux::CasStore,
-    hash: &str,
-    expected_chain_root_id: &str,
-) -> Result<ThreadEvent> {
-    let mut reader = LocalProjectionCasReader { cas };
-    load_thread_event_with_reader(&mut reader, hash, expected_chain_root_id)
 }
 
 fn load_thread_event_with_reader<R: ProjectionCasObjectReader>(

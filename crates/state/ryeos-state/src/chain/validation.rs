@@ -775,6 +775,7 @@ fn validate_event_advance(
     )))
 }
 
+#[cfg(test)]
 fn load_hashed_chain_state(cas: &lillux::CasStore, hash: &str) -> anyhow::Result<ChainState> {
     load_hashed_chain_state_with_budget(cas, hash, &mut None)
 }
@@ -816,6 +817,7 @@ fn validate_predecessor_link(
     }
 }
 
+#[cfg(test)]
 fn load_hashed_snapshot(cas: &lillux::CasStore, hash: &str) -> anyhow::Result<ThreadSnapshot> {
     load_hashed_snapshot_with_budget(cas, hash, &mut None)
 }
@@ -846,10 +848,6 @@ fn load_hashed_snapshot_with_budget(
         );
     }
     Ok(snapshot)
-}
-
-fn load_hashed_event(cas: &lillux::CasStore, hash: &str) -> anyhow::Result<ThreadEvent> {
-    load_hashed_event_with_budget(cas, hash, &mut None)
 }
 
 fn load_hashed_event_with_budget(

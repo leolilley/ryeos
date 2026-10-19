@@ -2473,7 +2473,7 @@ impl ReleasedLiveStateStartup {
     }
 
     fn advance_closed_schema_sources(&mut self,
-        factory: &Arc<OriginalNativeFactory>, prepay: &dyn Fn(u64, u64) -> anyhow::Result<()>) -> anyhow::Result<()> {
+        prepay: &dyn Fn(u64, u64) -> anyhow::Result<()>) -> anyhow::Result<()> {
         let parts = self.inner.get_mut();
         let StartupCloseProgress { original, context, schema_admission_custody, .. } = &mut parts.progress;
         let registered = match context.as_ref() {
@@ -2538,7 +2538,7 @@ impl ReleasedLiveStateStartup {
         if let Some(operational) = &mut self.inner.get_mut().progress.operational_closed {
             operational.advance_live_schema_sources(factory, terminal, prepay)?;
         }
-        self.advance_closed_schema_sources(factory, prepay)?;
+        self.advance_closed_schema_sources(prepay)?;
         let Some(released) = self.inner.progress.schema_released.as_ref() else { return Ok(()); };
         released.terminal(factory)?;
         let quote = quote_startup_released_schema_source(
@@ -3523,9 +3523,7 @@ mod recovery_owner_tests {
                         owner: Arc::clone(&owner),
                         remaining: AtomicU64::new(64),
                     });
-                    let inputs = unsafe {
-                        OriginalOutsideFinalizerFileRetirementInputs::issued(owner, authority)?
-                    };
+                    let inputs = OriginalOutsideFinalizerFileRetirementInputs::issued(owner, authority)?;
                     Ok(Arc::new(inputs))
                 },
             ).unwrap();

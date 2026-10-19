@@ -20,7 +20,7 @@ pub(super) enum LiveOperationalInitializationPhase {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum NotIssuedReason {
+pub(super) enum NotIssuedReason {
     EstablishedBeforeThisOpen,
     PreSyncFailure,
 }

@@ -3489,7 +3489,6 @@ mod tests {
     #[test]
     fn source_only_root_seals_distinct_source_and_executor_manifests() {
         let root_manifest_hash = "a".repeat(64);
-        let executor_manifest_hash = "b".repeat(64);
         let member_source_proof = bundle_executor_proof_fixture();
         let executor_manifest_hash = lillux::sha256_hex(
             lillux::canonical_json(&member_source_proof.executor_manifest_object)

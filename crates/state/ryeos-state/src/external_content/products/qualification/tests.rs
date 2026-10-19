@@ -1,6 +1,7 @@
 use super::*;
 #[cfg(test)]
 use crate::external_content::qualification_purpose::QUALIFICATION_LAUNCH_PURPOSE_SCHEMA;
+#[cfg(test)]
 use crate::external_content::qualification_purpose::{
     QualificationLaunchPurpose, QualificationSubject,
 };
@@ -645,6 +646,7 @@ pub(crate) fn launch_purpose() -> QualificationLaunchPurpose {
     }
 }
 
+#[cfg(test)]
 fn product_subject_mut(
     purpose: &mut QualificationLaunchPurpose,
 ) -> (&mut String, &mut ProductWitnessSource, &mut String) {
@@ -1798,6 +1800,7 @@ fn product_evidence_refuses_predecessor_use_retention_schema() {
     }
 }
 
+#[cfg(test)]
 fn remote_subordinate_proof_fixture() -> ProductQualificationRemoteConsumerProof {
     use ryeos_external_execution_contract::restored_runtime_measurement::{
         ConsumerArchiveBudget, ConsumerRuntimeVerificationCoordinate,
