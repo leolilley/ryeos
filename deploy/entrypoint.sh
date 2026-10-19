@@ -120,6 +120,16 @@ hand_app_root_to_node_account() {
   done < <(find "$app_root" -xdev ! -type d \( ! -user "$NODE_UID" -o ! -group "$NODE_GID" \) -links +1 -print0)
   find "$app_root" -xdev \( ! -user "$NODE_UID" -o ! -group "$NODE_GID" \) \
     \( -type d -o -links 1 \) -exec chown -h "$NODE_UID:$NODE_GID" -- {} +
+  # The node pins directories under the app root as owner-private and refuses
+  # any mode other than exactly 0700. A directory made under the default
+  # umask is 0755, and one made under a platform volume that sets the group
+  # bit is inherited by every directory created beneath it, so the five-digit
+  # mode clears the set-id bits as well as the group and other access.
+  chmod 00700 -- "$app_root"
+  if [[ "$(stat -c %a -- "$app_root")" != 700 ]]; then
+    echo "[entrypoint] refusing to start: $app_root could not be set to owner-private mode 0700" >&2
+    return 1
+  fi
 }
 
 # Re-execute this script as the node account before any ryeos command. As

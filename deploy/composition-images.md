@@ -48,6 +48,9 @@ entrypoint logs `host refuses capability bounding-set changes` and continues
 with the other guarantees, which already leave the daemon with no
 capabilities and no way to regain them.
 
+The app root is handed over as an owner-private directory, mode 0700 with
+no set-id bits, because the node refuses any other mode when it pins it.
+
 ## Operator window on a hosted container
 
 Verbs such as `ryeos node external-execution compose` need the node stopped,
