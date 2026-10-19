@@ -153,8 +153,18 @@ run_as_node_account() {
   chown -h "$NODE_UID:$NODE_GID" /data
   hand_app_root_to_node_account /data/app
   echo "[entrypoint] /data handed to the node account $NODE_UID:$NODE_GID; dropping root"
+  local -a cap_args=(--inh-caps=-all)
+  # Some hosted sandboxes refuse changes to the capability bounding set. The
+  # uid change already empties the effective and permitted sets, and
+  # no_new_privs keeps them empty, so the drop proceeds without that one flag
+  # and says so.
+  if setpriv --bounding-set=-all -- true 2>/dev/null; then
+    cap_args+=(--bounding-set=-all)
+  else
+    echo "[entrypoint] host refuses capability bounding-set changes; dropping root without clearing the bounding set" >&2
+  fi
   exec setpriv --reuid="$NODE_UID" --regid="$NODE_GID" --clear-groups \
-    --no-new-privs --bounding-set=-all --inh-caps=-all \
+    --no-new-privs "${cap_args[@]}" \
     -- "${BASH_SOURCE[0]}" "$@"
 }
 
