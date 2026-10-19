@@ -358,6 +358,13 @@ grep -Fxq 'FROM ${PUBLICATION_STAGE} AS composition-publication' <<<"$(dockerfil
     echo "Dockerfile.release composition publication must follow PUBLICATION_STAGE" >&2
     exit 1
 }
+# Only the distributable archives may depend on the official-only `published`
+# stage; a runtime image reaching it would refuse a development publication.
+published_copies="$(dockerfile_instructions "$root/Dockerfile.release" | grep -E '^(COPY --from=published |FROM published )' || true)"
+[[ "$published_copies" == $'COPY --from=published /out/ /\nCOPY --from=published /workload-out/ /' ]] || {
+    echo "Dockerfile.release: only the bundle and workload-client artifacts may depend on the published stage" >&2
+    exit 1
+}
 # The selected features are themselves bundle-set data: no scheduler where the
 # set has no scheduling bundle, no provider setup where it has no directive.
 [[ -z "$(ryeos_bundle_set_cargo_features core ryeosd)" ]]
