@@ -676,8 +676,14 @@ fn run(
 }
 
 fn main() {
+    if std::env::args().any(|arg| arg == "--list") {
+        // A harness-free test binary answers the runner's listing request
+        // with its one test and nothing else on stdout.
+        println!("guest_occurrence_owner_native: test");
+        return;
+    }
     if std::env::var("RYEOS_GUEST_OCCURRENCE_NATIVE").as_deref() != Ok("1") {
-        println!("native guest occurrence probe skipped (set RYEOS_GUEST_OCCURRENCE_NATIVE=1)");
+        eprintln!("native guest occurrence probe skipped (set RYEOS_GUEST_OCCURRENCE_NATIVE=1)");
         return;
     }
     if std::env::var("RYEOS_GUEST_OCCURRENCE_NATIVE_CHILD").as_deref() == Ok("1") {
