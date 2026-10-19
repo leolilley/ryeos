@@ -46,7 +46,11 @@ impl NativeTestNode {
         ryeos_node_runtime::identity::NodeIdentity,
         WriteBarrier,
     ) {
-        let Self { config, identity, write_barrier } = self;
+        let Self {
+            config,
+            identity,
+            write_barrier,
+        } = self;
         (config, identity, write_barrier)
     }
 }
@@ -80,7 +84,10 @@ impl NativeTestState {
             .context("create test operator identity")?;
         let signer = Arc::new(NodeIdentitySigner::from_identity(&identity));
         let mut head_trust = ryeos_state::refs::TrustStore::new();
-        head_trust.insert(identity.fingerprint().to_string(), *identity.verifying_key());
+        head_trust.insert(
+            identity.fingerprint().to_string(),
+            *identity.verifying_key(),
+        );
         let write_barrier = WriteBarrier::new();
         let store = TestStateStore::open_with_barrier(
             app_root,
@@ -90,7 +97,11 @@ impl NativeTestState {
         )?;
         Ok(Self {
             store,
-            node: NativeTestNode { config, identity, write_barrier },
+            node: NativeTestNode {
+                config,
+                identity,
+                write_barrier,
+            },
         })
     }
 

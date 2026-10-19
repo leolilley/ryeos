@@ -27,7 +27,9 @@ fn compiled_direct_token_requires_exact_reservation_owner_tuple() {
     };
 
     let directory = tempfile::tempdir().unwrap();
-    let db = crate::runtime_db::test_native::TestRuntime::open(&directory.path().join("runtime.sqlite3"));
+    let db = crate::runtime_db::test_native::TestRuntime::open(
+        &directory.path().join("runtime.sqlite3"),
+    );
     let mut reservation =
         crate::runtime_db::external_execution::tests::direct_owner_reservation(&db);
     let exact_program = Fixture::new().compile().unwrap();

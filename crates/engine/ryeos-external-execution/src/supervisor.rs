@@ -734,9 +734,11 @@ mod tests {
     #[test]
     fn complete_capture_replay_reuses_exact_receipt_without_second_native_capture() {
         let state_root = tempfile::tempdir().unwrap();
-        let state =
-            ryeos_state::test_support::TestState::open(state_root.path(), Arc::new(ryeos_state::TrustStore::new()))
-                .unwrap();
+        let state = ryeos_state::test_support::TestState::open(
+            state_root.path(),
+            Arc::new(ryeos_state::TrustStore::new()),
+        )
+        .unwrap();
         let authority = state.pinned_authority().unwrap();
         let cas = authority.cas_store().unwrap();
         let policy = ProjectSnapshotPolicy::new(
@@ -1122,8 +1124,9 @@ mod tests {
         let live = lease_fixture_live_journal(&state, &binding, journal_root.path());
         let inputs = vec!["5".repeat(64), "6".repeat(64), "7".repeat(64)];
         let plan = LeaseReadyPlan::observe(inputs.clone()).unwrap();
-        let mut runtime = SerializedExternalCandidateSupervisor::new(live, RecordingLauncher::default())
-            .with_lease_ready(plan);
+        let mut runtime =
+            SerializedExternalCandidateSupervisor::new(live, RecordingLauncher::default())
+                .with_lease_ready(plan);
         assert!(runtime.is_lease_ready());
 
         let ready = runtime.publish_ready(&supervisor_key).unwrap();
@@ -1156,13 +1159,8 @@ mod tests {
 
         // Neither frame starts the candidate; only the owner's Release does.
         assert_eq!(runtime.launcher.releases, 0);
-        let release = signed_owner_frame(
-            &binding,
-            &owner,
-            1,
-            None,
-            ExecutionChannelPayload::Release,
-        );
+        let release =
+            signed_owner_frame(&binding, &owner, 1, None, ExecutionChannelPayload::Release);
         assert_eq!(
             runtime
                 .dispatch_release(release.canonical().as_bytes())
@@ -1191,7 +1189,8 @@ mod tests {
         let binding = lease_fixture_binding(&owner, &supervisor_key);
         let journal_root = tempfile::tempdir().unwrap();
         let live = lease_fixture_live_journal(&state, &binding, journal_root.path());
-        let runtime = SerializedExternalCandidateSupervisor::new(live, RecordingLauncher::default());
+        let runtime =
+            SerializedExternalCandidateSupervisor::new(live, RecordingLauncher::default());
         assert!(!runtime.is_lease_ready());
 
         let ready = runtime.publish_ready(&supervisor_key).unwrap();

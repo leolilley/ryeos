@@ -906,36 +906,36 @@ pub(super) async fn start(
     if !recovering
         && let (Some(scope), Some(accounting)) =
             (cap.accounting_scope.as_ref(), state.accounting.as_ref())
-        {
-            let request_digest = ryeos_state::objects::canonical_value_digest(&json!({
-                "schema":1,
-                "kind":"dedicated_worker_execution",
-                "request":&request,
-                "admitted_session_capsule_hash":&capsule_hash,
-                "credential_generation":profile.credential_generation,
-            }))?;
-            match accounting.claim_execution_resource(
-                &scope.execution_budget_id,
-                ExecutionResourceDimension::WorkerExecution,
-                &request.thread_id,
-                &request_digest,
-                lillux::time::timestamp_millis(),
-            )? {
-                ExecutionResourceClaimOutcome::Admitted { .. } => {}
-                ExecutionResourceClaimOutcome::ReleasedUncontacted { .. } => {
-                    bail!("worker-execution claim cannot be in a released state")
-                }
-                ExecutionResourceClaimOutcome::Denied { reason, .. } => {
-                    aggregate_budget = execution_resource_budget(state, cap)?;
-                    let refused = json!({
-                        "state":"budget_exhausted",
-                        "budget_reason":reason,
-                        "bounded_outcome":bounded_budget_outcome(&reason)?,
-                    });
-                    return attach_execution_resource_budget(refused, aggregate_budget.as_ref());
-                }
+    {
+        let request_digest = ryeos_state::objects::canonical_value_digest(&json!({
+            "schema":1,
+            "kind":"dedicated_worker_execution",
+            "request":&request,
+            "admitted_session_capsule_hash":&capsule_hash,
+            "credential_generation":profile.credential_generation,
+        }))?;
+        match accounting.claim_execution_resource(
+            &scope.execution_budget_id,
+            ExecutionResourceDimension::WorkerExecution,
+            &request.thread_id,
+            &request_digest,
+            lillux::time::timestamp_millis(),
+        )? {
+            ExecutionResourceClaimOutcome::Admitted { .. } => {}
+            ExecutionResourceClaimOutcome::ReleasedUncontacted { .. } => {
+                bail!("worker-execution claim cannot be in a released state")
+            }
+            ExecutionResourceClaimOutcome::Denied { reason, .. } => {
+                aggregate_budget = execution_resource_budget(state, cap)?;
+                let refused = json!({
+                    "state":"budget_exhausted",
+                    "budget_reason":reason,
+                    "bounded_outcome":bounded_budget_outcome(&reason)?,
+                });
+                return attach_execution_resource_budget(refused, aggregate_budget.as_ref());
             }
         }
+    }
     ryeos_app::private_artifact_home::require_within_default_limit(
         &state.config.runtime_state_dir(),
         &profile.home_id,

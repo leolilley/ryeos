@@ -67,22 +67,44 @@ impl lillux_sqlite::OriginalMetadataPinRetirementAuthority
         terminal: &Arc<lillux_sqlite::OriginalNativeTerminal>,
         pin: &Arc<lillux_sqlite::RetainedOriginalMetadataPin>,
     ) -> Result<()> {
-        ensure!(self.process == std::process::id(), "foreign live packet metadata pin");
-        let original_factory = self.factory.upgrade().context("live packet factory absent")?;
-        let original_terminal = self.terminal.upgrade().context("live packet terminal absent")?;
-        ensure!(Arc::ptr_eq(factory, &original_factory)
-            && Arc::ptr_eq(terminal, &original_terminal),
-            "live packet metadata pin selects another native terminal");
-        ensure!(self.pins.iter().flatten().any(|original|
-            original.upgrade().is_some_and(|original| Arc::ptr_eq(&original, pin))),
-            "live packet metadata pin is outside its exact packet inventory");
+        ensure!(
+            self.process == std::process::id(),
+            "foreign live packet metadata pin"
+        );
+        let original_factory = self
+            .factory
+            .upgrade()
+            .context("live packet factory absent")?;
+        let original_terminal = self
+            .terminal
+            .upgrade()
+            .context("live packet terminal absent")?;
+        ensure!(
+            Arc::ptr_eq(factory, &original_factory) && Arc::ptr_eq(terminal, &original_terminal),
+            "live packet metadata pin selects another native terminal"
+        );
+        ensure!(
+            self.pins.iter().flatten().any(|original| original
+                .upgrade()
+                .is_some_and(|original| Arc::ptr_eq(&original, pin))),
+            "live packet metadata pin is outside its exact packet inventory"
+        );
         self.leaf.require_original(factory, terminal)?;
-        self.late.upgrade().context("live packet cleanup funding absent")?.require_original()
+        self.late
+            .upgrade()
+            .context("live packet cleanup funding absent")?
+            .require_original()
     }
 
     fn debit_original_steps(&self, steps: u64) -> Result<()> {
-        ensure!(self.process == std::process::id(), "foreign live packet metadata debit");
-        self.late.upgrade().context("live packet cleanup funding absent")?.prepay(0, steps)
+        ensure!(
+            self.process == std::process::id(),
+            "foreign live packet metadata debit"
+        );
+        self.late
+            .upgrade()
+            .context("live packet cleanup funding absent")?
+            .prepay(0, steps)
     }
 }
 
@@ -137,8 +159,10 @@ unsafe impl lillux_sqlite::OriginalOutsideFinalizerFileRetirementAuthority
 
 pub(super) struct LateNativeControl {
     clock: Mutex<ClockState>,
-    registry_identity: OnceLock<lillux_sqlite::original_physical_custody::OriginalPhysicalRegistryIdentity>,
-    registry_retirement: OnceLock<lillux_sqlite::original_physical_custody::RetiredOriginalPhysicalRegistry>,
+    registry_identity:
+        OnceLock<lillux_sqlite::original_physical_custody::OriginalPhysicalRegistryIdentity>,
+    registry_retirement:
+        OnceLock<lillux_sqlite::original_physical_custody::RetiredOriginalPhysicalRegistry>,
     process: lillux::process_control::ExactProcessIdentity,
     occupancy: lillux::time::OccupancyLimit,
     cleanup: std::time::Duration,
@@ -253,17 +277,27 @@ impl LateNativeControl {
     fn packet_metadata_pin_input_quote(
         pin_count: usize,
     ) -> Result<lillux_sqlite::original_physical_custody::OutsideWork> {
-        ensure!(pin_count > 0 && pin_count <= 2,
-            "live packet metadata-pin inventory exceeds its two producer roles");
+        ensure!(
+            pin_count > 0 && pin_count <= 2,
+            "live packet metadata-pin inventory exceeds its two producer roles"
+        );
         let bytes = std::mem::size_of::<LivePacketMetadataPinRetirementAuthority>()
-            .checked_add(std::mem::size_of::<lillux_sqlite::OriginalMetadataPinRetirementInputs>())
-            .and_then(|bytes| pin_count.checked_mul(std::mem::size_of::<Arc<lillux_sqlite::RetainedOriginalMetadataPin>>())
-                .and_then(|pins| bytes.checked_add(pins)))
+            .checked_add(std::mem::size_of::<
+                lillux_sqlite::OriginalMetadataPinRetirementInputs,
+            >())
+            .and_then(|bytes| {
+                pin_count
+                    .checked_mul(std::mem::size_of::<
+                        Arc<lillux_sqlite::RetainedOriginalMetadataPin>,
+                    >())
+                    .and_then(|pins| bytes.checked_add(pins))
+            })
             // One Arc control block for the authority, one for the issued
             // inputs, and one bounded Vec allocation for the exact pins.
             .and_then(|bytes| bytes.checked_add(4 * std::mem::size_of::<usize>()))
             .context("live packet metadata-pin input storage quote overflow")?;
-        let steps = u64::try_from(pin_count)?.checked_mul(4)
+        let steps = u64::try_from(pin_count)?
+            .checked_mul(4)
             .and_then(|steps| steps.checked_add(8))
             .context("live packet metadata-pin input work quote overflow")?;
         Ok(lillux_sqlite::original_physical_custody::OutsideWork {
@@ -310,10 +344,7 @@ impl LateNativeControl {
         // the original retained late-cleanup owner before allocating inputs.
         let inputs = unsafe {
             lillux_sqlite::OriginalMetadataPinRetirementInputs::issued(
-                factory,
-                terminal,
-                pins,
-                authority,
+                factory, terminal, pins, authority,
             )?
         };
         Ok(Arc::new(inputs))
@@ -340,8 +371,8 @@ impl LateNativeControl {
     /// Worst-case descriptor and packet-owner authority issuance, close
     /// receipts, and source consumption across the selected owner bounds and
     /// every finalizer attempt. Failed-attempt backing is not refunded.
-    pub(super) fn maximum_packet_metadata_pin_retirement_quote(
-    ) -> Result<lillux_sqlite::original_physical_custody::OutsideWork> {
+    pub(super) fn maximum_packet_metadata_pin_retirement_quote()
+    -> Result<lillux_sqlite::original_physical_custody::OutsideWork> {
         let packet_count = ryeos_app::state_store::MAX_LIVE_SELECTED_NATIVE_PACKET_SOURCES;
         let attempts = u64::from(super::MAX_FINALIZATION_ATTEMPTS);
         let packet_calls = u64::try_from(packet_count)?
@@ -354,12 +385,14 @@ impl LateNativeControl {
             ryeos_app::state_store::quote_retired_packet_metadata_pin_receipts(packet_count)?;
         // One pass can allocate one receipt per pin before close; another
         // validates and consumes those same receipts after native disposal.
-        let receipt_steps = receipts_per_pass.steps
+        let receipt_steps = receipts_per_pass
+            .steps
             .checked_mul(attempts)
             .and_then(|steps| steps.checked_mul(2))
             .context("packet receipt retry work quote overflow")?;
         let receipts = lillux_sqlite::original_physical_custody::OutsideWork {
-            bytes: receipts_per_pass.bytes
+            bytes: receipts_per_pass
+                .bytes
                 .checked_mul(attempts)
                 .context("packet receipt retry storage quote overflow")?,
             steps: receipt_steps,
@@ -375,7 +408,10 @@ impl LateNativeControl {
         };
         let source_parts = ryeos_app::state_store::quote_retired_packet_source_parts(packet_count)?
             .checked_mul(attempts)?;
-        input.checked_add(census)?.checked_add(receipts)?.checked_add(close)?
+        input
+            .checked_add(census)?
+            .checked_add(receipts)?
+            .checked_add(close)?
             .checked_add(source_parts)
     }
 
@@ -398,7 +434,10 @@ impl LateNativeControl {
         let state = ryeos_state::state_db::ClosedLiveStatePhysicalCustody::quote_maximum_metadata_pin_attempt(
             maximum_resource_tickets,
         )?;
-        per_leaf.checked_mul(leaves)?.checked_add(state)?.checked_mul(attempts)
+        per_leaf
+            .checked_mul(leaves)?
+            .checked_add(state)?
+            .checked_mul(attempts)
     }
 
     /// Worst-case lookup and input issuance across every descriptor and every
@@ -417,9 +456,11 @@ impl LateNativeControl {
         let generated_root_receipts = ryeos_state::state_db::quote_retired_generated_root_receipts(
             usize::try_from(maximum_resource_tickets)?,
             usize::try_from(maximum_resource_tickets)?,
-        )?.checked_mul(u64::from(super::MAX_FINALIZATION_ATTEMPTS))?;
+        )?
+        .checked_mul(u64::from(super::MAX_FINALIZATION_ATTEMPTS))?;
         let ticket_count = usize::try_from(maximum_resource_tickets)?;
-        let projection_slots = ticket_count.checked_mul(2)
+        let projection_slots = ticket_count
+            .checked_mul(2)
             .context("live State projection slot bound overflow")?;
         let projection_roots = ryeos_state::state_db::maximum_live_projection_physical_sources(
             maximum_resource_tickets,
@@ -427,16 +468,21 @@ impl LateNativeControl {
         let projection_receipts = ryeos_state::state_db::quote_live_projection_retired_sources(
             projection_slots,
             projection_roots,
-        )?.checked_mul(u64::from(super::MAX_FINALIZATION_ATTEMPTS))?;
-        let state_root_receipts = ryeos_state::state_db::quote_live_state_finalization_root_receipts()?
-            .checked_mul(u64::from(super::MAX_FINALIZATION_ATTEMPTS))?;
-        let operational_metadata = ryeos_state::operational::quote_maximum_operational_metadata_retirement()?
-            .checked_mul(u64::from(super::MAX_FINALIZATION_ATTEMPTS))?;
+        )?
+        .checked_mul(u64::from(super::MAX_FINALIZATION_ATTEMPTS))?;
+        let state_root_receipts =
+            ryeos_state::state_db::quote_live_state_finalization_root_receipts()?
+                .checked_mul(u64::from(super::MAX_FINALIZATION_ATTEMPTS))?;
+        let operational_metadata =
+            ryeos_state::operational::quote_maximum_operational_metadata_retirement()?
+                .checked_mul(u64::from(super::MAX_FINALIZATION_ATTEMPTS))?;
         Self::retirement_lookup_quote(maximum_sources)?
             .checked_add(Self::retirement_input_quote()?)?
             .checked_mul(calls)?
             .checked_add(Self::maximum_packet_metadata_pin_retirement_quote()?)?
-            .checked_add(Self::maximum_state_metadata_pin_retirement_quote(maximum_resource_tickets)?)?
+            .checked_add(Self::maximum_state_metadata_pin_retirement_quote(
+                maximum_resource_tickets,
+            )?)?
             .checked_add(generated_root_receipts)?
             .checked_add(projection_receipts)?
             .checked_add(state_root_receipts)?
@@ -630,8 +676,10 @@ impl LateNativeControl {
                 .get_mut(slot_index)
                 .context("outside descriptor slot exceeds its preallocated cache")?;
             if let Some(entry) = slot {
-                ensure!(entry.registration.same_member(registration)?,
-                    "outside descriptor cache slot names another registration");
+                ensure!(
+                    entry.registration.same_member(registration)?,
+                    "outside descriptor cache slot names another registration"
+                );
                 ensure!(
                     Arc::ptr_eq(&entry.registration.owner()?, &owner),
                     "cached outside descriptor membership changed"
@@ -690,8 +738,10 @@ impl LateNativeControl {
             .get_mut(slot_index)
             .and_then(Option::as_mut)
             .context("outside descriptor input reservation disappeared")?;
-        ensure!(entry.registration.same_member(registration)?,
-            "outside descriptor cache slot changed during issuance");
+        ensure!(
+            entry.registration.same_member(registration)?,
+            "outside descriptor cache slot changed during issuance"
+        );
         ensure!(
             matches!(&entry.state, CachedOutsideRetirementInputState::Issuing),
             "outside descriptor input issuance state changed"
@@ -749,7 +799,9 @@ impl LateNativeControl {
             ClockState::Ready(owner) => owner,
             _ => anyhow::bail!("original late cleanup clock is already terminal or closing"),
         };
-        let phase = owner.window_fixed(&self.occupancy, self.cleanup).map_err(anyhow::Error::msg)?;
+        let phase = owner
+            .window_fixed(&self.occupancy, self.cleanup)
+            .map_err(anyhow::Error::msg)?;
         ensure!(
             matches!(
                 phase,
@@ -888,8 +940,14 @@ impl LateNativeControl {
                     let mut state = self.clock.try_lock().map_err(|_| {
                         anyhow::anyhow!("original late cleanup clock busy or poisoned")
                     })?;
-                    ensure!(matches!(*state, ClockState::Closing), "original clock close state changed");
-                    *state = ClockState::Open { owner, input_alias_joined: true };
+                    ensure!(
+                        matches!(*state, ClockState::Closing),
+                        "original clock close state changed"
+                    );
+                    *state = ClockState::Open {
+                        owner,
+                        input_alias_joined: true,
+                    };
                     anyhow::bail!("original clock descriptor owner remains aliased");
                 }
             },
@@ -962,8 +1020,13 @@ impl LateNativeControl {
             .try_lock()
             .map_err(|_| anyhow::anyhow!("original late cleanup clock busy or poisoned"))?;
         Ok(match &*state {
-            ClockState::Open { input_alias_joined, .. } => *input_alias_joined,
-            ClockState::Ready(_) | ClockState::Closing | ClockState::Retired(_) | ClockState::Refused(_) => true,
+            ClockState::Open {
+                input_alias_joined, ..
+            } => *input_alias_joined,
+            ClockState::Ready(_)
+            | ClockState::Closing
+            | ClockState::Retired(_)
+            | ClockState::Refused(_) => true,
         })
     }
 
@@ -1011,33 +1074,58 @@ mod tests {
         let input = LateNativeControl::retirement_input_quote().unwrap();
         let all_attempts = LateNativeControl::maximum_retirement_inputs_quote(2, 2).unwrap();
         let maximum_calls = 2 * u64::from(super::super::MAX_FINALIZATION_ATTEMPTS);
-        let descriptor_attempts = small_lookup.checked_add(input).unwrap()
-            .checked_mul(maximum_calls).unwrap();
-        let packet_pins = LateNativeControl::maximum_packet_metadata_pin_retirement_quote().unwrap();
+        let descriptor_attempts = small_lookup
+            .checked_add(input)
+            .unwrap()
+            .checked_mul(maximum_calls)
+            .unwrap();
+        let packet_pins =
+            LateNativeControl::maximum_packet_metadata_pin_retirement_quote().unwrap();
         let state_pins = LateNativeControl::maximum_state_metadata_pin_retirement_quote(2).unwrap();
-        let generated_roots = ryeos_state::state_db::quote_retired_generated_root_receipts(2, 2).unwrap()
-            .checked_mul(u64::from(super::super::MAX_FINALIZATION_ATTEMPTS)).unwrap();
-        let projection_roots = ryeos_state::state_db::quote_live_projection_retired_sources(4, 6).unwrap()
-            .checked_mul(u64::from(super::super::MAX_FINALIZATION_ATTEMPTS)).unwrap();
-        let state_roots = ryeos_state::state_db::quote_live_state_finalization_root_receipts().unwrap()
-            .checked_mul(u64::from(super::super::MAX_FINALIZATION_ATTEMPTS)).unwrap();
-        let operational_metadata = ryeos_state::operational::quote_maximum_operational_metadata_retirement().unwrap()
-            .checked_mul(u64::from(super::super::MAX_FINALIZATION_ATTEMPTS)).unwrap();
+        let generated_roots = ryeos_state::state_db::quote_retired_generated_root_receipts(2, 2)
+            .unwrap()
+            .checked_mul(u64::from(super::super::MAX_FINALIZATION_ATTEMPTS))
+            .unwrap();
+        let projection_roots = ryeos_state::state_db::quote_live_projection_retired_sources(4, 6)
+            .unwrap()
+            .checked_mul(u64::from(super::super::MAX_FINALIZATION_ATTEMPTS))
+            .unwrap();
+        let state_roots = ryeos_state::state_db::quote_live_state_finalization_root_receipts()
+            .unwrap()
+            .checked_mul(u64::from(super::super::MAX_FINALIZATION_ATTEMPTS))
+            .unwrap();
+        let operational_metadata =
+            ryeos_state::operational::quote_maximum_operational_metadata_retirement()
+                .unwrap()
+                .checked_mul(u64::from(super::super::MAX_FINALIZATION_ATTEMPTS))
+                .unwrap();
         let marker_owner = ryeos_state::operational::quote_operational_marker_owner().unwrap();
-        assert_eq!(all_attempts,
-            descriptor_attempts.checked_add(packet_pins).unwrap()
-                .checked_add(state_pins).unwrap()
-                .checked_add(generated_roots).unwrap().checked_add(projection_roots).unwrap()
-                .checked_add(state_roots).unwrap().checked_add(operational_metadata).unwrap()
-                .checked_add(marker_owner).unwrap());
+        assert_eq!(
+            all_attempts,
+            descriptor_attempts
+                .checked_add(packet_pins)
+                .unwrap()
+                .checked_add(state_pins)
+                .unwrap()
+                .checked_add(generated_roots)
+                .unwrap()
+                .checked_add(projection_roots)
+                .unwrap()
+                .checked_add(state_roots)
+                .unwrap()
+                .checked_add(operational_metadata)
+                .unwrap()
+                .checked_add(marker_owner)
+                .unwrap()
+        );
     }
 
     #[test]
     fn indexed_retirement_cache_backing_is_preallocated_and_quoted_per_source() {
         let small = LateNativeControl::maximum_storage_quote(2).unwrap();
         let large = LateNativeControl::maximum_storage_quote(5).unwrap();
-        let entry = u64::try_from(std::mem::size_of::<Option<CachedOutsideRetirementInput>>())
-            .unwrap();
+        let entry =
+            u64::try_from(std::mem::size_of::<Option<CachedOutsideRetirementInput>>()).unwrap();
         assert_eq!(large.bytes - small.bytes, entry * 3);
         assert_eq!(large.steps - small.steps, 3);
     }
@@ -1046,31 +1134,49 @@ mod tests {
     fn packet_metadata_pin_inputs_quote_exact_bounded_inventory() {
         let one = LateNativeControl::packet_metadata_pin_input_quote(1).unwrap();
         let two = LateNativeControl::packet_metadata_pin_input_quote(2).unwrap();
-        assert_eq!(two.bytes - one.bytes,
-            u64::try_from(std::mem::size_of::<Arc<lillux_sqlite::RetainedOriginalMetadataPin>>()).unwrap());
+        assert_eq!(
+            two.bytes - one.bytes,
+            u64::try_from(std::mem::size_of::<
+                Arc<lillux_sqlite::RetainedOriginalMetadataPin>,
+            >())
+            .unwrap()
+        );
         assert_eq!(one.steps, 12);
         assert_eq!(two.steps, 16);
         assert!(LateNativeControl::packet_metadata_pin_input_quote(0).is_err());
         assert!(LateNativeControl::packet_metadata_pin_input_quote(3).is_err());
 
         let attempts_state = u64::from(super::super::MAX_FINALIZATION_ATTEMPTS);
-        let state_leaf = two.checked_add(lillux_sqlite::original_physical_custody::OutsideWork {
-            bytes: 0, steps: 2 * lillux_sqlite::ORIGINAL_METADATA_PIN_RETIREMENT_STEPS,
-        }).unwrap();
+        let state_leaf = two
+            .checked_add(lillux_sqlite::original_physical_custody::OutsideWork {
+                bytes: 0,
+                steps: 2 * lillux_sqlite::ORIGINAL_METADATA_PIN_RETIREMENT_STEPS,
+            })
+            .unwrap();
         let state_local = ryeos_state::state_db::ClosedLiveStatePhysicalCustody::quote_maximum_metadata_pin_attempt(64)
             .unwrap();
-        assert_eq!(LateNativeControl::maximum_state_metadata_pin_retirement_quote(64).unwrap(),
-            state_leaf.checked_mul(64).unwrap().checked_add(state_local).unwrap()
-                .checked_mul(attempts_state).unwrap());
+        assert_eq!(
+            LateNativeControl::maximum_state_metadata_pin_retirement_quote(64).unwrap(),
+            state_leaf
+                .checked_mul(64)
+                .unwrap()
+                .checked_add(state_local)
+                .unwrap()
+                .checked_mul(attempts_state)
+                .unwrap()
+        );
 
         let packet_count = ryeos_app::state_store::MAX_LIVE_SELECTED_NATIVE_PACKET_SOURCES;
         let attempts = u64::from(super::super::MAX_FINALIZATION_ATTEMPTS);
         let calls = u64::try_from(packet_count).unwrap() * attempts;
         let packet_inputs = two.checked_mul(calls).unwrap();
         let census = ryeos_app::state_store::quote_packet_metadata_pin_retirements(packet_count)
-            .unwrap().checked_mul(attempts).unwrap();
-        let receipt = ryeos_app::state_store::quote_retired_packet_metadata_pin_receipts(packet_count)
+            .unwrap()
+            .checked_mul(attempts)
             .unwrap();
+        let receipt =
+            ryeos_app::state_store::quote_retired_packet_metadata_pin_receipts(packet_count)
+                .unwrap();
         let receipt_total = lillux_sqlite::original_physical_custody::OutsideWork {
             bytes: receipt.bytes * attempts,
             steps: receipt.steps * attempts * 2,
@@ -1080,11 +1186,20 @@ mod tests {
             steps: calls * 2 * lillux_sqlite::ORIGINAL_METADATA_PIN_RETIREMENT_STEPS,
         };
         let source_parts = ryeos_app::state_store::quote_retired_packet_source_parts(packet_count)
-            .unwrap().checked_mul(attempts).unwrap();
-        assert_eq!(LateNativeControl::maximum_packet_metadata_pin_retirement_quote().unwrap(),
-            packet_inputs.checked_add(census).unwrap()
-                .checked_add(receipt_total).unwrap()
-                .checked_add(close_total).unwrap()
-                .checked_add(source_parts).unwrap());
+            .unwrap()
+            .checked_mul(attempts)
+            .unwrap();
+        assert_eq!(
+            LateNativeControl::maximum_packet_metadata_pin_retirement_quote().unwrap(),
+            packet_inputs
+                .checked_add(census)
+                .unwrap()
+                .checked_add(receipt_total)
+                .unwrap()
+                .checked_add(close_total)
+                .unwrap()
+                .checked_add(source_parts)
+                .unwrap()
+        );
     }
 }

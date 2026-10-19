@@ -57,25 +57,35 @@ impl CreatedDirectoryRecord {
         ensure!(
             matches!(self.source_purpose.as_str(), "runtime" | "scheduler")
                 && matches_inspection_destination(
-                    &self.destination_name, &self.operation_id, &self.source_purpose),
+                    &self.destination_name,
+                    &self.operation_id,
+                    &self.source_purpose
+                ),
             "created-directory evidence changes fixed operation selection"
         );
         Ok(())
     }
-    pub(super) fn signed_bytes(&self, identity: &NodeIdentity,
-        storage: &lillux::cas::CanonicalRecordStorageQuote) -> Result<Vec<u8>> {
+    pub(super) fn signed_bytes(
+        &self,
+        identity: &NodeIdentity,
+        storage: &lillux::cas::CanonicalRecordStorageQuote,
+    ) -> Result<Vec<u8>> {
         self.validate()?;
         sign_inspection_record(self, &self.signer, identity, storage)
     }
     pub(super) fn verified(bytes: &[u8], identity: &NodeIdentity) -> Result<Self> {
         let record: Self = verify_inspection_record(
-            bytes, identity, ("created-directory", 1, "offline_reset_inspection_created"))?;
+            bytes,
+            identity,
+            ("created-directory", 1, "offline_reset_inspection_created"),
+        )?;
         record.validate()?;
-        ensure!(record.signer == identity.fingerprint(),
-            "created-directory evidence is foreign");
+        ensure!(
+            record.signer == identity.fingerprint(),
+            "created-directory evidence is foreign"
+        );
         Ok(record)
     }
-
 }
 
 /// Required signed counter facts only; never acquisition/allocation terminals.
@@ -141,12 +151,8 @@ pub(super) enum InspectionStoreDispositionRecord {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum OriginalLocalSettlementObligation {
-    NativeAllocationAccounting {
-        attempted: u32,
-    },
-    SourcePins {
-        count: u32,
-    },
+    NativeAllocationAccounting { attempted: u32 },
+    SourcePins { count: u32 },
     ReservationPublicationDescriptor,
     IssuedReservationPin,
 }
@@ -230,8 +236,11 @@ impl InspectionDispositionRecord {
         // A disposed reset still holds its published reservation, the
         // issued reservation pin and its host's allocation accounting.
         ensure!(
-            self.held.contains(&OriginalLocalSettlementObligation::ReservationPublicationDescriptor)
-                && self.held.contains(&OriginalLocalSettlementObligation::IssuedReservationPin),
+            self.held
+                .contains(&OriginalLocalSettlementObligation::ReservationPublicationDescriptor)
+                && self
+                    .held
+                    .contains(&OriginalLocalSettlementObligation::IssuedReservationPin),
             "disposition omits the held reservation"
         );
         ensure!(
@@ -272,14 +281,20 @@ impl InspectionDispositionRecord {
         }
         Ok(())
     }
-    pub(super) fn signed_bytes(&self, identity: &NodeIdentity,
-        storage: &lillux::cas::CanonicalRecordStorageQuote) -> Result<Vec<u8>> {
+    pub(super) fn signed_bytes(
+        &self,
+        identity: &NodeIdentity,
+        storage: &lillux::cas::CanonicalRecordStorageQuote,
+    ) -> Result<Vec<u8>> {
         self.validate()?;
         sign_inspection_record(self, &self.signer, identity, storage)
     }
     pub(super) fn verified(bytes: &[u8], identity: &NodeIdentity) -> Result<Self> {
         let record: Self = verify_inspection_record(
-            bytes, identity, ("disposition", DISPOSITION_SCHEMA, DISPOSITION_PURPOSE))?;
+            bytes,
+            identity,
+            ("disposition", DISPOSITION_SCHEMA, DISPOSITION_PURPOSE),
+        )?;
         record.validate()?;
         ensure!(
             record.signer == identity.fingerprint(),
@@ -300,11 +315,15 @@ fn sign_inspection_record<T: Serialize>(
     );
     // The original caller funds this exact immutable quote before entry.
     // Fixed raw/index/output slabs replace the unbounded generic JSON tree.
-    ensure!(storage.output_bytes() <= 8192, "inspection canonical output exceeds original record capacity");
+    ensure!(
+        storage.output_bytes() <= 8192,
+        "inspection canonical output exceeds original record capacity"
+    );
     let body = String::from_utf8(lillux::cas::canonical_record_bytes(record, storage)?)?;
-    let bytes = lillux::signature::sign_content_bounded(
-        &body, identity.signing_key(), "#", None, 8192,
-    ).map_err(anyhow::Error::msg)?.into_bytes();
+    let bytes =
+        lillux::signature::sign_content_bounded(&body, identity.signing_key(), "#", None, 8192)
+            .map_err(anyhow::Error::msg)?
+            .into_bytes();
     ensure!(
         bytes.len() <= 8192,
         "inspection record exceeds original record capacity"
@@ -361,10 +380,11 @@ pub(super) fn require_current_record(
     schema: u32,
     purpose: &str,
 ) -> Result<()> {
-    let header: RecordHeader = serde_json::from_str(body).map_err(|_| ResetScratchRepairRequired {
-        what: format!("offline reset {record} record has no recognizable schema"),
-        foreign: None,
-    })?;
+    let header: RecordHeader =
+        serde_json::from_str(body).map_err(|_| ResetScratchRepairRequired {
+            what: format!("offline reset {record} record has no recognizable schema"),
+            foreign: None,
+        })?;
     if header.schema != u64::from(schema) || header.purpose != purpose {
         return Err(ResetScratchRepairRequired {
             what: format!(
@@ -389,7 +409,12 @@ fn verify_inspection_record<T: for<'de> Deserialize<'de> + Serialize>(
     );
     let raw = std::str::from_utf8(bytes)?;
     let body = lillux::signature::verified_leading_body(
-        raw, "#", None, identity.verifying_key(), identity.fingerprint())?;
+        raw,
+        "#",
+        None,
+        identity.verifying_key(),
+        identity.fingerprint(),
+    )?;
     require_current_record(body, record, schema, purpose)?;
     let record: T = serde_json::from_str(body)?;
     // Selected evidence schemas contain integer counters, strings and fixed
@@ -399,13 +424,18 @@ fn verify_inspection_record<T: for<'de> Deserialize<'de> + Serialize>(
     // fund decoding, signature verification, counting and these working slabs.
     let storage = lillux::cas::canonical_record_storage_quote(&record, 8192)?;
     let canonical = lillux::cas::canonical_record_bytes(&record, &storage)?;
-    ensure!(canonical.as_slice() == body.as_bytes(), "noncanonical inspection record");
+    ensure!(
+        canonical.as_slice() == body.as_bytes(),
+        "noncanonical inspection record"
+    );
     Ok(record)
 }
 
-
 fn is_lower_hex(value: &str, length: usize) -> bool {
-    value.len() == length && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    value.len() == length
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 fn required_nullable<'de, D, T>(deserializer: D) -> std::result::Result<Option<T>, D::Error>
@@ -455,7 +485,9 @@ pub(super) struct OfflineNativeFactsRecord {
 }
 impl OfflineNativeFactsRecord {
     /// Copy the plain facts of a host whose backend finished in this process.
-    pub(super) fn captured(facts: &lillux_sqlite::offline_host::OfflineNativeFacts) -> Result<Self> {
+    pub(super) fn captured(
+        facts: &lillux_sqlite::offline_host::OfflineNativeFacts,
+    ) -> Result<Self> {
         let lillux_sqlite::offline_host::OfflineNativeFacts {
             process,
             generation,
@@ -468,7 +500,10 @@ impl OfflineNativeFactsRecord {
             ticketless,
             leases,
         } = facts;
-        ensure!(*process == std::process::id(), "offline native facts belong to another process");
+        ensure!(
+            *process == std::process::id(),
+            "offline native facts belong to another process"
+        );
         let lillux_sqlite::OriginalNativeBudgetSnapshot {
             storage_bytes: _,
             allocator_steps,
@@ -481,8 +516,12 @@ impl OfflineNativeFactsRecord {
             region_bytes: *region_bytes,
             storage_bytes: *storage_bytes,
             arena: match arena {
-                lillux_sqlite::OriginalNativeArenaDisposition::NotAcquired => NativeArenaRecord::NotAcquired,
-                lillux_sqlite::OriginalNativeArenaDisposition::Released => NativeArenaRecord::Released,
+                lillux_sqlite::OriginalNativeArenaDisposition::NotAcquired => {
+                    NativeArenaRecord::NotAcquired
+                }
+                lillux_sqlite::OriginalNativeArenaDisposition::Released => {
+                    NativeArenaRecord::Released
+                }
             },
             allocator_steps: *allocator_steps,
             cleanup_reserved: *cleanup_reserved,
@@ -507,7 +546,8 @@ impl OfflineNativeFactsRecord {
         );
         ensure!(
             usize::try_from(self.tickets_issued)? <= lillux_sqlite::MAX_NATIVE_CONNECTIONS
-                && usize::try_from(self.connections_issued)? <= lillux_sqlite::MAX_NATIVE_CONNECTIONS,
+                && usize::try_from(self.connections_issued)?
+                    <= lillux_sqlite::MAX_NATIVE_CONNECTIONS,
             "offline native facts record exceeds the native ticket capacity"
         );
         Ok(())
@@ -554,8 +594,13 @@ pub(super) enum AbandonedDepositKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum DepositIdentity {
-    Directory { identity: lillux::PinnedDirectoryIdentity },
-    File { device: u64, inode: u64 },
+    Directory {
+        identity: lillux::PinnedDirectoryIdentity,
+    },
+    File {
+        device: u64,
+        inode: u64,
+    },
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -661,9 +706,18 @@ impl OfflineResetReleasedRecord {
     /// Build a `Completed` record from captured facts only. The reservation
     /// publication obligation is discharged by this record's own unlink, so
     /// every other held obligation is discharged here.
-    pub(super) fn completed(binding: ReleasedBinding, facts: CompletedReleaseFacts<'_>) -> Result<Self> {
-        let ReleasedBinding { signer, operation_id, claim_sha256, claim_nonce, ledger_identity, reservation } =
-            binding;
+    pub(super) fn completed(
+        binding: ReleasedBinding,
+        facts: CompletedReleaseFacts<'_>,
+    ) -> Result<Self> {
+        let ReleasedBinding {
+            signer,
+            operation_id,
+            claim_sha256,
+            claim_nonce,
+            ledger_identity,
+            reservation,
+        } = binding;
         let CompletedReleaseFacts {
             mode,
             disposition_sha256,
@@ -741,12 +795,29 @@ impl OfflineResetReleasedRecord {
                 "recovery-only release names a reservation"
             );
         } else {
-            ensure!(reservation.1 > 0, "released record lacks its reservation identity");
+            ensure!(
+                reservation.1 > 0,
+                "released record lacks its reservation identity"
+            );
         }
         match outcome {
-            ReleasedOutcome::Completed { mode, disposition_sha256, native, region, discharged, pins, state_ack } => {
-                ensure!(!recovery_only, "a recovery-only release cannot be completed");
-                ensure!(is_lower_hex(disposition_sha256, 64), "invalid released disposition digest");
+            ReleasedOutcome::Completed {
+                mode,
+                disposition_sha256,
+                native,
+                region,
+                discharged,
+                pins,
+                state_ack,
+            } => {
+                ensure!(
+                    !recovery_only,
+                    "a recovery-only release cannot be completed"
+                );
+                ensure!(
+                    is_lower_hex(disposition_sha256, 64),
+                    "invalid released disposition digest"
+                );
                 native.validate()?;
                 ensure!(
                     native.arena == NativeArenaRecord::Released,
@@ -758,7 +829,9 @@ impl OfflineResetReleasedRecord {
                 );
                 require_canonical_obligations(discharged)?;
                 ensure!(
-                    !discharged.contains(&OriginalLocalSettlementObligation::ReservationPublicationDescriptor),
+                    !discharged.contains(
+                        &OriginalLocalSettlementObligation::ReservationPublicationDescriptor
+                    ),
                     "the reservation publication is discharged by the release unlink, not recorded"
                 );
                 ensure!(
@@ -768,7 +841,9 @@ impl OfflineResetReleasedRecord {
                 ensure!(
                     discharged.iter().any(|obligation| matches!(
                         obligation,
-                        OriginalLocalSettlementObligation::NativeAllocationAccounting { attempted: _ }
+                        OriginalLocalSettlementObligation::NativeAllocationAccounting {
+                            attempted: _
+                        }
                     )),
                     "completed release omits its host's native allocation accounting"
                 );
@@ -776,7 +851,9 @@ impl OfflineResetReleasedRecord {
                     .iter()
                     .find_map(|obligation| match obligation {
                         OriginalLocalSettlementObligation::SourcePins { count } => Some(*count),
-                        OriginalLocalSettlementObligation::NativeAllocationAccounting { attempted: _ }
+                        OriginalLocalSettlementObligation::NativeAllocationAccounting {
+                            attempted: _,
+                        }
                         | OriginalLocalSettlementObligation::ReservationPublicationDescriptor
                         | OriginalLocalSettlementObligation::IssuedReservationPin => None,
                     })
@@ -817,10 +894,21 @@ impl OfflineResetReleasedRecord {
                     );
                 }
             }
-            ReleasedOutcome::Abandoned { disposition_sha256, deposits, applied, recovered_at_ms } => {
-                ensure!(*recovered_at_ms > 0, "abandoned release lacks its recovery time");
+            ReleasedOutcome::Abandoned {
+                disposition_sha256,
+                deposits,
+                applied,
+                recovered_at_ms,
+            } => {
+                ensure!(
+                    *recovered_at_ms > 0,
+                    "abandoned release lacks its recovery time"
+                );
                 if let Some(digest) = disposition_sha256 {
-                    ensure!(is_lower_hex(digest, 64), "invalid abandoned disposition digest");
+                    ensure!(
+                        is_lower_hex(digest, 64),
+                        "invalid abandoned disposition digest"
+                    );
                 }
                 ensure!(
                     deposits.len() <= MAX_ABANDONED_DEPOSITS,
@@ -828,7 +916,8 @@ impl OfflineResetReleasedRecord {
                 );
                 for pair in deposits.windows(2) {
                     ensure!(
-                        (pair[0].location, pair[0].name.as_str()) < (pair[1].location, pair[1].name.as_str()),
+                        (pair[0].location, pair[0].name.as_str())
+                            < (pair[1].location, pair[1].name.as_str()),
                         "abandoned deposits are unsorted or repeated"
                     );
                 }
@@ -839,12 +928,16 @@ impl OfflineResetReleasedRecord {
                     ensure!(
                         disposition_sha256.is_none()
                             && *applied == AppliedEvidence::NotApplied
-                            && deposits.iter().all(|deposit| deposit.kind == AbandonedDepositKind::SecureTemp),
+                            && deposits
+                                .iter()
+                                .all(|deposit| deposit.kind == AbandonedDepositKind::SecureTemp),
                         "a recovery-only release may record only reset temporary debris"
                     );
                 } else {
                     ensure!(
-                        deposits.iter().all(|deposit| deposit.kind != AbandonedDepositKind::SecureTemp),
+                        deposits
+                            .iter()
+                            .all(|deposit| deposit.kind != AbandonedDepositKind::SecureTemp),
                         "temporary debris is recorded only in a recovery-only release"
                     );
                 }
@@ -852,7 +945,9 @@ impl OfflineResetReleasedRecord {
                 // runs it, so its release never removes the file.
                 if *applied == AppliedEvidence::Resumed {
                     ensure!(
-                        deposits.iter().all(|deposit| deposit.location != DepositLocation::RuntimeNamespace),
+                        deposits
+                            .iter()
+                            .all(|deposit| deposit.location != DepositLocation::RuntimeNamespace),
                         "a resumed operation's release cannot remove its staged operation file"
                     );
                 }
@@ -864,8 +959,10 @@ impl OfflineResetReleasedRecord {
                     ensure!(
                         deposits.iter().any(|other| {
                             other.location == DepositLocation::InspectionParent
-                                && ((other.kind == AbandonedDepositKind::Witness && other.name == witness)
-                                    || (other.kind == AbandonedDepositKind::Quarantine && other.name == quarantine))
+                                && ((other.kind == AbandonedDepositKind::Witness
+                                    && other.name == witness)
+                                    || (other.kind == AbandonedDepositKind::Quarantine
+                                        && other.name == quarantine))
                         }),
                         "witness-bound directory `{}` lacks its recorded creation witness",
                         deposit.name
@@ -876,17 +973,26 @@ impl OfflineResetReleasedRecord {
         Ok(())
     }
 
-    pub(super) fn signed_bytes(&self, identity: &NodeIdentity,
-        storage: &lillux::cas::CanonicalRecordStorageQuote) -> Result<Vec<u8>> {
+    pub(super) fn signed_bytes(
+        &self,
+        identity: &NodeIdentity,
+        storage: &lillux::cas::CanonicalRecordStorageQuote,
+    ) -> Result<Vec<u8>> {
         self.validate()?;
         sign_inspection_record(self, &self.signer, identity, storage)
     }
 
     pub(super) fn verified(bytes: &[u8], identity: &NodeIdentity) -> Result<Self> {
-        let record: Self =
-            verify_inspection_record(bytes, identity, ("released", RELEASED_SCHEMA, RELEASED_PURPOSE))?;
+        let record: Self = verify_inspection_record(
+            bytes,
+            identity,
+            ("released", RELEASED_SCHEMA, RELEASED_PURPOSE),
+        )?;
         record.validate()?;
-        ensure!(record.signer == identity.fingerprint(), "foreign released record signer");
+        ensure!(
+            record.signer == identity.fingerprint(),
+            "foreign released record signer"
+        );
         Ok(record)
     }
 }
@@ -894,7 +1000,13 @@ impl OfflineResetReleasedRecord {
 /// Check one abandoned deposit's name against its kind's grammar for
 /// `operation`, and its identity shape.
 fn require_deposit(operation: &str, deposit: &AbandonedDeposit) -> Result<()> {
-    let AbandonedDeposit { location, name, kind, identity, witness_bound } = deposit;
+    let AbandonedDeposit {
+        location,
+        name,
+        kind,
+        identity,
+        witness_bound,
+    } = deposit;
     let inspection = |name: &str| {
         ["runtime", "scheduler"]
             .iter()
@@ -911,15 +1023,18 @@ fn require_deposit(operation: &str, deposit: &AbandonedDeposit) -> Result<()> {
         }
         AbandonedDepositKind::Quarantine => {
             !directory
-                && name.strip_prefix("cleanup.").is_some_and(|target| match location {
-                    DepositLocation::Ledger => ["reserved.", "disposed.", "released."]
-                        .iter()
-                        .any(|prefix| target.strip_prefix(prefix) == Some(operation)),
-                    DepositLocation::InspectionParent => witness(target),
-                    DepositLocation::RuntimeNamespace => {
-                        target.strip_prefix("execution-history-reset.operation.") == Some(operation)
-                    }
-                })
+                && name
+                    .strip_prefix("cleanup.")
+                    .is_some_and(|target| match location {
+                        DepositLocation::Ledger => ["reserved.", "disposed.", "released."]
+                            .iter()
+                            .any(|prefix| target.strip_prefix(prefix) == Some(operation)),
+                        DepositLocation::InspectionParent => witness(target),
+                        DepositLocation::RuntimeNamespace => {
+                            target.strip_prefix("execution-history-reset.operation.")
+                                == Some(operation)
+                        }
+                    })
         }
         AbandonedDepositKind::SecureTemp => {
             !directory
@@ -935,7 +1050,10 @@ fn require_deposit(operation: &str, deposit: &AbandonedDeposit) -> Result<()> {
                 && name.strip_prefix("execution-history-reset.operation.") == Some(operation)
         }
     };
-    ensure!(named, "abandoned deposit `{name}` does not match its kind for this operation");
+    ensure!(
+        named,
+        "abandoned deposit `{name}` does not match its kind for this operation"
+    );
     ensure!(
         !*witness_bound || *kind == AbandonedDepositKind::Directory,
         "only an inspection directory can be witness-bound"
@@ -951,8 +1069,8 @@ fn require_deposit(operation: &str, deposit: &AbandonedDeposit) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::inspection_destination::OriginalInspectionMode;
+    use super::*;
 
     const QUOTE_BOUND: usize = 8192;
 
@@ -1000,9 +1118,24 @@ mod tests {
 
     fn pins() -> Vec<RetiredPinFact> {
         vec![
-            RetiredPinFact { slot: 0, device: 1, inode: 10, byte_length: 4096 },
-            RetiredPinFact { slot: 8, device: 1, inode: 11, byte_length: 0 },
-            RetiredPinFact { slot: ISSUED_RESERVATION_PIN_SLOT, device: 1, inode: 7, byte_length: 900 },
+            RetiredPinFact {
+                slot: 0,
+                device: 1,
+                inode: 10,
+                byte_length: 4096,
+            },
+            RetiredPinFact {
+                slot: 8,
+                device: 1,
+                inode: 11,
+                byte_length: 0,
+            },
+            RetiredPinFact {
+                slot: ISSUED_RESERVATION_PIN_SLOT,
+                device: 1,
+                inode: 7,
+                byte_length: 900,
+            },
         ]
     }
 
@@ -1019,10 +1152,12 @@ mod tests {
     ) -> Result<OfflineResetReleasedRecord> {
         let state_ack = match mode {
             OriginalInspectionMode::DryRun => None,
-            OriginalInspectionMode::Mutating => Some(ryeos_state::ThreadHistoryDiscardOperationRef {
-                operation_id: operation(),
-                sha256: "d".repeat(64),
-            }),
+            OriginalInspectionMode::Mutating => {
+                Some(ryeos_state::ThreadHistoryDiscardOperationRef {
+                    operation_id: operation(),
+                    sha256: "d".repeat(64),
+                })
+            }
         };
         OfflineResetReleasedRecord::completed(
             binding(identity),
@@ -1046,16 +1181,31 @@ mod tests {
         identity: DepositIdentity,
         witness_bound: bool,
     ) -> AbandonedDeposit {
-        AbandonedDeposit { location, name, kind, identity, witness_bound }
+        AbandonedDeposit {
+            location,
+            name,
+            kind,
+            identity,
+            witness_bound,
+        }
     }
 
     fn file(inode: u64) -> DepositIdentity {
         DepositIdentity::File { device: 1, inode }
     }
 
-    fn abandoned(identity: &NodeIdentity, deposits: Vec<AbandonedDeposit>) -> OfflineResetReleasedRecord {
-        let ReleasedBinding { signer, operation_id, claim_sha256, claim_nonce, ledger_identity, reservation } =
-            binding(identity);
+    fn abandoned(
+        identity: &NodeIdentity,
+        deposits: Vec<AbandonedDeposit>,
+    ) -> OfflineResetReleasedRecord {
+        let ReleasedBinding {
+            signer,
+            operation_id,
+            claim_sha256,
+            claim_nonce,
+            ledger_identity,
+            reservation,
+        } = binding(identity);
         OfflineResetReleasedRecord {
             schema: RELEASED_SCHEMA,
             purpose: RELEASED_PURPOSE.into(),
@@ -1077,17 +1227,35 @@ mod tests {
     fn every_deposit_kind() -> Vec<AbandonedDeposit> {
         let op = operation();
         let tmp = tempfile::tempdir().unwrap();
-        let directory = lillux::PinnedDirectory::open(tmp.path()).unwrap().unwrap().identity().unwrap();
+        let directory = lillux::PinnedDirectory::open(tmp.path())
+            .unwrap()
+            .unwrap()
+            .identity()
+            .unwrap();
         let mut deposits = vec![
-            deposit(DepositLocation::Ledger, format!("cleanup.reserved.{op}"), AbandonedDepositKind::Quarantine, file(2), false),
+            deposit(
+                DepositLocation::Ledger,
+                format!("cleanup.reserved.{op}"),
+                AbandonedDepositKind::Quarantine,
+                file(2),
+                false,
+            ),
             deposit(
                 DepositLocation::InspectionParent,
                 format!("inspection.{op}.runtime"),
                 AbandonedDepositKind::Directory,
-                DepositIdentity::Directory { identity: directory },
+                DepositIdentity::Directory {
+                    identity: directory,
+                },
                 true,
             ),
-            deposit(DepositLocation::InspectionParent, format!("created.inspection.{op}.runtime"), AbandonedDepositKind::Witness, file(4), false),
+            deposit(
+                DepositLocation::InspectionParent,
+                format!("created.inspection.{op}.runtime"),
+                AbandonedDepositKind::Witness,
+                file(4),
+                false,
+            ),
             deposit(
                 DepositLocation::InspectionParent,
                 format!("cleanup.created.inspection.{op}.scheduler"),
@@ -1110,7 +1278,9 @@ mod tests {
                 false,
             ),
         ];
-        deposits.sort_by(|left, right| (left.location, left.name.as_str()).cmp(&(right.location, right.name.as_str())));
+        deposits.sort_by(|left, right| {
+            (left.location, left.name.as_str()).cmp(&(right.location, right.name.as_str()))
+        });
         deposits
     }
 
@@ -1119,19 +1289,35 @@ mod tests {
     fn completed_release_is_built_from_captured_facts_and_round_trips() {
         let (_tmp, identity) = signer();
         let released = released_host();
-        for mode in [OriginalInspectionMode::DryRun, OriginalInspectionMode::Mutating] {
+        for mode in [
+            OriginalInspectionMode::DryRun,
+            OriginalInspectionMode::Mutating,
+        ] {
             let record = completed(&identity, &released, mode).unwrap();
-            let ReleasedOutcome::Completed { discharged, native, region, .. } = &record.outcome else {
+            let ReleasedOutcome::Completed {
+                discharged,
+                native,
+                region,
+                ..
+            } = &record.outcome
+            else {
                 panic!("completed outcome");
             };
             assert!(
-                !discharged.contains(&OriginalLocalSettlementObligation::ReservationPublicationDescriptor),
+                !discharged
+                    .contains(&OriginalLocalSettlementObligation::ReservationPublicationDescriptor),
                 "the reservation publication is discharged by the unlink"
             );
             assert_eq!(discharged.len(), held().len() - 1);
-            assert_eq!((region.generation, region.bytes), (native.generation, native.region_bytes));
+            assert_eq!(
+                (region.generation, region.bytes),
+                (native.generation, native.region_bytes)
+            );
             let signed = sign(&record, &identity);
-            assert_eq!(OfflineResetReleasedRecord::verified(&signed, &identity).unwrap(), record);
+            assert_eq!(
+                OfflineResetReleasedRecord::verified(&signed, &identity).unwrap(),
+                record
+            );
         }
     }
 
@@ -1145,14 +1331,20 @@ mod tests {
             let mut record = original.clone();
             change(&mut record);
             let error = record.validate().unwrap_err();
-            assert!(format!("{error:#}").contains(expected), "{expected}: {error:#}");
+            assert!(
+                format!("{error:#}").contains(expected),
+                "{expected}: {error:#}"
+            );
         };
         refuse(
             &|record| {
                 if let ReleasedOutcome::Completed { discharged, .. } = &mut record.outcome {
                     // In canonical position, so only the discharge rule refuses it.
                     let at = discharged.len() - 1;
-                    discharged.insert(at, OriginalLocalSettlementObligation::ReservationPublicationDescriptor);
+                    discharged.insert(
+                        at,
+                        OriginalLocalSettlementObligation::ReservationPublicationDescriptor,
+                    );
                 }
             },
             "discharged by the release unlink",
@@ -1208,7 +1400,10 @@ mod tests {
             },
             "omits its host's native allocation accounting",
         );
-        refuse(&|record| record.operation_id = RECOVERY_ONLY_OPERATION.into(), "names a reservation");
+        refuse(
+            &|record| record.operation_id = RECOVERY_ONLY_OPERATION.into(),
+            "names a reservation",
+        );
         // A held list that is not canonical is refused before any record exists.
         let mut unsorted = held();
         unsorted.swap(0, 3);
@@ -1232,7 +1427,10 @@ mod tests {
         for (state_ack, acknowledgement_expected) in [
             (None, true),
             (
-                Some(ryeos_state::ThreadHistoryDiscardOperationRef { operation_id: operation(), sha256: "d".repeat(64) }),
+                Some(ryeos_state::ThreadHistoryDiscardOperationRef {
+                    operation_id: operation(),
+                    sha256: "d".repeat(64),
+                }),
                 false,
             ),
         ] {
@@ -1250,7 +1448,10 @@ mod tests {
                 },
             )
             .unwrap_err();
-            assert!(format!("{error:#}").contains("prepared final acknowledgement"), "{error:#}");
+            assert!(
+                format!("{error:#}").contains("prepared final acknowledgement"),
+                "{error:#}"
+            );
         }
     }
 
@@ -1260,22 +1461,37 @@ mod tests {
         let record = abandoned(&identity, every_deposit_kind());
         record.validate().unwrap();
         let signed = sign(&record, &identity);
-        assert_eq!(OfflineResetReleasedRecord::verified(&signed, &identity).unwrap(), record);
+        assert_eq!(
+            OfflineResetReleasedRecord::verified(&signed, &identity).unwrap(),
+            record
+        );
         // The recovery-only record names no reservation and holds only debris.
         let mut recovery = abandoned(
             &identity,
-            vec![deposit(DepositLocation::Ledger, ".secure.tmp.reset.9.0".into(), AbandonedDepositKind::SecureTemp, file(3), false)],
+            vec![deposit(
+                DepositLocation::Ledger,
+                ".secure.tmp.reset.9.0".into(),
+                AbandonedDepositKind::SecureTemp,
+                file(3),
+                false,
+            )],
         );
         recovery.operation_id = RECOVERY_ONLY_OPERATION.into();
         recovery.claim_sha256 = "0".repeat(64);
         recovery.claim_nonce = "0".repeat(32);
         recovery.reservation = (0, 0);
-        if let ReleasedOutcome::Abandoned { disposition_sha256, .. } = &mut recovery.outcome {
+        if let ReleasedOutcome::Abandoned {
+            disposition_sha256, ..
+        } = &mut recovery.outcome
+        {
             *disposition_sha256 = None;
         }
         recovery.validate().unwrap();
         let signed = sign(&recovery, &identity);
-        assert_eq!(OfflineResetReleasedRecord::verified(&signed, &identity).unwrap(), recovery);
+        assert_eq!(
+            OfflineResetReleasedRecord::verified(&signed, &identity).unwrap(),
+            recovery
+        );
     }
 
     #[test]
@@ -1284,38 +1500,89 @@ mod tests {
         let other = "f".repeat(32);
         let refused = |deposits: Vec<AbandonedDeposit>, expected: &str| {
             let error = abandoned(&identity, deposits).validate().unwrap_err();
-            assert!(format!("{error:#}").contains(expected), "{expected}: {error:#}");
+            assert!(
+                format!("{error:#}").contains(expected),
+                "{expected}: {error:#}"
+            );
         };
         refused(
-            vec![deposit(DepositLocation::InspectionParent, format!("created.inspection.{other}.runtime"), AbandonedDepositKind::Witness, file(4), false)],
+            vec![deposit(
+                DepositLocation::InspectionParent,
+                format!("created.inspection.{other}.runtime"),
+                AbandonedDepositKind::Witness,
+                file(4),
+                false,
+            )],
             "does not match its kind",
         );
         refused(
-            vec![deposit(DepositLocation::Ledger, ".secure.tmp.state.41.0".into(), AbandonedDepositKind::SecureTemp, file(3), false)],
+            vec![deposit(
+                DepositLocation::Ledger,
+                ".secure.tmp.state.41.0".into(),
+                AbandonedDepositKind::SecureTemp,
+                file(3),
+                false,
+            )],
             "does not match its kind",
         );
         refused(
-            vec![deposit(DepositLocation::Ledger, ".secure.tmp.41.0".into(), AbandonedDepositKind::SecureTemp, file(3), false)],
+            vec![deposit(
+                DepositLocation::Ledger,
+                ".secure.tmp.41.0".into(),
+                AbandonedDepositKind::SecureTemp,
+                file(3),
+                false,
+            )],
             "does not match its kind",
         );
         refused(
-            vec![deposit(DepositLocation::Ledger, format!("execution-history-reset.operation.{}", operation()), AbandonedDepositKind::InertOperation, file(6), false)],
+            vec![deposit(
+                DepositLocation::Ledger,
+                format!("execution-history-reset.operation.{}", operation()),
+                AbandonedDepositKind::InertOperation,
+                file(6),
+                false,
+            )],
             "does not match its kind",
         );
         refused(
-            vec![deposit(DepositLocation::RuntimeNamespace, format!("cleanup.reserved.{}", operation()), AbandonedDepositKind::Quarantine, file(2), false)],
+            vec![deposit(
+                DepositLocation::RuntimeNamespace,
+                format!("cleanup.reserved.{}", operation()),
+                AbandonedDepositKind::Quarantine,
+                file(2),
+                false,
+            )],
             "does not match its kind",
         );
         refused(
-            vec![deposit(DepositLocation::InspectionParent, format!("inspection.{}.runtime", operation()), AbandonedDepositKind::Directory, file(9), false)],
+            vec![deposit(
+                DepositLocation::InspectionParent,
+                format!("inspection.{}.runtime", operation()),
+                AbandonedDepositKind::Directory,
+                file(9),
+                false,
+            )],
             "does not match its kind",
         );
         refused(
-            vec![deposit(DepositLocation::InspectionParent, format!("created.inspection.{}.runtime", operation()), AbandonedDepositKind::Witness, file(4), true)],
+            vec![deposit(
+                DepositLocation::InspectionParent,
+                format!("created.inspection.{}.runtime", operation()),
+                AbandonedDepositKind::Witness,
+                file(4),
+                true,
+            )],
             "witness-bound",
         );
         refused(
-            vec![deposit(DepositLocation::InspectionParent, format!("created.inspection.{}.runtime", operation()), AbandonedDepositKind::Witness, file(0), false)],
+            vec![deposit(
+                DepositLocation::InspectionParent,
+                format!("created.inspection.{}.runtime", operation()),
+                AbandonedDepositKind::Witness,
+                file(0),
+                false,
+            )],
             "lacks its identity",
         );
         let mut reversed = every_deposit_kind();
@@ -1327,7 +1594,10 @@ mod tests {
         recovery.claim_nonce = "0".repeat(32);
         recovery.reservation = (0, 0);
         let error = recovery.validate().unwrap_err();
-        assert!(format!("{error:#}").contains("does not match its kind"), "{error:#}");
+        assert!(
+            format!("{error:#}").contains("does not match its kind"),
+            "{error:#}"
+        );
     }
 
     #[test]
@@ -1336,14 +1606,24 @@ mod tests {
         let op = operation();
         let refuse = |record: OfflineResetReleasedRecord, expected: &str| {
             let error = record.validate().unwrap_err();
-            assert!(format!("{error:#}").contains(expected), "{expected}: {error:#}");
+            assert!(
+                format!("{error:#}").contains(expected),
+                "{expected}: {error:#}"
+            );
         };
         // A witness-bound directory needs its witness, public or quarantined.
         let mut unpaired = every_deposit_kind();
         unpaired.retain(|deposit| deposit.kind != AbandonedDepositKind::Witness);
-        refuse(abandoned(&identity, unpaired.clone()), "lacks its recorded creation witness");
+        refuse(
+            abandoned(&identity, unpaired.clone()),
+            "lacks its recorded creation witness",
+        );
         let tmp = tempfile::tempdir().unwrap();
-        let directory = lillux::PinnedDirectory::open(tmp.path()).unwrap().unwrap().identity().unwrap();
+        let directory = lillux::PinnedDirectory::open(tmp.path())
+            .unwrap()
+            .unwrap()
+            .identity()
+            .unwrap();
         let mut quarantined = vec![
             deposit(
                 DepositLocation::InspectionParent,
@@ -1356,11 +1636,15 @@ mod tests {
                 DepositLocation::InspectionParent,
                 format!("inspection.{op}.scheduler"),
                 AbandonedDepositKind::Directory,
-                DepositIdentity::Directory { identity: directory },
+                DepositIdentity::Directory {
+                    identity: directory,
+                },
                 true,
             ),
         ];
-        quarantined.sort_by(|left, right| (left.location, left.name.as_str()).cmp(&(right.location, right.name.as_str())));
+        quarantined.sort_by(|left, right| {
+            (left.location, left.name.as_str()).cmp(&(right.location, right.name.as_str()))
+        });
         abandoned(&identity, quarantined).validate().unwrap();
         // A resumed operation's staged file and its quarantine stay.
         let mut resumed = abandoned(&identity, every_deposit_kind());
@@ -1383,7 +1667,13 @@ mod tests {
         refuse(
             abandoned(
                 &identity,
-                vec![deposit(DepositLocation::Ledger, ".secure.tmp.reset.41.0".into(), AbandonedDepositKind::SecureTemp, file(3), false)],
+                vec![deposit(
+                    DepositLocation::Ledger,
+                    ".secure.tmp.reset.41.0".into(),
+                    AbandonedDepositKind::SecureTemp,
+                    file(3),
+                    false,
+                )],
             ),
             "recorded only in a recovery-only release",
         );
@@ -1396,15 +1686,26 @@ mod tests {
     fn largest_abandoned_records_sign_within_the_record_bound() {
         let (_tmp, identity) = signer();
         let largest = |record: &OfflineResetReleasedRecord| {
-            let storage = lillux::cas::canonical_record_storage_quote(record, RECORD_BYTES).unwrap();
+            let storage =
+                lillux::cas::canonical_record_storage_quote(record, RECORD_BYTES).unwrap();
             let signed = record.signed_bytes(&identity, &storage).unwrap();
             assert!(signed.len() <= RECORD_BYTES, "{}", signed.len());
-            assert_eq!(&OfflineResetReleasedRecord::verified(&signed, &identity).unwrap(), record);
+            assert_eq!(
+                &OfflineResetReleasedRecord::verified(&signed, &identity).unwrap(),
+                record
+            );
         };
         let op = operation();
         let tmp = tempfile::tempdir().unwrap();
-        let directory = lillux::PinnedDirectory::open(tmp.path()).unwrap().unwrap().identity().unwrap();
-        let wide = |inode| DepositIdentity::File { device: u64::MAX, inode };
+        let directory = lillux::PinnedDirectory::open(tmp.path())
+            .unwrap()
+            .unwrap()
+            .identity()
+            .unwrap();
+        let wide = |inode| DepositIdentity::File {
+            device: u64::MAX,
+            inode,
+        };
         let mut deposits = Vec::new();
         for purpose in ["runtime", "scheduler"] {
             let name = format!("inspection.{op}.{purpose}");
@@ -1412,10 +1713,18 @@ mod tests {
                 DepositLocation::InspectionParent,
                 name.clone(),
                 AbandonedDepositKind::Directory,
-                DepositIdentity::Directory { identity: directory },
+                DepositIdentity::Directory {
+                    identity: directory,
+                },
                 true,
             ));
-            deposits.push(deposit(DepositLocation::InspectionParent, format!("created.{name}"), AbandonedDepositKind::Witness, wide(u64::MAX), false));
+            deposits.push(deposit(
+                DepositLocation::InspectionParent,
+                format!("created.{name}"),
+                AbandonedDepositKind::Witness,
+                wide(u64::MAX),
+                false,
+            ));
             deposits.push(deposit(
                 DepositLocation::InspectionParent,
                 format!("cleanup.created.{name}"),
@@ -1425,7 +1734,13 @@ mod tests {
             ));
         }
         for prefix in ["reserved.", "disposed.", "released."] {
-            deposits.push(deposit(DepositLocation::Ledger, format!("cleanup.{prefix}{op}"), AbandonedDepositKind::Quarantine, wide(u64::MAX), false));
+            deposits.push(deposit(
+                DepositLocation::Ledger,
+                format!("cleanup.{prefix}{op}"),
+                AbandonedDepositKind::Quarantine,
+                wide(u64::MAX),
+                false,
+            ));
         }
         deposits.push(deposit(
             DepositLocation::RuntimeNamespace,
@@ -1441,27 +1756,49 @@ mod tests {
             wide(u64::MAX),
             false,
         ));
-        deposits.sort_by(|left, right| (left.location, left.name.as_str()).cmp(&(right.location, right.name.as_str())));
+        deposits.sort_by(|left, right| {
+            (left.location, left.name.as_str()).cmp(&(right.location, right.name.as_str()))
+        });
         assert!(deposits.len() <= MAX_ABANDONED_DEPOSITS);
         let mut record = abandoned(&identity, deposits);
-        if let ReleasedOutcome::Abandoned { recovered_at_ms, .. } = &mut record.outcome {
+        if let ReleasedOutcome::Abandoned {
+            recovered_at_ms, ..
+        } = &mut record.outcome
+        {
             *recovered_at_ms = u64::MAX;
         }
         largest(&record);
         let mut temps: Vec<_> = (0..MAX_ABANDONED_DEPOSITS)
             .map(|index| {
-                let location = [DepositLocation::Ledger, DepositLocation::InspectionParent, DepositLocation::RuntimeNamespace][index % 3];
+                let location = [
+                    DepositLocation::Ledger,
+                    DepositLocation::InspectionParent,
+                    DepositLocation::RuntimeNamespace,
+                ][index % 3];
                 let name = format!(".secure.tmp.reset.{}.{}", u32::MAX, u64::MAX - index as u64);
-                deposit(location, name, AbandonedDepositKind::SecureTemp, wide(u64::MAX), false)
+                deposit(
+                    location,
+                    name,
+                    AbandonedDepositKind::SecureTemp,
+                    wide(u64::MAX),
+                    false,
+                )
             })
             .collect();
-        temps.sort_by(|left, right| (left.location, left.name.as_str()).cmp(&(right.location, right.name.as_str())));
+        temps.sort_by(|left, right| {
+            (left.location, left.name.as_str()).cmp(&(right.location, right.name.as_str()))
+        });
         let mut recovery = abandoned(&identity, temps);
         recovery.operation_id = RECOVERY_ONLY_OPERATION.into();
         recovery.claim_sha256 = "0".repeat(64);
         recovery.claim_nonce = "0".repeat(32);
         recovery.reservation = (0, 0);
-        if let ReleasedOutcome::Abandoned { disposition_sha256, recovered_at_ms, .. } = &mut recovery.outcome {
+        if let ReleasedOutcome::Abandoned {
+            disposition_sha256,
+            recovered_at_ms,
+            ..
+        } = &mut recovery.outcome
+        {
             *disposition_sha256 = None;
             *recovered_at_ms = u64::MAX;
         }
@@ -1487,10 +1824,16 @@ mod tests {
         for field in ["ledger_identity", "reservation", "outcome", "claim_nonce"] {
             let mut missing = value.clone();
             missing.as_object_mut().unwrap().remove(field);
-            assert!(serde_json::from_value::<OfflineResetReleasedRecord>(missing).is_err(), "{field}");
+            assert!(
+                serde_json::from_value::<OfflineResetReleasedRecord>(missing).is_err(),
+                "{field}"
+            );
         }
         let mut missing = value.clone();
-        missing["outcome"].as_object_mut().unwrap().remove("disposition_sha256");
+        missing["outcome"]
+            .as_object_mut()
+            .unwrap()
+            .remove("disposition_sha256");
         assert!(
             serde_json::from_value::<OfflineResetReleasedRecord>(missing).is_err(),
             "a nullable digest is still required"
@@ -1503,13 +1846,18 @@ mod tests {
     #[test]
     fn retired_record_schemas_are_refused_naming_the_repair() {
         let (_tmp, identity) = signer();
-        let mut released = serde_json::to_value(abandoned(&identity, every_deposit_kind())).unwrap();
+        let mut released =
+            serde_json::to_value(abandoned(&identity, every_deposit_kind())).unwrap();
         released["schema"] = serde_json::json!(0);
         released["purpose"] = serde_json::json!("offline_reset_reservation_released_v0");
-        let error = OfflineResetReleasedRecord::verified(&sign_raw(released, &identity), &identity).unwrap_err();
+        let error = OfflineResetReleasedRecord::verified(&sign_raw(released, &identity), &identity)
+            .unwrap_err();
         let message = format!("{error:#}");
         assert!(message.contains("retired schema 0"), "{message}");
-        assert!(message.contains(ryeos_state::EXECUTION_HISTORY_SCRATCH_REPAIR), "{message}");
+        assert!(
+            message.contains(ryeos_state::EXECUTION_HISTORY_SCRATCH_REPAIR),
+            "{message}"
+        );
         assert!(error.downcast_ref::<ResetScratchRepairRequired>().is_some());
 
         // A schema-2 disposition still carried `remaining` and authorities.
@@ -1521,13 +1869,26 @@ mod tests {
             "remaining": [],
             "retained_authorities": [],
         });
-        let error = InspectionDispositionRecord::verified(&sign_raw(disposition, &identity), &identity).unwrap_err();
+        let error =
+            InspectionDispositionRecord::verified(&sign_raw(disposition, &identity), &identity)
+                .unwrap_err();
         let message = format!("{error:#}");
-        assert!(message.contains("disposition record uses retired schema 2"), "{message}");
-        assert!(message.contains(ryeos_state::EXECUTION_HISTORY_SCRATCH_REPAIR), "{message}");
+        assert!(
+            message.contains("disposition record uses retired schema 2"),
+            "{message}"
+        );
+        assert!(
+            message.contains(ryeos_state::EXECUTION_HISTORY_SCRATCH_REPAIR),
+            "{message}"
+        );
 
         let unrecognizable = serde_json::json!({ "kind": "terminal" });
-        let error = InspectionDispositionRecord::verified(&sign_raw(unrecognizable, &identity), &identity).unwrap_err();
-        assert!(format!("{error:#}").contains(ryeos_state::EXECUTION_HISTORY_SCRATCH_REPAIR), "{error:#}");
+        let error =
+            InspectionDispositionRecord::verified(&sign_raw(unrecognizable, &identity), &identity)
+                .unwrap_err();
+        assert!(
+            format!("{error:#}").contains(ryeos_state::EXECUTION_HISTORY_SCRATCH_REPAIR),
+            "{error:#}"
+        );
     }
 }

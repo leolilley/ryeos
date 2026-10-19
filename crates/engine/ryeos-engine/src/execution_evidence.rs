@@ -406,11 +406,11 @@ fn validate_project_response(
                     .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
                 || !lillux::valid_hash(&scoped.observation_object_hash)
                 || !calls.is_empty())
-            {
-                return Err(EngineError::Internal(
+        {
+            return Err(EngineError::Internal(
                     "execution evidence scoped attempt coordinate is not canonical or mixes managed calls".to_owned(),
                 ));
-            }
+        }
         if calls.iter().any(|call| {
             !lillux::valid_hash(&call.operation_id)
                 || !lillux::valid_hash(&call.action_digest)

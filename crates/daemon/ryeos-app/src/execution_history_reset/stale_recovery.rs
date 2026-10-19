@@ -20,10 +20,10 @@ use ryeos_node_runtime::identity::NodeIdentity;
 use ryeos_state::ThreadHistoryDiscardOperationRef;
 
 use super::creation_evidence::{
-    AbandonedDeposit, AbandonedDepositKind, AppliedEvidence, CreatedDirectoryRecord, DepositIdentity,
-    DepositLocation, InspectionDispositionRecord, MAX_ABANDONED_DEPOSITS, OfflineResetReleasedRecord,
-    RECORD_BYTES, RECOVERY_ONLY_OPERATION, RELEASED_PURPOSE, RELEASED_SCHEMA, ReleasedOutcome,
-    ResetScratchRepairRequired,
+    AbandonedDeposit, AbandonedDepositKind, AppliedEvidence, CreatedDirectoryRecord,
+    DepositIdentity, DepositLocation, InspectionDispositionRecord, MAX_ABANDONED_DEPOSITS,
+    OfflineResetReleasedRecord, RECORD_BYTES, RECOVERY_ONLY_OPERATION, RELEASED_PURPOSE,
+    RELEASED_SCHEMA, ReleasedOutcome, ResetScratchRepairRequired,
 };
 use super::inspection_destination::OriginalInspectionMode;
 use super::offline_policy::OfflineResetPolicyOwner;
@@ -34,23 +34,37 @@ use super::{RecoveredApplied, RecoveredReleaseOutcome, RecoveredReservation};
 pub(super) const LEDGER_DIRECTORY: &str = "offline-reset-quota";
 pub(super) const INSPECTIONS_DIRECTORY: &str = "offline-reset-inspections";
 /// Ledger records of the retired post-acknowledgement account tail.
-pub(super) const RETIRED_RECORD_PREFIXES: [&str; 4] =
-    ["terminal.", "prepared.", "account-intent.", "account-settled."];
+pub(super) const RETIRED_RECORD_PREFIXES: [&str; 4] = [
+    "terminal.",
+    "prepared.",
+    "account-intent.",
+    "account-settled.",
+];
 /// Bound on the names one scan of a reset-owned directory accepts.
 const SCAN_BOUND: usize = 1024;
 /// Bound on the names one scan of the shared runtime namespace reads.
 const RUNTIME_SCAN_BOUND: usize = 4096;
 /// Bound on the contents of one inspection directory removed as a tree.
-const TREE_BUDGET: lillux::DirectoryTraversalBudget =
-    lillux::DirectoryTraversalBudget { max_entries: 256, max_depth: 8 };
+const TREE_BUDGET: lillux::DirectoryTraversalBudget = lillux::DirectoryTraversalBudget {
+    max_entries: 256,
+    max_depth: 8,
+};
 
 fn repair(what: impl Into<String>) -> anyhow::Error {
-    ResetScratchRepairRequired { what: what.into(), foreign: None }.into()
+    ResetScratchRepairRequired {
+        what: what.into(),
+        foreign: None,
+    }
+    .into()
 }
 
 /// A refusal of a foreign name at app-root-relative `path`.
 fn foreign(what: impl Into<String>, path: String) -> anyhow::Error {
-    ResetScratchRepairRequired { what: what.into(), foreign: Some(path) }.into()
+    ResetScratchRepairRequired {
+        what: what.into(),
+        foreign: Some(path),
+    }
+    .into()
 }
 
 /// The process-local bound of one recovery: the signed cleanup steps and
@@ -82,8 +96,11 @@ enum LedgerKind {
 }
 
 impl LedgerKind {
-    const ALL: [(Self, &'static str); 3] =
-        [(Self::Reserved, "reserved."), (Self::Disposed, "disposed."), (Self::Released, "released.")];
+    const ALL: [(Self, &'static str); 3] = [
+        (Self::Reserved, "reserved."),
+        (Self::Disposed, "disposed."),
+        (Self::Released, "released."),
+    ];
 }
 
 /// One ledger record of a stale operation, public or quarantined.
@@ -179,7 +196,9 @@ pub(super) fn recover_stale(
     };
     let mut bound = RecoveryBound {
         steps: quota.max_cleanup_steps,
-        deadline: lillux::time::MonotonicDeadline::after(std::time::Duration::from_millis(quota.max_cleanup_millis)),
+        deadline: lillux::time::MonotonicDeadline::after(std::time::Duration::from_millis(
+            quota.max_cleanup_millis,
+        )),
     };
     let roots = Roots {
         app_root,
@@ -203,16 +222,19 @@ pub(super) fn recover_stale(
     let mut settlements = Vec::new();
     for (operation, stale) in &operations {
         settlements.push(
-            plan_operation(&roots, operation, stale, &markers, &mut bound)
-                .with_context(|| format!("authenticate stale offline reset operation {operation}"))?,
+            plan_operation(&roots, operation, stale, &markers, &mut bound).with_context(|| {
+                format!("authenticate stale offline reset operation {operation}")
+            })?,
         );
     }
     let mut recovered = Vec::new();
     for settlement in &settlements {
-        recovered.push(
-            settle(&roots, settlement, &mut bound)
-                .with_context(|| format!("settle stale offline reset operation {}", settlement.operation))?,
-        );
+        recovered.push(settle(&roots, settlement, &mut bound).with_context(|| {
+            format!(
+                "settle stale offline reset operation {}",
+                settlement.operation
+            )
+        })?);
     }
     // Reset temporaries are dead-writer debris. Rescanned after the
     // operations settle, since a recovery-only release already settled
@@ -223,7 +245,9 @@ pub(super) fn recover_stale(
             break;
         }
         let chunk = debris.into_iter().take(MAX_ABANDONED_DEPOSITS).collect();
-        recovered.push(settle_debris(&roots, chunk, &mut bound).context("settle reset temporary debris")?);
+        recovered.push(
+            settle_debris(&roots, chunk, &mut bound).context("settle reset temporary debris")?,
+        );
     }
     drop(inspection_lock);
     drop(ledger_lock);
@@ -238,15 +262,18 @@ fn operation_of(text: &str) -> Option<&str> {
 fn inspection_operation(name: &str) -> Option<&str> {
     let tail = name.strip_prefix("inspection.")?;
     let (operation, purpose) = tail.split_once('.')?;
-    (matches!(purpose, "runtime" | "scheduler") && operation_of(operation).is_some()).then_some(operation)
+    (matches!(purpose, "runtime" | "scheduler") && operation_of(operation).is_some())
+        .then_some(operation)
 }
 
 fn is_reset_temporary(name: &OsStr) -> Option<bool> {
     match lillux::parse_secure_temp_name(name) {
         lillux::SecureTempClass::NotTemp => None,
-        lillux::SecureTempClass::Temp { purpose, pid: _, seq: _ } => {
-            Some(purpose == crate::execution_history_reset::RESET_TEMP_PURPOSE.as_str())
-        }
+        lillux::SecureTempClass::Temp {
+            purpose,
+            pid: _,
+            seq: _,
+        } => Some(purpose == crate::execution_history_reset::RESET_TEMP_PURPOSE.as_str()),
         lillux::SecureTempClass::Malformed => Some(false),
     }
 }
@@ -257,7 +284,11 @@ fn utf8(name: &OsString, place: &str) -> Result<String> {
         .ok_or_else(|| repair(format!("{place} holds a name that is not UTF-8: {name:?}")))
 }
 
-fn bounded_names(directory: &lillux::PinnedDirectory, bound: usize, place: &str) -> Result<Vec<OsString>> {
+fn bounded_names(
+    directory: &lillux::PinnedDirectory,
+    bound: usize,
+    place: &str,
+) -> Result<Vec<OsString>> {
     let names = directory.entry_names_bounded(bound + 1)?;
     if names.len() > bound {
         return Err(repair(format!("{place} holds more than {bound} names")));
@@ -270,7 +301,9 @@ fn bounded_names(directory: &lillux::PinnedDirectory, bound: usize, place: &str)
 fn runtime_names(runtime: &lillux::PinnedDirectory) -> Result<Vec<OsString>> {
     let names = runtime.entry_names_bounded(RUNTIME_SCAN_BOUND + 1)?;
     if names.len() > RUNTIME_SCAN_BOUND {
-        return Err(super::scratch::runtime_namespace_overfull(RUNTIME_SCAN_BOUND));
+        return Err(super::scratch::runtime_namespace_overfull(
+            RUNTIME_SCAN_BOUND,
+        ));
     }
     Ok(names)
 }
@@ -307,7 +340,10 @@ fn scan_ledger(
     bound.charge(1)?;
     for name in bounded_names(roots.ledger, SCAN_BOUND, PLACE)? {
         if let Some(path) = super::scratch::foreign_ledger_path(&name) {
-            return Err(foreign(format!("{PLACE} holds foreign name {:?}", name), path));
+            return Err(foreign(
+                format!("{PLACE} holds foreign name {:?}", name),
+                path,
+            ));
         }
         let text = utf8(&name, PLACE)?;
         match is_reset_temporary(&name) {
@@ -319,27 +355,41 @@ fn scan_ledger(
             Some(public) => (true, public),
             None => (false, text.as_str()),
         };
-        let Some((kind, operation)) = LedgerKind::ALL
-            .iter()
-            .find_map(|(kind, prefix)| public.strip_prefix(prefix).map(|operation| (*kind, operation)))
-        else {
-            if RETIRED_RECORD_PREFIXES.iter().any(|prefix| public.starts_with(prefix)) {
+        let Some((kind, operation)) = LedgerKind::ALL.iter().find_map(|(kind, prefix)| {
+            public
+                .strip_prefix(prefix)
+                .map(|operation| (*kind, operation))
+        }) else {
+            if RETIRED_RECORD_PREFIXES
+                .iter()
+                .any(|prefix| public.starts_with(prefix))
+            {
                 return Err(repair(format!("{PLACE} holds retired record `{text}`")));
             }
-            return Err(repair(format!("{PLACE} holds unclassified deposit `{text}`")));
+            return Err(repair(format!(
+                "{PLACE} holds unclassified deposit `{text}`"
+            )));
         };
         if operation_of(operation).is_none() {
             return Err(repair(format!("{PLACE} name `{text}` names no operation")));
         }
         bound.charge(2)?;
         let identity = regular_identity(roots.ledger, &text, PLACE, Some(LEDGER_DIRECTORY))?;
-        let bytes = lillux_sqlite::read_regular_without_sqlite_alias(roots.ledger, &name, RECORD_BYTES)?
-            .with_context(|| format!("{PLACE} record `{text}` disappeared during recovery"))?;
+        let bytes =
+            lillux_sqlite::read_regular_without_sqlite_alias(roots.ledger, &name, RECORD_BYTES)?
+                .with_context(|| format!("{PLACE} record `{text}` disappeared during recovery"))?;
         operations
             .entry(operation.to_owned())
             .or_default()
             .records
-            .insert((kind, quarantined), LedgerEntry { name: text, identity, bytes });
+            .insert(
+                (kind, quarantined),
+                LedgerEntry {
+                    name: text,
+                    identity,
+                    bytes,
+                },
+            );
     }
     Ok(())
 }
@@ -356,7 +406,10 @@ fn scan_inspections(
     bound.charge(1)?;
     for name in bounded_names(copy_root, SCAN_BOUND, PLACE)? {
         if let Some(path) = super::scratch::foreign_inspections_path(&name) {
-            return Err(foreign(format!("{PLACE} holds foreign name {:?}", name), path));
+            return Err(foreign(
+                format!("{PLACE} holds foreign name {:?}", name),
+                path,
+            ));
         }
         let text = utf8(&name, PLACE)?;
         match is_reset_temporary(&name) {
@@ -369,7 +422,9 @@ fn scan_inspections(
             .or_else(|| text.strip_prefix("created."))
             .unwrap_or(&text);
         let Some(operation) = inspection_operation(directory) else {
-            return Err(repair(format!("{PLACE} holds unclassified deposit `{text}`")));
+            return Err(repair(format!(
+                "{PLACE} holds unclassified deposit `{text}`"
+            )));
         };
         let Some(stale) = operations.get_mut(operation) else {
             return Err(repair(format!(
@@ -394,7 +449,10 @@ fn scan_runtime(
     for name in runtime_names(roots.runtime)? {
         let Some(text) = name.to_str() else { continue };
         let public = text.strip_prefix("cleanup.").unwrap_or(text);
-        let Some(operation) = public.strip_prefix(super::original_operation::PREFIX).and_then(operation_of) else {
+        let Some(operation) = public
+            .strip_prefix(super::original_operation::PREFIX)
+            .and_then(operation_of)
+        else {
             continue;
         };
         if let Some(stale) = operations.get_mut(operation) {
@@ -406,11 +464,22 @@ fn scan_runtime(
 
 /// Every reset temporary left in the ledger, the inspections parent and the
 /// runtime namespace, with its observed identity.
-fn scan_reset_temporaries(roots: &Roots<'_>, bound: &mut RecoveryBound) -> Result<Vec<AbandonedDeposit>> {
+fn scan_reset_temporaries(
+    roots: &Roots<'_>,
+    bound: &mut RecoveryBound,
+) -> Result<Vec<AbandonedDeposit>> {
     let mut debris = Vec::new();
     for (location, place, owned) in [
-        (DepositLocation::Ledger, "offline quota ledger", Some(LEDGER_DIRECTORY)),
-        (DepositLocation::InspectionParent, "offline reset inspections parent", Some(INSPECTIONS_DIRECTORY)),
+        (
+            DepositLocation::Ledger,
+            "offline quota ledger",
+            Some(LEDGER_DIRECTORY),
+        ),
+        (
+            DepositLocation::InspectionParent,
+            "offline reset inspections parent",
+            Some(INSPECTIONS_DIRECTORY),
+        ),
         (DepositLocation::RuntimeNamespace, "runtime namespace", None),
     ] {
         let Some(directory) = roots.directory(location) else {
@@ -427,7 +496,8 @@ fn scan_reset_temporaries(roots: &Roots<'_>, bound: &mut RecoveryBound) -> Resul
             }
             bound.charge(1)?;
             let text = utf8(&name, "reset temporary debris")?;
-            let (device, inode) = regular_identity(directory, &text, "reset temporary debris", owned)?;
+            let (device, inode) =
+                regular_identity(directory, &text, "reset temporary debris", owned)?;
             debris.push(AbandonedDeposit {
                 location,
                 name: text,
@@ -440,9 +510,18 @@ fn scan_reset_temporaries(roots: &Roots<'_>, bound: &mut RecoveryBound) -> Resul
     Ok(debris)
 }
 
-fn verified_released(roots: &Roots<'_>, entry: &LedgerEntry, operation: &str) -> Result<OfflineResetReleasedRecord> {
-    let record = OfflineResetReleasedRecord::verified(&entry.bytes, roots.identity)
-        .map_err(|error| repair(format!("released record `{}` cannot be authenticated: {error:#}", entry.name)))?;
+fn verified_released(
+    roots: &Roots<'_>,
+    entry: &LedgerEntry,
+    operation: &str,
+) -> Result<OfflineResetReleasedRecord> {
+    let record =
+        OfflineResetReleasedRecord::verified(&entry.bytes, roots.identity).map_err(|error| {
+            repair(format!(
+                "released record `{}` cannot be authenticated: {error:#}",
+                entry.name
+            ))
+        })?;
     if record.operation_id != operation || record.ledger_identity != roots.ledger_identity {
         return Err(repair(format!(
             "released record `{}` names another operation or ledger",
@@ -454,8 +533,15 @@ fn verified_released(roots: &Roots<'_>, entry: &LedgerEntry, operation: &str) ->
 
 /// The one public-or-quarantined entry of `kind`; both at once cannot be
 /// attributed.
-fn single<'a>(stale: &'a StaleOperation, kind: LedgerKind, operation: &str) -> Result<Option<&'a LedgerEntry>> {
-    match (stale.records.get(&(kind, false)), stale.records.get(&(kind, true))) {
+fn single<'a>(
+    stale: &'a StaleOperation,
+    kind: LedgerKind,
+    operation: &str,
+) -> Result<Option<&'a LedgerEntry>> {
+    match (
+        stale.records.get(&(kind, false)),
+        stale.records.get(&(kind, true)),
+    ) {
         (Some(_), Some(_)) => Err(repair(format!(
             "operation {operation} has both a public and a quarantined {kind:?} record"
         ))),
@@ -498,13 +584,21 @@ fn plan_operation<'a>(
         // the release tail quarantines records only after its release is
         // durable.
         let quarantined = stale.records.keys().any(|(_, quarantined)| *quarantined);
-        let Some(reserved) = reserved.filter(|_| !quarantined && operation != RECOVERY_ONLY_OPERATION) else {
+        let Some(reserved) =
+            reserved.filter(|_| !quarantined && operation != RECOVERY_ONLY_OPERATION)
+        else {
             return Err(repair(format!(
                 "ledger records of operation {operation} have no reservation or release anchoring them"
             )));
         };
-        let record = observe_abandoned(roots, operation, stale, reserved, disposed, markers, bound)?;
-        return Ok(Settlement { operation, stale, record, published: None });
+        let record =
+            observe_abandoned(roots, operation, stale, reserved, disposed, markers, bound)?;
+        return Ok(Settlement {
+            operation,
+            stale,
+            record,
+            published: None,
+        });
     };
     let record = verified_released(roots, entry, operation)?;
     // A reservation still present beside its release is the one the
@@ -534,12 +628,16 @@ fn plan_operation<'a>(
                 )));
             }
         }
-        ReleasedOutcome::Abandoned { disposition_sha256: _, deposits, applied: _, recovered_at_ms: _ } => {
+        ReleasedOutcome::Abandoned {
+            disposition_sha256: _,
+            deposits,
+            applied: _,
+            recovered_at_ms: _,
+        } => {
             for name in &stale.inspection {
-                if !deposits
-                    .iter()
-                    .any(|deposit| deposit.location == DepositLocation::InspectionParent && &deposit.name == name)
-                {
+                if !deposits.iter().any(|deposit| {
+                    deposit.location == DepositLocation::InspectionParent && &deposit.name == name
+                }) {
                     return Err(repair(format!(
                         "inspection deposit `{name}` is not recorded in the release of operation {operation}"
                     )));
@@ -547,13 +645,27 @@ fn plan_operation<'a>(
             }
         }
     }
-    Ok(Settlement { operation, stale, record, published: Some(entry.identity) })
+    Ok(Settlement {
+        operation,
+        stale,
+        record,
+        published: Some(entry.identity),
+    })
 }
 
 /// Publish the settlement's release if it is new, remove the deposits it
 /// records, then unlink the operation's ledger records.
-fn settle(roots: &Roots<'_>, settlement: &Settlement<'_>, bound: &mut RecoveryBound) -> Result<RecoveredReservation> {
-    let Settlement { operation, stale, record, published } = settlement;
+fn settle(
+    roots: &Roots<'_>,
+    settlement: &Settlement<'_>,
+    bound: &mut RecoveryBound,
+) -> Result<RecoveredReservation> {
+    let Settlement {
+        operation,
+        stale,
+        record,
+        published,
+    } = settlement;
     let released_identity = match published {
         Some(identity) => *identity,
         None => publish_release(roots, record, bound)?,
@@ -568,7 +680,12 @@ fn settle(roots: &Roots<'_>, settlement: &Settlement<'_>, bound: &mut RecoveryBo
             pins: _,
             state_ack: _,
         } => (RecoveredReleaseOutcome::Completed, None, 0),
-        ReleasedOutcome::Abandoned { disposition_sha256: _, deposits, applied, recovered_at_ms: _ } => (
+        ReleasedOutcome::Abandoned {
+            disposition_sha256: _,
+            deposits,
+            applied,
+            recovered_at_ms: _,
+        } => (
             RecoveredReleaseOutcome::Abandoned,
             Some(match applied {
                 AppliedEvidence::Applied => RecoveredApplied::Applied,
@@ -599,13 +716,21 @@ fn observe_abandoned(
     markers: &Markers,
     bound: &mut RecoveryBound,
 ) -> Result<OfflineResetReleasedRecord> {
-    let reservation = StaleReservation::verified(&reserved.bytes, roots.identity)
-        .map_err(|error| repair(format!("reservation `{}` cannot be authenticated: {error:#}", reserved.name)))?;
-    let copy_root = roots
-        .copy_root
-        .ok_or_else(|| repair("the offline reset inspections parent is absent beside a stale reservation"))?;
+    let reservation =
+        StaleReservation::verified(&reserved.bytes, roots.identity).map_err(|error| {
+            repair(format!(
+                "reservation `{}` cannot be authenticated: {error:#}",
+                reserved.name
+            ))
+        })?;
+    let copy_root = roots.copy_root.ok_or_else(|| {
+        repair("the offline reset inspections parent is absent beside a stale reservation")
+    })?;
     if reservation.operation_id() != operation {
-        return Err(repair(format!("reservation `{}` names another operation", reserved.name)));
+        return Err(repair(format!(
+            "reservation `{}` names another operation",
+            reserved.name
+        )));
     }
     reservation
         .require_roots(roots.app_root, roots.runtime, copy_root)
@@ -614,7 +739,10 @@ fn observe_abandoned(
         Some(entry) => {
             InspectionDispositionRecord::verified(&entry.bytes, roots.identity)
                 .and_then(|record| {
-                    ensure!(record.operation_id == operation, "disposition names another operation");
+                    ensure!(
+                        record.operation_id == operation,
+                        "disposition names another operation"
+                    );
                     reservation.require_disposition(&record)
                 })
                 .map_err(|error| repair(format!("disposition `{}`: {error:#}", entry.name)))?;
@@ -626,19 +754,39 @@ fn observe_abandoned(
     // Creation witnesses first: they bind the directories they created.
     let mut witnessed = BTreeMap::new();
     for name in &stale.inspection {
-        let Some(directory) = name.strip_prefix("cleanup.created.").or_else(|| name.strip_prefix("created.")) else {
+        let Some(directory) = name
+            .strip_prefix("cleanup.created.")
+            .or_else(|| name.strip_prefix("created."))
+        else {
             continue;
         };
         bound.charge(3)?;
-        let (device, inode) =
-            regular_identity(copy_root, name, "offline reset inspections parent", Some(INSPECTIONS_DIRECTORY))?;
-        let bytes = lillux_sqlite::read_regular_without_sqlite_alias(copy_root, OsStr::new(name), RECORD_BYTES)?
-            .with_context(|| format!("creation witness `{name}` disappeared during recovery"))?;
+        let (device, inode) = regular_identity(
+            copy_root,
+            name,
+            "offline reset inspections parent",
+            Some(INSPECTIONS_DIRECTORY),
+        )?;
+        let bytes = lillux_sqlite::read_regular_without_sqlite_alias(
+            copy_root,
+            OsStr::new(name),
+            RECORD_BYTES,
+        )?
+        .with_context(|| format!("creation witness `{name}` disappeared during recovery"))?;
         let evidence = CreatedDirectoryRecord::verified(&bytes, roots.identity)
-            .and_then(|evidence| reservation.require_witness(&evidence, directory).map(|()| evidence))
+            .and_then(|evidence| {
+                reservation
+                    .require_witness(&evidence, directory)
+                    .map(|()| evidence)
+            })
             .map_err(|error| repair(format!("creation witness `{name}`: {error:#}")))?;
-        if witnessed.insert(directory.to_owned(), evidence.created_identity).is_some() {
-            return Err(repair(format!("destination `{directory}` has both a public and a quarantined witness")));
+        if witnessed
+            .insert(directory.to_owned(), evidence.created_identity)
+            .is_some()
+        {
+            return Err(repair(format!(
+                "destination `{directory}` has both a public and a quarantined witness"
+            )));
         }
         deposits.push(AbandonedDeposit {
             location: DepositLocation::InspectionParent,
@@ -659,12 +807,16 @@ fn observe_abandoned(
         bound.charge(3)?;
         let directory = copy_root
             .open_child_directory(OsStr::new(name))?
-            .with_context(|| format!("inspection directory `{name}` disappeared during recovery"))?;
+            .with_context(|| {
+                format!("inspection directory `{name}` disappeared during recovery")
+            })?;
         let observed = directory.identity()?;
         let witness_bound = match witnessed.get(name) {
             Some(created) if *created == observed => true,
             Some(_) => {
-                return Err(repair(format!("inspection directory `{name}` differs from its creation witness")));
+                return Err(repair(format!(
+                    "inspection directory `{name}` differs from its creation witness"
+                )));
             }
             None => {
                 // A directory created before its witness is still empty;
@@ -685,17 +837,28 @@ fn observe_abandoned(
             witness_bound,
         });
     }
-    let resumed = markers.active.as_ref().is_some_and(|active| active.operation_id == operation);
+    let resumed = markers
+        .active
+        .as_ref()
+        .is_some_and(|active| active.operation_id == operation);
     // A mutating reset staged its operation file. Unless an Active marker
     // names it, so the next attempt resumes it, the file is inert.
     if reservation.mode() == OriginalInspectionMode::Mutating && !resumed {
         for name in &stale.runtime {
             bound.charge(3)?;
             let (device, inode) = regular_identity(roots.runtime, name, "runtime namespace", None)?;
-            let bytes = lillux_sqlite::read_regular_without_sqlite_alias(roots.runtime, OsStr::new(name), RECORD_BYTES)?
-                .with_context(|| format!("staged operation `{name}` disappeared during recovery"))?;
-            super::original_operation::require_own_operation_file(&bytes, roots.identity, operation)
-                .map_err(|error| repair(format!("staged operation `{name}`: {error:#}")))?;
+            let bytes = lillux_sqlite::read_regular_without_sqlite_alias(
+                roots.runtime,
+                OsStr::new(name),
+                RECORD_BYTES,
+            )?
+            .with_context(|| format!("staged operation `{name}` disappeared during recovery"))?;
+            super::original_operation::require_own_operation_file(
+                &bytes,
+                roots.identity,
+                operation,
+            )
+            .map_err(|error| repair(format!("staged operation `{name}`: {error:#}")))?;
             deposits.push(AbandonedDeposit {
                 location: DepositLocation::RuntimeNamespace,
                 name: name.clone(),
@@ -709,11 +872,16 @@ fn observe_abandoned(
             });
         }
     }
-    deposits.sort_by(|left, right| (left.location, left.name.as_str()).cmp(&(right.location, right.name.as_str())));
+    deposits.sort_by(|left, right| {
+        (left.location, left.name.as_str()).cmp(&(right.location, right.name.as_str()))
+    });
     let applied = if resumed {
         AppliedEvidence::Resumed
     } else if reservation.mode() == OriginalInspectionMode::Mutating
-        && markers.acknowledged.as_ref().is_some_and(|acknowledged| acknowledged.operation_id == operation)
+        && markers
+            .acknowledged
+            .as_ref()
+            .is_some_and(|acknowledged| acknowledged.operation_id == operation)
     {
         AppliedEvidence::Applied
     } else {
@@ -752,9 +920,17 @@ fn publish_release(
     let name = super::inspection_destination::released_name(&record.operation_id);
     let file = roots
         .ledger
-        .atomic_create_regular(OsStr::new(&name), &signed, 0o600, crate::execution_history_reset::RESET_TEMP_PURPOSE)?
+        .atomic_create_regular(
+            OsStr::new(&name),
+            &signed,
+            0o600,
+            crate::execution_history_reset::RESET_TEMP_PURPOSE,
+        )?
         .with_context(|| format!("released record `{name}` appeared during recovery"))?;
-    roots.ledger.sync().context("sync the recovered release record")?;
+    roots
+        .ledger
+        .sync()
+        .context("sync the recovered release record")?;
     let identity = lillux::observe_open_file_identity(&file)?;
     Ok((identity.device(), identity.inode()))
 }
@@ -762,10 +938,18 @@ fn publish_release(
 /// Remove each recorded deposit still present with its recorded identity,
 /// directories first. An absent deposit was removed by an earlier attempt;
 /// one with another identity cannot be attributed and refuses.
-fn remove_deposits(roots: &Roots<'_>, deposits: &[AbandonedDeposit], bound: &mut RecoveryBound) -> Result<usize> {
+fn remove_deposits(
+    roots: &Roots<'_>,
+    deposits: &[AbandonedDeposit],
+    bound: &mut RecoveryBound,
+) -> Result<usize> {
     let mut removed = 0;
-    let directories = deposits.iter().filter(|deposit| deposit.kind == AbandonedDepositKind::Directory);
-    let files = deposits.iter().filter(|deposit| deposit.kind != AbandonedDepositKind::Directory);
+    let directories = deposits
+        .iter()
+        .filter(|deposit| deposit.kind == AbandonedDepositKind::Directory);
+    let files = deposits
+        .iter()
+        .filter(|deposit| deposit.kind != AbandonedDepositKind::Directory);
     for deposit in directories.chain(files) {
         bound.charge(4)?;
         let Some(parent) = roots.directory(deposit.location) else {
@@ -778,17 +962,26 @@ fn remove_deposits(roots: &Roots<'_>, deposits: &[AbandonedDeposit], bound: &mut
                     continue;
                 };
                 if directory.identity()? != *identity {
-                    return Err(repair(format!("deposit `{}` was replaced since its release", deposit.name)));
+                    return Err(repair(format!(
+                        "deposit `{}` was replaced since its release",
+                        deposit.name
+                    )));
                 }
                 if deposit.witness_bound {
-                    directory.remove_contents_recursive_bounded_until(TREE_BUDGET, bound.deadline)?;
+                    directory
+                        .remove_contents_recursive_bounded_until(TREE_BUDGET, bound.deadline)?;
                 }
-                if parent.remove_empty_child_if_same(name, &directory)?.is_none() {
+                if parent
+                    .remove_empty_child_if_same(name, &directory)?
+                    .is_none()
+                {
                     return Err(repair(format!("deposit `{}` is not empty", deposit.name)));
                 }
                 true
             }
-            DepositIdentity::File { device, inode } => unlink_if_same(parent, &deposit.name, (*device, *inode))?,
+            DepositIdentity::File { device, inode } => {
+                unlink_if_same(parent, &deposit.name, (*device, *inode))?
+            }
         };
         if gone {
             removed += 1;
@@ -797,13 +990,19 @@ fn remove_deposits(roots: &Roots<'_>, deposits: &[AbandonedDeposit], bound: &mut
     Ok(removed)
 }
 
-fn unlink_if_same(parent: &lillux::PinnedDirectory, name: &str, expected: (u64, u64)) -> Result<bool> {
+fn unlink_if_same(
+    parent: &lillux::PinnedDirectory,
+    name: &str,
+    expected: (u64, u64),
+) -> Result<bool> {
     let Some(pin) = parent.open_mount_entry(OsStr::new(name))? else {
         return Ok(false);
     };
     let observed = lillux::observe_open_file_identity(&pin)?;
     if (observed.device(), observed.inode()) != expected {
-        return Err(repair(format!("`{name}` was replaced since recovery observed it")));
+        return Err(repair(format!(
+            "`{name}` was replaced since recovery observed it"
+        )));
     }
     parent.unlink_regular_if_same(OsStr::new(name), &pin)
 }
@@ -847,7 +1046,9 @@ fn settle_debris(
     mut debris: Vec<AbandonedDeposit>,
     bound: &mut RecoveryBound,
 ) -> Result<RecoveredReservation> {
-    debris.sort_by(|left, right| (left.location, left.name.as_str()).cmp(&(right.location, right.name.as_str())));
+    debris.sort_by(|left, right| {
+        (left.location, left.name.as_str()).cmp(&(right.location, right.name.as_str()))
+    });
     let record = OfflineResetReleasedRecord {
         schema: RELEASED_SCHEMA,
         purpose: RELEASED_PURPOSE.into(),
@@ -880,11 +1081,11 @@ fn settle_debris(
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
-    use super::*;
     use super::super::creation_evidence::{
-        DISPOSITION_PURPOSE, DISPOSITION_SCHEMA, InspectionStoreDispositionRecord, OriginalLocalSettlementObligation,
-        OriginalNativeQuotaEvidence,
+        DISPOSITION_PURPOSE, DISPOSITION_SCHEMA, InspectionStoreDispositionRecord,
+        OriginalLocalSettlementObligation, OriginalNativeQuotaEvidence,
     };
+    use super::*;
     use ryeos_node_runtime::config::{Config, ConfigSources};
     use ryeos_node_runtime::state_lock::{StateLock, default_lock_path};
     use std::os::unix::fs::PermissionsExt;
@@ -902,19 +1103,27 @@ mod tests {
             self.config.app_root.join(".ai/node").join(LEDGER_DIRECTORY)
         }
         fn inspections(&self) -> PathBuf {
-            self.config.app_root.join(".ai/node").join(INSPECTIONS_DIRECTORY)
+            self.config
+                .app_root
+                .join(".ai/node")
+                .join(INSPECTIONS_DIRECTORY)
         }
         fn runtime(&self) -> PathBuf {
             self.config.runtime_state_dir()
         }
         fn marker(&self) -> PathBuf {
-            self.runtime().join("recovery/thread-projection/thread-history-discard.json")
+            self.runtime()
+                .join("recovery/thread-projection/thread-history-discard.json")
         }
     }
 
     fn names(path: &Path) -> Vec<String> {
         let mut names = std::fs::read_dir(path)
-            .map(|entries| entries.map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned()).collect())
+            .map(|entries| {
+                entries
+                    .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
             .unwrap_or_else(|_| Vec::new());
         names.sort();
         names
@@ -922,14 +1131,29 @@ mod tests {
 
     fn node() -> Node {
         let tmp = tempfile::TempDir::new().unwrap();
-        let config = Config::load(&ConfigSources { app_root: Some(tmp.path().to_owned()), ..Default::default() }).unwrap();
+        let config = Config::load(&ConfigSources {
+            app_root: Some(tmp.path().to_owned()),
+            ..Default::default()
+        })
+        .unwrap();
         let identity = NodeIdentity::create(&config.node_signing_key_path).unwrap();
         let runtime = config.runtime_state_dir();
         for directory in ["objects", "refs", "locators", "recovery/thread-projection"] {
             std::fs::create_dir_all(runtime.join(directory)).unwrap();
         }
-        for directory in ["", "objects", "refs", "locators", "recovery", "recovery/thread-projection"] {
-            std::fs::set_permissions(runtime.join(directory), std::fs::Permissions::from_mode(0o700)).unwrap();
+        for directory in [
+            "",
+            "objects",
+            "refs",
+            "locators",
+            "recovery",
+            "recovery/thread-projection",
+        ] {
+            std::fs::set_permissions(
+                runtime.join(directory),
+                std::fs::Permissions::from_mode(0o700),
+            )
+            .unwrap();
         }
         super::super::tests::install_offline_policy(&config, &identity, true);
         for directory in [LEDGER_DIRECTORY, INSPECTIONS_DIRECTORY] {
@@ -937,7 +1161,11 @@ mod tests {
             std::fs::create_dir_all(&path).unwrap();
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
         }
-        Node { _tmp: tmp, config, identity }
+        Node {
+            _tmp: tmp,
+            config,
+            identity,
+        }
     }
 
     /// Run `body` inside one reset admission frame: the StateLock, runtime
@@ -952,21 +1180,38 @@ mod tests {
         ) -> T,
     ) -> T {
         let state_lock = StateLock::acquire(&default_lock_path(&node.config.app_root)).unwrap();
-        let runtime = lillux::PinnedDirectory::open(&node.runtime()).unwrap().unwrap();
+        let runtime = lillux::PinnedDirectory::open(&node.runtime())
+            .unwrap()
+            .unwrap();
         let namespace = runtime.lock_exclusive().unwrap();
-        let policy = OfflineResetPolicyOwner::load(&node.config, &node.identity, &state_lock, &runtime, &namespace).unwrap();
+        let policy = OfflineResetPolicyOwner::load(
+            &node.config,
+            &node.identity,
+            &state_lock,
+            &runtime,
+            &namespace,
+        )
+        .unwrap();
         let mut trust = ryeos_state::refs::TrustStore::new();
-        trust.insert(node.identity.fingerprint().to_owned(), *node.identity.verifying_key());
-        let prepared =
-            ryeos_state::PreparedOfflineProjection::capture(runtime.try_clone().unwrap(), Arc::new(trust), &namespace)
-                .unwrap();
+        trust.insert(
+            node.identity.fingerprint().to_owned(),
+            *node.identity.verifying_key(),
+        );
+        let prepared = ryeos_state::PreparedOfflineProjection::capture(
+            runtime.try_clone().unwrap(),
+            Arc::new(trust),
+            &namespace,
+        )
+        .unwrap();
         let state = prepared.authority().unwrap();
         let guard = state.acquire_exclusive_guard(true).unwrap();
         body(&policy, &state, &guard, &runtime)
     }
 
     fn recover(node: &Node) -> Result<Vec<RecoveredReservation>> {
-        frame(node, |policy, state, guard, _| recover_stale(policy, &node.identity, state, guard))
+        frame(node, |policy, state, guard, _| {
+            recover_stale(policy, &node.identity, state, guard)
+        })
     }
 
     /// Plant the reservation a process that died after publishing leaves.
@@ -984,11 +1229,19 @@ mod tests {
                 mode,
                 policy.quota().unwrap(),
             );
-            std::fs::write(node.ledger().join(format!("reserved.{operation}")), &reserved).unwrap();
+            std::fs::write(
+                node.ledger().join(format!("reserved.{operation}")),
+                &reserved,
+            )
+            .unwrap();
             if destination {
                 let name = format!("inspection.{operation}.scheduler");
                 std::fs::create_dir(node.inspections().join(&name)).unwrap();
-                std::fs::write(node.inspections().join(&name).join("scheduler.sqlite3"), b"copied").unwrap();
+                std::fs::write(
+                    node.inspections().join(&name).join("scheduler.sqlite3"),
+                    b"copied",
+                )
+                .unwrap();
                 let record = CreatedDirectoryRecord {
                     schema: 1,
                     purpose: "offline_reset_inspection_created".into(),
@@ -1003,7 +1256,8 @@ mod tests {
                     parent_identity: copy_root.identity().unwrap(),
                     created_identity: open(&node.inspections().join(&name)).identity().unwrap(),
                 };
-                let storage = lillux::cas::canonical_record_storage_quote(&record, RECORD_BYTES).unwrap();
+                let storage =
+                    lillux::cas::canonical_record_storage_quote(&record, RECORD_BYTES).unwrap();
                 std::fs::write(
                     node.inspections().join(format!("created.{name}")),
                     record.signed_bytes(&node.identity, &storage).unwrap(),
@@ -1023,16 +1277,24 @@ mod tests {
     }
 
     fn stage_operation(node: &Node, operation: &str) -> PathBuf {
-        let path = node.runtime().join(format!("{}{operation}", super::super::original_operation::PREFIX));
-        std::fs::write(&path, super::super::original_operation::fixture_signed_operation(&node.identity, operation))
-            .unwrap();
+        let path = node.runtime().join(format!(
+            "{}{operation}",
+            super::super::original_operation::PREFIX
+        ));
+        std::fs::write(
+            &path,
+            super::super::original_operation::fixture_signed_operation(&node.identity, operation),
+        )
+        .unwrap();
         path
     }
 
     fn signed_disposition(node: &Node, operation: &str) -> Vec<u8> {
         let reserved = std::fs::read(node.ledger().join(format!("reserved.{operation}"))).unwrap();
         let raw = std::str::from_utf8(&reserved).unwrap();
-        let (body, _) = lillux::signature::strip_canonical_signature_with_envelope(raw, "#", None, false).unwrap();
+        let (body, _) =
+            lillux::signature::strip_canonical_signature_with_envelope(raw, "#", None, false)
+                .unwrap();
         let claim: serde_json::Value = serde_json::from_str(&body).unwrap();
         let text = |field: &str| claim[field].as_str().unwrap().to_owned();
         let stores = [0usize, 1].map(|index| {
@@ -1040,7 +1302,9 @@ mod tests {
             InspectionStoreDispositionRecord::NeverStarted {
                 purpose: purpose.to_owned(),
                 destination_name: format!("inspection.{operation}.{purpose}"),
-                original_present: std::array::from_fn(|role| !claim["sources"][index]["roles"][role].is_null()),
+                original_present: std::array::from_fn(|role| {
+                    !claim["sources"][index]["roles"][role].is_null()
+                }),
             }
         });
         let record = InspectionDispositionRecord {
@@ -1073,7 +1337,9 @@ mod tests {
     }
 
     fn repair_named(error: &anyhow::Error) -> bool {
-        error.chain().any(|cause| cause.downcast_ref::<ResetScratchRepairRequired>().is_some())
+        error
+            .chain()
+            .any(|cause| cause.downcast_ref::<ResetScratchRepairRequired>().is_some())
             && format!("{error:#}").contains(ryeos_state::EXECUTION_HISTORY_SCRATCH_REPAIR)
     }
 
@@ -1085,7 +1351,12 @@ mod tests {
     fn recovery_settles_a_stale_dry_run_and_its_debris() {
         let node = node();
         let operation = stale_claim(&node, OriginalInspectionMode::DryRun, true);
-        assert_eq!(names(&node.inspections()).len(), 2, "{:?}", names(&node.inspections()));
+        assert_eq!(
+            names(&node.inspections()).len(),
+            2,
+            "{:?}",
+            names(&node.inspections())
+        );
         for directory in [node.ledger(), node.inspections(), node.runtime()] {
             std::fs::write(directory.join(".secure.tmp.reset.7.1"), b"debris").unwrap();
         }
@@ -1095,13 +1366,27 @@ mod tests {
         assert_eq!(recovered[0].operation_id, operation);
         assert_eq!(recovered[0].outcome, RecoveredReleaseOutcome::Abandoned);
         assert_eq!(recovered[0].applied, Some(RecoveredApplied::NotApplied));
-        assert_eq!((recovered[0].deposits_removed, recovered[0].records_unlinked), (2, 2));
+        assert_eq!(
+            (recovered[0].deposits_removed, recovered[0].records_unlinked),
+            (2, 2)
+        );
         assert_eq!(recovered[1].operation_id, RECOVERY_ONLY_OPERATION);
         assert_eq!(recovered[1].deposits_removed, 3);
-        assert!(names(&node.ledger()).is_empty(), "{:?}", names(&node.ledger()));
-        assert!(names(&node.inspections()).is_empty(), "{:?}", names(&node.inspections()));
+        assert!(
+            names(&node.ledger()).is_empty(),
+            "{:?}",
+            names(&node.ledger())
+        );
+        assert!(
+            names(&node.inspections()).is_empty(),
+            "{:?}",
+            names(&node.inspections())
+        );
         assert!(!node.runtime().join(".secure.tmp.reset.7.1").exists());
-        assert!(node.runtime().join(".secure.tmp.state.7.2").exists(), "another owner's temporary survives");
+        assert!(
+            node.runtime().join(".secure.tmp.state.7.2").exists(),
+            "another owner's temporary survives"
+        );
         // A second recovery finds nothing.
         assert!(recover(&node).unwrap().is_empty());
     }
@@ -1120,7 +1405,11 @@ mod tests {
         assert_eq!(recovered[0].applied, Some(RecoveredApplied::Resumed));
         assert_eq!(recovered[0].deposits_removed, 0);
         assert!(staged.exists(), "the resumed operation's staged file stays");
-        assert!(names(&node.ledger()).is_empty(), "{:?}", names(&node.ledger()));
+        assert!(
+            names(&node.ledger()).is_empty(),
+            "{:?}",
+            names(&node.ledger())
+        );
     }
 
     /// The state a performed attempt refused past its scheduler window
@@ -1137,10 +1426,21 @@ mod tests {
         let recovered = recover(&node).unwrap();
         assert_eq!(recovered.len(), 1, "{recovered:?}");
         assert_eq!(recovered[0].applied, Some(RecoveredApplied::Resumed));
-        assert_eq!((recovered[0].deposits_removed, recovered[0].records_unlinked), (2, 2));
+        assert_eq!(
+            (recovered[0].deposits_removed, recovered[0].records_unlinked),
+            (2, 2)
+        );
         assert!(staged.exists(), "the resumed operation's staged file stays");
-        assert!(names(&node.inspections()).is_empty(), "{:?}", names(&node.inspections()));
-        assert!(names(&node.ledger()).is_empty(), "{:?}", names(&node.ledger()));
+        assert!(
+            names(&node.inspections()).is_empty(),
+            "{:?}",
+            names(&node.inspections())
+        );
+        assert!(
+            names(&node.ledger()).is_empty(),
+            "{:?}",
+            names(&node.ledger())
+        );
     }
 
     /// A performed attempt that died after State acknowledged its discard
@@ -1153,20 +1453,36 @@ mod tests {
         let operation = stale_claim(&node, OriginalInspectionMode::Mutating, false);
         let staged = stage_operation(&node, &operation);
         std::fs::write(
-            node.runtime().join(format!("cleanup.{}{operation}", super::super::original_operation::PREFIX)),
+            node.runtime().join(format!(
+                "cleanup.{}{operation}",
+                super::super::original_operation::PREFIX
+            )),
             super::super::original_operation::fixture_signed_operation(&node.identity, &operation),
         )
         .unwrap();
-        std::fs::write(node.ledger().join(format!("disposed.{operation}")), signed_disposition(&node, &operation))
-            .unwrap();
+        std::fs::write(
+            node.ledger().join(format!("disposed.{operation}")),
+            signed_disposition(&node, &operation),
+        )
+        .unwrap();
         write_marker(&node, &operation, "acknowledged");
         let recovered = recover(&node).unwrap();
         assert_eq!(recovered.len(), 1, "{recovered:?}");
         assert_eq!(recovered[0].applied, Some(RecoveredApplied::Applied));
-        assert_eq!((recovered[0].deposits_removed, recovered[0].records_unlinked), (2, 3));
+        assert_eq!(
+            (recovered[0].deposits_removed, recovered[0].records_unlinked),
+            (2, 3)
+        );
         assert!(!staged.exists());
-        assert!(names(&node.ledger()).is_empty(), "{:?}", names(&node.ledger()));
-        assert!(node.marker().exists(), "the acknowledged marker is State's record and stays");
+        assert!(
+            names(&node.ledger()).is_empty(),
+            "{:?}",
+            names(&node.ledger())
+        );
+        assert!(
+            node.marker().exists(),
+            "the acknowledged marker is State's record and stays"
+        );
     }
 
     /// The abandoned release recovery itself would commit for `operation`,
@@ -1176,15 +1492,25 @@ mod tests {
     }
 
     /// The abandoned release of `operation` recording `deposits`, signed.
-    fn signed_abandonment_of(node: &Node, operation: &str, deposits: Vec<AbandonedDeposit>) -> Vec<u8> {
+    fn signed_abandonment_of(
+        node: &Node,
+        operation: &str,
+        deposits: Vec<AbandonedDeposit>,
+    ) -> Vec<u8> {
         let reserved_path = node.ledger().join(format!("reserved.{operation}"));
         let reserved = std::fs::read(&reserved_path).unwrap();
         let raw = std::str::from_utf8(&reserved).unwrap();
-        let (body, _) = lillux::signature::strip_canonical_signature_with_envelope(raw, "#", None, false).unwrap();
+        let (body, _) =
+            lillux::signature::strip_canonical_signature_with_envelope(raw, "#", None, false)
+                .unwrap();
         let claim: serde_json::Value = serde_json::from_str(&body).unwrap();
-        let metadata = std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(&reserved_path).unwrap());
-        let device = std::os::unix::fs::MetadataExt::dev(&std::fs::metadata(&reserved_path).unwrap());
-        let ledger = lillux::PinnedDirectory::open(&node.ledger()).unwrap().unwrap();
+        let metadata =
+            std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(&reserved_path).unwrap());
+        let device =
+            std::os::unix::fs::MetadataExt::dev(&std::fs::metadata(&reserved_path).unwrap());
+        let ledger = lillux::PinnedDirectory::open(&node.ledger())
+            .unwrap()
+            .unwrap();
         let record = OfflineResetReleasedRecord {
             schema: RELEASED_SCHEMA,
             purpose: RELEASED_PURPOSE.into(),
@@ -1217,16 +1543,32 @@ mod tests {
         let reserved = node.ledger().join(format!("reserved.{operation}"));
         let quarantined = node.ledger().join(format!("cleanup.reserved.{operation}"));
         std::fs::rename(&reserved, &quarantined).unwrap();
-        std::fs::write(node.ledger().join(format!("released.{operation}")), &released).unwrap();
+        std::fs::write(
+            node.ledger().join(format!("released.{operation}")),
+            &released,
+        )
+        .unwrap();
         let recovered = recover(&node).unwrap();
         assert_eq!(recovered.len(), 1, "{recovered:?}");
         assert_eq!(recovered[0].records_unlinked, 2);
-        assert!(names(&node.ledger()).is_empty(), "{:?}", names(&node.ledger()));
+        assert!(
+            names(&node.ledger()).is_empty(),
+            "{:?}",
+            names(&node.ledger())
+        );
 
-        std::fs::write(node.ledger().join(format!("cleanup.released.{operation}")), &released).unwrap();
+        std::fs::write(
+            node.ledger().join(format!("cleanup.released.{operation}")),
+            &released,
+        )
+        .unwrap();
         let recovered = recover(&node).unwrap();
         assert_eq!(recovered[0].records_unlinked, 1);
-        assert!(names(&node.ledger()).is_empty(), "{:?}", names(&node.ledger()));
+        assert!(
+            names(&node.ledger()).is_empty(),
+            "{:?}",
+            names(&node.ledger())
+        );
 
         let operation = stale_claim(&node, OriginalInspectionMode::DryRun, false);
         let reserved = node.ledger().join(format!("reserved.{operation}"));
@@ -1242,14 +1584,22 @@ mod tests {
     /// and recovery finishes unlinking them.
     #[test]
     fn recovery_finishes_a_completed_release_left_with_its_disposition() {
-        use super::super::creation_evidence::{CompletedReleaseFacts, ISSUED_RESERVATION_PIN_SLOT, ReleasedBinding, RetiredPinFact};
+        use super::super::creation_evidence::{
+            CompletedReleaseFacts, ISSUED_RESERVATION_PIN_SLOT, ReleasedBinding, RetiredPinFact,
+        };
         let node = node();
         let operation = stale_claim(&node, OriginalInspectionMode::DryRun, false);
         let disposition = signed_disposition(&node, &operation);
-        std::fs::write(node.ledger().join(format!("disposed.{operation}")), &disposition).unwrap();
+        std::fs::write(
+            node.ledger().join(format!("disposed.{operation}")),
+            &disposition,
+        )
+        .unwrap();
         std::fs::remove_file(node.ledger().join(format!("reserved.{operation}"))).unwrap();
         let released = lillux_sqlite::test_host::TestNativeHost::acquire().release();
-        let ledger = lillux::PinnedDirectory::open(&node.ledger()).unwrap().unwrap();
+        let ledger = lillux::PinnedDirectory::open(&node.ledger())
+            .unwrap()
+            .unwrap();
         let record = OfflineResetReleasedRecord::completed(
             ReleasedBinding {
                 signer: node.identity.fingerprint().to_owned(),
@@ -1269,7 +1619,12 @@ mod tests {
                     OriginalLocalSettlementObligation::ReservationPublicationDescriptor,
                     OriginalLocalSettlementObligation::IssuedReservationPin,
                 ],
-                pins: vec![RetiredPinFact { slot: ISSUED_RESERVATION_PIN_SLOT, device: 1, inode: 7, byte_length: 1 }],
+                pins: vec![RetiredPinFact {
+                    slot: ISSUED_RESERVATION_PIN_SLOT,
+                    device: 1,
+                    inode: 7,
+                    byte_length: 1,
+                }],
                 state_ack: None,
                 acknowledgement_expected: false,
             },
@@ -1285,7 +1640,11 @@ mod tests {
         assert_eq!(recovered.len(), 1, "{recovered:?}");
         assert_eq!(recovered[0].outcome, RecoveredReleaseOutcome::Completed);
         assert_eq!(recovered[0].records_unlinked, 2);
-        assert!(names(&node.ledger()).is_empty(), "{:?}", names(&node.ledger()));
+        assert!(
+            names(&node.ledger()).is_empty(),
+            "{:?}",
+            names(&node.ledger())
+        );
     }
 
     /// Names recovery cannot attribute refuse and nothing is removed. A
@@ -1301,12 +1660,20 @@ mod tests {
             ("ledger", "notes".to_owned(), false),
             ("ledger", format!("terminal.{operation}"), true),
             ("ledger", format!("disposed.{operation}"), true),
-            ("inspections", format!("created.inspection.{operation}.runtime"), true),
+            (
+                "inspections",
+                format!("created.inspection.{operation}.runtime"),
+                true,
+            ),
             ("inspections", "unclassified".to_owned(), false),
         ] {
             let node = node();
             let claim = stale_claim(&node, OriginalInspectionMode::DryRun, false);
-            let directory = if place == "ledger" { node.ledger() } else { node.inspections() };
+            let directory = if place == "ledger" {
+                node.ledger()
+            } else {
+                node.inspections()
+            };
             std::fs::write(directory.join(&name), b"unknown").unwrap();
             let before = (names(&node.ledger()), names(&node.inspections()));
             let error = recover(&node).unwrap_err();
@@ -1315,12 +1682,26 @@ mod tests {
                 assert!(repair_named(&error), "{name}: {message}");
                 assert!(!message.contains("by hand"), "{name}: {message}");
             } else {
-                let refusal = error.chain().find_map(|cause| cause.downcast_ref::<ResetScratchRepairRequired>());
-                let path = refusal.and_then(|refusal| refusal.foreign.clone()).unwrap_or_default();
-                assert!(path.ends_with(&format!("/{name}")) && path.starts_with(".ai/node/"), "{name}: {message}");
-                assert!(message.contains(&format!("remove `{path}` by hand")), "{name}: {message}");
+                let refusal = error
+                    .chain()
+                    .find_map(|cause| cause.downcast_ref::<ResetScratchRepairRequired>());
+                let path = refusal
+                    .and_then(|refusal| refusal.foreign.clone())
+                    .unwrap_or_default();
+                assert!(
+                    path.ends_with(&format!("/{name}")) && path.starts_with(".ai/node/"),
+                    "{name}: {message}"
+                );
+                assert!(
+                    message.contains(&format!("remove `{path}` by hand")),
+                    "{name}: {message}"
+                );
             }
-            assert_eq!((names(&node.ledger()), names(&node.inspections())), before, "{name}");
+            assert_eq!(
+                (names(&node.ledger()), names(&node.inspections())),
+                before,
+                "{name}"
+            );
             assert!(node.ledger().join(format!("reserved.{claim}")).exists());
         }
     }
@@ -1331,7 +1712,10 @@ mod tests {
     /// removed.
     #[test]
     fn recovery_refuses_a_non_regular_entry_of_its_own_grammar_as_foreign() {
-        for (place, parent) in [("ledger", LEDGER_DIRECTORY), ("inspections", INSPECTIONS_DIRECTORY)] {
+        for (place, parent) in [
+            ("ledger", LEDGER_DIRECTORY),
+            ("inspections", INSPECTIONS_DIRECTORY),
+        ] {
             let node = node();
             let claim = stale_claim(&node, OriginalInspectionMode::DryRun, false);
             let name = if place == "ledger" {
@@ -1339,17 +1723,39 @@ mod tests {
             } else {
                 format!("created.inspection.{claim}.runtime")
             };
-            let directory = if place == "ledger" { node.ledger() } else { node.inspections() };
+            let directory = if place == "ledger" {
+                node.ledger()
+            } else {
+                node.inspections()
+            };
             std::fs::create_dir(directory.join(&name)).unwrap();
             let before = (names(&node.ledger()), names(&node.inspections()));
             let error = recover(&node).unwrap_err();
             let message = format!("{error:#}");
-            let refusal = error.chain().find_map(|cause| cause.downcast_ref::<ResetScratchRepairRequired>());
-            let path = refusal.and_then(|refusal| refusal.foreign.clone()).unwrap_or_default();
-            assert_eq!(path, format!(".ai/node/{parent}/{name}"), "{name}: {message}");
-            assert!(message.contains("is not a regular file"), "{name}: {message}");
-            assert!(message.contains(&format!("remove `{path}` by hand")), "{name}: {message}");
-            assert_eq!((names(&node.ledger()), names(&node.inspections())), before, "{name}");
+            let refusal = error
+                .chain()
+                .find_map(|cause| cause.downcast_ref::<ResetScratchRepairRequired>());
+            let path = refusal
+                .and_then(|refusal| refusal.foreign.clone())
+                .unwrap_or_default();
+            assert_eq!(
+                path,
+                format!(".ai/node/{parent}/{name}"),
+                "{name}: {message}"
+            );
+            assert!(
+                message.contains("is not a regular file"),
+                "{name}: {message}"
+            );
+            assert!(
+                message.contains(&format!("remove `{path}` by hand")),
+                "{name}: {message}"
+            );
+            assert_eq!(
+                (names(&node.ledger()), names(&node.inspections())),
+                before,
+                "{name}"
+            );
             assert!(directory.join(&name).is_dir());
         }
     }
@@ -1361,7 +1767,11 @@ mod tests {
         let node = node();
         let operation = stale_claim(&node, OriginalInspectionMode::DryRun, false);
         let released = signed_abandonment(&node, &operation);
-        std::fs::write(node.ledger().join(format!("released.{operation}")), &released).unwrap();
+        std::fs::write(
+            node.ledger().join(format!("released.{operation}")),
+            &released,
+        )
+        .unwrap();
         // The same bytes at a new inode replace the settled reservation.
         let reserved = node.ledger().join(format!("reserved.{operation}"));
         let replacement = node.ledger().join("replacement");
@@ -1370,7 +1780,10 @@ mod tests {
         let before = names(&node.ledger());
         let error = recover(&node).unwrap_err();
         assert!(repair_named(&error), "{error:#}");
-        assert!(format!("{error:#}").contains("is not the reservation its release"), "{error:#}");
+        assert!(
+            format!("{error:#}").contains("is not the reservation its release"),
+            "{error:#}"
+        );
         assert_eq!(names(&node.ledger()), before);
     }
 
@@ -1381,7 +1794,11 @@ mod tests {
         let node = node();
         let operation = stale_claim(&node, OriginalInspectionMode::DryRun, false);
         let elsewhere = tempfile::TempDir::new().unwrap();
-        let identity = lillux::PinnedDirectory::open(elsewhere.path()).unwrap().unwrap().identity().unwrap();
+        let identity = lillux::PinnedDirectory::open(elsewhere.path())
+            .unwrap()
+            .unwrap()
+            .identity()
+            .unwrap();
         let released = signed_abandonment_of(
             &node,
             &operation,
@@ -1393,12 +1810,23 @@ mod tests {
                 witness_bound: false,
             }],
         );
-        std::fs::write(node.ledger().join(format!("released.{operation}")), &released).unwrap();
+        std::fs::write(
+            node.ledger().join(format!("released.{operation}")),
+            &released,
+        )
+        .unwrap();
         std::fs::remove_dir(node.inspections()).unwrap();
         let recovered = recover(&node).unwrap();
         assert_eq!(recovered.len(), 1, "{recovered:?}");
-        assert_eq!((recovered[0].deposits_removed, recovered[0].records_unlinked), (0, 2));
-        assert!(names(&node.ledger()).is_empty(), "{:?}", names(&node.ledger()));
+        assert_eq!(
+            (recovered[0].deposits_removed, recovered[0].records_unlinked),
+            (0, 2)
+        );
+        assert!(
+            names(&node.ledger()).is_empty(),
+            "{:?}",
+            names(&node.ledger())
+        );
     }
 
     /// The runtime namespace is scanned to a bound; past it recovery
@@ -1415,11 +1843,19 @@ mod tests {
         let error = recover(&node).unwrap_err();
         let message = format!("{error:#}");
         assert!(
-            error.chain().all(|cause| cause.downcast_ref::<ResetScratchRepairRequired>().is_none()),
+            error
+                .chain()
+                .all(|cause| cause.downcast_ref::<ResetScratchRepairRequired>().is_none()),
             "{message}"
         );
-        assert!(message.contains("runtime namespace holds more than"), "{message}");
-        assert!(message.contains("the namespace itself needs attention"), "{message}");
+        assert!(
+            message.contains("runtime namespace holds more than"),
+            "{message}"
+        );
+        assert!(
+            message.contains("the namespace itself needs attention"),
+            "{message}"
+        );
         assert!(message.contains("cannot clear it"), "{message}");
         assert_eq!(names(&node.ledger()).len(), 1);
     }
@@ -1429,15 +1865,26 @@ mod tests {
     fn recovery_refuses_while_a_claim_on_its_ledger_is_alive() {
         let node = node();
         stale_claim(&node, OriginalInspectionMode::DryRun, false);
-        let ledger = lillux::PinnedDirectory::open(&node.ledger()).unwrap().unwrap();
-        let live = super::super::original_quota_claim::FixtureLiveClaim::register(ledger.identity().unwrap());
+        let ledger = lillux::PinnedDirectory::open(&node.ledger())
+            .unwrap()
+            .unwrap();
+        let live = super::super::original_quota_claim::FixtureLiveClaim::register(
+            ledger.identity().unwrap(),
+        );
         let error = recover(&node).unwrap_err();
-        assert!(format!("{error:#}").contains("alive in this process"), "{error:#}");
+        assert!(
+            format!("{error:#}").contains("alive in this process"),
+            "{error:#}"
+        );
         assert_eq!(names(&node.ledger()).len(), 1);
         // A live claim on another ledger does not block this one.
         let other = tempfile::TempDir::new().unwrap();
         let foreign = super::super::original_quota_claim::FixtureLiveClaim::register(
-            lillux::PinnedDirectory::open(other.path()).unwrap().unwrap().identity().unwrap(),
+            lillux::PinnedDirectory::open(other.path())
+                .unwrap()
+                .unwrap()
+                .identity()
+                .unwrap(),
         );
         drop(live);
         assert_eq!(recover(&node).unwrap().len(), 1);

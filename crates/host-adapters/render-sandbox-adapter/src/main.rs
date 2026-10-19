@@ -24,9 +24,6 @@ use chrono::DateTime;
 use lillux::network::{NetworkCancellation, NetworkContext};
 use lillux::time::{Duration, MonotonicDeadline};
 use provider_spec::{PlanValue, ProviderSpec, RouteName, RouteTarget};
-use ryeos_remote_lease_core::{
-    operation_deadline, read_sealed_env, request_deadline, write_response, write_response_bounded,
-};
 use ryeos_external_execution_contract::{
     LIFECYCLE_ADAPTER_EXECUTABLE_FD_ENV, LIFECYCLE_ADAPTER_PROTOCOL, LIFECYCLE_BOOTSTRAP_FD_ENV,
     LIFECYCLE_CREDENTIAL_FD_ENV, LIFECYCLE_HOSTS_FD_ENV, LIFECYCLE_HOSTS_SHA256_ENV,
@@ -42,6 +39,9 @@ use ryeos_external_execution_contract::{
 use ryeos_http_transport::{
     ContactState, Deadlines, Header, HttpClient, HttpError, HttpRequest, HttpResponse, Limits,
     RequestBodySource,
+};
+use ryeos_remote_lease_core::{
+    operation_deadline, read_sealed_env, request_deadline, write_response, write_response_bounded,
 };
 use serde::{Deserialize, Serialize};
 use signal_hook::consts::{SIGINT, SIGTERM};
@@ -1002,9 +1002,10 @@ fn allocate(
             if error
                 .downcast_ref::<HttpError>()
                 .is_some_and(|error| error.contact_state() == ContactState::NoRequestSent)
-                && provider_spec.allocation_no_occurrence_proof_enabled() {
-                    return allocation_no_occurrence(common, reservation, settings);
-                }
+                && provider_spec.allocation_no_occurrence_proof_enabled()
+            {
+                return allocation_no_occurrence(common, reservation, settings);
+            }
             // The POST may have committed. Do not retry or search the broad list.
             return pending();
         }

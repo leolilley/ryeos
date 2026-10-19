@@ -914,9 +914,7 @@ impl RuntimeDb {
         &self,
         placement: &str,
     ) -> Result<Option<QualificationLocalStartRecord>> {
-        self.conn.with_sql(|conn| {
-            read_local_start(conn, placement)
-        })
+        self.conn.with_sql(|conn| read_local_start(conn, placement))
     }
 
     /// Claim the original launch's credential generation exactly once. The
@@ -1374,7 +1372,9 @@ impl RuntimeDb {
                     "external_execution_connector",
                 ] {
                     let exists: bool = tx.query_row(
-                        &format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE placement_thread_id=?1)"),
+                        &format!(
+                            "SELECT EXISTS(SELECT 1 FROM {table} WHERE placement_thread_id=?1)"
+                        ),
                         [&current.placement_thread_id],
                         |row| row.get(0),
                     )?;
@@ -1424,7 +1424,8 @@ impl RuntimeDb {
             let current = read_local_start(&tx, &expected.placement_thread_id)?
                 .context("qualification workspace removal lost its original row")?;
             ensure!(
-                current == *expected && current.phase == QualificationLocalStartPhase::CleanupIntent,
+                current == *expected
+                    && current.phase == QualificationLocalStartPhase::CleanupIntent,
                 "qualification workspace removal requires its exact cleanup intent"
             );
             require_local_processes_settled(&tx, &current)?;

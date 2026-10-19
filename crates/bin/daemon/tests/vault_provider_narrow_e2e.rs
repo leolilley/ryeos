@@ -30,7 +30,9 @@ use std::path::Path;
 use std::time::Duration;
 
 use common::DaemonHarness;
-use common::fast_fixture::{FastFixture, register_config_fixture_bundle, register_workflow_bundles};
+use common::fast_fixture::{
+    FastFixture, register_config_fixture_bundle, register_workflow_bundles,
+};
 use common::mock_provider::{MockProvider, MockResponse};
 use lillux::crypto::SigningKey;
 
@@ -603,8 +605,13 @@ async fn generic_tool_resume_does_not_require_provider_secret() {
     let body_bytes = serde_json::to_vec(&body).expect("serialize body");
     let user_key = h.user_key.as_ref().expect("fast fixture user key");
     let node_key = h.node_key.as_ref().expect("fast fixture node key");
-    let signed_headers =
-        common::build_signed_headers_for_bytes(user_key, node_key, "POST", "/execute/launch", &body_bytes);
+    let signed_headers = common::build_signed_headers_for_bytes(
+        user_key,
+        node_key,
+        "POST",
+        "/execute/launch",
+        &body_bytes,
+    );
     let mut req = reqwest::Client::new()
         .post(format!("http://{}/execute/launch", h.bind))
         .header("content-type", "application/json")

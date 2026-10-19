@@ -41,12 +41,12 @@ pub mod external_connector;
 pub mod external_content_admission;
 mod external_lifecycle_adapter;
 pub mod external_placement;
-pub(crate) mod external_supervisor_native;
 pub mod external_qualification_command;
 pub mod external_qualification_guest_scratch;
 pub mod external_qualification_invocation;
 pub mod external_qualification_local;
 pub mod external_qualification_transcript;
+pub(crate) mod external_supervisor_native;
 pub mod federated_follow;
 pub mod guest_runtime_upload;
 pub mod handler_context;
@@ -65,8 +65,8 @@ pub mod managed_external_content_operation;
 pub mod node_config;
 pub mod node_requirement_admission;
 pub mod object_contracts;
-pub mod operator_authority;
 pub mod offline_native;
+pub mod operator_authority;
 pub mod operator_external_content;
 pub mod operator_guest_runtime_materialization;
 pub mod operator_runtime_snapshot;
@@ -106,8 +106,8 @@ pub use selected_invocation_bookkeeping::{
 pub mod service_registry;
 pub mod source_closure_admission;
 pub mod standalone_audit;
-pub mod state;
 pub mod standalone_native;
+pub mod state;
 pub mod state_store;
 pub mod stream_envelope;
 pub mod temp_dir_guard;
@@ -128,8 +128,9 @@ mod test_support_native;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
     pub use crate::runtime_db::test_native::{
-        TestRuntime, live_open_refusal as runtime_live_open_refusal, open_live as open_live_runtime,
-        read_existing as read_existing_runtime, retire as retire_runtime, seed_node,
+        TestRuntime, live_open_refusal as runtime_live_open_refusal,
+        open_live as open_live_runtime, read_existing as read_existing_runtime,
+        retire as retire_runtime, seed_node,
     };
     pub use crate::state_store::test_native::{
         TEST_STATE_STORE_ENVELOPE, TestAccountingDb, TestStateStore, with_store_host,
@@ -137,7 +138,7 @@ pub mod test_support {
     pub use crate::test_support_native::{NativeTestNode, NativeTestState};
     pub use ryeos_state::test_support::{
         TEST_STATE_ENVELOPE, TestState, live_state_open_refusal, open_live_state,
-        open_live_state_with_repair_sink, release_shared_test_host, retire_live_state, seed_node_state,
-        settle_refused_open, shared_test_host,
+        open_live_state_with_repair_sink, release_shared_test_host, retire_live_state,
+        seed_node_state, settle_refused_open, shared_test_host,
     };
 }

@@ -193,10 +193,13 @@ impl CompiledDispatchInvoker {
         // dispatch takes neither.
         match (&self.authority, confinement.is_some()) {
             (DispatchAuthority::CallerPrincipal, false)
-            | (DispatchAuthority::FixedPrincipal {
-                fingerprint: _,
-                scopes: _,
-            }, true) => {}
+            | (
+                DispatchAuthority::FixedPrincipal {
+                    fingerprint: _,
+                    scopes: _,
+                },
+                true,
+            ) => {}
             (DispatchAuthority::CallerPrincipal, true) => {
                 return Err(RouteDispatchError::Internal(format!(
                     "dispatch invoker for '{}': caller-principal dispatch does not take a \
@@ -204,10 +207,13 @@ impl CompiledDispatchInvoker {
                     self.item_ref
                 )));
             }
-            (DispatchAuthority::FixedPrincipal {
-                fingerprint: _,
-                scopes: _,
-            }, false) => {
+            (
+                DispatchAuthority::FixedPrincipal {
+                    fingerprint: _,
+                    scopes: _,
+                },
+                false,
+            ) => {
                 return Err(RouteDispatchError::Internal(format!(
                     "dispatch invoker for '{}': fixed-principal dispatch requires its admitted \
                      item and request workspace",
@@ -487,9 +493,10 @@ impl CompiledDispatchInvoker {
         // the route itself is the principal and the caller's context (if any)
         // would name a different fingerprint, so none is passed.
         let caller_context = match &self.authority {
-            DispatchAuthority::CallerPrincipal => {
-                ctx.principal.as_ref().map(|principal| principal.handler_context())
-            }
+            DispatchAuthority::CallerPrincipal => ctx
+                .principal
+                .as_ref()
+                .map(|principal| principal.handler_context()),
             DispatchAuthority::FixedPrincipal {
                 fingerprint: _,
                 scopes: _,
@@ -786,8 +793,7 @@ mod tests {
             }
             other => panic!("expected a forbidden refusal, got {other:?}"),
         }
-        match require_confined_path("project", &workspace.join("nested"), &workspace, "tool:b/t")
-        {
+        match require_confined_path("project", &workspace.join("nested"), &workspace, "tool:b/t") {
             Err(RouteDispatchError::Internal(_)) => {}
             other => panic!("expected an unresolvable-path refusal, got {other:?}"),
         }

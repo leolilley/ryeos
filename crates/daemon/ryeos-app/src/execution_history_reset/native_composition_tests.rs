@@ -72,7 +72,8 @@ fn history_reset_composes_replay_cutover_and_preserves_stable_credentials() {
         ryeos_state::DurableCasPublicationKey::external_content_import(&"a".repeat(64)).unwrap();
     let (import_stage_id, import_object_hash) = {
         let state =
-            ryeos_state::test_support::TestState::open(&runtime_state_dir, Arc::clone(&trust)).unwrap();
+            ryeos_state::test_support::TestState::open(&runtime_state_dir, Arc::clone(&trust))
+                .unwrap();
         let staged = {
             let authority = state.pinned_authority().unwrap();
             let guard = authority.acquire_shared_guard().unwrap();
@@ -97,8 +98,12 @@ fn history_reset_composes_replay_cutover_and_preserves_stable_credentials() {
                 .unwrap();
             (stage.staging_id().to_owned(), object_hash)
         };
-        state.merge_operational_credential_profile(&profile).unwrap();
-        state.merge_operational_credential_profile(&enrolling).unwrap();
+        state
+            .merge_operational_credential_profile(&profile)
+            .unwrap();
+        state
+            .merge_operational_credential_profile(&enrolling)
+            .unwrap();
         state.close().unwrap();
         staged
     };
@@ -113,7 +118,8 @@ fn history_reset_composes_replay_cutover_and_preserves_stable_credentials() {
         lillux_sqlite::OriginalNativeDomain::NodeOperational,
         |connection| {
             let epoch: i32 =
-                connection.query_row("SELECT epoch FROM replay_index_epoch", [], |row| row.get(0))?;
+                connection
+                    .query_row("SELECT epoch FROM replay_index_epoch", [], |row| row.get(0))?;
             connection.execute_batch("UPDATE replay_index_epoch SET epoch = epoch - 2;")?;
             Ok(epoch)
         },
@@ -150,9 +156,15 @@ fn history_reset_composes_replay_cutover_and_preserves_stable_credentials() {
         preview.replay_indexes.scope,
         ryeos_state::operational::ReplayIndexResetScope::AllReplayRecords
     );
-    assert_eq!(preview.replay_indexes.stored_epoch, current_replay_epoch - 2);
+    assert_eq!(
+        preview.replay_indexes.stored_epoch,
+        current_replay_epoch - 2
+    );
     assert_eq!(std::fs::read(&config.db_path).unwrap(), runtime_before);
-    assert_eq!(std::fs::read(&operational_path).unwrap(), operational_before);
+    assert_eq!(
+        std::fs::read(&operational_path).unwrap(),
+        operational_before
+    );
     // The preview leaves the predecessor replay epoch a live node refuses.
     let refusal = {
         let host = ryeos_state::test_support::shared_test_host();
@@ -164,7 +176,10 @@ fn history_reset_composes_replay_cutover_and_preserves_stable_credentials() {
         ryeos_state::test_support::release_shared_test_host(host);
         refusal
     };
-    assert!(refusal.contains("replay indexes use predecessor epoch"), "{refusal}");
+    assert!(
+        refusal.contains("replay indexes use predecessor epoch"),
+        "{refusal}"
+    );
 
     // Model resumption after a process died with the durable discard intent
     // published but before replay or Runtime activation. The interrupted
@@ -172,7 +187,9 @@ fn history_reset_composes_replay_cutover_and_preserves_stable_credentials() {
     {
         let host = ryeos_state::test_support::shared_test_host();
         let state_lock = StateLock::acquire(&default_lock_path(tmp.path())).unwrap();
-        let directory = lillux::PinnedDirectory::open(&runtime_state_dir).unwrap().unwrap();
+        let directory = lillux::PinnedDirectory::open(&runtime_state_dir)
+            .unwrap()
+            .unwrap();
         let namespace = directory.lock_exclusive().unwrap();
         let state = ryeos_state::test_support::TestOfflineState::open(
             &runtime_state_dir,
@@ -202,15 +219,29 @@ fn history_reset_composes_replay_cutover_and_preserves_stable_credentials() {
             // Before durable intent the captured authority admits no Runtime
             // mutation, and it is never captured for another namespace or
             // another app root.
-            assert!(db.apply_explicit_history_reset(&offline, &config.db_path).is_err());
+            assert!(
+                db.apply_explicit_history_reset(&offline, &config.db_path)
+                    .is_err()
+            );
             assert!(db.discard_all_thread_history(&offline).is_err());
-            assert!(db.requires_explicit_history_reset(), "a refused reset changes nothing");
+            assert!(
+                db.requires_explicit_history_reset(),
+                "a refused reset changes nothing"
+            );
             let foreign = TempDir::new().unwrap();
-            let foreign_directory = lillux::PinnedDirectory::open(foreign.path()).unwrap().unwrap();
+            let foreign_directory = lillux::PinnedDirectory::open(foreign.path())
+                .unwrap()
+                .unwrap();
             let foreign_namespace = foreign_directory.lock_exclusive().unwrap();
             assert!(
-                OfflineResetAuthority::capture(&state_lock, &directory, &foreign_namespace, &config, &db)
-                    .is_err()
+                OfflineResetAuthority::capture(
+                    &state_lock,
+                    &directory,
+                    &foreign_namespace,
+                    &config,
+                    &db
+                )
+                .is_err()
             );
             drop(foreign_namespace);
             let other_root = TempDir::new().unwrap();
@@ -220,13 +251,24 @@ fn history_reset_composes_replay_cutover_and_preserves_stable_credentials() {
             })
             .unwrap();
             assert!(
-                OfflineResetAuthority::capture(&state_lock, &directory, &namespace, &other_config, &db)
-                    .is_err()
+                OfflineResetAuthority::capture(
+                    &state_lock,
+                    &directory,
+                    &namespace,
+                    &other_config,
+                    &db
+                )
+                .is_err()
             );
 
-            let policy =
-                OfflineResetPolicyOwner::load(&config, &identity, &state_lock, &directory, &namespace)
-                    .unwrap();
+            let policy = OfflineResetPolicyOwner::load(
+                &config,
+                &identity,
+                &state_lock,
+                &directory,
+                &namespace,
+            )
+            .unwrap();
             let quota_claim = OriginalQuotaClaim::prepare(
                 &policy,
                 &identity,
@@ -255,7 +297,10 @@ fn history_reset_composes_replay_cutover_and_preserves_stable_credentials() {
                 .begin_thread_history_discard_admitted(&guard, operation.reference())
                 .unwrap();
         }
-        assert!(db.requires_explicit_history_reset(), "the interrupted attempt never reached Runtime");
+        assert!(
+            db.requires_explicit_history_reset(),
+            "the interrupted attempt never reached Runtime"
+        );
         crate::runtime_db::test_native::retire(&host, db);
         state.close().unwrap();
         drop(namespace);
@@ -283,7 +328,8 @@ fn history_reset_composes_replay_cutover_and_preserves_stable_credentials() {
     // is invalidated, and the durable raw-import upload is still reopenable.
     {
         let state =
-            ryeos_state::test_support::TestState::open(&runtime_state_dir, Arc::clone(&trust)).unwrap();
+            ryeos_state::test_support::TestState::open(&runtime_state_dir, Arc::clone(&trust))
+                .unwrap();
         let profiles = state.operational_credential_profiles().unwrap();
         let find = |profile_id: &str| {
             profiles
@@ -295,7 +341,10 @@ fn history_reset_composes_replay_cutover_and_preserves_stable_credentials() {
         let retired = find(&enrolling.profile_id).unwrap();
         assert_eq!(retired.state, "unauthenticated");
         assert_eq!(retired.authority_revision, enrolling.authority_revision + 1);
-        assert_eq!(retired.credential_generation, enrolling.credential_generation);
+        assert_eq!(
+            retired.credential_generation,
+            enrolling.credential_generation
+        );
         assert_eq!(retired.home_id, enrolling.home_id);
         assert!(retired.active_login_id.is_none());
         assert!(retired.sanitized_account.is_none());
@@ -307,13 +356,17 @@ fn history_reset_composes_replay_cutover_and_preserves_stable_credentials() {
                 .unwrap()
                 .open_durable_cas_upload_admitted(&guard, &import_stage_id, &import_owner)
                 .unwrap();
-            stage.ensure_publication_contract(&import_key, None).unwrap();
+            stage
+                .ensure_publication_contract(&import_key, None)
+                .unwrap();
             stage.ensure_protects_object(&import_object_hash).unwrap();
         }
         state.close().unwrap();
     }
     // The cut-over Runtime store is the exact current schema a live node opens.
-    drop(crate::runtime_db::test_native::TestRuntime::open(&config.db_path));
+    drop(crate::runtime_db::test_native::TestRuntime::open(
+        &config.db_path,
+    ));
 
     let repeated = {
         let _serial = lillux_sqlite::test_host::serial();

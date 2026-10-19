@@ -380,9 +380,7 @@ impl RuntimeDb {
         &self,
         operation_id: &str,
     ) -> Result<Option<RuntimeSnapshotStageRecord>> {
-        self.conn.with_sql(|conn| {
-            read(conn, operation_id)
-        })
+        self.conn.with_sql(|conn| read(conn, operation_id))
     }
 
     pub fn reserve_runtime_snapshot_upload_stage(
@@ -672,7 +670,8 @@ impl RuntimeDb {
             ensure!(
                 matches!(
                     record.phase,
-                    RuntimeSnapshotStagePhase::AttemptPending | RuntimeSnapshotStagePhase::Quarantined
+                    RuntimeSnapshotStagePhase::AttemptPending
+                        | RuntimeSnapshotStagePhase::Quarantined
                 ) && parent.phase == super::runtime_snapshot::RuntimeSnapshotPhase::Reserved,
                 "snapshot create locator did not follow its one attempt claim"
             );
@@ -716,8 +715,8 @@ impl RuntimeDb {
                 )?;
                 ensure!(changed == 1, "snapshot parent bind lost durable CAS");
             }
-            let current =
-                read(&tx, &result.create_operation_id)?.context("snapshot create locator vanished")?;
+            let current = read(&tx, &result.create_operation_id)?
+                .context("snapshot create locator vanished")?;
             tx.commit()?;
             Ok(current)
         })
@@ -751,7 +750,8 @@ impl RuntimeDb {
                 params![operation_id, now],
             )?;
             ensure!(changed == 1, "snapshot create quarantine lost durable CAS");
-            let current = read(&tx, operation_id)?.context("snapshot create quarantine vanished")?;
+            let current =
+                read(&tx, operation_id)?.context("snapshot create quarantine vanished")?;
             tx.commit()?;
             Ok(current)
         })
@@ -787,7 +787,8 @@ impl RuntimeDb {
             ensure!(
                 matches!(
                     record.phase,
-                    RuntimeSnapshotStagePhase::AttemptPending | RuntimeSnapshotStagePhase::Quarantined
+                    RuntimeSnapshotStagePhase::AttemptPending
+                        | RuntimeSnapshotStagePhase::Quarantined
                 ),
                 "snapshot upload receipt did not follow one attempt"
             );
@@ -825,8 +826,8 @@ impl RuntimeDb {
                 ],
             )?;
             ensure!(changed == 1, "snapshot upload bind lost durable CAS");
-            let current =
-                read(&tx, &receipt.upload_operation_id)?.context("snapshot upload receipt vanished")?;
+            let current = read(&tx, &receipt.upload_operation_id)?
+                .context("snapshot upload receipt vanished")?;
             tx.commit()?;
             Ok(current)
         })
@@ -859,7 +860,8 @@ impl RuntimeDb {
              WHERE operation_id=?1 AND phase='attempt_pending'",
                 params![operation_id, now],
             )?;
-            let current = read(&tx, operation_id)?.context("snapshot upload quarantine vanished")?;
+            let current =
+                read(&tx, operation_id)?.context("snapshot upload quarantine vanished")?;
             tx.commit()?;
             Ok(current)
         })
@@ -1052,7 +1054,9 @@ mod tests {
                 .unwrap(),
             RuntimeSnapshotStageClaim::Accepted(_)
         ));
-        db.conn.with_sql(|connection| validate_current(connection)).unwrap();
+        db.conn
+            .with_sql(|connection| validate_current(connection))
+            .unwrap();
     }
 
     #[test]
@@ -1082,7 +1086,9 @@ mod tests {
                 .unwrap(),
             RuntimeSnapshotStageClaim::Reconcile(_)
         ));
-        db.conn.with_sql(|connection| validate_current(connection)).unwrap();
+        db.conn
+            .with_sql(|connection| validate_current(connection))
+            .unwrap();
     }
 
     #[test]
@@ -1155,7 +1161,9 @@ mod tests {
             .unwrap(),
             RuntimeSnapshotStageClaim::Reconcile(_)
         ));
-        db.conn.with_sql(|connection| validate_current(connection)).unwrap();
+        db.conn
+            .with_sql(|connection| validate_current(connection))
+            .unwrap();
     }
 
     #[test]
@@ -1206,7 +1214,9 @@ mod tests {
                 .unwrap(),
             bound,
         );
-        db.conn.with_sql(|connection| validate_current(connection)).unwrap();
+        db.conn
+            .with_sql(|connection| validate_current(connection))
+            .unwrap();
     }
 
     #[test]
@@ -1250,7 +1260,9 @@ mod tests {
             super::super::runtime_snapshot::RuntimeSnapshotPhase::Reserved
         );
         assert!(parent_record.locator.is_none());
-        db.conn.with_sql(|connection| validate_current(connection)).unwrap();
+        db.conn
+            .with_sql(|connection| validate_current(connection))
+            .unwrap();
     }
 
     #[test]

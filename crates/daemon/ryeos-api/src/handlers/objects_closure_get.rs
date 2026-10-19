@@ -53,7 +53,8 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         "blob_bytes": u64::MAX,
         "entries": [],
     });
-    let mut estimated_response_bytes = u64::try_from(serde_json::to_vec(&response_envelope)?.len())?;
+    let mut estimated_response_bytes =
+        u64::try_from(serde_json::to_vec(&response_envelope)?.len())?;
     let mut entry_count = 0usize;
 
     for hash in &report.object_hashes {
@@ -64,11 +65,13 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         )? {
             let cap = usize::try_from(req.max_object_bytes)
                 .context("admitted per-object byte limit exceeds this platform")?;
-            let value: Value = serde_json::from_slice(&raw).context("failed to parse closure object")?;
+            let value: Value =
+                serde_json::from_slice(&raw).context("failed to parse closure object")?;
             if lillux::canonical_json_bounded(&value, cap)?.as_slice() != raw {
                 bail!("closure object {hash} is not canonical JSON");
             }
-            let object_bytes = u64::try_from(raw.len()).context("closure object size exceeds u64")?;
+            let object_bytes =
+                u64::try_from(raw.len()).context("closure object size exceeds u64")?;
             total_object_bytes = total_object_bytes
                 .checked_add(object_bytes)
                 .context("object closure byte count overflow")?;
@@ -128,10 +131,12 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
 
     let mut total_blob_bytes = 0_u64;
     for hash in &report.blob_hashes {
-        let remaining_blob_bytes = req.max_total_blob_bytes
+        let remaining_blob_bytes = req
+            .max_total_blob_bytes
             .checked_sub(total_blob_bytes)
             .context("object closure blob byte accounting exceeded its admitted total")?;
-        let response_budget = req.max_response_bytes
+        let response_budget = req
+            .max_response_bytes
             .checked_sub(estimated_response_bytes)
             .context("object closure response exceeds max_response_bytes")?;
         let (read_ceiling, entry_overhead) = admitted_blob_entry_read_bound(
@@ -256,46 +261,24 @@ mod tests {
     #[test]
     fn closure_blob_read_limit_includes_json_entry_and_base64_expansion() {
         let hash = "ab".repeat(32);
-        let (limit, overhead) = admitted_blob_entry_read_bound(
-            &hash,
-            1024,
-            1024,
-            1_000_000,
-            false,
-        )
-        .unwrap();
+        let (limit, overhead) =
+            admitted_blob_entry_read_bound(&hash, 1024, 1024, 1_000_000, false).unwrap();
         assert_eq!(limit, 1024);
         let exact_response_budget = overhead + encoded_len(limit);
-        let (exact_limit, exact_overhead) = admitted_blob_entry_read_bound(
-            &hash,
-            1024,
-            1024,
-            exact_response_budget,
-            false,
-        )
-        .unwrap();
+        let (exact_limit, exact_overhead) =
+            admitted_blob_entry_read_bound(&hash, 1024, 1024, exact_response_budget, false)
+                .unwrap();
         assert_eq!(exact_overhead, overhead);
         assert_eq!(exact_limit, limit);
 
-        let (below_limit, _) = admitted_blob_entry_read_bound(
-            &hash,
-            1024,
-            1024,
-            exact_response_budget - 1,
-            false,
-        )
-        .unwrap();
+        let (below_limit, _) =
+            admitted_blob_entry_read_bound(&hash, 1024, 1024, exact_response_budget - 1, false)
+                .unwrap();
         assert!(encoded_len(below_limit) <= exact_response_budget - 1 - overhead);
         assert!(encoded_len(below_limit + 1) > exact_response_budget - 1 - overhead);
 
-        let (aggregate_limited, _) = admitted_blob_entry_read_bound(
-            &hash,
-            1024,
-            17,
-            1_000_000,
-            true,
-        )
-        .unwrap();
+        let (aggregate_limited, _) =
+            admitted_blob_entry_read_bound(&hash, 1024, 17, 1_000_000, true).unwrap();
         assert_eq!(aggregate_limited, 17);
     }
 

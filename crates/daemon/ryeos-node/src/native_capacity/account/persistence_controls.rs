@@ -3,9 +3,9 @@
 //! native-release capabilities. Full reservation/cold-start controls must also
 //! exercise actual authenticated inputs and retained physical owners.
 
-use super::*;
 use super::anchor::RetainedAnchor;
 use super::redo::{AccountRedo, Operation};
+use super::*;
 use std::cell::Cell;
 
 struct Work {
@@ -15,12 +15,24 @@ struct Work {
 }
 impl Work {
     fn new() -> Self {
-        Self { remaining: Cell::new(1_000_000), calls: Cell::new(0), fail_at: Cell::new(None) }
+        Self {
+            remaining: Cell::new(1_000_000),
+            calls: Cell::new(0),
+            fail_at: Cell::new(None),
+        }
     }
     fn pay(&self, steps: u64) -> Result<()> {
         self.calls.set(self.calls.get() + 1);
-        self.remaining.set(self.remaining.get().checked_sub(steps).context("fixture work exhausted")?);
-        ensure!(self.fail_at.get() != Some(self.calls.get()), "injected retained publication refusal");
+        self.remaining.set(
+            self.remaining
+                .get()
+                .checked_sub(steps)
+                .context("fixture work exhausted")?,
+        );
+        ensure!(
+            self.fail_at.get() != Some(self.calls.get()),
+            "injected retained publication refusal"
+        );
         Ok(())
     }
 }
@@ -48,41 +60,96 @@ impl Fixture {
         directory.tighten_owner_private_directory().unwrap();
         let (mut policy, genesis, target) = redo::controls::fixture();
         adjust(&mut policy);
-        let debit = genesis.successor(Operation::Debit, target, &policy).unwrap();
-        let account = directory.atomic_create_pinned_regular(OsStr::new("account"),
-            &encode(genesis.target()).unwrap(), 0o600, crate::NODE_TEMP_PURPOSE).unwrap().unwrap();
-        directory.atomic_create_pinned_regular(OsStr::new("anchor"),
-            &genesis.encode(&policy).unwrap(), 0o600, crate::NODE_TEMP_PURPOSE).unwrap().unwrap();
-        let store = RetainedStore::open(directory.try_clone().unwrap(), account.identity().unwrap()).unwrap();
-        let mut anchor = RetainedAnchor::retain(directory.try_clone().unwrap(), directory.identity().unwrap()).unwrap();
+        let debit = genesis
+            .successor(Operation::Debit, target, &policy)
+            .unwrap();
+        let account = directory
+            .atomic_create_pinned_regular(
+                OsStr::new("account"),
+                &encode(genesis.target()).unwrap(),
+                0o600,
+                crate::NODE_TEMP_PURPOSE,
+            )
+            .unwrap()
+            .unwrap();
+        directory
+            .atomic_create_pinned_regular(
+                OsStr::new("anchor"),
+                &genesis.encode(&policy).unwrap(),
+                0o600,
+                crate::NODE_TEMP_PURPOSE,
+            )
+            .unwrap()
+            .unwrap();
+        let store =
+            RetainedStore::open(directory.try_clone().unwrap(), account.identity().unwrap())
+                .unwrap();
+        let mut anchor = RetainedAnchor::retain(
+            directory.try_clone().unwrap(),
+            directory.identity().unwrap(),
+        )
+        .unwrap();
         let deadline = lillux::time::MonotonicDeadline::after(std::time::Duration::from_secs(30));
         let work = Work::new();
-        anchor.load(&policy, &target.issuance_digest, deadline, &|n| work.pay(n)).unwrap();
+        anchor
+            .load(&policy, &target.issuance_digest, deadline, &|n| work.pay(n))
+            .unwrap();
         work.calls.set(0);
-        Self { _temporary: temporary, directory, store, anchor, policy, genesis, debit, deadline, work }
+        Self {
+            _temporary: temporary,
+            directory,
+            store,
+            anchor,
+            policy,
+            genesis,
+            debit,
+            deadline,
+            work,
+        }
     }
-    fn issuance(&self) -> [u8; 32] { self.genesis.target().issuance_digest }
+    fn issuance(&self) -> [u8; 32] {
+        self.genesis.target().issuance_digest
+    }
     fn publish(&mut self, next: AccountRedo) -> Result<()> {
-        self.anchor.publish(next, &self.policy, &self.issuance(), self.deadline, &|n| self.work.pay(n))
+        self.anchor
+            .publish(next, &self.policy, &self.issuance(), self.deadline, &|n| {
+                self.work.pay(n)
+            })
     }
     fn apply(&self, redo: &AccountRedo) -> Result<()> {
-        self.store.apply_redo(redo, self.deadline, &|n| self.work.pay(n))
+        self.store
+            .apply_redo(redo, self.deadline, &|n| self.work.pay(n))
     }
     fn account_bytes(&self) -> [u8; RECORD_BYTES] {
-        self.store.read_bytes(self.deadline, &|n| self.work.pay(n)).unwrap()
+        self.store
+            .read_bytes(self.deadline, &|n| self.work.pay(n))
+            .unwrap()
     }
     /// The orderly-rollover renewal of the fixture debit: one record that
     /// settles the served incarnation and opens epoch 2.
     fn renewal(&self) -> AccountRedo {
         let before = self.debit.target();
-        self.debit.renew(Operation::RolloverRenewal, redo::controls::next_epoch(before),
-            rollover_authorization(&self.issuance(), before).unwrap(), &self.policy).unwrap()
+        self.debit
+            .renew(
+                Operation::RolloverRenewal,
+                redo::controls::next_epoch(before),
+                rollover_authorization(&self.issuance(), before).unwrap(),
+                &self.policy,
+            )
+            .unwrap()
     }
     /// A fresh owner over the same files, as the next start would open them.
     fn reopen(&self) -> RetainedAnchor {
-        let mut reopened = RetainedAnchor::retain(self.directory.try_clone().unwrap(),
-            self.directory.identity().unwrap()).unwrap();
-        reopened.load(&self.policy, &self.issuance(), self.deadline, &|n| self.work.pay(n)).unwrap();
+        let mut reopened = RetainedAnchor::retain(
+            self.directory.try_clone().unwrap(),
+            self.directory.identity().unwrap(),
+        )
+        .unwrap();
+        reopened
+            .load(&self.policy, &self.issuance(), self.deadline, &|n| {
+                self.work.pay(n)
+            })
+            .unwrap();
         reopened
     }
     fn write_account_unchecked(&self, bytes: &[u8; RECORD_BYTES]) {
@@ -99,19 +166,37 @@ fn publication_refusals_retain_one_target_and_do_not_mutate_account() {
     // atomic_fs controls separately cover its marker/rename crash phases.
     for fail_at in 1..=8 {
         let mut f = Fixture::new();
-        let original_anchor = f.directory.open_pinned_regular(OsStr::new("anchor"), false)
-            .unwrap().unwrap().identity().unwrap();
+        let original_anchor = f
+            .directory
+            .open_pinned_regular(OsStr::new("anchor"), false)
+            .unwrap()
+            .unwrap()
+            .identity()
+            .unwrap();
         let account_identity = f.store.identity;
         f.work.fail_at.set(Some(fail_at));
-        assert!(f.publish(f.debit).is_err(), "unreached publication boundary {fail_at}");
+        assert!(
+            f.publish(f.debit).is_err(),
+            "unreached publication boundary {fail_at}"
+        );
         let spent = f.work.remaining.get();
         f.work.fail_at.set(None);
         assert_eq!(f.account_bytes(), encode(f.genesis.target()).unwrap());
         f.publish(f.debit).unwrap();
-        assert!(f.work.remaining.get() < spent, "retry replenished its original counter");
+        assert!(
+            f.work.remaining.get() < spent,
+            "retry replenished its original counter"
+        );
         assert_eq!(f.anchor.current().unwrap(), &f.debit);
-        assert_ne!(f.directory.open_pinned_regular(OsStr::new("anchor"), false)
-            .unwrap().unwrap().identity().unwrap(), original_anchor);
+        assert_ne!(
+            f.directory
+                .open_pinned_regular(OsStr::new("anchor"), false)
+                .unwrap()
+                .unwrap()
+                .identity()
+                .unwrap(),
+            original_anchor
+        );
         f.apply(f.anchor.current().unwrap()).unwrap();
         assert_eq!(f.account_bytes(), encode(f.debit.target()).unwrap());
         assert_eq!(f.store.pinned.identity().unwrap(), account_identity);
@@ -121,7 +206,20 @@ fn publication_refusals_retain_one_target_and_do_not_mutate_account() {
 
 #[test]
 fn fresh_publisher_reconciles_exact_torn_images_in_the_issued_account_inode() {
-    for cut in [0, 1, 8, 12, 20, 60, 100, 133, 269, PROCESS_END, RECORD_BYTES - 1, RECORD_BYTES] {
+    for cut in [
+        0,
+        1,
+        8,
+        12,
+        20,
+        60,
+        100,
+        133,
+        269,
+        PROCESS_END,
+        RECORD_BYTES - 1,
+        RECORD_BYTES,
+    ] {
         let mut f = Fixture::new();
         f.publish(f.debit).unwrap();
         let mut torn = encode(f.genesis.target()).unwrap();
@@ -149,27 +247,48 @@ fn renewal_refused_at_every_publication_boundary_ends_in_exactly_one_epoch() {
         f.publish(f.debit).unwrap();
         f.apply(&f.debit).unwrap();
         let renewal = f.renewal();
-        assert_eq!(renewal.settled_incarnation(),
-            Some(f.debit.target().outstanding.unwrap().process_digest));
+        assert_eq!(
+            renewal.settled_incarnation(),
+            Some(f.debit.target().outstanding.unwrap().process_digest)
+        );
         f.work.calls.set(0);
         f.work.fail_at.set(Some(fail_at));
-        assert!(f.publish(renewal).is_err(), "unreached publication boundary {fail_at}");
+        assert!(
+            f.publish(renewal).is_err(),
+            "unreached publication boundary {fail_at}"
+        );
         f.work.fail_at.set(None);
-        assert_eq!(f.account_bytes(), encode(f.debit.target()).unwrap(),
-            "account written before the anchor at boundary {fail_at}");
+        assert_eq!(
+            f.account_bytes(),
+            encode(f.debit.target()).unwrap(),
+            "account written before the anchor at boundary {fail_at}"
+        );
 
         let mut reopened = f.reopen();
         let current = *reopened.current().unwrap();
         let charged = current.charge_recovery(&process, &f.policy).unwrap();
-        reopened.publish(charged, &f.policy, &f.issuance(), f.deadline, &|n| f.work.pay(n)).unwrap();
+        reopened
+            .publish(charged, &f.policy, &f.issuance(), f.deadline, &|n| {
+                f.work.pay(n)
+            })
+            .unwrap();
         f.apply(reopened.current().unwrap()).unwrap();
         let settled = if current == f.debit {
             reached[0] = true;
             // The renewal never became durable: the served incarnation is
             // settled dead in the same epoch, as any crashed incarnation is.
-            let target = CapacityRecord { outstanding: None, ..*charged.target() };
-            let dead = charged.successor(Operation::DeadIncarnationSettlement, target, &f.policy).unwrap();
-            reopened.publish(dead, &f.policy, &f.issuance(), f.deadline, &|n| f.work.pay(n)).unwrap();
+            let target = CapacityRecord {
+                outstanding: None,
+                ..*charged.target()
+            };
+            let dead = charged
+                .successor(Operation::DeadIncarnationSettlement, target, &f.policy)
+                .unwrap();
+            reopened
+                .publish(dead, &f.policy, &f.issuance(), f.deadline, &|n| {
+                    f.work.pay(n)
+                })
+                .unwrap();
             f.apply(reopened.current().unwrap()).unwrap();
             assert_eq!(dead.epoch(), 1);
             dead
@@ -177,7 +296,11 @@ fn renewal_refused_at_every_publication_boundary_ends_in_exactly_one_epoch() {
             reached[1] = true;
             assert_eq!(current, renewal, "boundary {fail_at} left neither image");
             assert_eq!(charged.epoch(), 2);
-            assert_eq!(charged.recovery_attempts(), 1, "repair is charged to the opened epoch");
+            assert_eq!(
+                charged.recovery_attempts(),
+                1,
+                "repair is charged to the opened epoch"
+            );
             charged
         };
         assert_eq!(decode(&f.account_bytes()).unwrap(), *settled.target());
@@ -197,7 +320,24 @@ fn fresh_publisher_reconciles_torn_renewal_images_including_the_epoch_bytes() {
     // Cuts inside the epoch field (12..20) leave a record that is neither
     // image; the exact-prefix rule still repairs it to the renewal target.
     // The full-length cut is the crash after a complete write: a no-op.
-    for cut in [0, 1, 8, 12, 13, 19, 20, 28, 60, 100, 101, 133, 269, PROCESS_END, RECORD_BYTES - 1, RECORD_BYTES] {
+    for cut in [
+        0,
+        1,
+        8,
+        12,
+        13,
+        19,
+        20,
+        28,
+        60,
+        100,
+        101,
+        133,
+        269,
+        PROCESS_END,
+        RECORD_BYTES - 1,
+        RECORD_BYTES,
+    ] {
         let mut f = Fixture::new();
         f.publish(f.debit).unwrap();
         f.apply(&f.debit).unwrap();
@@ -209,8 +349,10 @@ fn fresh_publisher_reconciles_torn_renewal_images_including_the_epoch_bytes() {
         f.write_account_unchecked(&torn);
         let reopened = f.reopen();
         assert_eq!(reopened.current().unwrap(), &renewal);
-        assert_eq!(reopened.current().unwrap().settled_incarnation(),
-            Some(f.debit.target().outstanding.unwrap().process_digest));
+        assert_eq!(
+            reopened.current().unwrap().settled_incarnation(),
+            Some(f.debit.target().outstanding.unwrap().process_digest)
+        );
         f.apply(reopened.current().unwrap()).unwrap();
         assert_eq!(f.account_bytes(), target);
         let repaired = decode(&f.account_bytes()).unwrap();
@@ -249,28 +391,64 @@ fn crash_loop_spends_one_epoch_then_exhausts_without_renewal() {
     let (mut policy, genesis, debited) = redo::controls::fixture();
     sixteen_incarnations(&mut policy);
     let incarnation = debited.outstanding.unwrap();
-    let renewal = genesis.successor(Operation::Debit, debited, &policy).unwrap()
-        .renew(Operation::RolloverRenewal, redo::controls::next_epoch(&debited),
-            rollover_authorization(&[0x31; 32], &debited).unwrap(), &policy).unwrap();
+    let renewal = genesis
+        .successor(Operation::Debit, debited, &policy)
+        .unwrap()
+        .renew(
+            Operation::RolloverRenewal,
+            redo::controls::next_epoch(&debited),
+            rollover_authorization(&[0x31; 32], &debited).unwrap(),
+            &policy,
+        )
+        .unwrap();
     for (start, epoch) in [(genesis, 1), (renewal, 2)] {
         let mut current = start;
         if current.operation() == Operation::RolloverRenewal {
-            current = current.charge_recovery(&redo::controls::process(4242), &policy).unwrap();
+            current = current
+                .charge_recovery(&redo::controls::process(4242), &policy)
+                .unwrap();
             assert_eq!(current.recovery_attempts(), 1);
         }
         for turn in 0..16u32 {
             let before = *current.target();
-            let (sequence, consumed) = before.prepare_debit(policy.allowance, policy.incarnation.units).unwrap();
-            let debit = current.successor(Operation::Debit,
-                CapacityRecord { sequence, consumed, outstanding: Some(incarnation), ..before }, &policy).unwrap();
-            let charged = debit.charge_recovery(&redo::controls::process(4300 + turn), &policy).unwrap();
-            current = charged.successor(Operation::DeadIncarnationSettlement,
-                CapacityRecord { outstanding: None, ..*charged.target() }, &policy).unwrap();
+            let (sequence, consumed) = before
+                .prepare_debit(policy.allowance, policy.incarnation.units)
+                .unwrap();
+            let debit = current
+                .successor(
+                    Operation::Debit,
+                    CapacityRecord {
+                        sequence,
+                        consumed,
+                        outstanding: Some(incarnation),
+                        ..before
+                    },
+                    &policy,
+                )
+                .unwrap();
+            let charged = debit
+                .charge_recovery(&redo::controls::process(4300 + turn), &policy)
+                .unwrap();
+            current = charged
+                .successor(
+                    Operation::DeadIncarnationSettlement,
+                    CapacityRecord {
+                        outstanding: None,
+                        ..*charged.target()
+                    },
+                    &policy,
+                )
+                .unwrap();
             assert_eq!(current.epoch(), epoch, "a crash loop never opens an epoch");
             assert!(current.recovery_attempts() <= 32);
         }
-        let exhausted = current.target().prepare_debit(policy.allowance, policy.incarnation.units);
-        assert_eq!(exhausted.unwrap_err(), CapacityDebitRefusal::AllowanceExhausted);
+        let exhausted = current
+            .target()
+            .prepare_debit(policy.allowance, policy.incarnation.units);
+        assert_eq!(
+            exhausted.unwrap_err(),
+            CapacityDebitRefusal::AllowanceExhausted
+        );
         assert_eq!(current.target().sequence, start.target().sequence + 16);
         assert!(current.recovery_attempts() <= 32);
         assert_eq!(current.epoch(), epoch);
@@ -284,14 +462,35 @@ fn orderly_rollovers_renew_epochs_without_exhausting_the_issuance() {
     for turn in 1..=24u64 {
         let before = *f.anchor.current().unwrap().target();
         assert_eq!(before.epoch, turn);
-        let (sequence, consumed) = before.prepare_debit(f.policy.allowance, f.policy.incarnation.units).unwrap();
-        let debit = f.anchor.current().unwrap().successor(Operation::Debit,
-            CapacityRecord { sequence, consumed, outstanding: Some(incarnation), ..before }, &f.policy).unwrap();
+        let (sequence, consumed) = before
+            .prepare_debit(f.policy.allowance, f.policy.incarnation.units)
+            .unwrap();
+        let debit = f
+            .anchor
+            .current()
+            .unwrap()
+            .successor(
+                Operation::Debit,
+                CapacityRecord {
+                    sequence,
+                    consumed,
+                    outstanding: Some(incarnation),
+                    ..before
+                },
+                &f.policy,
+            )
+            .unwrap();
         f.publish(debit).unwrap();
         f.apply(&debit).unwrap();
         let served = debit.target();
-        let renewal = debit.renew(Operation::RolloverRenewal, redo::controls::next_epoch(served),
-            rollover_authorization(&f.issuance(), served).unwrap(), &f.policy).unwrap();
+        let renewal = debit
+            .renew(
+                Operation::RolloverRenewal,
+                redo::controls::next_epoch(served),
+                rollover_authorization(&f.issuance(), served).unwrap(),
+                &f.policy,
+            )
+            .unwrap();
         f.publish(renewal).unwrap();
         f.apply(&renewal).unwrap();
         let record = decode(&f.account_bytes()).unwrap();
@@ -299,7 +498,12 @@ fn orderly_rollovers_renew_epochs_without_exhausting_the_issuance() {
         assert_eq!(record.sequence, turn);
         assert_eq!(record.consumed, genesis_consumed());
         assert_eq!(f.anchor.current().unwrap().recovery_attempts(), 0);
-        assert_eq!(summarize(f.anchor.current().unwrap(), &f.policy).unwrap().incarnations_remaining, 16);
+        assert_eq!(
+            summarize(f.anchor.current().unwrap(), &f.policy)
+                .unwrap()
+                .incarnations_remaining,
+            16
+        );
     }
     assert_eq!(decode(&f.account_bytes()).unwrap().epoch, 25);
 }
@@ -310,9 +514,12 @@ fn signed_reissuance(body: &ReissuanceBody, key: &SigningKey) -> Vec<u8> {
     let signature = key.sign(canonical.as_bytes());
     serde_json::to_vec(&ReissuanceDocument {
         body: body.clone(),
-        signature: format!("ed25519:{}",
-            base64::engine::general_purpose::STANDARD.encode(signature.to_bytes())),
-    }).unwrap()
+        signature: format!(
+            "ed25519:{}",
+            base64::engine::general_purpose::STANDARD.encode(signature.to_bytes())
+        ),
+    })
+    .unwrap()
 }
 
 #[test]
@@ -327,8 +534,14 @@ fn operator_reissue_anchor_opens_only_with_its_present_verified_document() {
     let mut f = Fixture::new();
     f.publish(f.debit).unwrap();
     f.apply(&f.debit).unwrap();
-    let settled = CapacityRecord { outstanding: None, ..*f.debit.target() };
-    let release = f.debit.successor(Operation::ReleaseSettlement, settled, &f.policy).unwrap();
+    let settled = CapacityRecord {
+        outstanding: None,
+        ..*f.debit.target()
+    };
+    let release = f
+        .debit
+        .successor(Operation::ReleaseSettlement, settled, &f.policy)
+        .unwrap();
     f.publish(release).unwrap();
     f.apply(&release).unwrap();
     let body = ReissuanceBody {
@@ -338,29 +551,49 @@ fn operator_reissue_anchor_opens_only_with_its_present_verified_document() {
         issuance_digest: hex_digest(&f.issuance()),
         from_epoch: 1,
         to_epoch: 2,
-        anchor_digest: hex_digest(&sha2::Sha256::digest(f.anchor.current().unwrap().encode(&f.policy).unwrap()).into()),
+        anchor_digest: hex_digest(
+            &sha2::Sha256::digest(f.anchor.current().unwrap().encode(&f.policy).unwrap()).into(),
+        ),
         previous_reissuance_digest: None,
         reason: "exhausted".to_owned(),
         issued_at: "2026-10-14T00:00:00Z".to_owned(),
     };
     let document = signed_reissuance(&body, &operator);
-    let reissue = release.renew(Operation::OperatorReissue, redo::controls::next_epoch(&settled),
-        sha2::Sha256::digest(&document).into(), &f.policy).unwrap();
+    let reissue = release
+        .renew(
+            Operation::OperatorReissue,
+            redo::controls::next_epoch(&settled),
+            sha2::Sha256::digest(&document).into(),
+            &f.policy,
+        )
+        .unwrap();
     f.publish(reissue).unwrap();
     f.apply(&reissue).unwrap();
 
     let onboarding_root = tempfile::tempdir().unwrap();
-    let onboarding = || PinnedDirectory::open(onboarding_root.path()).unwrap().unwrap();
+    let onboarding = || {
+        PinnedDirectory::open(onboarding_root.path())
+            .unwrap()
+            .unwrap()
+    };
     let path = onboarding_root.path().join(REISSUANCE_DOCUMENT_NAME);
     let verify = |current: &AccountRedo, key: &SigningKey, fingerprint: &str| {
-        verify_reissue_anchor_document(onboarding(), &key.verifying_key(), fingerprint,
-            &node_fingerprint, &f.issuance(), current)
+        verify_reissue_anchor_document(
+            onboarding(),
+            &key.verifying_key(),
+            fingerprint,
+            &node_fingerprint,
+            &f.issuance(),
+            current,
+        )
     };
     let current = *f.anchor.current().unwrap();
     assert_eq!(current.operation(), Operation::OperatorReissue);
 
     // Absent.
-    let Err(absent) = verify(&current, &operator, &operator_fingerprint) else { panic!("absent document accepted") };
+    let Err(absent) = verify(&current, &operator, &operator_fingerprint) else {
+        panic!("absent document accepted")
+    };
     assert!(absent.to_string().contains("has no document"));
     // Accept, and the retained input is the file that was read.
     std::fs::write(&path, &document).unwrap();
@@ -376,31 +609,70 @@ fn operator_reissue_anchor_opens_only_with_its_present_verified_document() {
     let mut tampered: ReissuanceDocument = serde_json::from_slice(&document).unwrap();
     tampered.body.reason = "tampered".to_owned();
     std::fs::write(&path, serde_json::to_vec(&tampered).unwrap()).unwrap();
-    let Err(stale) = verify(&current, &operator, &operator_fingerprint) else { panic!("tampered document accepted") };
+    let Err(stale) = verify(&current, &operator, &operator_fingerprint) else {
+        panic!("tampered document accepted")
+    };
     assert!(stale.to_string().contains("is stale"));
     // Stale and foreign bodies that the anchor itself names: publish an anchor
     // over each signed variant so the digest matches and the body is judged.
     for (label, edit) in [
-        ("wrong epoch", Box::new(|b: &mut ReissuanceBody| { b.from_epoch = 2; b.to_epoch = 3; }) as Box<dyn Fn(&mut ReissuanceBody)>),
-        ("wrong node", Box::new(|b: &mut ReissuanceBody| b.node_fingerprint = "f".repeat(64))),
-        ("wrong issuance", Box::new(|b: &mut ReissuanceBody| b.issuance_digest = "0".repeat(64))),
-        ("wrong operator", Box::new(|b: &mut ReissuanceBody| b.operator_fingerprint = "a".repeat(64))),
+        (
+            "wrong epoch",
+            Box::new(|b: &mut ReissuanceBody| {
+                b.from_epoch = 2;
+                b.to_epoch = 3;
+            }) as Box<dyn Fn(&mut ReissuanceBody)>,
+        ),
+        (
+            "wrong node",
+            Box::new(|b: &mut ReissuanceBody| b.node_fingerprint = "f".repeat(64)),
+        ),
+        (
+            "wrong issuance",
+            Box::new(|b: &mut ReissuanceBody| b.issuance_digest = "0".repeat(64)),
+        ),
+        (
+            "wrong operator",
+            Box::new(|b: &mut ReissuanceBody| b.operator_fingerprint = "a".repeat(64)),
+        ),
     ] {
         let mut variant = body.clone();
         edit(&mut variant);
         let bytes = signed_reissuance(&variant, &operator);
-        let named = AccountRedo::decode(&f.anchor.current().unwrap().encode(&f.policy).unwrap(),
-            &f.policy, &f.issuance()).unwrap();
-        let named = release.renew(Operation::OperatorReissue, *named.target(),
-            sha2::Sha256::digest(&bytes).into(), &f.policy).unwrap();
+        let named = AccountRedo::decode(
+            &f.anchor.current().unwrap().encode(&f.policy).unwrap(),
+            &f.policy,
+            &f.issuance(),
+        )
+        .unwrap();
+        let named = release
+            .renew(
+                Operation::OperatorReissue,
+                *named.target(),
+                sha2::Sha256::digest(&bytes).into(),
+                &f.policy,
+            )
+            .unwrap();
         std::fs::write(&path, &bytes).unwrap();
-        assert!(verify(&named, &operator, &operator_fingerprint).is_err(), "{label}");
+        assert!(
+            verify(&named, &operator, &operator_fingerprint).is_err(),
+            "{label}"
+        );
         // Signed by another key over an otherwise valid body.
         let foreign = signed_reissuance(&body, &foreign_operator);
-        let named = release.renew(Operation::OperatorReissue, *named.target(),
-            sha2::Sha256::digest(&foreign).into(), &f.policy).unwrap();
+        let named = release
+            .renew(
+                Operation::OperatorReissue,
+                *named.target(),
+                sha2::Sha256::digest(&foreign).into(),
+                &f.policy,
+            )
+            .unwrap();
         std::fs::write(&path, &foreign).unwrap();
-        assert!(verify(&named, &operator, &operator_fingerprint).is_err(), "{label} foreign signature");
+        assert!(
+            verify(&named, &operator, &operator_fingerprint).is_err(),
+            "{label} foreign signature"
+        );
     }
     // The account was never touched by any refusal.
     assert_eq!(decode(&f.account_bytes()).unwrap(), *reissue.target());
@@ -429,17 +701,18 @@ fn pending_recovery_charge_cannot_retry_the_earlier_debit_or_refund_consumption(
 fn unbound_stage_refuses_before_more_staging_and_remains_available_to_operator() {
     let mut f = Fixture::new();
     let name = OsStr::new(".secure.authoring.unbound");
-    let orphan = f.directory.atomic_create_pinned_regular(
-        name,
-        b"unbound stage",
-        0o600,
-        crate::NODE_TEMP_PURPOSE,
-    ).unwrap().unwrap();
+    let orphan = f
+        .directory
+        .atomic_create_pinned_regular(name, b"unbound stage", 0o600, crate::NODE_TEMP_PURPOSE)
+        .unwrap()
+        .unwrap();
     let identity = orphan.identity().unwrap();
     for _ in 0..3 {
         assert!(f.publish(f.debit).is_err());
         assert_eq!(f.directory.entries_no_follow_bounded(8).unwrap().len(), 3);
-        f.directory.require_pinned_regular_entry_fixed(&orphan).unwrap();
+        f.directory
+            .require_pinned_regular_entry_fixed(&orphan)
+            .unwrap();
         assert_eq!(orphan.identity().unwrap(), identity);
         assert_eq!(f.account_bytes(), encode(f.genesis.target()).unwrap());
     }
@@ -460,5 +733,8 @@ fn foreign_account_bytes_and_identical_replacement_inode_are_never_repaired() {
     std::fs::write(&replacement, target).unwrap();
     std::fs::rename(&replacement, f._temporary.path().join("account")).unwrap();
     assert!(f.apply(&f.debit).is_err());
-    assert_eq!(std::fs::read(f._temporary.path().join("account")).unwrap(), target);
+    assert_eq!(
+        std::fs::read(f._temporary.path().join("account")).unwrap(),
+        target
+    );
 }

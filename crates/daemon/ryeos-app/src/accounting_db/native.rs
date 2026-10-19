@@ -21,7 +21,9 @@ enum LedgerConnection {
     CheckedOut,
     // Inputs refused before any open was attempted. No ticket exists; the
     // inputs stay here because no Store join path accepts them.
-    Unissued { _retained: OriginalNativeBoundInputs },
+    Unissued {
+        _retained: OriginalNativeBoundInputs,
+    },
     Live(OriginalNativeConnection),
     Opening(OriginalNativeOpenFailure),
     Closing(OriginalNativeCloseFailure),
@@ -117,7 +119,9 @@ impl AccountingNativeLedger {
         Self {
             inner: lillux::custody::Held::new(
                 LEDGER_KIND,
-                AccountingNativeLedgerParts { state: Mutex::new(state) },
+                AccountingNativeLedgerParts {
+                    state: Mutex::new(state),
+                },
                 ledger_holders_taken,
             ),
         }
@@ -125,7 +129,10 @@ impl AccountingNativeLedger {
     /// Move the custody state out whole; a copy in another process is refused
     /// and comes back still held.
     fn into_state(self) -> std::result::Result<Mutex<LedgerNativeState>, Self> {
-        self.inner.take_whole().map(|parts| parts.state).map_err(|inner| Self { inner })
+        self.inner
+            .take_whole()
+            .map(|parts| parts.state)
+            .map_err(|inner| Self { inner })
     }
 }
 
@@ -165,7 +172,11 @@ impl AccountingNativeOutsideSources {
         Self {
             inner: lillux::custody::Held::new(
                 OUTSIDE_SOURCES_KIND,
-                AccountingNativeOutsideSourceSlots { connection, reference, unused_reference },
+                AccountingNativeOutsideSourceSlots {
+                    connection,
+                    reference,
+                    unused_reference,
+                },
                 outside_sources_empty,
             ),
         }
@@ -174,13 +185,18 @@ impl AccountingNativeOutsideSources {
     /// cached source slots. The caller has taken these sources in the
     /// original process; a foreign copy is relinquished and the process
     /// aborts.
-    pub fn into_parts(self) -> (
+    pub fn into_parts(
+        self,
+    ) -> (
         Option<OriginalNativeOutsideConnectionParts>,
         Option<OriginalNativeOutsideConnectionParts>,
         Option<OriginalNativeTransientInputs>,
     ) {
-        let AccountingNativeOutsideSourceSlots { connection, reference, unused_reference } =
-            self.inner.take_or_abort();
+        let AccountingNativeOutsideSourceSlots {
+            connection,
+            reference,
+            unused_reference,
+        } = self.inner.take_or_abort();
         (connection, reference, unused_reference)
     }
 }
@@ -220,8 +236,12 @@ impl AccountingNativeLedger {
                 connection: LedgerConnection::Unissued { _retained: inputs },
                 reference: LedgerReference::Unused(reference),
             }));
-            return (ledger, Err(anyhow::anyhow!(
-                "accounting ledger input selects another native role; inputs retained")));
+            return (
+                ledger,
+                Err(anyhow::anyhow!(
+                    "accounting ledger input selects another native role; inputs retained"
+                )),
+            );
         }
         let ledger = Arc::new(Self::from_state(LedgerNativeState {
             factory: Some(Arc::clone(&factory)),
@@ -266,8 +286,12 @@ impl AccountingNativeLedger {
     }
 
     fn lock_state(&self) -> Result<MutexGuard<'_, LedgerNativeState>> {
-        anyhow::ensure!(!self.inner.is_foreign(), "inherited accounting ledger owner");
-        self.inner.state
+        anyhow::ensure!(
+            !self.inner.is_foreign(),
+            "inherited accounting ledger owner"
+        );
+        self.inner
+            .state
             .lock()
             .map_err(|_| anyhow::anyhow!("accounting ledger owner mutex poisoned"))
     }
@@ -277,8 +301,15 @@ impl AccountingNativeLedger {
     /// custody state intact and a poisoned mutex is recovered here. SQL
     /// admission itself keeps refusing on a poisoned mutex.
     fn lock_custody_state(&self) -> Result<MutexGuard<'_, LedgerNativeState>> {
-        anyhow::ensure!(!self.inner.is_foreign(), "inherited accounting ledger owner");
-        Ok(self.inner.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
+        anyhow::ensure!(
+            !self.inner.is_foreign(),
+            "inherited accounting ledger owner"
+        );
+        Ok(self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner))
     }
 
     /// Ledger SQL in the live owner's native scope, serialized on this owner.
@@ -302,7 +333,10 @@ impl AccountingNativeLedger {
         deadline: MonotonicDeadline,
         operation: impl for<'c> FnOnce(&'c Connection) -> Result<T>,
     ) -> Result<T> {
-        anyhow::ensure!(!self.inner.is_foreign(), "inherited accounting ledger owner");
+        anyhow::ensure!(
+            !self.inner.is_foreign(),
+            "inherited accounting ledger owner"
+        );
         let mut state = loop {
             if deadline.has_elapsed() {
                 bail!("original funding deadline expired waiting for ledger");
@@ -385,10 +419,11 @@ impl AccountingNativeLedger {
             },
             LedgerConnection::Opening(mut failure) => {
                 if failure.retained_admission().is_some()
-                    && let Err(error) = failure.recover_retained_admission() {
-                        state.connection = LedgerConnection::Opening(failure);
-                        return Err(error.context("accounting ledger admission recovery retained"));
-                    }
+                    && let Err(error) = failure.recover_retained_admission()
+                {
+                    state.connection = LedgerConnection::Opening(failure);
+                    return Err(error.context("accounting ledger admission recovery retained"));
+                }
                 match failure.retry_close() {
                     Ok(released) => LedgerConnection::Terminal(
                         OriginalNativeConnectionTerminal::Released(released),
@@ -466,9 +501,9 @@ impl AccountingNativeLedger {
                 if let Some(terminal) = released.terminal(factory)?
                     && !matches!(terminal, OriginalNativeConnectionTerminal::Released(receipt)
                         if receipt.native_ticket().is_none())
-                    {
-                        terminals.push(terminal.clone());
-                    }
+                {
+                    terminals.push(terminal.clone());
+                }
             }
             LedgerReference::Unused(_) => {}
             _ => bail!("accounting schema reference is not at a closed native phase"),
@@ -483,23 +518,34 @@ impl AccountingNativeLedger {
     pub(crate) fn into_census(
         self: Arc<Self>,
         factory: &Arc<OriginalNativeFactory>,
-    ) -> std::result::Result<Vec<OriginalNativeConnectionTerminal>, (Arc<Self>, anyhow::Error)> {
+    ) -> std::result::Result<Vec<OriginalNativeConnectionTerminal>, (Arc<Self>, anyhow::Error)>
+    {
         if let Err(error) = self.native_terminals(factory) {
             return Err((self, error));
         }
         let owner = match Arc::try_unwrap(self) {
             Ok(owner) => owner,
             Err(shared) => {
-                return Err((shared, anyhow::anyhow!("accounting ledger still has aliases")));
+                return Err((
+                    shared,
+                    anyhow::anyhow!("accounting ledger still has aliases"),
+                ));
             }
         };
         let state = match owner.into_state() {
             Ok(state) => state,
             Err(owner) => {
-                return Err((Arc::new(owner), anyhow::anyhow!("accounting ledger belongs to another process")));
+                return Err((
+                    Arc::new(owner),
+                    anyhow::anyhow!("accounting ledger belongs to another process"),
+                ));
             }
         };
-        let LedgerNativeState { factory: _, connection, reference } = state
+        let LedgerNativeState {
+            factory: _,
+            connection,
+            reference,
+        } = state
             .into_inner()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut terminals = Vec::with_capacity(2);
@@ -520,9 +566,9 @@ impl AccountingNativeLedger {
                 if let Ok(Some(terminal)) = released.terminal(factory)
                     && !matches!(terminal, OriginalNativeConnectionTerminal::Released(receipt)
                         if receipt.native_ticket().is_none())
-                    {
-                        terminals.push(terminal.clone());
-                    }
+                {
+                    terminals.push(terminal.clone());
+                }
             }
             other => drop(other),
         }
@@ -588,7 +634,9 @@ impl AccountingNativeLedger {
             parts @ LedgerConnection::Parts(_) => parts,
             unissued @ LedgerConnection::Unissued { _retained: _ } => {
                 state.connection = unissued;
-                bail!("accounting ledger inputs were refused before issue and stay in this owner; no Store join exists for them");
+                bail!(
+                    "accounting ledger inputs were refused before issue and stay in this owner; no Store join exists for them"
+                );
             }
             other => {
                 state.connection = other;
@@ -622,7 +670,9 @@ impl AccountingNativeLedger {
                 match released.into_outside_parts(&factory, aggregate) {
                     Ok((parts, unused, _prior_refusal)) => LedgerReference::Parts {
                         parts,
-                        unused: UnusedLedgerReference::new(unused.map(|inputs| inputs.take_or_abort())),
+                        unused: UnusedLedgerReference::new(
+                            unused.map(|inputs| inputs.take_or_abort()),
+                        ),
                     },
                     Err((released, error)) => {
                         state.reference = LedgerReference::Released(released);
@@ -683,7 +733,8 @@ impl AccountingNativeLedger {
 
     /// True once every native owner has left for the node finalizer.
     pub fn sources_taken(&self) -> bool {
-        self.lock_custody_state().is_ok_and(|state| holders_taken(&state))
+        self.lock_custody_state()
+            .is_ok_and(|state| holders_taken(&state))
     }
 
     /// Move both terminals out for a test host's census, ending this owner's
@@ -844,10 +895,13 @@ mod tests {
         let (ledger, db) = open_on(&host, &root, false);
         db.expect("fresh native ledger opens");
         let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = ledger.with_sql(|_conn| -> Result<()> { panic!("ledger SQL closure panicked") });
+            let _ =
+                ledger.with_sql(|_conn| -> Result<()> { panic!("ledger SQL closure panicked") });
         }));
         assert!(panicked.is_err());
-        let refused = ledger.with_sql(|_conn| Ok(())).expect_err("poisoned SQL admission refuses");
+        let refused = ledger
+            .with_sql(|_conn| Ok(()))
+            .expect_err("poisoned SQL admission refuses");
         assert!(refused.to_string().contains("poisoned"), "{refused}");
         assert!(ledger.is_closed());
         retire(&host, &ledger);
@@ -897,7 +951,10 @@ mod tests {
         let before = abandoned(LEDGER);
         drop(ledger);
         let delta = abandoned(LEDGER) - before;
-        lillux_sqlite::test_host::end_isolated_process((dir, root, host), &format!("ledger +{delta}"))
+        lillux_sqlite::test_host::end_isolated_process(
+            (dir, root, host),
+            &format!("ledger +{delta}"),
+        )
     }
 
     #[test]
@@ -978,7 +1035,11 @@ mod tests {
         }
         .unwrap();
         let before = abandoned(SOURCES);
-        drop(AccountingNativeOutsideSources::new(None, None, Some(reference)));
+        drop(AccountingNativeOutsideSources::new(
+            None,
+            None,
+            Some(reference),
+        ));
         assert_eq!(abandoned(SOURCES), before + 1);
         ryeos_state::test_support::release_shared_test_host(host);
     }

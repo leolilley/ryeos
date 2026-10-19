@@ -135,7 +135,7 @@ fn rollback_precreate_workspace(
         error = error.context(format!("new Q workspace rollback failed: {cleanup:#}"));
         error = retain_partial_workspace(owner, record, workspace, error);
     }
-    
+
     if unproved {
         error.context("Q original root rollback remains unproved")
     } else {
@@ -432,7 +432,8 @@ impl QualificationLocalOwner<'_> {
                 // other low-level failure could follow mkdir but precede the
                 // descriptor return, so leave that child untouched and fence.
                 let uncertain = error
-                    .downcast_ref::<std::io::Error>().is_none_or(|cause| cause.kind() != std::io::ErrorKind::AlreadyExists);
+                    .downcast_ref::<std::io::Error>()
+                    .is_none_or(|cause| cause.kind() != std::io::ErrorKind::AlreadyExists);
                 return Err(rollback_precreate_workspace(
                     self, &current, error, &guard, uncertain,
                 ));

@@ -14,8 +14,9 @@ use anyhow::Result;
 use lillux_sqlite::test_host::TestNativeHost;
 use lillux_sqlite::{
     OriginalNativeBoundInputs, OriginalNativeBoundMode, OriginalNativeConnection,
-    OriginalNativeDomain, OriginalNativeFactory, OriginalNativeTransientInputs, OriginalSchedulerRetirementAuthority,
-    OriginalSchedulerRetirementEffect, OriginalSchedulerRetirementInputs,
+    OriginalNativeDomain, OriginalNativeFactory, OriginalNativeTransientInputs,
+    OriginalSchedulerRetirementAuthority, OriginalSchedulerRetirementEffect,
+    OriginalSchedulerRetirementInputs,
 };
 use ryeos_state::test_support::{release_shared_test_host, shared_test_host};
 
@@ -37,11 +38,13 @@ fn open_on_host(
         )
     }
     .expect("test scheduler schema reference inputs");
-    let reference =
-        match SchedulerDb::prepare_scheduler_schema_reference(Arc::clone(host.factory()), reference_inputs) {
-            Ok(reference) => reference,
-            Err(failure) => panic!("test scheduler schema reference refused: {failure}"),
-        };
+    let reference = match SchedulerDb::prepare_scheduler_schema_reference(
+        Arc::clone(host.factory()),
+        reference_inputs,
+    ) {
+        Ok(reference) => reference,
+        Err(failure) => panic!("test scheduler schema reference refused: {failure}"),
+    };
     // SAFETY: test-only issuance under the shared host's own funded factory.
     let inputs = unsafe {
         OriginalNativeBoundInputs::issued(
@@ -64,7 +67,8 @@ fn settle_on_host(host: &TestNativeHost, db: SchedulerDb) -> Result<()> {
     for terminal in db.retained_native_terminals()? {
         host.retain_terminal(terminal);
     }
-    db.release_settled_into_census().map_err(|(_db, error)| error)
+    db.release_settled_into_census()
+        .map_err(|(_db, error)| error)
 }
 
 /// Settle the one remaining handle of a shared store.
@@ -86,7 +90,9 @@ fn settle_refusal_on_host(host: &TestNativeHost, failure: SchedulerDbOpenFailure
     for terminal in settled.retained_native_terminals()? {
         host.retain_terminal(terminal);
     }
-    settled.release_settled_for_test().map_err(|(_failure, error)| error)
+    settled
+        .release_settled_for_test()
+        .map_err(|(_failure, error)| error)
 }
 
 /// Open `directory/scheduler.sqlite3`, creating it if absent, on a host the
@@ -135,7 +141,10 @@ unsafe impl OriginalSchedulerRetirementAuthority for TestRetirementAuthority {
         generation: [u8; 16],
         _cleanup: bool,
     ) -> Result<()> {
-        anyhow::ensure!(generation == self.generation, "test retirement names another generation");
+        anyhow::ensure!(
+            generation == self.generation,
+            "test retirement names another generation"
+        );
         Ok(())
     }
     fn prepay_effect(
@@ -160,7 +169,9 @@ pub struct TestSchedulerHost {
 
 impl TestSchedulerHost {
     pub fn acquire() -> Self {
-        Self { host: Some(shared_test_host()) }
+        Self {
+            host: Some(shared_test_host()),
+        }
     }
 
     fn host(&self) -> &TestNativeHost {
@@ -220,7 +231,12 @@ impl TestSchedulerHost {
         } else {
             OriginalNativeBoundMode::Existing
         };
-        match self.host().open_bound(runtime, OsStr::new(name), mode, OriginalNativeDomain::NodeScheduler) {
+        match self.host().open_bound(
+            runtime,
+            OsStr::new(name),
+            mode,
+            OriginalNativeDomain::NodeScheduler,
+        ) {
             Ok(connection) => connection,
             Err(failure) => {
                 let error = failure.to_string();
@@ -322,7 +338,11 @@ impl TestSchedulerDb {
         );
         let host = shared_test_host();
         match open_on_host(&host, runtime, OriginalNativeBoundMode::CreateExclusive) {
-            Ok(db) => Self { db: Some(Arc::new(db)), host: Some(host), _root: root },
+            Ok(db) => Self {
+                db: Some(Arc::new(db)),
+                host: Some(host),
+                _root: root,
+            },
             Err(failure) => {
                 let error = failure.to_string();
                 // The refused opening settles into the census through its
@@ -354,9 +374,10 @@ impl Drop for TestSchedulerDb {
             return;
         };
         if let Err(error) = settle_shared_on_host(&host, db)
-            && !std::thread::panicking() {
-                panic!("test scheduler store did not settle into the census: {error:#}");
-            }
+            && !std::thread::panicking()
+        {
+            panic!("test scheduler store did not settle into the census: {error:#}");
+        }
         release_shared_test_host(host);
     }
 }

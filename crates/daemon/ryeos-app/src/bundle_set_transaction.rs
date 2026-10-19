@@ -135,9 +135,10 @@ impl ActiveBundleSelectionStore {
             bail!("active bundle selection changed since admission");
         }
         if let Some(current) = &current
-            && current.installed_set_digest != journal.old_installed_set_digest {
-                bail!("active installed-set digest disagrees with transaction predecessor");
-            }
+            && current.installed_set_digest != journal.old_installed_set_digest
+        {
+            bail!("active installed-set digest disagrees with transaction predecessor");
+        }
         let next = ActiveBundleSelection {
             schema: ActiveBundleSelection::SCHEMA,
             selection_hash: journal.selection_hash.clone(),

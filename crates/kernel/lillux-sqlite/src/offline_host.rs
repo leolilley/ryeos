@@ -14,23 +14,22 @@
 //! [`OfflineNativeHost::retain_terminal`] before
 //! [`OfflineNativeHost::finish_backend`]; [`OfflineNativeHost::release`]
 //! refuses while any alias of the factory or backend terminal survives.
+use crate::original_host_owner::OriginalNativeRegionHandle;
 use crate::original_host_owner::backing::{HostStorage, HostStorageRegionReleaseFact};
 use crate::original_host_owner::region::{NativeHostRegion, next_resident_generation};
-use crate::original_host_owner::OriginalNativeRegionHandle;
 use crate::{
-    ClosedOriginalProjectionLease, OriginalDestinationCustodyFailure,
-    OriginalDestinationOutsideCustody, OriginalLiveNativeDrainInputs,
-    OriginalNativeAdmissionAuthority, OriginalNativeArenaDisposition, OriginalNativeBudget,
-    OriginalNativeBudgetOwner, OriginalNativeBudgetSnapshot,
-    OriginalNativeCleanupAuthority, OriginalNativeConnectionAdmission,
-    OriginalNativeConnectionTerminal, OriginalNativeDestinationAuthority, OriginalNativeFactory,
-    OriginalNativeFactoryFailure, OriginalNativeOutsideLeafEvidence,
-    OriginalNativeProducerCellIndex, OriginalNativeProducerControl,
-    ReleasedOriginalNativeAcquisition,
-    OriginalNativeProjectionLeaseAdmission, OriginalNativeTerminal,
-    SqliteInspectionProductionControl, SqliteInspectionProductionKind,
-    SqliteInspectionProductionPermit, SqliteInspectionProductionPublicationFailure,
-    CONTROL_STORAGE, MAX_NATIVE_CONNECTIONS,
+    CONTROL_STORAGE, ClosedOriginalProjectionLease, MAX_NATIVE_CONNECTIONS,
+    OriginalDestinationCustodyFailure, OriginalDestinationOutsideCustody,
+    OriginalLiveNativeDrainInputs, OriginalNativeAdmissionAuthority,
+    OriginalNativeArenaDisposition, OriginalNativeBudget, OriginalNativeBudgetOwner,
+    OriginalNativeBudgetSnapshot, OriginalNativeCleanupAuthority,
+    OriginalNativeConnectionAdmission, OriginalNativeConnectionTerminal,
+    OriginalNativeDestinationAuthority, OriginalNativeFactory, OriginalNativeFactoryFailure,
+    OriginalNativeOutsideLeafEvidence, OriginalNativeProducerCellIndex,
+    OriginalNativeProducerControl, OriginalNativeProjectionLeaseAdmission, OriginalNativeTerminal,
+    ReleasedOriginalNativeAcquisition, SqliteInspectionProductionControl,
+    SqliteInspectionProductionKind, SqliteInspectionProductionPermit,
+    SqliteInspectionProductionPublicationFailure,
 };
 use anyhow::{Context, Result, ensure};
 use lillux::PinnedDirectory;
@@ -92,7 +91,9 @@ pub fn offline_native_allocation_funding_margin_steps(storage: u64, tickets: u32
     let blocks = (storage - CONTROL_STORAGE) / 2 / NATIVE_ARENA_BLOCK_BYTES;
     blocks
         .checked_mul(NATIVE_BLOCK_TURNOVER_STEPS)
-        .and_then(|steps| steps.checked_add(u64::from(tickets).checked_mul(NATIVE_TICKET_SERVICE_STEPS)?))
+        .and_then(|steps| {
+            steps.checked_add(u64::from(tickets).checked_mul(NATIVE_TICKET_SERVICE_STEPS)?)
+        })
         .context("offline native allocation funding margin overflow")
 }
 
@@ -148,7 +149,9 @@ impl DurabilityPinRelease {
             crate::native::DurabilityPinClose::ConsumedWithError => &mut self.consumed_with_error,
             crate::native::DurabilityPinClose::NotClosedHere => return Ok(()),
         };
-        *slot = slot.checked_add(1).context("offline native retired pin count overflow")?;
+        *slot = slot
+            .checked_add(1)
+            .context("offline native retired pin count overflow")?;
         Ok(())
     }
 }
@@ -190,12 +193,18 @@ pub struct OfflineNativeRetained {
 }
 impl std::fmt::Debug for OfflineNativeRetained {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("OfflineNativeRetained").field("error", &self.error).finish_non_exhaustive()
+        f.debug_struct("OfflineNativeRetained")
+            .field("error", &self.error)
+            .finish_non_exhaustive()
     }
 }
 impl std::fmt::Display for OfflineNativeRetained {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "offline native host release refused; host retained: {:#}", self.error)
+        write!(
+            f,
+            "offline native host release refused; host retained: {:#}",
+            self.error
+        )
     }
 }
 impl std::error::Error for OfflineNativeRetained {}
@@ -239,12 +248,18 @@ pub struct OfflineNativeHostFailure {
 }
 impl std::fmt::Debug for OfflineNativeHostFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("OfflineNativeHostFailure").field("error", &self.error).finish_non_exhaustive()
+        f.debug_struct("OfflineNativeHostFailure")
+            .field("error", &self.error)
+            .finish_non_exhaustive()
     }
 }
 impl std::fmt::Display for OfflineNativeHostFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "offline native host issuance refused; partial host retained: {:#}", self.error)
+        write!(
+            f,
+            "offline native host issuance refused; partial host retained: {:#}",
+            self.error
+        )
     }
 }
 impl std::error::Error for OfflineNativeHostFailure {}
@@ -256,7 +271,10 @@ impl OfflineNativeHostFailure {
         let Some(host) = host else { return Ok(error) };
         match host.finish() {
             Ok(_) => Ok(error),
-            Err(OfflineNativeRetained { host, error: cleanup }) => Err(Self {
+            Err(OfflineNativeRetained {
+                host,
+                error: cleanup,
+            }) => Err(Self {
                 host: Some(host),
                 error: error.context(format!("partial host release retained: {cleanup:#}")),
             }),
@@ -285,12 +303,18 @@ impl OfflineNativeHost {
     ) -> std::result::Result<Self, OfflineNativeHostFailure> {
         // The quote is pure; `raw` is an inert counter with no native effect
         // yet, so a quote refusal has nothing to release.
-        let layout = HostStorage::quote_native_region()
-            .map_err(|error| OfflineNativeHostFailure { host: None, error: anyhow::Error::msg(error) })?;
+        let layout =
+            HostStorage::quote_native_region().map_err(|error| OfflineNativeHostFailure {
+                host: None,
+                error: anyhow::Error::msg(error),
+            })?;
         let mut host = Self::new(authority, NativeHostRegion::new(layout));
         match host.install(raw) {
             Ok(()) => Ok(host),
-            Err(error) => Err(OfflineNativeHostFailure { host: Some(host), error }),
+            Err(error) => Err(OfflineNativeHostFailure {
+                host: Some(host),
+                error,
+            }),
         }
     }
 
@@ -319,17 +343,22 @@ impl OfflineNativeHost {
     fn install(&mut self, raw: OriginalNativeBudget) -> Result<()> {
         let snapshot = raw.snapshot();
         self.storage_bytes = snapshot.storage_bytes;
-        let required = offline_native_required_cleanup_steps(snapshot.storage_bytes, raw.connections_limit())?;
+        let required =
+            offline_native_required_cleanup_steps(snapshot.storage_bytes, raw.connections_limit())?;
         ensure!(
             snapshot.cleanup_reserved >= required,
             "offline native budget reserves {} cleanup steps; the arena requires {required}",
             snapshot.cleanup_reserved
         );
         let authority = self.authority.clone();
-        self.region.enter(raw, OFFLINE_NATIVE_RELEASE_STEPS, || authority.checkpoint(false))?;
+        self.region.enter(raw, OFFLINE_NATIVE_RELEASE_STEPS, || {
+            authority.checkpoint(false)
+        })?;
         self.region.map_resident(|| authority.checkpoint(false))?;
         self.region.confirm_backing_residency()?;
-        let residency = self.region.backing_residency_proof()
+        let residency = self
+            .region
+            .backing_residency_proof()
             .context("offline native region has no residency proof")?;
         let generation = next_resident_generation()?;
         // SAFETY: `issue`'s contract: `raw` was minted once for this host
@@ -351,7 +380,9 @@ impl OfflineNativeHost {
         });
         self.admission = Some(admission.clone());
         self.authority.checkpoint(false)?;
-        let core = admission.region.claim_producer_control(SqliteInspectionProductionKind::FactoryIssuer)?;
+        let core = admission
+            .region
+            .claim_producer_control(SqliteInspectionProductionKind::FactoryIssuer)?;
         admission
             .issuer
             .set(core.index())
@@ -362,7 +393,9 @@ impl OfflineNativeHost {
         // SAFETY: the issuer cell belongs to this host's own region.
         let permit = match unsafe {
             SqliteInspectionProductionPermit::issued_from_region(
-                SqliteInspectionProductionKind::FactoryIssuer, control, core,
+                SqliteInspectionProductionKind::FactoryIssuer,
+                control,
+                core,
             )
         } {
             Ok(permit) => permit,
@@ -405,13 +438,20 @@ impl OfflineNativeHost {
     /// lock the limits allowed, so a caller bound by a capability floor
     /// re-decides it from this proof before opening any connection.
     pub fn residency_proof(&self) -> Option<lillux::process_control::ResidencyProof> {
-        self.admission.as_ref().map(|admission| admission.residency.clone())
+        self.admission
+            .as_ref()
+            .map(|admission| admission.residency.clone())
     }
 
     /// The admitting factory: valid from Ready until the backend finishes.
     pub fn factory(&self) -> Result<&Arc<OriginalNativeFactory>> {
-        ensure!(self.ready && self.backend.is_none(), "offline native factory is not admitting");
-        self.factory.as_ref().context("offline native factory absent")
+        ensure!(
+            self.ready && self.backend.is_none(),
+            "offline native factory is not admitting"
+        );
+        self.factory
+            .as_ref()
+            .context("offline native factory absent")
     }
 
     /// The same factory after [`Self::finish_backend`] completed and before
@@ -419,14 +459,25 @@ impl OfflineNativeHost {
     /// terminal: final acknowledgements, retirements after the backend and
     /// outside custody. It admits no new connection.
     pub fn post_backend_factory(&self) -> Result<&Arc<OriginalNativeFactory>> {
-        ensure!(self.backend.is_some() && self.facts.is_some(), "offline native backend has not finished");
-        self.factory.as_ref().context("offline native factory absent")
+        ensure!(
+            self.backend.is_some() && self.facts.is_some(),
+            "offline native backend has not finished"
+        );
+        self.factory
+            .as_ref()
+            .context("offline native factory absent")
     }
 
     /// Destination authority for opens issued under this host.
     pub fn destination(&self) -> Result<Arc<dyn OriginalNativeDestinationAuthority>> {
-        ensure!(self.ready && self.backend.is_none(), "offline native factory is not admitting");
-        let destination = self.destination.as_ref().context("offline native destination absent")?;
+        ensure!(
+            self.ready && self.backend.is_none(),
+            "offline native factory is not admitting"
+        );
+        let destination = self
+            .destination
+            .as_ref()
+            .context("offline native destination absent")?;
         Ok(destination.clone())
     }
 
@@ -436,12 +487,20 @@ impl OfflineNativeHost {
         &self,
         terminal: OriginalNativeConnectionTerminal,
     ) -> std::result::Result<(), (OriginalNativeConnectionTerminal, anyhow::Error)> {
-        let checked = self.census_open().and_then(|factory| terminal.require_original(factory));
+        let checked = self
+            .census_open()
+            .and_then(|factory| terminal.require_original(factory));
         if let Err(error) = checked {
             return Err((terminal, error));
         }
-        let slot = if terminal.ticket().is_some() { &self.terminals } else { &self.ticketless };
-        slot.lock().unwrap_or_else(PoisonError::into_inner).push(terminal);
+        let slot = if terminal.ticket().is_some() {
+            &self.terminals
+        } else {
+            &self.ticketless
+        };
+        slot.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(terminal);
         Ok(())
     }
 
@@ -451,18 +510,28 @@ impl OfflineNativeHost {
         &self,
         lease: Arc<ClosedOriginalProjectionLease>,
     ) -> std::result::Result<(), (Arc<ClosedOriginalProjectionLease>, anyhow::Error)> {
-        let checked = self.census_open().and_then(|factory| lease.require_original(factory));
+        let checked = self
+            .census_open()
+            .and_then(|factory| lease.require_original(factory));
         if let Err(error) = checked {
             return Err((lease, error));
         }
-        self.leases.lock().unwrap_or_else(PoisonError::into_inner).push(lease);
+        self.leases
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(lease);
         Ok(())
     }
 
     /// The census closes when the backend finishes against it.
     fn census_open(&self) -> Result<&Arc<OriginalNativeFactory>> {
-        ensure!(self.backend.is_none(), "offline native census closed: the backend already finished");
-        self.factory.as_ref().context("offline native factory absent")
+        ensure!(
+            self.backend.is_none(),
+            "offline native census closed: the backend already finished"
+        );
+        self.factory
+            .as_ref()
+            .context("offline native factory absent")
     }
 
     /// Issued ticket count and recorded terminals plus leases. Once the
@@ -471,14 +540,31 @@ impl OfflineNativeHost {
     /// contradict them.
     pub fn ticket_census(&self) -> Result<(u32, usize)> {
         if let Some(facts) = &self.facts {
-            let recorded = facts.terminals.checked_add(facts.leases).context("offline native census overflow")?;
+            let recorded = facts
+                .terminals
+                .checked_add(facts.leases)
+                .context("offline native census overflow")?;
             return Ok((facts.tickets_issued, recorded));
         }
-        ensure!(self.backend.is_none(), "offline native census closed: backend finished without its facts");
-        let factory = self.factory.as_ref().context("offline native factory absent")?;
+        ensure!(
+            self.backend.is_none(),
+            "offline native census closed: backend finished without its facts"
+        );
+        let factory = self
+            .factory
+            .as_ref()
+            .context("offline native factory absent")?;
         let issued = factory.budget_snapshot()?.connections_issued;
-        let recorded = self.terminals.lock().unwrap_or_else(PoisonError::into_inner).len()
-            + self.leases.lock().unwrap_or_else(PoisonError::into_inner).len();
+        let recorded = self
+            .terminals
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len()
+            + self
+                .leases
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .len();
         Ok((issued, recorded))
     }
 
@@ -490,28 +576,51 @@ impl OfflineNativeHost {
     /// next; a retry after success returns the same terminal.
     pub fn finish_backend(&mut self) -> Result<Arc<OriginalNativeTerminal>> {
         if self.facts.is_some() {
-            return self.backend.clone().context("finished offline native backend terminal absent");
+            return self
+                .backend
+                .clone()
+                .context("finished offline native backend terminal absent");
         }
         self.closed.store(true, Ordering::Release);
         self.authority.checkpoint(true)?;
-        let factory = self.factory.clone().context("offline native factory absent; no backend to finish")?;
+        let factory = self
+            .factory
+            .clone()
+            .context("offline native factory absent; no backend to finish")?;
         if self.backend.is_none() {
-            let leases = self.leases.lock().unwrap_or_else(PoisonError::into_inner).clone();
+            let leases = self
+                .leases
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone();
             // The factory's own Ready acknowledgement selects the finish:
             // initialization can refuse after Ready was published.
             let finished = if factory.ready_acknowledged()? {
                 let admission = self.admission.clone().context("offline admission absent")?;
                 let released = admission.release_ticketed(&factory)?;
-                self.terminals.lock().unwrap_or_else(PoisonError::into_inner).extend(released);
-                let terminals = self.terminals.lock().unwrap_or_else(PoisonError::into_inner).clone();
+                self.terminals
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .extend(released);
+                let terminals = self
+                    .terminals
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .clone();
                 if self.drained.is_none() {
-                    let cleanup: Arc<dyn OriginalNativeCleanupAuthority> = Arc::new(OfflineCleanup { admission });
+                    let cleanup: Arc<dyn OriginalNativeCleanupAuthority> =
+                        Arc::new(OfflineCleanup { admission });
                     // SAFETY: admission is closed above and never reopens;
                     // the cleanup authority rechecks producer quiescence
                     // and the caller's cleanup window before every effect.
-                    self.drained = Some(unsafe { OriginalLiveNativeDrainInputs::issued(factory.clone(), cleanup) }?);
+                    self.drained = Some(unsafe {
+                        OriginalLiveNativeDrainInputs::issued(factory.clone(), cleanup)
+                    }?);
                 }
-                let drained = self.drained.as_ref().context("offline drain inputs absent")?;
+                let drained = self
+                    .drained
+                    .as_ref()
+                    .context("offline drain inputs absent")?;
                 factory.finish_live_backend(&terminals, &leases, drained)
             } else {
                 factory.finish_original_initialization_refusal()
@@ -519,16 +628,25 @@ impl OfflineNativeHost {
             match finished {
                 Ok(terminal) => self.backend = Some(terminal),
                 Err(failure) => {
-                    let error = anyhow::anyhow!("offline native backend finish retained: {failure}");
+                    let error =
+                        anyhow::anyhow!("offline native backend finish retained: {failure}");
                     self.factory_failures.push(failure);
                     return Err(error);
                 }
             }
         }
-        let backend = self.backend.clone().context("offline native backend terminal absent")?;
+        let backend = self
+            .backend
+            .clone()
+            .context("offline native backend terminal absent")?;
         let admission = self.admission.clone().context("offline admission absent")?;
-        let budget = admission.budget.retire_original_handle(&factory, &backend)?;
-        let generation = self.region.generation().context("finished offline native region lacks its generation")?;
+        let budget = admission
+            .budget
+            .retire_original_handle(&factory, &backend)?;
+        let generation = self
+            .region
+            .generation()
+            .context("finished offline native region lacks its generation")?;
         self.facts = Some(OfflineNativeFacts {
             process: self.region.process(),
             generation,
@@ -537,16 +655,30 @@ impl OfflineNativeHost {
             arena: backend.arena_disposition()?,
             tickets_issued: budget.connections_issued,
             budget,
-            terminals: self.terminals.lock().unwrap_or_else(PoisonError::into_inner).len(),
-            ticketless: self.ticketless.lock().unwrap_or_else(PoisonError::into_inner).len(),
-            leases: self.leases.lock().unwrap_or_else(PoisonError::into_inner).len(),
+            terminals: self
+                .terminals
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .len(),
+            ticketless: self
+                .ticketless
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .len(),
+            leases: self
+                .leases
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .len(),
         });
         Ok(backend)
     }
 
     /// The facts recorded by [`Self::finish_backend`].
     pub fn facts(&self) -> Result<OfflineNativeFacts> {
-        self.facts.clone().context("offline native backend has not finished")
+        self.facts
+            .clone()
+            .context("offline native backend has not finished")
     }
 
     /// End the host. In order: drop the drain inputs, terminals, leases,
@@ -580,13 +712,26 @@ impl OfflineNativeHost {
         );
         drop(self.drained.take());
         self.retire_terminal_durability_pins()?;
-        self.terminals.lock().unwrap_or_else(PoisonError::into_inner).clear();
-        self.ticketless.lock().unwrap_or_else(PoisonError::into_inner).clear();
-        self.leases.lock().unwrap_or_else(PoisonError::into_inner).clear();
+        self.terminals
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+        self.ticketless
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+        self.leases
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
         drop(self.destination.take());
         self.factory_failures.clear();
         if let Some(admission) = &self.admission {
-            admission.ticketed.lock().unwrap_or_else(PoisonError::into_inner).clear();
+            admission
+                .ticketed
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clear();
         }
         // The host holds one reference to each, and the backend terminal one
         // more to its factory. Any other reference is a caller alias.
@@ -595,7 +740,13 @@ impl OfflineNativeHost {
         let factory = self.factory.as_ref().map_or(0, Arc::strong_count);
         let factory_held = usize::from(self.factory.is_some()) + backend_held;
         if backend != backend_held || factory != factory_held {
-            return Err(OfflineNativeAliasRefusal { backend, backend_held, factory, factory_held }.into());
+            return Err(OfflineNativeAliasRefusal {
+                backend,
+                backend_held,
+                factory,
+                factory_held,
+            }
+            .into());
         }
         drop(self.backend.take());
         drop(self.factory.take());
@@ -604,12 +755,21 @@ impl OfflineNativeHost {
         let authority = self.authority.clone();
         self.region.begin_close()?;
         if let Err(error) = self.region.release(|| authority.checkpoint(true)) {
-            let census = self.region.census().map(|census| format!("{census:?}")).unwrap_or_default();
-            return Err(error.context(format!("offline native region release retained; region {census}")));
+            let census = self
+                .region
+                .census()
+                .map(|census| format!("{census:?}"))
+                .unwrap_or_default();
+            return Err(error.context(format!(
+                "offline native region release retained; region {census}"
+            )));
         }
         self.region.require_released()?;
         let region = match &self.facts {
-            Some(facts) => Some(self.region.region_release_fact(facts.generation, facts.region_bytes)?),
+            Some(facts) => Some(
+                self.region
+                    .region_release_fact(facts.generation, facts.region_bytes)?,
+            ),
             None => None,
         };
         Ok(OfflineNativeReleased {
@@ -660,7 +820,6 @@ impl OfflineNativeHost {
     }
 }
 
-
 struct OfflineAdmission {
     original: Weak<OfflineAdmission>,
     budget: Arc<OriginalNativeBudgetOwner>,
@@ -694,16 +853,25 @@ struct OfflineTicketedPreparation {
 
 impl OfflineAdmission {
     fn production_control(&self) -> Arc<dyn SqliteInspectionProductionControl> {
-        Arc::new(OfflineProductionControl { closed: self.closed.clone(), authority: self.authority.clone() })
+        Arc::new(OfflineProductionControl {
+            closed: self.closed.clone(),
+            authority: self.authority.clone(),
+        })
     }
 
-    fn begin_ticket(&self, kind: SqliteInspectionProductionKind) -> Result<(u32, SqliteInspectionProductionPermit)> {
+    fn begin_ticket(
+        &self,
+        kind: SqliteInspectionProductionKind,
+    ) -> Result<(u32, SqliteInspectionProductionPermit)> {
         self.require_original(false)?;
         // A new ticket is new native work against the resident region.
         self.residency
             .confirm_swap_unreachable()
             .map_err(|reason| anyhow::anyhow!("native residency no longer holds: {reason}"))?;
-        ensure!(self.original.strong_count() > 0, "offline admission no longer retained");
+        ensure!(
+            self.original.strong_count() > 0,
+            "offline admission no longer retained"
+        );
         let core = self.region.claim_producer_control(kind)?;
         let ticket = match self.budget.debit_connection_ticket() {
             Ok(ticket) => ticket,
@@ -713,32 +881,59 @@ impl OfflineAdmission {
             // The ticket is debited: the census needs its terminal, so the
             // cell stays with the admission until finish releases it.
             self.retain_ticketed(OfflineTicketedPreparation {
-                ticket, core: Some(core), publication: None, callback: None, terminal: None, recorded: false,
+                ticket,
+                core: Some(core),
+                publication: None,
+                callback: None,
+                terminal: None,
+                recorded: false,
             });
-            anyhow::bail!("offline producer ticket {ticket} bind refused: {refusal}; retained for its released terminal");
+            anyhow::bail!(
+                "offline producer ticket {ticket} bind refused: {refusal}; retained for its released terminal"
+            );
         }
         // SAFETY: the bound cell and ticket come from this host's own region.
-        match unsafe { SqliteInspectionProductionPermit::issued_from_region(kind, self.production_control(), core) } {
+        match unsafe {
+            SqliteInspectionProductionPermit::issued_from_region(
+                kind,
+                self.production_control(),
+                core,
+            )
+        } {
             Ok(permit) => Ok((ticket, permit)),
             Err(failure) => {
                 let refusal = failure.refusal;
                 self.retain_ticketed(OfflineTicketedPreparation {
-                    ticket, core: None, publication: Some(failure), callback: None, terminal: None, recorded: false,
+                    ticket,
+                    core: None,
+                    publication: Some(failure),
+                    callback: None,
+                    terminal: None,
+                    recorded: false,
                 });
-                anyhow::bail!("offline producer ticket {ticket} publication refused: {refusal}; retained for its released terminal")
+                anyhow::bail!(
+                    "offline producer ticket {ticket} publication refused: {refusal}; retained for its released terminal"
+                )
             }
         }
     }
 
     fn retain_ticketed(&self, preparation: OfflineTicketedPreparation) {
-        self.ticketed.lock().unwrap_or_else(PoisonError::into_inner).push(preparation);
+        self.ticketed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(preparation);
     }
 
     /// Acknowledge every retained debited-but-unpublished ticket through the
     /// factory and return the released terminals not yet recorded. A refusal
     /// keeps every preparation, including completed ones, for a retry.
-    fn release_ticketed(&self, factory: &Arc<OriginalNativeFactory>) -> Result<Vec<OriginalNativeConnectionTerminal>> {
-        let mut retained = std::mem::take(&mut *self.ticketed.lock().unwrap_or_else(PoisonError::into_inner));
+    fn release_ticketed(
+        &self,
+        factory: &Arc<OriginalNativeFactory>,
+    ) -> Result<Vec<OriginalNativeConnectionTerminal>> {
+        let mut retained =
+            std::mem::take(&mut *self.ticketed.lock().unwrap_or_else(PoisonError::into_inner));
         // No bookkeeping lock spans the native effects below.
         let result = (|| -> Result<Vec<OriginalNativeConnectionTerminal>> {
             for preparation in &mut retained {
@@ -750,12 +945,18 @@ impl OfflineAdmission {
                         }
                         Err(failure) => {
                             preparation.publication = Some(failure);
-                            anyhow::bail!("offline publication custody transfer refused for ticket {}", preparation.ticket);
+                            anyhow::bail!(
+                                "offline publication custody transfer refused for ticket {}",
+                                preparation.ticket
+                            );
                         }
                     }
                 }
                 if preparation.terminal.is_none() {
-                    let core = preparation.core.as_ref().context("offline ticketed preparation cell absent")?;
+                    let core = preparation
+                        .core
+                        .as_ref()
+                        .context("offline ticketed preparation cell absent")?;
                     let observed = core.observation()?.ticket;
                     if observed == 0 {
                         core.bind_ticket(preparation.ticket)?;
@@ -775,14 +976,20 @@ impl OfflineAdmission {
             let mut released = Vec::new();
             for preparation in &mut retained {
                 if !preparation.recorded {
-                    let terminal = preparation.terminal.clone().context("offline released ticket terminal absent")?;
+                    let terminal = preparation
+                        .terminal
+                        .clone()
+                        .context("offline released ticket terminal absent")?;
                     released.push(OriginalNativeConnectionTerminal::Released(terminal));
                     preparation.recorded = true;
                 }
             }
             Ok(released)
         })();
-        self.ticketed.lock().unwrap_or_else(PoisonError::into_inner).extend(retained);
+        self.ticketed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .extend(retained);
         result
     }
 }
@@ -790,14 +997,21 @@ impl OfflineAdmission {
 impl OriginalNativeAdmissionAuthority for OfflineAdmission {
     fn require_original(&self, cleanup: bool) -> Result<()> {
         if !cleanup {
-            ensure!(!self.refusal.load(Ordering::SeqCst), "offline native service refused");
+            ensure!(
+                !self.refusal.load(Ordering::SeqCst),
+                "offline native service refused"
+            );
         }
-        ensure!(cleanup || !self.closed.load(Ordering::Acquire), "offline native admission closed");
+        ensure!(
+            cleanup || !self.closed.load(Ordering::Acquire),
+            "offline native admission closed"
+        );
         let checked = self.authority.checkpoint(cleanup);
         if let Err(error) = &checked
-            && crate::native_refusal_is_fact(error) {
-                self.refuse_service();
-            }
+            && crate::native_refusal_is_fact(error)
+        {
+            self.refuse_service();
+        }
         checked
     }
     fn require_runtime_binding(&self, runtime: &PinnedDirectory) -> Result<()> {
@@ -809,7 +1023,10 @@ impl OriginalNativeAdmissionAuthority for OfflineAdmission {
         self.budget.clone()
     }
     fn debit_sql_vm_steps(&self, steps: u64) -> Result<()> {
-        ensure!(!self.refusal.load(Ordering::SeqCst), "offline native service refused");
+        ensure!(
+            !self.refusal.load(Ordering::SeqCst),
+            "offline native service refused"
+        );
         self.authority.charge_sql_vm_steps(steps)?;
         self.budget.debit_steps(steps, false)
     }
@@ -823,10 +1040,13 @@ impl OriginalNativeAdmissionAuthority for OfflineAdmission {
             .map_err(anyhow::Error::new)
     }
     fn begin_projection_lease(&self) -> Result<OriginalNativeProjectionLeaseAdmission> {
-        let (ticket, permit) = self.begin_ticket(SqliteInspectionProductionKind::ProjectionLease)?;
+        let (ticket, permit) =
+            self.begin_ticket(SqliteInspectionProductionKind::ProjectionLease)?;
         // SAFETY: ticket and interval come from this host's own budget.
-        unsafe { OriginalNativeProjectionLeaseAdmission::issued(self.budget.clone(), ticket, permit) }
-            .map_err(anyhow::Error::new)
+        unsafe {
+            OriginalNativeProjectionLeaseAdmission::issued(self.budget.clone(), ticket, permit)
+        }
+        .map_err(anyhow::Error::new)
     }
 }
 
@@ -850,7 +1070,9 @@ struct OfflineProducerFailure {
 }
 impl std::fmt::Debug for OfflineProducerFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("OfflineProducerFailure").field("error", &self.error).finish_non_exhaustive()
+        f.debug_struct("OfflineProducerFailure")
+            .field("error", &self.error)
+            .finish_non_exhaustive()
     }
 }
 impl std::fmt::Display for OfflineProducerFailure {
@@ -860,14 +1082,14 @@ impl std::fmt::Display for OfflineProducerFailure {
 }
 impl std::error::Error for OfflineProducerFailure {}
 
-
 struct OfflineProductionControl {
     closed: Arc<AtomicBool>,
     authority: Arc<dyn OfflineNativeAuthority>,
 }
 impl SqliteInspectionProductionControl for OfflineProductionControl {
     fn checkpoint(&self) -> Result<()> {
-        self.authority.checkpoint(self.closed.load(Ordering::Acquire))
+        self.authority
+            .checkpoint(self.closed.load(Ordering::Acquire))
     }
     fn complete(&self) -> Result<()> {
         Ok(())
@@ -880,10 +1102,19 @@ struct OfflineCleanup {
 }
 impl OriginalNativeCleanupAuthority for OfflineCleanup {
     fn require_original(&self, _factory: &Arc<OriginalNativeFactory>) -> Result<()> {
-        ensure!(self.admission.closed.load(Ordering::Acquire), "offline producer admission still open");
+        ensure!(
+            self.admission.closed.load(Ordering::Acquire),
+            "offline producer admission still open"
+        );
         self.admission.authority.checkpoint(true)?;
-        let issuer = self.admission.issuer.get().context("offline issuer cell absent")?;
-        self.admission.region.require_quiescent_nonissuer_producers(*issuer)?;
+        let issuer = self
+            .admission
+            .issuer
+            .get()
+            .context("offline issuer cell absent")?;
+        self.admission
+            .region
+            .require_quiescent_nonissuer_producers(*issuer)?;
         Ok(())
     }
 }
@@ -894,8 +1125,14 @@ struct OfflineDestination {
 }
 impl OriginalNativeDestinationAuthority for OfflineDestination {
     fn require_original(&self, factory: &Arc<OriginalNativeFactory>) -> Result<()> {
-        let original = self.factory.upgrade().context("offline destination factory gone")?;
-        ensure!(Arc::ptr_eq(&original, factory), "offline destination selects foreign factory");
+        let original = self
+            .factory
+            .upgrade()
+            .context("offline destination factory gone")?;
+        ensure!(
+            Arc::ptr_eq(&original, factory),
+            "offline destination selects foreign factory"
+        );
         // Close and cleanup also pass here, so require the cleanup window,
         // which spans the operation window and outlasts it.
         self.authority.checkpoint(true)
@@ -906,11 +1143,14 @@ impl OriginalNativeDestinationAuthority for OfflineDestination {
         _aggregate: &OriginalNativeTerminal,
         _leaf: &OriginalNativeOutsideLeafEvidence,
         _prepay: &dyn Fn(u64, u64) -> Result<()>,
-    ) -> std::result::Result<OriginalDestinationOutsideCustody, OriginalDestinationCustodyFailure> {
+    ) -> std::result::Result<OriginalDestinationOutsideCustody, OriginalDestinationCustodyFailure>
+    {
         Err(OriginalDestinationCustodyFailure::retain(
             factory.clone(),
             self,
-            anyhow::anyhow!("offline native host finishes its connections in-process; no outside custody receiver"),
+            anyhow::anyhow!(
+                "offline native host finishes its connections in-process; no outside custody receiver"
+            ),
         ))
     }
 }
@@ -935,7 +1175,11 @@ mod tests {
         assert!(offline_native_allocation_funding_margin_steps(CONTROL_STORAGE, 1).is_err());
         assert!(offline_native_allocation_funding_margin_steps(storage, 0).is_err());
         assert!(
-            offline_native_allocation_funding_margin_steps(storage, MAX_NATIVE_CONNECTIONS as u32 + 1).is_err()
+            offline_native_allocation_funding_margin_steps(
+                storage,
+                MAX_NATIVE_CONNECTIONS as u32 + 1
+            )
+            .is_err()
         );
     }
 
@@ -949,8 +1193,13 @@ mod tests {
             .region
             .claim_producer_control(SqliteInspectionProductionKind::Native)
             .expect("producer cell");
-        let ticket = admission.budget.debit_connection_ticket().expect("debited ticket");
-        core.bind_ticket(ticket).map_err(|refusal| anyhow::anyhow!("{refusal}")).expect("bound cell");
+        let ticket = admission
+            .budget
+            .debit_connection_ticket()
+            .expect("debited ticket");
+        core.bind_ticket(ticket)
+            .map_err(|refusal| anyhow::anyhow!("{refusal}"))
+            .expect("bound cell");
         admission.retain_ticketed(OfflineTicketedPreparation {
             ticket: ticket + 1,
             core: Some(core),
@@ -965,13 +1214,27 @@ mod tests {
         };
         let message = format!("{error:#}");
         assert!(
-            message.contains(&format!("carries ticket {ticket}, not its debited ticket {}", ticket + 1)),
+            message.contains(&format!(
+                "carries ticket {ticket}, not its debited ticket {}",
+                ticket + 1
+            )),
             "{message}"
         );
         {
-            let mut retained = admission.ticketed.lock().unwrap_or_else(PoisonError::into_inner);
-            assert_eq!(retained.len(), 1, "the refused preparation is kept for a retry");
-            assert!(retained[0].core.is_some() && retained[0].terminal.is_none() && !retained[0].recorded);
+            let mut retained = admission
+                .ticketed
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            assert_eq!(
+                retained.len(),
+                1,
+                "the refused preparation is kept for a retry"
+            );
+            assert!(
+                retained[0].core.is_some()
+                    && retained[0].terminal.is_none()
+                    && !retained[0].recorded
+            );
             // Restore the debited ticket so the host's own finish releases
             // the cell into the census.
             retained[0].ticket = ticket;
@@ -989,7 +1252,10 @@ mod tests {
         let host = test.live_host_mut();
         drop(host.finish_backend().expect("backend finished"));
         let facts = host.facts().expect("facts recorded");
-        assert_eq!(host.ticket_census().expect("census"), (facts.tickets_issued, facts.terminals + facts.leases));
+        assert_eq!(
+            host.ticket_census().expect("census"),
+            (facts.tickets_issued, facts.terminals + facts.leases)
+        );
         assert_eq!(host.ticket_census().expect("census"), (1, 1));
     }
 }

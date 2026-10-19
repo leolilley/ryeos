@@ -25,8 +25,8 @@ use serde::{Deserialize, Serialize};
 
 use super::{BindResponse, RetainedProductImportRequest};
 use crate::handler_context::HandlerContext;
-use ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy;
 use crate::state::AppState;
+use ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy;
 
 /// Root selector admission uses the already-admitted execution principal.
 /// This does not import content or create bindings: explicit composition must
@@ -167,9 +167,9 @@ impl ComposeRetainedProductsRequest {
                     .snapshot_hash
                     .bytes()
                     .any(|b| b.is_ascii_uppercase()))
-            {
-                bail!("product composition context requires an exact canonical snapshot");
-            }
+        {
+            bail!("product composition context requires an exact canonical snapshot");
+        }
         if self.maximum_bytes == 0 {
             bail!("product composition requires a positive aggregate import bound");
         }
@@ -1228,7 +1228,8 @@ mod tests {
             root: ResolvedAncestor {
                 requested_id: "qualification/verify".into(),
                 resolved_ref: "tool:qualification/verify".into(),
-                source_path: "/bundles/environment-qualification/.ai/tools/qualification/verify.py".into(),
+                source_path: "/bundles/environment-qualification/.ai/tools/qualification/verify.py"
+                    .into(),
                 source_space: ItemSpace::Bundle,
                 source_root: ItemSourceRoot::Bundle {
                     name: "knowledge".into(),

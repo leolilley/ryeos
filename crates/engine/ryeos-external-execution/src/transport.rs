@@ -579,29 +579,28 @@ impl<R: ExternalSupervisorRuntime, T: ExternalExecutionChannelTransport>
         if matches!(
             &dispatched.outcome,
             ExternalOwnerFrameOutcome::Acknowledgement
-        )
-            && let ExecutionChannelPayload::Acknowledge {
-                peer_frame_sequence,
-                peer_frame_digest,
-                application: ryeos_state::external_execution::ExecutionFrameApplication::Applied,
-            } = &verified.frame().payload
+        ) && let ExecutionChannelPayload::Acknowledge {
+            peer_frame_sequence,
+            peer_frame_digest,
+            application: ryeos_state::external_execution::ExecutionFrameApplication::Applied,
+        } = &verified.frame().payload
+        {
+            if self
+                .sealed_exports
+                .contains(&(*peer_frame_sequence, peer_frame_digest.clone()))
             {
-                if self
-                    .sealed_exports
-                    .contains(&(*peer_frame_sequence, peer_frame_digest.clone()))
-                {
-                    self.export_applied = true;
-                }
-                if self
-                    .command_terminated
-                    .as_ref()
-                    .is_some_and(|(sequence, digest)| {
-                        sequence == peer_frame_sequence && digest == peer_frame_digest
-                    })
-                {
-                    self.command_terminated_applied = true;
-                }
+                self.export_applied = true;
             }
+            if self
+                .command_terminated
+                .as_ref()
+                .is_some_and(|(sequence, digest)| {
+                    sequence == peer_frame_sequence && digest == peer_frame_digest
+                })
+            {
+                self.command_terminated_applied = true;
+            }
+        }
         let is_partial = matches!(
             dispatched.outcome,
             ExternalOwnerFrameOutcome::Application(SupervisorApplicationOutcome::Partial)

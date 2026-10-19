@@ -1053,16 +1053,15 @@ impl ThreadSnapshot {
         let Some(hash) = self.result_workspace_output_capture_hash.as_deref() else {
             return Ok(());
         };
-        let capture_maximum = super::workspace_output_capture::MAX_WORKSPACE_OUTPUT_CAPTURE_BYTES as u64;
+        let capture_maximum =
+            super::workspace_output_capture::MAX_WORKSPACE_OUTPUT_CAPTURE_BYTES as u64;
         let value = match budget.as_deref_mut() {
             Some(budget) => budget
                 .get_object(cas, hash, capture_maximum)?
                 .ok_or_else(|| anyhow::anyhow!("workspace output capture {hash} is missing"))?,
-            None => crate::object_closure::load_exact_cas_object_with_cas(
-                cas,
-                hash,
-                capture_maximum,
-            )?,
+            None => {
+                crate::object_closure::load_exact_cas_object_with_cas(cas, hash, capture_maximum)?
+            }
         };
         let capture = super::WorkspaceOutputCapture::from_value(&value)?;
         let admitted = self
@@ -1084,11 +1083,13 @@ impl ThreadSnapshot {
             );
         }
         let base = match budget.as_deref_mut() {
-            Some(budget) => crate::project_materialization::load_project_snapshot_bounded_with_budget(
-                cas,
-                &capture.base_project_snapshot_hash,
-                budget,
-            )?,
+            Some(budget) => {
+                crate::project_materialization::load_project_snapshot_bounded_with_budget(
+                    cas,
+                    &capture.base_project_snapshot_hash,
+                    budget,
+                )?
+            }
             None => crate::project_materialization::load_project_snapshot_bounded(
                 cas,
                 &capture.base_project_snapshot_hash,
@@ -1096,11 +1097,13 @@ impl ThreadSnapshot {
         }
         .context("terminal workspace output base snapshot is missing")?;
         let result = match budget.as_deref_mut() {
-            Some(budget) => crate::project_materialization::load_project_snapshot_bounded_with_budget(
-                cas,
-                &capture.result_project_snapshot_hash,
-                budget,
-            )?,
+            Some(budget) => {
+                crate::project_materialization::load_project_snapshot_bounded_with_budget(
+                    cas,
+                    &capture.result_project_snapshot_hash,
+                    budget,
+                )?
+            }
             None => crate::project_materialization::load_project_snapshot_bounded(
                 cas,
                 &capture.result_project_snapshot_hash,
@@ -1108,11 +1111,13 @@ impl ThreadSnapshot {
         }
         .context("terminal workspace output result snapshot is missing")?;
         let policy = match budget {
-            Some(budget) => crate::project_materialization::load_project_policy_bounded_with_budget(
-                cas,
-                &capture.partition.project_snapshot_policy_hash,
-                budget,
-            )?,
+            Some(budget) => {
+                crate::project_materialization::load_project_policy_bounded_with_budget(
+                    cas,
+                    &capture.partition.project_snapshot_policy_hash,
+                    budget,
+                )?
+            }
             None => crate::project_materialization::load_project_policy_bounded(
                 cas,
                 &capture.partition.project_snapshot_policy_hash,

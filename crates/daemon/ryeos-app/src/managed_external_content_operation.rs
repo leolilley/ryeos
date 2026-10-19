@@ -146,7 +146,9 @@ impl ManagedActivationJobOperation {
                 bail!("online managed activation cannot name an offline archive root")
             }
             (AcquisitionMode::Offline, Some(root), Some(digest)) => {
-                ryeos_node_runtime::node_policy::sections::external_content::validate_root_name(root)?;
+                ryeos_node_runtime::node_policy::sections::external_content::validate_root_name(
+                    root,
+                )?;
                 validate_hash("offline activation root authority", digest)?;
             }
             (AcquisitionMode::Offline, None, None) => {}
@@ -753,7 +755,8 @@ mod tests {
         }
     }
 
-    fn import_limits() -> ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportLimits
+    fn import_limits()
+    -> ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportLimits
     {
         ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportLimits {
             max_depth: 8,

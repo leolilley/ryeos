@@ -2244,8 +2244,9 @@ impl Engine {
                 reason: error.to_string(),
             })?;
         if let Some(target) = target
-            && target.requests_resources() {
-                self.execution_resource_policy
+            && target.requests_resources()
+        {
+            self.execution_resource_policy
                     .as_ref()
                     .ok_or_else(|| EngineError::IsolationPolicyRefused {
                         reason: "node execution resource authority is disabled for a resource-bearing target"
@@ -2255,7 +2256,7 @@ impl Engine {
                     .map_err(|error| EngineError::IsolationPolicyRefused {
                         reason: error.to_string(),
                     })?;
-            }
+        }
         Ok(())
     }
 
@@ -4848,7 +4849,10 @@ formats:
                 canonical_root: chosen_root.clone(),
             },
         ]);
-        assert_eq!(engine.registered_bundle_name_at(&chosen_root), Some("chosen"));
+        assert_eq!(
+            engine.registered_bundle_name_at(&chosen_root),
+            Some("chosen")
+        );
         assert_eq!(
             engine.registered_bundle_name_at(&chosen_root.join(AI_DIR)),
             None

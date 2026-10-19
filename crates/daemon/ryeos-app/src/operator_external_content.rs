@@ -14,8 +14,8 @@ use ryeos_state::external_content::products::transfer::ProductWitnessSource;
 use serde::{Deserialize, Serialize};
 
 use crate::handler_context::HandlerContext;
-use ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy;
 use crate::state::AppState;
+use ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy;
 
 pub mod consumer_qualification_context;
 pub mod content_qualification;
@@ -456,18 +456,19 @@ pub fn import_managed_activation_component(
     {
         bail!("managed external-content component exceeds current node import policy");
     }
-    let limits = ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportLimits {
-        max_depth: maximum_depth,
-        max_entries: maximum_entries,
-        max_file_bytes: maximum_file_bytes,
-        max_total_bytes: maximum_bytes,
-        store_budget_bytes: policy
-            .store_budget_bytes
-            .min(import_policy.limits.store_budget_bytes),
-        minimum_free_bytes: policy
-            .minimum_free_bytes
-            .max(import_policy.limits.minimum_free_bytes),
-    };
+    let limits =
+        ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportLimits {
+            max_depth: maximum_depth,
+            max_entries: maximum_entries,
+            max_file_bytes: maximum_file_bytes,
+            max_total_bytes: maximum_bytes,
+            store_budget_bytes: policy
+                .store_budget_bytes
+                .min(import_policy.limits.store_budget_bytes),
+            minimum_free_bytes: policy
+                .minimum_free_bytes
+                .max(import_policy.limits.minimum_free_bytes),
+        };
     let policy_digest = crate::managed_external_content_operation::managed_policy_digest(
         &import_policy.limits,
         policy,

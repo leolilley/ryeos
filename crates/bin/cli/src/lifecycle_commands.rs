@@ -2749,11 +2749,8 @@ fn capability_section(
             ),
         };
         section.rows.push(
-            crate::tty::Row::key_value(
-                "residency now",
-                format!("{now} (checked from this shell)"),
-            )
-            .with_tone(tone),
+            crate::tty::Row::key_value("residency now", format!("{now} (checked from this shell)"))
+                .with_tone(tone),
         );
     }
     let host = &report.host;

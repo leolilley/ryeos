@@ -462,9 +462,9 @@ impl ProductQualificationConsumerWorkerRequest {
                 || profile.len() > 256
                 || profile.trim() != profile
                 || profile.chars().any(char::is_control))
-            {
-                bail!("qualification Worker credential profile ID is not canonical and bounded");
-            }
+        {
+            bail!("qualification Worker credential profile ID is not canonical and bounded");
+        }
         if let Some(fixture) = &self.fixture {
             fixture.validate()?;
         }
@@ -855,9 +855,9 @@ impl ProductQualificationVerifier {
                     &self.artifact_identity,
                     AdmittedLaunchArtifactIdentity::DirectItemExecutor { .. }
                 ))
-            {
-                bail!("qualification verifier has no canonical direct execution root context");
-            }
+        {
+            bail!("qualification verifier has no canonical direct execution root context");
+        }
         for (label, value) in [
             ("verifier chain root", &self.chain_root_id),
             ("verifier thread", &self.thread_id),

@@ -543,7 +543,13 @@ pub fn resolve_runtime_binary_command_ref_with_selection(
     trust_store: &TrustStore,
     root_trust_class: TrustClass,
     selection: &crate::contracts::PlanRuntimeBinarySelection,
-) -> Result<(ResolvedBinary, ryeos_state::objects::BundleExecutorMemberSourceProofV1), EngineError> {
+) -> Result<
+    (
+        ResolvedBinary,
+        ryeos_state::objects::BundleExecutorMemberSourceProofV1,
+    ),
+    EngineError,
+> {
     let (verified, origin, selected_bundle) = resolve_runtime_binary_command_ref_verified(
         binary_ref,
         wrapper_source_root,
@@ -573,8 +579,16 @@ pub fn resolve_runtime_binary_command_ref_with_selection(
         item_source_object: verified.source_proof.item_source_object,
         signed_item_source_sidecar: verified.source_proof.signed_sidecar,
     };
-    proof.validate(&identity.manifest_hash, &identity.signer_fingerprint, &identity.content_hash)
-        .map_err(|error| EngineError::BinManifestInvalid { bin: binary_ref.to_owned(), reason: error.to_string() })?;
+    proof
+        .validate(
+            &identity.manifest_hash,
+            &identity.signer_fingerprint,
+            &identity.content_hash,
+        )
+        .map_err(|error| EngineError::BinManifestInvalid {
+            bin: binary_ref.to_owned(),
+            reason: error.to_string(),
+        })?;
     Ok((identity, proof))
 }
 
@@ -611,11 +625,14 @@ fn resolve_runtime_binary_command_ref_verified(
     roots: &ResolutionRoots,
     trust_store: &TrustStore,
     root_trust_class: TrustClass,
-) -> Result<(
-    VerifiedBundleBinary,
-    ryeos_state::objects::BundleExecutorRequestOriginV1,
-    ryeos_state::objects::SelectedBundleIdentityV1,
-), EngineError> {
+) -> Result<
+    (
+        VerifiedBundleBinary,
+        ryeos_state::objects::BundleExecutorRequestOriginV1,
+        ryeos_state::objects::SelectedBundleIdentityV1,
+    ),
+    EngineError,
+> {
     let Some(rest) = binary_ref.strip_prefix("bin:") else {
         return Err(EngineError::InvalidBinPrefix {
             raw: binary_ref.to_string(),
@@ -2215,25 +2232,29 @@ mod tests {
         let saved_manifest = captured.source_proof.manifest_object.clone();
         captured.source_proof.manifest_object["oversize"] =
             serde_json::Value::String("x".repeat(MAX_EXECUTOR_MANIFEST_OBJECT_BYTES as usize));
-        assert!(verify_retained_bundle_payload_proof(
-            &captured.source_proof,
-            &retained_identity,
-            0o755,
-            &key.verifying_key(),
-        )
-        .is_err());
+        assert!(
+            verify_retained_bundle_payload_proof(
+                &captured.source_proof,
+                &retained_identity,
+                0o755,
+                &key.verifying_key(),
+            )
+            .is_err()
+        );
         captured.source_proof.manifest_object = saved_manifest;
 
         let saved_sidecar = captured.source_proof.signed_sidecar.clone();
         captured.source_proof.signed_sidecar =
             vec![b'x'; MAX_EXECUTOR_ITEM_SOURCE_SIDECAR_BYTES + 1];
-        assert!(verify_retained_bundle_payload_proof(
-            &captured.source_proof,
-            &retained_identity,
-            0o755,
-            &key.verifying_key(),
-        )
-        .is_err());
+        assert!(
+            verify_retained_bundle_payload_proof(
+                &captured.source_proof,
+                &retained_identity,
+                0o755,
+                &key.verifying_key(),
+            )
+            .is_err()
+        );
         captured.source_proof.signed_sidecar = saved_sidecar;
 
         std::fs::write(&captured.identity.absolute_path, b"mutated-after-capture\n").unwrap();
@@ -2271,12 +2292,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let bundle = tmp.path().join("bundle");
         let (fingerprint, key) = write_resolver_fixture(&bundle, "demo");
-        let captured = capture_bundle_binary_ref(
-            "bin:demo",
-            &bundle,
-            &trust_store_for(&fingerprint, &key),
-        )
-        .expect("signed Bundle executor should be captured");
+        let captured =
+            capture_bundle_binary_ref("bin:demo", &bundle, &trust_store_for(&fingerprint, &key))
+                .expect("signed Bundle executor should be captured");
         let source = captured.source_proof;
         let proof = ryeos_state::objects::BundleExecutorMemberSourceProofV1 {
             requested_binary_ref: "bin:demo".to_owned(),
@@ -2322,22 +2340,32 @@ mod tests {
         .expect("retained signatures verify under the current authorized key");
 
         let mut substituted_signature = proof;
-        let mut sidecar = String::from_utf8(substituted_signature.signed_item_source_sidecar).unwrap();
+        let mut sidecar =
+            String::from_utf8(substituted_signature.signed_item_source_sidecar).unwrap();
         let header_end = sidecar.find('\n').unwrap();
         let signer_separator = sidecar[..header_end].rfind(':').unwrap();
         let signature_separator = sidecar[..signer_separator].rfind(':').unwrap();
         let signature_start = signature_separator + 1;
-        let replacement = if sidecar.as_bytes()[signature_start] == b'A' { b'B' } else { b'A' };
-        sidecar.replace_range(signature_start..signature_start + 1, &(replacement as char).to_string());
+        let replacement = if sidecar.as_bytes()[signature_start] == b'A' {
+            b'B'
+        } else {
+            b'A'
+        };
+        sidecar.replace_range(
+            signature_start..signature_start + 1,
+            &(replacement as char).to_string(),
+        );
         substituted_signature.signed_item_source_sidecar = sidecar.into_bytes();
-        assert!(verify_retained_bundle_executor_member_proof(
-            &substituted_signature,
-            &captured.identity.manifest_hash,
-            &fingerprint,
-            &captured.identity.content_hash,
-            &key.verifying_key(),
-        )
-        .is_err());
+        assert!(
+            verify_retained_bundle_executor_member_proof(
+                &substituted_signature,
+                &captured.identity.manifest_hash,
+                &fingerprint,
+                &captured.identity.content_hash,
+                &key.verifying_key(),
+            )
+            .is_err()
+        );
     }
 
     #[cfg(target_os = "linux")]

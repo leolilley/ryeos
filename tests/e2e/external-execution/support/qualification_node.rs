@@ -65,10 +65,9 @@ pub fn node_policy_snapshot(
         .ancestors()
         .nth(4)
         .unwrap();
-    let profile = std::fs::read_to_string(
-        repository.join("bundles/.ai/node/init/profiles/core.yaml"),
-    )
-    .unwrap();
+    let profile =
+        std::fs::read_to_string(repository.join("bundles/.ai/node/init/profiles/core.yaml"))
+            .unwrap();
     let profile: serde_json::Value = serde_yaml::from_str(&profile).unwrap();
     let fixed_names = fixed
         .iter()
@@ -117,7 +116,9 @@ pub fn private_directory() -> tempfile::TempDir {
     directory
 }
 
-pub fn manifest_hash(manifest: &ryeos_state::objects::ExternalLargeContentManifestObject) -> String {
+pub fn manifest_hash(
+    manifest: &ryeos_state::objects::ExternalLargeContentManifestObject,
+) -> String {
     lillux::sha256_hex(
         lillux::canonical_json(&manifest.to_value().unwrap())
             .unwrap()
@@ -318,7 +319,11 @@ fn live_bundle_engine(
     let core = ryeos_engine::test_support::core_bundle_root();
     let workflow = ryeos_engine::test_support::workflow_bundle_roots();
     let mut kind_roots = vec![core.join(".ai/node/engine/kinds")];
-    kind_roots.extend(workflow.iter().map(|root| root.join(".ai/node/engine/kinds")));
+    kind_roots.extend(
+        workflow
+            .iter()
+            .map(|root| root.join(".ai/node/engine/kinds")),
+    );
     let kinds = ryeos_engine::kind_registry::KindRegistry::load_base(&kind_roots, &trust).unwrap();
     let mut roots = vec![core];
     roots.extend(workflow);
@@ -486,11 +491,10 @@ fn install_bundle_engine(
     state.engine = engine;
     state.services = Arc::new(ryeos_api::registry::build_service_registry());
     state.service_descriptors = ryeos_api::handlers::ALL;
-    state.node_policy = Arc::new(
-        node_policy_snapshot(
-            &state.config.app_root,
-            state.identity.fingerprint(),
-            vec![
+    state.node_policy = Arc::new(node_policy_snapshot(
+        &state.config.app_root,
+        state.identity.fingerprint(),
+        vec![
             Arc::new(ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy()),
             Arc::new(import_policy),
             Arc::new(
@@ -509,8 +513,7 @@ fn install_bundle_engine(
                 },
             ),
             ],
-        ),
-    );
+    ));
 }
 
 /// Bring a freshly built test node to the point where its signed authoring
@@ -708,7 +711,8 @@ where
                 .build()
                 .unwrap();
             let root = tempfile::tempdir().unwrap();
-            let (store_owner, state) = ryeos_app::state::test_support::build_bound(root.path()).unwrap();
+            let (store_owner, state) =
+                ryeos_app::state::test_support::build_bound(root.path()).unwrap();
             // A failing scenario must still end its runtime's tasks and close
             // the Store, so one failure does not leave the native host dirty.
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

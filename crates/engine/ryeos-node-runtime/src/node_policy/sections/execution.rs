@@ -458,16 +458,28 @@ mod tests {
             change(&mut budget);
             budget.validate().err().map(|error| error.to_string())
         };
-        assert!(refused(|b| b.max_concurrent_leases = 0).unwrap().contains("max_concurrent"));
+        assert!(
+            refused(|b| b.max_concurrent_leases = 0)
+                .unwrap()
+                .contains("max_concurrent")
+        );
         assert!(
             refused(|b| b.max_concurrent_leases = MAX_EXTERNAL_CONCURRENT_LEASES + 1).is_some()
         );
-        assert!(refused(|b| b.max_lease_lifetime_seconds = 0).unwrap().contains("lifetime"));
+        assert!(
+            refused(|b| b.max_lease_lifetime_seconds = 0)
+                .unwrap()
+                .contains("lifetime")
+        );
         assert!(
             refused(|b| b.max_lease_lifetime_seconds = MAX_EXTERNAL_LEASE_LIFETIME_SECONDS + 1)
                 .is_some()
         );
-        assert!(refused(|b| b.daily_lease_seconds = 4 * 60 * 60 - 1).unwrap().contains("daily"));
+        assert!(
+            refused(|b| b.daily_lease_seconds = 4 * 60 * 60 - 1)
+                .unwrap()
+                .contains("daily")
+        );
         // The ceiling is two concurrent day-long leases at the highest
         // budget weight, in budget seconds.
         let most = 2
@@ -485,7 +497,11 @@ mod tests {
         assert!(refused(|b| b.daily_lease_seconds = 2 * 24 * 60 * 60 * 1000).is_none());
         assert!(refused(|b| b.daily_lease_seconds = 2 * 24 * 60 * 60 + 1).is_none());
         assert!(refused(|b| b.daily_lease_seconds = 4 * 60 * 60).is_none());
-        assert!(refused(|b| b.turn_end_margin_seconds = 0).unwrap().contains("turn_end_margin"));
+        assert!(
+            refused(|b| b.turn_end_margin_seconds = 0)
+                .unwrap()
+                .contains("turn_end_margin")
+        );
         assert!(refused(|b| b.turn_end_margin_seconds = 4 * 60 * 60).is_some());
         assert!(refused(|b| b.turn_end_margin_seconds = 4 * 60 * 60 - 1).is_none());
     }

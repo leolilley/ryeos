@@ -49,8 +49,9 @@ impl StoppedNodeScheduler {
         identity: &ryeos_node_runtime::identity::NodeIdentity,
     ) -> Result<Arc<Self>> {
         let factory = Arc::clone(host.factory()?);
-        ryeos_scheduler_service::validate_retirement_startup(&factory, runtime, identity)
-            .context("validate scheduler retirement journal before the stopped-node scheduler open")?;
+        ryeos_scheduler_service::validate_retirement_startup(&factory, runtime, identity).context(
+            "validate scheduler retirement journal before the stopped-node scheduler open",
+        )?;
         let destination = host.destination()?;
         // SAFETY: the host's destination authority admits only this host's
         // factory on this node's runtime directory, under the caller's
@@ -107,7 +108,9 @@ impl StoppedNodeScheduler {
             return Err(match Arc::clone(&scheduler).settle(host) {
                 Ok(()) => error,
                 Err(settle) => CarriedOwners::carry(
-                    error.context(format!("stopped-node scheduler store did not settle: {settle:#}")),
+                    error.context(format!(
+                        "stopped-node scheduler store did not settle: {settle:#}"
+                    )),
                     settle,
                 ),
             });
@@ -200,7 +203,10 @@ fn retain_terminals(
         return Ok(());
     }
     Err(CarriedOwners::carry(
-        anyhow!("stopped-node scheduler census not retained: {}", reasons.join("; ")),
+        anyhow!(
+            "stopped-node scheduler census not retained: {}",
+            reasons.join("; ")
+        ),
         refused,
     ))
 }
@@ -357,7 +363,12 @@ mod tests {
                 .expect("count pins"),
             0
         );
-        assert!(guard.operational_snapshot_roots().expect("snapshot roots").is_empty());
+        assert!(
+            guard
+                .operational_snapshot_roots()
+                .expect("snapshot roots")
+                .is_empty()
+        );
         assert!(guard.finish_fire_retention(&[]).is_err());
         assert!(guard.repair_fire_retention().is_err());
         assert!(scheduler.try_acquire_project_schedules().is_err());

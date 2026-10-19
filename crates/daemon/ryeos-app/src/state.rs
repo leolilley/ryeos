@@ -10,16 +10,13 @@ use ryeos_runtime::authorizer::Authorizer;
 
 use crate::callback_token::{CallbackCapabilityStore, ThreadAuthStore};
 use crate::command_service::CommandService;
-use ryeos_node_runtime::config::Config;
 use crate::engine_cache::EngineCache;
 use crate::event_store_service::EventStoreService;
 use crate::event_stream::ThreadEventHub;
 use crate::extension_state::ExtensionState;
-use ryeos_node_runtime::identity::NodeIdentity;
 use crate::ignore::IgnoreMatcher;
 use crate::live_input_queue::LiveInputQueue;
 use crate::node_config::NodeConfigSnapshot;
-use ryeos_node_runtime::node_policy::NodePolicySnapshot;
 use crate::projection_health::ThreadProjectionHealthSnapshot;
 use crate::resolution_cache::ResolutionCache;
 use crate::service_registry::{ServiceDescriptor, ServiceRegistry};
@@ -27,6 +24,9 @@ use crate::state_store::StateStore;
 use crate::thread_lifecycle::ThreadLifecycleService;
 use crate::vault::NodeVault;
 use crate::write_barrier::WriteBarrier;
+use ryeos_node_runtime::config::Config;
+use ryeos_node_runtime::identity::NodeIdentity;
+use ryeos_node_runtime::node_policy::NodePolicySnapshot;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CatalogHealth {
@@ -382,7 +382,13 @@ pub mod test_support {
         // The owner already holds this App root's operator lock; a second
         // acquisition would conflict with it.
         let controller_lifetime = store_owner.controller_lifetime();
-        let state = compose(config, identity, state_store, write_barrier, controller_lifetime)?;
+        let state = compose(
+            config,
+            identity,
+            state_store,
+            write_barrier,
+            controller_lifetime,
+        )?;
         Ok((store_owner, state))
     }
 
@@ -506,9 +512,9 @@ pub mod test_support {
             external_candidate_connectors: Arc::new(Default::default()),
             external_provider_configurations: Arc::new(Default::default()),
             external_candidate_imports: Arc::new(Default::default()),
-            node_policy: Arc::new(ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(
-                Vec::new(),
-            )),
+            node_policy: Arc::new(
+                ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(Vec::new()),
+            ),
             vault: Arc::new(crate::vault::EmptyVault),
             provider_env: Arc::new(crate::vault::ProviderEnvironment::none()),
             command_registry: Arc::new(ryeos_runtime::CommandRegistry::from_records(

@@ -3,7 +3,7 @@
 //! These records carry evidence only. Filesystem and SQLite effects remain
 //! owned by the selected host service and Lillux's retained native owner.
 
-use anyhow::{ensure, Context, Result};
+use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 
 pub const SCHEDULER_RETIREMENT_RECORD_MAX_BYTES: usize = 8 * 1024;
@@ -298,10 +298,16 @@ impl SchedulerRetirementIntent {
             }
         }
         if self.scheduler_sources[0].current.is_none() {
-            ensure!(self.scheduler_sources.iter().all(|source| source.current.is_none())
-                && self.scheduler_accounting == crate::SchedulerFireHistoryAccounting::Exact {
-                    counts: Default::default(),
-                }, "absent original scheduler cannot supply sidecars or nonzero/unavailable accounting");
+            ensure!(
+                self.scheduler_sources
+                    .iter()
+                    .all(|source| source.current.is_none())
+                    && self.scheduler_accounting
+                        == crate::SchedulerFireHistoryAccounting::Exact {
+                            counts: Default::default(),
+                        },
+                "absent original scheduler cannot supply sidecars or nonzero/unavailable accounting"
+            );
         }
         if let Some(recovery) = &self.recovery {
             ensure!(
@@ -2385,9 +2391,11 @@ mod compact_observation_controls {
         let value: serde_json::Value = serde_json::from_slice(&bytes)?;
         let coordinates = value["stopped_coordinates"].as_array().unwrap();
         assert_eq!(coordinates.len(), 100);
-        assert!(coordinates
-            .iter()
-            .all(|item| item.get("name").is_none() && item.get("role").is_none()));
+        assert!(
+            coordinates
+                .iter()
+                .all(|item| item.get("name").is_none() && item.get("role").is_none())
+        );
         assert_eq!(
             decode_scheduler_retirement_record::<SchedulerRetirementResolutionObservation>(&bytes)?,
             observation
@@ -2448,8 +2456,8 @@ mod compact_observation_controls {
     }
 
     #[test]
-    fn strict_decoder_refuses_each_missing_field_legacy_names_extras_and_reordered_facts(
-    ) -> Result<()> {
+    fn strict_decoder_refuses_each_missing_field_legacy_names_extras_and_reordered_facts()
+    -> Result<()> {
         let observation = observation();
         let value = serde_json::to_value(&observation)?;
         // Every observation key is required, including nullable Option fields.

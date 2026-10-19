@@ -64,8 +64,10 @@ impl HostRuntimeBinding {
         account.require_directory_owner(observed_app_root)?;
         process_scopes.validate().map_err(anyhow::Error::msg)?;
         oci_lifecycle.validate().map_err(anyhow::Error::msg)?;
-        anyhow::ensure!(node_resources == oci_lifecycle.node_resources(),
-            "host runtime node envelope differs from OCI generation");
+        anyhow::ensure!(
+            node_resources == oci_lifecycle.node_resources(),
+            "host runtime node envelope differs from OCI generation"
+        );
         process_scopes
             .require_oci_generation_as_administrator(&account, &oci_lifecycle)
             .map_err(anyhow::Error::msg)?;
@@ -152,8 +154,10 @@ impl HostRuntimeBinding {
         self.node_resources.validate().map_err(anyhow::Error::msg)?;
         if let Some(lifecycle) = &self.oci_lifecycle {
             lifecycle.validate().map_err(anyhow::Error::msg)?;
-            anyhow::ensure!(self.node_resources == lifecycle.node_resources(),
-                "host runtime node envelope differs from OCI generation");
+            anyhow::ensure!(
+                self.node_resources == lifecycle.node_resources(),
+                "host runtime node envelope differs from OCI generation"
+            );
         }
         self.process_scopes.validate().map_err(anyhow::Error::msg)?;
         if !lillux::valid_hash(&self.node_fingerprint) {
@@ -188,7 +192,13 @@ impl HostRuntimeBinding {
         process_scopes: lillux::ProcessScopeConfiguration,
         oci_lifecycle: lillux::OciLifecycleGeneration,
     ) -> Result<Self> {
-        let mut binding = Self::capture(app_root, node_fingerprint, account, node_resources, process_scopes)?;
+        let mut binding = Self::capture(
+            app_root,
+            node_fingerprint,
+            account,
+            node_resources,
+            process_scopes,
+        )?;
         binding.oci_lifecycle = Some(oci_lifecycle);
         binding.validate_as_administrator(app_root.path())?;
         Ok(binding)
@@ -442,7 +452,10 @@ mod tests {
         let mut changed = original;
         changed["node_resources"]["maximum_memory_bytes"] = 536870912_u64.into();
         let changed: HostRuntimeBinding = serde_json::from_value(changed).unwrap();
-        assert_ne!(first.identity_digest().unwrap(), changed.identity_digest().unwrap());
+        assert_ne!(
+            first.identity_digest().unwrap(),
+            changed.identity_digest().unwrap()
+        );
         let mut no_capacity = first.node_resources;
         no_capacity.maximum_memory_bytes = 0;
         assert!(no_capacity.validate().is_err());
@@ -501,7 +514,10 @@ mod tests {
             }
         }))
         .unwrap();
-        let error = format!("{:#}", binding.require_current_process_placed().unwrap_err());
+        let error = format!(
+            "{:#}",
+            binding.require_current_process_placed().unwrap_err()
+        );
         assert!(error.contains("supervised route refused"), "{error}");
         assert!(error.contains("ryeos-direct-fixture/controller"), "{error}");
     }

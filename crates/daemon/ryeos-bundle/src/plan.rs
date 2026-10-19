@@ -820,10 +820,24 @@ mod tests {
             .join("bundles");
 
         let sets: [&[&str]; 6] = [
-            &["core", "scheduling", "knowledge", "directive", "graph", "ryeos-docs"],
+            &[
+                "core",
+                "scheduling",
+                "knowledge",
+                "directive",
+                "graph",
+                "ryeos-docs",
+            ],
             &["core", "graph", "bundle-release"],
             &["core", "graph", "knowledge", "codex"],
-            &["core", "knowledge", "directive", "graph", "ryeos-docs", "opencode"],
+            &[
+                "core",
+                "knowledge",
+                "directive",
+                "graph",
+                "ryeos-docs",
+                "opencode",
+            ],
             &["core", "graph"],
             &["core", "knowledge"],
         ];

@@ -1028,9 +1028,8 @@ mod tests {
         );
         let ref_ = CanonicalRef::parse("tool:chosen/hook").unwrap();
 
-        let only =
-            select_registered_bundle(&registered, "chosen", RegisteredBundleSelection::Only)
-                .unwrap();
+        let only = select_registered_bundle(&registered, "chosen", RegisteredBundleSelection::Only)
+            .unwrap();
         let roots = ResolutionRoots::from_registered(None, &only);
         assert!(matches!(
             resolve_item_full(&roots, &schema, &ref_),

@@ -9,12 +9,12 @@ use std::sync::Arc;
 
 use anyhow::{Context as _, bail};
 
-use ryeos_node_runtime::node_policy::sections::execution::{
-    NodeExecutionResourceDescriptor, NodeExecutionResourcePolicy,
-};
 use ryeos_engine::contracts::{
     ExecutionResourceAccess, ExecutionResourceEnforcement, ExecutionResourceFactValue,
     ExecutionResourceRequirement, ExecutionResourceSelection, ExecutionTargetRequirement,
+};
+use ryeos_node_runtime::node_policy::sections::execution::{
+    NodeExecutionResourceDescriptor, NodeExecutionResourcePolicy,
 };
 
 #[derive(Debug, Clone)]
@@ -997,8 +997,8 @@ pub fn settle_process_resource_operations_with_accounting(
         .iter()
         .map(|binding| accounting.resource_operation_state(binding.operation_id.as_str()))
         .collect::<anyhow::Result<Vec<_>>>()?;
-    let retains_unknown_advisory_liability = end.is_none()
-        && states.contains(&ryeos_accounting::ResourceBudgetState::AdvisoryIssued);
+    let retains_unknown_advisory_liability =
+        end.is_none() && states.contains(&ryeos_accounting::ResourceBudgetState::AdvisoryIssued);
     accounting.mark_resource_owner_cleanup_proved(
         owner_gate_id.as_str(),
         owner_incarnation.as_str(),

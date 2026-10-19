@@ -166,7 +166,9 @@ pub async fn status(env: &LocalLifecycleEnv) -> Result<LifecycleStatus> {
                 } else if let Some(connect_error) =
                     err.downcast_ref::<crate::control::ControlConnectError>()
                 {
-                    if let Some(reason) = unaddressable_control_path(control_path, connect_error.kind) {
+                    if let Some(reason) =
+                        unaddressable_control_path(control_path, connect_error.kind)
+                    {
                         // No socket can be bound at this pathname, so nothing
                         // is listening there: proof of absence, like NotFound.
                         tracing::warn!("{reason}");
@@ -272,8 +274,9 @@ pub async fn status(env: &LocalLifecycleEnv) -> Result<LifecycleStatus> {
     if unusable_control_paths.is_empty() {
         let state_dir = config.app_root.join(ryeos_engine::AI_DIR).join("state");
         let marker = crate::lifecycle_marker::read(&state_dir);
-        if let Some(crate::lifecycle_marker::LifecycleMarker::Running { pid, started_at, .. }) =
-            marker.clone()
+        if let Some(crate::lifecycle_marker::LifecycleMarker::Running {
+            pid, started_at, ..
+        }) = marker.clone()
             && crate::lifecycle_marker::process_alive_as_ryeosd(pid)
         {
             let marker_age = crate::lifecycle_marker::age(&state_dir).unwrap_or_default();
@@ -398,10 +401,16 @@ pub fn capacity_status_rows(
             None => summary.epoch.to_string(),
         };
         rows.push(("epoch", epoch));
-        rows.push(("incarnations remaining", summary.incarnations_remaining.to_string()));
+        rows.push((
+            "incarnations remaining",
+            summary.incarnations_remaining.to_string(),
+        ));
         rows.push((
             "recovery attempts",
-            format!("{} of {}", summary.recovery_attempts_used, summary.recovery_attempts_maximum),
+            format!(
+                "{} of {}",
+                summary.recovery_attempts_used, summary.recovery_attempts_maximum
+            ),
         ));
         rows.push(("last operation", summary.last_operation.clone()));
     }
@@ -415,7 +424,10 @@ pub fn capacity_status_rows(
 /// platform's Unix socket address bound names a path no daemon could ever
 /// have bound. Returns the explanation to log; `None` for every other
 /// connect failure, which keeps its own classification.
-fn unaddressable_control_path(control_path: &std::path::Path, kind: std::io::ErrorKind) -> Option<String> {
+fn unaddressable_control_path(
+    control_path: &std::path::Path,
+    kind: std::io::ErrorKind,
+) -> Option<String> {
     use std::os::unix::ffi::OsStrExt as _;
     if kind != std::io::ErrorKind::InvalidInput
         || lillux::local_ipc::local_endpoint_path_addressable(control_path)
@@ -550,13 +562,28 @@ mod tests {
         mark_initialized(&config.app_root);
         let before: Vec<_> = walkdir(&config.app_root);
         let status = status(&env).await.unwrap();
-        let LifecycleStatus::Stopped { app_root, capacity, capacity_error } = status else {
+        let LifecycleStatus::Stopped {
+            app_root,
+            capacity,
+            capacity_error,
+        } = status
+        else {
             panic!("expected stopped status, got: {status:?}")
         };
         assert_eq!(app_root, config.app_root);
-        assert!(capacity.is_none(), "no issuance means no account: {capacity:?}");
-        assert!(capacity_error.is_none(), "an un-issued root is not an error: {capacity_error:?}");
-        assert_eq!(walkdir(&config.app_root), before, "status must create no files");
+        assert!(
+            capacity.is_none(),
+            "no issuance means no account: {capacity:?}"
+        );
+        assert!(
+            capacity_error.is_none(),
+            "an un-issued root is not an error: {capacity_error:?}"
+        );
+        assert_eq!(
+            walkdir(&config.app_root),
+            before,
+            "status must create no files"
+        );
         assert!(!tmp.path().join("runtime").exists());
     }
 
@@ -585,20 +612,22 @@ mod tests {
             outstanding_incarnation: false,
             recovery_attempts_used: 5,
             recovery_attempts_maximum: 32,
-            remaining: ryeos_node_runtime::node_policy::sections::native_capacity::NativeCapacityUnits {
-                storage_bytes: 0,
-                host_control_storage_bytes: 0,
-                allocator_steps: 0,
-                connection_tickets: 0,
-                cleanup_steps: 0,
-            },
+            remaining:
+                ryeos_node_runtime::node_policy::sections::native_capacity::NativeCapacityUnits {
+                    storage_bytes: 0,
+                    host_control_storage_bytes: 0,
+                    allocator_steps: 0,
+                    connection_tickets: 0,
+                    cleanup_steps: 0,
+                },
             incarnations_remaining: 11,
             last_operation: "rollover_renewal".to_owned(),
-            renewal: ryeos_node_runtime::node_policy::sections::native_capacity::NativeRenewalEnvelope {
-                at_orderly_rollover: true,
-                operator_reissue: true,
-                maximum_epochs: None,
-            },
+            renewal:
+                ryeos_node_runtime::node_policy::sections::native_capacity::NativeRenewalEnvelope {
+                    at_orderly_rollover: true,
+                    operator_reissue: true,
+                    maximum_epochs: None,
+                },
         };
         let rows = capacity_status_rows(Some(&unbounded), None);
         assert_eq!(rows[0], ("epoch", "3".to_owned()));
@@ -615,7 +644,10 @@ mod tests {
         assert_eq!(rows[0], ("epoch", "3 of 8".to_owned()));
 
         let rows = capacity_status_rows(None, Some("foreign capacity anchor"));
-        assert_eq!(rows, vec![("capacity", "unreadable: foreign capacity anchor".to_owned())]);
+        assert_eq!(
+            rows,
+            vec![("capacity", "unreadable: foreign capacity anchor".to_owned())]
+        );
     }
 
     #[tokio::test]
@@ -777,22 +809,17 @@ mod tests {
         let env = test_env(&root);
         let config = env.config();
         mark_initialized(&config.app_root);
-        assert!(!lillux::local_ipc::local_endpoint_path_addressable(&config.uds_path));
+        assert!(!lillux::local_ipc::local_endpoint_path_addressable(
+            &config.uds_path
+        ));
         let reason =
-            unaddressable_control_path(&config.uds_path, std::io::ErrorKind::InvalidInput)
-                .unwrap();
+            unaddressable_control_path(&config.uds_path, std::io::ErrorKind::InvalidInput).unwrap();
         assert!(reason.contains("limited to"), "{reason}");
         assert!(
             unaddressable_control_path(&config.uds_path, std::io::ErrorKind::PermissionDenied)
                 .is_none()
         );
-        assert!(
-            unaddressable_control_path(
-                tmp.path(),
-                std::io::ErrorKind::InvalidInput
-            )
-            .is_none()
-        );
+        assert!(unaddressable_control_path(tmp.path(), std::io::ErrorKind::InvalidInput).is_none());
 
         let status = status(&env).await.unwrap();
         assert!(

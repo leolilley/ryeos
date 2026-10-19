@@ -49,9 +49,10 @@ pub enum FieldCursor {
 pub enum FieldCursorRequest {
     #[default]
     Live,
-    BraidCut { anchor: FieldEventRef },
+    BraidCut {
+        anchor: FieldEventRef,
+    },
 }
-
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

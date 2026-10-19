@@ -503,9 +503,7 @@ impl RuntimeDb {
         &self,
         placement: &str,
     ) -> Result<Option<QualificationGuestScratchRecord>> {
-        self.conn.with_sql(|conn| {
-            read_scratch(conn, placement)
-        })
+        self.conn.with_sql(|conn| read_scratch(conn, placement))
     }
 
     /// A retry may report transport completion only for the same one-use Q
@@ -529,7 +527,8 @@ impl RuntimeDb {
             }
             let allocation =
                 read(conn, placement)?.context("closed Q scratch lost its settled allocation")?;
-            let ExternalAllocationOwner::QualificationCandidate(owner) = &allocation.reservation.owner
+            let ExternalAllocationOwner::QualificationCandidate(owner) =
+                &allocation.reservation.owner
             else {
                 bail!("closed Q scratch changed its qualification owner");
             };
@@ -554,9 +553,8 @@ impl RuntimeDb {
         expected: &QualificationGuestScratchRecord,
         original_parent: &lillux::PinnedDirectory,
     ) -> Result<QualificationGuestScratchRecord> {
-        self.conn.with_sql(|conn| {
-            retire_absent_reserved(conn, expected, original_parent)
-        })
+        self.conn
+            .with_sql(|conn| retire_absent_reserved(conn, expected, original_parent))
     }
 
     /// Refuse every replay, including a prior Reserved row whose child may
@@ -855,28 +853,32 @@ mod tests {
                 .is_none(),
             "Reserved intent unexpectedly created a child"
         );
-        crate::runtime_db::test_native::read_existing(&root.path().join("scratch.sqlite3"), |reopened| {
-            ensure!(
-                read_scratch(reopened, &record.placement_thread_id)? == Some(record.clone()),
-                "Reserved intent disappeared across restart"
-            );
-            ensure!(
-                QualificationWorkspaceCustodyRegistry::new()
-                    .borrow_guest_scratch(&record)
-                    .is_err(),
-                "restart adopted a path as original descriptor custody"
-            );
-            let closed = retire_absent_reserved(reopened, &record, &parent)?;
-            ensure!(
-                closed.phase == QualificationGuestScratchPhase::Closed
-                    && closed.cleanup_basis
-                        == Some(QualificationGuestScratchCleanupBasis::NoAllocation)
-                    && read_scratch(reopened, &record.placement_thread_id)? == Some(closed.clone())
-                    && retire_absent_reserved(reopened, &record, &parent).is_err(),
-                "absent precreation scratch did not close exactly once"
-            );
-            Ok(())
-        });
+        crate::runtime_db::test_native::read_existing(
+            &root.path().join("scratch.sqlite3"),
+            |reopened| {
+                ensure!(
+                    read_scratch(reopened, &record.placement_thread_id)? == Some(record.clone()),
+                    "Reserved intent disappeared across restart"
+                );
+                ensure!(
+                    QualificationWorkspaceCustodyRegistry::new()
+                        .borrow_guest_scratch(&record)
+                        .is_err(),
+                    "restart adopted a path as original descriptor custody"
+                );
+                let closed = retire_absent_reserved(reopened, &record, &parent)?;
+                ensure!(
+                    closed.phase == QualificationGuestScratchPhase::Closed
+                        && closed.cleanup_basis
+                            == Some(QualificationGuestScratchCleanupBasis::NoAllocation)
+                        && read_scratch(reopened, &record.placement_thread_id)?
+                            == Some(closed.clone())
+                        && retire_absent_reserved(reopened, &record, &parent).is_err(),
+                    "absent precreation scratch did not close exactly once"
+                );
+                Ok(())
+            },
+        );
         Ok(())
     }
 
@@ -884,26 +886,29 @@ mod tests {
     fn precreation_recovery_refuses_present_child_or_later_local_owner() -> Result<()> {
         let root = tempfile::tempdir()?;
         let (parent, record) = fixture(root.path())?;
-        crate::runtime_db::test_native::read_existing(&root.path().join("scratch.sqlite3"), |conn| {
-            let child = parent.create_child(OsStr::new(&record.placement_thread_id), 0o700)?;
-            ensure!(
-                retire_absent_reserved(conn, &record, &parent).is_err()
-                    && read_scratch(conn, &record.placement_thread_id)? == Some(record.clone()),
-                "precreation recovery adopted a present child"
-            );
-            drop(child);
-            std::fs::remove_dir(parent.path().join(&record.placement_thread_id))?;
-            conn.execute(
-                "INSERT INTO external_qualification_local_start VALUES (?1)",
-                [&record.placement_thread_id],
-            )?;
-            ensure!(
-                retire_absent_reserved(conn, &record, &parent).is_err()
-                    && read_scratch(conn, &record.placement_thread_id)? == Some(record),
-                "precreation recovery erased a later local owner"
-            );
-            Ok(())
-        });
+        crate::runtime_db::test_native::read_existing(
+            &root.path().join("scratch.sqlite3"),
+            |conn| {
+                let child = parent.create_child(OsStr::new(&record.placement_thread_id), 0o700)?;
+                ensure!(
+                    retire_absent_reserved(conn, &record, &parent).is_err()
+                        && read_scratch(conn, &record.placement_thread_id)? == Some(record.clone()),
+                    "precreation recovery adopted a present child"
+                );
+                drop(child);
+                std::fs::remove_dir(parent.path().join(&record.placement_thread_id))?;
+                conn.execute(
+                    "INSERT INTO external_qualification_local_start VALUES (?1)",
+                    [&record.placement_thread_id],
+                )?;
+                ensure!(
+                    retire_absent_reserved(conn, &record, &parent).is_err()
+                        && read_scratch(conn, &record.placement_thread_id)? == Some(record),
+                    "precreation recovery erased a later local owner"
+                );
+                Ok(())
+            },
+        );
         Ok(())
     }
 
@@ -911,32 +916,35 @@ mod tests {
     fn created_before_allocation_and_lost_remove_ack_keep_original_custody() -> Result<()> {
         let root = tempfile::tempdir()?;
         let (parent, reserved) = fixture(root.path())?;
-        crate::runtime_db::test_native::read_existing(&root.path().join("scratch.sqlite3"), |conn| {
-            let child = parent.create_child(OsStr::new(&reserved.placement_thread_id), 0o700)?;
-            let guard = Arc::new(TempDirGuard::new_pinned(
-                parent,
-                reserved.placement_thread_id.clone().into(),
-                Arc::new(child),
-            ));
-            let custody = Arc::new(QualificationGuestScratchCustody::new(&reserved, guard)?);
-            let registry = QualificationWorkspaceCustodyRegistry::new();
-            registry.retain_guest_scratch(Arc::clone(&custody))?;
-            let mut created = reserved.clone();
-            created.phase = QualificationGuestScratchPhase::Created;
-            created.updated_at_ms = 2;
-            transition(conn, &reserved, &created)?;
-            ensure!(
-                read(conn, &created.placement_thread_id)?.is_none()
-                    && Arc::ptr_eq(&registry.borrow_guest_scratch(&created)?, &custody),
-                "Created scratch lost its original pre-allocation custody"
-            );
-            let mut intent = created.clone();
-            intent.phase = QualificationGuestScratchPhase::CleanupIntent;
-            intent.cleanup_basis = Some(QualificationGuestScratchCleanupBasis::NoAllocation);
-            intent.updated_at_ms = 3;
-            require_cleanup_basis(conn, &intent)?;
-            transition(conn, &created, &intent)?;
-            ensure!(
+        crate::runtime_db::test_native::read_existing(
+            &root.path().join("scratch.sqlite3"),
+            |conn| {
+                let child =
+                    parent.create_child(OsStr::new(&reserved.placement_thread_id), 0o700)?;
+                let guard = Arc::new(TempDirGuard::new_pinned(
+                    parent,
+                    reserved.placement_thread_id.clone().into(),
+                    Arc::new(child),
+                ));
+                let custody = Arc::new(QualificationGuestScratchCustody::new(&reserved, guard)?);
+                let registry = QualificationWorkspaceCustodyRegistry::new();
+                registry.retain_guest_scratch(Arc::clone(&custody))?;
+                let mut created = reserved.clone();
+                created.phase = QualificationGuestScratchPhase::Created;
+                created.updated_at_ms = 2;
+                transition(conn, &reserved, &created)?;
+                ensure!(
+                    read(conn, &created.placement_thread_id)?.is_none()
+                        && Arc::ptr_eq(&registry.borrow_guest_scratch(&created)?, &custody),
+                    "Created scratch lost its original pre-allocation custody"
+                );
+                let mut intent = created.clone();
+                intent.phase = QualificationGuestScratchPhase::CleanupIntent;
+                intent.cleanup_basis = Some(QualificationGuestScratchCleanupBasis::NoAllocation);
+                intent.updated_at_ms = 3;
+                require_cleanup_basis(conn, &intent)?;
+                transition(conn, &created, &intent)?;
+                ensure!(
                 conn.execute(
                     "INSERT INTO external_execution_allocation(placement_thread_id,reservation_json)
                      VALUES (?1,'{\"owner\":{\"kind\":\"qualification_candidate\"}}')",
@@ -945,37 +953,38 @@ mod tests {
                 .is_err(),
                 "cleanup intent admitted a late Q allocation"
             );
-            custody.guard().remove_now()?;
-            custody.guard().prove_owned_scratch_removed()?;
-            // The unlink committed but the journal update did not. Only this
-            // daemon's retained original guard can retry the physical proof.
-            ensure!(
-                read_scratch(conn, &intent.placement_thread_id)? == Some(intent.clone()),
-                "lost removal ACK advanced the journal"
-            );
-            ensure!(
-                QualificationWorkspaceCustodyRegistry::new()
-                    .borrow_guest_scratch(&intent)
-                    .is_err(),
-                "restart adopted removed scratch from its diagnostic path"
-            );
-            let mut removed = intent.clone();
-            removed.phase = QualificationGuestScratchPhase::Removed;
-            removed.removed_at_ms = Some(4);
-            removed.updated_at_ms = 4;
-            transition(conn, &intent, &removed)?;
-            let mut closed = removed.clone();
-            closed.phase = QualificationGuestScratchPhase::Closed;
-            closed.closed_at_ms = Some(5);
-            closed.updated_at_ms = 5;
-            transition(conn, &removed, &closed)?;
-            registry.release_closed_guest_scratch(&closed)?;
-            ensure!(
-                registry.borrow_guest_scratch(&closed).is_err(),
-                "Closed scratch retained active descriptor custody"
-            );
-            Ok(())
-        });
+                custody.guard().remove_now()?;
+                custody.guard().prove_owned_scratch_removed()?;
+                // The unlink committed but the journal update did not. Only this
+                // daemon's retained original guard can retry the physical proof.
+                ensure!(
+                    read_scratch(conn, &intent.placement_thread_id)? == Some(intent.clone()),
+                    "lost removal ACK advanced the journal"
+                );
+                ensure!(
+                    QualificationWorkspaceCustodyRegistry::new()
+                        .borrow_guest_scratch(&intent)
+                        .is_err(),
+                    "restart adopted removed scratch from its diagnostic path"
+                );
+                let mut removed = intent.clone();
+                removed.phase = QualificationGuestScratchPhase::Removed;
+                removed.removed_at_ms = Some(4);
+                removed.updated_at_ms = 4;
+                transition(conn, &intent, &removed)?;
+                let mut closed = removed.clone();
+                closed.phase = QualificationGuestScratchPhase::Closed;
+                closed.closed_at_ms = Some(5);
+                closed.updated_at_ms = 5;
+                transition(conn, &removed, &closed)?;
+                registry.release_closed_guest_scratch(&closed)?;
+                ensure!(
+                    registry.borrow_guest_scratch(&closed).is_err(),
+                    "Closed scratch retained active descriptor custody"
+                );
+                Ok(())
+            },
+        );
         Ok(())
     }
 }

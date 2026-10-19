@@ -32,7 +32,9 @@ pub struct SupervisorJournalEnvelope {
 impl From<ryeos_state::external_execution::transport::ExternalSupervisorNativeEnvelope>
     for SupervisorJournalEnvelope
 {
-    fn from(sealed: ryeos_state::external_execution::transport::ExternalSupervisorNativeEnvelope) -> Self {
+    fn from(
+        sealed: ryeos_state::external_execution::transport::ExternalSupervisorNativeEnvelope,
+    ) -> Self {
         Self {
             storage_bytes: sealed.storage_bytes,
             allocator_steps: sealed.allocator_steps,
@@ -84,7 +86,10 @@ struct SupervisorAuthority {
 
 impl OfflineNativeAuthority for SupervisorAuthority {
     fn checkpoint(&self, cleanup: bool) -> Result<()> {
-        ensure!(self.process == std::process::id(), "inherited supervisor native host refused");
+        ensure!(
+            self.process == std::process::id(),
+            "inherited supervisor native host refused"
+        );
         self.state_root.ensure_path_binding()?;
         self.state_lock.ensure_protects(&self.state_root)?;
         for directory in &self.journal_directories {
@@ -95,7 +100,10 @@ impl OfflineNativeAuthority for SupervisorAuthority {
         } else {
             (&self.operation, "operation")
         };
-        ensure!(!deadline.has_elapsed(), "supervisor journal native {window} window elapsed");
+        ensure!(
+            !deadline.has_elapsed(),
+            "supervisor journal native {window} window elapsed"
+        );
         Ok(())
     }
     fn require_runtime(&self, runtime: &lillux::PinnedDirectory) -> Result<()> {
@@ -197,10 +205,19 @@ impl SupervisorNativeHost {
     pub fn finish(self) -> std::result::Result<OfflineNativeFacts, (Option<Self>, anyhow::Error)> {
         let Self { authority, host } = self;
         match host.finish() {
-            Ok(OfflineNativeReleased { facts, region: _, durability_pins: _ }) => facts.ok_or_else(|| {
-                (None, anyhow::anyhow!("supervisor native host released without backend facts"))
+            Ok(OfflineNativeReleased {
+                facts,
+                region: _,
+                durability_pins: _,
+            }) => facts.ok_or_else(|| {
+                (
+                    None,
+                    anyhow::anyhow!("supervisor native host released without backend facts"),
+                )
             }),
-            Err(OfflineNativeRetained { host, error }) => Err((Some(Self { authority, host }), error)),
+            Err(OfflineNativeRetained { host, error }) => {
+                Err((Some(Self { authority, host }), error))
+            }
         }
     }
 }

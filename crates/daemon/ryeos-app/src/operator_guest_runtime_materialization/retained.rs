@@ -78,8 +78,7 @@ impl MaterializationClaimEvidence {
         let mut previous: Option<&str> = None;
         for signer in &self.checked_trusted_publishers {
             ensure!(
-                lillux::valid_hash(signer)
-                    && previous.is_none_or(|value| value < signer.as_str()),
+                lillux::valid_hash(signer) && previous.is_none_or(|value| value < signer.as_str()),
                 "materialization checked publishers are not canonical and sorted"
             );
             previous = Some(signer);

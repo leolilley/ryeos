@@ -356,14 +356,8 @@ fn capture_guarded(
         .write_barrier
         .acquire_with_timeout(crate::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
         .map_err(|error| anyhow::anyhow!("cannot acquire product publication permit: {error}"))?;
-    let published = publish_product_witness(
-        authority,
-        &coordinate,
-        &attestation,
-        limits,
-        &signer,
-        guard,
-    )?;
+    let published =
+        publish_product_witness(authority, &coordinate, &attestation, limits, &signer, guard)?;
     // Publication owns the witness/manifest closure. Settle only this capture's
     // upload; later consumer binding uses a fresh stage, not this capability.
     // The signed head is the committed answer. A staging cleanup failure must
@@ -444,10 +438,7 @@ fn load_capture_source(
         bail!("producer terminal result generation changed during product capture");
     }
     let capsule = ryeos_state::objects::AdmittedLaunchCapsule::from_current_value(
-        ryeos_state::object_closure::load_exact_capsule_object_with_cas(
-            &cas,
-            &capsule_hash,
-        )?,
+        ryeos_state::object_closure::load_exact_capsule_object_with_cas(&cas, &capsule_hash)?,
     )?;
     capsule.verify_retained_execution_realization(
         &cas,

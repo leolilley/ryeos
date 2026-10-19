@@ -511,9 +511,7 @@ pub fn list_threads_by_status(
 pub fn list_threads(db: &ProjectionDb, limit: usize) -> anyhow::Result<Vec<ThreadRow>> {
     db.with_sql(|connection| {
         let sql = &format!("SELECT {THREAD_COLUMNS} FROM threads ORDER BY created_at LIMIT ?");
-        let mut stmt = connection
-            .prepare(sql)
-            .context("prepare list_threads")?;
+        let mut stmt = connection.prepare(sql).context("prepare list_threads")?;
         let rows = stmt
             .query_map([limit], ThreadRow::from_row)
             .context("query list_threads")?;
@@ -1108,11 +1106,10 @@ pub fn replay_events(
         let sql_limit = i64::try_from(limit).context("replay_events limit exceeds SQLite i64")?;
         params.push(Box::new(sql_limit));
 
-        let mut stmt = connection
-            .prepare(&sql)
-            .context("prepare replay_events")?;
+        let mut stmt = connection.prepare(&sql).context("prepare replay_events")?;
 
-        let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params.iter().map(|p| p.as_ref()).collect();
         let rows = stmt
             .query_map(param_refs.as_slice(), EventRow::from_row)
             .context("query replay_events")?;
@@ -1228,7 +1225,8 @@ fn replay_events_range_bounded(
         let mut stmt = connection
             .prepare(&sql)
             .context("prepare replay_events_bounded")?;
-        let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params.iter().map(|p| p.as_ref()).collect();
         let mut query_rows = stmt
             .query(param_refs.as_slice())
             .context("query replay_events_bounded")?;
@@ -2764,8 +2762,9 @@ pub fn get_provider_call_observation_identity(
                     let turn = u32::try_from(raw_turn)
                         .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(3, raw_turn))?;
                     let raw_attempt_number = row.get::<_, i64>(4)?;
-                    let attempt_number = u32::try_from(raw_attempt_number)
-                        .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(4, raw_attempt_number))?;
+                    let attempt_number = u32::try_from(raw_attempt_number).map_err(|_| {
+                        rusqlite::Error::IntegralValueOutOfRange(4, raw_attempt_number)
+                    })?;
                     Ok(ProviderCallObservationIdentity {
                         observation_id: row.get(0)?,
                         chain_root_id: row.get(1)?,
@@ -3718,13 +3717,15 @@ mod tests {
     fn get_thread_result_rejects_oversized_blob_before_reading_it() {
         let db = test_db();
         let oversized = i64::try_from(crate::objects::MAX_THREAD_RESULT_CONTENT_BYTES + 1).unwrap();
-        db.with_sql(|connection| Ok(connection.execute(
+        db.with_sql(|connection| {
+            Ok(connection.execute(
                 "INSERT INTO thread_results \
                  (thread_id, chain_root_id, status, result, updated_at) \
                  VALUES ('T-large', 'chain-A', 'completed', zeroblob(?1), 'now')",
                 [oversized],
-            )?))
-            .unwrap();
+            )?)
+        })
+        .unwrap();
 
         let error = get_thread_result(&db, "T-large").unwrap_err();
         assert!(error.to_string().contains("result is"));
@@ -3735,13 +3736,15 @@ mod tests {
     fn get_thread_result_accepts_content_larger_than_one_event() {
         let db = test_db();
         let content = vec![b'x'; crate::objects::MAX_THREAD_EVENT_SERIALIZED_BYTES + 1];
-        db.with_sql(|connection| Ok(connection.execute(
+        db.with_sql(|connection| {
+            Ok(connection.execute(
                 "INSERT INTO thread_results \
                  (thread_id, chain_root_id, status, result, updated_at) \
                  VALUES ('T-result', 'chain-A', 'completed', ?1, 'now')",
                 [&content],
-            )?))
-            .unwrap();
+            )?)
+        })
+        .unwrap();
 
         let row = get_thread_result(&db, "T-result")
             .unwrap()
@@ -3752,7 +3755,8 @@ mod tests {
     #[test]
     fn thread_result_error_previews_bound_oversized_errors() {
         let db = test_db();
-        db.with_sql(|connection| Ok(connection.execute(
+        db.with_sql(|connection| {
+            Ok(connection.execute(
                 "INSERT INTO thread_results \
                  (thread_id, chain_root_id, status, error, updated_at) \
                  VALUES ('T-small', 'T-small', 'failed', ?1, 'now'), \
@@ -3761,8 +3765,9 @@ mod tests {
                     r#"{"result":"use ?? for fallback"}"#,
                     serde_json::json!({ "result": "x".repeat(128) }).to_string(),
                 ],
-            )?))
-            .unwrap();
+            )?)
+        })
+        .unwrap();
 
         let previews = thread_result_error_previews(
             &db,
@@ -3822,11 +3827,13 @@ mod tests {
         insert_thread(&db, "T-child", "T-child", ThreadStatus::Running);
         insert_thread(&db, "T-resume", "T-root", ThreadStatus::Created);
         insert_thread(&db, "T-sub", "T-sub", ThreadStatus::Created);
-        db.with_sql(|connection| Ok(connection.execute(
+        db.with_sql(|connection| {
+            Ok(connection.execute(
                 "UPDATE threads SET upstream_thread_id = 'T-root' WHERE thread_id = 'T-resume'",
                 [],
-            )?))
-            .unwrap();
+            )?)
+        })
+        .unwrap();
         project_thread_edge(&db, "T-root", "T-root", "T-child", Some(1), Some("follow")).unwrap();
         project_thread_edge(
             &db,
@@ -3933,12 +3940,14 @@ mod tests {
             let event_hash = format!("{seq:064x}");
             // Deliberately reverse timestamps: navigation must remain braid-ordered.
             let timestamp = format!("2026-01-01T00:00:0{}Z", 5 - seq);
-            db.with_sql(|connection| Ok(connection.execute(
-                "INSERT INTO events (event_hash, chain_root_id, chain_seq, thread_id, \
+            db.with_sql(|connection| {
+                Ok(connection.execute(
+                    "INSERT INTO events (event_hash, chain_root_id, chain_seq, thread_id, \
                  thread_seq, event_type, durability, ts, payload) \
                  VALUES (?, 'chain-cut', ?, 'T-cut', ?, 'step', 'durable', ?, X'7B7D')",
-                rusqlite::params![event_hash, seq, seq, timestamp],
-            )?))
+                    rusqlite::params![event_hash, seq, seq, timestamp],
+                )?)
+            })
             .unwrap();
         }
 
@@ -3999,12 +4008,14 @@ mod tests {
                 rusqlite::params![&event_hash, seq, thread_id, seq, event_type, payload],
             )?))
             .unwrap();
-            db.with_sql(|connection| Ok(connection.execute(
-                "INSERT INTO event_operation_index (
+            db.with_sql(|connection| {
+                Ok(connection.execute(
+                    "INSERT INTO event_operation_index (
                     event_hash, thread_id, event_type, operation_id, chain_seq
                  ) VALUES (?1, ?2, ?3, ?4, ?5)",
-                rusqlite::params![event_hash, thread_id, event_type, operation_id, seq],
-            )?))
+                    rusqlite::params![event_hash, thread_id, event_type, operation_id, seq],
+                )?)
+            })
             .unwrap();
         }
 
@@ -4080,12 +4091,14 @@ mod tests {
             ("T-1", "fleet", b"alpha".as_slice()),
             ("T-2", "team", b"beta".as_slice()),
         ] {
-            db.with_sql(|connection| Ok(connection.execute(
+            db.with_sql(|connection| {
+                Ok(connection.execute(
                     "INSERT INTO thread_facets (thread_id, key, value, updated_at)
                      VALUES (?1, ?2, ?3, '2026-01-01T00:00:00Z')",
                     rusqlite::params![thread_id, key, value],
-                )?))
-                .unwrap();
+                )?)
+            })
+            .unwrap();
         }
 
         let thread_ids = vec!["T-1".to_string(), "T-2".to_string()];

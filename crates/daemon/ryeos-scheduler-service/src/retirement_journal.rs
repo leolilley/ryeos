@@ -1,10 +1,9 @@
 use std::{collections::BTreeMap, ffi::OsStr};
 
-use anyhow::{ensure, Context, Result};
+use anyhow::{Context, Result, ensure};
 use ryeos_app::execution_history_reset::{SchedulerResetPreview, SchedulerResetRetirement};
 use ryeos_node_runtime::identity::NodeIdentity;
 use ryeos_scheduler_contract::{
-    decode_scheduler_retirement_record, encode_scheduler_retirement_record,
     SchedulerRetirementEffect, SchedulerRetirementFailureDisposition,
     SchedulerRetirementFailureFact, SchedulerRetirementFailureStage, SchedulerRetirementIntent,
     SchedulerRetirementNonRegularKind, SchedulerRetirementObservedCoordinate,
@@ -15,7 +14,8 @@ use ryeos_scheduler_contract::{
     SchedulerRetirementResolutionObservation, SchedulerRetirementResolutionOutcome,
     SchedulerRetirementResolutionState, SchedulerRetirementRole, SchedulerRetirementRoleIdentity,
     SchedulerRetirementStoppedPlan, SchedulerRetirementStoppedRolePlan,
-    SchedulerRetirementStoppedSource,
+    SchedulerRetirementStoppedSource, decode_scheduler_retirement_record,
+    encode_scheduler_retirement_record,
 };
 
 const ORIGINAL_OPERATION_PREFIX: &str = "execution-history-reset.operation.";
@@ -84,10 +84,7 @@ pub(crate) fn install_native_removal_cut() {
 }
 
 #[cfg(feature = "crash-qualification-test-support")]
-fn native_removal_cut(
-    _source: &OsStr,
-    sink: &OsStr,
-) -> lillux::secure_fs::PlannedRemovalCut {
+fn native_removal_cut(_source: &OsStr, sink: &OsStr) -> lillux::secure_fs::PlannedRemovalCut {
     use lillux::secure_fs::PlannedRemovalCut;
     let Some(sink) = sink.to_str() else {
         return PlannedRemovalCut::Proceed;
@@ -121,7 +118,9 @@ fn native_removal_cut(
 
 #[cfg(feature = "crash-qualification-test-support")]
 impl ResetCrashCut {
-    fn before_publication(phase: ryeos_scheduler_contract::SchedulerRetirementPhase) -> Option<Self> {
+    fn before_publication(
+        phase: ryeos_scheduler_contract::SchedulerRetirementPhase,
+    ) -> Option<Self> {
         use ryeos_scheduler_contract::SchedulerRetirementPhase as Phase;
         match phase {
             Phase::Quarantined => Some(Self::QuarantinedBeforeAck),
@@ -130,7 +129,9 @@ impl ResetCrashCut {
         }
     }
 
-    fn after_publication(phase: ryeos_scheduler_contract::SchedulerRetirementPhase) -> Option<Self> {
+    fn after_publication(
+        phase: ryeos_scheduler_contract::SchedulerRetirementPhase,
+    ) -> Option<Self> {
         use ryeos_scheduler_contract::SchedulerRetirementPhase as Phase;
         match phase {
             Phase::QuarantineAuthorized => Some(Self::QuarantineArmed),
@@ -333,9 +334,12 @@ fn classify_fires_root(
             root_path.display()
         )));
     }
-    let root = runtime
-        .open_child_directory(root_name)?
-        .with_context(|| format!("scheduler fires root {} changed while pinned", root_path.display()))?;
+    let root = runtime.open_child_directory(root_name)?.with_context(|| {
+        format!(
+            "scheduler fires root {} changed while pinned",
+            root_path.display()
+        )
+    })?;
     let names = root.entry_names_bounded(MAX_DIRECTORY_ENTRIES + 1)?;
     if names.len() > MAX_DIRECTORY_ENTRIES {
         return Err(refuse(format!(
@@ -474,7 +478,9 @@ pub(crate) fn retire_fire_history(
                     fire_directory.directory.path().join(file).display()
                 );
                 ensure!(
-                    fire_directory.directory.unlink_regular_if_same(file, &pin)?,
+                    fire_directory
+                        .directory
+                        .unlink_regular_if_same(file, &pin)?,
                     "scheduler fire file {} disappeared during removal",
                     fire_directory.directory.path().join(file).display()
                 );
@@ -537,7 +543,8 @@ fn retired_generations_in(
         if !display.starts_with(RETIRED_PREFIX) {
             continue;
         }
-        let record: RetiredOperationEvidence = read_signed_in(factory, runtime, &display, identity)?;
+        let record: RetiredOperationEvidence =
+            read_signed_in(factory, runtime, &display, identity)?;
         record.validate(&display, identity, &runtime_identity)?;
         let complete = phase_name(&record.terminal_generation, COMPLETE_SEQUENCE);
         if let Some(bytes) = read_optional_signed_bytes_in(factory, runtime, &complete)? {
@@ -804,7 +811,9 @@ impl<'a> RetirementJournal<'a> {
             } else {
                 None
             };
-            if let Some(generation) = generation.filter(|generation| !retired.contains_key(generation)) {
+            if let Some(generation) =
+                generation.filter(|generation| !retired.contains_key(generation))
+            {
                 *generations.entry(generation).or_default() += 1;
             }
             if let Some(id) = display.strip_prefix(ORIGINAL_OPERATION_PREFIX) {
@@ -1008,8 +1017,12 @@ impl<'a> RetirementJournal<'a> {
                 let (generation, sequence) = parse_phase_name(rest)?;
                 generations.insert(generation.clone());
                 if sequence == COMPLETE_SEQUENCE {
-                    let record: SchedulerRetirementRecord =
-                        read_signed_in(factory, runtime, &phase_name(&generation, sequence), identity)?;
+                    let record: SchedulerRetirementRecord = read_signed_in(
+                        factory,
+                        runtime,
+                        &phase_name(&generation, sequence),
+                        identity,
+                    )?;
                     ensure!(
                         record.phase
                             == ryeos_scheduler_contract::SchedulerRetirementPhase::Complete,
@@ -1114,9 +1127,9 @@ impl<'a> RetirementJournal<'a> {
             }
             match lillux::classify_secure_temp_name(name, crate::SCHEDULER_TEMP_PURPOSE) {
                 lillux::SecureTempOwnership::NotTemp => {}
-                lillux::SecureTempOwnership::Own => anyhow::bail!(
-                    "unfinished scheduler journal publication requires held recovery"
-                ),
+                lillux::SecureTempOwnership::Own => {
+                    anyhow::bail!("unfinished scheduler journal publication requires held recovery")
+                }
                 // The scheduler directory is shared with other Runtime owners;
                 // their interrupted publications are theirs to settle.
                 lillux::SecureTempOwnership::Foreign => continue,
@@ -1136,15 +1149,16 @@ impl<'a> RetirementJournal<'a> {
                 continue;
             }
             if let Some(generation) = journal_record_generation(&display)?
-                && let Some(operation_id) = retired.get(&generation) {
-                    // Skipped, but only as this node's signed record of the
-                    // listed generation: a forged file refuses here, at
-                    // admission, never later.
-                    let bytes = read_signed_bytes_in(factory, runtime, &display)?;
-                    authenticate_journal_record(&display, &bytes, identity, &generation, operation_id)?;
-                    signed_names.push(display.to_string());
-                    continue;
-                }
+                && let Some(operation_id) = retired.get(&generation)
+            {
+                // Skipped, but only as this node's signed record of the
+                // listed generation: a forged file refuses here, at
+                // admission, never later.
+                let bytes = read_signed_bytes_in(factory, runtime, &display)?;
+                authenticate_journal_record(&display, &bytes, identity, &generation, operation_id)?;
+                signed_names.push(display.to_string());
+                continue;
+            }
             // A begun fire-history retirement is finished by the next
             // retirement completion; it must be this node's signed intent.
             if display.starts_with(FIRES_PREFIX) {
@@ -1239,7 +1253,8 @@ impl<'a> RetirementJournal<'a> {
         }
         let mut child_parents = std::collections::BTreeSet::new();
         for intent_name in generation_intents.values() {
-            let intent: SchedulerRetirementIntent = read_signed_in(factory, runtime, intent_name, identity)?;
+            let intent: SchedulerRetirementIntent =
+                read_signed_in(factory, runtime, intent_name, identity)?;
             intent.validate()?;
             ensure!(
                 !retired_operations.contains(&intent.operation_id),
@@ -1278,7 +1293,8 @@ impl<'a> RetirementJournal<'a> {
             let mut previous_hash = None;
             for sequence in &sequences {
                 let filename = phase_name(generation, *sequence);
-                let record: SchedulerRetirementRecord = read_signed_in(factory, runtime, &filename, identity)?;
+                let record: SchedulerRetirementRecord =
+                    read_signed_in(factory, runtime, &filename, identity)?;
                 record.validate()?;
                 let bytes = read_signed_bytes_in(factory, runtime, &filename)?;
                 ensure!(
@@ -1841,9 +1857,10 @@ impl<'a> RetirementJournal<'a> {
                 .current
                 .clone();
                 if *sequence < 6
-                    && let Some(identity) = &mut expected_identity {
-                        identity.content_sha256 = None;
-                    }
+                    && let Some(identity) = &mut expected_identity
+                {
+                    identity.content_sha256 = None;
+                }
                 let bytes = read_signed_bytes(runtime, &name)?;
                 ensure!(
                     record.generation == generation
@@ -2164,9 +2181,8 @@ impl<'a> RetirementJournal<'a> {
                     );
                 }
             }
-            let terminal_generation = terminal.context(
-                "acknowledged scheduler operation has no terminal generation to retire",
-            )?;
+            let terminal_generation = terminal
+                .context("acknowledged scheduler operation has no terminal generation to retire")?;
             let complete = read_signed_bytes(
                 runtime,
                 &phase_name(&terminal_generation, COMPLETE_SEQUENCE),
@@ -2248,9 +2264,10 @@ impl<'a> RetirementJournal<'a> {
                 .current
                 .clone();
             if self.next_sequence < 6
-                && let Some(identity) = &mut expected {
-                    identity.content_sha256 = None;
-                }
+                && let Some(identity) = &mut expected
+            {
+                identity.content_sha256 = None;
+            }
             ensure!(
                 role == SchedulerRetirementRole::ALL[index]
                     && phase == expected_phase
@@ -2600,6 +2617,7 @@ fn parse_generation(value: &str) -> Result<[u8; 16]> {
 pub(crate) fn native_resolution_projection(
     native: &lillux_sqlite::SqliteRoleResolutionObservation,
 ) -> Result<SchedulerRetirementResolutionObservation> {
+    use SchedulerRetirementObservedCoordinate as Coordinate;
     use lillux::secure_fs::{
         PinnedEntryType, PlannedQuarantineDisposition as Disposition,
         PlannedQuarantineStage as Stage,
@@ -2609,7 +2627,6 @@ pub(crate) fn native_resolution_projection(
         SqliteRoleMutationOperation as Operation, SqliteRoleResolutionAction as Action,
         SqliteRoleResolutionOutcome as Outcome,
     };
-    use SchedulerRetirementObservedCoordinate as Coordinate;
 
     let coordinate = |value: &NativeCoordinate| -> Result<Coordinate> {
         Ok(match value {
@@ -3047,9 +3064,10 @@ fn validate_stopped_intake_prefix(
     for record in records.iter().take(9) {
         let mut expected = plan.roles[role_index(record.role)].current.clone();
         if record.sequence < 6
-            && let Some(identity) = &mut expected {
-                identity.content_sha256 = None;
-            }
+            && let Some(identity) = &mut expected
+        {
+            identity.content_sha256 = None;
+        }
         ensure!(
             record.role_identity == expected,
             "recovery child phase differs from its authenticated current remaining source"
@@ -3066,10 +3084,14 @@ fn validate_recovery_source_authorization(
         let (identity, allowed, absent) = authorized_role_sources(parent, role)?;
         let selected = &plan.roles[role_index(role)];
         match &selected.source {
-            SchedulerRetirementStoppedSource::Absent => ensure!(absent && selected.current.is_none(),
-                "recovery child selected absence without same-operation removal authorization"),
-            source => ensure!(allowed.contains(source) && selected.current == identity,
-                "recovery child source differs from authenticated parent phase/resolution authority"),
+            SchedulerRetirementStoppedSource::Absent => ensure!(
+                absent && selected.current.is_none(),
+                "recovery child selected absence without same-operation removal authorization"
+            ),
+            source => ensure!(
+                allowed.contains(source) && selected.current == identity,
+                "recovery child source differs from authenticated parent phase/resolution authority"
+            ),
         }
     }
     Ok(())
@@ -3295,7 +3317,13 @@ fn finish_retired_operation(
             continue;
         }
         remove_signed_record(runtime, &display, |bytes| {
-            authenticate_journal_record(&display, bytes, identity, &generation, &record.operation_id)
+            authenticate_journal_record(
+                &display,
+                bytes,
+                identity,
+                &generation,
+                &record.operation_id,
+            )
         })?;
         removed += 1;
     }
@@ -3630,9 +3658,15 @@ pub(crate) struct ResetNativeReadScope {
     _thread: std::marker::PhantomData<*const ()>,
 }
 impl ResetNativeReadScope {
-    pub(crate) fn enter(factory: Option<&std::sync::Arc<lillux_sqlite::OriginalNativeFactory>>) -> Self {
-        let previous = RESET_NATIVE_SCOPE.with(|scope| scope.replace(factory.map(std::sync::Arc::downgrade)));
-        Self { previous, _thread: std::marker::PhantomData }
+    pub(crate) fn enter(
+        factory: Option<&std::sync::Arc<lillux_sqlite::OriginalNativeFactory>>,
+    ) -> Self {
+        let previous =
+            RESET_NATIVE_SCOPE.with(|scope| scope.replace(factory.map(std::sync::Arc::downgrade)));
+        Self {
+            previous,
+            _thread: std::marker::PhantomData,
+        }
     }
 }
 impl Drop for ResetNativeReadScope {
@@ -3644,7 +3678,8 @@ impl Drop for ResetNativeReadScope {
 
 /// The factory selected by the innermost [`ResetNativeReadScope`]. A
 /// selected factory that has already ended refuses.
-pub(crate) fn reset_native_scope() -> Result<Option<std::sync::Arc<lillux_sqlite::OriginalNativeFactory>>> {
+pub(crate) fn reset_native_scope()
+-> Result<Option<std::sync::Arc<lillux_sqlite::OriginalNativeFactory>>> {
     RESET_NATIVE_SCOPE.with(|scope| match scope.borrow().as_ref() {
         Some(weak) => weak
             .upgrade()
@@ -3672,8 +3707,12 @@ fn read_optional_signed_bytes_in(
         None => reset_native_scope()?,
     };
     let bytes = match factory.or(scoped.as_deref()) {
-        Some(factory) => factory.read_regular_without_sqlite_alias(runtime, OsStr::new(name), maximum),
-        None => lillux_sqlite::read_regular_without_sqlite_alias(runtime, OsStr::new(name), maximum),
+        Some(factory) => {
+            factory.read_regular_without_sqlite_alias(runtime, OsStr::new(name), maximum)
+        }
+        None => {
+            lillux_sqlite::read_regular_without_sqlite_alias(runtime, OsStr::new(name), maximum)
+        }
     }
     .with_context(|| format!("read guarded scheduler retirement record {name}"))?;
     if let Some(bytes) = &bytes {
@@ -4152,8 +4191,12 @@ mod terminal_scanner_controls {
 
     /// A runtime holding only the completed recovery lineage of operation
     /// `11…` (an interrupted parent settled by its terminal child).
-    fn completed_lineage_runtime(
-    ) -> Result<(tempfile::TempDir, NodeIdentity, std::path::PathBuf, lillux::PinnedDirectory)> {
+    fn completed_lineage_runtime() -> Result<(
+        tempfile::TempDir,
+        NodeIdentity,
+        std::path::PathBuf,
+        lillux::PinnedDirectory,
+    )> {
         let directory = tempfile::tempdir()?;
         let identity = NodeIdentity::create(&directory.path().join("identity.key"))?;
         let runtime_path = directory.path().join("runtime");
@@ -4209,10 +4252,20 @@ mod terminal_scanner_controls {
         let removed = RetirementJournal::retire_acknowledged_evidence(&runtime, &identity)?;
         // Every journal record plus the transient retirement record.
         assert_eq!(removed, before.len() + 1);
-        assert!(reserved_names(&runtime)?.is_empty(), "{:?}", reserved_names(&runtime)?);
-        assert_eq!(RetirementJournal::validate_admission(&runtime, &identity)?, 0);
+        assert!(
+            reserved_names(&runtime)?.is_empty(),
+            "{:?}",
+            reserved_names(&runtime)?
+        );
+        assert_eq!(
+            RetirementJournal::validate_admission(&runtime, &identity)?,
+            0
+        );
         // A second acknowledged reset finds nothing left to retire.
-        assert_eq!(RetirementJournal::retire_acknowledged_evidence(&runtime, &identity)?, 0);
+        assert_eq!(
+            RetirementJournal::retire_acknowledged_evidence(&runtime, &identity)?,
+            0
+        );
         Ok(())
     }
 
@@ -4245,7 +4298,11 @@ mod terminal_scanner_controls {
         let remaining = reserved_names(&runtime)?.len();
         let removed = RetirementJournal::retire_acknowledged_evidence(&runtime, &identity)?;
         assert_eq!(removed, remaining);
-        assert!(reserved_names(&runtime)?.is_empty(), "{:?}", reserved_names(&runtime)?);
+        assert!(
+            reserved_names(&runtime)?.is_empty(),
+            "{:?}",
+            reserved_names(&runtime)?
+        );
         Ok(())
     }
 
@@ -4263,7 +4320,10 @@ mod terminal_scanner_controls {
         let child = "22".repeat(16);
         std::fs::remove_file(runtime_path.join(phase_name(&child, COMPLETE_SEQUENCE)))?;
         std::fs::remove_file(runtime_path.join(phase_name(&child, 3)))?;
-        std::fs::write(runtime_path.join("scheduler.sqlite3"), b"recreated main role")?;
+        std::fs::write(
+            runtime_path.join("scheduler.sqlite3"),
+            b"recreated main role",
+        )?;
 
         let generation = "66".repeat(16);
         assert_eq!(
@@ -4311,7 +4371,11 @@ mod terminal_scanner_controls {
         std::fs::remove_file(runtime_path.join(format!("{INTENT_PREFIX}{generation}")))?;
         std::fs::remove_file(runtime_path.join("scheduler.sqlite3"))?;
         RetirementJournal::retire_acknowledged_evidence(&runtime, &identity)?;
-        assert!(reserved_names(&runtime)?.is_empty(), "{:?}", reserved_names(&runtime)?);
+        assert!(
+            reserved_names(&runtime)?.is_empty(),
+            "{:?}",
+            reserved_names(&runtime)?
+        );
         Ok(())
     }
 
@@ -4353,13 +4417,18 @@ mod terminal_scanner_controls {
         )?;
         std::fs::create_dir_all(runtime_path.join(FIRES_ROOT).join("alpha"))?;
         std::fs::write(
-            runtime_path.join(FIRES_ROOT).join("alpha").join(FIRE_JOURNAL_LOCK),
+            runtime_path
+                .join(FIRES_ROOT)
+                .join("alpha")
+                .join(FIRE_JOURNAL_LOCK),
             b"",
         )?;
 
         // The scheduling boot after the crash recreated a closed database.
         let host = ryeos_scheduler::test_native::TestSchedulerHost::acquire();
-        let created = host.open_at(&runtime_path).map_err(|failure| anyhow::anyhow!("{failure}"))?;
+        let created = host
+            .open_at(&runtime_path)
+            .map_err(|failure| anyhow::anyhow!("{failure}"))?;
         host.settle(created);
         let generation = [0x66; 16];
         let role_identity = |name: &str| -> Result<Option<SqliteRoleIdentity>> {
@@ -4379,7 +4448,11 @@ mod terminal_scanner_controls {
             }))
         };
         let mut roles = Vec::new();
-        for name in ["scheduler.sqlite3", "scheduler.sqlite3-wal", "scheduler.sqlite3-shm"] {
+        for name in [
+            "scheduler.sqlite3",
+            "scheduler.sqlite3-wal",
+            "scheduler.sqlite3-shm",
+        ] {
             roles.push(match role_identity(name)? {
                 Some(current) => StoppedSqliteRolePlan {
                     source: StoppedSqliteRoleSource::Canonical,
@@ -4395,7 +4468,9 @@ mod terminal_scanner_controls {
             generation,
             generations: vec![generation],
             runtime_identity: runtime.identity()?,
-            roles: roles.try_into().map_err(|_| anyhow::anyhow!("three roles"))?,
+            roles: roles
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("three roles"))?,
         };
         let intake_runtime = std::sync::Arc::new(
             lillux::PinnedDirectory::open(&runtime_path)?.context("test runtime absent")?,
@@ -4425,9 +4500,15 @@ mod terminal_scanner_controls {
             &"aa".repeat(32),
         )?;
         assert!(removed > 0);
-        assert!(reserved_names(&runtime)?.is_empty(), "{:?}", reserved_names(&runtime)?);
         assert!(
-            std::fs::read_dir(runtime_path.join(FIRES_ROOT))?.next().is_none(),
+            reserved_names(&runtime)?.is_empty(),
+            "{:?}",
+            reserved_names(&runtime)?
+        );
+        assert!(
+            std::fs::read_dir(runtime_path.join(FIRES_ROOT))?
+                .next()
+                .is_none(),
             "the earlier begun fire retirement is finished"
         );
 
@@ -4437,19 +4518,19 @@ mod terminal_scanner_controls {
         let db = db.map_err(|failure| anyhow::anyhow!("{failure}"))?;
         let db = factory
             .with_original_service_scope(|_| -> Result<_> {
-            db.drain_projection_retirement()?;
-            for role in [SqliteRole::Main, SqliteRole::Wal, SqliteRole::Shm] {
-                let present = plan.roles[role as usize].current.is_some();
-                let quarantined = db.quarantine_projection_role(role)?;
-                let purged = db.purge_projection_role(role)?;
-                if present {
-                    assert_eq!(quarantined, SqliteRoleMutationOutcome::QuarantinedDurable);
-                    assert_eq!(purged, SqliteRoleMutationOutcome::RemovedDurable);
+                db.drain_projection_retirement()?;
+                for role in [SqliteRole::Main, SqliteRole::Wal, SqliteRole::Shm] {
+                    let present = plan.roles[role as usize].current.is_some();
+                    let quarantined = db.quarantine_projection_role(role)?;
+                    let purged = db.purge_projection_role(role)?;
+                    if present {
+                        assert_eq!(quarantined, SqliteRoleMutationOutcome::QuarantinedDurable);
+                        assert_eq!(purged, SqliteRoleMutationOutcome::RemovedDurable);
+                    }
                 }
-            }
-            db.release_projection_retirement()?;
-            Ok(db)
-        })
+                db.release_projection_retirement()?;
+                Ok(db)
+            })
             .map_err(|failure| anyhow::anyhow!("{failure}"))??;
         factory
             .with_original_service_scope(move |_| drop(db))
@@ -4530,7 +4611,9 @@ mod terminal_scanner_controls {
             _factory: &std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
             _cleanup: bool,
         ) -> Result<lillux::time::MonotonicDeadline> {
-            Ok(lillux::time::MonotonicDeadline::after(std::time::Duration::from_secs(60)))
+            Ok(lillux::time::MonotonicDeadline::after(
+                std::time::Duration::from_secs(60),
+            ))
         }
     }
 
@@ -4585,7 +4668,10 @@ mod terminal_scanner_controls {
             Err(failure) => panic!("test lease close retained: {failure}"),
         }
         let refused = unscoped.expect_err("unscoped admission must refuse under a held lease");
-        assert!(refused.contains("read guarded scheduler retirement record"), "{refused}");
+        assert!(
+            refused.contains("read guarded scheduler retirement record"),
+            "{refused}"
+        );
         let admitted = scoped.expect("scoped startup admission accepts the completed journal");
         assert_eq!(admitted, unleased);
         Ok(())
@@ -4671,7 +4757,10 @@ mod terminal_scanner_controls {
         let error = RetirementJournal::scan_interrupted_evidence(&runtime, &identity)
             .err()
             .context("own interrupted publication was ignored")?;
-        assert!(error.to_string().contains("requires held recovery"), "{error:#}");
+        assert!(
+            error.to_string().contains("requires held recovery"),
+            "{error:#}"
+        );
         std::fs::remove_file(runtime_path.join(&own))?;
 
         std::fs::write(runtime_path.join(".secure.tmp.4242.4"), b"unattributed")?;
@@ -4708,14 +4797,16 @@ mod terminal_scanner_controls {
             } else {
                 format!("scheduler-retirement.role.{parent}.main.{suffix}")
             };
-            assert!(runtime
-                .atomic_create_regular(
-                    OsStr::new(&name),
-                    b"unexpected parent artifact",
-                    0o600,
-                    crate::SCHEDULER_TEMP_PURPOSE,
-                )?
-                .is_some());
+            assert!(
+                runtime
+                    .atomic_create_regular(
+                        OsStr::new(&name),
+                        b"unexpected parent artifact",
+                        0o600,
+                        crate::SCHEDULER_TEMP_PURPOSE,
+                    )?
+                    .is_some()
+            );
             assert!(
                 RetirementJournal::scan_interrupted_evidence(&runtime, &identity).is_err(),
                 "completed child suppressed pre-effect parent {suffix}"
@@ -4735,14 +4826,16 @@ mod terminal_scanner_controls {
         );
         let absent = SchedulerRetirementObservedCoordinate::Absent;
         ensure_resolution_coordinate_matches(&runtime, &name, &absent, None, false)?;
-        assert!(runtime
-            .atomic_create_regular(
-                OsStr::new(&name),
-                b"foreign replacement",
-                0o600,
-                crate::SCHEDULER_TEMP_PURPOSE,
-            )?
-            .is_some());
+        assert!(
+            runtime
+                .atomic_create_regular(
+                    OsStr::new(&name),
+                    b"foreign replacement",
+                    0o600,
+                    crate::SCHEDULER_TEMP_PURPOSE,
+                )?
+                .is_some()
+        );
         // Both a stable occupied coordinate and a replacement after the directory
         // snapshot must refuse the signed absence testimony.
         assert!(
@@ -4785,14 +4878,16 @@ mod terminal_scanner_controls {
             } else {
                 b"untrusted terminal residue".to_vec()
             };
-            assert!(runtime
-                .atomic_create_regular(
-                    OsStr::new(&name),
-                    &bytes,
-                    0o600,
-                    crate::SCHEDULER_TEMP_PURPOSE,
-                )?
-                .is_some());
+            assert!(
+                runtime
+                    .atomic_create_regular(
+                        OsStr::new(&name),
+                        &bytes,
+                        0o600,
+                        crate::SCHEDULER_TEMP_PURPOSE,
+                    )?
+                    .is_some()
+            );
             assert!(
                 RetirementJournal::scan_interrupted_evidence(&runtime, &identity).is_err(),
                 "terminal child suppressed {residue}"
@@ -4974,9 +5069,11 @@ mod guarded_journal_read_controls {
             // Refusal must occur in the byte intake and phase-presence path,
             // before the aliased SQLite bytes reach signature decoding.
             let error = read_signed_bytes(runtime, &intent_name).unwrap_err();
-            assert!(error
-                .to_string()
-                .contains("read guarded scheduler retirement record"));
+            assert!(
+                error
+                    .to_string()
+                    .contains("read guarded scheduler retirement record")
+            );
             assert!(load_record_chain(runtime, identity, &generation).is_err());
             assert!(RetirementJournal::scan_interrupted_evidence(runtime, identity).is_err());
             owner.require_scheduler_runtime(runtime)?;
@@ -4999,23 +5096,27 @@ mod guarded_journal_read_controls {
         assert!(read_optional_signed_bytes(&runtime, "nonregular").is_err());
         let limit = ryeos_scheduler_contract::SCHEDULER_RETIREMENT_RECORD_MAX_BYTES;
         let exact = vec![b'x'; limit];
-        assert!(runtime
-            .atomic_create_regular(
-                OsStr::new("exact"),
-                &exact,
-                0o600,
-                crate::SCHEDULER_TEMP_PURPOSE,
-            )?
-            .is_some());
+        assert!(
+            runtime
+                .atomic_create_regular(
+                    OsStr::new("exact"),
+                    &exact,
+                    0o600,
+                    crate::SCHEDULER_TEMP_PURPOSE,
+                )?
+                .is_some()
+        );
         assert_eq!(read_signed_bytes(&runtime, "exact")?, exact);
-        assert!(runtime
-            .atomic_create_regular(
-                OsStr::new("oversized"),
-                &vec![b'x'; limit + 1],
-                0o600,
-                crate::SCHEDULER_TEMP_PURPOSE,
-            )?
-            .is_some());
+        assert!(
+            runtime
+                .atomic_create_regular(
+                    OsStr::new("oversized"),
+                    &vec![b'x'; limit + 1],
+                    0o600,
+                    crate::SCHEDULER_TEMP_PURPOSE,
+                )?
+                .is_some()
+        );
         assert!(read_optional_signed_bytes(&runtime, "oversized").is_err());
         Ok(())
     }
@@ -5195,8 +5296,8 @@ pub(crate) mod compact_native_projection_controls {
     }
 
     #[test]
-    fn pre_effect_capacity_reserves_all_generation_remainders_and_staged_operation_bytes(
-    ) -> Result<()> {
+    fn pre_effect_capacity_reserves_all_generation_remainders_and_staged_operation_bytes()
+    -> Result<()> {
         let directory = tempfile::tempdir()?;
         let runtime =
             lillux::PinnedDirectory::open(directory.path())?.context("test runtime absent")?;
@@ -5205,14 +5306,16 @@ pub(crate) mod compact_native_projection_controls {
         // this capacity API does not authenticate records or issue a permit.
         for index in 1..=4 {
             let name = format!("{INTENT_PREFIX}{index:032x}");
-            assert!(runtime
-                .atomic_create_regular(
-                    OsStr::new(&name),
-                    b"untrusted inventory",
-                    0o600,
-                    crate::SCHEDULER_TEMP_PURPOSE,
-                )?
-                .is_some());
+            assert!(
+                runtime
+                    .atomic_create_regular(
+                        OsStr::new(&name),
+                        b"untrusted inventory",
+                        0o600,
+                        crate::SCHEDULER_TEMP_PURPOSE,
+                    )?
+                    .is_some()
+            );
         }
         RetirementJournal::reserve_pre_effect_capacity(&runtime, None, false)?;
         assert!(RetirementJournal::reserve_pre_effect_capacity(&runtime, None, true).is_err());
@@ -5221,25 +5324,29 @@ pub(crate) mod compact_native_projection_controls {
         //256. The20th refuses even though present evidence bytes are tiny.
         for index in 1..=19 {
             let name = format!("{ORIGINAL_OPERATION_PREFIX}{index:032x}");
-            assert!(runtime
+            assert!(
+                runtime
+                    .atomic_create_regular(
+                        OsStr::new(&name),
+                        b"untrusted operation inventory",
+                        0o600,
+                        crate::SCHEDULER_TEMP_PURPOSE,
+                    )?
+                    .is_some()
+            );
+        }
+        RetirementJournal::reserve_pre_effect_capacity(&runtime, None, false)?;
+        let name = format!("{ORIGINAL_OPERATION_PREFIX}{:032x}", 20);
+        assert!(
+            runtime
                 .atomic_create_regular(
                     OsStr::new(&name),
                     b"untrusted operation inventory",
                     0o600,
                     crate::SCHEDULER_TEMP_PURPOSE,
                 )?
-                .is_some());
-        }
-        RetirementJournal::reserve_pre_effect_capacity(&runtime, None, false)?;
-        let name = format!("{ORIGINAL_OPERATION_PREFIX}{:032x}", 20);
-        assert!(runtime
-            .atomic_create_regular(
-                OsStr::new(&name),
-                b"untrusted operation inventory",
-                0o600,
-                crate::SCHEDULER_TEMP_PURPOSE,
-            )?
-            .is_some());
+                .is_some()
+        );
         let before = runtime.entry_names_bounded(MAX_DIRECTORY_ENTRIES)?;
         assert!(RetirementJournal::reserve_pre_effect_capacity(&runtime, None, false).is_err());
         assert_eq!(runtime.entry_names_bounded(MAX_DIRECTORY_ENTRIES)?, before);
@@ -5271,8 +5378,8 @@ pub(crate) mod compact_native_projection_controls {
     }
 
     #[test]
-    fn signed_original_evidence_substitution_preserves_live_reservation_and_phase_cursor(
-    ) -> Result<()> {
+    fn signed_original_evidence_substitution_preserves_live_reservation_and_phase_cursor()
+    -> Result<()> {
         for substitution in ["id", "hash", "accounting", "source"] {
             let directory = tempfile::tempdir()?;
             let identity = NodeIdentity::create(&directory.path().join("identity.key"))?;
@@ -5378,13 +5485,15 @@ pub(crate) mod compact_native_projection_controls {
                     names_before
                 );
             }
-            assert!(journal
-                .append(
-                    SchedulerRetirementRole::Main,
-                    ryeos_scheduler_contract::SchedulerRetirementPhase::Captured,
-                    None
-                )
-                .is_err());
+            assert!(
+                journal
+                    .append(
+                        SchedulerRetirementRole::Main,
+                        ryeos_scheduler_contract::SchedulerRetirementPhase::Captured,
+                        None
+                    )
+                    .is_err()
+            );
             assert_eq!(journal.next_sequence, 0);
             assert_eq!(
                 runtime.entry_names_bounded(MAX_DIRECTORY_ENTRIES)?,
@@ -5676,20 +5785,24 @@ pub(crate) mod compact_native_projection_controls {
         };
         outcome.validate_for_intent(&intent, &outcome.intent_sha256)?;
         assert!(!outcome.observed.recovery_required);
-        assert!(outcome
-            .observed
-            .stopped_coordinates
-            .iter()
-            .any(|item| item.name == "scheduler.sqlite3-wal"
-                && matches!(
-                    item.coordinate,
-                    SchedulerRetirementObservedCoordinate::SameOriginal { .. }
-                )));
+        assert!(
+            outcome
+                .observed
+                .stopped_coordinates
+                .iter()
+                .any(|item| item.name == "scheduler.sqlite3-wal"
+                    && matches!(
+                        item.coordinate,
+                        SchedulerRetirementObservedCoordinate::SameOriginal { .. }
+                    ))
+        );
         let mut false_state = outcome.clone();
         false_state.observed.recovery_required = true;
-        assert!(false_state
-            .validate_for_intent(&intent, &outcome.intent_sha256)
-            .is_err());
+        assert!(
+            false_state
+                .validate_for_intent(&intent, &outcome.intent_sha256)
+                .is_err()
+        );
         let signed_outcome = sign_record_bytes(&identity, &outcome)?;
         assert!(
             signed_outcome.len() <= ryeos_scheduler_contract::SCHEDULER_RETIREMENT_RECORD_MAX_BYTES
@@ -5790,9 +5903,10 @@ pub(crate) mod late_recovery_controls {
             };
             let mut role_identity = sources[role_index(role)].current.clone();
             if sequence < 6
-                && let Some(identity) = &mut role_identity {
-                    identity.content_sha256 = None;
-                }
+                && let Some(identity) = &mut role_identity
+            {
+                identity.content_sha256 = None;
+            }
             let record = SchedulerRetirementRecord {
                 schema: 1,
                 purpose: ryeos_scheduler_contract::SCHEDULER_RETIREMENT_PURPOSE.to_owned(),
@@ -6041,9 +6155,11 @@ pub(crate) mod late_recovery_controls {
         // This signed format control has no App mutation permit/native effects.
         signed_prefix(&runtime, &identity, &child, 28)?;
         assert!(RetirementJournal::scan_interrupted_evidence(&runtime, &identity)?.is_empty());
-        assert!(runtime
-            .entry_no_follow(OsStr::new(&intent.outcome_filename()?))?
-            .is_none());
+        assert!(
+            runtime
+                .entry_no_follow(OsStr::new(&intent.outcome_filename()?))?
+                .is_none()
+        );
         let residue = format!(
             "scheduler-retirement.role.{}.main.purge",
             parent_intent.generation
@@ -6182,8 +6298,12 @@ mod fire_history_retirement_controls {
 
     /// A runtime whose fires root holds `alpha` (journal and lock) and
     /// `beta` (journal only).
-    fn fired_runtime(
-    ) -> Result<(tempfile::TempDir, NodeIdentity, std::path::PathBuf, lillux::PinnedDirectory)> {
+    fn fired_runtime() -> Result<(
+        tempfile::TempDir,
+        NodeIdentity,
+        std::path::PathBuf,
+        lillux::PinnedDirectory,
+    )> {
         let directory = tempfile::tempdir()?;
         let identity = NodeIdentity::create(&directory.path().join("identity.key"))?;
         let runtime_path = directory.path().join("runtime");
@@ -6242,7 +6362,12 @@ mod fire_history_retirement_controls {
             schedules: 2,
             files: 3,
         };
-        publish_signed(runtime, identity, &format!("{FIRES_PREFIX}{operation_id}"), &intent)?;
+        publish_signed(
+            runtime,
+            identity,
+            &format!("{FIRES_PREFIX}{operation_id}"),
+            &intent,
+        )?;
         Ok(())
     }
 
@@ -6252,12 +6377,19 @@ mod fire_history_retirement_controls {
     fn fire_history_is_retired_leaving_only_the_empty_root() -> Result<()> {
         let (_directory, identity, runtime_path, runtime) = fired_runtime()?;
         let removed = retire_fire_history(&runtime, &identity, OPERATION, &operation_sha256())?;
-        assert_eq!(removed, 3 + 2, "three fire files and two schedule directories");
+        assert_eq!(
+            removed,
+            3 + 2,
+            "three fire files and two schedule directories"
+        );
         assert!(fires_tree(&runtime_path)?.is_empty());
         assert!(runtime_path.join(FIRES_ROOT).is_dir());
         assert!(intent_names(&runtime)?.is_empty());
         // Nothing left: a repeated completion is a no-op.
-        assert_eq!(retire_fire_history(&runtime, &identity, OPERATION, &operation_sha256())?, 0);
+        assert_eq!(
+            retire_fire_history(&runtime, &identity, OPERATION, &operation_sha256())?,
+            0
+        );
         Ok(())
     }
 
@@ -6269,8 +6401,18 @@ mod fire_history_retirement_controls {
         for resumed_by in [OPERATION, "55555555555555555555555555555555"] {
             let (_directory, identity, runtime_path, runtime) = fired_runtime()?;
             begun_intent(&runtime, &identity, OPERATION)?;
-            std::fs::remove_file(runtime_path.join(FIRES_ROOT).join("alpha").join(FIRE_JOURNAL))?;
-            std::fs::remove_file(runtime_path.join(FIRES_ROOT).join("beta").join(FIRE_JOURNAL))?;
+            std::fs::remove_file(
+                runtime_path
+                    .join(FIRES_ROOT)
+                    .join("alpha")
+                    .join(FIRE_JOURNAL),
+            )?;
+            std::fs::remove_file(
+                runtime_path
+                    .join(FIRES_ROOT)
+                    .join("beta")
+                    .join(FIRE_JOURNAL),
+            )?;
             std::fs::remove_dir(runtime_path.join(FIRES_ROOT).join("beta"))?;
             assert!(RetirementJournal::scan_interrupted_evidence(&runtime, &identity)?.is_empty());
             RetirementJournal::validate_admission(&runtime, &identity)?;
@@ -6278,7 +6420,11 @@ mod fire_history_retirement_controls {
 
             let removed =
                 retire_fire_history(&runtime, &identity, resumed_by, &operation_sha256())?;
-            assert_eq!(removed, 1 + 1, "the lock file and the alpha directory remained");
+            assert_eq!(
+                removed,
+                1 + 1,
+                "the lock file and the alpha directory remained"
+            );
             assert!(fires_tree(&runtime_path)?.is_empty());
             assert!(intent_names(&runtime)?.is_empty());
         }
@@ -6290,11 +6436,14 @@ mod fire_history_retirement_controls {
     #[test]
     fn foreign_file_in_a_schedule_directory_is_refused_and_kept() -> Result<()> {
         let (_directory, identity, runtime_path, runtime) = fired_runtime()?;
-        let foreign = runtime_path.join(FIRES_ROOT).join("alpha").join("notes.txt");
+        let foreign = runtime_path
+            .join(FIRES_ROOT)
+            .join("alpha")
+            .join("notes.txt");
         std::fs::write(&foreign, b"not fire history")?;
         let before = fires_tree(&runtime_path)?;
-        let error = retire_fire_history(&runtime, &identity, OPERATION, &operation_sha256())
-            .unwrap_err();
+        let error =
+            retire_fire_history(&runtime, &identity, OPERATION, &operation_sha256()).unwrap_err();
         // Not retried for the settlement window: the reset surfaces it at once.
         assert!(error.chain().any(|cause| {
             cause
@@ -6306,7 +6455,10 @@ mod fire_history_retirement_controls {
         assert!(refusal.contains("notes.txt"), "{refusal}");
         assert_eq!(fires_tree(&runtime_path)?, before);
         assert_eq!(std::fs::read(&foreign)?, b"not fire history");
-        assert!(intent_names(&runtime)?.is_empty(), "no intent precedes a refusal");
+        assert!(
+            intent_names(&runtime)?.is_empty(),
+            "no intent precedes a refusal"
+        );
 
         // A begun retirement refuses the same way and keeps its intent.
         begun_intent(&runtime, &identity, OPERATION)?;

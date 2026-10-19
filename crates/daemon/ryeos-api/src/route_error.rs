@@ -273,7 +273,9 @@ mod tests {
         match RouteDispatchError::BadRequest("invalid JSON body: eof".to_owned())
             .conceal_handler_detail("probe/anonymous", "tool:x/t")
         {
-            RouteDispatchError::BadRequest(message) => assert_eq!(message, "invalid JSON body: eof"),
+            RouteDispatchError::BadRequest(message) => {
+                assert_eq!(message, "invalid JSON body: eof")
+            }
             other => panic!("expected the caller-facing refusal unchanged, got {other:?}"),
         }
     }

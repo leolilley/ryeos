@@ -136,8 +136,7 @@ mod tests {
         .unwrap();
         // Only MY_SECRET is wanted; every unrelated line (blocked, invalid,
         // malformed) is ignored rather than failing the resolution.
-        let map =
-            read_overlay(tmp.path(), &wanted(&["MY_SECRET"])).unwrap();
+        let map = read_overlay(tmp.path(), &wanted(&["MY_SECRET"])).unwrap();
         assert_eq!(map.get("MY_SECRET").map(String::as_str), Some("ok"));
         assert!(!map.contains_key("RYEOSD_URL"));
         assert!(!map.contains_key("PATH"));
@@ -157,8 +156,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         // A bare wanted key with no `=` is a likely typo — surface it.
         std::fs::write(tmp.path().join(".env"), "MY_SECRET\n").unwrap();
-        let err =
-            read_overlay(tmp.path(), &wanted(&["MY_SECRET"])).unwrap_err();
+        let err = read_overlay(tmp.path(), &wanted(&["MY_SECRET"])).unwrap_err();
         let msg = format!("{err:#}");
         assert!(
             msg.contains("MY_SECRET") && msg.contains("malformed"),

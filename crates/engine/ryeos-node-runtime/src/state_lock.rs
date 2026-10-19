@@ -302,9 +302,14 @@ mod tests {
         let primary_owner = primary.into_original_owner().unwrap();
         assert!(Arc::ptr_eq(&inventory_owner, &primary_owner));
         assert!(Arc::ptr_eq(&store_lease, &admission_lease));
-        admission_lease.ensure_protects_app_root(tmpdir.path()).unwrap();
+        admission_lease
+            .ensure_protects_app_root(tmpdir.path())
+            .unwrap();
         let other_path = tmpdir.path().join("other.lock");
-        let other_owner = StateLock::acquire(&other_path).unwrap().into_original_owner().unwrap();
+        let other_owner = StateLock::acquire(&other_path)
+            .unwrap()
+            .into_original_owner()
+            .unwrap();
         assert!(!Arc::ptr_eq(&inventory_owner, &other_owner));
         drop(other_owner);
         drop(primary_owner);
@@ -313,7 +318,9 @@ mod tests {
         // Ending only the inventory alias must not release account protection.
         drop(inventory_owner);
         assert!(StateLock::acquire(&path).is_err());
-        admission_lease.ensure_protects_app_root(tmpdir.path()).unwrap();
+        admission_lease
+            .ensure_protects_app_root(tmpdir.path())
+            .unwrap();
         drop(admission_lease);
         StateLock::acquire(&path).expect("final admission lease did not release exclusion");
         // This control exercises holder lifetime, not durable settlement or an

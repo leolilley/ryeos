@@ -4,7 +4,10 @@
 //! independent authorities. The daemon composition root must install an
 //! adapter that implements these exact operations; absence fails closed.
 
-use ryeos_bundle_publication_contract::{BUNDLE_CATALOG_RELEASE_CLAIM, BUNDLE_GENERATION_RELEASE_CLAIM, BUNDLE_PUBLICATION_POLICY, BUNDLE_SET_RELEASE_CLAIM, SUBSTRATE_RELEASE_CLAIM};
+use ryeos_bundle_publication_contract::{
+    BUNDLE_CATALOG_RELEASE_CLAIM, BUNDLE_GENERATION_RELEASE_CLAIM, BUNDLE_PUBLICATION_POLICY,
+    BUNDLE_SET_RELEASE_CLAIM, SUBSTRATE_RELEASE_CLAIM,
+};
 use std::{ffi::OsStr, io::Read as _};
 use std::{future::Future, path::PathBuf, pin::Pin, sync::Arc};
 
@@ -896,8 +899,10 @@ fn verify_catalog_substrate(
         objects,
         &set.substrate_release_attestation_hash,
     )?)?;
-    policy
-        .verify_publisher_attestation(&attestation, ryeos_bundle_publication_contract::SUBSTRATE_RELEASE_CLAIM)?;
+    policy.verify_publisher_attestation(
+        &attestation,
+        ryeos_bundle_publication_contract::SUBSTRATE_RELEASE_CLAIM,
+    )?;
     let release = ryeos_bundle_publication_contract::SubstrateRelease::from_current_value(
         &super::read_exact(objects, &attestation.subject_hash)?,
     )?;
@@ -1169,7 +1174,6 @@ impl BundlePublisherAuthority for LocalConstrainedPublisherAuthority {
         request: CatalogRequestPublicationRequest,
     ) -> ProducerFuture<'a> {
         Box::pin(async move {
-
             let cas = self.cas()?;
             let set =
                 BundleSet::from_current_value(&super::read_exact(cas, &request.bundle_set_hash)?)?;

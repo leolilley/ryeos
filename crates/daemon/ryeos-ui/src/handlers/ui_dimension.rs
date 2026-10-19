@@ -371,7 +371,10 @@ async fn load_schedule_summary(state: &AppState) -> (usize, usize) {
     let Ok(_read_guard) = scheduler.acquire_read().await else {
         return (0, 0);
     };
-    match scheduler.scheduler_db().list_specs_filtered(false, None, None) {
+    match scheduler
+        .scheduler_db()
+        .list_specs_filtered(false, None, None)
+    {
         Ok(specs) => {
             let total = specs.len();
             let enabled = specs.iter().filter(|s| s.enabled).count();

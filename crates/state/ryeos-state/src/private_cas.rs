@@ -34,7 +34,9 @@ const LAYOUT_ROOTS: [&str; 3] = ["objects", "refs", "locators"];
 /// created descriptor-relative and without following links. The directory is
 /// locked exclusively before anything is created inside it, and an existing
 /// holder of that lock is refused rather than waited for.
-pub fn open_private_scratch_cas(directory: &lillux::PinnedDirectory) -> Result<PinnedStateAuthority> {
+pub fn open_private_scratch_cas(
+    directory: &lillux::PinnedDirectory,
+) -> Result<PinnedStateAuthority> {
     directory
         .require_owner_private_directory()
         .context("private scratch CAS directory is not owner-private")?;
@@ -82,7 +84,10 @@ mod tests {
         let guard = authority.acquire_shared_guard().unwrap();
         let cas = authority.cas_store().unwrap();
         let hash = cas.store_blob(b"scratch").unwrap();
-        assert_eq!(cas.get_blob(&hash).unwrap().as_deref(), Some(b"scratch".as_slice()));
+        assert_eq!(
+            cas.get_blob(&hash).unwrap().as_deref(),
+            Some(b"scratch".as_slice())
+        );
         drop(guard);
         for name in LAYOUT_ROOTS.into_iter().chain(["recovery"]) {
             assert!(root.path().join(name).is_dir(), "{name}");

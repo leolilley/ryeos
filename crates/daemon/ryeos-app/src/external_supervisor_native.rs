@@ -110,7 +110,8 @@ impl SupervisorJournalEnvelopeSource {
     ) -> Result<ExternalSupervisorNativeEnvelope> {
         match self {
             Self::Policy(policy) => {
-                let quota = external_supervisor_journal_quota(policy, contract, execution_timeout_seconds)?;
+                let quota =
+                    external_supervisor_journal_quota(policy, contract, execution_timeout_seconds)?;
                 Ok(ExternalSupervisorNativeEnvelope {
                     storage_bytes: quota.max_native_storage_bytes,
                     allocator_steps: quota.max_native_allocator_steps,
@@ -151,10 +152,16 @@ mod tests {
         contract.contact_timeout_seconds = 60;
         contract.observation_timeout_seconds = 300;
         contract.cleanup_timeout_seconds = 600;
-        assert_eq!(external_supervisor_occurrence_lifetime_ms(&contract, 3_600).unwrap(), 4_860_000);
+        assert_eq!(
+            external_supervisor_occurrence_lifetime_ms(&contract, 3_600).unwrap(),
+            4_860_000
+        );
         contract.contact_timeout_seconds = 1;
         contract.observation_timeout_seconds = 2;
         contract.cleanup_timeout_seconds = 3;
-        assert_eq!(external_supervisor_occurrence_lifetime_ms(&contract, 4).unwrap(), 12_000);
+        assert_eq!(
+            external_supervisor_occurrence_lifetime_ms(&contract, 4).unwrap(),
+            12_000
+        );
     }
 }

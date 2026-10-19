@@ -4362,7 +4362,8 @@ mod tests {
     pub(super) fn realization_identity_fixture(
         root: &Path,
     ) -> (crate::state_store::test_native::TestStateStore, Engine) {
-        let identity = ryeos_node_runtime::identity::NodeIdentity::create(&root.join("node-key.pem")).unwrap();
+        let identity =
+            ryeos_node_runtime::identity::NodeIdentity::create(&root.join("node-key.pem")).unwrap();
         let signer = Arc::new(crate::state_store::NodeIdentitySigner::from_identity(
             &identity,
         ));

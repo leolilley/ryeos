@@ -573,10 +573,7 @@ mod tests {
         assert!(refusal.contains("service_refusal_stop"), "{refusal}");
         assert!(refusal.contains("ryeos node allow-restart"), "{refusal}");
         let record = crate::lifecycle_marker::restart_inhibition_record(&state_dir);
-        assert!(
-            refusal.contains(&record.display().to_string()),
-            "{refusal}"
-        );
+        assert!(refusal.contains(&record.display().to_string()), "{refusal}");
         // The refusal left no lifecycle gate held.
         let _gate = LifecycleStartLock::try_acquire(&app_root)
             .unwrap()

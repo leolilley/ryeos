@@ -414,10 +414,7 @@ impl ScopedProducerProcessRegistry {
             });
         }
         if let Err(error) = child.authority.workspace().ensure_path_binding() {
-            return Err(ScopedProducerInsertError {
-                error,
-                child,
-            });
+            return Err(ScopedProducerInsertError { error, child });
         }
         if let Some(channel) = child.ingress_handoff.as_ref()
             && let Err(error) = channel.ensure_peer_live_and_quiet()

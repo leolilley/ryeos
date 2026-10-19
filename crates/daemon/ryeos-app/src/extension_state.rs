@@ -37,8 +37,13 @@ pub struct ExtensionState {
 
 impl Clone for ExtensionState {
     fn clone(&self) -> Self {
-        let entries = self.entries.read().unwrap_or_else(std::sync::PoisonError::into_inner);
-        Self { entries: RwLock::new(entries.clone()) }
+        let entries = self
+            .entries
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Self {
+            entries: RwLock::new(entries.clone()),
+        }
     }
 }
 

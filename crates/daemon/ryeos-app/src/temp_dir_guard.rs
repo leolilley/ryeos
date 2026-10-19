@@ -374,12 +374,12 @@ impl TempDirGuard {
             unreachable!("matching retained workspace view checked above")
         };
         if let ryeos_engine::isolation::CreatedWorkspaceView::Descriptor(authority) = view.authority
-            && let Err((authority, error)) = authority.try_close_last_owner(deadline) {
-                view.authority =
-                    ryeos_engine::isolation::CreatedWorkspaceView::Descriptor(authority);
-                *slot = Some(WorkspaceViewSlot::Draining(view));
-                return Err(error.into());
-            }
+            && let Err((authority, error)) = authority.try_close_last_owner(deadline)
+        {
+            view.authority = ryeos_engine::isolation::CreatedWorkspaceView::Descriptor(authority);
+            *slot = Some(WorkspaceViewSlot::Draining(view));
+            return Err(error.into());
+        }
         *slot = Some(WorkspaceViewSlot::Closed {
             workspace_id: view.workspace_id,
             view_identity: view.view_identity,

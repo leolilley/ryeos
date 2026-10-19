@@ -183,9 +183,10 @@ impl RetainedWorkspaceOutputContent {
                     }
                 };
                 if let Some(expected) = &declaration.expected_manifest_hash
-                    && &selected.manifest_hash()? != expected {
-                        bail!("workspace-output product differs from its expected manifest");
-                    }
+                    && &selected.manifest_hash()? != expected
+                {
+                    bail!("workspace-output product differs from its expected manifest");
+                }
                 Ok(Some(selected))
             }
         }

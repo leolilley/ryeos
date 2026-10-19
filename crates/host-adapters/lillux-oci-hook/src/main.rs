@@ -27,10 +27,11 @@ const SETUP_TRANSACTION_NAME: &str = "setup-transaction.json";
 const MAX_RECORD_BYTES: u64 = 131_072;
 const CONTROLLER_UID: u32 = 10001;
 const CONTROLLER_GID: u32 = 10001;
-const CONTAINED_NODE_RESOURCES: lillux::ProcessScopeResourceLimits = lillux::ProcessScopeResourceLimits {
-    maximum_memory_bytes: 1_073_741_824,
-    maximum_processes: 256,
-};
+const CONTAINED_NODE_RESOURCES: lillux::ProcessScopeResourceLimits =
+    lillux::ProcessScopeResourceLimits {
+        maximum_memory_bytes: 1_073_741_824,
+        maximum_processes: 256,
+    };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -89,9 +90,11 @@ fn reconcile_records(first: LifecycleRecord, second: LifecycleRecord) -> Result<
         bail!("container index and app-root lease disagree on immutable authority");
     }
     if let Some((a, b)) = first.preparation.as_ref().zip(second.preparation.as_ref())
-        && !a.supersedes(b) && !b.supersedes(a) {
-            bail!("lifecycle indexes disagree on original preparation evidence");
-        }
+        && !a.supersedes(b)
+        && !b.supersedes(a)
+    {
+        bail!("lifecycle indexes disagree on original preparation evidence");
+    }
     let choose_first = if phase_rank(first.phase) == phase_rank(second.phase) {
         match (&first.preparation, &second.preparation) {
             (Some(a), Some(b)) => a.supersedes(b),
@@ -99,12 +102,10 @@ fn reconcile_records(first: LifecycleRecord, second: LifecycleRecord) -> Result<
             (None, Some(_)) => false,
             _ => true,
         }
-    } else { phase_rank(first.phase) > phase_rank(second.phase) };
-    Ok(if choose_first {
-        first
     } else {
-        second
-    })
+        phase_rank(first.phase) > phase_rank(second.phase)
+    };
+    Ok(if choose_first { first } else { second })
 }
 
 impl LifecycleRecord {
@@ -144,7 +145,9 @@ impl LifecycleRecord {
         }
         self.intent.validate().map_err(anyhow::Error::msg)?;
         if let Some(progress) = &self.preparation {
-            progress.require_intent(&self.intent).map_err(anyhow::Error::msg)?;
+            progress
+                .require_intent(&self.intent)
+                .map_err(anyhow::Error::msg)?;
         }
         self.intent
             .require_container_id(&self.container_id)
@@ -407,13 +410,18 @@ fn prestart(state: lillux::OciHookState) -> Result<()> {
         CONTAINED_NODE_RESOURCES,
         |progress| {
             progress.require_intent(&original_intent)?;
-            if record.preparation.as_ref().is_some_and(|before| !progress.supersedes(before)) {
+            if record
+                .preparation
+                .as_ref()
+                .is_some_and(|before| !progress.supersedes(before))
+            {
                 return Err("OCI preparation observer regressed original evidence".to_owned());
             }
             record.preparation = Some(progress.clone());
             setup.record = record.clone();
             write_setup_transaction(&host_state, &setup).map_err(|error| error.to_string())?;
-            write_record(&host_state, &container_name, &record).map_err(|error| error.to_string())?;
+            write_record(&host_state, &container_name, &record)
+                .map_err(|error| error.to_string())?;
             write_record(&host_state, &lease_name, &record).map_err(|error| error.to_string())
         },
     )
@@ -506,7 +514,10 @@ fn release(container_id: &str) -> Result<()> {
                 // still publishing its indexes. It cannot grant this release.
                 let preceding_released = index.phase == LifecyclePhase::Released
                     && index.intent != transaction.record.intent
-                    && matches!(transaction.record.phase, LifecyclePhase::Intent | LifecyclePhase::Prepared);
+                    && matches!(
+                        transaction.record.phase,
+                        LifecyclePhase::Intent | LifecyclePhase::Prepared
+                    );
                 let allowed = preceding_released || {
                     let joined = reconcile_records(transaction.record.clone(), index.clone())?;
                     joined == transaction.record
@@ -518,11 +529,19 @@ fn release(container_id: &str) -> Result<()> {
         }
         if transaction.record.phase != LifecyclePhase::Released {
             if let Some(lifecycle) = &transaction.record.lifecycle {
-                lifecycle.prove_ended_and_retire().map_err(anyhow::Error::msg)?;
+                lifecycle
+                    .prove_ended_and_retire()
+                    .map_err(anyhow::Error::msg)?;
             } else if let Some(progress) = &transaction.record.preparation {
-                progress.prove_ended_and_retire(&transaction.record.intent).map_err(anyhow::Error::msg)?;
+                progress
+                    .prove_ended_and_retire(&transaction.record.intent)
+                    .map_err(anyhow::Error::msg)?;
             } else {
-                transaction.record.intent.prove_ended_and_retire().map_err(anyhow::Error::msg)?;
+                transaction
+                    .record
+                    .intent
+                    .prove_ended_and_retire()
+                    .map_err(anyhow::Error::msg)?;
             }
         }
         let mut released = transaction.record.clone();
@@ -560,9 +579,14 @@ fn release(container_id: &str) -> Result<()> {
             .prove_ended_and_retire()
             .map_err(anyhow::Error::msg)?;
     } else if let Some(progress) = &record.preparation {
-        progress.prove_ended_and_retire(&record.intent).map_err(anyhow::Error::msg)?;
+        progress
+            .prove_ended_and_retire(&record.intent)
+            .map_err(anyhow::Error::msg)?;
     } else {
-        record.intent.prove_ended_and_retire().map_err(anyhow::Error::msg)?;
+        record
+            .intent
+            .prove_ended_and_retire()
+            .map_err(anyhow::Error::msg)?;
     }
     record.phase = LifecyclePhase::Released;
     let mut release_transaction = SetupTransaction {

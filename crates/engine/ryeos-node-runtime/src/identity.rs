@@ -420,8 +420,7 @@ fn load_verified_authorized_key_from_directory(
         return Ok(None);
     };
     let observation = lillux::observe_open_regular_file(&file)?;
-    let bytes =
-        lillux::read_open_regular_file_stable_bounded(&file, &observation, 1024 * 1024)?;
+    let bytes = lillux::read_open_regular_file_stable_bounded(&file, &observation, 1024 * 1024)?;
     directory.ensure_regular_entry_matches(std::ffi::OsStr::new(&name), Some(&file))?;
     directory.ensure_path_binding()?;
     let raw = std::str::from_utf8(&bytes).context("authorized-key grant is not UTF-8")?;

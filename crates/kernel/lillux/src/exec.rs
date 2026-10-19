@@ -1084,8 +1084,7 @@ impl InheritedReadonlyDocument {
             let lease = try_retain_fork_sensitive_descriptors()?;
             // Duplicate under the lease. The registered duplicate gives this
             // call unique ownership of a coordinate no other owner can name.
-            let duplicate =
-                unsafe { libc::fcntl(transport.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 3) };
+            let duplicate = unsafe { libc::fcntl(transport.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 3) };
             if duplicate < 0 {
                 return Err(format!(
                     "adopt inherited document descriptor: {}",
@@ -4258,10 +4257,11 @@ fn arm_occupancy_watchdog_inner(
     // this non-exec child's inherited lock descriptions.
     let before_clock = Instant::now();
     let now = crate::time::occupancy_now()?;
-    let remaining_ns = service_tick.checked_sub(now.tick_ns)
+    let remaining_ns = service_tick
+        .checked_sub(now.tick_ns)
         .ok_or("original watchdog service window elapsed before fork")?;
-    let setup_deadline = before_clock.checked_add(
-        Duration::from_nanos(remaining_ns).min(Duration::from_secs(5)))
+    let setup_deadline = before_clock
+        .checked_add(Duration::from_nanos(remaining_ns).min(Duration::from_secs(5)))
         .ok_or("watchdog fork deadline overflow")?;
     let fork_guard = quiesce_fork_sensitive_descriptors(setup_deadline)?;
     // The parent write end stays open until the fork has happened or failed.
@@ -4311,7 +4311,10 @@ fn arm_occupancy_watchdog_inner(
         events: libc::POLLIN,
         revents: 0,
     };
-    let poll_ms = setup_deadline.saturating_duration_since(Instant::now()).as_millis().min(5_000) as i32;
+    let poll_ms = setup_deadline
+        .saturating_duration_since(Instant::now())
+        .as_millis()
+        .min(5_000) as i32;
     let polled = unsafe { libc::poll(&mut readiness_poll, 1, poll_ms) };
     let mut ready = [0_u8; 1];
     let acknowledged = polled == 1
@@ -4668,7 +4671,8 @@ impl BorrowedForkChildCloseRegistration {
         self,
         lease: &ForkSensitiveDescriptorLease,
     ) -> Result<(), Self> {
-        if self.barrier_identity != direct_attachment_fork_barrier() as *const DescriptorForkBarrier as usize
+        if self.barrier_identity
+            != direct_attachment_fork_barrier() as *const DescriptorForkBarrier as usize
             || self.barrier_identity != lease.barrier_identity
             || self.parent_pid != std::process::id()
             || lease.parent_pid != std::process::id()
@@ -4713,7 +4717,8 @@ impl BorrowedForkChildCloseReservation {
     ) -> Result<BorrowedForkChildCloseRegistration, Self> {
         let registration = &self.registration;
         if fd < 0
-            || registration.barrier_identity != direct_attachment_fork_barrier() as *const DescriptorForkBarrier as usize
+            || registration.barrier_identity
+                != direct_attachment_fork_barrier() as *const DescriptorForkBarrier as usize
             || registration.barrier_identity != lease.barrier_identity
             || registration.parent_pid != std::process::id()
             || lease.parent_pid != std::process::id()
@@ -4747,7 +4752,8 @@ impl BorrowedForkChildCloseReservation {
     /// Cancel unused capacity. A reservation has no bound descriptor.
     pub fn cancel(self, lease: &ForkSensitiveDescriptorLease) -> Result<(), Self> {
         let registration = &self.registration;
-        if registration.barrier_identity != direct_attachment_fork_barrier() as *const DescriptorForkBarrier as usize
+        if registration.barrier_identity
+            != direct_attachment_fork_barrier() as *const DescriptorForkBarrier as usize
             || registration.barrier_identity != lease.barrier_identity
             || registration.parent_pid != std::process::id()
             || lease.parent_pid != std::process::id()
@@ -4775,7 +4781,8 @@ impl BorrowedForkChildCloseReservation {
 pub fn reserve_borrowed_fork_child_close_descriptor(
     lease: &ForkSensitiveDescriptorLease,
 ) -> Result<BorrowedForkChildCloseReservation, &'static str> {
-    if lease.barrier_identity != direct_attachment_fork_barrier() as *const DescriptorForkBarrier as usize
+    if lease.barrier_identity
+        != direct_attachment_fork_barrier() as *const DescriptorForkBarrier as usize
         || lease.parent_pid != std::process::id()
         || !lease.retained
         || lease.owner != thread::current().id()
@@ -4867,7 +4874,10 @@ impl ForkSensitiveDescriptorLeaseRefused {
     }
 
     pub fn deadline_elapsed(&self) -> bool {
-        matches!(self.cause, ForkSensitiveDescriptorLeaseRefusal::DeadlineElapsed)
+        matches!(
+            self.cause,
+            ForkSensitiveDescriptorLeaseRefusal::DeadlineElapsed
+        )
     }
 }
 
@@ -5059,7 +5069,9 @@ impl ForkSensitiveDescriptorLease {
     pub fn hold_until_process_exit(mut self) {
         if self.retained && self.parent_pid == std::process::id() {
             FORK_EXCLUSIONS_HELD_UNTIL_EXIT
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| count.checked_add(1))
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                    count.checked_add(1)
+                })
                 .expect("held fork exclusion count overflow");
         }
         self.retained = false;
@@ -5068,8 +5080,10 @@ impl ForkSensitiveDescriptorLease {
 
 impl Drop for ForkSensitiveDescriptorLease {
     fn drop(&mut self) {
-        if !self.retained || self.parent_pid != std::process::id()
-            || self.barrier_identity != direct_attachment_fork_barrier() as *const DescriptorForkBarrier as usize
+        if !self.retained
+            || self.parent_pid != std::process::id()
+            || self.barrier_identity
+                != direct_attachment_fork_barrier() as *const DescriptorForkBarrier as usize
         {
             return;
         }
@@ -5152,25 +5166,41 @@ impl QuiescedForkSensitiveDescriptors {
         preserved: &BTreeSet<i32>,
     ) -> Result<PreparedForkChildDescriptorBarrier, String> {
         if self.parent_pid != std::process::id()
-            || self.barrier_identity != direct_attachment_fork_barrier() as *const DescriptorForkBarrier as usize
+            || self.barrier_identity
+                != direct_attachment_fork_barrier() as *const DescriptorForkBarrier as usize
         {
             return Err("child barrier preparation requires the original parent".into());
         }
         let barrier = direct_attachment_fork_barrier();
         let state = barrier.state.lock().unwrap_or_else(|p| p.into_inner());
-        if !state.fork_quiesced || !state.pending_fork_control_fds.is_disjoint(preserved)
-            || state.borrowed_child_close.slots.iter().flatten()
+        if !state.fork_quiesced
+            || !state.pending_fork_control_fds.is_disjoint(preserved)
+            || state
+                .borrowed_child_close
+                .slots
+                .iter()
+                .flatten()
                 .any(|(fd, _)| fd.is_some_and(|fd| preserved.contains(&fd)))
-        { return Err("child barrier cannot preserve native/control custody".into()); }
+        {
+            return Err("child barrier cannot preserve native/control custody".into());
+        }
         let mut child_state = DescriptorForkBarrierState::default();
-        child_state.fork_child_close_fds = state.fork_child_close_fds
-            .intersection(preserved).copied().collect();
+        child_state.fork_child_close_fds = state
+            .fork_child_close_fds
+            .intersection(preserved)
+            .copied()
+            .collect();
         child_state.next_owned_registration_generation = state.next_owned_registration_generation;
-        child_state.owned_registration_generations = state.owned_registration_generations.iter()
-            .filter(|(fd, _)| preserved.contains(fd)).map(|(fd, generation)| (*fd, *generation)).collect();
+        child_state.owned_registration_generations = state
+            .owned_registration_generations
+            .iter()
+            .filter(|(fd, _)| preserved.contains(fd))
+            .map(|(fd, generation)| (*fd, *generation))
+            .collect();
         Ok(PreparedForkChildDescriptorBarrier {
             barrier: Box::new(DescriptorForkBarrier {
-                state: Mutex::new(child_state), changed: Condvar::new(),
+                state: Mutex::new(child_state),
+                changed: Condvar::new(),
                 waiting_descriptor_closers: AtomicUsize::new(0),
             }),
         })
@@ -5181,8 +5211,11 @@ impl QuiescedForkSensitiveDescriptors {
         preserved: &BTreeSet<i32>,
     ) -> Result<Vec<i32>, String> {
         if self.parent_pid != std::process::id()
-            || self.barrier_identity != direct_attachment_fork_barrier() as *const DescriptorForkBarrier as usize
-        { return Err("fork snapshot requires its original bookkeeping owner".into()); }
+            || self.barrier_identity
+                != direct_attachment_fork_barrier() as *const DescriptorForkBarrier as usize
+        {
+            return Err("fork snapshot requires its original bookkeeping owner".into());
+        }
         let barrier = direct_attachment_fork_barrier();
         let state = barrier
             .state
@@ -5190,7 +5223,12 @@ impl QuiescedForkSensitiveDescriptors {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         debug_assert!(state.fork_quiesced);
         if !state.pending_fork_control_fds.is_disjoint(preserved)
-            || state.borrowed_child_close.slots.iter().flatten().any(|(fd, _)| fd.is_some_and(|fd| preserved.contains(&fd)))
+            || state
+                .borrowed_child_close
+                .slots
+                .iter()
+                .flatten()
+                .any(|(fd, _)| fd.is_some_and(|fd| preserved.contains(&fd)))
         {
             return Err("inherited authority aliases parent process-control authority".to_owned());
         }
@@ -5198,7 +5236,14 @@ impl QuiescedForkSensitiveDescriptors {
             .pending_fork_control_fds
             .iter()
             .chain(state.fork_child_close_fds.difference(preserved))
-            .chain(state.borrowed_child_close.slots.iter().flatten().filter_map(|(fd, _)| fd.as_ref()))
+            .chain(
+                state
+                    .borrowed_child_close
+                    .slots
+                    .iter()
+                    .flatten()
+                    .filter_map(|(fd, _)| fd.as_ref()),
+            )
             .copied()
             .collect())
     }
@@ -5294,7 +5339,9 @@ impl ForkChildCloseFile {
         {
             return Err("original registered close generation missing".into());
         }
-        if self.file.is_none() { return Err("registered close file already absent".into()); }
+        if self.file.is_none() {
+            return Err("registered close file already absent".into());
+        }
         // The exact registration remains protected until the single syscall
         // finishes. No fork can snapshot this FD between close and removal.
         let result = self.close_registered_locked(&mut state);
@@ -5308,20 +5355,31 @@ impl ForkChildCloseFile {
     /// Caller holds the actual barrier and has checked the original process,
     /// exact live registration and sole owner. One syscall consumes the file;
     /// errno is cached because its numeric FD may already have been released.
-    fn close_registered_locked(&mut self, state: &mut DescriptorForkBarrierState) -> Result<(), i32> {
+    fn close_registered_locked(
+        &mut self,
+        state: &mut DescriptorForkBarrierState,
+    ) -> Result<(), i32> {
         self.close_registered_locked_with(state, |fd| {
             if unsafe { libc::close(fd) } == 0 {
                 Ok(())
             } else {
-                Err(std::io::Error::last_os_error().raw_os_error().unwrap_or(libc::EIO))
+                Err(std::io::Error::last_os_error()
+                    .raw_os_error()
+                    .unwrap_or(libc::EIO))
             }
         })
     }
 
-    fn close_registered_locked_with(&mut self, state: &mut DescriptorForkBarrierState,
-        close: impl FnOnce(i32) -> Result<(), i32>) -> Result<(), i32> {
+    fn close_registered_locked_with(
+        &mut self,
+        state: &mut DescriptorForkBarrierState,
+        close: impl FnOnce(i32) -> Result<(), i32>,
+    ) -> Result<(), i32> {
         use std::os::fd::IntoRawFd as _;
-        let file = self.file.take().expect("validated original registered file");
+        let file = self
+            .file
+            .take()
+            .expect("validated original registered file");
         let result = close(file.into_raw_fd());
         self.explicit_close = Some(result);
         state.owned_registration_generations.remove(&self.fd);
@@ -5330,7 +5388,9 @@ impl ForkChildCloseFile {
     }
 
     pub(crate) fn is_registered_live(&self) -> bool {
-        self.parent_pid == std::process::id() && self.file.is_some() && self.explicit_close.is_none()
+        self.parent_pid == std::process::id()
+            && self.file.is_some()
+            && self.explicit_close.is_none()
     }
 
     pub(crate) fn explicitly_retired(&self) -> bool {
@@ -5357,7 +5417,9 @@ fn relinquish_foreign_descriptor_coordinate(file: Option<std::fs::File>) {
 /// own descriptor barrier. Reads one atomic pointer: no lock, no allocation,
 /// so it is safe between fork and exec.
 pub fn in_forked_child() -> bool {
-    !CHILD_DESCRIPTOR_FORK_BARRIER.load(Ordering::Acquire).is_null()
+    !CHILD_DESCRIPTOR_FORK_BARRIER
+        .load(Ordering::Acquire)
+        .is_null()
 }
 
 #[cfg(unix)]
@@ -5369,7 +5431,8 @@ impl Drop for ForkChildCloseFile {
             return;
         }
         if self.parent_pid != std::process::id()
-            || self.barrier_identity != direct_attachment_fork_barrier() as *const DescriptorForkBarrier as usize
+            || self.barrier_identity
+                != direct_attachment_fork_barrier() as *const DescriptorForkBarrier as usize
         {
             let child = CHILD_DESCRIPTOR_FORK_BARRIER.load(Ordering::Acquire);
             if child.is_null() {
@@ -5505,7 +5568,9 @@ pub(crate) fn register_fork_child_close_file(file: std::fs::File) -> ForkChildCl
         !state.fork_quiesced,
         "fork-child-close descriptor registered during a fork"
     );
-    let generation = state.next_owned_registration_generation.checked_add(1)
+    let generation = state
+        .next_owned_registration_generation
+        .checked_add(1)
         .expect("owned descriptor registration generation exhausted");
     assert!(
         state.fork_child_close_fds.insert(fd),
@@ -5642,7 +5707,10 @@ impl Drop for PendingForkControlDescriptor {
                     state.pending_fork_control_fds.contains(&self.fd),
                     "pending fork-control descriptor was not registered"
                 );
-                let writer = self.writer.take().expect("pending fork-control writer present");
+                let writer = self
+                    .writer
+                    .take()
+                    .expect("pending fork-control writer present");
                 state.deferred_control_closes.push((self.fd, writer));
                 let previous_closers = barrier
                     .waiting_descriptor_closers
@@ -5701,8 +5769,11 @@ impl Drop for QuiescedForkSensitiveDescriptors {
     fn drop(&mut self) {
         if !self.armed
             || self.parent_pid != std::process::id()
-            || self.barrier_identity != direct_attachment_fork_barrier() as *const DescriptorForkBarrier as usize
-        { return; }
+            || self.barrier_identity
+                != direct_attachment_fork_barrier() as *const DescriptorForkBarrier as usize
+        {
+            return;
+        }
         let barrier = direct_attachment_fork_barrier();
         let mut state = barrier
             .state
@@ -5850,7 +5921,10 @@ fn fork_creation_witness_closed(witness: &std::fs::File, bound: Duration) -> std
 }
 
 #[cfg(not(unix))]
-fn fork_creation_witness_closed(_witness: &std::fs::File, _bound: Duration) -> std::io::Result<bool> {
+fn fork_creation_witness_closed(
+    _witness: &std::fs::File,
+    _bound: Duration,
+) -> std::io::Result<bool> {
     Ok(false)
 }
 
@@ -5870,7 +5944,8 @@ impl QuiescedForkSensitiveDescriptors {
     ) {
         if !self.armed
             || self.parent_pid != std::process::id()
-            || self.barrier_identity != direct_attachment_fork_barrier() as *const DescriptorForkBarrier as usize
+            || self.barrier_identity
+                != direct_attachment_fork_barrier() as *const DescriptorForkBarrier as usize
         {
             return;
         }
@@ -6036,7 +6111,9 @@ pub(crate) struct WitnessedForkCustody {
 #[cfg(unix)]
 impl WitnessedForkCustody {
     pub(crate) fn guard(&self) -> &QuiescedForkSensitiveDescriptors {
-        self.guard.as_ref().expect("witnessed fork custody holds its guard")
+        self.guard
+            .as_ref()
+            .expect("witnessed fork custody holds its guard")
     }
 
     /// The creator observed exec, or readiness emitted after the descriptor
@@ -6063,7 +6140,10 @@ impl WitnessedForkCustody {
         let Some(guard) = self.guard.take() else {
             return Ok(());
         };
-        let witness = self.witness.take().expect("witnessed fork custody holds its witness");
+        let witness = self
+            .witness
+            .take()
+            .expect("witnessed fork custody holds its witness");
         let fact = match fork_creation_witness_closed(&witness, FORK_CREATION_WITNESS_SETTLE) {
             Ok(true) => {
                 drop(guard);
@@ -6073,7 +6153,10 @@ impl WitnessedForkCustody {
                 "{}: a created process still held its pre-exec descriptor table {:?} after creation ended",
                 self.context, FORK_CREATION_WITNESS_SETTLE
             ),
-            Err(error) => format!("{}: creation witness observation failed: {error}", self.context),
+            Err(error) => format!(
+                "{}: creation witness observation failed: {error}",
+                self.context
+            ),
         };
         guard.strand_with_witness(fact.clone(), Some(witness), creator_settled);
         Err(format!("fork custody stranded: {fact}"))
@@ -6359,7 +6442,10 @@ pub(crate) fn spawn_command_with_fork_custody(
         }
         Err(error) => match custody.settle() {
             Ok(()) => Err(error),
-            Err(fact) => Err(std::io::Error::new(error.kind(), format!("{error}; {fact}"))),
+            Err(fact) => Err(std::io::Error::new(
+                error.kind(),
+                format!("{error}; {fact}"),
+            )),
         },
     }
 }
@@ -6708,7 +6794,13 @@ impl SelectedScopedBorrow<'_> {
         original_service: crate::time::MonotonicDeadline,
         original_cleanup: crate::time::MonotonicDeadline,
     ) -> Result<(), String> {
-        self.custody.allocate_scope_into(provider, allocation, limits, original_service, original_cleanup)
+        self.custody.allocate_scope_into(
+            provider,
+            allocation,
+            limits,
+            original_service,
+            original_cleanup,
+        )
     }
 
     pub fn prepare_from_compiled_slots(
@@ -6781,7 +6873,8 @@ impl SelectedScopedBorrow<'_> {
         &self,
         expected: &crate::ProcessScopeRecovery,
     ) -> Result<(), String> {
-        self.custody.require_recorded_local_scope_settlement(expected)
+        self.custody
+            .require_recorded_local_scope_settlement(expected)
     }
 }
 
@@ -6879,8 +6972,12 @@ impl SelectedScopedCustody {
         original_service: crate::time::MonotonicDeadline,
         original_cleanup: crate::time::MonotonicDeadline,
     ) -> Result<(), String> {
-        if self.refused || self.scope_preparation.is_some() || self.bounds.is_some()
-            || self.scope.is_some() || self.request.is_some() || self.create_started
+        if self.refused
+            || self.scope_preparation.is_some()
+            || self.bounds.is_some()
+            || self.scope.is_some()
+            || self.request.is_some()
+            || self.create_started
         {
             return Err("selected scope storage occupied or refused".into());
         }
@@ -6895,7 +6992,10 @@ impl SelectedScopedCustody {
             original_service,
             original_cleanup,
         ));
-        let result = self.scope_preparation.as_mut().ok_or("selected preparation frame absent")?
+        let result = self
+            .scope_preparation
+            .as_mut()
+            .ok_or("selected preparation frame absent")?
             .allocate_into(&mut self.scope);
         if result.is_err() {
             // Frame is already retained before formatting/error bookkeeping.
@@ -6916,21 +7016,29 @@ impl SelectedScopedCustody {
         original_service: crate::time::MonotonicDeadline,
         original_cleanup: crate::time::MonotonicDeadline,
     ) -> Result<(), String> {
-        if self.refused || self.request.is_some() || self.target.is_some()
-            || self.mounts.is_some() || self.create_started
+        if self.refused
+            || self.request.is_some()
+            || self.target.is_some()
+            || self.mounts.is_some()
+            || self.create_started
         {
             return Err("selected destination already prepared or refused".into());
         }
         let adopted = self.scope_preparation.is_some();
         if adopted {
-            let bounds = self.bounds.ok_or("selected adopted original bounds absent")?;
-            if scope.is_some() || self.scope.is_none()
+            let bounds = self
+                .bounds
+                .ok_or("selected adopted original bounds absent")?;
+            if scope.is_some()
+                || self.scope.is_none()
                 || bounds.service.is_before(&original_service)
                 || original_service.is_before(&bounds.service)
                 || bounds.cleanup.is_before(&original_cleanup)
                 || original_cleanup.is_before(&bounds.cleanup)
             {
-                return Err("selected compiler cannot replace adopted scope or original pair".into());
+                return Err(
+                    "selected compiler cannot replace adopted scope or original pair".into(),
+                );
             }
         } else if self.bounds.is_some() || self.scope.is_some() {
             return Err("selected destination already prepared".into());
@@ -6939,7 +7047,11 @@ impl SelectedScopedCustody {
             return Err("selected original bounds inverted or expired".into());
         }
         let req = request.as_ref().ok_or("compiled request already spent")?;
-        let actual_scope = self.scope.as_ref().or(scope.as_ref()).ok_or("selected actual scope absent")?;
+        let actual_scope = self
+            .scope
+            .as_ref()
+            .or(scope.as_ref())
+            .ok_or("selected actual scope absent")?;
         actual_scope.require_selected_launch_right()?;
         if target.is_none()
             || mounts.is_none()
@@ -7667,34 +7779,52 @@ mod selected_scoped_component_tests {
     #[test]
     #[ignore = "requires an explicitly delegated disposable cgroup; never auto-run"]
     fn selected_expired_allocation_retains_actual_provider_plan_and_pair() {
-        let parent = std::env::var_os("LILLUX_TEST_CGROUP_PARENT")
-            .expect("explicit disposable delegation");
-        let configuration: crate::ProcessScopeConfiguration = serde_json::from_value(
-            serde_json::json!({
+        let parent =
+            std::env::var_os("LILLUX_TEST_CGROUP_PARENT").expect("explicit disposable delegation");
+        let configuration: crate::ProcessScopeConfiguration =
+            serde_json::from_value(serde_json::json!({
                 "version": 3,
                 "backend": {"implementation": "linux_cgroup_v2", "parent": parent}
-            }),
-        ).unwrap();
+            }))
+            .unwrap();
         let provider = Arc::new(crate::ProcessScopeProvider::open(&configuration).unwrap());
-        let allocation = provider.plan_allocation(
-            "retained-expired-no-create", Duration::from_secs(5),
-        ).unwrap();
+        let allocation = provider
+            .plan_allocation("retained-expired-no-create", Duration::from_secs(5))
+            .unwrap();
         let original = crate::time::MonotonicDeadline::after(Duration::ZERO);
         let mut storage = SelectedScopedStorage::for_component_test();
-        assert!(Arc::clone(&provider).allocate_into_selected_slot(
-            allocation.clone(), &mut storage.borrow_for_component_test(), original, original,
-        ).is_err());
+        assert!(
+            Arc::clone(&provider)
+                .allocate_into_selected_slot(
+                    allocation.clone(),
+                    &mut storage.borrow_for_component_test(),
+                    original,
+                    original,
+                )
+                .is_err()
+        );
         let preparation = storage.custody.scope_preparation.as_ref().unwrap();
         assert!(preparation.same_provider_and_plan_for_component_test(&provider, &allocation));
         let address = preparation as *const _;
-        assert!(Arc::clone(&provider).allocate_into_selected_slot(
-            allocation.clone(), &mut storage.borrow_for_component_test(),
-            crate::time::MonotonicDeadline::after(Duration::from_secs(5)),
-            crate::time::MonotonicDeadline::after(Duration::from_secs(5)),
-        ).is_err());
-        assert_eq!(storage.custody.scope_preparation.as_ref().unwrap() as *const _, address);
+        assert!(
+            Arc::clone(&provider)
+                .allocate_into_selected_slot(
+                    allocation.clone(),
+                    &mut storage.borrow_for_component_test(),
+                    crate::time::MonotonicDeadline::after(Duration::from_secs(5)),
+                    crate::time::MonotonicDeadline::after(Duration::from_secs(5)),
+                )
+                .is_err()
+        );
+        assert_eq!(
+            storage.custody.scope_preparation.as_ref().unwrap() as *const _,
+            address
+        );
         assert!(storage.custody.scope.is_none() && storage.custody.refused);
-        assert_eq!(storage.borrow_for_component_test().observe_cleanup(), SelectedScopedObservation::Pending);
+        assert_eq!(
+            storage.borrow_for_component_test().observe_cleanup(),
+            SelectedScopedObservation::Pending
+        );
         assert!(!storage.custody.locally_settled);
         let bounds = storage.custody.bounds.unwrap();
         assert!(!bounds.service.is_before(&original) && !original.is_before(&bounds.service));
@@ -7704,44 +7834,88 @@ mod selected_scoped_component_tests {
     #[test]
     #[ignore = "requires an explicitly delegated disposable cgroup; never auto-run"]
     fn selected_created_incarnation_ambiguity_refuses_local_settlement_and_service() {
-        let parent = std::env::var_os("LILLUX_TEST_CGROUP_PARENT")
-            .expect("explicit disposable delegation");
-        let configuration: crate::ProcessScopeConfiguration = serde_json::from_value(
-            serde_json::json!({
+        let parent =
+            std::env::var_os("LILLUX_TEST_CGROUP_PARENT").expect("explicit disposable delegation");
+        let configuration: crate::ProcessScopeConfiguration =
+            serde_json::from_value(serde_json::json!({
                 "version": 3,
                 "backend": {"implementation": "linux_cgroup_v2", "parent": parent}
-            }),
-        ).unwrap();
+            }))
+            .unwrap();
         let provider = Arc::new(crate::ProcessScopeProvider::open(&configuration).unwrap());
-        let allocation = provider.plan_allocation(
-            &format!("selected-precompile-{:032x}", rand::random::<u128>()),
-            Duration::from_secs(5),
-        ).unwrap();
+        let allocation = provider
+            .plan_allocation(
+                &format!("selected-precompile-{:032x}", rand::random::<u128>()),
+                Duration::from_secs(5),
+            )
+            .unwrap();
         let original = crate::time::MonotonicDeadline::after(Duration::from_secs(5));
         let mut storage = SelectedScopedStorage::for_component_test();
-        Arc::clone(&provider).allocate_into_selected_slot(
-            allocation.clone(), &mut storage.borrow_for_component_test(), original, original,
-        ).unwrap_err();
+        Arc::clone(&provider)
+            .allocate_into_selected_slot(
+                allocation.clone(),
+                &mut storage.borrow_for_component_test(),
+                original,
+                original,
+            )
+            .unwrap_err();
         assert!(storage.custody.request.is_none() && storage.custody.setup_child.is_none());
-        assert!(storage.custody.scope_preparation.as_ref().unwrap()
-            .same_provider_and_plan_for_component_test(&provider, &allocation));
-        assert!(storage.borrow_for_component_test().retained_scope_recovery().is_none());
-        assert_eq!(storage.borrow_for_component_test().observe_cleanup(), SelectedScopedObservation::Pending);
+        assert!(
+            storage
+                .custody
+                .scope_preparation
+                .as_ref()
+                .unwrap()
+                .same_provider_and_plan_for_component_test(&provider, &allocation)
+        );
+        assert!(
+            storage
+                .borrow_for_component_test()
+                .retained_scope_recovery()
+                .is_none()
+        );
+        assert_eq!(
+            storage.borrow_for_component_test().observe_cleanup(),
+            SelectedScopedObservation::Pending
+        );
         assert!(!storage.custody.locally_settled && storage.custody.scope.is_none());
         let address = storage.custody.scope_preparation.as_ref().unwrap() as *const _;
-        assert!(Arc::clone(&provider).allocate_into_selected_slot(
-            allocation.clone(), &mut storage.borrow_for_component_test(), original, original,
-        ).is_err());
-        assert_eq!(storage.custody.scope_preparation.as_ref().unwrap() as *const _, address);
+        assert!(
+            Arc::clone(&provider)
+                .allocate_into_selected_slot(
+                    allocation.clone(),
+                    &mut storage.borrow_for_component_test(),
+                    original,
+                    original,
+                )
+                .is_err()
+        );
+        assert_eq!(
+            storage.custody.scope_preparation.as_ref().unwrap() as *const _,
+            address
+        );
         let mut source = Some(request("/never-contact", &[]));
         let mut source_scope = None;
         let mut target = None;
         let mut mounts = None;
-        assert!(storage.borrow_for_component_test().prepare_from_compiled_slots(
-            &mut source, &mut source_scope, &mut target, &mut mounts, original, original,
-        ).is_err());
+        assert!(
+            storage
+                .borrow_for_component_test()
+                .prepare_from_compiled_slots(
+                    &mut source,
+                    &mut source_scope,
+                    &mut target,
+                    &mut mounts,
+                    original,
+                    original,
+                )
+                .is_err()
+        );
         assert!(source.is_some() && storage.custody.scope.is_none());
-        assert_eq!(storage.borrow_for_component_test().create(), SelectedScopedObservation::Refused);
+        assert_eq!(
+            storage.borrow_for_component_test().create(),
+            SelectedScopedObservation::Refused
+        );
         // No name reopen, foreign kill, fixture retirement or finance credit.
         // Explicit disposable delegation remains an operator obligation. This
         // unrun control does not establish the still-missing final-Drop barrier.
@@ -11626,11 +11800,7 @@ fn lib_spawn_awaiting_attachment_in_scope_with_deadline(
                 start,
                 format!(
                     "Failed to spawn awaiting attachment: readiness identity changed from {}/{} to {}/{}{}",
-                    identity.pid,
-                    identity.pgid,
-                    ready.pid,
-                    ready.pgid,
-                    cleanup
+                    identity.pid, identity.pgid, ready.pid, ready.pgid, cleanup
                 ),
             ));
         }
@@ -11656,8 +11826,9 @@ fn lib_spawn_awaiting_attachment_in_scope_with_deadline(
     // window. Later direct children close this exact known descriptor in their
     // own pre-exec hook, without touching Rust's private exec-error channel or
     // any caller-declared inherited descriptor.
-    let release_registration =
-        fork_custody.guard().register_pending_fork_control(release_writer);
+    let release_registration = fork_custody
+        .guard()
+        .register_pending_fork_control(release_writer);
     // READY is emitted only after the child's known snapshot was scrubbed.
     fork_custody.release_observed();
 
@@ -12410,7 +12581,11 @@ fn lib_spawn_with_stdio_custody_into(
             let mut deadline = supervised_setup_deadline(start, timeout);
             if let Some(original) = absolute_deadline {
                 let observed = Instant::now();
-                deadline = deadline.min(observed.checked_add(original.remaining()).unwrap_or(observed));
+                deadline = deadline.min(
+                    observed
+                        .checked_add(original.remaining())
+                        .unwrap_or(observed),
+                );
             }
             Some(
                 prepare_command_fork_custody(&mut command, &preserved, deadline).map_err(
@@ -14000,7 +14175,10 @@ fn open_attachment_cwd(
         )
     })?;
     let lease = retain_fork_sensitive_descriptors_until(deadline).map_err(|refused| {
-        spawn_failure(start, format!("Failed to spawn awaiting attachment: {refused}"))
+        spawn_failure(
+            start,
+            format!("Failed to spawn awaiting attachment: {refused}"),
+        )
     })?;
     let fd = unsafe {
         libc::open(
@@ -14576,7 +14754,9 @@ fn join_attachment_worker_bounded<T>(
     drop(worker);
     Err(format!(
         "attachment spawn worker did not finish within its bound and was detached{}",
-        terminated.err().map_or_else(String::new, |error| format!("; scope termination: {error}"))
+        terminated
+            .err()
+            .map_or_else(String::new, |error| format!("; scope termination: {error}"))
     ))
 }
 
@@ -15100,7 +15280,9 @@ mod fork_creation_custody_tests {
         drop(release_reader);
         drop(witness_writer);
 
-        let fact = custody.settle().expect_err("a live pre-exec child must strand the window");
+        let fact = custody
+            .settle()
+            .expect_err("a live pre-exec child must strand the window");
         assert!(fact.contains("fork custody stranded"), "{fact}");
         let refused = match lease_within(5) {
             Ok(_) => panic!("lease granted while a pre-exec child holds the table"),
@@ -15117,10 +15299,11 @@ mod fork_creation_custody_tests {
                 .is_some_and(|fact| fact.contains("fork custody stranded")),
             "{refused}"
         );
-        let refused = match quiesce_fork_sensitive_descriptors(Instant::now() + Duration::from_secs(5)) {
-            Ok(_) => panic!("fork window reopened while a pre-exec child holds the table"),
-            Err(error) => error,
-        };
+        let refused =
+            match quiesce_fork_sensitive_descriptors(Instant::now() + Duration::from_secs(5)) {
+                Ok(_) => panic!("fork window reopened while a pre-exec child holds the table"),
+                Err(error) => error,
+            };
         assert!(refused.contains("fork custody stranded"), "{refused}");
 
         // Let the child exec; exec closes its witness copy.
@@ -15140,9 +15323,10 @@ mod fork_creation_custody_tests {
         if exiting == 0 {
             unsafe { libc::_exit(7) };
         }
-        let status = reap_fork_holder_until(exiting, Instant::now() + Duration::from_secs(5), "test")
-            .unwrap()
-            .expect("an exited child is reaped");
+        let status =
+            reap_fork_holder_until(exiting, Instant::now() + Duration::from_secs(5), "test")
+                .unwrap()
+                .expect("an exited child is reaped");
         assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 7);
 
         let paused = unsafe { libc::fork() };
@@ -15153,13 +15337,23 @@ mod fork_creation_custody_tests {
             }
         }
         let started = Instant::now();
-        let error = reap_fork_holder_until(paused, Instant::now() + Duration::from_millis(50), "test")
-            .expect_err("a child that never exits overruns its bound");
-        assert!(error.contains("overran its bound and was killed"), "{error}");
+        let error =
+            reap_fork_holder_until(paused, Instant::now() + Duration::from_millis(50), "test")
+                .expect_err("a child that never exits overruns its bound");
+        assert!(
+            error.contains("overran its bound and was killed"),
+            "{error}"
+        );
         assert!(started.elapsed() < Duration::from_secs(3));
         // Killed and reaped: the PID is no longer a child of this process.
-        assert_eq!(unsafe { libc::waitpid(paused, std::ptr::null_mut(), libc::WNOHANG) }, -1);
-        assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::ECHILD));
+        assert_eq!(
+            unsafe { libc::waitpid(paused, std::ptr::null_mut(), libc::WNOHANG) },
+            -1
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ECHILD)
+        );
     }
 
     #[cfg(target_os = "linux")]
@@ -15186,7 +15380,13 @@ mod fork_creation_custody_tests {
                 }
             }
             let bytes = descendant.to_ne_bytes();
-            unsafe { libc::write(report_writer.as_raw_fd(), bytes.as_ptr().cast(), bytes.len()) };
+            unsafe {
+                libc::write(
+                    report_writer.as_raw_fd(),
+                    bytes.as_ptr().cast(),
+                    bytes.len(),
+                )
+            };
             loop {
                 unsafe { libc::pause() };
             }
@@ -15198,11 +15398,20 @@ mod fork_creation_custody_tests {
         let descendant = libc::pid_t::from_ne_bytes(bytes);
 
         let started = Instant::now();
-        let error = reap_fork_holder_until(holder, Instant::now() + Duration::from_millis(100), "test holder")
-            .expect_err("the holder overruns its bound");
-        assert!(error.contains("overran its bound and was killed"), "{error}");
+        let error = reap_fork_holder_until(
+            holder,
+            Instant::now() + Duration::from_millis(100),
+            "test holder",
+        )
+        .expect_err("the holder overruns its bound");
+        assert!(
+            error.contains("overran its bound and was killed"),
+            "{error}"
+        );
         assert!(started.elapsed() < Duration::from_secs(3));
-        let fact = custody.settle().expect_err("a live descendant keeps the witness open");
+        let fact = custody
+            .settle()
+            .expect_err("a live descendant keeps the witness open");
         assert!(fact.contains("fork custody stranded"), "{fact}");
         let refused = match try_retain_fork_sensitive_descriptors() {
             Ok(_) => panic!("lease granted while a created process holds the witness"),
@@ -15252,7 +15461,11 @@ mod fork_creation_custody_tests {
         assert!(!writer_closed(&mut early_reader));
         // A witness-less strand never reopens. Its creator is settled, so the
         // deferred close settles now and later closes happen at once.
-        guard.strand_with_witness("test creator ended without disposal proof".to_owned(), None, true);
+        guard.strand_with_witness(
+            "test creator ended without disposal proof".to_owned(),
+            None,
+            true,
+        );
         assert!(writer_closed(&mut early_reader));
         drop(late);
         assert!(writer_closed(&mut late_reader));
@@ -15289,7 +15502,9 @@ mod fork_creation_custody_tests {
         drop(lease);
         let guard = quiesce_fork_sensitive_descriptors(Instant::now() + Duration::from_secs(5))
             .expect("fork window must be available");
-        let witnessed = guard.witness_detached_creation("test detached creation").unwrap();
+        let witnessed = guard
+            .witness_detached_creation("test detached creation")
+            .unwrap();
         let custody = witnessed.0;
         // The detached creator still owns its write end and may still fork.
         let creator_witness = witnessed.1;
@@ -15298,7 +15513,10 @@ mod fork_creation_custody_tests {
             .expect_err("an open creator write end strands the window");
         assert!(fact.contains("fork custody stranded"), "{fact}");
         drop(registered);
-        assert!(!writer_closed(&mut reader), "a live creator's snapshot must defer the close");
+        assert!(
+            !writer_closed(&mut reader),
+            "a live creator's snapshot must defer the close"
+        );
         // The creator finishes: hang-up reopens and settles the deferred close.
         drop(creator_witness);
         drop(lease_within(5).expect("hang-up reopens the window"));
@@ -17042,11 +17260,15 @@ fn do_stream(
 
     #[cfg(unix)]
     let guard = match prepare_command_fork_custody(
-        &mut command, &BTreeSet::from([0, 1, 2]),
+        &mut command,
+        &BTreeSet::from([0, 1, 2]),
         supervised_setup_deadline(Instant::now(), timeout),
     ) {
         Ok(guard) => guard,
-        Err(error) => { eprintln!("fork custody: {error}"); return 125; }
+        Err(error) => {
+            eprintln!("fork custody: {error}");
+            return 125;
+        }
     };
     #[cfg(unix)]
     let spawn_result = spawn_command_with_fork_custody(&mut command, Some(guard));
@@ -17191,7 +17413,9 @@ fn spawn_detached(
     let mut preserved = BTreeSet::from([0, 1, 2]);
     preserved.extend(inherited_fds.iter().map(|fd| fd.file().as_raw_fd()));
     let guard = prepare_command_fork_custody(
-        &mut command, &preserved, supervised_setup_deadline(Instant::now(), 0.0),
+        &mut command,
+        &preserved,
+        supervised_setup_deadline(Instant::now(), 0.0),
     )?;
     configure_inherited_fds(&mut command, inherited_fds)?;
     unsafe {

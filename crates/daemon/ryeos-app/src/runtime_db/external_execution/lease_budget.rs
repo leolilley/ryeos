@@ -141,7 +141,10 @@ impl ExternalLeaseCharge {
             self.budget_weight,
             ryeos_external_execution_contract::MAX_LEASE_BUDGET_WEIGHT
         );
-        ensure!(self.lifetime_seconds > 0, "lease refused: its lifetime is zero");
+        ensure!(
+            self.lifetime_seconds > 0,
+            "lease refused: its lifetime is zero"
+        );
         Ok(())
     }
 
@@ -365,7 +368,10 @@ mod tests {
         }
     }
 
-    fn open() -> (tempfile::TempDir, crate::runtime_db::test_native::TestRuntime) {
+    fn open() -> (
+        tempfile::TempDir,
+        crate::runtime_db::test_native::TestRuntime,
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let db =
             crate::runtime_db::test_native::TestRuntime::open(&dir.path().join("runtime.sqlite3"));
@@ -397,7 +403,12 @@ mod tests {
             .unwrap();
     }
 
-    fn lease(db: &RuntimeDb, placement: &str, now_ms: i64, charge: ExternalLeaseCharge) -> Result<()> {
+    fn lease(
+        db: &RuntimeDb,
+        placement: &str,
+        now_ms: i64,
+        charge: ExternalLeaseCharge,
+    ) -> Result<()> {
         db.conn
             .with_sql(|connection| reserve(connection, placement, now_ms, &charge))
     }
@@ -437,11 +448,23 @@ mod tests {
                 && refusal.contains("none is queued"),
             "{refusal}"
         );
-        assert_eq!(used(&db, now), ExternalLeaseUse { held: 2, day_seconds: 7200 });
+        assert_eq!(
+            used(&db, now),
+            ExternalLeaseUse {
+                held: 2,
+                day_seconds: 7200
+            }
+        );
 
         // Settlement releases the lease in the settling transaction.
         settle(&db, "T-a", now + 90_000);
-        assert_eq!(used(&db, now), ExternalLeaseUse { held: 1, day_seconds: 3690 });
+        assert_eq!(
+            used(&db, now),
+            ExternalLeaseUse {
+                held: 1,
+                day_seconds: 3690
+            }
+        );
         lease(&db, "T-c", now, charge(2, 8 * 3600)).unwrap();
     }
 
@@ -472,7 +495,13 @@ mod tests {
         settle(&db, "T-b", now + 1_000);
         settle(&db, "T-c", now + 1_000);
         let tomorrow = now + DAY_MS;
-        assert_eq!(used(&db, tomorrow), ExternalLeaseUse { held: 0, day_seconds: 0 });
+        assert_eq!(
+            used(&db, tomorrow),
+            ExternalLeaseUse {
+                held: 0,
+                day_seconds: 0
+            }
+        );
         lease(&db, "T-d", tomorrow, budget).unwrap();
         let rows: i64 = db
             .conn
@@ -487,7 +516,9 @@ mod tests {
         assert_eq!(rows, 1);
     }
 
-    fn budget(daily_lease_seconds: u64) -> ryeos_node_runtime::node_policy::sections::execution::ExternalLeaseBudget {
+    fn budget(
+        daily_lease_seconds: u64,
+    ) -> ryeos_node_runtime::node_policy::sections::execution::ExternalLeaseBudget {
         ryeos_node_runtime::node_policy::sections::execution::ExternalLeaseBudget {
             max_concurrent_leases: 8,
             max_lease_lifetime_seconds: 3600,
@@ -500,7 +531,13 @@ mod tests {
     fn a_weight_of_one_charges_exactly_the_unweighted_lifetime() {
         let unweighted = UnweightedLeaseCharge::under(&budget(7200), 3600).unwrap();
         let one = unweighted.weighted_by(1).unwrap();
-        assert_eq!(one, ExternalLeaseCharge { budget_weight: 1, ..charge(8, 7200) });
+        assert_eq!(
+            one,
+            ExternalLeaseCharge {
+                budget_weight: 1,
+                ..charge(8, 7200)
+            }
+        );
         assert_eq!(one.weighted_lifetime_seconds(), 3600);
 
         // The same leases, settlements and refusals as before weights
@@ -513,7 +550,13 @@ mod tests {
         }
         lease(&db, "T-a", now, one).unwrap();
         lease(&db, "T-b", now, one).unwrap();
-        assert_eq!(used(&db, now), ExternalLeaseUse { held: 2, day_seconds: 7200 });
+        assert_eq!(
+            used(&db, now),
+            ExternalLeaseUse {
+                held: 2,
+                day_seconds: 7200
+            }
+        );
         let refusal = lease(&db, "T-c", now, one).unwrap_err().to_string();
         assert!(
             refusal.contains("daily lease budget is 7200s")
@@ -522,7 +565,13 @@ mod tests {
             "{refusal}"
         );
         settle(&db, "T-a", now + 90_000);
-        assert_eq!(used(&db, now), ExternalLeaseUse { held: 1, day_seconds: 3690 });
+        assert_eq!(
+            used(&db, now),
+            ExternalLeaseUse {
+                held: 1,
+                day_seconds: 3690
+            }
+        );
     }
 
     #[test]
@@ -540,7 +589,13 @@ mod tests {
             allocation(&db, placement);
         }
         lease(&db, "T-a", now, four).unwrap();
-        assert_eq!(used(&db, now), ExternalLeaseUse { held: 1, day_seconds: 4 * 3600 });
+        assert_eq!(
+            used(&db, now),
+            ExternalLeaseUse {
+                held: 1,
+                day_seconds: 4 * 3600
+            }
+        );
         let refusal = lease(&db, "T-b", now, four).unwrap_err().to_string();
         assert!(
             refusal.contains(
@@ -555,7 +610,13 @@ mod tests {
         // used: 10s lasted at weight 4 stays charged as 40s, and the other
         // 14360s return to the day.
         settle(&db, "T-a", now + 10_000);
-        assert_eq!(used(&db, now), ExternalLeaseUse { held: 0, day_seconds: 40 });
+        assert_eq!(
+            used(&db, now),
+            ExternalLeaseUse {
+                held: 0,
+                day_seconds: 40
+            }
+        );
         // A weight-1 lease of the remaining room fits exactly; one second
         // more of weighted room does not.
         let fill = ExternalLeaseCharge {
@@ -574,9 +635,21 @@ mod tests {
             "{refusal}"
         );
         lease(&db, "T-b", now, fill).unwrap();
-        assert_eq!(used(&db, now), ExternalLeaseUse { held: 1, day_seconds: 4 * 3600 });
+        assert_eq!(
+            used(&db, now),
+            ExternalLeaseUse {
+                held: 1,
+                day_seconds: 4 * 3600
+            }
+        );
         settle(&db, "T-b", now);
-        assert_eq!(used(&db, now), ExternalLeaseUse { held: 0, day_seconds: 40 });
+        assert_eq!(
+            used(&db, now),
+            ExternalLeaseUse {
+                held: 0,
+                day_seconds: 40
+            }
+        );
         // A settled lease keeps its weight: the stored row is immutable.
         let weight: i64 = db
             .conn
@@ -611,7 +684,13 @@ mod tests {
              admitted"
         );
         assert!(!refusal.contains("already hold"), "{refusal}");
-        assert_eq!(used(&db, now), ExternalLeaseUse { held: 0, day_seconds: 0 });
+        assert_eq!(
+            used(&db, now),
+            ExternalLeaseUse {
+                held: 0,
+                day_seconds: 0
+            }
+        );
         // Exactly the whole day fits once, and the next is the day-is-full
         // refusal, not the never-admissible one.
         let whole_day = UnweightedLeaseCharge::under(&budget(7200), 3600)
@@ -622,7 +701,8 @@ mod tests {
         allocation(&db, "T-b");
         let refusal = lease(&db, "T-b", now, whole_day).unwrap_err().to_string();
         assert!(
-            refusal.contains("already hold 7200s") && refusal.contains("none is queued")
+            refusal.contains("already hold 7200s")
+                && refusal.contains("none is queued")
                 && !refusal.contains("never be admitted"),
             "{refusal}"
         );
@@ -646,10 +726,17 @@ mod tests {
         let (_dir, db) = open();
         let now = 10 * DAY_MS;
         allocation(&db, "T-a");
-        let zero = ExternalLeaseCharge { budget_weight: 0, ..charge(2, 7200) };
+        let zero = ExternalLeaseCharge {
+            budget_weight: 0,
+            ..charge(2, 7200)
+        };
         assert!(lease(&db, "T-a", now, zero).is_err());
         // The journal holds the same bound as the contract.
-        for (weight, accepted) in [(0, false), (i64::from(max) + 1, false), (i64::from(max), true)] {
+        for (weight, accepted) in [
+            (0, false),
+            (i64::from(max) + 1, false),
+            (i64::from(max), true),
+        ] {
             let inserted = db.conn.with_sql(|connection| {
                 Ok(connection.execute(
                     "INSERT INTO external_execution_lease_budget VALUES('T-a',?1,1,?2,NULL,NULL)",
@@ -658,13 +745,14 @@ mod tests {
             });
             assert_eq!(inserted.is_ok(), accepted, "weight {weight}");
         }
-        assert!(db
-            .conn
-            .with_sql(|connection| Ok(connection.execute(
-                "UPDATE external_execution_lease_budget SET budget_weight=1",
-                [],
-            )?))
-            .is_err());
+        assert!(
+            db.conn
+                .with_sql(|connection| Ok(connection.execute(
+                    "UPDATE external_execution_lease_budget SET budget_weight=1",
+                    [],
+                )?))
+                .is_err()
+        );
     }
 
     #[test]
@@ -685,7 +773,13 @@ mod tests {
             "UPDATE external_execution_lease_budget SET reserved_seconds=1"
         ));
         settle(&db, "T-a", now + 5_000);
-        assert_eq!(used(&db, now), ExternalLeaseUse { held: 0, day_seconds: 5 });
+        assert_eq!(
+            used(&db, now),
+            ExternalLeaseUse {
+                held: 0,
+                day_seconds: 5
+            }
+        );
         assert!(refused(
             "UPDATE external_execution_lease_budget SET charged_seconds=0"
         ));
@@ -702,7 +796,13 @@ mod tests {
                         placement_thread_id, cleanup_state, created_at_ms, updated_at_ms
                      ) VALUES (?1, ?2, ?3, 1, 1, '{}', 'fd:fixture', 'live', ?4, ?5,
                                'owned', 1, 1)",
-                    params![worker, "b".repeat(64), "a".repeat(64), generation, placement],
+                    params![
+                        worker,
+                        "b".repeat(64),
+                        "a".repeat(64),
+                        generation,
+                        placement
+                    ],
                 )?)
             })
             .unwrap();
@@ -728,10 +828,11 @@ mod tests {
                 .unwrap();
             // A worker row of the running incarnation keeps its lease.
             worker_row(&db, "T-held", "worker-held", "daemon-first");
-            assert!(db
-                .predecessor_external_lease_placements("daemon-first")
-                .unwrap()
-                .is_empty());
+            assert!(
+                db.predecessor_external_lease_placements("daemon-first")
+                    .unwrap()
+                    .is_empty()
+            );
             let lease = db.held_external_lease("T-held").unwrap().unwrap();
             assert_eq!(lease.lifetime_seconds, 60);
             assert_eq!(
@@ -765,7 +866,8 @@ mod tests {
         // fence and is released only by the observed terminal.
         let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         assert_eq!(
-            db.predecessor_external_lease_placements("daemon-second").unwrap(),
+            db.predecessor_external_lease_placements("daemon-second")
+                .unwrap(),
             vec!["T-held".to_owned()]
         );
         db.cancel_external_allocation("T-held").unwrap();
@@ -797,10 +899,11 @@ mod tests {
         )
         .unwrap();
         assert!(db.held_external_lease("T-held").unwrap().is_none());
-        assert!(db
-            .predecessor_external_lease_placements("daemon-second")
-            .unwrap()
-            .is_empty());
+        assert!(
+            db.predecessor_external_lease_placements("daemon-second")
+                .unwrap()
+                .is_empty()
+        );
         let now = i64::try_from(lillux::time::timestamp_millis()).unwrap();
         assert_eq!(used(&db, now).held, 0);
     }
@@ -841,9 +944,7 @@ mod tests {
             .unwrap();
         let now = i64::try_from(lillux::time::timestamp_millis()).unwrap();
         assert_eq!(used(&db, now).held, 1);
-        db.conn
-            .with_sql(super::super::validate_current)
-            .unwrap();
+        db.conn.with_sql(super::super::validate_current).unwrap();
 
         // The second concurrent lease is refused by the node's ceiling of one.
         let mut second = reservation(&db, "two");
@@ -852,14 +953,15 @@ mod tests {
             .reserve_external_lease_allocation(&second, &binding, &charge_of(60))
             .unwrap_err()
             .to_string();
-        assert!(refusal.contains("1 of its 1 concurrent leases"), "{refusal}");
+        assert!(
+            refusal.contains("1 of its 1 concurrent leases"),
+            "{refusal}"
+        );
         assert!(db.external_allocation("T-two").unwrap().is_none());
 
         db.cancel_external_allocation("T-one").unwrap();
         assert_eq!(used(&db, now).held, 0);
-        db.conn
-            .with_sql(super::super::validate_current)
-            .unwrap();
+        db.conn.with_sql(super::super::validate_current).unwrap();
         reserve_session(&db, &plain).unwrap();
     }
 }

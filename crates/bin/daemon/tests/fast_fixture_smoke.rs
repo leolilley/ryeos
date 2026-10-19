@@ -16,7 +16,8 @@ fn prepared_core_fixture() -> (tempfile::TempDir, std::path::PathBuf, tempfile::
         &app_root,
         user_dir.path(),
         common::fast_fixture::FastFixtureProfile::Core,
-    ).expect("prepare isolated Core fixture");
+    )
+    .expect("prepare isolated Core fixture");
     common::fast_fixture::register_core_bundle_at_state(&app_root, &fixture)
         .expect("register prepared Core");
     (node_dir, app_root, user_dir)
@@ -29,26 +30,40 @@ fn fixture_capacity_issuance_is_real_and_reseal_preserves_its_account() {
     let (_node_dir, app_root, _user_dir) = prepared_core_fixture();
     common::fast_fixture::seal_initialized_state(&app_root).expect("first fixture seal");
     let first = ryeos_node::init::verify_init_completion(&app_root)
-        .expect("verify first completion").expect("completion exists");
+        .expect("verify first completion")
+        .expect("completion exists");
     let paths = [
         app_root.join(".ai/node/native-capacity/account"),
         app_root.join(".ai/node/native-capacity/anchor"),
         app_root.join(".ai/config/onboarding/native-capacity-issuance.json"),
     ];
-    let before = paths.each_ref().map(|path| std::fs::read(path).expect("read issued capacity"));
+    let before = paths
+        .each_ref()
+        .map(|path| std::fs::read(path).expect("read issued capacity"));
     common::fast_fixture::seal_initialized_state(&app_root).expect("reseal existing fixture");
     let after = ryeos_node::init::verify_init_completion(&app_root)
-        .expect("verify reseal").expect("completion exists");
+        .expect("verify reseal")
+        .expect("completion exists");
     assert_eq!(first.capacity_account, after.capacity_account);
-    assert_eq!(before, paths.each_ref().map(|path| std::fs::read(path).expect("read preserved capacity")));
+    assert_eq!(
+        before,
+        paths
+            .each_ref()
+            .map(|path| std::fs::read(path).expect("read preserved capacity"))
+    );
 
     let lock = ryeos_node_runtime::state_lock::StateLock::acquire(
         &ryeos_node_runtime::state_lock::default_lock_path(&app_root),
-    ).expect("hold actual fixture exclusion");
+    )
+    .expect("hold actual fixture exclusion");
     let inputs = ryeos_node::native_capacity::LiveNativeCapacityInputs::capture(
-        &app_root, std::sync::Arc::new(lock.retain()),
-    ).expect("capture actual authenticated inputs from fixture issuance");
-    inputs.require_original_cleanup().expect("original fixture input custody");
+        &app_root,
+        std::sync::Arc::new(lock.retain()),
+    )
+    .expect("capture actual authenticated inputs from fixture issuance");
+    inputs
+        .require_original_cleanup()
+        .expect("original fixture input custody");
     drop(inputs);
     drop(lock);
 }
@@ -94,8 +109,15 @@ fn fixture_first_seal_refuses_an_orphan_capacity_namespace() {
     let orphan = capacity.join("account");
     std::fs::write(&orphan, b"unissued preserved obligation").expect("orphan evidence");
     assert!(common::fast_fixture::seal_initialized_state(&app_root).is_err());
-    assert_eq!(std::fs::read(&orphan).unwrap(), b"unissued preserved obligation");
-    assert!(!app_root.join(".ai/config/onboarding/native-capacity-issuance.json").exists());
+    assert_eq!(
+        std::fs::read(&orphan).unwrap(),
+        b"unissued preserved obligation"
+    );
+    assert!(
+        !app_root
+            .join(".ai/config/onboarding/native-capacity-issuance.json")
+            .exists()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

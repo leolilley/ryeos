@@ -39,7 +39,9 @@ pub struct NodeCapabilityReportReader {
 
 impl NodeCapabilityReportReader {
     pub fn new(read: impl Fn() -> Result<HostCapabilities> + Send + Sync + 'static) -> Self {
-        Self { read: Box::new(read) }
+        Self {
+            read: Box::new(read),
+        }
     }
 
     pub fn current(&self) -> Result<HostCapabilities> {
@@ -113,7 +115,9 @@ fn classify_report_failure(error: anyhow::Error) -> anyhow::Error {
 /// Whether `error` is a node report that could not be read at this moment,
 /// as opposed to a refusal or any other failure.
 pub fn is_report_unreadable(error: &anyhow::Error) -> bool {
-    error.chain().any(|cause| cause.is::<NodeReportUnreadable>())
+    error
+        .chain()
+        .any(|cause| cause.is::<NodeReportUnreadable>())
 }
 
 /// How long one execution's launch may keep meeting an unreadable report
@@ -279,7 +283,9 @@ pub fn admit_item_requirements_met_by(
     if let Some(reason) =
         ryeos_bundle::runtime_authority::credential_kinds_refusal(&requires.credential_kinds)
     {
-        bail!(NodeRequirementRefused(format!("launch refused: {item_ref}: {reason}")));
+        bail!(NodeRequirementRefused(format!(
+            "launch refused: {item_ref}: {reason}"
+        )));
     }
     if requires.node.is_empty() && requires.credential_kinds.is_empty() {
         return Ok(RequirementsMet::new());
@@ -296,11 +302,20 @@ fn judge_item_requirements(
     let kind_lists: Vec<(String, &[CapabilityRequirement])> = requires
         .credential_kinds
         .iter()
-        .map(|(kind, entries)| (format!("requires.credential_kinds.{kind}"), entries.as_slice()))
+        .map(|(kind, entries)| {
+            (
+                format!("requires.credential_kinds.{kind}"),
+                entries.as_slice(),
+            )
+        })
         .collect();
     let mut lists: Vec<(&str, &[CapabilityRequirement])> =
         vec![("requires.node", requires.node.as_slice())];
-    lists.extend(kind_lists.iter().map(|(list, entries)| (list.as_str(), *entries)));
+    lists.extend(
+        kind_lists
+            .iter()
+            .map(|(list, entries)| (list.as_str(), *entries)),
+    );
     refuse_unmet(item_ref, &lists, view)
 }
 
@@ -342,7 +357,10 @@ pub fn admit_structured_session_start(
         return Ok(());
     };
     let kind_requirements = select_credential_kind(&requirements, binding_kind)?;
-    let kind_list = format!("requires.credential_kinds.{}", binding_kind.unwrap_or_default());
+    let kind_list = format!(
+        "requires.credential_kinds.{}",
+        binding_kind.unwrap_or_default()
+    );
     let view = current_node_capabilities(state)?;
     refuse_unmet(
         &requirements.workload_class,
@@ -408,7 +426,11 @@ fn refuse_unmet(
     bail!(NodeRequirementRefused(format!(
         "launch refused: this node cannot prove what {subject} requires{text}\n  this node can \
          prove: {}",
-        if proven.is_empty() { "nothing".to_owned() } else { proven.join(", ") }
+        if proven.is_empty() {
+            "nothing".to_owned()
+        } else {
+            proven.join(", ")
+        }
     )));
 }
 
@@ -472,7 +494,11 @@ fn met_entries(
         .collect()
 }
 
-fn unmet_reason(entry: &CapabilityRequirement, name: &str, view: &HostCapabilities) -> Option<String> {
+fn unmet_reason(
+    entry: &CapabilityRequirement,
+    name: &str,
+    view: &HostCapabilities,
+) -> Option<String> {
     match view.provided.get(name) {
         Some(evidence) => satisfies(entry, name, evidence)
             .err()
@@ -510,7 +536,9 @@ mod tests {
     /// composition root's report reader registered over `report`.
     fn node_reporting(report: HostCapabilities) -> ExtensionState {
         let extensions = ExtensionState::new();
-        extensions.insert(Arc::new(NodeCapabilityReportReader::new(move || Ok(report.clone()))));
+        extensions.insert(Arc::new(NodeCapabilityReportReader::new(move || {
+            Ok(report.clone())
+        })));
         extensions
     }
 
@@ -602,14 +630,16 @@ mod tests {
             "fixture basis",
         );
         let mut requires = login_requires();
-        requires.node.push(CapabilityRequirement::Spec(CapabilityRequirementSpec {
-            name: None,
-            any_of: vec!["recovery:enclosure".into(), "recovery:scope".into()],
-            accept: vec!["provider_attested".into()],
-            providers: Vec::new(),
-        }));
-        let met = admit_item_requirements_met_by(&node_reporting(report), "login", &requires)
-            .unwrap();
+        requires
+            .node
+            .push(CapabilityRequirement::Spec(CapabilityRequirementSpec {
+                name: None,
+                any_of: vec!["recovery:enclosure".into(), "recovery:scope".into()],
+                accept: vec!["provider_attested".into()],
+                providers: Vec::new(),
+            }));
+        let met =
+            admit_item_requirements_met_by(&node_reporting(report), "login", &requires).unwrap();
         let met_by = |list: &str, label: &str| {
             let met = &met[list][label];
             (met.name.as_str(), met.grade.as_str(), met.provider.as_str())
@@ -623,11 +653,17 @@ mod tests {
             ("persistence:durable_state", "trusted", HOST_PROVIDER)
         );
         assert_eq!(
-            met_by("requires.node", "any_of(recovery:enclosure, recovery:scope)"),
+            met_by(
+                "requires.node",
+                "any_of(recovery:enclosure, recovery:scope)"
+            ),
             ("recovery:scope", "provider_attested", "fixture-provider")
         );
         assert_eq!(
-            met_by("requires.credential_kinds.credential_profile", "credential:private_home"),
+            met_by(
+                "requires.credential_kinds.credential_profile",
+                "credential:private_home"
+            ),
             ("credential:private_home", "trusted", HOST_PROVIDER)
         );
         assert_eq!(met.len(), 2);
@@ -651,7 +687,10 @@ mod tests {
                 ("persistence:durable_state", ProofSource::Trusted),
                 ("time", ProofSource::Measured),
             ],
-            &[("credential:private_home", "credential home root: group-writable")],
+            &[(
+                "credential:private_home",
+                "credential home root: group-writable",
+            )],
         );
         let text = refusal(
             admit_item_requirements(
@@ -675,7 +714,10 @@ mod tests {
             "{text}"
         );
         assert!(!text.contains("requires.node"), "{text}");
-        assert!(text.contains("this node can prove: persistence:durable_state, time"), "{text}");
+        assert!(
+            text.contains("this node can prove: persistence:durable_state, time"),
+            "{text}"
+        );
     }
 
     #[test]
@@ -707,7 +749,10 @@ mod tests {
             admit_item_requirements(&ExtensionState::new(), "login", &login_requires())
                 .unwrap_err(),
         );
-        assert!(missing.contains("this node has no signed capability report"), "{missing}");
+        assert!(
+            missing.contains("this node has no signed capability report"),
+            "{missing}"
+        );
         let stale = refusal_text(
             admit_item_requirements(&node_with_stale_report(), "login", &login_requires())
                 .unwrap_err(),
@@ -719,19 +764,36 @@ mod tests {
         // apart, so it never stands in for a refusal.
         let missing = admit_item_requirements(&ExtensionState::new(), "login", &login_requires())
             .unwrap_err();
-        assert!(missing.downcast_ref::<NodeRequirementRefused>().is_some(), "{missing:#}");
+        assert!(
+            missing.downcast_ref::<NodeRequirementRefused>().is_some(),
+            "{missing:#}"
+        );
         let stale = admit_item_requirements(&node_with_stale_report(), "login", &login_requires())
             .unwrap_err();
-        assert!(stale.downcast_ref::<NodeRequirementRefused>().is_some(), "{stale:#}");
+        assert!(
+            stale.downcast_ref::<NodeRequirementRefused>().is_some(),
+            "{stale:#}"
+        );
         assert!(!is_report_unreadable(&stale), "{stale:#}");
         let unreadable =
             admit_item_requirements(&node_with_unreadable_report(), "login", &login_requires())
                 .unwrap_err();
-        assert!(unreadable.downcast_ref::<NodeRequirementRefused>().is_none(), "{unreadable:#}");
+        assert!(
+            unreadable
+                .downcast_ref::<NodeRequirementRefused>()
+                .is_none(),
+            "{unreadable:#}"
+        );
         assert!(is_report_unreadable(&unreadable), "{unreadable:#}");
         let text = refusal_text(unreadable);
-        assert!(text.contains("read the node's signed capability report"), "{text}");
-        assert!(text.contains("the state directory did not answer"), "{text}");
+        assert!(
+            text.contains("read the node's signed capability report"),
+            "{text}"
+        );
+        assert!(
+            text.contains("the state directory did not answer"),
+            "{text}"
+        );
         // An item that declares nothing is admitted without any report.
         admit_item_requirements(
             &ExtensionState::new(),
@@ -749,8 +811,7 @@ mod tests {
             vec![CapabilityRequirement::from("secrets:provider_env")],
         );
         let text = refusal(
-            admit_item_requirements(&node_reporting(login_node()), "login", &requires)
-                .unwrap_err(),
+            admit_item_requirements(&node_reporting(login_node()), "login", &requires).unwrap_err(),
         );
         assert!(text.contains("may declare at most 1"), "{text}");
     }
@@ -771,7 +832,13 @@ mod tests {
         assert!(unmet_entries(std::slice::from_ref(&entry), &met).is_empty());
         let unmet = unmet_entries(
             std::slice::from_ref(&entry),
-            &view(&[], &[("recovery:enclosure", "no enclosure"), ("recovery:scope", "no scope")]),
+            &view(
+                &[],
+                &[
+                    ("recovery:enclosure", "no enclosure"),
+                    ("recovery:scope", "no scope"),
+                ],
+            ),
         );
         assert_eq!(
             unmet["any_of(recovery:enclosure, recovery:scope)"],
@@ -807,7 +874,10 @@ mod tests {
                 ("persistence:durable_state", ProofSource::Trusted),
                 ("time", ProofSource::Measured),
             ],
-            &[("secrets:provider_env", "declared names absent at startup: OPENAI_API_KEY")],
+            &[(
+                "secrets:provider_env",
+                "declared names absent at startup: OPENAI_API_KEY",
+            )],
         ));
         let contract = remote_contract();
         admit_structured_session_start(&node, &contract, Some(CREDENTIAL_PROFILE_KIND)).unwrap();
@@ -832,8 +902,7 @@ mod tests {
     fn structured_session_start_refuses_an_unnamed_or_undeclared_kind() {
         let node = node_reporting(view(&[], &[]));
         let contract = remote_contract();
-        let text =
-            refusal(admit_structured_session_start(&node, &contract, None).unwrap_err());
+        let text = refusal(admit_structured_session_start(&node, &contract, None).unwrap_err());
         assert!(text.contains("names no credential kind"), "{text}");
         let text = refusal(
             admit_structured_session_start(&node, &contract, Some("device_token")).unwrap_err(),
@@ -909,19 +978,34 @@ mod tests {
         // Inside the window the row stays recoverable at every attempt.
         for minute in [0, 4, 9] {
             let error = episodes
-                .judge("T-row", start + Duration::from_secs(minute * 60), window, unreadable())
+                .judge(
+                    "T-row",
+                    start + Duration::from_secs(minute * 60),
+                    window,
+                    unreadable(),
+                )
                 .unwrap_err();
             assert!(is_report_unreadable(&error), "{error:#}");
         }
         // Another row's episode is its own.
         let other = episodes
-            .judge("T-other", start + Duration::from_secs(10 * 60), window, unreadable())
+            .judge(
+                "T-other",
+                start + Duration::from_secs(10 * 60),
+                window,
+                unreadable(),
+            )
             .unwrap_err();
         assert!(is_report_unreadable(&other), "{other:#}");
         // Once the row has met an unreadable report for the whole window,
         // its launch is refused, plainly and permanently.
         let refused = episodes
-            .judge("T-row", start + Duration::from_secs(10 * 60), window, unreadable())
+            .judge(
+                "T-row",
+                start + Duration::from_secs(10 * 60),
+                window,
+                unreadable(),
+            )
             .unwrap_err();
         assert!(!is_report_unreadable(&refused), "{refused:#}");
         let text = refused
@@ -933,17 +1017,27 @@ mod tests {
             text.contains("stayed unreadable for 600s across 4 launch attempts of T-row"),
             "{text}"
         );
-        assert!(text.contains("the state directory did not answer"), "{text}");
+        assert!(
+            text.contains("the state directory did not answer"),
+            "{text}"
+        );
 
         // A readable report in between ends the episode: the next
         // unreadable report opens a new window.
         let mut episodes = UnreadableReportEpisodes::new();
-        episodes.judge("T-row", start, window, unreadable()).unwrap_err();
+        episodes
+            .judge("T-row", start, window, unreadable())
+            .unwrap_err();
         episodes
             .judge("T-row", start + Duration::from_secs(300), window, Ok(()))
             .unwrap();
         let error = episodes
-            .judge("T-row", start + Duration::from_secs(700), window, unreadable())
+            .judge(
+                "T-row",
+                start + Duration::from_secs(700),
+                window,
+                unreadable(),
+            )
             .unwrap_err();
         assert!(is_report_unreadable(&error), "{error:#}");
         // So does a refusal, which is returned unchanged.
@@ -951,9 +1045,17 @@ mod tests {
         let error = episodes
             .judge("T-row", start + Duration::from_secs(1400), window, stale)
             .unwrap_err();
-        assert!(error.downcast_ref::<NodeRequirementRefused>().is_some(), "{error:#}");
+        assert!(
+            error.downcast_ref::<NodeRequirementRefused>().is_some(),
+            "{error:#}"
+        );
         let error = episodes
-            .judge("T-row", start + Duration::from_secs(1500), window, unreadable())
+            .judge(
+                "T-row",
+                start + Duration::from_secs(1500),
+                window,
+                unreadable(),
+            )
             .unwrap_err();
         assert!(is_report_unreadable(&error), "{error:#}");
     }

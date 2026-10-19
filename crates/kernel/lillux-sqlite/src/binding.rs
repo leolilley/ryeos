@@ -16,26 +16,44 @@ pub(super) struct BoundComponent {
 impl BoundComponent {
     pub(super) fn new(name: &std::ffi::OsStr) -> Result<Self, &'static str> {
         let source = name.as_encoded_bytes();
-        if source.is_empty() || source.len() > BOUND_COMPONENT_MAX_BYTES
-            || source.contains(&0) || source.contains(&b'/')
-            || source == b"." || source == b".." {
+        if source.is_empty()
+            || source.len() > BOUND_COMPONENT_MAX_BYTES
+            || source.contains(&0)
+            || source.contains(&b'/')
+            || source == b"."
+            || source == b".."
+        {
             return Err("invalid or oversized bound SQLite component");
         }
         let mut bytes = [0; BOUND_COMPONENT_MAX_BYTES + 1];
         bytes[..source.len()].copy_from_slice(source);
-        Ok(Self { bytes, length: source.len() })
+        Ok(Self {
+            bytes,
+            length: source.len(),
+        })
     }
     pub(super) fn as_os_str(&self) -> &std::ffi::OsStr {
         // SAFETY: this exact complete encoding came from OsStr on this
         // platform; no truncation or byte transformation occurs.
         unsafe { std::ffi::OsStr::from_encoded_bytes_unchecked(&self.bytes[..self.length]) }
     }
-    fn as_ptr(&self) -> *const c_char { self.bytes.as_ptr().cast() }
+    fn as_ptr(&self) -> *const c_char {
+        self.bytes.as_ptr().cast()
+    }
 }
 
 unsafe extern "C" {
-    fn ryeos_projection_lease_open(pin: c_int, mode: c_int, out: *mut *mut c_void, actual_fd: *mut c_int) -> c_int;
-    fn ryeos_projection_lease_close(owner: *mut c_void, pin_consumed: *mut c_int, fd_consumed: *mut c_int) -> c_int;
+    fn ryeos_projection_lease_open(
+        pin: c_int,
+        mode: c_int,
+        out: *mut *mut c_void,
+        actual_fd: *mut c_int,
+    ) -> c_int;
+    fn ryeos_projection_lease_close(
+        owner: *mut c_void,
+        pin_consumed: *mut c_int,
+        fd_consumed: *mut c_int,
+    ) -> c_int;
     fn ryeos_sqlite_close_original_finalizer_file(
         fd: c_int,
         device: u64,
@@ -327,11 +345,17 @@ impl ProjectionLease {
         let mut out = std::ptr::null_mut();
         let mut actual_fd = -1;
         let code = unsafe { ryeos_projection_lease_open(pin, mode, &mut out, &mut actual_fd) };
-        (code, NonNull::new(out).map(Self), (actual_fd >= 0).then_some(actual_fd))
+        (
+            code,
+            NonNull::new(out).map(Self),
+            (actual_fd >= 0).then_some(actual_fd),
+        )
     }
     pub(super) fn close(&self) -> (c_int, bool, bool) {
         let (mut consumed, mut fd_consumed) = (0, 0);
-        let code = unsafe { ryeos_projection_lease_close(self.0.as_ptr(), &mut consumed, &mut fd_consumed) };
+        let code = unsafe {
+            ryeos_projection_lease_close(self.0.as_ptr(), &mut consumed, &mut fd_consumed)
+        };
         (code, consumed == 1, fd_consumed == 1)
     }
 }
@@ -352,7 +376,8 @@ impl Binding {
         lease: Option<SqliteCopyLease>,
     ) -> std::result::Result<Self, (anyhow::Error, Option<Self>)> {
         use std::os::fd::AsRawFd;
-        let name = BoundComponent::new(name).map_err(|reason| (anyhow::Error::msg(reason), None))?;
+        let name =
+            BoundComponent::new(name).map_err(|reason| (anyhow::Error::msg(reason), None))?;
         let mut pointer = std::ptr::null_mut();
         let lease = lease
             .map(|lease| Box::into_raw(Box::new(lease)).cast::<c_void>())
@@ -577,7 +602,10 @@ impl Binding {
     pub(super) fn main_empty(&self) -> Result<bool> {
         let mut empty = 0;
         let code = unsafe {
-            ryeos_sqlite_binding_main_empty(self.0.expect("owned native context").as_ptr(), &mut empty)
+            ryeos_sqlite_binding_main_empty(
+                self.0.expect("owned native context").as_ptr(),
+                &mut empty,
+            )
         };
         ensure!(
             code == libsqlite3_sys::SQLITE_OK,

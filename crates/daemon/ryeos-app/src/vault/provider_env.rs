@@ -52,8 +52,7 @@ impl ProviderEnvironment {
                 )
             })?;
         }
-        let declared_names: Vec<String> =
-            declared.iter().map(|entry| entry.name.clone()).collect();
+        let declared_names: Vec<String> = declared.iter().map(|entry| entry.name.clone()).collect();
         let mut retained = BTreeMap::new();
         for (name, value) in values {
             if declared_names.binary_search(&name).is_err() {
@@ -244,7 +243,10 @@ impl std::fmt::Debug for ProviderEnvironment {
 /// Test construction of a declaration whose every name lists `recipients`
 /// as recipient principals.
 #[cfg(test)]
-pub(crate) fn test_declaration(names: &[&str], recipients: &[&str]) -> Vec<ProviderEnvironmentName> {
+pub(crate) fn test_declaration(
+    names: &[&str],
+    recipients: &[&str],
+) -> Vec<ProviderEnvironmentName> {
     names
         .iter()
         .map(|name| ProviderEnvironmentName {
@@ -325,7 +327,11 @@ mod tests {
         let read = environment.read_declared(&["A_KEY".to_owned(), "C_KEY".to_owned()]);
         assert_eq!(read.len(), 1);
         assert_eq!(read.get("A_KEY").map(String::as_str), Some("value-a"));
-        assert!(ProviderEnvironment::none().read_declared(&["A_KEY".to_owned()]).is_empty());
+        assert!(
+            ProviderEnvironment::none()
+                .read_declared(&["A_KEY".to_owned()])
+                .is_empty()
+        );
     }
 
     #[test]
@@ -343,8 +349,14 @@ mod tests {
             .admit_recipient("fp:mallory", &[], Some(&strings(&["A_KEY"])))
             .unwrap_err()
             .to_string();
-        assert!(error.contains("`A_KEY`") && error.contains("`fp:mallory`"), "{error}");
-        assert!(!error.contains("value-a") && !error.contains("value-b"), "{error}");
+        assert!(
+            error.contains("`A_KEY`") && error.contains("`fp:mallory`"),
+            "{error}"
+        );
+        assert!(
+            !error.contains("value-a") && !error.contains("value-b"),
+            "{error}"
+        );
         // A capability recipient admits holders of the exact capability and
         // nobody else.
         assert_eq!(
@@ -365,13 +377,19 @@ mod tests {
             )
             .unwrap_err()
             .to_string();
-        assert!(error.contains("`B_KEY`") && error.contains("`fp:bob`"), "{error}");
+        assert!(
+            error.contains("`B_KEY`") && error.contains("`fp:bob`"),
+            "{error}"
+        );
         // A principal listed for one name is not a recipient of another.
         let error = environment
             .admit_recipient("fp:alice", &[], Some(&strings(&["A_KEY", "B_KEY"])))
             .unwrap_err()
             .to_string();
-        assert!(error.contains("`B_KEY`") && error.contains("`fp:alice`"), "{error}");
+        assert!(
+            error.contains("`B_KEY`") && error.contains("`fp:alice`"),
+            "{error}"
+        );
         // An open declaration puts every declared name in play.
         assert!(environment.admit_recipient("fp:alice", &[], None).is_err());
         assert_eq!(
@@ -439,7 +457,10 @@ mod tests {
                 .admit_recipient("fp:alice", &strings(&[wildcard]), None)
                 .unwrap_err()
                 .to_string();
-            assert!(error.contains("wildcard grants do not satisfy it"), "{wildcard}: {error}");
+            assert!(
+                error.contains("wildcard grants do not satisfy it"),
+                "{wildcard}: {error}"
+            );
         }
     }
 

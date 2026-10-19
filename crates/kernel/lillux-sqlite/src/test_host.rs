@@ -38,7 +38,11 @@ pub struct TestNativeEnvelope {
 }
 impl Default for TestNativeEnvelope {
     fn default() -> Self {
-        Self { storage_bytes: 16 * MIB, allocator_steps: 1_000_000_000, tickets: 64 }
+        Self {
+            storage_bytes: 16 * MIB,
+            allocator_steps: 1_000_000_000,
+            tickets: 64,
+        }
     }
 }
 
@@ -65,13 +69,20 @@ pub(crate) fn serial_guard() -> MutexGuard<'static, ()> {
 fn retain_leaked(retained: crate::offline_host::OfflineNativeRetained) -> String {
     let census = format!("{:#}", retained.error);
     *LEAKED.lock().unwrap_or_else(PoisonError::into_inner) = Some(census.clone());
-    RETAINED.lock().unwrap_or_else(PoisonError::into_inner).push(retained.host);
+    RETAINED
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .push(retained.host);
     census
 }
 
 fn current_holder() -> String {
     let thread = std::thread::current();
-    format!("{} ({:?})", thread.name().unwrap_or("<unnamed>"), thread.id())
+    format!(
+        "{} ({:?})",
+        thread.name().unwrap_or("<unnamed>"),
+        thread.id()
+    )
 }
 
 /// Test authority: the serial guard is the only exclusion and has no deadline.
@@ -110,7 +121,10 @@ pub type AfterBackend = Box<dyn FnOnce(&crate::OriginalNativeTerminal) -> Result
 fn finish_with(
     mut live: OfflineNativeHost,
     after_backend: Vec<AfterBackend>,
-) -> std::result::Result<crate::offline_host::OfflineNativeReleased, crate::offline_host::OfflineNativeRetained> {
+) -> std::result::Result<
+    crate::offline_host::OfflineNativeReleased,
+    crate::offline_host::OfflineNativeRetained,
+> {
     let backend = match live.finish_backend() {
         Ok(backend) => backend,
         Err(error) => return Err(crate::offline_host::OfflineNativeRetained { host: live, error }),
@@ -140,7 +154,10 @@ fn install_with(
     // SAFETY: test-only funding; this host is the sole issuer of the envelope.
     let raw = unsafe {
         OriginalNativeBudget::prepaid_by_original_issuer(
-            envelope.storage_bytes, envelope.allocator_steps, envelope.tickets, cleanup,
+            envelope.storage_bytes,
+            envelope.allocator_steps,
+            envelope.tickets,
+            cleanup,
         )
     }
     .map_err(|refusal| format!("funding refused: {refusal}"))?;
@@ -154,7 +171,10 @@ fn install_with(
                 let census = format!("{message}; partial host retained: {error:#}");
                 *LEAKED.lock().unwrap_or_else(PoisonError::into_inner) = Some(census.clone());
                 if let Some(host) = host {
-                    RETAINED.lock().unwrap_or_else(PoisonError::into_inner).push(host);
+                    RETAINED
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .push(host);
                 }
                 census
             }
@@ -173,7 +193,10 @@ fn acquire_serial() -> MutexGuard<'static, ()> {
             Err(std::sync::TryLockError::Poisoned(poisoned)) => break poisoned.into_inner(),
             Err(std::sync::TryLockError::WouldBlock) => {
                 if started.elapsed() >= ACQUIRE_DEADLINE {
-                    let holder = HOLDER.lock().unwrap_or_else(PoisonError::into_inner).clone();
+                    let holder = HOLDER
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .clone();
                     panic!(
                         "TestNativeHost acquire deadline elapsed after {:?}; held by {}",
                         ACQUIRE_DEADLINE,
@@ -184,7 +207,11 @@ fn acquire_serial() -> MutexGuard<'static, ()> {
             }
         }
     };
-    if let Some(census) = LEAKED.lock().unwrap_or_else(PoisonError::into_inner).as_ref() {
+    if let Some(census) = LEAKED
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .as_ref()
+    {
         panic!("previous TestNativeHost leaked its arena: {census}");
     }
     *HOLDER.lock().unwrap_or_else(PoisonError::into_inner) = Some(current_holder());
@@ -209,7 +236,10 @@ impl Drop for TestHostSerial {
 /// like [`TestNativeHost::acquire`] if a previous host leaked its arena.
 /// Never hold it while acquiring a host on the same thread.
 pub fn serial() -> TestHostSerial {
-    TestHostSerial { _serial: acquire_serial(), _thread: PhantomData }
+    TestHostSerial {
+        _serial: acquire_serial(),
+        _thread: PhantomData,
+    }
 }
 
 /// Issue a production [`OfflineNativeHost`] under the serial guard with the
@@ -222,7 +252,13 @@ pub fn issue_offline_host(
 ) -> (OfflineNativeHost, TestHostSerial) {
     let serial = acquire_serial();
     match install_with(envelope, authority) {
-        Ok(host) => (host, TestHostSerial { _serial: serial, _thread: PhantomData }),
+        Ok(host) => (
+            host,
+            TestHostSerial {
+                _serial: serial,
+                _thread: PhantomData,
+            },
+        ),
         Err(census) => {
             *LEAKED.lock().unwrap_or_else(PoisonError::into_inner) = Some(census.clone());
             panic!("offline test host {census}");
@@ -332,17 +368,25 @@ pub fn spawn_isolated_peer(test: &str, argument: &str) -> IsolatedPeer {
         .expect("spawn isolated peer");
     let mut stdin = child.stdin.take().expect("isolated peer stdin");
     let mut stdout = std::io::BufReader::new(child.stdout.take().expect("isolated peer stdout"));
-    writeln!(stdin, "{}", argument.replace('\n', " ")).and_then(|()| stdin.flush()).expect("hand the isolated peer its argument");
+    writeln!(stdin, "{}", argument.replace('\n', " "))
+        .and_then(|()| stdin.flush())
+        .expect("hand the isolated peer its argument");
     let mut seen = String::new();
     loop {
         let mut line = String::new();
-        let read = stdout.read_line(&mut line).expect("read isolated peer stdout");
+        let read = stdout
+            .read_line(&mut line)
+            .expect("read isolated peer stdout");
         if read == 0 {
             let status = child.wait().expect("wait for isolated peer");
             panic!("isolated peer {name} exited ({status}) before it was ready:\n{seen}");
         }
         if line.trim_end().ends_with(ISOLATED_READY) {
-            return IsolatedPeer { child, stdin, stdout };
+            return IsolatedPeer {
+                child,
+                stdin,
+                stdout,
+            };
         }
         seen.push_str(&line);
     }
@@ -354,10 +398,16 @@ impl IsolatedPeer {
     /// fails or reports nothing.
     pub fn finish(self) -> String {
         use std::io::Read;
-        let Self { mut child, stdin, mut stdout } = self;
+        let Self {
+            mut child,
+            stdin,
+            mut stdout,
+        } = self;
         drop(stdin);
         let mut rest = String::new();
-        stdout.read_to_string(&mut rest).expect("read isolated peer stdout");
+        stdout
+            .read_to_string(&mut rest)
+            .expect("read isolated peer stdout");
         let status = child.wait().expect("wait for isolated peer");
         assert!(status.success(), "isolated peer failed ({status}):\n{rest}");
         rest.lines()
@@ -369,32 +419,51 @@ impl IsolatedPeer {
 
 /// The argument [`spawn_isolated_peer`] handed this peer.
 pub fn isolated_peer_argument() -> String {
-    assert!(std::env::var_os(ISOLATED_TEST).is_some(), "only an isolated peer reads a peer argument");
+    assert!(
+        std::env::var_os(ISOLATED_TEST).is_some(),
+        "only an isolated peer reads a peer argument"
+    );
     let mut line = String::new();
-    std::io::stdin().read_line(&mut line).expect("read isolated peer argument");
+    std::io::stdin()
+        .read_line(&mut line)
+        .expect("read isolated peer argument");
     line.trim_end_matches('\n').to_owned()
 }
 
 /// Report this peer ready, then wait until its parent lets it go.
 pub fn isolated_peer_ready() {
     use std::io::{Read, Write};
-    assert!(std::env::var_os(ISOLATED_TEST).is_some(), "only an isolated peer reports ready");
+    assert!(
+        std::env::var_os(ISOLATED_TEST).is_some(),
+        "only an isolated peer reports ready"
+    );
     let mut stdout = std::io::stdout().lock();
     // The harness has already printed this test's name without a line break.
-    write!(stdout, "\n{ISOLATED_READY}\n").and_then(|()| stdout.flush()).expect("report isolated peer ready");
+    write!(stdout, "\n{ISOLATED_READY}\n")
+        .and_then(|()| stdout.flush())
+        .expect("report isolated peer ready");
     drop(stdout);
     let mut rest = Vec::new();
-    std::io::stdin().read_to_end(&mut rest).expect("wait for the isolated peer's release");
+    std::io::stdin()
+        .read_to_end(&mut rest)
+        .expect("wait for the isolated peer's release");
 }
 
 /// Report this peer's outcome; the test then returns normally.
 pub fn isolated_peer_outcome(outcome: &str) {
     use std::io::Write;
-    assert!(std::env::var_os(ISOLATED_TEST).is_some(), "only an isolated peer reports a peer outcome");
+    assert!(
+        std::env::var_os(ISOLATED_TEST).is_some(),
+        "only an isolated peer reports a peer outcome"
+    );
     let mut stdout = std::io::stdout().lock();
-    write!(stdout, "\n{ISOLATED_OUTCOME}{}\n", outcome.replace('\n', " "))
-        .and_then(|()| stdout.flush())
-        .expect("report isolated peer outcome");
+    write!(
+        stdout,
+        "\n{ISOLATED_OUTCOME}{}\n",
+        outcome.replace('\n', " ")
+    )
+    .and_then(|()| stdout.flush())
+    .expect("report isolated peer outcome");
 }
 
 impl TestNativeHost {
@@ -424,9 +493,10 @@ impl TestNativeHost {
         }
     }
 
-
     fn live(&self) -> &OfflineNativeHost {
-        self.live.as_ref().expect("live test host present outside teardown")
+        self.live
+            .as_ref()
+            .expect("live test host present outside teardown")
     }
 
     pub fn factory(&self) -> &Arc<OriginalNativeFactory> {
@@ -442,7 +512,10 @@ impl TestNativeHost {
     pub fn open_transient(&self) -> OriginalNativeConnection {
         let inputs = unsafe {
             // SAFETY: test-only issuance under this host's own funded factory.
-            OriginalNativeTransientInputs::issued(OriginalNativeDomain::StateTransient, self.destination())
+            OriginalNativeTransientInputs::issued(
+                OriginalNativeDomain::StateTransient,
+                self.destination(),
+            )
         }
         .expect("test transient inputs");
         match self.factory().open_transient(inputs) {
@@ -471,15 +544,22 @@ impl TestNativeHost {
     /// Create the database `name` beneath `root` on one bound ticket of
     /// this host, run `sql` on it, and close it into the census: a test
     /// source established through the native gate.
-    pub fn create_bound(&self, root: Arc<PinnedDirectory>, name: &OsStr, domain: OriginalNativeDomain, sql: &str) {
-        let connection = match self.open_bound(root, name, OriginalNativeBoundMode::CreateExclusive, domain) {
-            Ok(connection) => connection,
-            Err(failure) => {
-                let error = failure.to_string();
-                self.retire_open_failure(failure);
-                panic!("test bound create refused: {error}");
-            }
-        };
+    pub fn create_bound(
+        &self,
+        root: Arc<PinnedDirectory>,
+        name: &OsStr,
+        domain: OriginalNativeDomain,
+        sql: &str,
+    ) {
+        let connection =
+            match self.open_bound(root, name, OriginalNativeBoundMode::CreateExclusive, domain) {
+                Ok(connection) => connection,
+                Err(failure) => {
+                    let error = failure.to_string();
+                    self.retire_open_failure(failure);
+                    panic!("test bound create refused: {error}");
+                }
+            };
         let executed = connection.with_sql(|connection| Ok(connection.execute_batch(sql)?));
         self.close(connection);
         if let Err(error) = executed {
@@ -497,14 +577,15 @@ impl TestNativeHost {
         domain: OriginalNativeDomain,
         work: impl for<'c> FnOnce(&'c rusqlite::Connection) -> Result<T>,
     ) -> T {
-        let connection = match self.open_bound(root, name, OriginalNativeBoundMode::Existing, domain) {
-            Ok(connection) => connection,
-            Err(failure) => {
-                let error = failure.to_string();
-                self.retire_open_failure(failure);
-                panic!("test bound open refused: {error}");
-            }
-        };
+        let connection =
+            match self.open_bound(root, name, OriginalNativeBoundMode::Existing, domain) {
+                Ok(connection) => connection,
+                Err(failure) => {
+                    let error = failure.to_string();
+                    self.retire_open_failure(failure);
+                    panic!("test bound open refused: {error}");
+                }
+            };
         let result = connection.with_sql(work);
         self.close(connection);
         result.unwrap_or_else(|error| panic!("test bound SQL refused: {error:#}"))
@@ -514,13 +595,17 @@ impl TestNativeHost {
     /// observations and role mutations, inside an allocator scope of this
     /// host's arena.
     pub fn scope<T>(&self, work: impl FnOnce() -> T) -> T {
-        self.factory().raw_scope_for_test(work).expect("raw test allocator scope")
+        self.factory()
+            .raw_scope_for_test(work)
+            .expect("raw test allocator scope")
     }
     /// Native cleanup work, such as stopped intake, in a cleanup scope of
     /// this host's arena, the way a node runs it inside its original
     /// cleanup scope.
     pub fn cleanup_scope<T>(&self, work: impl FnOnce() -> T) -> T {
-        self.factory().raw_cleanup_scope_for_test(work).expect("raw test cleanup scope")
+        self.factory()
+            .raw_cleanup_scope_for_test(work)
+            .expect("raw test cleanup scope")
     }
     /// Close a connection and record its terminal in this host's census.
     pub fn close(&self, connection: OriginalNativeConnection) {
@@ -537,7 +622,9 @@ impl TestNativeHost {
     /// Release a refused open and record its terminal in this host's census.
     pub fn retire_open_failure(&self, failure: OriginalNativeOpenFailure) {
         match failure.retry_close() {
-            Ok(released) => self.retain_terminal(OriginalNativeConnectionTerminal::Released(released)),
+            Ok(released) => {
+                self.retain_terminal(OriginalNativeConnectionTerminal::Released(released))
+            }
             Err(failure) => panic!("test open failure release retained: {failure}"),
         }
     }
@@ -622,22 +709,31 @@ impl TestNativeHost {
         self.live()
     }
     pub(crate) fn live_host_mut(&mut self) -> &mut OfflineNativeHost {
-        self.live.as_mut().expect("live test host present outside teardown")
+        self.live
+            .as_mut()
+            .expect("live test host present outside teardown")
     }
     /// Arm one ticket around a raw open in this crate's tests.
     pub(crate) fn armed<T: crate::native::RawTestConnection>(
         &self,
         open: impl FnOnce() -> T,
     ) -> (T, crate::native::RawTestTicket) {
-        self.factory().arm_raw_for_test(self.destination(), open).expect("armed raw test ticket")
+        self.factory()
+            .arm_raw_for_test(self.destination(), open)
+            .expect("armed raw test ticket")
     }
     /// Recorded shared-mapping bytes and nonempty ledger slots.
     pub(crate) fn shared_census(&self) -> (u64, u32) {
-        self.factory().shared_census_for_test().expect("native shared census")
+        self.factory()
+            .shared_census_for_test()
+            .expect("native shared census")
     }
     /// Retire a raw ticket once everything it opened is closed.
     pub(crate) fn retire_raw(&self, raw: crate::native::RawTestTicket) {
-        let terminal = self.factory().retire_raw_for_test(raw).expect("raw test ticket retirement");
+        let terminal = self
+            .factory()
+            .retire_raw_for_test(raw)
+            .expect("raw test ticket retirement");
         self.retain_terminal(terminal);
     }
 }
@@ -653,7 +749,10 @@ mod tests {
     }
     impl OfflineNativeAuthority for SwitchAuthority {
         fn checkpoint(&self, _cleanup: bool) -> Result<()> {
-            ensure!(!self.withdrawn.load(std::sync::atomic::Ordering::Acquire), "test authority withdrawn");
+            ensure!(
+                !self.withdrawn.load(std::sync::atomic::Ordering::Acquire),
+                "test authority withdrawn"
+            );
             Ok(())
         }
         fn require_runtime(&self, _runtime: &PinnedDirectory) -> Result<()> {
@@ -668,26 +767,42 @@ mod tests {
     #[test]
     fn refused_partial_host_release_is_retained_not_dropped() {
         let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
-        let authority = Arc::new(SwitchAuthority { withdrawn: std::sync::atomic::AtomicBool::new(true) });
-        let before = RETAINED.lock().unwrap_or_else(PoisonError::into_inner).len();
+        let authority = Arc::new(SwitchAuthority {
+            withdrawn: std::sync::atomic::AtomicBool::new(true),
+        });
+        let before = RETAINED
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len();
         let census = install_with(TestNativeEnvelope::default(), authority.clone())
             .err()
             .expect("withdrawn authority refuses the install and its release");
         assert!(census.contains("partial host retained"), "{census}");
         assert_eq!(
-            LEAKED.lock().unwrap_or_else(PoisonError::into_inner).as_deref(),
+            LEAKED
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_deref(),
             Some(census.as_str()),
             "the refused release is recorded as leaked"
         );
         let host = {
             let mut retained = RETAINED.lock().unwrap_or_else(PoisonError::into_inner);
-            assert_eq!(retained.len(), before + 1, "the partial host is kept, not dropped");
+            assert_eq!(
+                retained.len(),
+                before + 1,
+                "the partial host is kept, not dropped"
+            );
             retained.pop().expect("retained partial host")
         };
         // Restore the authority and release the retained host, so the
         // process-wide arena and the leak record are clear for later tests.
-        authority.withdrawn.store(false, std::sync::atomic::Ordering::Release);
-        let released = host.release().expect("restored authority releases the partial host");
+        authority
+            .withdrawn
+            .store(false, std::sync::atomic::Ordering::Release);
+        let released = host
+            .release()
+            .expect("restored authority releases the partial host");
         assert!(released.facts.is_none() && released.region.is_none());
         *LEAKED.lock().unwrap_or_else(PoisonError::into_inner) = None;
     }
@@ -696,7 +811,11 @@ mod tests {
     fn unarmed_open_is_refused_with_misuse() {
         let _serial = crate::test_host::serial_guard();
         let refused = rusqlite::Connection::open_in_memory().expect_err("unarmed open refused");
-        assert_eq!(refused.sqlite_error_code(), Some(rusqlite::ErrorCode::ApiMisuse), "{refused}");
+        assert_eq!(
+            refused.sqlite_error_code(),
+            Some(rusqlite::ErrorCode::ApiMisuse),
+            "{refused}"
+        );
     }
 
     #[test]
@@ -721,8 +840,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = Arc::new(PinnedDirectory::open(tmp.path()).unwrap().unwrap());
         let failure = host
-            .open_bound(root, OsStr::new("absent.sqlite3"), OriginalNativeBoundMode::Existing,
-                OriginalNativeDomain::RuntimeMutation)
+            .open_bound(
+                root,
+                OsStr::new("absent.sqlite3"),
+                OriginalNativeBoundMode::Existing,
+                OriginalNativeDomain::RuntimeMutation,
+            )
             .err()
             .expect("absent bound database refused");
         host.retire_open_failure(failure);
@@ -743,11 +866,16 @@ mod tests {
         for _ in 0..6 {
             let before = steps();
             let connection = host.open_transient();
-            connection.with_sql(|sql| Ok(sql.execute_batch(&ddl)?)).unwrap();
+            connection
+                .with_sql(|sql| Ok(sql.execute_batch(&ddl)?))
+                .unwrap();
             costs.push(steps() - before);
             held.push(connection);
         }
-        assert!(costs.iter().all(|cost| *cost <= costs[0] + costs[0] / 4), "{costs:?}");
+        assert!(
+            costs.iter().all(|cost| *cost <= costs[0] + costs[0] / 4),
+            "{costs:?}"
+        );
         let churn = held.pop().unwrap();
         for _ in 0..50 {
             churn
@@ -821,10 +949,16 @@ mod tests {
             }
             (count, cost, probe.is_null())
         });
-        assert!(fragments >= 256, "too few fragments to show a bound: {fragments}");
+        assert!(
+            fragments >= 256,
+            "too few fragments to show a bound: {fragments}"
+        );
         assert!(probe, "no fragment can serve the probe request");
         // One entry charge plus at most the bounded own-bin probes.
-        assert!(cost <= 9, "own-bin walk cost {cost} with {fragments} fragments");
+        assert!(
+            cost <= 9,
+            "own-bin walk cost {cost} with {fragments} fragments"
+        );
     }
 
     /// The bound VFS has no rollback-journal role, so a database the native
@@ -832,12 +966,19 @@ mod tests {
     /// ordinary writes must then succeed.
     #[test]
     fn created_bound_database_is_writable_in_wal() {
-        for mode in [OriginalNativeBoundMode::CreateExclusive, OriginalNativeBoundMode::OpenOrCreate] {
+        for mode in [
+            OriginalNativeBoundMode::CreateExclusive,
+            OriginalNativeBoundMode::OpenOrCreate,
+        ] {
             let host = TestNativeHost::acquire();
             let tmp = tempfile::tempdir().unwrap();
             let root = Arc::new(PinnedDirectory::open(tmp.path()).unwrap().unwrap());
-            let connection = match host.open_bound(root, OsStr::new("runtime.sqlite3"), mode,
-                OriginalNativeDomain::NodeRuntime) {
+            let connection = match host.open_bound(
+                root,
+                OsStr::new("runtime.sqlite3"),
+                mode,
+                OriginalNativeDomain::NodeRuntime,
+            ) {
                 Ok(connection) => connection,
                 Err(failure) => {
                     let error = failure.to_string();
@@ -847,8 +988,11 @@ mod tests {
             };
             let (journal, value) = connection
                 .with_sql(|sql| {
-                    sql.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE t(x); INSERT INTO t VALUES(7);")?;
-                    let journal: String = sql.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
+                    sql.execute_batch(
+                        "PRAGMA journal_mode=WAL; CREATE TABLE t(x); INSERT INTO t VALUES(7);",
+                    )?;
+                    let journal: String =
+                        sql.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
                     let value: i64 = sql.query_row("SELECT x FROM t", [], |row| row.get(0))?;
                     Ok((journal, value))
                 })
@@ -866,8 +1010,12 @@ mod tests {
         let host = TestNativeHost::acquire();
         let tmp = tempfile::tempdir().unwrap();
         let root = Arc::new(PinnedDirectory::open(tmp.path()).unwrap().unwrap());
-        let created = match host.open_bound(Arc::clone(&root), OsStr::new("runtime.sqlite3"),
-            OriginalNativeBoundMode::CreateExclusive, OriginalNativeDomain::NodeRuntime) {
+        let created = match host.open_bound(
+            Arc::clone(&root),
+            OsStr::new("runtime.sqlite3"),
+            OriginalNativeBoundMode::CreateExclusive,
+            OriginalNativeDomain::NodeRuntime,
+        ) {
             Ok(connection) => connection,
             Err(failure) => {
                 let error = failure.to_string();
@@ -883,8 +1031,12 @@ mod tests {
         for sidecar in ["runtime.sqlite3-wal", "runtime.sqlite3-shm"] {
             let _ = std::fs::remove_file(tmp.path().join(sidecar));
         }
-        let connection = match host.open_bound(root, OsStr::new("runtime.sqlite3"),
-            OriginalNativeBoundMode::Existing, OriginalNativeDomain::NodeRuntime) {
+        let connection = match host.open_bound(
+            root,
+            OsStr::new("runtime.sqlite3"),
+            OriginalNativeBoundMode::Existing,
+            OriginalNativeDomain::NodeRuntime,
+        ) {
             Ok(connection) => connection,
             Err(failure) => {
                 let error = failure.to_string();
@@ -894,7 +1046,9 @@ mod tests {
         };
         let (journal, value) = connection
             .with_sql(|sql| {
-                sql.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE t(x); INSERT INTO t VALUES(9);")?;
+                sql.execute_batch(
+                    "PRAGMA journal_mode=WAL; CREATE TABLE t(x); INSERT INTO t VALUES(9);",
+                )?;
                 let journal: String = sql.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
                 let value: i64 = sql.query_row("SELECT x FROM t", [], |row| row.get(0))?;
                 Ok((journal, value))
@@ -910,12 +1064,21 @@ mod tests {
     /// alias of the projection it guards.
     struct AdmittedLease;
     impl crate::OriginalNativeProjectionLeaseAuthority for AdmittedLease {
-        fn require_original(&self, _factory: &Arc<OriginalNativeFactory>, _cleanup: bool) -> Result<()> {
+        fn require_original(
+            &self,
+            _factory: &Arc<OriginalNativeFactory>,
+            _cleanup: bool,
+        ) -> Result<()> {
             Ok(())
         }
-        fn fork_deadline(&self, _factory: &Arc<OriginalNativeFactory>, _cleanup: bool)
-            -> Result<lillux::time::MonotonicDeadline> {
-            Ok(lillux::time::MonotonicDeadline::after(Duration::from_secs(60)))
+        fn fork_deadline(
+            &self,
+            _factory: &Arc<OriginalNativeFactory>,
+            _cleanup: bool,
+        ) -> Result<lillux::time::MonotonicDeadline> {
+            Ok(lillux::time::MonotonicDeadline::after(Duration::from_secs(
+                60,
+            )))
         }
     }
 
@@ -925,21 +1088,32 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = Arc::new(PinnedDirectory::open(tmp.path()).unwrap().unwrap());
         std::fs::File::create(tmp.path().join("generated.sqlite3.lease")).unwrap();
-        let metadata = root.open_mount_entry(OsStr::new("generated.sqlite3.lease")).unwrap().unwrap();
-        let authority: Arc<dyn crate::OriginalNativeProjectionLeaseAuthority> = Arc::new(AdmittedLease);
+        let metadata = root
+            .open_mount_entry(OsStr::new("generated.sqlite3.lease"))
+            .unwrap()
+            .unwrap();
+        let authority: Arc<dyn crate::OriginalNativeProjectionLeaseAuthority> =
+            Arc::new(AdmittedLease);
         // SAFETY: test-only lease under this host's own funded factory; the
         // metadata inode is a fresh regular file no SQLite role uses.
         let inputs = unsafe {
             crate::OriginalProjectionLeaseInputs::issued(
-                Arc::clone(&root), metadata, crate::OriginalProjectionLeaseMode::Exclusive, authority,
+                Arc::clone(&root),
+                metadata,
+                crate::OriginalProjectionLeaseMode::Exclusive,
+                authority,
             )
         };
         let lease = match host.factory().acquire_projection_lease(inputs) {
             Ok(lease) => lease,
             Err(failure) => panic!("test lease refused: {failure}"),
         };
-        let connection = match host.open_bound(root, OsStr::new("generated.sqlite3"),
-            OriginalNativeBoundMode::CreateExclusive, OriginalNativeDomain::StateGeneratedProjection) {
+        let connection = match host.open_bound(
+            root,
+            OsStr::new("generated.sqlite3"),
+            OriginalNativeBoundMode::CreateExclusive,
+            OriginalNativeDomain::StateGeneratedProjection,
+        ) {
             Ok(connection) => connection,
             Err(failure) => {
                 let error = failure.to_string();
@@ -950,8 +1124,10 @@ mod tests {
         connection
             .with_sql(|sql| {
                 sql.execute_batch("CREATE TABLE t(x); INSERT INTO t VALUES(1);")?;
-                let (busy, frames, checkpointed): (i64, i64, i64) = sql
-                    .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+                let (busy, frames, checkpointed): (i64, i64, i64) =
+                    sql.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+                        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                    })?;
                 ensure!(busy == 0 && frames == checkpointed, "checkpoint incomplete");
                 Ok(())
             })
@@ -960,10 +1136,15 @@ mod tests {
             Ok(closed) => closed,
             Err(failure) => panic!("generated close retained: {failure}"),
         };
-        let synced = closed.sync_generated_bound().map(|_| ()).map_err(|failure| failure.to_string());
+        let synced = closed
+            .sync_generated_bound()
+            .map(|_| ())
+            .map_err(|failure| failure.to_string());
         host.retain_terminal(OriginalNativeConnectionTerminal::Closed(closed));
         match lease.close() {
-            Ok(crate::OriginalProjectionLeaseDisposition::Closed(closed)) => host.retain_lease(closed),
+            Ok(crate::OriginalProjectionLeaseDisposition::Closed(closed)) => {
+                host.retain_lease(closed)
+            }
             Ok(_) => panic!("held lease closed as never acquired"),
             Err(failure) => panic!("test lease close retained: {failure}"),
         }
@@ -971,7 +1152,8 @@ mod tests {
         // The synced connection's durability pins end typed in the release.
         let released = host.release();
         assert!(
-            released.durability_pins.closed >= 1 && released.durability_pins.consumed_with_error == 0,
+            released.durability_pins.closed >= 1
+                && released.durability_pins.consumed_with_error == 0,
             "release ended census durability pins {:?}",
             released.durability_pins
         );
@@ -987,29 +1169,41 @@ mod tests {
         let root = Arc::new(PinnedDirectory::open(tmp.path()).unwrap().unwrap());
         std::fs::File::create(tmp.path().join("generated.sqlite3.lease")).unwrap();
         std::fs::write(tmp.path().join("generation.json"), b"{}").unwrap();
-        let metadata = root.open_mount_entry(OsStr::new("generated.sqlite3.lease")).unwrap().unwrap();
-        let authority: Arc<dyn crate::OriginalNativeProjectionLeaseAuthority> = Arc::new(AdmittedLease);
+        let metadata = root
+            .open_mount_entry(OsStr::new("generated.sqlite3.lease"))
+            .unwrap()
+            .unwrap();
+        let authority: Arc<dyn crate::OriginalNativeProjectionLeaseAuthority> =
+            Arc::new(AdmittedLease);
         // SAFETY: test-only lease under this host's own funded factory; the
         // metadata inode is a fresh regular file no SQLite role uses.
         let inputs = unsafe {
             crate::OriginalProjectionLeaseInputs::issued(
-                Arc::clone(&root), metadata, crate::OriginalProjectionLeaseMode::Exclusive, authority,
+                Arc::clone(&root),
+                metadata,
+                crate::OriginalProjectionLeaseMode::Exclusive,
+                authority,
             )
         };
         let lease = match host.factory().acquire_projection_lease(inputs) {
             Ok(lease) => lease,
             Err(failure) => panic!("test lease refused: {failure}"),
         };
-        let unscoped = crate::read_regular_without_sqlite_alias(&root, OsStr::new("generation.json"), 64)
-            .map_err(|error| error.to_string());
-        let scoped = host.factory()
+        let unscoped =
+            crate::read_regular_without_sqlite_alias(&root, OsStr::new("generation.json"), 64)
+                .map_err(|error| error.to_string());
+        let scoped = host
+            .factory()
             .read_regular_without_sqlite_alias(&root, OsStr::new("generation.json"), 64)
             .map_err(|error| error.to_string());
-        let scoped_leased = host.factory()
+        let scoped_leased = host
+            .factory()
             .read_regular_without_sqlite_alias(&root, OsStr::new("generated.sqlite3.lease"), 64)
             .map_err(|error| error.to_string());
         match lease.close() {
-            Ok(crate::OriginalProjectionLeaseDisposition::Closed(closed)) => host.retain_lease(closed),
+            Ok(crate::OriginalProjectionLeaseDisposition::Closed(closed)) => {
+                host.retain_lease(closed)
+            }
             Ok(_) => panic!("held lease closed as never acquired"),
             Err(failure) => panic!("test lease close retained: {failure}"),
         }
@@ -1019,7 +1213,8 @@ mod tests {
         let refused = scoped_leased.expect_err("scoped read of the leased inode must refuse");
         assert!(refused.contains("refused (5)"), "{refused}");
         assert_eq!(
-            crate::read_regular_without_sqlite_alias(&root, OsStr::new("generation.json"), 64).unwrap(),
+            crate::read_regular_without_sqlite_alias(&root, OsStr::new("generation.json"), 64)
+                .unwrap(),
             Some(b"{}".to_vec())
         );
     }
@@ -1030,8 +1225,10 @@ mod tests {
     }
     impl OfflineNativeAuthority for Windows {
         fn checkpoint(&self, cleanup: bool) -> Result<()> {
-            ensure!(cleanup || self.operation.load(std::sync::atomic::Ordering::Acquire),
-                "operation window closed");
+            ensure!(
+                cleanup || self.operation.load(std::sync::atomic::Ordering::Acquire),
+                "operation window closed"
+            );
             Ok(())
         }
         fn require_runtime(&self, _runtime: &PinnedDirectory) -> Result<()> {
@@ -1049,11 +1246,16 @@ mod tests {
 
     fn raw(storage: u64, tickets: u32, cleanup: u64) -> OriginalNativeBudget {
         // SAFETY: test-only funding of one host under the serial guard.
-        unsafe { OriginalNativeBudget::prepaid_by_original_issuer(storage, 50_000_000, tickets, cleanup) }.unwrap()
+        unsafe {
+            OriginalNativeBudget::prepaid_by_original_issuer(storage, 50_000_000, tickets, cleanup)
+        }
+        .unwrap()
     }
 
-    fn issue(raw: OriginalNativeBudget, authority: Arc<dyn OfflineNativeAuthority>)
-        -> std::result::Result<OfflineNativeHost, crate::offline_host::OfflineNativeHostFailure> {
+    fn issue(
+        raw: OriginalNativeBudget,
+        authority: Arc<dyn OfflineNativeAuthority>,
+    ) -> std::result::Result<OfflineNativeHost, crate::offline_host::OfflineNativeHostFailure> {
         // SAFETY: each test holds the process-wide serial guard and uses only
         // private temporary state, so the exclusion is structural.
         unsafe { OfflineNativeHost::issue(raw, authority) }
@@ -1096,7 +1298,10 @@ mod tests {
         let cleanup = offline_native_required_cleanup_steps(16 * MIB, 4).unwrap();
         let mut stages = Vec::new();
         for n in 1..200 {
-            let authority = Arc::new(RefuseNth { n, seen: std::sync::atomic::AtomicUsize::new(0) });
+            let authority = Arc::new(RefuseNth {
+                n,
+                seen: std::sync::atomic::AtomicUsize::new(0),
+            });
             match issue(raw(16 * MIB, 4, cleanup), authority) {
                 Ok(host) => {
                     host.finish().unwrap();
@@ -1112,15 +1317,21 @@ mod tests {
         }
         assert!(!stages.is_empty() && stages.len() < 199, "{stages:?}");
         assert!(
-            stages.iter().any(|stage| stage.contains("install refused") || stage.contains("initialization refused")),
+            stages.iter().any(|stage| stage.contains("install refused")
+                || stage.contains("initialization refused")),
             "no refusal after the factory install was exercised: {stages:#?}"
         );
     }
 
-    fn transient(host: &OfflineNativeHost) -> std::result::Result<OriginalNativeConnection, OriginalNativeOpenFailure> {
+    fn transient(
+        host: &OfflineNativeHost,
+    ) -> std::result::Result<OriginalNativeConnection, OriginalNativeOpenFailure> {
         // SAFETY: test-only issuance under this host's own funded factory.
         let inputs = unsafe {
-            OriginalNativeTransientInputs::issued(OriginalNativeDomain::StateTransient, host.destination().unwrap())
+            OriginalNativeTransientInputs::issued(
+                OriginalNativeDomain::StateTransient,
+                host.destination().unwrap(),
+            )
         }
         .unwrap();
         host.factory().unwrap().open_transient(inputs)
@@ -1130,12 +1341,17 @@ mod tests {
     fn offline_host_refuses_underfunded_cleanup_and_releases_the_partial_host() {
         let _serial = serial();
         let required = offline_native_required_cleanup_steps(32 * MIB, 8).unwrap();
-        assert!(required < 400_000, "shipped replay-indexes cleanup quota must cover {required}");
+        assert!(
+            required < 400_000,
+            "shipped replay-indexes cleanup quota must cover {required}"
+        );
         let failure = match issue(raw(32 * MIB, 8, required - 1), Arc::new(TestAuthority)) {
             Ok(_) => panic!("underfunded cleanup must refuse"),
             Err(failure) => failure,
         };
-        let error = failure.release().unwrap_or_else(|retained| panic!("partial host retained: {retained}"));
+        let error = failure
+            .release()
+            .unwrap_or_else(|retained| panic!("partial host retained: {retained}"));
         assert!(format!("{error:#}").contains("cleanup steps"), "{error:#}");
         let host = issue(raw(32 * MIB, 8, required), Arc::new(TestAuthority)).unwrap();
         let facts = host.finish().unwrap().facts.expect("ready host facts");
@@ -1145,21 +1361,36 @@ mod tests {
     #[test]
     fn offline_host_window_closes_admission_while_cleanup_completes() {
         let _serial = serial();
-        let authority = Arc::new(Windows { operation: std::sync::atomic::AtomicBool::new(true) });
+        let authority = Arc::new(Windows {
+            operation: std::sync::atomic::AtomicBool::new(true),
+        });
         let cleanup = offline_native_required_cleanup_steps(16 * MIB, 4).unwrap();
         let host = issue(raw(16 * MIB, 4, cleanup), authority.clone()).unwrap();
-        let connection = transient(&host).unwrap_or_else(|failure| panic!("open refused: {failure}"));
-        let value: i64 = connection.with_sql(|sql| Ok(sql.query_row("SELECT 7", [], |row| row.get(0))?)).unwrap();
+        let connection =
+            transient(&host).unwrap_or_else(|failure| panic!("open refused: {failure}"));
+        let value: i64 = connection
+            .with_sql(|sql| Ok(sql.query_row("SELECT 7", [], |row| row.get(0))?))
+            .unwrap();
         assert_eq!(value, 7);
-        authority.operation.store(false, std::sync::atomic::Ordering::Release);
-        assert!(connection.with_sql(|sql| Ok(sql.execute_batch("SELECT 1")?)).is_err(),
-            "SQL refused once the operation window closes");
-        let closed = connection.close().unwrap_or_else(|failure| panic!("close in cleanup window refused: {failure}"));
+        authority
+            .operation
+            .store(false, std::sync::atomic::Ordering::Release);
+        assert!(
+            connection
+                .with_sql(|sql| Ok(sql.execute_batch("SELECT 1")?))
+                .is_err(),
+            "SQL refused once the operation window closes"
+        );
+        let closed = connection
+            .close()
+            .unwrap_or_else(|failure| panic!("close in cleanup window refused: {failure}"));
         retained(&host, OriginalNativeConnectionTerminal::Closed(closed));
         match transient(&host) {
             Ok(_) => panic!("admission must refuse after the operation window"),
             Err(failure) => {
-                let released = failure.retry_close().unwrap_or_else(|failure| panic!("release retained: {failure}"));
+                let released = failure
+                    .retry_close()
+                    .unwrap_or_else(|failure| panic!("release retained: {failure}"));
                 retained(&host, OriginalNativeConnectionTerminal::Released(released));
             }
         }
@@ -1221,15 +1452,27 @@ mod tests {
         });
         let cleanup = offline_native_required_cleanup_steps(16 * MIB, 4).unwrap();
         let host = issue(raw(16 * MIB, 4, cleanup), authority.clone()).unwrap();
-        assert!(authority.factory.set(Arc::downgrade(host.factory().unwrap())).is_ok());
+        assert!(
+            authority
+                .factory
+                .set(Arc::downgrade(host.factory().unwrap()))
+                .is_ok()
+        );
         std::fs::File::create(tmp.path().join("generated.sqlite3.lease")).unwrap();
-        let metadata = root.open_mount_entry(OsStr::new("generated.sqlite3.lease")).unwrap().unwrap();
-        let lease_authority: Arc<dyn crate::OriginalNativeProjectionLeaseAuthority> = Arc::new(AdmittedLease);
+        let metadata = root
+            .open_mount_entry(OsStr::new("generated.sqlite3.lease"))
+            .unwrap()
+            .unwrap();
+        let lease_authority: Arc<dyn crate::OriginalNativeProjectionLeaseAuthority> =
+            Arc::new(AdmittedLease);
         // SAFETY: test-only lease under this host's own funded factory; the
         // metadata inode is a fresh regular file no SQLite role uses.
         let inputs = unsafe {
             crate::OriginalProjectionLeaseInputs::issued(
-                Arc::clone(&root), metadata, crate::OriginalProjectionLeaseMode::Shared, lease_authority,
+                Arc::clone(&root),
+                metadata,
+                crate::OriginalProjectionLeaseMode::Shared,
+                lease_authority,
             )
         };
         let lease = match host.factory().unwrap().acquire_projection_lease(inputs) {
@@ -1241,14 +1484,26 @@ mod tests {
             Err(failure) => failure,
         };
         let error = format!("{refused}");
-        authority.scoped.store(true, std::sync::atomic::Ordering::Release);
-        let released = refused.retry_close().unwrap_or_else(|failure| panic!("release retained: {failure}"));
+        authority
+            .scoped
+            .store(true, std::sync::atomic::Ordering::Release);
+        let released = refused
+            .retry_close()
+            .unwrap_or_else(|failure| panic!("release retained: {failure}"));
         retained(&host, OriginalNativeConnectionTerminal::Released(released));
-        assert!(error.contains("guarded SQLite evidence read refused (5)"), "{error}");
-        let connection = transient(&host).unwrap_or_else(|failure| panic!("scoped reread refused the open: {failure}"));
-        let value: i64 = connection.with_sql(|sql| Ok(sql.query_row("SELECT 7", [], |row| row.get(0))?)).unwrap();
+        assert!(
+            error.contains("guarded SQLite evidence read refused (5)"),
+            "{error}"
+        );
+        let connection = transient(&host)
+            .unwrap_or_else(|failure| panic!("scoped reread refused the open: {failure}"));
+        let value: i64 = connection
+            .with_sql(|sql| Ok(sql.query_row("SELECT 7", [], |row| row.get(0))?))
+            .unwrap();
         assert_eq!(value, 7);
-        let closed = connection.close().unwrap_or_else(|failure| panic!("close refused: {failure}"));
+        let closed = connection
+            .close()
+            .unwrap_or_else(|failure| panic!("close refused: {failure}"));
         retained(&host, OriginalNativeConnectionTerminal::Closed(closed));
         match lease.close() {
             Ok(crate::OriginalProjectionLeaseDisposition::Closed(closed)) => {
@@ -1260,7 +1515,15 @@ mod tests {
             Err(failure) => panic!("test lease close retained: {failure}"),
         }
         let facts = host.finish().unwrap().facts.expect("ready host facts");
-        assert_eq!((facts.tickets_issued, facts.terminals, facts.ticketless, facts.leases), (2, 1, 1, 1));
+        assert_eq!(
+            (
+                facts.tickets_issued,
+                facts.terminals,
+                facts.ticketless,
+                facts.leases
+            ),
+            (2, 1, 1, 1)
+        );
     }
 
     /// Charges SQL VM steps to its own ceiling and stops SQL at its own
@@ -1289,21 +1552,26 @@ mod tests {
         }
     }
 
-    const LONG_STATEMENT: &str =
-        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 100000000) SELECT count(*) FROM n";
+    const LONG_STATEMENT: &str = "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 100000000) SELECT count(*) FROM n";
 
     fn run_until_refused(authority: Arc<SqlQuota>) -> (String, u64) {
         let cleanup = offline_native_required_cleanup_steps(16 * MIB, 4).unwrap();
         let host = issue(raw(16 * MIB, 4, cleanup), authority.clone()).unwrap();
-        let connection = transient(&host).unwrap_or_else(|failure| panic!("open refused: {failure}"));
+        let connection =
+            transient(&host).unwrap_or_else(|failure| panic!("open refused: {failure}"));
         let refused = connection
             .with_sql(|sql| Ok(sql.query_row(LONG_STATEMENT, [], |row| row.get::<_, i64>(0))?))
             .expect_err("the statement must be stopped by the caller's SQL quota");
-        let closed = connection.close().unwrap_or_else(|failure| panic!("close refused: {failure}"));
+        let closed = connection
+            .close()
+            .unwrap_or_else(|failure| panic!("close refused: {failure}"));
         retained(&host, OriginalNativeConnectionTerminal::Closed(closed));
         let facts = host.finish().unwrap().facts.expect("ready host facts");
         assert_eq!(facts.tickets_issued as usize, facts.terminals);
-        (format!("{refused:#}"), authority.used.load(std::sync::atomic::Ordering::Acquire))
+        (
+            format!("{refused:#}"),
+            authority.used.load(std::sync::atomic::Ordering::Acquire),
+        )
     }
 
     #[test]
@@ -1315,7 +1583,10 @@ mod tests {
             deadline: Instant::now() + Duration::from_secs(3600),
         });
         let (refused, used) = run_until_refused(authority);
-        assert!(used <= 10_000 && used > 0, "charged {used} of a 10000-step ceiling");
+        assert!(
+            used <= 10_000 && used > 0,
+            "charged {used} of a 10000-step ceiling"
+        );
         assert!(refused.to_lowercase().contains("interrupt"), "{refused}");
     }
 
@@ -1330,10 +1601,16 @@ mod tests {
         let started = Instant::now();
         let (refused, used) = run_until_refused(authority);
         let elapsed = started.elapsed();
-        assert!(used > 0 && elapsed >= Duration::from_millis(200), "the statement ran until the window elapsed");
+        assert!(
+            used > 0 && elapsed >= Duration::from_millis(200),
+            "the statement ran until the window elapsed"
+        );
         // The raw budget funds 50,000,000 steps; stopping well short of it
         // shows the window, not the budget, ended the statement.
-        assert!(used < 40_000_000, "charged {used} steps; the budget, not the window, stopped it");
+        assert!(
+            used < 40_000_000,
+            "charged {used} steps; the budget, not the window, stopped it"
+        );
         assert!(refused.to_lowercase().contains("interrupt"), "{refused}");
     }
 
@@ -1343,7 +1620,10 @@ mod tests {
     }
     impl OfflineNativeAuthority for CleanupGate {
         fn checkpoint(&self, cleanup: bool) -> Result<()> {
-            ensure!(!(cleanup && self.refuse.load(std::sync::atomic::Ordering::Acquire)), "cleanup window refused");
+            ensure!(
+                !(cleanup && self.refuse.load(std::sync::atomic::Ordering::Acquire)),
+                "cleanup window refused"
+            );
             Ok(())
         }
         fn require_runtime(&self, _runtime: &PinnedDirectory) -> Result<()> {
@@ -1360,17 +1640,31 @@ mod tests {
         let _serial = serial();
         let cleanup = offline_native_required_cleanup_steps(16 * MIB, 4).unwrap();
         let mut host = issue(raw(16 * MIB, 4, cleanup), Arc::new(TestAuthority)).unwrap();
-        assert!(host.post_backend_factory().is_err(), "post-backend factory before the backend finished");
+        assert!(
+            host.post_backend_factory().is_err(),
+            "post-backend factory before the backend finished"
+        );
         drop(host.finish_backend().unwrap());
-        assert!(host.factory().is_err() && host.destination().is_err(), "admission ends with the backend");
+        assert!(
+            host.factory().is_err() && host.destination().is_err(),
+            "admission ends with the backend"
+        );
         let alias = host.post_backend_factory().unwrap().clone();
         let facts = host.facts().unwrap();
-        let retained = host.release().expect_err("release must refuse while a factory alias survives");
+        let retained = host
+            .release()
+            .expect_err("release must refuse while a factory alias survives");
         let message = format!("{:#}", retained.error);
-        assert!(message.contains("factory strong count 3 (host holds 2)"), "{message}");
+        assert!(
+            message.contains("factory strong count 3 (host holds 2)"),
+            "{message}"
+        );
         let host = retained.host;
         assert_eq!(host.facts().unwrap(), facts);
-        assert!(Arc::ptr_eq(host.post_backend_factory().unwrap(), &alias), "refusal keeps the factory");
+        assert!(
+            Arc::ptr_eq(host.post_backend_factory().unwrap(), &alias),
+            "refusal keeps the factory"
+        );
         drop(alias);
         let released = host.release().unwrap();
         assert_eq!(released.facts, Some(facts));
@@ -1382,13 +1676,21 @@ mod tests {
         let cleanup = offline_native_required_cleanup_steps(16 * MIB, 4).unwrap();
         let mut host = issue(raw(16 * MIB, 4, cleanup), Arc::new(TestAuthority)).unwrap();
         let terminal = host.finish_backend().unwrap();
-        let retained = host.release().expect_err("release must refuse while the backend terminal survives");
+        let retained = host
+            .release()
+            .expect_err("release must refuse while the backend terminal survives");
         let message = format!("{:#}", retained.error);
-        assert!(message.contains("backend terminal strong count 2 (host holds 1)")
-            && message.contains("factory strong count 2 (host holds 2)"), "{message}");
+        assert!(
+            message.contains("backend terminal strong count 2 (host holds 1)")
+                && message.contains("factory strong count 2 (host holds 2)"),
+            "{message}"
+        );
         let mut host = retained.host;
         let again = host.finish_backend().unwrap();
-        assert!(Arc::ptr_eq(&again, &terminal), "refusal keeps the backend terminal");
+        assert!(
+            Arc::ptr_eq(&again, &terminal),
+            "refusal keeps the backend terminal"
+        );
         drop(again);
         drop(terminal);
         host.release().unwrap();
@@ -1397,21 +1699,39 @@ mod tests {
     #[test]
     fn offline_host_finish_backend_and_release_resume_after_refusal() {
         let _serial = serial();
-        let authority = Arc::new(CleanupGate { refuse: std::sync::atomic::AtomicBool::new(false) });
+        let authority = Arc::new(CleanupGate {
+            refuse: std::sync::atomic::AtomicBool::new(false),
+        });
         let cleanup = offline_native_required_cleanup_steps(16 * MIB, 4).unwrap();
         let mut host = issue(raw(16 * MIB, 4, cleanup), authority.clone()).unwrap();
-        authority.refuse.store(true, std::sync::atomic::Ordering::Release);
-        assert!(host.finish_backend().is_err(), "backend finish checks the cleanup window");
+        authority
+            .refuse
+            .store(true, std::sync::atomic::Ordering::Release);
+        assert!(
+            host.finish_backend().is_err(),
+            "backend finish checks the cleanup window"
+        );
         assert!(host.facts().is_err() && host.post_backend_factory().is_err());
-        authority.refuse.store(false, std::sync::atomic::Ordering::Release);
+        authority
+            .refuse
+            .store(false, std::sync::atomic::Ordering::Release);
         let first = host.finish_backend().unwrap();
         let second = host.finish_backend().unwrap();
-        assert!(Arc::ptr_eq(&first, &second), "a finished backend returns its cached terminal");
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "a finished backend returns its cached terminal"
+        );
         drop((first, second));
-        authority.refuse.store(true, std::sync::atomic::Ordering::Release);
-        let retained = host.release().expect_err("release checks the cleanup window");
+        authority
+            .refuse
+            .store(true, std::sync::atomic::Ordering::Release);
+        let retained = host
+            .release()
+            .expect_err("release checks the cleanup window");
         assert!(format!("{:#}", retained.error).contains("cleanup window refused"));
-        authority.refuse.store(false, std::sync::atomic::Ordering::Release);
+        authority
+            .refuse
+            .store(false, std::sync::atomic::Ordering::Release);
         retained.host.release().unwrap();
     }
 
@@ -1420,7 +1740,9 @@ mod tests {
         let _serial = serial();
         let cleanup = offline_native_required_cleanup_steps(16 * MIB, 4).unwrap();
         let host = issue(raw(16 * MIB, 4, cleanup), Arc::new(TestAuthority)).unwrap();
-        let retained = host.release().expect_err("release before the backend finished");
+        let retained = host
+            .release()
+            .expect_err("release before the backend finished");
         assert!(format!("{:#}", retained.error).contains("backend has not finished"));
         retained.host.finish().unwrap();
     }
@@ -1431,8 +1753,11 @@ mod tests {
         let cleanup = offline_native_required_cleanup_steps(16 * MIB, 4).unwrap();
         let mut host = issue(raw(16 * MIB, 4, cleanup), Arc::new(TestAuthority)).unwrap();
         for _ in 0..2 {
-            let connection = transient(&host).unwrap_or_else(|failure| panic!("open refused: {failure}"));
-            let closed = connection.close().unwrap_or_else(|failure| panic!("close refused: {failure}"));
+            let connection =
+                transient(&host).unwrap_or_else(|failure| panic!("open refused: {failure}"));
+            let closed = connection
+                .close()
+                .unwrap_or_else(|failure| panic!("close refused: {failure}"));
             retained(&host, OriginalNativeConnectionTerminal::Closed(closed));
         }
         let (issued, recorded) = host.ticket_census().unwrap();
@@ -1459,8 +1784,14 @@ mod tests {
         let cleanup = offline_native_required_cleanup_steps(16 * MIB, 4).unwrap();
         let host = issue(raw(16 * MIB, 4, cleanup), Arc::new(TestAuthority)).unwrap();
         let alias = host.factory().unwrap().clone();
-        let retained = host.finish().expect_err("finish must refuse while a factory alias survives");
-        assert!(format!("{:#}", retained.error).contains("aliases survive"), "{:#}", retained.error);
+        let retained = host
+            .finish()
+            .expect_err("finish must refuse while a factory alias survives");
+        assert!(
+            format!("{:#}", retained.error).contains("aliases survive"),
+            "{:#}",
+            retained.error
+        );
         drop(alias);
         retained.host.finish().unwrap();
     }
@@ -1503,23 +1834,35 @@ mod tests {
     fn original_output_retires_after_native_shutdown_and_refuses_while_aliased() {
         use std::os::fd::{AsRawFd, IntoRawFd};
         use std::os::unix::fs::MetadataExt;
-        let (host, _serial) = issue_offline_host(TestNativeEnvelope::default(), Arc::new(TestAuthority));
+        let (host, _serial) =
+            issue_offline_host(TestNativeEnvelope::default(), Arc::new(TestAuthority));
         let factory = host.factory().unwrap().clone();
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("aliased.sqlite3");
         let (connection, ticket) = factory
-            .arm_raw_for_test(host.destination().unwrap(), || rusqlite::Connection::open(&path).unwrap())
+            .arm_raw_for_test(host.destination().unwrap(), || {
+                rusqlite::Connection::open(&path).unwrap()
+            })
             .unwrap();
         factory
-            .raw_scope_for_test(|| connection.execute_batch("CREATE TABLE t(x); INSERT INTO t VALUES(1);").unwrap())
+            .raw_scope_for_test(|| {
+                connection
+                    .execute_batch("CREATE TABLE t(x); INSERT INTO t VALUES(1);")
+                    .unwrap()
+            })
             .unwrap();
         let output = std::fs::File::open(&path).unwrap();
-        let (dev, ino) = { let metadata = output.metadata().unwrap(); (metadata.dev(), metadata.ino()) };
+        let (dev, ino) = {
+            let metadata = output.metadata().unwrap();
+            (metadata.dev(), metadata.ino())
+        };
         std::fs::remove_file(&path).unwrap();
         let aliased = crate::binding::close_original_output(output.as_raw_fd(), dev, ino, 1 << 20);
         assert!(!aliased.consumed);
         assert_eq!(aliased.code, libsqlite3_sys::SQLITE_BUSY);
-        factory.raw_scope_for_test(|| connection.close().unwrap()).unwrap();
+        factory
+            .raw_scope_for_test(|| connection.close().unwrap())
+            .unwrap();
         let terminal = factory.retire_raw_for_test(ticket).unwrap();
         if let Err((_terminal, error)) = host.retain_terminal(terminal) {
             panic!("terminal does not belong to this host: {error:#}");
@@ -1531,16 +1874,29 @@ mod tests {
 
         let linked = std::fs::File::create(tmp.path().join("linked")).unwrap();
         let metadata = linked.metadata().unwrap();
-        let refused = crate::binding::close_original_output(linked.as_raw_fd(), metadata.dev(), metadata.ino(), 1023);
+        let refused = crate::binding::close_original_output(
+            linked.as_raw_fd(),
+            metadata.dev(),
+            metadata.ino(),
+            1023,
+        );
         assert!(!refused.consumed);
         assert_eq!(refused.code, libsqlite3_sys::SQLITE_MISMATCH);
-        let foreign = crate::binding::close_original_output(output.as_raw_fd(), dev, ino.wrapping_add(1), 1023);
+        let foreign = crate::binding::close_original_output(
+            output.as_raw_fd(),
+            dev,
+            ino.wrapping_add(1),
+            1023,
+        );
         assert!(!foreign.consumed);
         assert_eq!(foreign.code, libsqlite3_sys::SQLITE_MISMATCH);
         assert_eq!(output.metadata().unwrap().ino(), ino);
         let retired = crate::binding::close_original_output(output.into_raw_fd(), dev, ino, 1023);
         assert!(retired.consumed);
-        assert_eq!((retired.code, retired.observed_errno), (libsqlite3_sys::SQLITE_OK, 0));
+        assert_eq!(
+            (retired.code, retired.observed_errno),
+            (libsqlite3_sys::SQLITE_OK, 0)
+        );
         drop(linked);
     }
 }

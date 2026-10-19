@@ -183,7 +183,9 @@ pub fn compile(
     }
     if let Some(requires) = object.get("requires") {
         required.push("requires");
-        let remote = object.get("external_candidate").is_some_and(|candidate| !candidate.is_null());
+        let remote = object
+            .get("external_candidate")
+            .is_some_and(|candidate| !candidate.is_null());
         validate_placement_requirements(requires, remote)?;
     }
     if object.len() != required.len() || required.iter().any(|key| !object.contains_key(*key)) {
@@ -1546,7 +1548,9 @@ fn parse_placement_requirements(requires: &Value, remote: bool) -> Result<Placem
     let workload_class = value_string(object, "workload_class")?;
     validate_identifier(workload_class)?;
     if !remote && (object.contains_key("lease") || object.contains_key("guest")) {
-        bail!("structured-session `requires.lease` and `requires.guest` need an external candidate");
+        bail!(
+            "structured-session `requires.lease` and `requires.guest` need an external candidate"
+        );
     }
     let list = |key: &str| -> Result<Vec<Requirement>> {
         match object.get(key) {
@@ -1557,7 +1561,9 @@ fn parse_placement_requirements(requires: &Value, remote: bool) -> Result<Placem
     let kinds = object
         .get("credential_kinds")
         .and_then(Value::as_object)
-        .ok_or_else(|| anyhow!("structured-session `requires.credential_kinds` must be a mapping"))?;
+        .ok_or_else(|| {
+            anyhow!("structured-session `requires.credential_kinds` must be a mapping")
+        })?;
     if kinds.is_empty() || kinds.len() > MAX_CREDENTIAL_KINDS {
         bail!(
             "structured-session `requires.credential_kinds` must declare between 1 and \
@@ -2339,8 +2345,12 @@ mod tests {
         }
         // The remote authoring profile declares its placement requirements
         // as data, with one requirement list per credential kind it supports.
-        let remote: Value = serde_json::from_slice(&files["external-authoring.profile.json"]).unwrap();
-        assert_eq!(remote["requires"]["workload_class"], "codex.authoring.remote");
+        let remote: Value =
+            serde_json::from_slice(&files["external-authoring.profile.json"]).unwrap();
+        assert_eq!(
+            remote["requires"]["workload_class"],
+            "codex.authoring.remote"
+        );
         let admitted = compile(&files["external-authoring.profile.json"], &files).unwrap();
         let requirements = placement_requirements(&admitted.contract).unwrap().unwrap();
         assert_eq!(
@@ -2355,33 +2365,62 @@ mod tests {
             .map(|index| format!("n{index:03}"))
             .collect();
         for (pointer, value, refusal) in [
-            ("/requires/controller", json!(["time", "accounting"]), "sorted and unique"),
+            (
+                "/requires/controller",
+                json!(["time", "accounting"]),
+                "sorted and unique",
+            ),
             ("/requires/controller", json!(too_many), "outside its bound"),
             ("/requires/credential_kinds", json!({}), "between 1 and"),
-            ("/requires/credential_kinds", json!({"credential_profile": []}), "must name what"),
-            ("/requires/credential_kinds", json!({"credential profile": ["time"]}), "identifier"),
+            (
+                "/requires/credential_kinds",
+                json!({"credential_profile": []}),
+                "must name what",
+            ),
+            (
+                "/requires/credential_kinds",
+                json!({"credential profile": ["time"]}),
+                "identifier",
+            ),
             (
                 "/requires/credential_kinds",
                 json!({"credential_profile": [{"any_of": []}]}),
                 "neither name nor any_of",
             ),
-            ("/requires/guest", json!([{"name": "guest.exec_route_closed", "accept": ["peer_attested"]}]), "peer_attested"),
-            ("/requires/workload_class", json!("codex authoring"), "identifier"),
+            (
+                "/requires/guest",
+                json!([{"name": "guest.exec_route_closed", "accept": ["peer_attested"]}]),
+                "peer_attested",
+            ),
+            (
+                "/requires/workload_class",
+                json!("codex authoring"),
+                "identifier",
+            ),
         ] {
             let mut invalid = remote.clone();
             *invalid.pointer_mut(pointer).unwrap() = value;
             let error = compile(&serde_json::to_vec(&invalid).unwrap(), &files).unwrap_err();
-            assert!(format!("{error:#}").contains(refusal), "{pointer}: {error:#}");
+            assert!(
+                format!("{error:#}").contains(refusal),
+                "{pointer}: {error:#}"
+            );
         }
         for extra in ["extra", "credential"] {
             let mut unknown = remote.clone();
             unknown["requires"][extra] = json!([]);
-            assert!(compile(&serde_json::to_vec(&unknown).unwrap(), &files).is_err(), "{extra}");
+            assert!(
+                compile(&serde_json::to_vec(&unknown).unwrap(), &files).is_err(),
+                "{extra}"
+            );
         }
         let mut local: Value = serde_json::from_slice(&files["authoring.profile.json"]).unwrap();
         local["requires"] = remote["requires"].clone();
         let error = compile(&serde_json::to_vec(&local).unwrap(), &files).unwrap_err();
-        assert!(format!("{error:#}").contains("need an external candidate"), "{error:#}");
+        assert!(
+            format!("{error:#}").contains("need an external candidate"),
+            "{error:#}"
+        );
         // Early lifecycle authority must be correlated before the daemon ACK
         // can permit a child; final-response corroboration is too late.
         let profile: Value = serde_json::from_slice(&files["authoring.profile.json"]).unwrap();

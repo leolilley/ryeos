@@ -2329,7 +2329,7 @@ impl GuestOccurrenceOwner {
             0o600,
             crate::GUEST_TEMP_PURPOSE,
         )?
-            .context("guest occurrence owner record already exists")?;
+        .context("guest occurrence owner record already exists")?;
         Ok(Self {
             occurrence: occurrence.try_clone()?,
             root,
@@ -2566,7 +2566,12 @@ fn prepare_guest_base_install_locked<'a>(
     };
     let bytes = canonical_record(&intent)?;
     let record = journal
-        .atomic_create_regular(OsStr::new(RECORD_NAME), &bytes, 0o600, crate::GUEST_TEMP_PURPOSE)?
+        .atomic_create_regular(
+            OsStr::new(RECORD_NAME),
+            &bytes,
+            0o600,
+            crate::GUEST_TEMP_PURPOSE,
+        )?
         .context("guest installation intent already exists")?;
     let marker = GuestBaseInstallMarker {
         schema: 1,

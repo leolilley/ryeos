@@ -58,6 +58,8 @@ impl NodeConfigSection for BundleSection {
         ctx: &NodeItemContext,
         body: &Value,
     ) -> anyhow::Result<Box<dyn CompiledNodeConfigItem>> {
-        Ok(Box::new(ryeos_node_runtime::bundle_bootstrap::parse_bundle(ctx, body)?))
+        Ok(Box::new(
+            ryeos_node_runtime::bundle_bootstrap::parse_bundle(ctx, body)?,
+        ))
     }
 }

@@ -19,41 +19,68 @@ pub struct HostStorage {
 
 /// Affine prepaid work held outside the resident graph. Only the reservation
 /// constructs this after irreversibly debiting the same original raw counter.
-pub struct HostReleaseCredit { process: u32, remaining: u64 }
+pub struct HostReleaseCredit {
+    process: u32,
+    remaining: u64,
+}
 impl HostReleaseCredit {
     /// # Safety
     /// The genuine outside issuer irreversibly debited exactly these cleanup
     /// steps from the same original counter once, before this affine transfer.
     /// No replacement, renewal or refund may reissue consumed attempt credit.
     pub unsafe fn prepaid(steps: u64) -> Self {
-        Self { process: std::process::id(), remaining: steps }
+        Self {
+            process: std::process::id(),
+            remaining: steps,
+        }
     }
     fn consume_attempt(&mut self) -> Result<(), &'static str> {
-        if crate::foreign_process(self.process) { return Err("foreign host release credit"); }
-        self.remaining = self.remaining.checked_sub(1).ok_or("original host release work exhausted")?;
+        if crate::foreign_process(self.process) {
+            return Err("foreign host release credit");
+        }
+        self.remaining = self
+            .remaining
+            .checked_sub(1)
+            .ok_or("original host release work exhausted")?;
         Ok(())
     }
 }
 
 #[derive(Clone, Copy)]
-pub struct HostStorageLayout { length: usize, page: usize, pub work: u64 }
+pub struct HostStorageLayout {
+    length: usize,
+    page: usize,
+    pub work: u64,
+}
 
 impl HostStorageLayout {
-    pub fn bytes(&self) -> usize { self.length }
+    pub fn bytes(&self) -> usize {
+        self.length
+    }
 }
 impl HostStorage {
     /// Pure concrete region/page quote, before any mapping or native effect.
     pub fn quote_native_region() -> Result<HostStorageLayout, &'static str> {
-        let concrete = super::original_native_region_layout().map_err(|_| "native region quote refused")?;
+        let concrete =
+            super::original_native_region_layout().map_err(|_| "native region quote refused")?;
         #[cfg(not(target_os = "linux"))]
-        { let _ = concrete; Err("host backing requires Linux") }
+        {
+            let _ = concrete;
+            Err("host backing requires Linux")
+        }
         #[cfg(target_os = "linux")]
         {
             let page = usize::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) })
                 .map_err(|_| "invalid host page size")?;
-            if page == 0 || concrete.layout.align() > page { return Err("native region page alignment refused"); }
-            let length = concrete.layout.size().checked_add(page - 1)
-                .map(|bytes| bytes / page * page).ok_or("native region page quote overflow")?;
+            if page == 0 || concrete.layout.align() > page {
+                return Err("native region page alignment refused");
+            }
+            let length = concrete
+                .layout
+                .size()
+                .checked_add(page - 1)
+                .map(|bytes| bytes / page * page)
+                .ok_or("native region page quote overflow")?;
             Self::quote(u64::try_from(length).map_err(|_| "native region size overflow")?)
         }
     }
@@ -61,7 +88,10 @@ impl HostStorage {
     /// No Drop unmaps this retained resource or invents settlement.
     pub fn quote(bytes: u64) -> Result<HostStorageLayout, &'static str> {
         #[cfg(not(target_os = "linux"))]
-        { let _ = bytes; return Err("host backing requires Linux"); }
+        {
+            let _ = bytes;
+            return Err("host backing requires Linux");
+        }
         #[cfg(target_os = "linux")]
         {
             let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
@@ -70,8 +100,10 @@ impl HostStorage {
             if page == 0 || length == 0 || length % page != 0 || length > isize::MAX as usize {
                 return Err("host allowance must cover an exact page-aligned mapping");
             }
-            let work = u64::try_from(length / page).map_err(|_| "host page work overflow")?
-                .checked_add(2).ok_or("host mapping work overflow")?;
+            let work = u64::try_from(length / page)
+                .map_err(|_| "host page work overflow")?
+                .checked_add(2)
+                .ok_or("host mapping work overflow")?;
             Ok(HostStorageLayout { length, page, work })
         }
     }
@@ -82,14 +114,37 @@ impl HostStorage {
     /// The returned sole controller is retained before every subsequent effect.
     pub unsafe fn map(layout: HostStorageLayout) -> Result<Self, &'static str> {
         #[cfg(not(target_os = "linux"))]
-        { let _ = layout; return Err("host backing requires Linux"); }
+        {
+            let _ = layout;
+            return Err("host backing requires Linux");
+        }
         #[cfg(target_os = "linux")]
         {
-            let address = unsafe { libc::mmap(std::ptr::null_mut(), layout.length,
-                libc::PROT_READ | libc::PROT_WRITE, libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
-                -1, 0) };
-            if address == libc::MAP_FAILED { return Err("host backing mapping refused"); }
-            Ok(Self { release_generation: None, process: std::process::id(), unlocked: false, unmapped: false, address: address as usize, length: layout.length, resident: AtomicBool::new(false), locked: AtomicBool::new(false), residency_started: AtomicBool::new(false), residency: std::sync::OnceLock::new() })
+            let address = unsafe {
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    layout.length,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                    -1,
+                    0,
+                )
+            };
+            if address == libc::MAP_FAILED {
+                return Err("host backing mapping refused");
+            }
+            Ok(Self {
+                release_generation: None,
+                process: std::process::id(),
+                unlocked: false,
+                unmapped: false,
+                address: address as usize,
+                length: layout.length,
+                resident: AtomicBool::new(false),
+                locked: AtomicBool::new(false),
+                residency_started: AtomicBool::new(false),
+                residency: std::sync::OnceLock::new(),
+            })
         }
     }
 
@@ -111,26 +166,37 @@ impl HostStorage {
         mut checkpoint: impl FnMut() -> Result<(), &'static str>,
     ) -> Result<lillux::process_control::ResidencyProof, String> {
         #[cfg(not(target_os = "linux"))]
-        { let _ = (layout, checkpoint); return Err("host residency requires Linux".to_owned()); }
+        {
+            let _ = (layout, checkpoint);
+            return Err("host residency requires Linux".to_owned());
+        }
         #[cfg(target_os = "linux")]
         {
             // Check the cached process before changing inherited state or
             // touching a copied mapping. The outside owner never replays a
             // released or already-published physical residency attempt.
-            if crate::foreign_process(self.process) || self.unlocked || self.unmapped
+            if crate::foreign_process(self.process)
+                || self.unlocked
+                || self.unmapped
                 || self.resident.load(Ordering::Acquire)
-                || self.address == 0 || self.length != layout.length {
+                || self.address == 0
+                || self.length != layout.length
+            {
                 return Err("host residency requires the original empty mapping".to_owned());
             }
-            self.residency_started.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            self.residency_started
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
                 .map_err(|_| "original host residency already attempted; no replay")?;
             checkpoint()?;
             let length = u64::try_from(self.length).map_err(|_| "host residency size overflow")?;
-            let planned = lillux::process_control::ResidencyProof::plan(length)
-                .map_err(|reason| format!("host physical residency refused: {reason}; original mapping retained"))?;
+            let planned =
+                lillux::process_control::ResidencyProof::plan(length).map_err(|reason| {
+                    format!("host physical residency refused: {reason}; original mapping retained")
+                })?;
             let proof = match planned {
                 lillux::process_control::ResidencyProof::Locked { basis } => {
-                    if unsafe { libc::mlock(self.address as *const libc::c_void, self.length) } == 0 {
+                    if unsafe { libc::mlock(self.address as *const libc::c_void, self.length) } == 0
+                    {
                         // Retain this irreversible completion before a page
                         // checkpoint can refuse. A failed mlock is still
                         // conservatively munlocked over the entire actual
@@ -165,7 +231,9 @@ impl HostStorage {
                     // Observed again right before the touch: the pages stay
                     // resident only while nothing can page them out.
                     proof.confirm_swap_unreachable().map_err(|reason| {
-                        format!("host physical residency refused: {reason}; original mapping retained")
+                        format!(
+                            "host physical residency refused: {reason}; original mapping retained"
+                        )
                     })?;
                     proof
                 }
@@ -177,10 +245,14 @@ impl HostStorage {
             // the original authority is checked at each bounded page effect.
             for offset in (0..self.length).step_by(layout.page) {
                 checkpoint()?;
-                unsafe { (self.address as *mut u8).add(offset).write_volatile(0); }
+                unsafe {
+                    (self.address as *mut u8).add(offset).write_volatile(0);
+                }
             }
             checkpoint()?;
-            self.residency.set(proof.clone()).map_err(|_| "host residency proof already recorded")?;
+            self.residency
+                .set(proof.clone())
+                .map_err(|_| "host residency proof already recorded")?;
             self.resident.store(true, Ordering::Release);
             Ok(proof)
         }
@@ -188,7 +260,9 @@ impl HostStorage {
 
     /// The proof that keeps this mapping resident, once residency completed.
     pub fn residency_proof(&self) -> Option<&lillux::process_control::ResidencyProof> {
-        if crate::foreign_process(self.process) { return None; }
+        if crate::foreign_process(self.process) {
+            return None;
+        }
         self.residency.get()
     }
 
@@ -197,7 +271,10 @@ impl HostStorage {
     /// life; a swap-unreachable proof is observed again, since swap enabled
     /// after startup would let the kernel page the region out.
     pub fn confirm_residency(&self) -> Result<(), String> {
-        if crate::foreign_process(self.process) || self.unmapped || !self.resident.load(Ordering::Acquire) {
+        if crate::foreign_process(self.process)
+            || self.unmapped
+            || !self.resident.load(Ordering::Acquire)
+        {
             return Err("host storage has no completed physical residency".to_owned());
         }
         self.residency
@@ -211,7 +288,10 @@ impl HostStorage {
     /// or an escaping mapped reference. The outside reservation retains this
     /// physical mapping until the region's explicit release exclusion.
     pub fn resident_region(&self) -> Result<(NonNull<u8>, usize), &'static str> {
-        if crate::foreign_process(self.process) || self.unmapped || !self.resident.load(Ordering::Acquire) {
+        if crate::foreign_process(self.process)
+            || self.unmapped
+            || !self.resident.load(Ordering::Acquire)
+        {
             return Err("host storage has no completed physical residency");
         }
         let pointer = NonNull::new(self.address as *mut u8).ok_or("host region address is null")?;
@@ -229,11 +309,24 @@ impl HostStorage {
         credit: &mut HostReleaseCredit,
         checkpoint: impl FnMut() -> Result<(), &'static str>,
     ) -> Result<HostStorageReleased, &'static str> {
-        if crate::foreign_process(self.process) { return Err("foreign host mapping process"); }
-        exclusion.require_physical_mapping(self.address, self.length).map_err(|_| "physical release selects another actual mapping")?;
-        exclusion.ready_for_physical_release().map_err(|_| "native region disposal is incomplete")?;
-        let generation = exclusion.original_generation().map_err(|_| "foreign original region release")?;
-        if self.release_generation.is_some_and(|original| original != generation) { return Err("physical release generation changed"); }
+        if crate::foreign_process(self.process) {
+            return Err("foreign host mapping process");
+        }
+        exclusion
+            .require_physical_mapping(self.address, self.length)
+            .map_err(|_| "physical release selects another actual mapping")?;
+        exclusion
+            .ready_for_physical_release()
+            .map_err(|_| "native region disposal is incomplete")?;
+        let generation = exclusion
+            .original_generation()
+            .map_err(|_| "foreign original region release")?;
+        if self
+            .release_generation
+            .is_some_and(|original| original != generation)
+        {
+            return Err("physical release generation changed");
+        }
         self.release_generation = Some(generation);
         self.release_mapping(credit, checkpoint)
     }
@@ -243,18 +336,32 @@ impl HostStorage {
     /// initialized/published here and no raw pointer/loan escaped. It retains
     /// the actual raw budget or initialization failure and original authority,
     /// debit, account and clocks through physical release and settlement.
-    pub unsafe fn release_before_region(&mut self, credit: &mut HostReleaseCredit,
-        checkpoint: impl FnMut() -> Result<(), &'static str>) -> Result<HostStorageReleased, &'static str> {
-        if crate::foreign_process(self.process) { return Err("foreign host mapping process"); }
-        if self.release_generation.is_some() { return Err("admitted region cannot use pre-region release"); }
+    pub unsafe fn release_before_region(
+        &mut self,
+        credit: &mut HostReleaseCredit,
+        checkpoint: impl FnMut() -> Result<(), &'static str>,
+    ) -> Result<HostStorageReleased, &'static str> {
+        if crate::foreign_process(self.process) {
+            return Err("foreign host mapping process");
+        }
+        if self.release_generation.is_some() {
+            return Err("admitted region cannot use pre-region release");
+        }
         self.release_mapping(credit, checkpoint)
     }
 
-    fn release_mapping(&mut self, credit: &mut HostReleaseCredit, mut checkpoint: impl FnMut() -> Result<(), &'static str>)
-        -> Result<HostStorageReleased, &'static str> {
-        if crate::foreign_process(self.process) { return Err("foreign host mapping process"); }
+    fn release_mapping(
+        &mut self,
+        credit: &mut HostReleaseCredit,
+        mut checkpoint: impl FnMut() -> Result<(), &'static str>,
+    ) -> Result<HostStorageReleased, &'static str> {
+        if crate::foreign_process(self.process) {
+            return Err("foreign host mapping process");
+        }
         #[cfg(not(target_os = "linux"))]
-        { return Err("host release requires Linux"); }
+        {
+            return Err("host release requires Linux");
+        }
         #[cfg(target_os = "linux")]
         {
             if !self.unlocked {
@@ -275,31 +382,50 @@ impl HostStorage {
                 }
                 self.unmapped = true;
             }
-            Ok(HostStorageReleased { process: self.process,
+            Ok(HostStorageReleased {
+                process: self.process,
                 kind: match self.release_generation {
-                    Some(generation) => HostStorageReleaseKind::Region { generation, bytes: self.length },
+                    Some(generation) => HostStorageReleaseKind::Region {
+                        generation,
+                        bytes: self.length,
+                    },
                     None => HostStorageReleaseKind::BeforeRegion { bytes: self.length },
-                } })
+                },
+            })
         }
     }
-
 }
 
 /// Constructed by actual physical release or the sole outside owner's
 /// verified never-acquired mapping disposition.
 /// Private observation, never a caller-provided terminal flag.
-pub struct HostStorageReleased { process: u32, kind: HostStorageReleaseKind }
+pub struct HostStorageReleased {
+    process: u32,
+    kind: HostStorageReleaseKind,
+}
 #[derive(Clone, Copy)]
-enum HostStorageReleaseKind { Region { generation: u64, bytes: usize }, BeforeRegion { bytes: usize }, NeverMapped }
+enum HostStorageReleaseKind {
+    Region { generation: u64, bytes: usize },
+    BeforeRegion { bytes: usize },
+    NeverMapped,
+}
 #[derive(Clone, Copy)]
-pub struct HostStorageRegionReleaseFact { process: u32, generation: u64, bytes: usize }
+pub struct HostStorageRegionReleaseFact {
+    process: u32,
+    generation: u64,
+    bytes: usize,
+}
 impl HostStorageRegionReleaseFact {
     pub fn generation(&self) -> Result<u64, &'static str> {
-        if crate::foreign_process(self.process) { return Err("foreign admitted region release fact"); }
+        if crate::foreign_process(self.process) {
+            return Err("foreign admitted region release fact");
+        }
         Ok(self.generation)
     }
     pub fn bytes(&self) -> Result<usize, &'static str> {
-        if crate::foreign_process(self.process) { return Err("foreign admitted region release fact"); }
+        if crate::foreign_process(self.process) {
+            return Err("foreign admitted region release fact");
+        }
         Ok(self.bytes)
     }
 }
@@ -309,17 +435,30 @@ impl HostStorageReleased {
     /// verifying its retained acquisition state contains no mapping, region,
     /// publication or escaped pointer. Numeric records alone are insufficient.
     pub unsafe fn never_mapped() -> Self {
-        Self { process: std::process::id(), kind: HostStorageReleaseKind::NeverMapped }
+        Self {
+            process: std::process::id(),
+            kind: HostStorageReleaseKind::NeverMapped,
+        }
     }
     pub fn require_original_process(&self) -> Result<(), &'static str> {
-        if crate::foreign_process(self.process) { return Err("foreign physical release observation"); }
+        if crate::foreign_process(self.process) {
+            return Err("foreign physical release observation");
+        }
         Ok(())
     }
     pub fn admitted_region(&self) -> Result<Option<HostStorageRegionReleaseFact>, &'static str> {
         self.require_original_process()?;
         Ok(match self.kind {
-            HostStorageReleaseKind::Region { generation, bytes } => Some(HostStorageRegionReleaseFact { process: self.process, generation, bytes }),
-            HostStorageReleaseKind::BeforeRegion { .. } | HostStorageReleaseKind::NeverMapped => None,
+            HostStorageReleaseKind::Region { generation, bytes } => {
+                Some(HostStorageRegionReleaseFact {
+                    process: self.process,
+                    generation,
+                    bytes,
+                })
+            }
+            HostStorageReleaseKind::BeforeRegion { .. } | HostStorageReleaseKind::NeverMapped => {
+                None
+            }
         })
     }
 }
@@ -337,14 +476,23 @@ mod release_credit_controls {
         // same irreversible allowance; no completion callback refunds it.
         credit.consume_attempt().unwrap();
         credit.consume_attempt().unwrap();
-        assert_eq!(credit.consume_attempt(), Err("original host release work exhausted"));
-        assert_eq!(credit.consume_attempt(), Err("original host release work exhausted"));
+        assert_eq!(
+            credit.consume_attempt(),
+            Err("original host release work exhausted")
+        );
+        assert_eq!(
+            credit.consume_attempt(),
+            Err("original host release work exhausted")
+        );
     }
 
     #[test]
     fn inherited_credit_refuses_before_counter_mutation() {
         let _serial = crate::test_host::serial_guard();
-        let mut credit = HostReleaseCredit { process: std::process::id().wrapping_add(1), remaining: 2 };
+        let mut credit = HostReleaseCredit {
+            process: std::process::id().wrapping_add(1),
+            remaining: 2,
+        };
         assert_eq!(credit.consume_attempt(), Err("foreign host release credit"));
         assert_eq!(credit.remaining, 2);
     }
@@ -361,7 +509,8 @@ mod controller_lock_ceiling {
         // constant; the region it locks must stay well inside it.
         let bytes = HostStorage::quote_native_region().unwrap().bytes() as u64;
         assert!(
-            bytes.checked_mul(2).unwrap() <= lillux::process_control::CONTROLLER_MEMLOCK_CEILING_BYTES,
+            bytes.checked_mul(2).unwrap()
+                <= lillux::process_control::CONTROLLER_MEMLOCK_CEILING_BYTES,
             "resident region {bytes} bytes outgrew the controller lock ceiling"
         );
     }

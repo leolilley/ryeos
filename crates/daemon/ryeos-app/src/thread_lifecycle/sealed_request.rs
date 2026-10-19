@@ -307,23 +307,22 @@ impl SealedResolvedItem {
         pinned_capsule_root.set_mode(0o700)?;
         pinned_capsule_root.ensure_path_binding()?;
         let source_name = std::ffi::OsStr::new("subject.source");
-        let materialized_source_file =
-            match pinned_capsule_root.open_regular(source_name, false)? {
-                Some(existing) => existing,
-                None => match pinned_capsule_root.atomic_create_regular(
-                    source_name,
-                    &source_bytes,
-                    0o600,
-                    crate::APP_TEMP_PURPOSE,
-                )? {
-                    Some(created) => created,
-                    None => pinned_capsule_root
-                        .open_regular(source_name, false)?
-                        .ok_or_else(|| {
-                            anyhow!("admitted launch capsule source disappeared during create race")
-                        })?,
-                },
-            };
+        let materialized_source_file = match pinned_capsule_root.open_regular(source_name, false)? {
+            Some(existing) => existing,
+            None => match pinned_capsule_root.atomic_create_regular(
+                source_name,
+                &source_bytes,
+                0o600,
+                crate::APP_TEMP_PURPOSE,
+            )? {
+                Some(created) => created,
+                None => pinned_capsule_root
+                    .open_regular(source_name, false)?
+                    .ok_or_else(|| {
+                        anyhow!("admitted launch capsule source disappeared during create race")
+                    })?,
+            },
+        };
         let expected_source_len = u64::try_from(source_bytes.len())
             .context("admitted launch capsule source length exceeds u64")?;
         let (materialized_source_hash, materialized_source_metadata) =
@@ -3322,7 +3321,8 @@ mod authority_tests {
             target_operator_authority: crate::operator_authority::AdmittedOperatorAuthority {
                 owner_principal: owner,
                 origin_site_id: "site:source".to_string(),
-                principal_class: ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteOperator,
+                principal_class:
+                    ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteOperator,
                 grant_digest: "f".repeat(64),
                 scopes: vec!["*".to_string()],
             },

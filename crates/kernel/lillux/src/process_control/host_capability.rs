@@ -43,8 +43,12 @@ pub const RESIDENCY_SWAP_ABSENT: &str = "residency:swap_absent";
 /// `RESIDENCY_SWAP_ABSENT` only.
 pub const ACCOUNTING: &str = "accounting";
 /// Every name the residency proof decides.
-pub const RESIDENCY_CAPABILITIES: [&str; 4] =
-    [ACCOUNTING, RESIDENCY_LOCKED, RESIDENCY_SWAP_LIMIT, RESIDENCY_SWAP_ABSENT];
+pub const RESIDENCY_CAPABILITIES: [&str; 4] = [
+    ACCOUNTING,
+    RESIDENCY_LOCKED,
+    RESIDENCY_SWAP_LIMIT,
+    RESIDENCY_SWAP_ABSENT,
+];
 
 /// The node's app root is on storage that outlives the node's container:
 /// a block or network filesystem on its own mount, or the host's own root
@@ -96,15 +100,18 @@ enum KnownResidencyProof {
 impl Serialize for ResidencyProof {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         match self {
-            Self::Locked { basis } => {
-                KnownResidencyProof::Locked { basis: basis.clone() }.serialize(serializer)
+            Self::Locked { basis } => KnownResidencyProof::Locked {
+                basis: basis.clone(),
             }
-            Self::SwapLimit { basis } => {
-                KnownResidencyProof::SwapLimit { basis: basis.clone() }.serialize(serializer)
+            .serialize(serializer),
+            Self::SwapLimit { basis } => KnownResidencyProof::SwapLimit {
+                basis: basis.clone(),
             }
-            Self::SwapAbsent { basis } => {
-                KnownResidencyProof::SwapAbsent { basis: basis.clone() }.serialize(serializer)
+            .serialize(serializer),
+            Self::SwapAbsent { basis } => KnownResidencyProof::SwapAbsent {
+                basis: basis.clone(),
             }
+            .serialize(serializer),
             Self::Unknown(original) => original.serialize(serializer),
         }
     }
@@ -121,7 +128,9 @@ impl<'de> Deserialize<'de> for ResidencyProof {
         if !matches!(method, "locked" | "swap_limit" | "swap_absent") {
             return Ok(Self::Unknown(original));
         }
-        match serde_json::from_value(serde_json::Value::Object(original)).map_err(D::Error::custom)? {
+        match serde_json::from_value(serde_json::Value::Object(original))
+            .map_err(D::Error::custom)?
+        {
             KnownResidencyProof::Locked { basis } => Ok(Self::Locked { basis }),
             KnownResidencyProof::SwapLimit { basis } => Ok(Self::SwapLimit { basis }),
             KnownResidencyProof::SwapAbsent { basis } => Ok(Self::SwapAbsent { basis }),
@@ -174,7 +183,9 @@ impl ResidencyProof {
 
     pub fn basis(&self) -> &str {
         match self {
-            Self::Locked { basis } | Self::SwapLimit { basis } | Self::SwapAbsent { basis } => basis,
+            Self::Locked { basis } | Self::SwapLimit { basis } | Self::SwapAbsent { basis } => {
+                basis
+            }
             Self::Unknown(_) => "",
         }
     }
@@ -382,10 +393,15 @@ impl CapabilityRequirement {
             if list.iter().any(String::is_empty) {
                 return Some(format!("entry {} names an empty {what}", self.label()));
             }
-            if let Some(repeated) = list.iter().enumerate().find_map(|(index, item)| {
-                list[..index].contains(item).then_some(item)
-            }) {
-                return Some(format!("entry {} names {what} {repeated} twice", self.label()));
+            if let Some(repeated) = list
+                .iter()
+                .enumerate()
+                .find_map(|(index, item)| list[..index].contains(item).then_some(item))
+            {
+                return Some(format!(
+                    "entry {} names {what} {repeated} twice",
+                    self.label()
+                ));
             }
         }
         if spec.accept.iter().any(|grade| grade == "peer_attested") {
@@ -395,8 +411,10 @@ impl CapabilityRequirement {
                 self.label()
             ));
         }
-        if let Some(unknown) =
-            spec.accept.iter().find(|grade| !ACCEPTABLE_GRADES.contains(&grade.as_str()))
+        if let Some(unknown) = spec
+            .accept
+            .iter()
+            .find(|grade| !ACCEPTABLE_GRADES.contains(&grade.as_str()))
         {
             return Some(format!(
                 "entry {} accepts grade {unknown}, which this node cannot judge; the grades are {}",
@@ -430,11 +448,19 @@ pub fn satisfies(
         return Err(format!(
             "{name} is only {grade}-proven here by {}; the floor accepts {}",
             evidence.provider,
-            if accepted.is_empty() { "measured".to_owned() } else { accepted.join(", ") }
+            if accepted.is_empty() {
+                "measured".to_owned()
+            } else {
+                accepted.join(", ")
+            }
         ));
     }
     let providers = entry.providers();
-    if !providers.is_empty() && !providers.iter().any(|provider| *provider == evidence.provider) {
+    if !providers.is_empty()
+        && !providers
+            .iter()
+            .any(|provider| *provider == evidence.provider)
+    {
         return Err(format!(
             "{name} is proven here by {} ({grade}); the floor accepts only {}",
             evidence.provider,
@@ -477,7 +503,10 @@ pub fn is_weaker_grade(name: &str, than: &str) -> bool {
 /// lists is a stronger grade of it. An admission met by a weaker grade is
 /// worth showing to an operator.
 pub fn met_by_strongest(entry: &CapabilityRequirement, met: &str) -> bool {
-    !entry.names().iter().any(|other| is_weaker_grade(met, other))
+    !entry
+        .names()
+        .iter()
+        .any(|other| is_weaker_grade(met, other))
 }
 
 /// Nested sandboxing of a job: user, pid and mount namespaces can be
@@ -517,7 +546,10 @@ pub fn floor_entry_refusal(entry: &CapabilityRequirement) -> Option<String> {
         ));
     }
     let beside_accounting = entry.is_set() && names.iter().any(|name| name == ACCOUNTING);
-    match names.iter().find(|name| WEAKER_RESIDENCY.contains(&name.as_str())) {
+    match names
+        .iter()
+        .find(|name| WEAKER_RESIDENCY.contains(&name.as_str()))
+    {
         Some(weaker) if !beside_accounting => Some(format!(
             "entry {} names {weaker}, which a stronger residency basis does not meet; name it \
              only beside {ACCOUNTING} in one any_of set",
@@ -571,7 +603,9 @@ static ENCLOSURE_INITS: RwLock<Vec<String>> = RwLock::new(Vec::new());
 pub fn admit_enclosure_inits(names: &[String]) -> Result<(), String> {
     for name in names {
         if name.is_empty() || name.len() > 255 || name.contains('/') || name.contains('\0') {
-            return Err(format!("trusted enclosure init {name:?} is not an executable file name"));
+            return Err(format!(
+                "trusted enclosure init {name:?} is not an executable file name"
+            ));
         }
     }
     let mut admitted = ENCLOSURE_INITS
@@ -583,7 +617,10 @@ pub fn admit_enclosure_inits(names: &[String]) -> Result<(), String> {
 
 /// The admitted list; empty, trusting no init, if it is unreadable.
 fn enclosure_inits() -> Vec<String> {
-    ENCLOSURE_INITS.read().map(|admitted| admitted.clone()).unwrap_or_default()
+    ENCLOSURE_INITS
+        .read()
+        .map(|admitted| admitted.clone())
+        .unwrap_or_default()
 }
 
 /// Why this node's exit ends its pid namespace, from what the process sees:
@@ -623,14 +660,16 @@ fn decide_enclosure_exit(
         ));
     }
     match pid1 {
-        Some(init) if trusted_inits.iter().any(|trusted| trusted == init) => Ok(CapabilityEvidence {
-            source: ProofSource::Trusted,
-            provider: HOST_PROVIDER.to_owned(),
-            basis: format!(
-                "the node's parent is pid 1 ({init}), which node policy trusts to exit when its \
+        Some(init) if trusted_inits.iter().any(|trusted| trusted == init) => {
+            Ok(CapabilityEvidence {
+                source: ProofSource::Trusted,
+                provider: HOST_PROVIDER.to_owned(),
+                basis: format!(
+                    "the node's parent is pid 1 ({init}), which node policy trusts to exit when its \
                  only child exits"
-            ),
-        }),
+                ),
+            })
+        }
         Some(init) => Err(format!(
             "the node's parent is pid 1 ({init}), which node policy does not name as an init \
              that exits with its only child"
@@ -788,25 +827,36 @@ fn decide_hypervisor(
     product_name: Option<&str>,
 ) -> (Option<bool>, String) {
     let flags = cpuinfo.and_then(|cpuinfo| {
-        cpuinfo
-            .lines()
-            .find_map(|line| line.strip_prefix("flags").and_then(|rest| rest.trim_start().strip_prefix(':')))
+        cpuinfo.lines().find_map(|line| {
+            line.strip_prefix("flags")
+                .and_then(|rest| rest.trim_start().strip_prefix(':'))
+        })
     });
     if let Some(flags) = flags
         && flags.split_whitespace().any(|flag| flag == "hypervisor")
     {
         return (Some(true), "the CPU reports the hypervisor flag".to_owned());
     }
-    if let Some(kind) = hypervisor_type.map(str::trim).filter(|kind| !kind.is_empty()) {
+    if let Some(kind) = hypervisor_type
+        .map(str::trim)
+        .filter(|kind| !kind.is_empty())
+    {
         return (Some(true), format!("/sys/hypervisor/type is {kind}"));
     }
     let firmware = [sys_vendor, product_name]
         .into_iter()
         .flatten()
         .map(str::trim)
-        .find(|name| VIRTUAL_MACHINE_FIRMWARE.iter().any(|known| name.contains(known)));
+        .find(|name| {
+            VIRTUAL_MACHINE_FIRMWARE
+                .iter()
+                .any(|known| name.contains(known))
+        });
     if let Some(name) = firmware {
-        return (Some(true), format!("the firmware names a virtual machine ({name})"));
+        return (
+            Some(true),
+            format!("the firmware names a virtual machine ({name})"),
+        );
     }
     match (flags, sys_vendor) {
         (Some(_), Some(vendor)) => (
@@ -847,10 +897,30 @@ enum StorageClass {
 // Filesystem names as the mount table writes them, and the magic numbers
 // from <linux/magic.h> that `fstatfs` reports for the same filesystems.
 const EPHEMERAL_FILESYSTEMS: [(&str, u64, &str, &str); 4] = [
-    ("overlay", 0x794c_7630, "the container's writable layer", "discarded when the container is replaced"),
-    ("aufs", 0x6175_6673, "a container's union layer", "discarded when the container is replaced"),
-    ("tmpfs", 0x0102_1994, "memory-backed", "lost when its host or container stops"),
-    ("ramfs", 0x8584_58f6, "memory-backed", "lost when its host or container stops"),
+    (
+        "overlay",
+        0x794c_7630,
+        "the container's writable layer",
+        "discarded when the container is replaced",
+    ),
+    (
+        "aufs",
+        0x6175_6673,
+        "a container's union layer",
+        "discarded when the container is replaced",
+    ),
+    (
+        "tmpfs",
+        0x0102_1994,
+        "memory-backed",
+        "lost when its host or container stops",
+    ),
+    (
+        "ramfs",
+        0x8584_58f6,
+        "memory-backed",
+        "lost when its host or container stops",
+    ),
 ];
 const BLOCK_FILESYSTEMS: [(&str, u64); 8] = [
     ("ext2", 0xef53),
@@ -907,7 +977,11 @@ pub fn decide_durable_root(facts: &RootStorageFacts) -> Result<CapabilityEvidenc
     let name = facts
         .filesystem
         .clone()
-        .or_else(|| facts.f_type.map(|f_type| format!("filesystem 0x{f_type:x}")))
+        .or_else(|| {
+            facts
+                .f_type
+                .map(|f_type| format!("filesystem 0x{f_type:x}"))
+        })
         .ok_or_else(|| format!("the filesystem of the app root {path} is unreadable"))?;
     let class = classify_storage(facts.filesystem.as_deref(), facts.f_type);
     if let StorageClass::Ephemeral(what, lost) = class {
@@ -924,14 +998,24 @@ pub fn decide_durable_root(facts: &RootStorageFacts) -> Result<CapabilityEvidenc
              container's own filesystem is undecided"
         ));
     };
-    let source = facts.mount_source.as_deref().unwrap_or("an unreadable source");
+    let source = facts
+        .mount_source
+        .as_deref()
+        .unwrap_or("an unreadable source");
     let basis = if mount_id != root_mount_id {
-        let kind = if class == StorageClass::Network { "network" } else { "block" };
+        let kind = if class == StorageClass::Network {
+            "network"
+        } else {
+            "block"
+        };
         format!(
             "the app root {path} is on {name}, a {kind} filesystem mounted at {} from {source}, \
              distinct from /; durable by mount: the mount outlives the process; nothing here \
              proves the provider keeps it across redeploys",
-            facts.mount_point.as_deref().unwrap_or("an unreadable mount point")
+            facts
+                .mount_point
+                .as_deref()
+                .unwrap_or("an unreadable mount point")
         )
     } else {
         match (facts.private_pid_namespace, facts.hypervisor) {
@@ -977,7 +1061,11 @@ pub fn decide_durable_root(facts: &RootStorageFacts) -> Result<CapabilityEvidenc
             basis: format!("{basis} (observed under gVisor emulation)"),
         });
     }
-    Ok(CapabilityEvidence { source: ProofSource::Measured, provider: HOST_PROVIDER.to_owned(), basis })
+    Ok(CapabilityEvidence {
+        source: ProofSource::Measured,
+        provider: HOST_PROVIDER.to_owned(),
+        basis,
+    })
 }
 
 /// A hard lifetime a hosting provider imposes on every host of its class,
@@ -1152,7 +1240,9 @@ pub fn decide_private_directory(facts: &PrivateDirectoryFacts) -> Result<String,
     if let Some(refusal) = &facts.walk_refusal {
         return Err(refusal.clone());
     }
-    let process = facts.process_uid.ok_or_else(|| "this process's uid is unreadable".to_owned())?;
+    let process = facts
+        .process_uid
+        .ok_or_else(|| "this process's uid is unreadable".to_owned())?;
     let (Some(anchor), Some(target)) = (facts.chain.first(), facts.chain.last()) else {
         return Err(format!("nothing on the walk to {path} was measured"));
     };
@@ -1332,7 +1422,10 @@ impl HostCapabilities {
     pub fn refuse(&mut self, name: &str, reason: impl Into<String>) {
         let reason: String = reason.into();
         if !self.provided.contains_key(name) {
-            self.missing.insert(name.to_owned(), bounded_text(&reason, MAX_CAPABILITY_TEXT_BYTES));
+            self.missing.insert(
+                name.to_owned(),
+                bounded_text(&reason, MAX_CAPABILITY_TEXT_BYTES),
+            );
         }
     }
 
@@ -1373,7 +1466,9 @@ impl HostFacts {
                 pid1: None,
                 pid1_executable: None,
                 enclosure_exit: None,
-                enclosure_exit_refusal: Some("host observation is unavailable on this OS".to_owned()),
+                enclosure_exit_refusal: Some(
+                    "host observation is unavailable on this OS".to_owned(),
+                ),
                 uid_map: None,
                 cgroup: CgroupFacts {
                     filesystem: "absent".to_owned(),
@@ -1387,14 +1482,21 @@ impl HostFacts {
                     pids_max: None,
                 },
                 swap_devices: None,
-                memlock: MemlockFacts { soft: None, hard: None, locked_bytes: None, cap_ipc_lock: false },
+                memlock: MemlockFacts {
+                    soft: None,
+                    hard: None,
+                    locked_bytes: None,
+                    cap_ipc_lock: false,
+                },
                 unshare_user: unobservable(),
                 unshare_user_pid_mount: unobservable(),
                 pidfd: unobservable(),
                 subreaper: unobservable(),
                 resident_bytes,
                 residency: None,
-                residency_refusal: Some("resident memory proof is unavailable on this OS".to_owned()),
+                residency_refusal: Some(
+                    "resident memory proof is unavailable on this OS".to_owned(),
+                ),
                 app_root_storage: RootStorageFacts::observe(app_root),
                 declared_lifetime: None,
             }
@@ -1411,7 +1513,11 @@ impl HostFacts {
     /// only for a standing basis and carries that basis name. It runs for the
     /// startup plan and again for the proof the reservation established,
     /// which can be weaker when the kernel refuses a lock the limits allowed.
-    pub fn apply_residency(&self, view: &mut HostCapabilities, proof: Result<&ResidencyProof, &str>) {
+    pub fn apply_residency(
+        &self,
+        view: &mut HostCapabilities,
+        proof: Result<&ResidencyProof, &str>,
+    ) {
         for name in RESIDENCY_CAPABILITIES {
             view.withdraw(name);
         }
@@ -1428,20 +1534,36 @@ impl HostFacts {
                 return;
             }
         };
-        let source = if self.gvisor() { ProofSource::ProviderAttested } else { ProofSource::Measured };
+        let source = if self.gvisor() {
+            ProofSource::ProviderAttested
+        } else {
+            ProofSource::Measured
+        };
         let mut basis = format!("resident region {}: {}", proof.method(), proof.basis());
         if self.gvisor() {
             basis.push_str(" (observed under gVisor emulation)");
         }
-        for name in [RESIDENCY_LOCKED, RESIDENCY_SWAP_LIMIT, RESIDENCY_SWAP_ABSENT] {
+        for name in [
+            RESIDENCY_LOCKED,
+            RESIDENCY_SWAP_LIMIT,
+            RESIDENCY_SWAP_ABSENT,
+        ] {
             if name == held {
                 view.provide(name, source.clone(), HOST_PROVIDER, basis.clone());
             } else {
-                view.refuse(name, format!("the resident region is held by {held}, not {name}"));
+                view.refuse(
+                    name,
+                    format!("the resident region is held by {held}, not {name}"),
+                );
             }
         }
         if proof.standing() {
-            view.provide(ACCOUNTING, source, HOST_PROVIDER, format!("{held}: {basis}"));
+            view.provide(
+                ACCOUNTING,
+                source,
+                HOST_PROVIDER,
+                format!("{held}: {basis}"),
+            );
         } else {
             view.refuse(
                 ACCOUNTING,
@@ -1464,9 +1586,17 @@ impl HostFacts {
     /// policy trusts to exit with its only child; a measured proof satisfies
     /// both.
     pub fn capabilities(&self) -> HostCapabilities {
-        let observed = if self.gvisor() { ProofSource::ProviderAttested } else { ProofSource::Measured };
+        let observed = if self.gvisor() {
+            ProofSource::ProviderAttested
+        } else {
+            ProofSource::Measured
+        };
         let emulated = |basis: String| {
-            if self.gvisor() { format!("{basis} (observed under gVisor emulation)") } else { basis }
+            if self.gvisor() {
+                format!("{basis} (observed under gVisor emulation)")
+            } else {
+                basis
+            }
         };
         let mut view = HostCapabilities::default();
         view.provide(
@@ -1478,46 +1608,61 @@ impl HostFacts {
         let unproven = "resident memory is not proven".to_owned();
         self.apply_residency(
             &mut view,
-            self.residency.as_ref().ok_or(self.residency_refusal.as_ref().unwrap_or(&unproven).as_str()),
+            self.residency.as_ref().ok_or(
+                self.residency_refusal
+                    .as_ref()
+                    .unwrap_or(&unproven)
+                    .as_str(),
+            ),
         );
         // Trust in a mechanism's semantics holds only where the kernel itself
         // answered; under gVisor the facts it rests on are emulated, so the
         // grade falls to provider-attested.
-        let trusted = if self.gvisor() { ProofSource::ProviderAttested } else { ProofSource::Trusted };
+        let trusted = if self.gvisor() {
+            ProofSource::ProviderAttested
+        } else {
+            ProofSource::Trusted
+        };
         if self.pidfd.allowed() {
             view.provide(
                 "termination:process_group",
                 trusted.clone(),
                 HOST_PROVIDER,
                 emulated(
-                    "process group plus pidfd; a job that calls setsid or double-forks escapes it".to_owned(),
+                    "process group plus pidfd; a job that calls setsid or double-forks escapes it"
+                        .to_owned(),
                 ),
             );
         } else {
-            view.refuse("termination:process_group", format!("pidfd_open {}", self.pidfd.describe()));
+            view.refuse(
+                "termination:process_group",
+                format!("pidfd_open {}", self.pidfd.describe()),
+            );
         }
         // The grade each enclosure name may carry, or why it cannot.
         let unproven = || {
-            self.enclosure_exit_refusal
-                .clone()
-                .unwrap_or_else(|| "nothing proves the node's exit ends its pid namespace".to_owned())
+            self.enclosure_exit_refusal.clone().unwrap_or_else(|| {
+                "nothing proves the node's exit ends its pid namespace".to_owned()
+            })
         };
-        let (measured_exit, trusted_exit): (Result<(ProofSource, String), String>, Result<(ProofSource, String), String>) =
-            match &self.enclosure_exit {
-                Some(evidence) if evidence.source == ProofSource::Measured => (
-                    Ok((observed.clone(), emulated(evidence.basis.clone()))),
-                    Ok((observed.clone(), emulated(evidence.basis.clone()))),
-                ),
-                Some(evidence) if evidence.source == ProofSource::Trusted => (
-                    Err(format!(
-                        "the node is not pid 1 of its pid namespace; its enclosure ends with it only \
+        let (measured_exit, trusted_exit): (
+            Result<(ProofSource, String), String>,
+            Result<(ProofSource, String), String>,
+        ) = match &self.enclosure_exit {
+            Some(evidence) if evidence.source == ProofSource::Measured => (
+                Ok((observed.clone(), emulated(evidence.basis.clone()))),
+                Ok((observed.clone(), emulated(evidence.basis.clone()))),
+            ),
+            Some(evidence) if evidence.source == ProofSource::Trusted => (
+                Err(format!(
+                    "the node is not pid 1 of its pid namespace; its enclosure ends with it only \
                          by trust in pid 1 ({})",
-                        evidence.basis
-                    )),
-                    Ok((trusted.clone(), emulated(evidence.basis.clone()))),
-                ),
-                _ => (Err(unproven()), Err(unproven())),
-            };
+                    evidence.basis
+                )),
+                Ok((trusted.clone(), emulated(evidence.basis.clone()))),
+            ),
+            _ => (Err(unproven()), Err(unproven())),
+        };
         for (name, exit) in [
             (TERMINATION_ENCLOSURE, &measured_exit),
             (TERMINATION_ENCLOSURE_TRUSTED_INIT, &trusted_exit),
@@ -1537,11 +1682,17 @@ impl HostFacts {
                 "limits:enclosure",
                 observed.clone(),
                 HOST_PROVIDER,
-                emulated(format!("memory.max {} on cgroup {}, not writable by the node", limit.value, limit.cgroup)),
+                emulated(format!(
+                    "memory.max {} on cgroup {}, not writable by the node",
+                    limit.value, limit.cgroup
+                )),
             ),
             Some(limit) => view.refuse(
                 "limits:enclosure",
-                format!("memory.max {} on cgroup {} is writable by the node itself", limit.value, limit.cgroup),
+                format!(
+                    "memory.max {} on cgroup {} is writable by the node itself",
+                    limit.value, limit.cgroup
+                ),
             ),
             None => view.refuse(
                 "limits:enclosure",
@@ -1580,7 +1731,11 @@ impl HostFacts {
                         "the node is not the whole of a container enclosure (cgroup namespace {}, \
                          membership {}, /sys/fs/cgroup is {}), so a restart cannot be told apart \
                          from the same generation",
-                        if self.initial_cgroup_namespace { "initial" } else { "private" },
+                        if self.initial_cgroup_namespace {
+                            "initial"
+                        } else {
+                            "private"
+                        },
                         self.cgroup.membership.as_deref().unwrap_or("unreadable"),
                         self.cgroup.filesystem
                     ),
@@ -1588,15 +1743,21 @@ impl HostFacts {
             }
         }
         match decide_durable_root(&self.app_root_storage) {
-            Ok(evidence) => {
-                view.provide(STORAGE_DURABLE_ROOT, evidence.source, &evidence.provider, evidence.basis)
-            }
+            Ok(evidence) => view.provide(
+                STORAGE_DURABLE_ROOT,
+                evidence.source,
+                &evidence.provider,
+                evidence.basis,
+            ),
             Err(reason) => view.refuse(STORAGE_DURABLE_ROOT, reason),
         }
         match decide_durable_state(&self.app_root_storage, self.declared_lifetime.as_ref()) {
-            Ok(evidence) => {
-                view.provide(PERSISTENCE_DURABLE_STATE, evidence.source, &evidence.provider, evidence.basis)
-            }
+            Ok(evidence) => view.provide(
+                PERSISTENCE_DURABLE_STATE,
+                evidence.source,
+                &evidence.provider,
+                evidence.basis,
+            ),
             Err(reason) => view.refuse(PERSISTENCE_DURABLE_STATE, reason),
         }
         if self.unshare_user_pid_mount.allowed() {
@@ -1609,7 +1770,10 @@ impl HostFacts {
         } else {
             view.refuse(
                 ISOLATION_NAMESPACES,
-                format!("unshare of user, pid and mount namespaces {}", self.unshare_user_pid_mount.describe()),
+                format!(
+                    "unshare of user, pid and mount namespaces {}",
+                    self.unshare_user_pid_mount.describe()
+                ),
             );
         }
         view
@@ -1623,7 +1787,11 @@ pub fn current_host_generation() -> Result<(String, Option<u64>), String> {
     #[cfg(target_os = "linux")]
     {
         let boot_id = super::linux::read_boot_id()?;
-        if boot_id.len() != 36 || !boot_id.bytes().all(|byte| byte == b'-' || byte.is_ascii_hexdigit()) {
+        if boot_id.len() != 36
+            || !boot_id
+                .bytes()
+                .all(|byte| byte == b'-' || byte.is_ascii_hexdigit())
+        {
             return Err("the kernel boot identity is unreadable or malformed".to_owned());
         }
         Ok((boot_id, linux::container_enclosure()?))
@@ -1648,7 +1816,13 @@ pub(super) fn read_cgroup_enclosure() -> Result<Option<u64>, String> {
 pub(super) fn read_witnessed_enclosure() -> Result<Option<u64>, String> {
     let (node_pid, parent_pid, pid1) = linux::pid_facts();
     let private = linux::private_pid_namespace();
-    match decide_enclosure_exit(private, node_pid, parent_pid, pid1.as_deref(), &enclosure_inits()) {
+    match decide_enclosure_exit(
+        private,
+        node_pid,
+        parent_pid,
+        pid1.as_deref(),
+        &enclosure_inits(),
+    ) {
         Ok(_) => linux::container_enclosure(),
         Err(_) => Ok(None),
     }
@@ -1688,9 +1862,11 @@ mod linux {
     }
 
     fn status_field(status: &str, name: &str) -> Option<String> {
-        status
-            .lines()
-            .find_map(|line| line.strip_prefix(name)?.strip_prefix(':').map(|value| value.trim().to_owned()))
+        status.lines().find_map(|line| {
+            line.strip_prefix(name)?
+                .strip_prefix(':')
+                .map(|value| value.trim().to_owned())
+        })
     }
 
     fn cap_ipc_lock(status: &str) -> bool {
@@ -1701,11 +1877,19 @@ mod linux {
 
     fn locked_bytes(status: &str) -> Option<u64> {
         let value = status_field(status, "VmLck")?;
-        value.strip_suffix("kB")?.trim().parse::<u64>().ok()?.checked_mul(1024)
+        value
+            .strip_suffix("kB")?
+            .trim()
+            .parse::<u64>()
+            .ok()?
+            .checked_mul(1024)
     }
 
     fn memlock_limit() -> Option<(u64, u64)> {
-        let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+        let mut limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
         if unsafe { libc::getrlimit(libc::RLIMIT_MEMLOCK, &mut limit) } != 0 {
             return None;
         }
@@ -1713,7 +1897,11 @@ mod linux {
     }
 
     fn display_limit(value: u64) -> String {
-        if value == libc::RLIM_INFINITY as u64 { "unlimited".to_owned() } else { format!("{value} bytes") }
+        if value == libc::RLIM_INFINITY as u64 {
+            "unlimited".to_owned()
+        } else {
+            format!("{value} bytes")
+        }
     }
 
     /// CAP_IPC_LOCK lifts RLIMIT_MEMLOCK only when held in the initial user
@@ -1761,7 +1949,8 @@ mod linux {
                     display_limit(hard)
                 ));
             }
-            _ => lock_notes.push("RLIMIT_MEMLOCK or the locked-memory count is unreadable".to_owned()),
+            _ => lock_notes
+                .push("RLIMIT_MEMLOCK or the locked-memory count is unreadable".to_owned()),
         }
         swap_unreachable_proof()
             .map_err(|swap| {
@@ -1822,7 +2011,10 @@ mod linux {
         // read is defined whether or not the call below fills it.
         let mut stat: libc::statfs = unsafe { std::mem::zeroed() };
         if unsafe { libc::fstatfs(root.as_raw_fd(), &mut stat) } != 0 {
-            return Err(format!("statfs {CGROUP_ROOT}: {}", std::io::Error::last_os_error()));
+            return Err(format!(
+                "statfs {CGROUP_ROOT}: {}",
+                std::io::Error::last_os_error()
+            ));
         }
         Ok((stat.f_type == super::super::cgroup::CGROUP2_SUPER_MAGIC).then_some(root))
     }
@@ -1832,7 +2024,9 @@ mod linux {
         // arrays, for which all-zero bytes are a valid value, so every field
         // read is defined whether or not the call below fills it.
         let mut stat: libc::statfs = unsafe { std::mem::zeroed() };
-        let Ok(path) = CString::new(CGROUP_ROOT) else { return "absent".to_owned() };
+        let Ok(path) = CString::new(CGROUP_ROOT) else {
+            return "absent".to_owned();
+        };
         if unsafe { libc::statfs(path.as_ptr(), &mut stat) } != 0 {
             return "absent".to_owned();
         }
@@ -1847,7 +2041,9 @@ mod linux {
     }
 
     fn namespace_inode(name: &str) -> Option<u64> {
-        std::fs::metadata(format!("/proc/self/ns/{name}")).ok().map(|metadata| metadata.ino())
+        std::fs::metadata(format!("/proc/self/ns/{name}"))
+            .ok()
+            .map(|metadata| metadata.ino())
     }
 
     pub(super) fn private_pid_namespace() -> Option<bool> {
@@ -1863,13 +2059,19 @@ mod linux {
         let node_pid = std::process::id();
         let parent_pid = u32::try_from(unsafe { libc::getppid() }).unwrap_or(0);
         let foreign_proc = match (
-            std::fs::metadata("/proc/1/ns/pid").ok().map(|metadata| metadata.ino()),
+            std::fs::metadata("/proc/1/ns/pid")
+                .ok()
+                .map(|metadata| metadata.ino()),
             namespace_inode("pid"),
         ) {
             (Some(pid1_namespace), Some(own)) => pid1_namespace != own,
             _ => false,
         };
-        let pid1 = if foreign_proc { None } else { pid1_executable().or_else(pid1_comm) };
+        let pid1 = if foreign_proc {
+            None
+        } else {
+            pid1_executable().or_else(pid1_comm)
+        };
         (node_pid, parent_pid, pid1)
     }
 
@@ -1879,17 +2081,19 @@ mod linux {
     }
 
     fn pid1_comm() -> Option<String> {
-        read_small("/proc/1/comm").ok().map(|comm| comm.trim().to_owned())
+        read_small("/proc/1/comm")
+            .ok()
+            .map(|comm| comm.trim().to_owned())
     }
 
     /// The enclosure inode only when the node is the whole of a container:
     /// a private cgroup namespace whose root is this process's own cgroup,
     /// and a private pid namespace whose init exit kills every member.
     pub(super) fn container_enclosure() -> Result<Option<u64>, String> {
-        let private_cgroup = namespace_inode("cgroup")
-            .is_some_and(|inode| inode != INITIAL_CGROUP_NAMESPACE_INODE);
-        let private_pid = namespace_inode("pid")
-            .is_some_and(|inode| inode != INITIAL_PID_NAMESPACE_INODE);
+        let private_cgroup =
+            namespace_inode("cgroup").is_some_and(|inode| inode != INITIAL_CGROUP_NAMESPACE_INODE);
+        let private_pid =
+            namespace_inode("pid").is_some_and(|inode| inode != INITIAL_PID_NAMESPACE_INODE);
         if !private_cgroup || !private_pid {
             return Ok(None);
         }
@@ -1903,7 +2107,9 @@ mod linux {
     pub(super) fn cgroup_enclosure() -> Result<Option<u64>, String> {
         match cgroup2_root()? {
             Some(root) => Ok(Some(
-                root.metadata().map_err(|error| format!("stat {CGROUP_ROOT}: {error}"))?.ino(),
+                root.metadata()
+                    .map_err(|error| format!("stat {CGROUP_ROOT}: {error}"))?
+                    .ino(),
             )),
             None => Ok(None),
         }
@@ -1912,19 +2118,29 @@ mod linux {
     fn membership() -> Result<PathBuf, String> {
         let file = File::open("/proc/self/cgroup")
             .map_err(|error| format!("open current process cgroup membership: {error}"))?;
-        super::super::cgroup::unified_cgroup_from_file(&file, super::super::cgroup::CURRENT_PROCESS_SUBJECT)
+        super::super::cgroup::unified_cgroup_from_file(
+            &file,
+            super::super::cgroup::CURRENT_PROCESS_SUBJECT,
+        )
     }
 
     /// This process's cgroup and each ancestor up to the visible root, as
     /// (relative name, directory) pairs, nearest first.
     fn enclosing_cgroups() -> Vec<(String, PathBuf)> {
-        let Ok(Some(_)) = cgroup2_root() else { return Vec::new() };
-        let Ok(relative) = membership() else { return Vec::new() };
+        let Ok(Some(_)) = cgroup2_root() else {
+            return Vec::new();
+        };
+        let Ok(relative) = membership() else {
+            return Vec::new();
+        };
         relative
             .ancestors()
             .filter_map(|ancestor| {
                 let inside = ancestor.strip_prefix("/").ok()?;
-                Some((ancestor.display().to_string(), Path::new(CGROUP_ROOT).join(inside)))
+                Some((
+                    ancestor.display().to_string(),
+                    Path::new(CGROUP_ROOT).join(inside),
+                ))
             })
             .collect()
     }
@@ -1932,16 +2148,24 @@ mod linux {
     /// Whether this process may write `path`, judged with its effective
     /// identity, which is the one the kernel checks when it writes.
     fn writable(path: &Path) -> bool {
-        let Ok(path) = CString::new(path.as_os_str().as_encoded_bytes()) else { return false };
+        let Ok(path) = CString::new(path.as_os_str().as_encoded_bytes()) else {
+            return false;
+        };
         unsafe { libc::faccessat(libc::AT_FDCWD, path.as_ptr(), libc::W_OK, libc::AT_EACCESS) == 0 }
     }
 
     fn nearest_finite(name: &str) -> Option<CgroupLimit> {
-        enclosing_cgroups().into_iter().find_map(|(cgroup, directory)| {
-            let file = directory.join(name);
-            let value = std::fs::read_to_string(&file).ok()?.trim().to_owned();
-            (value != "max").then(|| CgroupLimit { value, cgroup, writable_by_node: writable(&file) })
-        })
+        enclosing_cgroups()
+            .into_iter()
+            .find_map(|(cgroup, directory)| {
+                let file = directory.join(name);
+                let value = std::fs::read_to_string(&file).ok()?.trim().to_owned();
+                (value != "max").then(|| CgroupLimit {
+                    value,
+                    cgroup,
+                    writable_by_node: writable(&file),
+                })
+            })
     }
 
     /// Any enclosing cgroup whose `memory.swap.max` is 0, which this
@@ -1952,8 +2176,9 @@ mod linux {
     /// the limit must sit at or above the highest such ancestor.
     fn zero_swap_cgroup() -> Option<String> {
         let enclosing = enclosing_cgroups();
-        let highest_movable =
-            enclosing.iter().rposition(|(_, directory)| writable(&directory.join("cgroup.procs")));
+        let highest_movable = enclosing
+            .iter()
+            .rposition(|(_, directory)| writable(&directory.join("cgroup.procs")));
         zero_swap_at_or_above(&enclosing, highest_movable, |directory| {
             let file = directory.join("memory.swap.max");
             let value = std::fs::read_to_string(&file).ok()?;
@@ -1968,23 +2193,32 @@ mod linux {
         highest_movable: Option<usize>,
         proves: impl Fn(&Path) -> Option<bool>,
     ) -> Option<String> {
-        enclosing.iter().enumerate().find_map(|(index, (cgroup, directory))| {
-            if highest_movable.is_some_and(|highest| index < highest) {
-                return None;
-            }
-            proves(directory)?.then(|| cgroup.clone())
-        })
+        enclosing
+            .iter()
+            .enumerate()
+            .find_map(|(index, (cgroup, directory))| {
+                if highest_movable.is_some_and(|highest| index < highest) {
+                    return None;
+                }
+                proves(directory)?.then(|| cgroup.clone())
+            })
     }
 
     fn cgroup_mount() -> (Option<bool>, Option<bool>) {
-        let Ok(raw) = read_small("/proc/self/mountinfo") else { return (None, None) };
+        let Ok(raw) = read_small("/proc/self/mountinfo") else {
+            return (None, None);
+        };
         for line in raw.lines() {
-            let Some((left, right)) = line.split_once(" - ") else { continue };
+            let Some((left, right)) = line.split_once(" - ") else {
+                continue;
+            };
             let fields: Vec<&str> = left.split_whitespace().collect();
             if fields.get(4) != Some(&CGROUP_ROOT) {
                 continue;
             }
-            let read_only = fields.get(5).map(|options| options.split(',').any(|option| option == "ro"));
+            let read_only = fields
+                .get(5)
+                .map(|options| options.split(',').any(|option| option == "ro"));
             let nsdelegate = right
                 .split_whitespace()
                 .nth(2)
@@ -2037,7 +2271,10 @@ mod linux {
         let fork_custody_witness = witnessed.1;
         let pid = unsafe { libc::fork() };
         if pid < 0 {
-            return unobservable(format!("fork for probe: {}", std::io::Error::last_os_error()));
+            return unobservable(format!(
+                "fork for probe: {}",
+                std::io::Error::last_os_error()
+            ));
         }
         if pid == 0 {
             for fd in &child_close_fds {
@@ -2053,7 +2290,10 @@ mod linux {
             let code = if result == 0 {
                 0
             } else {
-                std::io::Error::last_os_error().raw_os_error().unwrap_or(255).clamp(1, 255)
+                std::io::Error::last_os_error()
+                    .raw_os_error()
+                    .unwrap_or(255)
+                    .clamp(1, 255)
             };
             unsafe { libc::_exit(code) }
         }
@@ -2079,7 +2319,9 @@ mod linux {
             }
         };
         if !libc::WIFEXITED(status) {
-            return ProbeOutcome::Unobservable { reason: "probe child did not exit normally".to_owned() };
+            return ProbeOutcome::Unobservable {
+                reason: "probe child did not exit normally".to_owned(),
+            };
         }
         match libc::WEXITSTATUS(status) {
             0 => ProbeOutcome::Allowed,
@@ -2094,26 +2336,41 @@ mod linux {
         let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, libc::getpid(), 0) };
         if fd < 0 {
             let error = std::io::Error::last_os_error();
-            return ProbeOutcome::Refused { errno: error.raw_os_error().unwrap_or(0), reason: error.to_string() };
+            return ProbeOutcome::Refused {
+                errno: error.raw_os_error().unwrap_or(0),
+                reason: error.to_string(),
+            };
         }
         unsafe { libc::close(fd as libc::c_int) };
         ProbeOutcome::Allowed
     }
 
     fn kernel_kind(version: &str) -> &'static str {
-        if version.to_ascii_lowercase().contains("gvisor") { "gvisor" } else { "native" }
+        if version.to_ascii_lowercase().contains("gvisor") {
+            "gvisor"
+        } else {
+            "native"
+        }
     }
 
     pub(super) fn observe(resident_bytes: u64, app_root: &Path) -> HostFacts {
         let status = read_small("/proc/self/status").unwrap_or_default();
         let version = read_small("/proc/version").unwrap_or_default();
         let kernel_kind = kernel_kind(&version);
-        let pid_namespace = std::fs::metadata("/proc/self/ns/pid").ok().map(|metadata| metadata.ino());
-        let (soft, hard) = memlock_limit().map_or((None, None), |(soft, hard)| (Some(soft), Some(hard)));
+        let pid_namespace = std::fs::metadata("/proc/self/ns/pid")
+            .ok()
+            .map(|metadata| metadata.ino());
+        let (soft, hard) =
+            memlock_limit().map_or((None, None), |(soft, hard)| (Some(soft), Some(hard)));
         let membership_path = membership().ok();
         let membership_writable = membership_path
             .as_ref()
-            .and_then(|relative| relative.strip_prefix("/").ok().map(|inside| Path::new(CGROUP_ROOT).join(inside)))
+            .and_then(|relative| {
+                relative
+                    .strip_prefix("/")
+                    .ok()
+                    .map(|inside| Path::new(CGROUP_ROOT).join(inside))
+            })
             .is_some_and(|directory| writable(&directory));
         let (mount_read_only, nsdelegate) = cgroup_mount();
         let residency = ResidencyProof::plan(resident_bytes);
@@ -2127,13 +2384,18 @@ mod linux {
         );
         HostFacts {
             version: HOST_FACTS_VERSION,
-            kernel_release: version.split_whitespace().nth(2).unwrap_or_default().to_owned(),
+            kernel_release: version
+                .split_whitespace()
+                .nth(2)
+                .unwrap_or_default()
+                .to_owned(),
             kernel_kind: kernel_kind.to_owned(),
             boot_id: super::super::linux::read_boot_id().unwrap_or_default(),
             pid_namespace,
             initial_pid_namespace: pid_namespace == Some(INITIAL_PID_NAMESPACE_INODE),
             cgroup_namespace: namespace_inode("cgroup"),
-            initial_cgroup_namespace: namespace_inode("cgroup") == Some(INITIAL_CGROUP_NAMESPACE_INODE),
+            initial_cgroup_namespace: namespace_inode("cgroup")
+                == Some(INITIAL_CGROUP_NAMESPACE_INODE),
             container_enclosure: container_enclosure().ok().flatten(),
             node_pid,
             parent_pid,
@@ -2142,7 +2404,10 @@ mod linux {
             enclosure_exit_refusal: enclosure_exit.as_ref().err().cloned(),
             enclosure_exit: enclosure_exit.ok(),
             uid_map: read_small("/proc/self/uid_map").ok().map(|map| {
-                map.lines().map(|line| line.split_whitespace().collect::<Vec<_>>().join(" ")).collect::<Vec<_>>().join("; ")
+                map.lines()
+                    .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+                    .collect::<Vec<_>>()
+                    .join("; ")
             }),
             cgroup: CgroupFacts {
                 filesystem: filesystem_name(),
@@ -2201,7 +2466,8 @@ mod linux {
                 &mut observation,
             )
         };
-        (status == 0 && observation.stx_mask & libc::STATX_MNT_ID != 0).then_some(observation.stx_mnt_id)
+        (status == 0 && observation.stx_mask & libc::STATX_MNT_ID != 0)
+            .then_some(observation.stx_mnt_id)
     }
 
     fn filesystem_magic(file: &File) -> Option<u64> {
@@ -2257,7 +2523,10 @@ mod linux {
         })
     }
 
-    pub(super) fn observe_private_directory(anchor: &Path, path: &Path) -> super::PrivateDirectoryFacts {
+    pub(super) fn observe_private_directory(
+        anchor: &Path,
+        path: &Path,
+    ) -> super::PrivateDirectoryFacts {
         // SAFETY: geteuid has no pointer arguments or caller-owned memory.
         let process_uid = unsafe { libc::geteuid() };
         let mut chain = Vec::new();
@@ -2282,9 +2551,13 @@ mod linux {
         if !anchor.is_absolute() {
             return Err(format!("{} is not an absolute path", anchor.display()));
         }
-        let below = path
-            .strip_prefix(anchor)
-            .map_err(|_| format!("{} does not lie beneath {}", path.display(), anchor.display()))?;
+        let below = path.strip_prefix(anchor).map_err(|_| {
+            format!(
+                "{} does not lie beneath {}",
+                path.display(),
+                anchor.display()
+            )
+        })?;
         let mut names = Vec::new();
         for component in below.components() {
             match component {
@@ -2356,8 +2629,14 @@ mod linux {
                 let mut stat: libc::stat = unsafe { std::mem::zeroed() };
                 // SAFETY: `name` is NUL-terminated, `stat` is writable and
                 // sized for the call, and `directory` is open for it.
-                let looked =
-                    unsafe { libc::fstatat(directory, name.as_ptr(), &mut stat, libc::AT_SYMLINK_NOFOLLOW) };
+                let looked = unsafe {
+                    libc::fstatat(
+                        directory,
+                        name.as_ptr(),
+                        &mut stat,
+                        libc::AT_SYMLINK_NOFOLLOW,
+                    )
+                };
                 if looked == 0 && stat.st_mode & libc::S_IFMT == libc::S_IFLNK {
                     Err(format!("{shown} is a symbolic link"))
                 } else {
@@ -2379,13 +2658,26 @@ mod linux {
         // SAFETY: the empty path with AT_EMPTY_PATH names the open
         // descriptor, and `observation` is writable and sized for the call.
         let status = unsafe {
-            libc::statx(file.as_raw_fd(), c"".as_ptr(), libc::AT_EMPTY_PATH, wanted, &mut observation)
+            libc::statx(
+                file.as_raw_fd(),
+                c"".as_ptr(),
+                libc::AT_EMPTY_PATH,
+                wanted,
+                &mut observation,
+            )
         };
         if status != 0 {
-            return Err(format!("{} is unreadable ({})", shown.display(), std::io::Error::last_os_error()));
+            return Err(format!(
+                "{} is unreadable ({})",
+                shown.display(),
+                std::io::Error::last_os_error()
+            ));
         }
         if observation.stx_mask & wanted != wanted {
-            return Err(format!("the owner, mode or mount of {} is unreadable", shown.display()));
+            return Err(format!(
+                "the owner, mode or mount of {} is unreadable",
+                shown.display()
+            ));
         }
         let mode = u32::from(observation.stx_mode);
         if mode & libc::S_IFMT != libc::S_IFDIR {
@@ -2455,9 +2747,14 @@ mod linux {
             let lease = crate::exec::try_retain_fork_sensitive_descriptors().unwrap();
             match super::probe_in_child(super::ChildProbe::Subreaper) {
                 super::ProbeOutcome::Unobservable { reason } => {
-                    assert!(reason.contains("retains fork-sensitive descriptor authority"), "{reason}");
+                    assert!(
+                        reason.contains("retains fork-sensitive descriptor authority"),
+                        "{reason}"
+                    );
                 }
-                other => panic!("probe forked while this thread held a descriptor lease: {other:?}"),
+                other => {
+                    panic!("probe forked while this thread held a descriptor lease: {other:?}")
+                }
             }
             drop(lease);
             let hold = std::time::Duration::from_millis(300);
@@ -2467,7 +2764,10 @@ mod linux {
             let waited = started.elapsed();
             holder.join().unwrap();
             assert_eq!(outcome, super::ProbeOutcome::Allowed);
-            assert!(waited >= hold - std::time::Duration::from_millis(50), "{waited:?}");
+            assert!(
+                waited >= hold - std::time::Duration::from_millis(50),
+                "{waited:?}"
+            );
             // The window reopened: a descriptor lease is granted at once.
             drop(crate::exec::try_retain_fork_sensitive_descriptors().unwrap());
         }
@@ -2478,7 +2778,11 @@ mod linux {
                              31 22 8:16 / /data\\040app rw - ext4 /dev/vdb rw\n";
             assert_eq!(
                 super::mount_entry(mountinfo, 31),
-                Some(("/data app".to_owned(), "ext4".to_owned(), "/dev/vdb".to_owned()))
+                Some((
+                    "/data app".to_owned(),
+                    "ext4".to_owned(),
+                    "/dev/vdb".to_owned()
+                ))
             );
             assert_eq!(
                 super::mount_entry(mountinfo, 22),
@@ -2503,14 +2807,32 @@ mod linux {
                 .map(|name| (name.to_string(), std::path::PathBuf::from(name)))
                 .collect();
             let zero_at = |zero: &'static [&'static str]| {
-                move |directory: &std::path::Path| Some(zero.iter().any(|name| std::path::Path::new(name) == directory))
+                move |directory: &std::path::Path| {
+                    Some(
+                        zero.iter()
+                            .any(|name| std::path::Path::new(name) == directory),
+                    )
+                }
             };
             // Nothing movable: the nearest zero limit proves.
-            assert_eq!(super::zero_swap_at_or_above(&enclosing, None, zero_at(&["/a/b"])).as_deref(), Some("/a/b"));
+            assert_eq!(
+                super::zero_swap_at_or_above(&enclosing, None, zero_at(&["/a/b"])).as_deref(),
+                Some("/a/b")
+            );
             // The node can write /a's cgroup.procs, so a limit on /a/b can be left.
-            assert_eq!(super::zero_swap_at_or_above(&enclosing, Some(2), zero_at(&["/a/b"])), None);
-            assert_eq!(super::zero_swap_at_or_above(&enclosing, Some(2), zero_at(&["/a/b", "/a"])).as_deref(), Some("/a"));
-            assert_eq!(super::zero_swap_at_or_above(&enclosing, Some(2), zero_at(&["/"])).as_deref(), Some("/"));
+            assert_eq!(
+                super::zero_swap_at_or_above(&enclosing, Some(2), zero_at(&["/a/b"])),
+                None
+            );
+            assert_eq!(
+                super::zero_swap_at_or_above(&enclosing, Some(2), zero_at(&["/a/b", "/a"]))
+                    .as_deref(),
+                Some("/a")
+            );
+            assert_eq!(
+                super::zero_swap_at_or_above(&enclosing, Some(2), zero_at(&["/"])).as_deref(),
+                Some("/")
+            );
         }
     }
 }
@@ -2519,8 +2841,13 @@ mod linux {
 mod tests {
     use super::*;
 
-    fn facts(enclosure_exit: Result<CapabilityEvidence, String>, container_enclosure: Option<u64>) -> HostFacts {
-        let unobservable = || ProbeOutcome::Unobservable { reason: "fixture".to_owned() };
+    fn facts(
+        enclosure_exit: Result<CapabilityEvidence, String>,
+        container_enclosure: Option<u64>,
+    ) -> HostFacts {
+        let unobservable = || ProbeOutcome::Unobservable {
+            reason: "fixture".to_owned(),
+        };
         HostFacts {
             version: HOST_FACTS_VERSION,
             kernel_release: "6.0".to_owned(),
@@ -2550,7 +2877,12 @@ mod tests {
                 pids_max: None,
             },
             swap_devices: Some(Vec::new()),
-            memlock: MemlockFacts { soft: None, hard: None, locked_bytes: None, cap_ipc_lock: false },
+            memlock: MemlockFacts {
+                soft: None,
+                hard: None,
+                locked_bytes: None,
+                cap_ipc_lock: false,
+            },
             unshare_user: unobservable(),
             unshare_user_pid_mount: unobservable(),
             pidfd: unobservable(),
@@ -2575,7 +2907,14 @@ mod tests {
             filesystem: Some(filesystem.to_owned()),
             f_type: Some(f_type),
             mount_id: Some(mount_id),
-            mount_point: Some(if mount_id == root_mount_id { "/" } else { "/data" }.to_owned()),
+            mount_point: Some(
+                if mount_id == root_mount_id {
+                    "/"
+                } else {
+                    "/data"
+                }
+                .to_owned(),
+            ),
             mount_source: Some("/dev/vdb".to_owned()),
             root_mount_id: Some(root_mount_id),
             private_pid_namespace,
@@ -2596,14 +2935,32 @@ mod tests {
         let in_container = Some(true);
         let on_host = Some(false);
         let refused = [
-            (storage("overlay", 0x794c_7630, 1, 1, in_container), "overlay (the container's writable layer)"),
-            (storage("tmpfs", 0x0102_1994, 40, 1, in_container), "memory-backed"),
-            (storage("ramfs", 0x8584_58f6, 40, 1, on_host), "memory-backed"),
+            (
+                storage("overlay", 0x794c_7630, 1, 1, in_container),
+                "overlay (the container's writable layer)",
+            ),
+            (
+                storage("tmpfs", 0x0102_1994, 40, 1, in_container),
+                "memory-backed",
+            ),
+            (
+                storage("ramfs", 0x8584_58f6, 40, 1, on_host),
+                "memory-backed",
+            ),
             // The magic number alone names a union filesystem.
-            (storage("ext4", 0x794c_7630, 40, 1, in_container), "the container's writable layer"),
-            (storage("ext4", 0xef53, 1, 1, in_container), "container's root filesystem"),
+            (
+                storage("ext4", 0x794c_7630, 40, 1, in_container),
+                "the container's writable layer",
+            ),
+            (
+                storage("ext4", 0xef53, 1, 1, in_container),
+                "container's root filesystem",
+            ),
             (storage("ext4", 0xef53, 1, 1, None), "undecided"),
-            (storage("9p", 0x0102_1997, 40, 1, in_container), "cannot classify"),
+            (
+                storage("9p", 0x0102_1997, 40, 1, in_container),
+                "cannot classify",
+            ),
         ];
         for (facts, reason) in refused {
             let refusal = decide_durable_root(&facts).unwrap_err();
@@ -2612,37 +2969,77 @@ mod tests {
         }
         let own_mount = decide_durable_root(&storage("ext4", 0xef53, 40, 1, in_container)).unwrap();
         assert_eq!(own_mount.source, ProofSource::Measured);
-        assert!(own_mount.basis.contains("durable by mount"), "{}", own_mount.basis);
-        assert!(own_mount.basis.contains("nothing here proves the provider keeps it"), "{}", own_mount.basis);
+        assert!(
+            own_mount.basis.contains("durable by mount"),
+            "{}",
+            own_mount.basis
+        );
+        assert!(
+            own_mount
+                .basis
+                .contains("nothing here proves the provider keeps it"),
+            "{}",
+            own_mount.basis
+        );
         assert!(own_mount.basis.contains("/dev/vdb"), "{}", own_mount.basis);
         let network = decide_durable_root(&storage("nfs4", 0x6969, 40, 1, in_container)).unwrap();
         assert_eq!(network.source, ProofSource::Measured);
-        assert!(network.basis.contains("network filesystem"), "{}", network.basis);
+        assert!(
+            network.basis.contains("network filesystem"),
+            "{}",
+            network.basis
+        );
         let host_root = decide_durable_root(&storage("ext4", 0xef53, 1, 1, on_host)).unwrap();
         assert_eq!(host_root.source, ProofSource::Measured);
-        assert!(host_root.basis.contains("initial pid namespace"), "{}", host_root.basis);
-        assert!(host_root.basis.contains("no hypervisor is detected"), "{}", host_root.basis);
+        assert!(
+            host_root.basis.contains("initial pid namespace"),
+            "{}",
+            host_root.basis
+        );
+        assert!(
+            host_root.basis.contains("no hypervisor is detected"),
+            "{}",
+            host_root.basis
+        );
 
         // A virtual machine's root disk is refused; its separate volume is not.
-        let vm_root = decide_durable_root(&in_vm(storage("ext4", 0xef53, 1, 1, on_host))).unwrap_err();
+        let vm_root =
+            decide_durable_root(&in_vm(storage("ext4", 0xef53, 1, 1, on_host))).unwrap_err();
         assert!(vm_root.contains("virtual machine's root disk"), "{vm_root}");
         assert!(vm_root.contains("separately attached volume"), "{vm_root}");
-        let vm_volume = decide_durable_root(&in_vm(storage("ext4", 0xef53, 40, 1, on_host))).unwrap();
+        let vm_volume =
+            decide_durable_root(&in_vm(storage("ext4", 0xef53, 40, 1, on_host))).unwrap();
         assert_eq!(vm_volume.source, ProofSource::Measured);
-        assert!(vm_volume.basis.contains("durable by mount"), "{}", vm_volume.basis);
+        assert!(
+            vm_volume.basis.contains("durable by mount"),
+            "{}",
+            vm_volume.basis
+        );
         let mut undecided = storage("xfs", 0x5846_5342, 1, 1, on_host);
         undecided.hypervisor = None;
-        assert!(decide_durable_root(&undecided).unwrap_err().contains("virtual is undecided"));
+        assert!(
+            decide_durable_root(&undecided)
+                .unwrap_err()
+                .contains("virtual is undecided")
+        );
 
         let mut unreadable = storage("ext4", 0xef53, 40, 1, in_container);
         unreadable.filesystem = None;
         unreadable.f_type = None;
-        assert!(decide_durable_root(&unreadable).unwrap_err().contains("unreadable"));
+        assert!(
+            decide_durable_root(&unreadable)
+                .unwrap_err()
+                .contains("unreadable")
+        );
         // The magic number classifies when the mount table is unreadable.
         unreadable.f_type = Some(0x5846_5342);
         assert!(decide_durable_root(&unreadable).is_ok());
         unreadable.root_mount_id = None;
-        assert!(decide_durable_root(&unreadable).unwrap_err().contains("undecided"));
+        assert!(
+            decide_durable_root(&unreadable)
+                .unwrap_err()
+                .contains("undecided")
+        );
 
         let mut emulated = storage("ext4", 0xef53, 40, 1, in_container);
         emulated.kernel_kind = "gvisor".to_owned();
@@ -2668,31 +3065,55 @@ mod tests {
         let decided = decide_hypervisor(Some(bare), None, Some("Dell Inc.\n"), Some("Inspiron\n"));
         assert_eq!(decided.0, Some(false), "{}", decided.1);
         assert!(decided.1.contains("Dell Inc."), "{}", decided.1);
-        assert_eq!(decide_hypervisor(Some(guest), None, None, None).0, Some(true));
-        assert_eq!(decide_hypervisor(Some(bare), Some("xen\n"), None, None).0, Some(true));
+        assert_eq!(
+            decide_hypervisor(Some(guest), None, None, None).0,
+            Some(true)
+        );
+        assert_eq!(
+            decide_hypervisor(Some(bare), Some("xen\n"), None, None).0,
+            Some(true)
+        );
         let firmware = decide_hypervisor(Some(bare), None, Some("QEMU"), Some("Standard PC"));
         assert_eq!(firmware.0, Some(true));
         assert!(firmware.1.contains("QEMU"), "{}", firmware.1);
-        assert_eq!(decide_hypervisor(Some(arm), None, Some("Amazon EC2"), None).0, Some(true));
+        assert_eq!(
+            decide_hypervisor(Some(arm), None, Some("Amazon EC2"), None).0,
+            Some(true)
+        );
         // Without the x86 flag line or the firmware identity nothing is decided.
-        assert_eq!(decide_hypervisor(Some(arm), None, Some("Ampere"), None).0, None);
+        assert_eq!(
+            decide_hypervisor(Some(arm), None, Some("Ampere"), None).0,
+            None
+        );
         assert_eq!(decide_hypervisor(Some(bare), None, None, None).0, None);
-        assert_eq!(decide_hypervisor(None, None, Some("Dell Inc."), None).0, None);
+        assert_eq!(
+            decide_hypervisor(None, None, Some("Dell Inc."), None).0,
+            None
+        );
     }
 
     #[test]
     fn host_capabilities_carry_the_durable_root_decision() {
         let mut host = facts(Err("fixture".to_owned()), None);
         let view = host.capabilities();
-        assert_eq!(view.provided[STORAGE_DURABLE_ROOT].source, ProofSource::Measured);
+        assert_eq!(
+            view.provided[STORAGE_DURABLE_ROOT].source,
+            ProofSource::Measured
+        );
         host.app_root_storage = storage("overlay", 0x794c_7630, 1, 1, Some(true));
         let view = host.capabilities();
-        assert!(view.missing[STORAGE_DURABLE_ROOT].contains("overlay"), "{view:?}");
+        assert!(
+            view.missing[STORAGE_DURABLE_ROOT].contains("overlay"),
+            "{view:?}"
+        );
         assert!(!view.provided.contains_key(STORAGE_DURABLE_ROOT));
     }
 
     fn bounded_day() -> HostLifetimeBound {
-        HostLifetimeBound { provider: "example-host".to_owned(), seconds: 24 * 3600 }
+        HostLifetimeBound {
+            provider: "example-host".to_owned(),
+            seconds: 24 * 3600,
+        }
     }
 
     #[test]
@@ -2700,38 +3121,88 @@ mod tests {
         let volume = storage("ext4", 0xef53, 40, 1, Some(true));
         // The storage half is measured, but the absence of a lifetime bound
         // is only declared, so the whole is trusted and says so.
-        assert_eq!(decide_durable_root(&volume).unwrap().source, ProofSource::Measured);
+        assert_eq!(
+            decide_durable_root(&volume).unwrap().source,
+            ProofSource::Measured
+        );
         let held = decide_durable_state(&volume, None).unwrap();
-        assert_eq!((held.source, held.provider.as_str()), (ProofSource::Trusted, HOST_PROVIDER));
+        assert_eq!(
+            (held.source, held.provider.as_str()),
+            (ProofSource::Trusted, HOST_PROVIDER)
+        );
         assert!(held.basis.contains("durable by mount"), "{}", held.basis);
         assert!(
             held.basis.contains("no hard lifetime is declared")
-                && held.basis.contains("that absence is declared data, not measured"),
+                && held
+                    .basis
+                    .contains("that absence is declared data, not measured"),
             "{}",
             held.basis
         );
         // A disposable virtual machine: its root disk, and a declared 24 h bound.
         let mut machine_root = storage("ext4", 0xef53, 1, 1, Some(false));
         machine_root.hypervisor = Some(true);
-        machine_root.hypervisor_basis = "the firmware names a virtual machine (Firecracker)".to_owned();
+        machine_root.hypervisor_basis =
+            "the firmware names a virtual machine (Firecracker)".to_owned();
         let refused = decide_durable_state(&machine_root, Some(&bounded_day())).unwrap_err();
-        assert!(refused.starts_with("no persistent disk; 24 h hard lifetime ("), "{refused}");
+        assert!(
+            refused.starts_with("no persistent disk; 24 h hard lifetime ("),
+            "{refused}"
+        );
         assert!(refused.contains("virtual machine's root disk"), "{refused}");
-        assert!(refused.contains("provider example-host ends this host 24 h (86400 s)"), "{refused}");
+        assert!(
+            refused.contains("provider example-host ends this host 24 h (86400 s)"),
+            "{refused}"
+        );
         // Either half alone refuses with its own plain reason.
         let overlay = storage("overlay", 0x794c_7630, 1, 1, Some(true));
-        assert!(decide_durable_state(&overlay, None).unwrap_err().starts_with("no persistent disk ("));
+        assert!(
+            decide_durable_state(&overlay, None)
+                .unwrap_err()
+                .starts_with("no persistent disk (")
+        );
         let bounded = decide_durable_state(&volume, Some(&bounded_day())).unwrap_err();
         assert!(bounded.starts_with("24 h hard lifetime ("), "{bounded}");
         // Under gVisor the storage half is provider-attested, and the whole
         // keeps that grade rather than rising to trusted.
         let mut emulated = volume.clone();
         emulated.kernel_kind = "gvisor".to_owned();
-        assert_eq!(decide_durable_state(&emulated, None).unwrap().source, ProofSource::ProviderAttested);
-        assert_eq!(HostLifetimeBound { provider: "p".to_owned(), seconds: 90 }.describe(), "90 s");
-        assert_eq!(HostLifetimeBound { provider: "p".to_owned(), seconds: 14_400 }.describe(), "4 h");
-        assert!(HostLifetimeBound { provider: "p".to_owned(), seconds: 0 }.refusal().is_some());
-        assert!(HostLifetimeBound { provider: "a b".to_owned(), seconds: 1 }.refusal().is_some());
+        assert_eq!(
+            decide_durable_state(&emulated, None).unwrap().source,
+            ProofSource::ProviderAttested
+        );
+        assert_eq!(
+            HostLifetimeBound {
+                provider: "p".to_owned(),
+                seconds: 90
+            }
+            .describe(),
+            "90 s"
+        );
+        assert_eq!(
+            HostLifetimeBound {
+                provider: "p".to_owned(),
+                seconds: 14_400
+            }
+            .describe(),
+            "4 h"
+        );
+        assert!(
+            HostLifetimeBound {
+                provider: "p".to_owned(),
+                seconds: 0
+            }
+            .refusal()
+            .is_some()
+        );
+        assert!(
+            HostLifetimeBound {
+                provider: "a b".to_owned(),
+                seconds: 1
+            }
+            .refusal()
+            .is_some()
+        );
         assert_eq!(bounded_day().refusal(), None);
     }
 
@@ -2739,20 +3210,34 @@ mod tests {
     fn host_capabilities_carry_the_durable_state_decision() {
         let mut host = facts(Err("fixture".to_owned()), None);
         let view = host.capabilities();
-        assert_eq!(view.provided[STORAGE_DURABLE_ROOT].source, ProofSource::Measured);
-        assert_eq!(view.provided[PERSISTENCE_DURABLE_STATE].source, ProofSource::Trusted);
+        assert_eq!(
+            view.provided[STORAGE_DURABLE_ROOT].source,
+            ProofSource::Measured
+        );
+        assert_eq!(
+            view.provided[PERSISTENCE_DURABLE_STATE].source,
+            ProofSource::Trusted
+        );
         host.declared_lifetime = Some(bounded_day());
         let view = host.capabilities();
         // The storage proof stands; the declared bound withholds durable state.
         assert!(view.provided.contains_key(STORAGE_DURABLE_ROOT));
-        assert!(view.missing[PERSISTENCE_DURABLE_STATE].starts_with("24 h hard lifetime"), "{view:?}");
+        assert!(
+            view.missing[PERSISTENCE_DURABLE_STATE].starts_with("24 h hard lifetime"),
+            "{view:?}"
+        );
         let value = serde_json::to_value(&host).unwrap();
         assert_eq!(value["declared_lifetime"]["seconds"], 86_400);
         assert_eq!(serde_json::from_value::<HostFacts>(value).unwrap(), host);
     }
 
     fn step(path: &str, owner: u32, mode: u32, mount: u64) -> DirectoryStepFacts {
-        DirectoryStepFacts { path: path.to_owned(), owner_uid: owner, mode, mount_id: mount }
+        DirectoryStepFacts {
+            path: path.to_owned(),
+            owner_uid: owner,
+            mode,
+            mount_id: mount,
+        }
     }
 
     /// A walk from `/data/app` down to `/data/app/state/homes` by uid 1000,
@@ -2775,27 +3260,54 @@ mod tests {
     fn a_private_directory_is_owned_0700_on_the_anchor_mount_below_safe_ancestors() {
         let basis = decide_private_directory(&private(0o700, 1000, 40)).unwrap();
         assert!(
-            basis.contains("private to uid 1000") && basis.contains("mode 0700") && basis.contains("mount 40"),
+            basis.contains("private to uid 1000")
+                && basis.contains("mode 0700")
+                && basis.contains("mount 40"),
             "{basis}"
         );
-        assert!(basis.contains("from /data/app down") && basis.contains("uid 1000 or root"), "{basis}");
-        assert!(decide_private_directory(&private(0o750, 1000, 40)).unwrap_err().contains("mode 0750"));
-        assert!(decide_private_directory(&private(0o1700, 1000, 40)).unwrap_err().contains("mode 1700"));
-        assert!(decide_private_directory(&private(0o700, 0, 40)).unwrap_err().contains("owned by uid 0"));
+        assert!(
+            basis.contains("from /data/app down") && basis.contains("uid 1000 or root"),
+            "{basis}"
+        );
+        assert!(
+            decide_private_directory(&private(0o750, 1000, 40))
+                .unwrap_err()
+                .contains("mode 0750")
+        );
+        assert!(
+            decide_private_directory(&private(0o1700, 1000, 40))
+                .unwrap_err()
+                .contains("mode 1700")
+        );
+        assert!(
+            decide_private_directory(&private(0o700, 0, 40))
+                .unwrap_err()
+                .contains("owned by uid 0")
+        );
         // A bind mount at the directory, or anywhere on the walk, is refused.
         let bound = decide_private_directory(&private(0o700, 1000, 41)).unwrap_err();
-        assert_eq!(bound, "/data/app/state/homes is on mount 41, not the mount 40 of /data/app");
+        assert_eq!(
+            bound,
+            "/data/app/state/homes is on mount 41, not the mount 40 of /data/app"
+        );
         // The first failing ancestor is named: another account's directory,
         // then a group-writable one without the sticky bit.
         let mut foreign = private(0o700, 1000, 40);
         foreign.chain[1].owner_uid = 1001;
         let refused = decide_private_directory(&foreign).unwrap_err();
-        assert!(refused.starts_with("/data/app/state, above /data/app/state/homes, is owned by uid 1001"), "{refused}");
+        assert!(
+            refused
+                .starts_with("/data/app/state, above /data/app/state/homes, is owned by uid 1001"),
+            "{refused}"
+        );
         let mut shared = private(0o700, 1000, 40);
         shared.chain[0].mode = 0o775;
         shared.chain[1].mode = 0o777;
         let refused = decide_private_directory(&shared).unwrap_err();
-        assert!(refused.starts_with("/data/app, above /data/app/state/homes, has mode 0775"), "{refused}");
+        assert!(
+            refused.starts_with("/data/app, above /data/app/state/homes, has mode 0775"),
+            "{refused}"
+        );
         // A sticky shared directory cannot have our entries replaced.
         let mut sticky = private(0o700, 1000, 40);
         sticky.chain[1].mode = 0o1777;
@@ -2804,16 +3316,26 @@ mod tests {
         let mut stopped = private(0o700, 1000, 40);
         stopped.chain.truncate(1);
         stopped.walk_refusal = Some("/data/app/state is a symbolic link".to_owned());
-        assert_eq!(decide_private_directory(&stopped).unwrap_err(), "/data/app/state is a symbolic link");
+        assert_eq!(
+            decide_private_directory(&stopped).unwrap_err(),
+            "/data/app/state is a symbolic link"
+        );
         let mut short = private(0o700, 1000, 40);
         short.chain.pop();
-        assert!(decide_private_directory(&short).unwrap_err().contains("ended at /data/app/state"));
+        assert!(
+            decide_private_directory(&short)
+                .unwrap_err()
+                .contains("ended at /data/app/state")
+        );
         // As root the directory is private to uid 0, and the basis says so.
         let mut root = private(0o700, 0, 40);
         root.process_uid = Some(0);
         root.chain[0].owner_uid = 0;
         let basis = decide_private_directory(&root).unwrap();
-        assert!(basis.starts_with("/data/app/state/homes is private to uid 0 (root):"), "{basis}");
+        assert!(
+            basis.starts_with("/data/app/state/homes is private to uid 0 (root):"),
+            "{basis}"
+        );
         assert!(basis.contains("is owned by root,"), "{basis}");
     }
 
@@ -2840,26 +3362,54 @@ mod tests {
         assert_eq!(facts.walk_refusal, None, "{facts:?}");
         assert_eq!(facts.chain.len(), 3, "{facts:?}");
         assert_eq!(facts.chain[2].mode, 0o700);
-        assert_eq!(Some(facts.chain[2].owner_uid), facts.process_uid, "{facts:?}");
+        assert_eq!(
+            Some(facts.chain[2].owner_uid),
+            facts.process_uid,
+            "{facts:?}"
+        );
         let storage = RootStorageFacts::observe(root.path());
         assert_eq!(Some(facts.chain[0].mount_id), storage.mount_id, "{facts:?}");
         decide_private_directory(&facts).unwrap();
         // A group-writable ancestor is named.
         let state = root.path().join("state");
         std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o775)).unwrap();
-        let refused = decide_private_directory(&PrivateDirectoryFacts::observe(root.path(), &home)).unwrap_err();
-        assert!(refused.contains(&format!("{}, above", state.display())) && refused.contains("0775"), "{refused}");
+        let refused = decide_private_directory(&PrivateDirectoryFacts::observe(root.path(), &home))
+            .unwrap_err();
+        assert!(
+            refused.contains(&format!("{}, above", state.display())) && refused.contains("0775"),
+            "{refused}"
+        );
         std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o755)).unwrap();
         std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o755)).unwrap();
         let open = PrivateDirectoryFacts::observe(root.path(), &home);
-        assert!(decide_private_directory(&open).unwrap_err().contains("0755"));
+        assert!(
+            decide_private_directory(&open)
+                .unwrap_err()
+                .contains("0755")
+        );
         let missing = PrivateDirectoryFacts::observe(root.path(), &root.path().join("absent"));
-        assert_eq!(missing.walk_refusal, Some(format!("{} is absent", root.path().join("absent").display())));
+        assert_eq!(
+            missing.walk_refusal,
+            Some(format!(
+                "{} is absent",
+                root.path().join("absent").display()
+            ))
+        );
         assert!(decide_private_directory(&missing).is_err());
         let outside = PrivateDirectoryFacts::observe(&state, root.path());
-        assert!(outside.walk_refusal.unwrap().contains("does not lie beneath"));
+        assert!(
+            outside
+                .walk_refusal
+                .unwrap()
+                .contains("does not lie beneath")
+        );
         let climbing = PrivateDirectoryFacts::observe(root.path(), &state.join("..").join("state"));
-        assert!(climbing.walk_refusal.unwrap().contains("plain directory names"));
+        assert!(
+            climbing
+                .walk_refusal
+                .unwrap()
+                .contains("plain directory names")
+        );
     }
 
     #[cfg(target_os = "linux")]
@@ -2871,7 +3421,10 @@ mod tests {
         std::fs::rename(&home, &real).unwrap();
         std::os::unix::fs::symlink(&real, &home).unwrap();
         let facts = PrivateDirectoryFacts::observe(root.path(), &home);
-        assert_eq!(facts.walk_refusal, Some(format!("{} is a symbolic link", home.display())));
+        assert_eq!(
+            facts.walk_refusal,
+            Some(format!("{} is a symbolic link", home.display()))
+        );
         assert_eq!(facts.chain.len(), 2, "{facts:?}");
         // An ancestor is a link.
         let (root, home) = private_tree();
@@ -2880,14 +3433,20 @@ mod tests {
         std::fs::rename(&state, &moved).unwrap();
         std::os::unix::fs::symlink(&moved, &state).unwrap();
         let facts = PrivateDirectoryFacts::observe(root.path(), &home);
-        assert_eq!(facts.walk_refusal, Some(format!("{} is a symbolic link", state.display())));
+        assert_eq!(
+            facts.walk_refusal,
+            Some(format!("{} is a symbolic link", state.display()))
+        );
         // The anchor itself is a link.
         let (root, _home) = private_tree();
         let linked_root = root.path().join("linked-root");
         std::fs::create_dir(root.path().join("target")).unwrap();
         std::os::unix::fs::symlink(root.path().join("target"), &linked_root).unwrap();
         let facts = PrivateDirectoryFacts::observe(&linked_root, &linked_root.join("homes"));
-        assert_eq!(facts.walk_refusal, Some(format!("{} is a symbolic link", linked_root.display())));
+        assert_eq!(
+            facts.walk_refusal,
+            Some(format!("{} is a symbolic link", linked_root.display()))
+        );
         assert!(facts.chain.is_empty());
         // A path swapped after a private observation is judged as it now
         // stands: a link put where the directory was is refused even though
@@ -2898,18 +3457,30 @@ mod tests {
         std::fs::rename(&home, &aside).unwrap();
         std::os::unix::fs::symlink(&aside, &home).unwrap();
         let swapped = PrivateDirectoryFacts::observe(root.path(), &home);
-        assert!(decide_private_directory(&swapped).unwrap_err().ends_with("is a symbolic link"));
+        assert!(
+            decide_private_directory(&swapped)
+                .unwrap_err()
+                .ends_with("is a symbolic link")
+        );
         // A regular file in its place is not a directory.
         std::fs::remove_file(&home).unwrap();
         std::fs::write(&home, b"").unwrap();
         let file = PrivateDirectoryFacts::observe(root.path(), &home);
-        assert_eq!(file.walk_refusal, Some(format!("{} is not a directory", home.display())));
+        assert_eq!(
+            file.walk_refusal,
+            Some(format!("{} is not a directory", home.display()))
+        );
     }
 
     #[test]
     fn a_view_keeps_bounded_printable_text_and_fits_a_guest_frame() {
         let mut view = HostCapabilities::default();
-        view.provide("time", ProofSource::Measured, "p\u{e9}r \"x\"", "a\\b\nc\u{2014}d");
+        view.provide(
+            "time",
+            ProofSource::Measured,
+            "p\u{e9}r \"x\"",
+            "a\\b\nc\u{2014}d",
+        );
         assert_eq!(view.provided["time"].provider, "p?r 'x'");
         assert_eq!(view.provided["time"].basis, "a/b?c?d");
         view.refuse("other", "r".repeat(2 * MAX_CAPABILITY_TEXT_BYTES));
@@ -2938,16 +3509,33 @@ mod tests {
             );
         }
         let encoded = serde_json::to_vec(&worst).unwrap();
-        let entry_bound = (MAX_CAPABILITY_NAME_BYTES + 2) + 1 + 10 + ("provider_attested".len() + 2) + 12
-            + (MAX_CAPABILITY_NAME_BYTES + 2) + 9 + (MAX_CAPABILITY_TEXT_BYTES + 2) + 1 + 1;
+        let entry_bound = (MAX_CAPABILITY_NAME_BYTES + 2)
+            + 1
+            + 10
+            + ("provider_attested".len() + 2)
+            + 12
+            + (MAX_CAPABILITY_NAME_BYTES + 2)
+            + 9
+            + (MAX_CAPABILITY_TEXT_BYTES + 2)
+            + 1
+            + 1;
         assert_eq!(entry_bound, 827);
-        assert!(encoded.len() <= MAX_CAPABILITY_ENTRIES * entry_bound + 32, "{}", encoded.len());
+        assert!(
+            encoded.len() <= MAX_CAPABILITY_ENTRIES * entry_bound + 32,
+            "{}",
+            encoded.len()
+        );
         assert!(encoded.len() <= 32 * 1024, "{}", encoded.len());
         // Every name the host view decides is within the name bound, and the
         // host view alone is within the entry bound.
         let host = facts(Err("fixture".to_owned()), None).capabilities();
         let names: Vec<&String> = host.provided.keys().chain(host.missing.keys()).collect();
-        assert!(names.iter().all(|name| name.len() <= MAX_CAPABILITY_NAME_BYTES), "{names:?}");
+        assert!(
+            names
+                .iter()
+                .all(|name| name.len() <= MAX_CAPABILITY_NAME_BYTES),
+            "{names:?}"
+        );
         assert!(names.len() <= MAX_CAPABILITY_ENTRIES, "{names:?}");
     }
 
@@ -2958,8 +3546,14 @@ mod tests {
         let facts = RootStorageFacts::observe(root.path());
         assert_eq!(facts.path, root.path().display().to_string());
         assert!(facts.f_type.is_some(), "{facts:?}");
-        assert!(facts.mount_id.is_some() && facts.root_mount_id.is_some(), "{facts:?}");
-        assert!(facts.filesystem.is_some() && facts.mount_point.is_some(), "{facts:?}");
+        assert!(
+            facts.mount_id.is_some() && facts.root_mount_id.is_some(),
+            "{facts:?}"
+        );
+        assert!(
+            facts.filesystem.is_some() && facts.mount_point.is_some(),
+            "{facts:?}"
+        );
         assert!(facts.private_pid_namespace.is_some(), "{facts:?}");
         assert!(!facts.hypervisor_basis.is_empty(), "{facts:?}");
         // Whatever this host is, the decision is reached with a reason.
@@ -2973,7 +3567,10 @@ mod tests {
     }
 
     fn inits() -> Vec<String> {
-        ["catatonit", "dumb-init", "tini"].iter().map(|name| (*name).to_owned()).collect()
+        ["catatonit", "dumb-init", "tini"]
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect()
     }
 
     #[test]
@@ -3000,16 +3597,33 @@ mod tests {
 
     #[test]
     fn trusted_grades_fall_to_provider_attested_under_gvisor() {
-        let mut under_tini = facts(decide_enclosure_exit(Some(true), 7, 1, Some("tini"), &inits()), Some(42));
+        let mut under_tini = facts(
+            decide_enclosure_exit(Some(true), 7, 1, Some("tini"), &inits()),
+            Some(42),
+        );
         under_tini.kernel_kind = "gvisor".to_owned();
         under_tini.pidfd = ProbeOutcome::Allowed;
         let view = under_tini.capabilities();
-        for name in [TERMINATION_ENCLOSURE_TRUSTED_INIT, RECOVERY_ENCLOSURE_TRUSTED_INIT, "termination:process_group"] {
+        for name in [
+            TERMINATION_ENCLOSURE_TRUSTED_INIT,
+            RECOVERY_ENCLOSURE_TRUSTED_INIT,
+            "termination:process_group",
+        ] {
             let evidence = &view.provided[name];
             assert_eq!(evidence.source, ProofSource::ProviderAttested, "{name}");
-            assert!(evidence.basis.contains("gVisor"), "{name}: {}", evidence.basis);
-            assert!(satisfies(&CapabilityRequirement::from(name), name, evidence).is_err(), "{name}");
-            assert!(satisfies(&accepting(name, &["trusted"]), name, evidence).is_err(), "{name}");
+            assert!(
+                evidence.basis.contains("gVisor"),
+                "{name}: {}",
+                evidence.basis
+            );
+            assert!(
+                satisfies(&CapabilityRequirement::from(name), name, evidence).is_err(),
+                "{name}"
+            );
+            assert!(
+                satisfies(&accepting(name, &["trusted"]), name, evidence).is_err(),
+                "{name}"
+            );
             satisfies(&accepting(name, &["provider_attested"]), name, evidence).unwrap();
         }
 
@@ -3025,8 +3639,12 @@ mod tests {
             refusal,
             "termination:process_group is only trusted-proven here by host; the floor accepts measured"
         );
-        satisfies(&accepting("termination:process_group", &["trusted"]), "termination:process_group", process_group)
-            .unwrap();
+        satisfies(
+            &accepting("termination:process_group", &["trusted"]),
+            "termination:process_group",
+            process_group,
+        )
+        .unwrap();
         satisfies(
             &accepting("termination:process_group", &["measured", "trusted"]),
             "termination:process_group",
@@ -3037,7 +3655,10 @@ mod tests {
 
     #[test]
     fn enclosure_capabilities_follow_the_exit_grade() {
-        let pid_one = facts(decide_enclosure_exit(Some(true), 1, 0, Some("ryeosd"), &[]), Some(42));
+        let pid_one = facts(
+            decide_enclosure_exit(Some(true), 1, 0, Some("ryeosd"), &[]),
+            Some(42),
+        );
         let view = pid_one.capabilities();
         for name in [
             TERMINATION_ENCLOSURE,
@@ -3046,20 +3667,55 @@ mod tests {
             RECOVERY_ENCLOSURE_TRUSTED_INIT,
         ] {
             assert_eq!(view.provided[name].source, ProofSource::Measured, "{name}");
-            satisfies(&CapabilityRequirement::from(name), name, &view.provided[name]).unwrap();
+            satisfies(
+                &CapabilityRequirement::from(name),
+                name,
+                &view.provided[name],
+            )
+            .unwrap();
         }
 
-        let under_tini = facts(decide_enclosure_exit(Some(true), 7, 1, Some("tini"), &inits()), Some(42));
+        let under_tini = facts(
+            decide_enclosure_exit(Some(true), 7, 1, Some("tini"), &inits()),
+            Some(42),
+        );
         let view = under_tini.capabilities();
-        assert!(view.missing[TERMINATION_ENCLOSURE].contains("not pid 1"), "{view:?}");
-        assert!(view.missing[RECOVERY_ENCLOSURE].contains("undecided"), "{view:?}");
-        assert_eq!(view.provided[TERMINATION_ENCLOSURE_TRUSTED_INIT].source, ProofSource::Trusted);
-        assert_eq!(view.provided[RECOVERY_ENCLOSURE_TRUSTED_INIT].source, ProofSource::Trusted);
-        assert!(view.provided[RECOVERY_ENCLOSURE_TRUSTED_INIT].basis.contains("inode 42"));
+        assert!(
+            view.missing[TERMINATION_ENCLOSURE].contains("not pid 1"),
+            "{view:?}"
+        );
+        assert!(
+            view.missing[RECOVERY_ENCLOSURE].contains("undecided"),
+            "{view:?}"
+        );
+        assert_eq!(
+            view.provided[TERMINATION_ENCLOSURE_TRUSTED_INIT].source,
+            ProofSource::Trusted
+        );
+        assert_eq!(
+            view.provided[RECOVERY_ENCLOSURE_TRUSTED_INIT].source,
+            ProofSource::Trusted
+        );
+        assert!(
+            view.provided[RECOVERY_ENCLOSURE_TRUSTED_INIT]
+                .basis
+                .contains("inode 42")
+        );
         // A trusted proof meets a trusted-init name only where the floor
         // accepts the trusted grade; a bare name still wants a measurement.
-        for name in [TERMINATION_ENCLOSURE_TRUSTED_INIT, RECOVERY_ENCLOSURE_TRUSTED_INIT] {
-            assert!(satisfies(&CapabilityRequirement::from(name), name, &view.provided[name]).is_err(), "{name}");
+        for name in [
+            TERMINATION_ENCLOSURE_TRUSTED_INIT,
+            RECOVERY_ENCLOSURE_TRUSTED_INIT,
+        ] {
+            assert!(
+                satisfies(
+                    &CapabilityRequirement::from(name),
+                    name,
+                    &view.provided[name]
+                )
+                .is_err(),
+                "{name}"
+            );
             satisfies(&accepting(name, &["trusted"]), name, &view.provided[name]).unwrap();
         }
         // A provider attestation of a trusted-init name does not meet a
@@ -3075,9 +3731,16 @@ mod tests {
             &attested,
         )
         .unwrap_err();
-        assert!(refusal.contains("only provider_attested-proven here by host; the floor accepts trusted"), "{refusal}");
+        assert!(
+            refusal
+                .contains("only provider_attested-proven here by host; the floor accepts trusted"),
+            "{refusal}"
+        );
 
-        let other = facts(decide_enclosure_exit(Some(true), 7, 1, Some("sh"), &inits()), Some(42));
+        let other = facts(
+            decide_enclosure_exit(Some(true), 7, 1, Some("sh"), &inits()),
+            Some(42),
+        );
         let view = other.capabilities();
         for name in [
             TERMINATION_ENCLOSURE,
@@ -3089,7 +3752,10 @@ mod tests {
         }
         assert!(view.missing[RECOVERY_ENCLOSURE_TRUSTED_INIT].contains("undecided"));
 
-        let not_whole = facts(decide_enclosure_exit(Some(true), 1, 0, Some("ryeosd"), &[]), None);
+        let not_whole = facts(
+            decide_enclosure_exit(Some(true), 1, 0, Some("ryeosd"), &[]),
+            None,
+        );
         let view = not_whole.capabilities();
         assert!(view.provided.contains_key(TERMINATION_ENCLOSURE));
         assert!(view.missing[RECOVERY_ENCLOSURE].contains("not the whole of a container"));
@@ -3099,9 +3765,27 @@ mod tests {
     fn residency_names_follow_the_proof_basis() {
         let mut host = facts(Err("fixture".to_owned()), None);
         let cases = [
-            (ResidencyProof::Locked { basis: "cap".to_owned() }, RESIDENCY_LOCKED, true),
-            (ResidencyProof::SwapLimit { basis: "cgroup /a".to_owned() }, RESIDENCY_SWAP_LIMIT, true),
-            (ResidencyProof::SwapAbsent { basis: "no swap now".to_owned() }, RESIDENCY_SWAP_ABSENT, false),
+            (
+                ResidencyProof::Locked {
+                    basis: "cap".to_owned(),
+                },
+                RESIDENCY_LOCKED,
+                true,
+            ),
+            (
+                ResidencyProof::SwapLimit {
+                    basis: "cgroup /a".to_owned(),
+                },
+                RESIDENCY_SWAP_LIMIT,
+                true,
+            ),
+            (
+                ResidencyProof::SwapAbsent {
+                    basis: "no swap now".to_owned(),
+                },
+                RESIDENCY_SWAP_ABSENT,
+                false,
+            ),
         ];
         for (proof, held, standing) in cases {
             host.residency = Some(proof.clone());
@@ -3111,24 +3795,38 @@ mod tests {
             assert_eq!(proof.capability_name(), Some(held));
             assert_eq!(view.provided[held].source, ProofSource::Measured, "{held}");
             assert!(view.provided[held].basis.contains(proof.basis()), "{held}");
-            for other in [RESIDENCY_LOCKED, RESIDENCY_SWAP_LIMIT, RESIDENCY_SWAP_ABSENT] {
+            for other in [
+                RESIDENCY_LOCKED,
+                RESIDENCY_SWAP_LIMIT,
+                RESIDENCY_SWAP_ABSENT,
+            ] {
                 if other != held {
                     assert!(view.missing[other].contains(held), "{other}: {view:?}");
                 }
             }
             if standing {
                 // The strong name shows the basis name that proves it.
-                assert!(view.provided[ACCOUNTING].basis.starts_with(held), "{view:?}");
+                assert!(
+                    view.provided[ACCOUNTING].basis.starts_with(held),
+                    "{view:?}"
+                );
             } else {
                 assert!(!view.provided.contains_key(ACCOUNTING));
-                assert!(view.missing[ACCOUNTING].contains(RESIDENCY_SWAP_ABSENT), "{view:?}");
+                assert!(
+                    view.missing[ACCOUNTING].contains(RESIDENCY_SWAP_ABSENT),
+                    "{view:?}"
+                );
             }
         }
 
         // An established proof re-decides every residency name.
-        host.residency = Some(ResidencyProof::Locked { basis: "cap".to_owned() });
+        host.residency = Some(ResidencyProof::Locked {
+            basis: "cap".to_owned(),
+        });
         let mut view = host.capabilities();
-        let weaker = ResidencyProof::SwapAbsent { basis: "no swap now".to_owned() };
+        let weaker = ResidencyProof::SwapAbsent {
+            basis: "no swap now".to_owned(),
+        };
         host.apply_residency(&mut view, Ok(&weaker));
         assert!(!view.provided.contains_key(ACCOUNTING));
         assert!(!view.provided.contains_key(RESIDENCY_LOCKED));
@@ -3138,7 +3836,10 @@ mod tests {
         host.residency_refusal = Some("mlock refused and swap is active".to_owned());
         let view = host.capabilities();
         for name in RESIDENCY_CAPABILITIES {
-            assert_eq!(view.missing[name], "mlock refused and swap is active", "{name}");
+            assert_eq!(
+                view.missing[name], "mlock refused and swap is active",
+                "{name}"
+            );
         }
         host.residency = Some(ResidencyProof::Unknown(serde_json::Map::new()));
         let view = host.capabilities();
@@ -3147,10 +3848,22 @@ mod tests {
         }
 
         host.kernel_kind = "gvisor".to_owned();
-        host.residency = Some(ResidencyProof::Locked { basis: "cap".to_owned() });
+        host.residency = Some(ResidencyProof::Locked {
+            basis: "cap".to_owned(),
+        });
         let view = host.capabilities();
-        assert_eq!(view.provided[ACCOUNTING].source, ProofSource::ProviderAttested);
-        assert!(satisfies(&CapabilityRequirement::from(ACCOUNTING), ACCOUNTING, &view.provided[ACCOUNTING]).is_err());
+        assert_eq!(
+            view.provided[ACCOUNTING].source,
+            ProofSource::ProviderAttested
+        );
+        assert!(
+            satisfies(
+                &CapabilityRequirement::from(ACCOUNTING),
+                ACCOUNTING,
+                &view.provided[ACCOUNTING]
+            )
+            .is_err()
+        );
         for evidence in view.provided.values() {
             assert_eq!(evidence.provider, HOST_PROVIDER);
         }
@@ -3165,16 +3878,21 @@ mod tests {
         .unwrap();
         assert_eq!(entries[1], CapabilityRequirement::from("time"));
         assert_eq!(entries[0].names(), [ACCOUNTING, RESIDENCY_SWAP_ABSENT]);
-        assert_eq!(entries[0].label(), "any_of(accounting, residency:swap_absent)");
+        assert_eq!(
+            entries[0].label(),
+            "any_of(accounting, residency:swap_absent)"
+        );
         assert_eq!(entries[1].names(), ["time"]);
         assert_eq!(
             serde_json::to_value(&entries).unwrap(),
             serde_json::json!([{"any_of": ["accounting", "residency:swap_absent"]}, "time"])
         );
-        assert!(serde_json::from_value::<CapabilityRequirement>(
-            serde_json::json!({"any_of": ["accounting"], "prefer": "accounting"})
-        )
-        .is_err());
+        assert!(
+            serde_json::from_value::<CapabilityRequirement>(
+                serde_json::json!({"any_of": ["accounting"], "prefer": "accounting"})
+            )
+            .is_err()
+        );
         assert!(serde_json::from_value::<CapabilityRequirement>(serde_json::json!(7)).is_err());
 
         // The object form carries accepted grades and providers and
@@ -3194,7 +3912,10 @@ mod tests {
         assert_eq!(serde_json::to_value(&entry).unwrap(), spec);
         let bare = CapabilityRequirement::from("time");
         assert!(bare.accepted_grades().is_empty() && bare.providers().is_empty());
-        assert_eq!(serde_json::to_value(&bare).unwrap(), serde_json::json!("time"));
+        assert_eq!(
+            serde_json::to_value(&bare).unwrap(),
+            serde_json::json!("time")
+        );
     }
 
     fn spec(value: serde_json::Value) -> CapabilityRequirement {
@@ -3204,15 +3925,39 @@ mod tests {
     #[test]
     fn a_spec_names_one_thing_and_only_grades_this_node_can_judge() {
         for (entry, refusal) in [
-            (spec(serde_json::json!({"name": "time", "any_of": ["accounting"]})), "both name and any_of"),
-            (spec(serde_json::json!({"accept": ["measured"]})), "neither name nor any_of"),
+            (
+                spec(serde_json::json!({"name": "time", "any_of": ["accounting"]})),
+                "both name and any_of",
+            ),
+            (
+                spec(serde_json::json!({"accept": ["measured"]})),
+                "neither name nor any_of",
+            ),
             (spec(serde_json::json!({"name": ""})), "empty capability"),
-            (spec(serde_json::json!({"any_of": ["accounting", "accounting"]})), "capability accounting twice"),
-            (spec(serde_json::json!({"name": "time", "accept": ["measured", "measured"]})), "grade measured twice"),
-            (spec(serde_json::json!({"name": "time", "accept": [""]})), "empty grade"),
-            (spec(serde_json::json!({"name": "time", "providers": ["host", "host"]})), "provider host twice"),
-            (spec(serde_json::json!({"name": "time", "accept": ["peer_attested"]})), "a peer's claim is not evidence"),
-            (spec(serde_json::json!({"name": "time", "accept": ["quorum_attested"]})), "grade quorum_attested, which this node cannot judge"),
+            (
+                spec(serde_json::json!({"any_of": ["accounting", "accounting"]})),
+                "capability accounting twice",
+            ),
+            (
+                spec(serde_json::json!({"name": "time", "accept": ["measured", "measured"]})),
+                "grade measured twice",
+            ),
+            (
+                spec(serde_json::json!({"name": "time", "accept": [""]})),
+                "empty grade",
+            ),
+            (
+                spec(serde_json::json!({"name": "time", "providers": ["host", "host"]})),
+                "provider host twice",
+            ),
+            (
+                spec(serde_json::json!({"name": "time", "accept": ["peer_attested"]})),
+                "a peer's claim is not evidence",
+            ),
+            (
+                spec(serde_json::json!({"name": "time", "accept": ["quorum_attested"]})),
+                "grade quorum_attested, which this node cannot judge",
+            ),
             (CapabilityRequirement::from(""), "empty capability"),
         ] {
             let reason = entry.spec_refusal().unwrap_or_default();
@@ -3223,7 +3968,9 @@ mod tests {
         for entry in [
             spec(serde_json::json!({"name": "time"})),
             spec(serde_json::json!({"name": "time", "accept": ["trusted"]})),
-            spec(serde_json::json!({"any_of": [ACCOUNTING, RESIDENCY_SWAP_ABSENT], "providers": ["host"]})),
+            spec(
+                serde_json::json!({"any_of": [ACCOUNTING, RESIDENCY_SWAP_ABSENT], "providers": ["host"]}),
+            ),
         ] {
             assert_eq!(entry.spec_refusal(), None, "{entry:?}");
         }
@@ -3239,7 +3986,11 @@ mod tests {
     }
 
     fn evidence(source: ProofSource, provider: &str) -> CapabilityEvidence {
-        CapabilityEvidence { source, provider: provider.to_owned(), basis: "fixture".to_owned() }
+        CapabilityEvidence {
+            source,
+            provider: provider.to_owned(),
+            basis: "fixture".to_owned(),
+        }
     }
 
     #[test]
@@ -3259,7 +4010,12 @@ mod tests {
             satisfies(&oci_only, "termination:scope", &measured_by_service).unwrap_err(),
             "termination:scope is proven here by host_service (measured); the floor accepts only external_controller:oci"
         );
-        satisfies(&oci_only, "termination:scope", &evidence(ProofSource::Measured, "external_controller:oci")).unwrap();
+        satisfies(
+            &oci_only,
+            "termination:scope",
+            &evidence(ProofSource::Measured, "external_controller:oci"),
+        )
+        .unwrap();
         // The grade is judged before the provider.
         let attested_by_oci = evidence(ProofSource::ProviderAttested, "external_controller:oci");
         assert_eq!(
@@ -3271,7 +4027,12 @@ mod tests {
         let widened = accepting("termination:scope", &["measured", "provider_attested"]);
         satisfies(&widened, "termination:scope", &attested_by_oci).unwrap();
         satisfies(&widened, "termination:scope", &measured_by_service).unwrap();
-        let refusal = satisfies(&widened, "termination:scope", &evidence(ProofSource::Trusted, "host")).unwrap_err();
+        let refusal = satisfies(
+            &widened,
+            "termination:scope",
+            &evidence(ProofSource::Trusted, "host"),
+        )
+        .unwrap_err();
         assert_eq!(
             refusal,
             "termination:scope is only trusted-proven here by host; the floor accepts measured, provider_attested"
@@ -3279,8 +4040,19 @@ mod tests {
         // A grade this build does not know meets nothing, even when listed
         // in evidence under the same text as an accepted grade's neighbour.
         let unknown = evidence(ProofSource::Unknown("quorum_attested".to_owned()), "host");
-        assert!(satisfies(&widened, "termination:scope", &unknown).unwrap_err().contains("quorum_attested-proven"));
-        assert!(satisfies(&bare, "termination:scope", &evidence(ProofSource::PeerAttested, "peer")).is_err());
+        assert!(
+            satisfies(&widened, "termination:scope", &unknown)
+                .unwrap_err()
+                .contains("quorum_attested-proven")
+        );
+        assert!(
+            satisfies(
+                &bare,
+                "termination:scope",
+                &evidence(ProofSource::PeerAttested, "peer")
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -3305,14 +4077,29 @@ mod tests {
             assert_eq!(floor_entry_refusal(&entry), None, "{}", entry.label());
         }
         for (entry, refusal) in [
-            (CapabilityRequirement::from(RESIDENCY_SWAP_ABSENT), "does not meet"),
-            (CapabilityRequirement::from(RESIDENCY_SWAP_LIMIT), "does not meet"),
-            (any_of(&[RESIDENCY_LOCKED, RESIDENCY_SWAP_ABSENT]), "does not meet"),
+            (
+                CapabilityRequirement::from(RESIDENCY_SWAP_ABSENT),
+                "does not meet",
+            ),
+            (
+                CapabilityRequirement::from(RESIDENCY_SWAP_LIMIT),
+                "does not meet",
+            ),
+            (
+                any_of(&[RESIDENCY_LOCKED, RESIDENCY_SWAP_ABSENT]),
+                "does not meet",
+            ),
             (any_of(&[ACCOUNTING, "termination:scope"]), "per-scope"),
             (any_of(&[ACCOUNTING, SCOPE_LIMITS]), "per-scope"),
             (any_of(&[ACCOUNTING, STORAGE_DURABLE_ROOT]), "on its own"),
-            (any_of(&["isolation:namespaces", STORAGE_DURABLE_ROOT]), "on its own"),
-            (any_of(&[ISOLATION_NAMESPACES, "time"]), "isolation:namespaces, which must be required on its own"),
+            (
+                any_of(&["isolation:namespaces", STORAGE_DURABLE_ROOT]),
+                "on its own",
+            ),
+            (
+                any_of(&[ISOLATION_NAMESPACES, "time"]),
+                "isolation:namespaces, which must be required on its own",
+            ),
         ] {
             let reason = floor_entry_refusal(&entry).unwrap_or_default();
             assert!(reason.contains(refusal), "{}: {reason}", entry.label());
@@ -3326,7 +4113,10 @@ mod tests {
         assert!(!met_by_strongest(&residency, RESIDENCY_SWAP_ABSENT));
         let enclosure = any_of(&[TERMINATION_ENCLOSURE, TERMINATION_ENCLOSURE_TRUSTED_INIT]);
         assert!(met_by_strongest(&enclosure, TERMINATION_ENCLOSURE));
-        assert!(!met_by_strongest(&enclosure, TERMINATION_ENCLOSURE_TRUSTED_INIT));
+        assert!(!met_by_strongest(
+            &enclosure,
+            TERMINATION_ENCLOSURE_TRUSTED_INIT
+        ));
     }
 
     #[test]
@@ -3342,17 +4132,29 @@ mod tests {
     fn unknown_report_enums_round_trip_exactly() {
         let source: ProofSource = serde_json::from_str("\"quorum_attested\"").unwrap();
         assert_eq!(source, ProofSource::Unknown("quorum_attested".to_owned()));
-        let foreign = CapabilityEvidence { source: source.clone(), provider: HOST_PROVIDER.to_owned(), basis: String::new() };
+        let foreign = CapabilityEvidence {
+            source: source.clone(),
+            provider: HOST_PROVIDER.to_owned(),
+            basis: String::new(),
+        };
         assert!(satisfies(&CapabilityRequirement::from("time"), "time", &foreign).is_err());
         let round_trip: CapabilityEvidence =
             serde_json::from_value(serde_json::to_value(&foreign).unwrap()).unwrap();
         assert_eq!(round_trip, foreign);
-        assert!(serde_json::from_value::<CapabilityEvidence>(
-            serde_json::json!({"source": "measured", "basis": "no provider"})
-        )
-        .is_err());
-        assert_eq!(serde_json::to_string(&source).unwrap(), "\"quorum_attested\"");
-        assert_eq!(serde_json::to_string(&ProofSource::Trusted).unwrap(), "\"trusted\"");
+        assert!(
+            serde_json::from_value::<CapabilityEvidence>(
+                serde_json::json!({"source": "measured", "basis": "no provider"})
+            )
+            .is_err()
+        );
+        assert_eq!(
+            serde_json::to_string(&source).unwrap(),
+            "\"quorum_attested\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ProofSource::Trusted).unwrap(),
+            "\"trusted\""
+        );
 
         let original = serde_json::json!({"method": "pinned_hugepages", "basis": "b", "pages": 4});
         let proof: ResidencyProof = serde_json::from_value(original.clone()).unwrap();
@@ -3361,9 +4163,24 @@ mod tests {
         assert!(proof.confirm_swap_unreachable().is_err());
 
         for (method, expected) in [
-            ("locked", ResidencyProof::Locked { basis: "cap".to_owned() }),
-            ("swap_limit", ResidencyProof::SwapLimit { basis: "cap".to_owned() }),
-            ("swap_absent", ResidencyProof::SwapAbsent { basis: "cap".to_owned() }),
+            (
+                "locked",
+                ResidencyProof::Locked {
+                    basis: "cap".to_owned(),
+                },
+            ),
+            (
+                "swap_limit",
+                ResidencyProof::SwapLimit {
+                    basis: "cap".to_owned(),
+                },
+            ),
+            (
+                "swap_absent",
+                ResidencyProof::SwapAbsent {
+                    basis: "cap".to_owned(),
+                },
+            ),
         ] {
             let known = serde_json::json!({"method": method, "basis": "cap"});
             let proof: ResidencyProof = serde_json::from_value(known.clone()).unwrap();
@@ -3373,9 +4190,11 @@ mod tests {
         }
 
         // A known method keeps its strict shape.
-        assert!(serde_json::from_value::<ResidencyProof>(
-            serde_json::json!({"method": "locked", "basis": "cap", "extra": 1})
-        )
-        .is_err());
+        assert!(
+            serde_json::from_value::<ResidencyProof>(
+                serde_json::json!({"method": "locked", "basis": "cap", "extra": 1})
+            )
+            .is_err()
+        );
     }
 }

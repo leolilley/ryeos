@@ -219,8 +219,10 @@ fn launch(request_fd: u32) -> ! {
     } else {
         None
     };
-    let native_terminal_writer = request.native_terminal_fd.map(|fd| unsafe { lillux::take_inherited_descriptor_authority(fd) }
-                .unwrap_or_else(|error| emit_refusal(status_fd, error)));
+    let native_terminal_writer = request.native_terminal_fd.map(|fd| {
+        unsafe { lillux::take_inherited_descriptor_authority(fd) }
+            .unwrap_or_else(|error| emit_refusal(status_fd, error))
+    });
     // Consume both original roles BEFORE translation and USER/PID transition.
     // A selected handoff failure cannot enter the ordinary null branch.
     let original_parts: Option<(

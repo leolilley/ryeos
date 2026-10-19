@@ -380,7 +380,8 @@ impl RuntimeDb {
             let Some(allocation) = read(&tx, placement)? else {
                 return Ok(None);
             };
-            let ExternalAllocationOwner::QualificationCandidate(owner) = &allocation.reservation.owner
+            let ExternalAllocationOwner::QualificationCandidate(owner) =
+                &allocation.reservation.owner
             else {
                 return Ok(None);
             };

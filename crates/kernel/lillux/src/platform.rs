@@ -77,7 +77,10 @@ pub fn io_error_is_transient_resource(error: &std::io::Error) -> bool {
     use std::io::ErrorKind;
     if matches!(
         error.kind(),
-        ErrorKind::Interrupted | ErrorKind::WouldBlock | ErrorKind::OutOfMemory | ErrorKind::TimedOut
+        ErrorKind::Interrupted
+            | ErrorKind::WouldBlock
+            | ErrorKind::OutOfMemory
+            | ErrorKind::TimedOut
     ) {
         return true;
     }
@@ -85,7 +88,15 @@ pub fn io_error_is_transient_resource(error: &std::io::Error) -> bool {
     {
         matches!(
             error.raw_os_error(),
-            Some(libc::EMFILE | libc::ENFILE | libc::ENOMEM | libc::ENOBUFS | libc::EIO | libc::EINTR | libc::EAGAIN)
+            Some(
+                libc::EMFILE
+                    | libc::ENFILE
+                    | libc::ENOMEM
+                    | libc::ENOBUFS
+                    | libc::EIO
+                    | libc::EINTR
+                    | libc::EAGAIN
+            )
         )
     }
     #[cfg(not(unix))]
@@ -98,15 +109,27 @@ pub fn io_error_is_transient_resource(error: &std::io::Error) -> bool {
 mod transient_resource_tests {
     #[test]
     fn descriptor_memory_io_and_interrupt_failures_are_transient() {
-        for errno in [libc::EMFILE, libc::ENFILE, libc::ENOMEM, libc::EIO, libc::EINTR, libc::EAGAIN] {
+        for errno in [
+            libc::EMFILE,
+            libc::ENFILE,
+            libc::ENOMEM,
+            libc::EIO,
+            libc::EINTR,
+            libc::EAGAIN,
+        ] {
             assert!(
                 super::io_error_is_transient_resource(&std::io::Error::from_raw_os_error(errno)),
                 "{errno}"
             );
         }
         for errno in [libc::ENOENT, libc::EACCES, libc::EEXIST, libc::ENOTDIR] {
-            assert!(!super::io_error_is_transient_resource(&std::io::Error::from_raw_os_error(errno)), "{errno}");
+            assert!(
+                !super::io_error_is_transient_resource(&std::io::Error::from_raw_os_error(errno)),
+                "{errno}"
+            );
         }
-        assert!(!super::io_error_is_transient_resource(&std::io::Error::other("tampered")));
+        assert!(!super::io_error_is_transient_resource(
+            &std::io::Error::other("tampered")
+        ));
     }
 }

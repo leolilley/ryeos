@@ -42,7 +42,6 @@ use ryeos_state::external_content::products::{ProductShape, ProductStorage};
 use ryeos_state::object_closure::load_exact_cas_object_with_cas;
 
 use crate::handler_context::HandlerContext;
-use ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy;
 use crate::runtime_db::restored_verifier_attempt::{
     RestoredVerifierAttemptClaim, RestoredVerifierAttemptPhase, RestoredVerifierAttemptRecord,
 };
@@ -65,6 +64,7 @@ use crate::runtime_db::runtime_snapshot_stage::{
     RuntimeSnapshotStageClaim, RuntimeSnapshotStagePhase,
 };
 use crate::state::AppState;
+use ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy;
 
 pub struct SnapshotProductionRequest {
     pub binding_id: String,

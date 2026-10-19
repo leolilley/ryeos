@@ -343,16 +343,17 @@ fn run() -> Result<()> {
             );
             let result = serve_occurrence(&occurrence, &nonce);
             if let Err(error) = &result
-                && let Ok(Some(directory)) = lillux::PinnedDirectory::open(&occurrence) {
-                    let message = format!("{error:#}");
-                    if message.len() <= 64 * 1024 {
-                        let _ = ensure_document(
-                            &directory,
-                            FAILURE_FILE,
-                            &FailureRecord { schema: 1, message },
-                        );
-                    }
+                && let Ok(Some(directory)) = lillux::PinnedDirectory::open(&occurrence)
+            {
+                let message = format!("{error:#}");
+                if message.len() <= 64 * 1024 {
+                    let _ = ensure_document(
+                        &directory,
+                        FAILURE_FILE,
+                        &FailureRecord { schema: 1, message },
+                    );
                 }
+            }
             result
         }
         _ => bail!("unsupported lifecycle adapter operation"),
@@ -1916,8 +1917,7 @@ mod tests {
         for content in &contents {
             let staged = stage_content_records(&mounts, content, &mut index, |descriptor| {
                 adopted.push(descriptor);
-                root
-                    .open_pinned_regular(OsStr::new(&format!("input-{descriptor}")), false)?
+                root.open_pinned_regular(OsStr::new(&format!("input-{descriptor}")), false)?
                     .context("fixture descriptor absent")?
                     .inherited_descriptor_authority()
             })
@@ -1964,8 +1964,7 @@ mod tests {
         let missing = root.create_child(OsStr::new("missing"), 0o700).unwrap();
         let result = stage_content_records(&missing, &content, &mut missing_index, |descriptor| {
             ensure!(descriptor == 101, "fixture manifest descriptor absent");
-            root
-                .open_pinned_regular(OsStr::new("binding"), false)?
+            root.open_pinned_regular(OsStr::new("binding"), false)?
                 .unwrap()
                 .inherited_descriptor_authority()
         });

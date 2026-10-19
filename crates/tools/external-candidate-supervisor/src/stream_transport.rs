@@ -542,7 +542,10 @@ mod tests {
             Failure::AmbiguousTransport(_)
         ));
         assert!(matches!(
-            close_failure(CloseCode::Error, "external_channel_stream_exchange_unavailable"),
+            close_failure(
+                CloseCode::Error,
+                "external_channel_stream_exchange_unavailable"
+            ),
             Failure::AmbiguousTransport(_)
         ));
         assert!(matches!(

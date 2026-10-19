@@ -28,8 +28,12 @@ const BUNDLE_NAME: &str = "external-candidate-authoring";
 fn guest_and_activated_runtime_qualifications_publish_real_current_attestations() {
     run_on_test_node(|root, mut state| async move {
         let binaries = RuntimeBinaries {
-            candidate: Path::new(env!("CARGO_BIN_EXE_ryeos-synthetic-external-candidate-runtime")),
-            provider: Path::new(env!("CARGO_BIN_EXE_ryeos-synthetic-external-provider-runtime")),
+            candidate: Path::new(env!(
+                "CARGO_BIN_EXE_ryeos-synthetic-external-candidate-runtime"
+            )),
+            provider: Path::new(env!(
+                "CARGO_BIN_EXE_ryeos-synthetic-external-provider-runtime"
+            )),
         };
         let session = private_directory();
         install_runtime_files(session.path(), &binaries, None);
@@ -48,7 +52,10 @@ fn guest_and_activated_runtime_qualifications_publish_real_current_attestations(
         let session_hash = manifest_hash(&predict_large_manifest(session.path()));
         assert_ne!(session_hash, guest_hash);
 
-        let repository = Path::new(env!("CARGO_MANIFEST_DIR")).ancestors().nth(4).unwrap();
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(4)
+            .unwrap();
         let bundle = candidate_authoring::write_candidate_authoring_bundle(
             repository,
             &root,
@@ -99,7 +106,9 @@ fn guest_and_activated_runtime_qualifications_publish_real_current_attestations(
             runtime_qualification::GUEST_RUNTIME_POLICY_REF
         );
         assert!(guest_qualification.owner_principal.starts_with("fp:"));
-        assert!(lillux::valid_hash(&guest_qualification.product_witness_hash));
+        assert!(lillux::valid_hash(
+            &guest_qualification.product_witness_hash
+        ));
         assert_eq!(
             guest_qualification.required_claims,
             GUEST_RUNTIME_REQUIRED_CLAIMS
@@ -125,10 +134,18 @@ fn guest_and_activated_runtime_qualifications_publish_real_current_attestations(
             content_qualification.declaration_id,
             runtime_qualification::CONTENT_DECLARATION_ID
         );
-        assert_eq!(content_qualification.owner_principal, guest_qualification.owner_principal);
+        assert_eq!(
+            content_qualification.owner_principal,
+            guest_qualification.owner_principal
+        );
         assert!(lillux::valid_hash(&content_qualification.coordinate_id));
-        assert!(lillux::valid_hash(&content_qualification.activation_receipt_hash));
-        assert_eq!(content_qualification.required_claims, CONTENT_RUNTIME_CLAIMS);
+        assert!(lillux::valid_hash(
+            &content_qualification.activation_receipt_hash
+        ));
+        assert_eq!(
+            content_qualification.required_claims,
+            CONTENT_RUNTIME_CLAIMS
+        );
         assert_eq!(archive.logical_entries, 10);
         assert_ne!(
             content_qualification.attestation_hash,

@@ -24,8 +24,10 @@ pub(crate) fn close_pair(
     second: &mut InheritedDescriptorAuthority,
     original: MonotonicDeadline,
 ) -> Result<PairCloseObservation, &'static str> {
-    let first = Arc::get_mut(&mut first.handle).ok_or("first clock descriptor still has another owner")?;
-    let second = Arc::get_mut(&mut second.handle).ok_or("second clock descriptor still has another owner")?;
+    let first =
+        Arc::get_mut(&mut first.handle).ok_or("first clock descriptor still has another owner")?;
+    let second = Arc::get_mut(&mut second.handle)
+        .ok_or("second clock descriptor still has another owner")?;
     // Refuse copied process state before touching a copied barrier mutex.
     let process = std::process::id();
     if first.parent_pid != process || second.parent_pid != process {
@@ -36,7 +38,9 @@ pub(crate) fn close_pair(
     if first.barrier_identity != identity || second.barrier_identity != identity {
         return Err("clock descriptor barrier changed");
     }
-    if original.has_elapsed() { return Err("original clock close interval exhausted"); }
+    if original.has_elapsed() {
+        return Err("original clock close interval exhausted");
+    }
     let mut state = match barrier.state.try_lock() {
         Ok(state) => state,
         Err(std::sync::TryLockError::WouldBlock) => return Err("clock close barrier busy"),
@@ -47,7 +51,8 @@ pub(crate) fn close_pair(
         return Err("clock close barrier unavailable within original interval");
     }
     let live = |file: &ForkChildCloseFile| {
-        file.file.is_some() && file.explicit_close.is_none()
+        file.file.is_some()
+            && file.explicit_close.is_none()
             && state.owned_registration_generations.get(&file.fd) == Some(&file.generation)
             && state.fork_child_close_fds.contains(&file.fd)
     };
@@ -61,7 +66,11 @@ pub(crate) fn close_pair(
     let first = first.close_registered_locked(&mut state);
     let second = second.close_registered_locked(&mut state);
     barrier.changed.notify_all();
-    Ok(PairCloseObservation { first, second, within_interval: !original.has_elapsed() })
+    Ok(PairCloseObservation {
+        first,
+        second,
+        within_interval: !original.has_elapsed(),
+    })
 }
 
 #[cfg(test)]
@@ -71,8 +80,12 @@ mod controls {
 
     fn pair() -> (InheritedDescriptorAuthority, InheritedDescriptorAuthority) {
         let lease = crate::exec::try_retain_fork_sensitive_descriptors().unwrap();
-        let first = InheritedDescriptorAuthority::from_owned_file(tempfile::tempfile().unwrap(), &lease).unwrap();
-        let second = InheritedDescriptorAuthority::from_owned_file(tempfile::tempfile().unwrap(), &lease).unwrap();
+        let first =
+            InheritedDescriptorAuthority::from_owned_file(tempfile::tempfile().unwrap(), &lease)
+                .unwrap();
+        let second =
+            InheritedDescriptorAuthority::from_owned_file(tempfile::tempfile().unwrap(), &lease)
+                .unwrap();
         (first, second)
     }
 
@@ -115,7 +128,11 @@ mod controls {
         drop(guard);
         // Cached explicit failure returns before inspecting another FD; Drop
         // likewise sees no File. It cannot attempt the original number again.
-        assert!(first.try_retire_registered(MonotonicDeadline::after(Duration::from_secs(1))).is_err());
+        assert!(
+            first
+                .try_retire_registered(MonotonicDeadline::after(Duration::from_secs(1)))
+                .is_err()
+        );
         assert!(first.file.is_none());
     }
 }

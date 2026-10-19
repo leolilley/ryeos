@@ -35,7 +35,8 @@ pub fn ordered_lease_ready_inputs<'a>(
 mod tests {
     use super::*;
 
-    const GOLDEN_FIELD_ORDER_SHA256: &str = "6be0689c0b3c74dfa90e1ac9b4e4e7e2adcbdee53f006148767d2b734c09cf0c";
+    const GOLDEN_FIELD_ORDER_SHA256: &str =
+        "6be0689c0b3c74dfa90e1ac9b4e4e7e2adcbdee53f006148767d2b734c09cf0c";
 
     #[test]
     fn golden_vector_pins_digest_and_order() {
@@ -125,14 +126,19 @@ mod tests {
             signature_hex: "ab".repeat(64),
         };
         let field_order = crate::canonical_json(&signed).unwrap();
-        let key_sorted =
-            serde_json::to_vec(&serde_json::to_value(&signed).unwrap()).unwrap();
+        let key_sorted = serde_json::to_vec(&serde_json::to_value(&signed).unwrap()).unwrap();
         assert!(
             field_order.starts_with(b"{\"authorization\":{\"schema\":"),
             "the delivered form leads with struct field order"
         );
         assert_ne!(field_order, key_sorted);
-        assert_ne!(signed_import_sha256(&field_order), signed_import_sha256(&key_sorted));
-        assert_eq!(signed_import_sha256(&field_order), GOLDEN_FIELD_ORDER_SHA256);
+        assert_ne!(
+            signed_import_sha256(&field_order),
+            signed_import_sha256(&key_sorted)
+        );
+        assert_eq!(
+            signed_import_sha256(&field_order),
+            GOLDEN_FIELD_ORDER_SHA256
+        );
     }
 }

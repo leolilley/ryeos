@@ -460,9 +460,7 @@ impl RuntimeDb {
         &self,
         placement: &str,
     ) -> Result<Option<QualificationWorkerProcessRecord>> {
-        self.conn.with_sql(|conn| {
-            read_process(conn, placement)
-        })
+        self.conn.with_sql(|conn| read_process(conn, placement))
     }
 
     /// Persist one held local Worker before allowing Lillux to release it.
@@ -609,7 +607,8 @@ impl RuntimeDb {
             let current = read_process(&tx, &proof.record.placement_thread_id)?
                 .context("qualification Worker death proof lost its attached row")?;
             ensure!(
-                current == proof.record && current.phase == QualificationWorkerProcessPhase::Attached,
+                current == proof.record
+                    && current.phase == QualificationWorkerProcessPhase::Attached,
                 "qualification Worker death proof changed its exact process incarnation"
             );
             require_retained_process_owner(&tx, &current)?;

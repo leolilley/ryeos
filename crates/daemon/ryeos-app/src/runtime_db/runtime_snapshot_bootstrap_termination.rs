@@ -244,7 +244,7 @@ impl RuntimeDb {
                 let mut statement = tx.prepare(&format!(
                     "SELECT b.operation_id {DUE_SOURCE_SQL} AND b.operation_id > ?2 ORDER BY b.operation_id LIMIT ?3"
                 ))?;
-                
+
                 statement
                     .query_map(params![now_ms, &cursor, 64_i64], |row| {
                         row.get::<_, String>(0)
@@ -298,9 +298,7 @@ impl RuntimeDb {
         &self,
         operation_id: &str,
     ) -> Result<Option<BootstrapTerminationRecord>> {
-        self.conn.with_sql(|conn| {
-            read(conn, operation_id)
-        })
+        self.conn.with_sql(|conn| read(conn, operation_id))
     }
 
     pub fn reserve_bootstrap_termination(

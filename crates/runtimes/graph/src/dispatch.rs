@@ -432,10 +432,10 @@ fn callback_child_thread_identity(thread: &Value) -> (Option<String>, Option<Str
             if thread
                 .get("thread_id")
                 .and_then(Value::as_str)
-                .is_some_and(|thread_id| thread_id.starts_with("svc-"))
-            => {
-                return (None, None);
-            }
+                .is_some_and(|thread_id| thread_id.starts_with("svc-")) =>
+        {
+            return (None, None);
+        }
         Some(_) => {
             return (
                 None,
@@ -1229,7 +1229,10 @@ mod tests {
             "recorded": true,
         }));
         assert!(child.is_none());
-        assert!(error.is_some(), "a recorded non-invocation id must validate");
+        assert!(
+            error.is_some(),
+            "a recorded non-invocation id must validate"
+        );
     }
 
     #[test]

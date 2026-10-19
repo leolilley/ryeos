@@ -973,7 +973,9 @@ pub const DERIVE_CONSUMER_QUALIFICATION_CONTEXT_DESCRIPTOR: ServiceDescriptor = 
     service_ref: "service:external-content/derive-consumer-qualification-context",
     endpoint: "external-content.derive-consumer-qualification-context",
     availability: ServiceAvailability::DaemonOnly,
-    required_caps: &["ryeos.execute.service.external-content/derive-consumer-qualification-context"],
+    required_caps: &[
+        "ryeos.execute.service.external-content/derive-consumer-qualification-context",
+    ],
     handler: |params, ctx, state| {
         Box::pin(async move {
             derive_consumer_qualification_context(

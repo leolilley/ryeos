@@ -138,7 +138,8 @@ impl RetainedRuntimeSnapshotProductionBinding {
         );
         ensure!(
             !self.signed_source.is_empty()
-                && self.signed_source.len() <= ryeos_node_runtime::node_document::MAX_ITEM_BYTES as usize,
+                && self.signed_source.len()
+                    <= ryeos_node_runtime::node_document::MAX_ITEM_BYTES as usize,
             "retained snapshot producer signed source exceeds bound"
         );
         let (body, _) = lillux::signature::strip_canonical_signature_with_envelope(

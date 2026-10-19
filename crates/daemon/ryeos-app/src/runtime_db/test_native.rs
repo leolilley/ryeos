@@ -42,7 +42,14 @@ pub fn bound(
     let name = path.file_name().expect("Runtime database basename");
     // SAFETY: test-only issuance under this host's own funded factory.
     unsafe {
-        OriginalNativeBoundInputs::issued(Arc::clone(root), name, mode, domain, host.destination(), None)
+        OriginalNativeBoundInputs::issued(
+            Arc::clone(root),
+            name,
+            mode,
+            domain,
+            host.destination(),
+            None,
+        )
     }
     .expect("Runtime bound inputs")
 }
@@ -51,14 +58,21 @@ pub fn bound(
 /// the way a live node does, beneath its pinned and locked parent.
 pub fn open_live(host: &TestNativeHost, path: &Path) -> RuntimeDb {
     let parent = path.parent().expect("Runtime database parent");
-    let root = Arc::new(lillux::PinnedDirectory::open_or_create(parent).expect("pin Runtime parent"));
+    let root =
+        Arc::new(lillux::PinnedDirectory::open_or_create(parent).expect("pin Runtime parent"));
     let namespace = root.lock_exclusive().expect("lock Runtime parent");
     match RuntimeDb::open_live_with_namespace_authority(
         path,
         Arc::clone(&root),
         namespace,
         Arc::clone(host.factory()),
-        bound(host, &root, path, OriginalNativeBoundMode::OpenOrCreate, OriginalNativeDomain::NodeRuntime),
+        bound(
+            host,
+            &root,
+            path,
+            OriginalNativeBoundMode::OpenOrCreate,
+            OriginalNativeDomain::NodeRuntime,
+        ),
         lillux::time::MonotonicDeadline::after(std::time::Duration::from_secs(60)),
         runtime_reference(host),
     ) {
@@ -68,11 +82,12 @@ pub fn open_live(host: &TestNativeHost, path: &Path) -> RuntimeDb {
             // failing, so the host still releases its arena.
             let message = format!("{failure:#}");
             if let Ok(released) = failure.retry_close()
-                && let Ok(terminals) = released.native_terminals(host.factory()) {
-                    for terminal in terminals {
-                        host.retain_terminal(terminal);
-                    }
+                && let Ok(terminals) = released.native_terminals(host.factory())
+            {
+                for terminal in terminals {
+                    host.retain_terminal(terminal);
                 }
+            }
             panic!("live Runtime refused under the gate: {message}")
         }
     }
@@ -90,7 +105,9 @@ pub fn retire(host: &TestNativeHost, db: RuntimeDb) -> Vec<OriginalNativeDomain>
         .iter()
         .map(|terminal| match terminal {
             OriginalNativeConnectionTerminal::Closed(owner) => owner.domain(),
-            OriginalNativeConnectionTerminal::Released(_) => panic!("closed Runtime yields closed terminals"),
+            OriginalNativeConnectionTerminal::Released(_) => {
+                panic!("closed Runtime yields closed terminals")
+            }
         })
         .collect();
     for terminal in terminals {
@@ -103,14 +120,20 @@ pub fn retire(host: &TestNativeHost, db: RuntimeDb) -> Vec<OriginalNativeDomain>
 /// Run `work` on the existing Runtime store at `path` through the native
 /// gate, on this thread's shared test host, without the live open's
 /// validation.
-pub fn read_existing<T>(path: &Path, work: impl for<'c> FnOnce(&'c rusqlite::Connection) -> Result<T>) -> T {
+pub fn read_existing<T>(
+    path: &Path,
+    work: impl for<'c> FnOnce(&'c rusqlite::Connection) -> Result<T>,
+) -> T {
     with_bound_path(path, OriginalNativeBoundMode::Existing, work)
 }
 
 /// Create the database at `path` through the native gate, on this thread's
 /// shared test host, and run `work` on it before it closes: a store some
 /// other writer left behind, established without the live open's schema.
-pub fn with_created<T>(path: &Path, work: impl for<'c> FnOnce(&'c rusqlite::Connection) -> Result<T>) -> T {
+pub fn with_created<T>(
+    path: &Path,
+    work: impl for<'c> FnOnce(&'c rusqlite::Connection) -> Result<T>,
+) -> T {
     with_bound_path(path, OriginalNativeBoundMode::CreateExclusive, work)
 }
 
@@ -129,7 +152,8 @@ fn with_bound_path<T>(
     );
     let name = path.file_name().expect("test database basename");
     with_shared_host(|host| {
-        let connection = match host.open_bound(root, name, mode, OriginalNativeDomain::NodeRuntime) {
+        let connection = match host.open_bound(root, name, mode, OriginalNativeDomain::NodeRuntime)
+        {
             Ok(connection) => connection,
             Err(failure) => {
                 let error = format!("{failure:#}");
@@ -137,10 +161,13 @@ fn with_bound_path<T>(
                 panic!("test bound open of {} refused: {error}", path.display());
             }
         };
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| connection.with_sql(work)));
+        let outcome =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| connection.with_sql(work)));
         host.close(connection);
         match outcome {
-            Ok(result) => result.unwrap_or_else(|error| panic!("test bound SQL refused: {error:#}")),
+            Ok(result) => {
+                result.unwrap_or_else(|error| panic!("test bound SQL refused: {error:#}"))
+            }
             Err(panic) => std::panic::resume_unwind(panic),
         }
     })
@@ -152,14 +179,21 @@ fn with_bound_path<T>(
 pub fn live_open_refusal(path: &Path) -> String {
     with_shared_host(|host| {
         let parent = path.parent().expect("Runtime database parent");
-        let root = Arc::new(lillux::PinnedDirectory::open_or_create(parent).expect("pin Runtime parent"));
+        let root =
+            Arc::new(lillux::PinnedDirectory::open_or_create(parent).expect("pin Runtime parent"));
         let namespace = root.lock_exclusive().expect("lock Runtime parent");
         let failure = match RuntimeDb::open_live_with_namespace_authority(
             path,
             Arc::clone(&root),
             namespace,
             Arc::clone(host.factory()),
-            bound(host, &root, path, OriginalNativeBoundMode::OpenOrCreate, OriginalNativeDomain::NodeRuntime),
+            bound(
+                host,
+                &root,
+                path,
+                OriginalNativeBoundMode::OpenOrCreate,
+                OriginalNativeDomain::NodeRuntime,
+            ),
             lillux::time::MonotonicDeadline::after(std::time::Duration::from_secs(60)),
             runtime_reference(host),
         ) {
@@ -174,7 +208,10 @@ pub fn live_open_refusal(path: &Path) -> String {
             Ok(released) => released,
             Err(failure) => panic!("refused Runtime acquisition release retained: {failure:#}"),
         };
-        for terminal in released.native_terminals(host.factory()).expect("released Runtime census") {
+        for terminal in released
+            .native_terminals(host.factory())
+            .expect("released Runtime census")
+        {
             host.retain_terminal(terminal);
         }
         drop(released);
@@ -213,7 +250,10 @@ pub fn original_mutation_refusal(
     match original_mutation(host, root, namespace, path) {
         Ok(db) => {
             retire(host, db);
-            panic!("original Runtime mutation of {} was admitted", path.display());
+            panic!(
+                "original Runtime mutation of {} was admitted",
+                path.display()
+            );
         }
         Err(failure) => settle_original_mutation_refusal(host, failure),
     }
@@ -230,7 +270,13 @@ fn original_mutation(
         Arc::clone(root),
         namespace.clone(),
         Arc::clone(host.factory()),
-        bound(host, root, path, OriginalNativeBoundMode::Existing, OriginalNativeDomain::RuntimeMutation),
+        bound(
+            host,
+            root,
+            path,
+            OriginalNativeBoundMode::Existing,
+            OriginalNativeDomain::RuntimeMutation,
+        ),
         runtime_reference(host),
         UnreadableLifetimeFence::Refuse,
     )
@@ -238,13 +284,19 @@ fn original_mutation(
 
 /// Release a refused original mutation acquisition into `host`'s census and
 /// return its refusal text.
-fn settle_original_mutation_refusal(host: &TestNativeHost, failure: OriginalRuntimeAcquisitionFailure) -> String {
+fn settle_original_mutation_refusal(
+    host: &TestNativeHost,
+    failure: OriginalRuntimeAcquisitionFailure,
+) -> String {
     let message = format!("{failure:#}");
     let released = match failure.retry_close() {
         Ok(released) => released,
         Err(failure) => panic!("refused original Runtime mutation release retained: {failure:#}"),
     };
-    for terminal in released.native_terminals(host.factory()).expect("released Runtime census") {
+    for terminal in released
+        .native_terminals(host.factory())
+        .expect("released Runtime census")
+    {
         host.retain_terminal(terminal);
     }
     drop(released);
@@ -273,10 +325,13 @@ pub fn seed_node(config: &ryeos_node_runtime::config::Config, runtime: bool) {
 pub fn with_transient<T>(work: impl for<'c> FnOnce(&'c rusqlite::Connection) -> Result<T>) -> T {
     with_shared_host(|host| {
         let connection = host.open_transient();
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| connection.with_sql(work)));
+        let outcome =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| connection.with_sql(work)));
         host.close(connection);
         match outcome {
-            Ok(result) => result.unwrap_or_else(|error| panic!("test transient SQL refused: {error:#}")),
+            Ok(result) => {
+                result.unwrap_or_else(|error| panic!("test transient SQL refused: {error:#}"))
+            }
             Err(panic) => std::panic::resume_unwind(panic),
         }
     })
@@ -348,7 +403,9 @@ impl std::ops::DerefMut for TestRuntime {
 
 impl Drop for TestRuntime {
     fn drop(&mut self) {
-        let (Some(db), Some(host)) = (self.db.take(), self.host.take()) else { return };
+        let (Some(db), Some(host)) = (self.db.take(), self.host.take()) else {
+            return;
+        };
         if !std::thread::panicking() {
             retire(&host, db);
             ryeos_state::test_support::release_shared_test_host(host);
@@ -358,11 +415,12 @@ impl Drop for TestRuntime {
         // arena is released for the tests after it. A refusal here is left
         // to the host's own leak report rather than a second panic.
         if let Ok(closed) = db.close_original_runtime(Arc::clone(host.factory()))
-            && let Ok(terminals) = closed.native_terminals() {
-                for terminal in terminals {
-                    host.retain_terminal(terminal);
-                }
+            && let Ok(terminals) = closed.native_terminals()
+        {
+            for terminal in terminals {
+                host.retain_terminal(terminal);
             }
+        }
         drop(host);
     }
 }

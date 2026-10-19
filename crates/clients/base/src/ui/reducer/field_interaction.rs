@@ -776,8 +776,16 @@ impl RyeOsCore {
     fn mounted_field_instances(&self) -> Vec<(RyeOsViewInstanceKey, String)> {
         let mut instances = Vec::new();
         for view_set in &self.view_sets {
-            instances.extend(view_set.tiles.values().filter(|&tile| self.binding_for_instance(&tile.instance_key, &tile.view.view_ref)
-                    .is_some_and(|binding| binding.widget == "field")).map(|tile| (tile.instance_key.clone(), tile.view.view_ref.clone())));
+            instances.extend(
+                view_set
+                    .tiles
+                    .values()
+                    .filter(|&tile| {
+                        self.binding_for_instance(&tile.instance_key, &tile.view.view_ref)
+                            .is_some_and(|binding| binding.widget == "field")
+                    })
+                    .map(|tile| (tile.instance_key.clone(), tile.view.view_ref.clone())),
+            );
             for edge in [
                 super::model::RyeOsDockEdge::Top,
                 super::model::RyeOsDockEdge::Bottom,
@@ -812,8 +820,11 @@ impl RyeOsCore {
         let mut instances = self.view_sets[self.active_view_set]
             .tiles
             .values()
-            .filter(|&tile| self.binding_for_instance(&tile.instance_key, &tile.view.view_ref)
-                    .is_some_and(|binding| binding.widget == "field")).map(|tile| (tile.instance_key.clone(), tile.view.view_ref.clone()))
+            .filter(|&tile| {
+                self.binding_for_instance(&tile.instance_key, &tile.view.view_ref)
+                    .is_some_and(|binding| binding.widget == "field")
+            })
+            .map(|tile| (tile.instance_key.clone(), tile.view.view_ref.clone()))
             .collect::<Vec<_>>();
         instances.extend(
             self.visible_dock_views()

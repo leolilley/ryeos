@@ -45,9 +45,17 @@ pub fn seed_node_state(host: &TestNativeHost, runtime_state_dir: &Path) -> Resul
     };
     let initialized = connection.with_sql(|sql| {
         configure_connection(sql)?;
-        crate::sqlite_schema::init_owned(sql, &operational_schema_spec(), crate::operational::SCHEMA_SQL, &path)?;
+        crate::sqlite_schema::init_owned(
+            sql,
+            &operational_schema_spec(),
+            crate::operational::SCHEMA_SQL,
+            &path,
+        )?;
         let mode: String = sql.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
-        anyhow::ensure!(mode == "wal", "seeded Operational journal mode is {mode}, not WAL");
+        anyhow::ensure!(
+            mode == "wal",
+            "seeded Operational journal mode is {mode}, not WAL"
+        );
         Ok(())
     });
     host.close(connection);
@@ -65,18 +73,30 @@ struct TestLeaseAuthority {
     deadline: lillux::time::MonotonicDeadline,
 }
 impl TestLeaseAuthority {
-    fn require_host_factory(&self, factory: &Arc<lillux_sqlite::OriginalNativeFactory>) -> Result<()> {
-        anyhow::ensure!(std::sync::Weak::ptr_eq(&self.factory, &Arc::downgrade(factory)),
-            "test lease authority refuses a foreign factory");
+    fn require_host_factory(
+        &self,
+        factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            std::sync::Weak::ptr_eq(&self.factory, &Arc::downgrade(factory)),
+            "test lease authority refuses a foreign factory"
+        );
         Ok(())
     }
 }
 impl lillux_sqlite::OriginalNativeProjectionLeaseAuthority for TestLeaseAuthority {
-    fn require_original(&self, factory: &Arc<lillux_sqlite::OriginalNativeFactory>, _cleanup: bool) -> Result<()> {
+    fn require_original(
+        &self,
+        factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
+        _cleanup: bool,
+    ) -> Result<()> {
         self.require_host_factory(factory)
     }
-    fn fork_deadline(&self, factory: &Arc<lillux_sqlite::OriginalNativeFactory>, _cleanup: bool)
-        -> Result<lillux::time::MonotonicDeadline> {
+    fn fork_deadline(
+        &self,
+        factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
+        _cleanup: bool,
+    ) -> Result<lillux::time::MonotonicDeadline> {
         self.require_host_factory(factory)?;
         Ok(self.deadline)
     }
@@ -104,7 +124,11 @@ const OPEN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(120);
 /// Operational store and the persistent projection on the host's tickets.
 /// Close it with [`retire_live_state`]. A refused open keeps its partial
 /// custody inside the returned error; settle it with [`settle_refused_open`].
-pub fn open_live_state(host: &TestNativeHost, runtime_state_dir: &Path, trust: Arc<TrustStore>) -> Result<StateDb> {
+pub fn open_live_state(
+    host: &TestNativeHost,
+    runtime_state_dir: &Path,
+    trust: Arc<TrustStore>,
+) -> Result<StateDb> {
     open_live_state_with_repair_sink(host, runtime_state_dir, trust, Arc::new(TestRepairSink))
 }
 
@@ -120,7 +144,9 @@ pub fn open_live_state_with_repair_sink(
     // A live node establishes both lock anchors before its State opens.
     crate::recovery::CasMutationGuard::ensure_anchor(runtime_state_dir)?;
     crate::gc::GcLock::ensure_anchor(runtime_state_dir)?;
-    let namespace = directory.lock_exclusive().context("lock test runtime state namespace")?;
+    let namespace = directory
+        .lock_exclusive()
+        .context("lock test runtime state namespace")?;
     let deadline = lillux::time::MonotonicDeadline::after(OPEN_DEADLINE);
     // SAFETY: the test host is the sole issuer of this factory under the
     // process-wide test serial guard; the namespace lock taken above is held
@@ -137,7 +163,10 @@ pub fn open_live_state_with_repair_sink(
             &NoLiveRuntime,
             Arc::clone(host.factory()),
             host.destination(),
-            Arc::new(TestLeaseAuthority { factory: Arc::downgrade(host.factory()), deadline }),
+            Arc::new(TestLeaseAuthority {
+                factory: Arc::downgrade(host.factory()),
+                deadline,
+            }),
             deadline,
         )
     }
@@ -151,10 +180,17 @@ pub fn retire_live_state(host: &TestNativeHost, state: StateDb) -> Result<()> {
         .close_live_census(Arc::clone(host.factory()), &guard)
         .map_err(anyhow::Error::new)?;
     drop(guard);
-    let crate::state_db::LiveStateCensus { terminals, leases, lease_retirement, prior_refusal } = census;
+    let crate::state_db::LiveStateCensus {
+        terminals,
+        leases,
+        lease_retirement,
+        prior_refusal,
+    } = census;
     retain_census(host, terminals, leases, lease_retirement);
     match prior_refusal {
-        Some(refusal) => Err(refusal.context("test State close completed after an earlier refusal")),
+        Some(refusal) => {
+            Err(refusal.context("test State close completed after an earlier refusal"))
+        }
         None => Ok(()),
     }
 }
@@ -173,7 +209,9 @@ fn retain_census(
     for lease in leases {
         host.retain_lease(lease);
     }
-    host.after_backend(Box::new(move |backend| lease_retirement.retire_after_backend(backend)));
+    host.after_backend(Box::new(move |backend| {
+        lease_retirement.retire_after_backend(backend)
+    }));
 }
 
 /// Settle a refused live State opening into `host`'s census and return its
@@ -185,24 +223,29 @@ pub fn settle_refused_open(host: &TestNativeHost, error: anyhow::Error) -> Resul
     let message = format!("{error:#}");
     let error = match error.downcast::<crate::state_db::LiveStateDatabaseOpenFailure>() {
         Ok(failure) => {
-            let released = failure
-                .close_retained()
-                .map_err(|failure| anyhow::anyhow!("refused live State close retained: {failure}"))?;
+            let released = failure.close_retained().map_err(|failure| {
+                anyhow::anyhow!("refused live State close retained: {failure}")
+            })?;
             let census = match released.into_census(host.factory()) {
                 Ok(census) => census,
                 Err((_released, error)) => return Err(error.context("refused live State census")),
             };
             // The prior refusal is the open refusal reported as `message`.
-            let crate::state_db::LiveStateCensus { terminals, leases, lease_retirement, prior_refusal: _ } = census;
+            let crate::state_db::LiveStateCensus {
+                terminals,
+                leases,
+                lease_retirement,
+                prior_refusal: _,
+            } = census;
             retain_census(host, terminals, leases, lease_retirement);
             return Ok(message);
         }
         Err(error) => error,
     };
     if let Ok(failure) = error.downcast::<crate::operational::LiveOperationalOpenFailure>() {
-        let released = failure
-            .close_retained()
-            .map_err(|failure| anyhow::anyhow!("refused live Operational close retained: {failure}"))?;
+        let released = failure.close_retained().map_err(|failure| {
+            anyhow::anyhow!("refused live Operational close retained: {failure}")
+        })?;
         let terminals = match released.into_census(host.factory()) {
             Ok(terminals) => terminals,
             Err((_released, error)) => return Err(error.context("refused live Operational census")),
@@ -217,23 +260,33 @@ pub fn settle_refused_open(host: &TestNativeHost, error: anyhow::Error) -> Resul
 /// The refusal of a live open of the node State under `runtime_state_dir` on
 /// `host`; the refused opening settles into the census. Panics if the open is
 /// admitted, after closing the admitted State into the census.
-pub fn live_state_open_refusal(host: &TestNativeHost, runtime_state_dir: &Path, trust: Arc<TrustStore>) -> String {
+pub fn live_state_open_refusal(
+    host: &TestNativeHost,
+    runtime_state_dir: &Path,
+    trust: Arc<TrustStore>,
+) -> String {
     match open_live_state(host, runtime_state_dir, trust) {
         Ok(state) => {
             retire_live_state(host, state).expect("close the admitted test State");
-            panic!("live State open of {} was admitted", runtime_state_dir.display());
+            panic!(
+                "live State open of {} was admitted",
+                runtime_state_dir.display()
+            );
         }
-        Err(error) => settle_refused_open(host, error).expect("settle the refused live State opening"),
+        Err(error) => {
+            settle_refused_open(host, error).expect("settle the refused live State opening")
+        }
     }
 }
 
 /// Envelope of the shared per-thread test host: room for the several
 /// stores (States, Runtime stores) a test keeps live at once on one arena.
-pub const TEST_STATE_ENVELOPE: lillux_sqlite::test_host::TestNativeEnvelope = lillux_sqlite::test_host::TestNativeEnvelope {
-    storage_bytes: 128 * 1024 * 1024,
-    allocator_steps: 4_000_000_000,
-    tickets: 64,
-};
+pub const TEST_STATE_ENVELOPE: lillux_sqlite::test_host::TestNativeEnvelope =
+    lillux_sqlite::test_host::TestNativeEnvelope {
+        storage_bytes: 128 * 1024 * 1024,
+        allocator_steps: 4_000_000_000,
+        tickets: 64,
+    };
 
 thread_local! {
     static SHARED_TEST_HOST: std::cell::RefCell<std::rc::Weak<TestNativeHost>> =
@@ -279,7 +332,10 @@ impl TestState {
     pub fn open(runtime_state_dir: &Path, trust: Arc<TrustStore>) -> Result<Self> {
         let host = shared_test_host();
         match open_live_state(&host, runtime_state_dir, trust) {
-            Ok(state) => Ok(Self { state: Some(state), host: Some(host) }),
+            Ok(state) => Ok(Self {
+                state: Some(state),
+                host: Some(host),
+            }),
             Err(error) => {
                 // A refused opening settles into the census, so the host
                 // still releases its arena for the tests after this one.
@@ -298,7 +354,10 @@ impl TestState {
     ) -> Result<Self> {
         let host = shared_test_host();
         match open_live_state_with_repair_sink(&host, runtime_state_dir, trust, repair_sink) {
-            Ok(state) => Ok(Self { state: Some(state), host: Some(host) }),
+            Ok(state) => Ok(Self {
+                state: Some(state),
+                host: Some(host),
+            }),
             Err(error) => {
                 let message = settle_refused_open(&host, error)?;
                 release_shared_test_host(host);
@@ -339,13 +398,17 @@ impl std::ops::Deref for TestState {
 
 impl Drop for TestState {
     fn drop(&mut self) {
-        let (Some(state), Some(host)) = (self.state.take(), self.host.take()) else { return };
+        let (Some(state), Some(host)) = (self.state.take(), self.host.take()) else {
+            return;
+        };
         // A failed test still closes its store into the census so the arena
         // is released for the tests after it; a refused close is left to the
         // host's own leak report rather than a second panic.
         match retire_live_state(&host, state) {
             Ok(()) => release_shared_test_host(host),
-            Err(error) if !std::thread::panicking() => panic!("test State close refused: {error:#}"),
+            Err(error) if !std::thread::panicking() => {
+                panic!("test State close refused: {error:#}")
+            }
             Err(_) => drop(host),
         }
     }
@@ -371,11 +434,17 @@ impl TestProjection {
             )
         }
         .expect("transient projection inputs");
-        let db = match crate::projection::ProjectionDb::open_original_transient(Arc::clone(host.factory()), inputs) {
+        let db = match crate::projection::ProjectionDb::open_original_transient(
+            Arc::clone(host.factory()),
+            inputs,
+        ) {
             Ok(db) => db,
             Err(error) => panic!("transient test projection refused: {error:#}"),
         };
-        Self { db: Some(db), host: Some(host) }
+        Self {
+            db: Some(db),
+            host: Some(host),
+        }
     }
 }
 
@@ -394,16 +463,22 @@ impl std::ops::DerefMut for TestProjection {
 
 impl Drop for TestProjection {
     fn drop(&mut self) {
-        let (Some(db), Some(host)) = (self.db.take(), self.host.take()) else { return };
+        let (Some(db), Some(host)) = (self.db.take(), self.host.take()) else {
+            return;
+        };
         match db.close_original(host.factory()) {
             Ok(closed) => {
                 let (outside, proof) = closed.into_outside_custody();
                 // A transient projection has no filesystem custody.
                 drop(outside);
-                host.retain_terminal(lillux_sqlite::OriginalNativeConnectionTerminal::Closed(proof));
+                host.retain_terminal(lillux_sqlite::OriginalNativeConnectionTerminal::Closed(
+                    proof,
+                ));
                 release_shared_test_host(host);
             }
-            Err(failure) if !std::thread::panicking() => panic!("test projection close refused: {failure}"),
+            Err(failure) if !std::thread::panicking() => {
+                panic!("test projection close refused: {failure}")
+            }
             Err(_) => drop(host),
         }
     }
@@ -418,7 +493,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let runtime_state_dir = dir.path().join("runtime-state");
         let state = TestState::open(&runtime_state_dir, Arc::new(TrustStore::new())).unwrap();
-        assert!(state.projection().projection_instance_id().unwrap().is_some());
+        assert!(
+            state
+                .projection()
+                .projection_instance_id()
+                .unwrap()
+                .is_some()
+        );
         state.close().unwrap();
         assert!(runtime_state_dir.join(OPERATIONAL_DB_FILENAME).is_file());
         let reopened = TestState::open(&runtime_state_dir, Arc::new(TrustStore::new())).unwrap();
@@ -429,18 +510,32 @@ mod tests {
     fn refused_live_open_settles_into_the_census() {
         let dir = tempfile::tempdir().unwrap();
         let runtime_state_dir = dir.path().join("runtime-state");
-        TestState::open(&runtime_state_dir, Arc::new(TrustStore::new())).unwrap().close().unwrap();
+        TestState::open(&runtime_state_dir, Arc::new(TrustStore::new()))
+            .unwrap()
+            .close()
+            .unwrap();
         std::fs::remove_file(runtime_state_dir.join(OPERATIONAL_DB_FILENAME)).unwrap();
         let host = TestNativeHost::acquire_with(TEST_STATE_ENVELOPE);
         // Read under the host's serial guard, so no other host test can
         // abandon an opening between the two reads.
         let before = crate::state_db::abandoned_live_openings();
-        let refusal = live_state_open_refusal(&host, &runtime_state_dir, Arc::new(TrustStore::new()));
-        assert!(refusal.contains("established live Operational database is absent"), "{refusal}");
+        let refusal =
+            live_state_open_refusal(&host, &runtime_state_dir, Arc::new(TrustStore::new()));
+        assert!(
+            refusal.contains("established live Operational database is absent"),
+            "{refusal}"
+        );
         let (issued, recorded) = host.ticket_census();
-        assert_eq!(issued as usize, recorded, "every issued ticket reaches the census");
+        assert_eq!(
+            issued as usize, recorded,
+            "every issued ticket reaches the census"
+        );
         drop(host.release());
-        assert_eq!(crate::state_db::abandoned_live_openings(), before, "nothing was abandoned");
+        assert_eq!(
+            crate::state_db::abandoned_live_openings(),
+            before,
+            "nothing was abandoned"
+        );
     }
 }
 
@@ -460,7 +555,11 @@ pub struct TestOfflineState {
 
 impl TestOfflineState {
     /// Open the authority roots with a transient projection only.
-    pub fn open(runtime_state_dir: &Path, namespace: &lillux::PinnedDirectoryLock, trust: Arc<TrustStore>) -> Result<Self> {
+    pub fn open(
+        runtime_state_dir: &Path,
+        namespace: &lillux::PinnedDirectoryLock,
+        trust: Arc<TrustStore>,
+    ) -> Result<Self> {
         let directory = lillux::PinnedDirectory::open(runtime_state_dir)?
             .context("test runtime state directory is absent")?;
         let host = shared_test_host();
@@ -469,7 +568,13 @@ impl TestOfflineState {
         // the life of the store, and the host destination admits only its own
         // factory.
         let opened = unsafe {
-            StateDb::open_offline_native(directory, namespace, trust, host.factory(), host.destination())
+            StateDb::open_offline_native(
+                directory,
+                namespace,
+                trust,
+                host.factory(),
+                host.destination(),
+            )
         };
         Self::admitted(host, None, opened)
     }
@@ -510,7 +615,11 @@ impl TestOfflineState {
         opened: Result<StateDb>,
     ) -> Result<Self> {
         match opened {
-            Ok(state) => Ok(Self { state: Some(state), host: Some(host), _lease_authority: lease_authority }),
+            Ok(state) => Ok(Self {
+                state: Some(state),
+                host: Some(host),
+                _lease_authority: lease_authority,
+            }),
             Err(error) => {
                 // The refusal may carry native owners of this host; they stay
                 // in the returned error. The host handle is dropped without a
@@ -539,13 +648,22 @@ impl TestOfflineState {
 fn retire_offline_state(host: &TestNativeHost, state: StateDb) -> Result<()> {
     let census = match state.close_offline_native(host.factory()) {
         Ok(census) => census,
-        Err((Some(state), error)) => return Err(crate::operational::CarriedOwners::carry(error, state)),
+        Err((Some(state), error)) => {
+            return Err(crate::operational::CarriedOwners::carry(error, state));
+        }
         Err((None, error)) => return Err(error),
     };
-    let crate::state_db::LiveStateCensus { terminals, leases, lease_retirement, prior_refusal } = census;
+    let crate::state_db::LiveStateCensus {
+        terminals,
+        leases,
+        lease_retirement,
+        prior_refusal,
+    } = census;
     retain_census(host, terminals, leases, lease_retirement);
     match prior_refusal {
-        Some(refusal) => Err(refusal.context("test offline State close completed after an earlier refusal")),
+        Some(refusal) => {
+            Err(refusal.context("test offline State close completed after an earlier refusal"))
+        }
         None => Ok(()),
     }
 }
@@ -565,10 +683,14 @@ impl std::ops::Deref for TestOfflineState {
 
 impl Drop for TestOfflineState {
     fn drop(&mut self) {
-        let (Some(state), Some(host)) = (self.state.take(), self.host.take()) else { return };
+        let (Some(state), Some(host)) = (self.state.take(), self.host.take()) else {
+            return;
+        };
         match retire_offline_state(&host, state) {
             Ok(()) => release_shared_test_host(host),
-            Err(error) if !std::thread::panicking() => panic!("test offline State close refused: {error:#}"),
+            Err(error) if !std::thread::panicking() => {
+                panic!("test offline State close refused: {error:#}")
+            }
             Err(_) => drop(host),
         }
     }
@@ -579,5 +701,7 @@ impl Drop for TestOfflineState {
 /// cannot shift each other's counts.
 pub fn abandoned_custody_serial() -> std::sync::MutexGuard<'static, ()> {
     static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    SERIAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }

@@ -421,8 +421,13 @@ fn ready_stage_complete(
         }
         Some(false) => matches!(
             (stage, phase),
-            (StartupStage::ReconcilingFollow, StartupPhase::ReconcilingFollow)
-                | (StartupStage::PostReconcileHeadReplay, StartupPhase::ReplayingHeadChanges)
+            (
+                StartupStage::ReconcilingFollow,
+                StartupPhase::ReconcilingFollow
+            ) | (
+                StartupStage::PostReconcileHeadReplay,
+                StartupPhase::ReplayingHeadChanges
+            )
         ),
         None => false,
     }
@@ -1052,16 +1057,52 @@ mod tests {
     #[test]
     fn ready_requires_the_composition_s_final_reconciliation_stage() {
         for selected in [None, Some(false), Some(true)] {
-            assert!(!ready_stage_complete(StartupStage::ReconcilingThreads, StartupPhase::ReconcilingThreads, selected));
-            assert!(!ready_stage_complete(StartupStage::InitialHeadReplay, StartupPhase::ReplayingHeadChanges, selected));
+            assert!(!ready_stage_complete(
+                StartupStage::ReconcilingThreads,
+                StartupPhase::ReconcilingThreads,
+                selected
+            ));
+            assert!(!ready_stage_complete(
+                StartupStage::InitialHeadReplay,
+                StartupPhase::ReplayingHeadChanges,
+                selected
+            ));
         }
-        assert!(ready_stage_complete(StartupStage::ReconcilingFollow, StartupPhase::ReconcilingFollow, Some(false)));
-        assert!(ready_stage_complete(StartupStage::PostReconcileHeadReplay, StartupPhase::ReplayingHeadChanges, Some(false)));
-        assert!(!ready_stage_complete(StartupStage::ReconcilingScheduler, StartupPhase::ReconcilingScheduler, Some(false)));
-        assert!(!ready_stage_complete(StartupStage::ReconcilingFollow, StartupPhase::ReconcilingFollow, Some(true)));
-        assert!(ready_stage_complete(StartupStage::ReconcilingScheduler, StartupPhase::ReconcilingScheduler, Some(true)));
-        assert!(!ready_stage_complete(StartupStage::ReconcilingFollow, StartupPhase::ReconcilingFollow, None));
-        assert!(!ready_stage_complete(StartupStage::ReconcilingScheduler, StartupPhase::ReconcilingScheduler, None));
+        assert!(ready_stage_complete(
+            StartupStage::ReconcilingFollow,
+            StartupPhase::ReconcilingFollow,
+            Some(false)
+        ));
+        assert!(ready_stage_complete(
+            StartupStage::PostReconcileHeadReplay,
+            StartupPhase::ReplayingHeadChanges,
+            Some(false)
+        ));
+        assert!(!ready_stage_complete(
+            StartupStage::ReconcilingScheduler,
+            StartupPhase::ReconcilingScheduler,
+            Some(false)
+        ));
+        assert!(!ready_stage_complete(
+            StartupStage::ReconcilingFollow,
+            StartupPhase::ReconcilingFollow,
+            Some(true)
+        ));
+        assert!(ready_stage_complete(
+            StartupStage::ReconcilingScheduler,
+            StartupPhase::ReconcilingScheduler,
+            Some(true)
+        ));
+        assert!(!ready_stage_complete(
+            StartupStage::ReconcilingFollow,
+            StartupPhase::ReconcilingFollow,
+            None
+        ));
+        assert!(!ready_stage_complete(
+            StartupStage::ReconcilingScheduler,
+            StartupPhase::ReconcilingScheduler,
+            None
+        ));
     }
 
     #[test]

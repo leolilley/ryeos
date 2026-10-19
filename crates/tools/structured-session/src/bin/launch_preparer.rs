@@ -180,7 +180,8 @@ fn prepare(request: ryeos_handler_protocol::LaunchPrepareRequest) -> LaunchPrepa
                             (name, value)
                         })
                         .collect::<BTreeMap<_, _>>();
-                    let environment_contributions = if !variables.is_empty() { {
+                    let environment_contributions = if !variables.is_empty() {
+                        {
                             BTreeMap::from([(
                                 ENVIRONMENT_BINDING.to_owned(),
                                 LaunchEnvironmentContributionRequestWire {
@@ -188,7 +189,10 @@ fn prepare(request: ryeos_handler_protocol::LaunchPrepareRequest) -> LaunchPrepa
                                     variables,
                                 },
                             )])
-                        } } else { Default::default() };
+                        }
+                    } else {
+                        Default::default()
+                    };
                     let workload_client_request = environment.workload_client;
                     (
                         environment.worker_ref,

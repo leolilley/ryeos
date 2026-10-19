@@ -66,24 +66,34 @@ pub(crate) struct OriginalRuntimeAcquisitionReleased {
     pub(super) _unused_inputs: Option<OriginalNativeBoundInputs>,
 }
 impl OriginalRuntimeAcquisitionReleased {
-    pub(crate) fn native_terminals(&self, factory: &Arc<OriginalNativeFactory>)
-        -> Result<Vec<OriginalNativeConnectionTerminal>> {
+    pub(crate) fn native_terminals(
+        &self,
+        factory: &Arc<OriginalNativeFactory>,
+    ) -> Result<Vec<OriginalNativeConnectionTerminal>> {
         self.require_native_custody(factory)?;
         let mut terminals: Vec<_> = self.terminal.iter().cloned().collect();
         if let Some(reference) = &self._schema_reference {
-            reference.require_original_closed(factory, lillux_sqlite::OriginalNativeDomain::NodeRuntimeSchemaReference)?;
+            reference.require_original_closed(
+                factory,
+                lillux_sqlite::OriginalNativeDomain::NodeRuntimeSchemaReference,
+            )?;
             terminals.push(reference.terminal().clone());
         }
         Ok(terminals)
     }
-    pub(crate) fn require_native_custody(&self, factory: &Arc<OriginalNativeFactory>) -> Result<()> {
+    pub(crate) fn require_native_custody(
+        &self,
+        factory: &Arc<OriginalNativeFactory>,
+    ) -> Result<()> {
         factory.require_original_process()?;
         self.factory.require_original_process()?;
         ensure!(
             self.factory.same_original(factory),
             "foreign Runtime acquisition cleanup factory"
         );
-        if let Some(terminal) = &self.terminal { terminal.require_original(factory)?; }
+        if let Some(terminal) = &self.terminal {
+            terminal.require_original(factory)?;
+        }
         // This is only the native census. Original filesystem/unused-input
         // holders remain retained for their independent outside disposition.
         Ok(())
@@ -98,7 +108,14 @@ impl OriginalRuntimeAcquisitionFailure {
         custody: AcquisitionCustody,
         schema_reference: Option<sqlite_schema::ClosedNativeSchemaSqlReference>,
     ) -> Self {
-        Self { error, custody: Mutex::new(custody), schema_reference, factory, root, namespace }
+        Self {
+            error,
+            custody: Mutex::new(custody),
+            schema_reference,
+            factory,
+            root,
+            namespace,
+        }
     }
     /// Consume retained custody before effects; no bookkeeping mutex is held
     /// across native close. Retry the actual partial owner, never reopen SQL.
@@ -134,13 +151,25 @@ impl OriginalRuntimeAcquisitionFailure {
                         error = lillux_sqlite::RefusalSupersedes::superseding(refusal, error);
                         Err(AcquisitionCustody::Open(owner))
                     } else {
-                        owner.retry_close()
-                            .map(|proof| (Some(OriginalNativeConnectionTerminal::Released(proof)), None))
+                        owner
+                            .retry_close()
+                            .map(|proof| {
+                                (
+                                    Some(OriginalNativeConnectionTerminal::Released(proof)),
+                                    None,
+                                )
+                            })
                             .map_err(AcquisitionCustody::Open)
                     }
                 } else {
-                    owner.retry_close()
-                        .map(|proof| (Some(OriginalNativeConnectionTerminal::Released(proof)), None))
+                    owner
+                        .retry_close()
+                        .map(|proof| {
+                            (
+                                Some(OriginalNativeConnectionTerminal::Released(proof)),
+                                None,
+                            )
+                        })
                         .map_err(AcquisitionCustody::Open)
                 }
             }
@@ -157,13 +186,22 @@ impl OriginalRuntimeAcquisitionFailure {
         let (terminal, unused_inputs) = match attempted {
             Ok(terminal) => terminal,
             Err(custody) => {
-                return Err(Self::retained(error, factory, root, namespace,
-                    custody, schema_reference));
+                return Err(Self::retained(
+                    error,
+                    factory,
+                    root,
+                    namespace,
+                    custody,
+                    schema_reference,
+                ));
             }
         };
         // Invalid native evidence cannot become a released frame. Preserve
         // the entire original source, including unused precontact inputs.
-        if let Err(refusal) = terminal.as_ref().map_or(Ok(()), |proof| proof.require_original(&factory)) {
+        if let Err(refusal) = terminal
+            .as_ref()
+            .map_or(Ok(()), |proof| proof.require_original(&factory))
+        {
             let custody = match terminal {
                 Some(terminal) => AcquisitionCustody::Terminal(terminal),
                 None => match unused_inputs {
@@ -171,13 +209,22 @@ impl OriginalRuntimeAcquisitionFailure {
                     None => AcquisitionCustody::NotAcquired,
                 },
             };
-            return Err(Self::retained(lillux_sqlite::RefusalSupersedes::superseding(refusal, error), factory, root, namespace,
-                custody, schema_reference));
+            return Err(Self::retained(
+                lillux_sqlite::RefusalSupersedes::superseding(refusal, error),
+                factory,
+                root,
+                namespace,
+                custody,
+                schema_reference,
+            ));
         }
         // A namespace refusal does not undo an actual native close. Retain it
         // as failure evidence alongside the same physical owners, allowing the
         // outside supervisor to retire those holders without admitting use.
-        if let Err(refusal) = namespace.ensure_protects(&root).and_then(|()| root.ensure_path_binding()) {
+        if let Err(refusal) = namespace
+            .ensure_protects(&root)
+            .and_then(|()| root.ensure_path_binding())
+        {
             error = lillux_sqlite::RefusalSupersedes::superseding(refusal, error);
         }
         Ok(OriginalRuntimeAcquisitionReleased {
@@ -222,7 +269,8 @@ impl RuntimeDb {
             namespace.ensure_protects(&root)?;
             let retained_root = root.try_clone()?;
             let inputs = match &mut custody {
-                AcquisitionCustody::BeforeOpen(inputs) => inputs.take()
+                AcquisitionCustody::BeforeOpen(inputs) => inputs
+                    .take()
                     .context("original Runtime admission inputs already consumed")?,
                 _ => anyhow::bail!("original Runtime admission phase changed"),
             };
@@ -276,7 +324,12 @@ impl RuntimeDb {
             Ok(value) => value,
             Err(error) => {
                 return Err(OriginalRuntimeAcquisitionFailure::retained(
-                    error, factory, root, namespace, custody, Some(schema_reference),
+                    error,
+                    factory,
+                    root,
+                    namespace,
+                    custody,
+                    Some(schema_reference),
                 ));
             }
         };
@@ -284,7 +337,10 @@ impl RuntimeDb {
             unreachable!()
         };
         Ok(Self {
-            conn: RuntimeConnection::OriginalMutation { owner, schema_reference },
+            conn: RuntimeConnection::OriginalMutation {
+                owner,
+                schema_reference,
+            },
             incarnation: RuntimeDbIncarnation(Arc::new(PrivateRuntimeDbIncarnation)),
             reset_target: Some(path.to_path_buf()),
             original_deadline_active: std::cell::Cell::new(false),
@@ -328,7 +384,12 @@ mod native_reference_tests {
             Arc::clone(root),
             namespace.clone(),
             Arc::clone(host.factory()),
-            bound(host, root, OriginalNativeBoundMode::Existing, OriginalNativeDomain::RuntimeMutation),
+            bound(
+                host,
+                root,
+                OriginalNativeBoundMode::Existing,
+                OriginalNativeDomain::RuntimeMutation,
+            ),
             runtime_reference(host),
             UnreadableLifetimeFence::Refuse,
         ) {
@@ -351,7 +412,12 @@ mod native_reference_tests {
             Arc::clone(&root),
             namespace.clone(),
             Arc::clone(host.factory()),
-            bound(&host, &root, OriginalNativeBoundMode::OpenOrCreate, OriginalNativeDomain::NodeRuntime),
+            bound(
+                &host,
+                &root,
+                OriginalNativeBoundMode::OpenOrCreate,
+                OriginalNativeDomain::NodeRuntime,
+            ),
             lillux::time::MonotonicDeadline::after(std::time::Duration::from_secs(60)),
             runtime_reference(&host),
         ) {
@@ -366,7 +432,12 @@ mod native_reference_tests {
         assert!(!current.requires_explicit_history_reset());
         current
             .conn
-            .with_sql(|connection| current.conn.schema_reference().require_matches(connection, &path))
+            .with_sql(|connection| {
+                current
+                    .conn
+                    .schema_reference()
+                    .require_matches(connection, &path)
+            })
             .expect("mutation carries the reference its current schema matches");
         current
             .conn
@@ -381,7 +452,10 @@ mod native_reference_tests {
             .unwrap();
         assert_eq!(
             retire(&host, current),
-            vec![OriginalNativeDomain::RuntimeMutation, OriginalNativeDomain::NodeRuntimeSchemaReference],
+            vec![
+                OriginalNativeDomain::RuntimeMutation,
+                OriginalNativeDomain::NodeRuntimeSchemaReference
+            ],
             "the closed mutation hands its reference terminal to the census"
         );
 
@@ -389,8 +463,13 @@ mod native_reference_tests {
         // current schema against the same native reference.
         let mut predecessor = open_mutation(&host, &root, &namespace, &path);
         assert!(predecessor.requires_explicit_history_reset());
-        predecessor.fixture_apply_explicit_history_reset(&path).unwrap();
-        assert_eq!(predecessor.operator_schema_epoch().unwrap(), RUNTIME_OPERATOR_SCHEMA_EPOCH);
+        predecessor
+            .fixture_apply_explicit_history_reset(&path)
+            .unwrap();
+        assert_eq!(
+            predecessor.operator_schema_epoch().unwrap(),
+            RUNTIME_OPERATOR_SCHEMA_EPOCH
+        );
         assert_eq!(retire(&host, predecessor).len(), 2);
 
         // Live, current and predecessor phases each paid one main and one
@@ -418,27 +497,52 @@ mod release_tests {
         let namespace = root.lock_exclusive().unwrap();
 
         let failure = OriginalRuntimeAcquisitionFailure::retained(
-            anyhow::anyhow!("acquisition refused"), Arc::clone(&factory), Arc::clone(&root),
-            namespace, AcquisitionCustody::BeforeOpen(None), None);
+            anyhow::anyhow!("acquisition refused"),
+            Arc::clone(&factory),
+            Arc::clone(&root),
+            namespace,
+            AcquisitionCustody::BeforeOpen(None),
+            None,
+        );
         // A custody with no owner to retire refuses and returns the SAME owner.
         let failure = match failure.retry_close() {
             Ok(_) => panic!("an empty pre-open custody cannot release"),
             Err(failure) => failure,
         };
-        assert_eq!(Arc::strong_count(&factory), base + 1, "refusal keeps the factory alias");
+        assert_eq!(
+            Arc::strong_count(&factory),
+            base + 1,
+            "refusal keeps the factory alias"
+        );
         assert_eq!(Arc::strong_count(&root), 2, "refusal keeps the pinned root");
         assert!(namespace_held(&root), "refusal keeps the namespace lock");
 
         // The consuming release moves every owner into the released frame.
         *failure.custody.lock().unwrap() = AcquisitionCustody::NotAcquired;
-        let released = failure.retry_close().expect("never-acquired custody releases");
+        let released = failure
+            .retry_close()
+            .expect("never-acquired custody releases");
         assert!(released.terminal.is_none());
         assert_eq!(Arc::strong_count(&factory), base + 1);
-        assert!(namespace_held(&root), "the released frame still holds the namespace");
+        assert!(
+            namespace_held(&root),
+            "the released frame still holds the namespace"
+        );
         drop(released);
-        assert_eq!(Arc::strong_count(&factory), base, "released frame ends its factory alias");
-        assert_eq!(Arc::strong_count(&root), 1, "released frame ends its root alias");
-        assert!(!namespace_held(&root), "released frame ends its namespace lock");
+        assert_eq!(
+            Arc::strong_count(&factory),
+            base,
+            "released frame ends its factory alias"
+        );
+        assert_eq!(
+            Arc::strong_count(&root),
+            1,
+            "released frame ends its root alias"
+        );
+        assert!(
+            !namespace_held(&root),
+            "released frame ends its namespace lock"
+        );
     }
 
     #[test]
@@ -449,8 +553,13 @@ mod release_tests {
         let dir = tempfile::tempdir().unwrap();
         let root = Arc::new(lillux::PinnedDirectory::open(dir.path()).unwrap().unwrap());
         let failure = OriginalRuntimeAcquisitionFailure::retained(
-            anyhow::anyhow!("acquisition refused"), Arc::clone(&factory), Arc::clone(&root),
-            root.lock_exclusive().unwrap(), AcquisitionCustody::NotAcquired, None);
+            anyhow::anyhow!("acquisition refused"),
+            Arc::clone(&factory),
+            Arc::clone(&root),
+            root.lock_exclusive().unwrap(),
+            AcquisitionCustody::NotAcquired,
+            None,
+        );
         assert!(namespace_held(&root));
         drop(failure);
         // Nothing is forgotten: the host can release once its test ends.
@@ -463,18 +572,22 @@ mod release_tests {
 #[cfg(test)]
 mod refusal_layer_tests {
     use lillux_sqlite::original_host_owner::FixedHostRefusal;
-    use lillux_sqlite::{native_refusal_is_fact, NativeCheckContended, RefusalSupersedes};
+    use lillux_sqlite::{NativeCheckContended, RefusalSupersedes, native_refusal_is_fact};
 
     /// A recovery, terminal or namespace refusal met while settling an acquisition
     /// refusal is classified by itself, not by the acquisition refusal.
     #[test]
     fn a_later_refusal_classifies_over_the_earlier_one() {
         let fact = || anyhow::anyhow!("namespace no longer protects the runtime root");
-        let contended = || anyhow::Error::new(FixedHostRefusal::Contended).context("original acquisition");
+        let contended =
+            || anyhow::Error::new(FixedHostRefusal::Contended).context("original acquisition");
         let later_fact = fact().superseding(contended());
         assert!(native_refusal_is_fact(&later_fact), "{later_fact:#}");
         let later_contention = anyhow::Error::new(NativeCheckContended).superseding(fact());
-        assert!(!native_refusal_is_fact(&later_contention), "{later_contention:#}");
+        assert!(
+            !native_refusal_is_fact(&later_contention),
+            "{later_contention:#}"
+        );
         assert!(format!("{later_fact:#}").contains("original acquisition"));
     }
 }

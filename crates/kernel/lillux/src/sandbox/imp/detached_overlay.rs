@@ -210,7 +210,13 @@ pub(super) fn probe() -> Result<(), String> {
             .create_child(OsStr::new("work"), 0o700)
             .map_err(|error| error.to_string())?;
         lower
-            .atomic_write_if_same(OsStr::new("seed"), None, b"lower", 0o600, PROBE_TEMP_PURPOSE)
+            .atomic_write_if_same(
+                OsStr::new("seed"),
+                None,
+                b"lower",
+                0o600,
+                PROBE_TEMP_PURPOSE,
+            )
             .map_err(|error| error.to_string())?;
         let lower = lower
             .inherited_descriptor_authority()

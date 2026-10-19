@@ -316,12 +316,13 @@ pub fn clear_restart_inhibition(
     let raw = record.read_stable_bounded(&observation, MAX_RESTART_INHIBIT_BYTES)?;
     // An unreadable record is still cleared on explicit operator request,
     // since it can carry no facts the next start must apply.
-    let cleared = serde_json::from_slice::<RestartInhibition>(&raw).unwrap_or_else(|_| RestartInhibition {
-        reason: "unreadable".to_owned(),
-        detail: None,
-        recorded_at: String::new(),
-        pid: 0,
-    });
+    let cleared =
+        serde_json::from_slice::<RestartInhibition>(&raw).unwrap_or_else(|_| RestartInhibition {
+            reason: "unreadable".to_owned(),
+            detail: None,
+            recorded_at: String::new(),
+            pid: 0,
+        });
     let entry = RestartInhibitionClear {
         cleared: cleared.clone(),
         cleared_at: lillux::time::iso8601_now(),
@@ -338,7 +339,9 @@ pub fn read_restart_clears(state_dir: &Path) -> anyhow::Result<Vec<RestartInhibi
     let Some(directory) = lillux::PinnedDirectory::open(state_dir)? else {
         return Ok(Vec::new());
     };
-    let Some(log) = directory.open_pinned_regular(std::ffi::OsStr::new(RESTART_CLEAR_LOG), false)? else {
+    let Some(log) =
+        directory.open_pinned_regular(std::ffi::OsStr::new(RESTART_CLEAR_LOG), false)?
+    else {
         return Ok(Vec::new());
     };
     let observation = log.observation()?;
@@ -354,7 +357,10 @@ pub fn read_restart_clears(state_dir: &Path) -> anyhow::Result<Vec<RestartInhibi
 
 /// Append one entry by pinned compare-and-write, dropping the oldest whole
 /// entries only when the log would exceed its bound.
-fn append_restart_clear(directory: &lillux::PinnedDirectory, entry: &RestartInhibitionClear) -> anyhow::Result<()> {
+fn append_restart_clear(
+    directory: &lillux::PinnedDirectory,
+    entry: &RestartInhibitionClear,
+) -> anyhow::Result<()> {
     let existing = directory.open_pinned_regular(std::ffi::OsStr::new(RESTART_CLEAR_LOG), false)?;
     let mut body = match &existing {
         Some(log) => {
@@ -365,7 +371,10 @@ fn append_restart_clear(directory: &lillux::PinnedDirectory, entry: &RestartInhi
     };
     let mut line = serde_json::to_vec(entry)?;
     line.push(b'\n');
-    anyhow::ensure!(line.len() <= MAX_RESTART_CLEAR_LOG_BYTES, "restart clear entry exceeds the log bound");
+    anyhow::ensure!(
+        line.len() <= MAX_RESTART_CLEAR_LOG_BYTES,
+        "restart clear entry exceeds the log bound"
+    );
     while body.len() + line.len() > MAX_RESTART_CLEAR_LOG_BYTES {
         match body.iter().position(|byte| *byte == b'\n') {
             Some(end) => {
@@ -418,8 +427,11 @@ fn write_strict(
         Some(file) => {
             let observation = file.observation()?;
             let raw = file.read_stable_bounded(&observation, MAX_MARKER_BYTES)?;
-            Some(serde_json::from_slice::<LifecycleMarker>(&raw)
-                .map_err(|error| anyhow::anyhow!("current lifecycle marker is unreadable: {error}"))?)
+            Some(
+                serde_json::from_slice::<LifecycleMarker>(&raw).map_err(|error| {
+                    anyhow::anyhow!("current lifecycle marker is unreadable: {error}")
+                })?,
+            )
         }
         None => None,
     };
@@ -448,7 +460,8 @@ pub fn take_previous_exit(state_dir: &Path) -> anyhow::Result<Option<LifecycleMa
     let Some(directory) = lillux::PinnedDirectory::open(state_dir)? else {
         return Ok(None);
     };
-    let Some(marker) = directory.open_pinned_regular(std::ffi::OsStr::new(MARKER_FILE), false)? else {
+    let Some(marker) = directory.open_pinned_regular(std::ffi::OsStr::new(MARKER_FILE), false)?
+    else {
         return Ok(None);
     };
     let observation = marker.observation()?;
@@ -468,8 +481,9 @@ pub fn take_previous_exit(state_dir: &Path) -> anyhow::Result<Option<LifecycleMa
 pub fn record_running(state_dir: &Path, launch_route: LaunchRoute) -> anyhow::Result<String> {
     let started_at = lillux::time::iso8601_now();
     write_strict(state_dir, |current| {
-        let (pending_latched_drain, carrier_incarnation) =
-            current.map(LifecycleMarker::carried_latched_drain).unwrap_or((None, None));
+        let (pending_latched_drain, carrier_incarnation) = current
+            .map(LifecycleMarker::carried_latched_drain)
+            .unwrap_or((None, None));
         Ok(LifecycleMarker::Running {
             pid: std::process::id(),
             started_at: started_at.clone(),
@@ -518,7 +532,9 @@ pub fn bind_pending_latched_drain(
         require_own_running(pid, &started_at, own_started_at)?;
         let pending_latched_drain = match pending_latched_drain {
             Some(facts) => {
-                let expected = carrier_incarnation.clone().unwrap_or_else(|| facts.incarnation_digest.clone());
+                let expected = carrier_incarnation
+                    .clone()
+                    .unwrap_or_else(|| facts.incarnation_digest.clone());
                 if predecessor.map(incarnation_digest_hex).as_deref() == Some(expected.as_str()) {
                     accepted = Some(facts.clone());
                     Some(facts)
@@ -532,7 +548,9 @@ pub fn bind_pending_latched_drain(
             }
             None => None,
         };
-        let carrier_incarnation = pending_latched_drain.as_ref().map(|_| incarnation_digest_hex(own));
+        let carrier_incarnation = pending_latched_drain
+            .as_ref()
+            .map(|_| incarnation_digest_hex(own));
         Ok(LifecycleMarker::Running {
             pid,
             started_at,
@@ -579,9 +597,17 @@ pub fn record_exit(
     launch_route: LaunchRoute,
 ) {
     let result = write_strict(state_dir, |current| {
-        let (latched_drain, carrier) =
-            current.map(LifecycleMarker::carried_latched_drain).unwrap_or((None, None));
-        Ok(exited_marker(reason, started_at, error, launch_route, latched_drain, carrier))
+        let (latched_drain, carrier) = current
+            .map(LifecycleMarker::carried_latched_drain)
+            .unwrap_or((None, None));
+        Ok(exited_marker(
+            reason,
+            started_at,
+            error,
+            launch_route,
+            latched_drain,
+            carrier,
+        ))
     });
     if let Err(e) = result {
         tracing::warn!(error = %e, "failed to write daemon lifecycle marker");
@@ -603,14 +629,26 @@ pub fn record_exit_with_latched_drain(
     facts: &LatchedDrainFacts,
 ) -> anyhow::Result<()> {
     write_strict(state_dir, |current| {
-        let older = current.map(LifecycleMarker::carried_latched_drain).and_then(|(older, _)| older);
+        let older = current
+            .map(LifecycleMarker::carried_latched_drain)
+            .and_then(|(older, _)| older);
         let merged = merge_latched_drain(older, facts);
-        Ok(exited_marker(reason, started_at, error, launch_route, Some(merged), None))
+        Ok(exited_marker(
+            reason,
+            started_at,
+            error,
+            launch_route,
+            Some(merged),
+            None,
+        ))
     })
 }
 
 /// `newer` with every thread of `older` it does not itself name.
-fn merge_latched_drain(older: Option<LatchedDrainFacts>, newer: &LatchedDrainFacts) -> LatchedDrainFacts {
+fn merge_latched_drain(
+    older: Option<LatchedDrainFacts>,
+    newer: &LatchedDrainFacts,
+) -> LatchedDrainFacts {
     let LatchedDrainFacts {
         outcome,
         incarnation_digest,
@@ -632,7 +670,11 @@ fn merge_latched_drain(older: Option<LatchedDrainFacts>, newer: &LatchedDrainFac
             threads.entry(thread).or_insert(identity);
         }
     }
-    LatchedDrainFacts { outcome, incarnation_digest, resume_attempts_reset_deferred: threads }
+    LatchedDrainFacts {
+        outcome,
+        incarnation_digest,
+        resume_attempts_reset_deferred: threads,
+    }
 }
 
 fn exited_marker(
@@ -690,11 +732,19 @@ pub fn complete_finalizing_exit(
                     && *pid == std::process::id()
                     && retained == started_at
         );
-        anyhow::ensure!(own_provisional, "lifecycle marker is not this run's provisional exit");
+        anyhow::ensure!(
+            own_provisional,
+            "lifecycle marker is not this run's provisional exit"
+        );
         // The provisional record's latched-drain facts survive completion.
         let (latched_drain, carrier) = decoded.carried_latched_drain();
         let body = serde_json::to_vec(&exited_marker(
-            reason, started_at, error, launch_route, latched_drain, carrier,
+            reason,
+            started_at,
+            error,
+            launch_route,
+            latched_drain,
+            carrier,
         ))?;
         directory.atomic_write_pinned_if_same(
             std::ffi::OsStr::new(MARKER_FILE),
@@ -766,7 +816,10 @@ pub fn report_previous_exit(previous: Option<&LifecycleMarker>) {
             carrier_incarnation: _,
         }) => {
             if pending_latched_drain.is_some() {
-                tracing::info!(pid, "previous ryeosd run carried unapplied latched-drain facts");
+                tracing::info!(
+                    pid,
+                    "previous ryeosd run carried unapplied latched-drain facts"
+                );
             }
             if process_alive(*pid) {
                 tracing::warn!(
@@ -836,7 +889,12 @@ mod tests {
         std::fs::create_dir_all(&state).unwrap();
         let state = state.as_path();
         require_restart_allowed(state).unwrap();
-        inhibit_restart(state, "service_refusal_stop", Some("admission fact refused")).unwrap();
+        inhibit_restart(
+            state,
+            "service_refusal_stop",
+            Some("admission fact refused"),
+        )
+        .unwrap();
         inhibit_restart(state, "startup_failed", None).unwrap();
         let refusal = require_restart_allowed(state).unwrap_err().to_string();
         assert!(refusal.contains("service_refusal_stop"), "{refusal}");
@@ -856,25 +914,40 @@ mod tests {
         )
         .unwrap();
         // A second holder, such as a running daemon, excludes the clear.
-        assert!(ryeos_node_runtime::state_lock::StateLock::acquire(
-            &ryeos_node_runtime::state_lock::default_lock_path(app_root),
-        )
-        .is_err());
+        assert!(
+            ryeos_node_runtime::state_lock::StateLock::acquire(
+                &ryeos_node_runtime::state_lock::default_lock_path(app_root),
+            )
+            .is_err()
+        );
 
-        let cleared = clear_restart_inhibition(app_root, &held, "fixture clear").unwrap().unwrap();
+        let cleared = clear_restart_inhibition(app_root, &held, "fixture clear")
+            .unwrap()
+            .unwrap();
         assert_eq!(cleared.reason, "service_refusal_stop");
         require_restart_allowed(state).unwrap();
-        assert!(clear_restart_inhibition(app_root, &held, "fixture clear").unwrap().is_none());
+        assert!(
+            clear_restart_inhibition(app_root, &held, "fixture clear")
+                .unwrap()
+                .is_none()
+        );
         std::fs::write(state.join(RESTART_INHIBIT_FILE), b"not json").unwrap();
         assert!(require_restart_allowed(state).is_err());
-        assert!(clear_restart_inhibition(app_root, &held, "fixture clear").unwrap().is_some());
+        assert!(
+            clear_restart_inhibition(app_root, &held, "fixture clear")
+                .unwrap()
+                .is_some()
+        );
         require_restart_allowed(state).unwrap();
 
         let clears = read_restart_clears(state).unwrap();
         assert_eq!(clears.len(), 2);
         assert_eq!(clears[0].cleared.reason, "service_refusal_stop");
         assert_eq!(clears[0].command, "fixture clear");
-        assert_eq!(clears[0].actor, lillux::process_control::ControllerAccount::current().unwrap());
+        assert_eq!(
+            clears[0].actor,
+            lillux::process_control::ControllerAccount::current().unwrap()
+        );
         assert!(!clears[0].cleared_at.is_empty());
         assert_eq!(clears[1].cleared.reason, "unreadable");
     }
@@ -927,7 +1000,13 @@ mod tests {
         assert!(acknowledge_startup_failure(tmp.path()).is_err());
 
         let started_at = record_running(tmp.path(), LaunchRoute::Supervised).unwrap();
-        record_exit(tmp.path(), "signal", &started_at, None, LaunchRoute::Supervised);
+        record_exit(
+            tmp.path(),
+            "signal",
+            &started_at,
+            None,
+            LaunchRoute::Supervised,
+        );
         assert!(acknowledge_startup_failure(tmp.path()).is_err());
         assert!(matches!(
             read(tmp.path()),
@@ -1011,7 +1090,10 @@ mod tests {
             None,
             LaunchRoute::Direct,
         ));
-        assert!(matches!(read(tmp.path()), Some(LifecycleMarker::Running { .. })));
+        assert!(matches!(
+            read(tmp.path()),
+            Some(LifecycleMarker::Running { .. })
+        ));
     }
 
     fn latched_facts(stopped: &[u8; 32]) -> LatchedDrainFacts {
@@ -1029,12 +1111,20 @@ mod tests {
         let started_at = record_running(tmp.path(), LaunchRoute::Direct).unwrap();
         let facts = latched_facts(&stopped);
         record_exit_with_latched_drain(
-            tmp.path(), FINALIZING_REASON, &started_at, Some("staged reason: rollover"),
-            LaunchRoute::Direct, &facts,
+            tmp.path(),
+            FINALIZING_REASON,
+            &started_at,
+            Some("staged reason: rollover"),
+            LaunchRoute::Direct,
+            &facts,
         )
         .unwrap();
         assert!(complete_finalizing_exit(
-            tmp.path(), "service_window_rollover", &started_at, None, LaunchRoute::Direct,
+            tmp.path(),
+            "service_window_rollover",
+            &started_at,
+            None,
+            LaunchRoute::Direct,
         ));
         assert!(matches!(
             read(tmp.path()),
@@ -1060,7 +1150,11 @@ mod tests {
         clear_pending_latched_drain(tmp.path(), &second_start).unwrap();
         assert!(matches!(
             read(tmp.path()),
-            Some(LifecycleMarker::Running { pending_latched_drain: None, carrier_incarnation: None, .. })
+            Some(LifecycleMarker::Running {
+                pending_latched_drain: None,
+                carrier_incarnation: None,
+                ..
+            })
         ));
     }
 
@@ -1070,15 +1164,26 @@ mod tests {
         let stopped = [1u8; 32];
         let started_at = record_running(tmp.path(), LaunchRoute::Direct).unwrap();
         record_exit_with_latched_drain(
-            tmp.path(), FINALIZING_REASON, &started_at, None, LaunchRoute::Direct,
+            tmp.path(),
+            FINALIZING_REASON,
+            &started_at,
+            None,
+            LaunchRoute::Direct,
             &latched_facts(&stopped),
         )
         .unwrap();
         let next_start = record_running(tmp.path(), LaunchRoute::Direct).unwrap();
-        assert_eq!(bind_pending_latched_drain(tmp.path(), &next_start, &[2u8; 32], Some(&[9u8; 32])).unwrap(), None);
+        assert_eq!(
+            bind_pending_latched_drain(tmp.path(), &next_start, &[2u8; 32], Some(&[9u8; 32]))
+                .unwrap(),
+            None
+        );
         assert!(matches!(
             read(tmp.path()),
-            Some(LifecycleMarker::Running { pending_latched_drain: None, .. })
+            Some(LifecycleMarker::Running {
+                pending_latched_drain: None,
+                ..
+            })
         ));
     }
 
@@ -1108,33 +1213,73 @@ mod tests {
         let started_at = record_running(tmp.path(), LaunchRoute::Direct).unwrap();
         let mut older = latched_facts(&first_stop);
         older.outcome = LatchedStopOutcome::ServiceRefusalStop;
-        older.resume_attempts_reset_deferred.insert("T-a".to_owned(), thread_identity(10));
-        older.resume_attempts_reset_deferred.insert("T-b".to_owned(), thread_identity(11));
-        record_exit_with_latched_drain(tmp.path(), FINALIZING_REASON, &started_at, None, LaunchRoute::Direct, &older)
-            .unwrap();
+        older
+            .resume_attempts_reset_deferred
+            .insert("T-a".to_owned(), thread_identity(10));
+        older
+            .resume_attempts_reset_deferred
+            .insert("T-b".to_owned(), thread_identity(11));
+        record_exit_with_latched_drain(
+            tmp.path(),
+            FINALIZING_REASON,
+            &started_at,
+            None,
+            LaunchRoute::Direct,
+            &older,
+        )
+        .unwrap();
 
         // The next start carries them but stops again before recovery
         // applied them; its own stop names one of the same threads.
         let next_start = record_running(tmp.path(), LaunchRoute::Direct).unwrap();
         let second_stop = [2u8; 32];
-        bind_pending_latched_drain(tmp.path(), &next_start, &second_stop, Some(&first_stop)).unwrap();
-        let mut newer = latched_facts(&second_stop);
-        newer.resume_attempts_reset_deferred.insert("T-b".to_owned(), thread_identity(21));
-        newer.resume_attempts_reset_deferred.insert("T-c".to_owned(), thread_identity(22));
-        record_exit_with_latched_drain(tmp.path(), FINALIZING_REASON, &next_start, None, LaunchRoute::Direct, &newer)
+        bind_pending_latched_drain(tmp.path(), &next_start, &second_stop, Some(&first_stop))
             .unwrap();
+        let mut newer = latched_facts(&second_stop);
+        newer
+            .resume_attempts_reset_deferred
+            .insert("T-b".to_owned(), thread_identity(21));
+        newer
+            .resume_attempts_reset_deferred
+            .insert("T-c".to_owned(), thread_identity(22));
+        record_exit_with_latched_drain(
+            tmp.path(),
+            FINALIZING_REASON,
+            &next_start,
+            None,
+            LaunchRoute::Direct,
+            &newer,
+        )
+        .unwrap();
 
-        let Some(LifecycleMarker::Exited { latched_drain: Some(merged), carrier_incarnation, .. }) = read(tmp.path())
+        let Some(LifecycleMarker::Exited {
+            latched_drain: Some(merged),
+            carrier_incarnation,
+            ..
+        }) = read(tmp.path())
         else {
             panic!("expected an exit carrying merged facts");
         };
         assert_eq!(carrier_incarnation, None);
         assert_eq!(merged.outcome, LatchedStopOutcome::ServiceWindowRollover);
-        assert_eq!(merged.incarnation_digest, incarnation_digest_hex(&second_stop));
-        let threads: Vec<&str> = merged.resume_attempts_reset_deferred.keys().map(String::as_str).collect();
+        assert_eq!(
+            merged.incarnation_digest,
+            incarnation_digest_hex(&second_stop)
+        );
+        let threads: Vec<&str> = merged
+            .resume_attempts_reset_deferred
+            .keys()
+            .map(String::as_str)
+            .collect();
         assert_eq!(threads, ["T-a", "T-b", "T-c"]);
-        assert_eq!(merged.resume_attempts_reset_deferred["T-a"], thread_identity(10));
-        assert_eq!(merged.resume_attempts_reset_deferred["T-b"], thread_identity(21));
+        assert_eq!(
+            merged.resume_attempts_reset_deferred["T-a"],
+            thread_identity(10)
+        );
+        assert_eq!(
+            merged.resume_attempts_reset_deferred["T-b"],
+            thread_identity(21)
+        );
     }
 
     #[test]
@@ -1143,21 +1288,38 @@ mod tests {
         let stopped = [1u8; 32];
         let started_at = record_running(tmp.path(), LaunchRoute::Direct).unwrap();
         record_exit_with_latched_drain(
-            tmp.path(), FINALIZING_REASON, &started_at, None, LaunchRoute::Direct, &latched_facts(&stopped),
+            tmp.path(),
+            FINALIZING_REASON,
+            &started_at,
+            None,
+            LaunchRoute::Direct,
+            &latched_facts(&stopped),
         )
         .unwrap();
         let this_start = record_running(tmp.path(), LaunchRoute::Direct).unwrap();
         // Same pid, different start: a recycled pid or an earlier attempt.
-        let error = bind_pending_latched_drain(tmp.path(), "1970-01-01T00:00:00Z", &[2u8; 32], Some(&stopped))
-            .unwrap_err()
-            .to_string();
+        let error = bind_pending_latched_drain(
+            tmp.path(),
+            "1970-01-01T00:00:00Z",
+            &[2u8; 32],
+            Some(&stopped),
+        )
+        .unwrap_err()
+        .to_string();
         assert!(error.contains("another run"), "{error}");
         assert!(clear_pending_latched_drain(tmp.path(), "1970-01-01T00:00:00Z").is_err());
         assert!(matches!(
             read(tmp.path()),
-            Some(LifecycleMarker::Running { pending_latched_drain: Some(_), .. })
+            Some(LifecycleMarker::Running {
+                pending_latched_drain: Some(_),
+                ..
+            })
         ));
-        assert!(bind_pending_latched_drain(tmp.path(), &this_start, &[2u8; 32], Some(&stopped)).unwrap().is_some());
+        assert!(
+            bind_pending_latched_drain(tmp.path(), &this_start, &[2u8; 32], Some(&stopped))
+                .unwrap()
+                .is_some()
+        );
         clear_pending_latched_drain(tmp.path(), &this_start).unwrap();
     }
 
@@ -1167,7 +1329,10 @@ mod tests {
         std::fs::write(tmp.path().join(MARKER_FILE), b"not json").unwrap();
         assert!(take_previous_exit(tmp.path()).is_err());
         assert!(record_running(tmp.path(), LaunchRoute::Direct).is_err());
-        assert_eq!(std::fs::read(tmp.path().join(MARKER_FILE)).unwrap(), b"not json");
+        assert_eq!(
+            std::fs::read(tmp.path().join(MARKER_FILE)).unwrap(),
+            b"not json"
+        );
     }
 
     #[test]

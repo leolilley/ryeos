@@ -109,8 +109,10 @@ mod tests {
             &participant
         ));
         assert!(state.scheduler().is_none());
-        assert!(state
-            .install_scheduler_participant(Arc::new(ObservationOnly))
-            .is_err());
+        assert!(
+            state
+                .install_scheduler_participant(Arc::new(ObservationOnly))
+                .is_err()
+        );
     }
 }

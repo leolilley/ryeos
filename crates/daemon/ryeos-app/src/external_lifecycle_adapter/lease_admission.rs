@@ -182,7 +182,11 @@ pub(crate) fn require_admitted(
 fn plain_reason(reason: &str) -> String {
     let mut plain = String::new();
     for character in reason.chars() {
-        let character = if character.is_control() { ' ' } else { character };
+        let character = if character.is_control() {
+            ' '
+        } else {
+            character
+        };
         if plain.len() + character.len_utf8() > MAX_REFUSAL_REASON_BYTES {
             plain.push('…');
             break;
@@ -254,7 +258,11 @@ mod tests {
             LeaseAdmissionInputs::controller_host_of("https://controller.example:7443").unwrap(),
             "controller.example"
         );
-        for refused in ["https://192.0.2.1", "http://controller.example.com", "relay"] {
+        for refused in [
+            "https://192.0.2.1",
+            "http://controller.example.com",
+            "relay",
+        ] {
             assert!(
                 LeaseAdmissionInputs::controller_host_of(refused).is_err(),
                 "{refused}"
@@ -353,7 +361,11 @@ mod tests {
                 "{text}"
             );
         }
-        for malformed in [serde_json::json!(-1), serde_json::json!(1.5), serde_json::json!("1")] {
+        for malformed in [
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+            serde_json::json!("1"),
+        ] {
             let admitted = verdict(
                 &request,
                 "admitted",

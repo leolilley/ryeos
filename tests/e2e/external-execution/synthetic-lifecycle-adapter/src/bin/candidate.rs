@@ -35,9 +35,9 @@ fn run() -> anyhow::Result<()> {
             claims.windows(2).all(|pair| pair[0] < pair[1])
                 && claims.iter().all(|claim| {
                     !claim.is_empty()
-                        && claim
-                            .bytes()
-                            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+                        && claim.bytes().all(|byte| {
+                            byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_'
+                        })
                 }),
             "qualification probe claims must be sorted unique canonical names"
         );

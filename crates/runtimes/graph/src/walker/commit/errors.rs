@@ -279,19 +279,19 @@ impl Walker {
             && let Err(observation_error) = self
                 .emit_dispatch_observation(graph_run_id, current, step, observation)
                 .await
-            {
-                return self
-                    .commit_observation_failure(
-                        graph_run_id,
-                        step,
-                        state,
-                        suppressed_errors,
-                        guard,
-                        inputs,
-                        observation_error,
-                    )
-                    .await;
-            }
+        {
+            return self
+                .commit_observation_failure(
+                    graph_run_id,
+                    step,
+                    state,
+                    suppressed_errors,
+                    guard,
+                    inputs,
+                    observation_error,
+                )
+                .await;
+        }
 
         // A cost-bearing child that then errored (or whose assign
         // failed) still spent tokens — account for it.

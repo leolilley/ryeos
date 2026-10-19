@@ -288,7 +288,6 @@ pub(crate) enum RelayTransferPhase {
 }
 
 impl RelayTransferPhase {
-
     fn parse(raw: &str) -> Result<Self> {
         match raw {
             "reserved" => Ok(Self::Reserved),
@@ -1013,7 +1012,14 @@ impl RuntimeDb {
             let request_digest = inbound
                 .observed_sha256
                 .context("external relay semantic commit lost request digest")?;
-            verify_relay_application_response(&tx, bootstrap, kind, sequence, &request_digest, &bytes)?;
+            verify_relay_application_response(
+                &tx,
+                bootstrap,
+                kind,
+                sequence,
+                &request_digest,
+                &bytes,
+            )?;
             require_retention_budget(&tx, &intent, bytes.len())?;
             let changed = tx.execute(
                 "UPDATE external_execution_relay_application
@@ -1327,8 +1333,8 @@ impl RuntimeDb {
             }
             let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             require_live_relay_allocation(&tx, intent)?;
-            let prior =
-                read_transfer(&tx, intent)?.context("external relay has no durable transfer owner")?;
+            let prior = read_transfer(&tx, intent)?
+                .context("external relay has no durable transfer owner")?;
             if prior.phase == RelayTransferPhase::Accepted {
                 if prior.observed_sha256.as_deref() != Some(&digest)
                     || prior.observed_bytes != Some(len)
@@ -1372,7 +1378,8 @@ impl RuntimeDb {
                     now
                 ],
             )?;
-            let current = read_transfer(&tx, intent)?.context("external relay readback disappeared")?;
+            let current =
+                read_transfer(&tx, intent)?.context("external relay readback disappeared")?;
             tx.commit()?;
             Ok(current)
         })

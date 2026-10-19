@@ -152,16 +152,13 @@ pub(crate) fn read_verdict(
     match field("verdict") {
         Some("admitted") => {
             ensure!(
-                field("admission_request_sha256")
-                    == Some(record.admission_request_sha256.as_str()),
+                field("admission_request_sha256") == Some(record.admission_request_sha256.as_str()),
                 "lifecycle adapter `{adapter_id}` admitted the lease against a different request"
             );
             let held = |frame: &Option<Vec<u8>>, label: &str| -> Result<String> {
-                Ok(lillux::sha256_hex(
-                    frame
-                        .as_deref()
-                        .with_context(|| format!("the lease record holds no {label} frame"))?,
-                ))
+                Ok(lillux::sha256_hex(frame.as_deref().with_context(|| {
+                    format!("the lease record holds no {label} frame")
+                })?))
             };
             let ready_frame_digest = held(&record.held_ready_frame, "Ready")?;
             let report_frame_digest = held(&record.held_report_frame, "report")?;
@@ -178,7 +175,9 @@ pub(crate) fn read_verdict(
                 .get("channel")
                 .filter(|channel| channel.is_object())
                 .with_context(|| {
-                    format!("lifecycle adapter `{adapter_id}` admitted the lease without resume state")
+                    format!(
+                        "lifecycle adapter `{adapter_id}` admitted the lease without resume state"
+                    )
                 })?;
             Ok(LeaseReadyVerdict::Admitted(ExternalLeaseAdmission {
                 ready_frame_digest,
@@ -198,7 +197,11 @@ pub(crate) fn read_verdict(
 fn plain_reason(reason: &str) -> String {
     let mut plain = String::new();
     for character in reason.chars() {
-        let character = if character.is_control() { ' ' } else { character };
+        let character = if character.is_control() {
+            ' '
+        } else {
+            character
+        };
         if plain.len() + character.len_utf8() > MAX_VERDICT_REASON_BYTES {
             plain.push('…');
             break;
@@ -217,8 +220,9 @@ mod tests {
     };
 
     /// The golden bytes the adapter core composes for the same inputs.
-    const GOLDEN: &[u8] =
-        include_bytes!("../../../../host-adapters/remote-lease-core/fixtures/lease-ready-request.json");
+    const GOLDEN: &[u8] = include_bytes!(
+        "../../../../host-adapters/remote-lease-core/fixtures/lease-ready-request.json"
+    );
 
     pub(crate) fn fixture_binding() -> ExecutionChannelBinding {
         ExecutionChannelBinding {
@@ -280,13 +284,9 @@ mod tests {
     fn the_request_is_the_adapter_cores_golden_bytes() {
         let admission = golden_admission();
         let record = activated_record(&admission);
-        let composed = canonical_request(
-            "remote-lease-test",
-            &admission,
-            &record,
-            &fixture_binding(),
-        )
-        .unwrap();
+        let composed =
+            canonical_request("remote-lease-test", &admission, &record, &fixture_binding())
+                .unwrap();
         assert!(
             composed == GOLDEN,
             "composed readiness request differs from the golden fixture:\n{}",
@@ -308,7 +308,10 @@ mod tests {
         let refusal = canonical_request("remote-lease-test", &other, &record, &fixture_binding())
             .unwrap_err()
             .to_string();
-        assert!(refusal.contains("not the one the lease record was reserved with"), "{refusal}");
+        assert!(
+            refusal.contains("not the one the lease record was reserved with"),
+            "{refusal}"
+        );
 
         let mut binding = fixture_binding();
         binding.occurrence_id = "lease-2".into();
@@ -321,8 +324,13 @@ mod tests {
         reserved.state = ExternalLeaseRecordState::Reserved;
         reserved.activation = None;
         assert!(
-            canonical_request("remote-lease-test", &admission, &reserved, &fixture_binding())
-                .is_err()
+            canonical_request(
+                "remote-lease-test",
+                &admission,
+                &reserved,
+                &fixture_binding()
+            )
+            .is_err()
         );
     }
 
@@ -347,8 +355,15 @@ mod tests {
         })
     }
 
-    fn read(record: &ExternalLeaseRecord, verdict: &serde_json::Value) -> Result<LeaseReadyVerdict> {
-        read_verdict(&serde_json::to_vec(verdict).unwrap(), record, "remote-lease-test")
+    fn read(
+        record: &ExternalLeaseRecord,
+        verdict: &serde_json::Value,
+    ) -> Result<LeaseReadyVerdict> {
+        read_verdict(
+            &serde_json::to_vec(verdict).unwrap(),
+            record,
+            "remote-lease-test",
+        )
     }
 
     #[test]
@@ -358,8 +373,14 @@ mod tests {
         else {
             panic!("an admitted verdict was read as terminate")
         };
-        assert_eq!(admission.ready_frame_digest, lillux::sha256_hex(b"ready-wire"));
-        assert_eq!(admission.report_frame_digest, lillux::sha256_hex(b"report-wire"));
+        assert_eq!(
+            admission.ready_frame_digest,
+            lillux::sha256_hex(b"ready-wire")
+        );
+        assert_eq!(
+            admission.report_frame_digest,
+            lillux::sha256_hex(b"report-wire")
+        );
         assert_eq!(admission.resume_state_json, "{\"chain\":\"state\"}");
 
         for (field, value) in [
@@ -403,7 +424,10 @@ mod tests {
         .unwrap() else {
             panic!("a terminate verdict was read as admitted")
         };
-        assert!(reason.starts_with("bad guest xxx") && reason.len() <= 1_000, "{reason}");
+        assert!(
+            reason.starts_with("bad guest xxx") && reason.len() <= 1_000,
+            "{reason}"
+        );
         assert!(
             read(
                 &record,

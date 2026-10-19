@@ -675,9 +675,9 @@ fn validate_structured_session_profile(profile: &StructuredSessionProfile) -> Re
             .is_some_and(|endpoint| {
                 endpoint != ryeos_runtime::workload_client::WORKLOAD_CLIENT_ENDPOINT_ENV
             })
-        {
-            bail!("structured-session workload-client endpoint environment is not current");
-        }
+    {
+        bail!("structured-session workload-client endpoint environment is not current");
+    }
     if profile.configuration_authority != ConfigurationAuthority::ImmutableArgv {
         bail!("structured-session configuration authority is not immutable argv");
     }
@@ -1945,9 +1945,8 @@ fn resolve_session_process_environment_with_delivery(
                         destinations,
                     } => directory.verified_writable_mount_namespace_path(&destinations[&name])?,
                 };
-                
-                path
-                    .to_str()
+
+                path.to_str()
                     .ok_or_else(|| anyhow!("runtime-view path is not UTF-8"))?
                     .to_owned()
             }

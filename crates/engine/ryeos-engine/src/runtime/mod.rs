@@ -906,33 +906,35 @@ pub(crate) fn compile_with_handlers_and_execution_root(
     // not solve this by adding a deferred child environment to a parent launch
     // preparer: an ordinary child owns this admission itself.
     let (cmd, verified_command) = if cmd_expanded.starts_with("bin:") {
-        let owner = spec_overrides.runtime_command_owner.as_ref().ok_or_else(|| {
-            EngineError::InvalidRuntimeConfig {
+        let owner = spec_overrides
+            .runtime_command_owner
+            .as_ref()
+            .ok_or_else(|| EngineError::InvalidRuntimeConfig {
                 path: "config.command".to_owned(),
                 reason: "binary command has no authenticated singleton runtime owner".to_owned(),
-            }
-        })?;
+            })?;
         let runtime_selection = crate::contracts::PlanRuntimeBinarySelection {
             definition_owner: owner.definition_owner.clone(),
             definition_owner_chain_index: owner.definition_owner_chain_index,
             authored_command: owner.authored_command.clone(),
             expanded_command: cmd_expanded.clone(),
         };
-        let (resolved, member_source_proof) = crate::binary_resolver::resolve_runtime_binary_command_ref_with_selection(
-            &cmd_expanded,
-            &chain
-                .first()
-                .ok_or_else(|| EngineError::NoRuntimeConfig {
-                    chain: chain_str.to_vec(),
-                })?
-                .source_root,
-            chain[0].source_space,
-            root_source_path,
-            roots,
-            node_trust_ref,
-            ctx.root_trust_class,
-            &runtime_selection,
-        )?;
+        let (resolved, member_source_proof) =
+            crate::binary_resolver::resolve_runtime_binary_command_ref_with_selection(
+                &cmd_expanded,
+                &chain
+                    .first()
+                    .ok_or_else(|| EngineError::NoRuntimeConfig {
+                        chain: chain_str.to_vec(),
+                    })?
+                    .source_root,
+                chain[0].source_space,
+                root_source_path,
+                roots,
+                node_trust_ref,
+                ctx.root_trust_class,
+                &runtime_selection,
+            )?;
         (
             resolved.absolute_path.to_string_lossy().into_owned(),
             Some(crate::contracts::PlanVerifiedCommand::BundleExecutor {

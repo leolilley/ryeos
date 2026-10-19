@@ -232,8 +232,8 @@ fn build_live_bundle_engine() -> ryeos_engine::engine::Engine {
             .map(|root| root.join(".ai/node/engine/kinds")),
     );
     kind_roots.push(ryeos_ui_bundle.join(".ai/node/engine/kinds"));
-    let kinds = KindRegistry::load_base(&kind_roots, &trust_store)
-    .expect("load live kind registry");
+    let kinds =
+        KindRegistry::load_base(&kind_roots, &trust_store).expect("load live kind registry");
 
     let mut bundle_roots = vec![core_bundle];
     bundle_roots.extend(workflow_bundles);

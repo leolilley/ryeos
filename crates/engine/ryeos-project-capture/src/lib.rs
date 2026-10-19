@@ -706,9 +706,11 @@ mod tests {
         std::fs::write(original.join("policy.py"), b"exact candidate").unwrap();
         let root = lillux::PinnedDirectory::open(&original).unwrap().unwrap();
         let state_root = tempfile::tempdir().unwrap();
-        let db =
-            ryeos_state::test_support::TestState::open(state_root.path(), Arc::new(ryeos_state::TrustStore::new()))
-                .unwrap();
+        let db = ryeos_state::test_support::TestState::open(
+            state_root.path(),
+            Arc::new(ryeos_state::TrustStore::new()),
+        )
+        .unwrap();
         let authority = db.pinned_authority().unwrap();
         let guard = authority.acquire_shared_guard().unwrap();
         let policy = ryeos_state::objects::ProjectSnapshotPolicy::new(
@@ -827,16 +829,17 @@ mod tests {
                 Path::new("standard.yaml"),
             )
             .unwrap();
-        let parsed = ryeos_node_runtime::node_policy::sections::ingest_ignore::IngestIgnorePolicySection
-            .parse(
-                &ryeos_node_runtime::node_policy::NodePolicyContext {
-                    section: "ingest_ignore".to_owned(),
-                    source_file: "standard.yaml".into(),
-                    signer_fingerprint: "ab".repeat(32),
-                },
-                profile.policies().get("ingest_ignore").unwrap(),
-            )
-            .unwrap();
+        let parsed =
+            ryeos_node_runtime::node_policy::sections::ingest_ignore::IngestIgnorePolicySection
+                .parse(
+                    &ryeos_node_runtime::node_policy::NodePolicyContext {
+                        section: "ingest_ignore".to_owned(),
+                        source_file: "standard.yaml".into(),
+                        signer_fingerprint: "ab".repeat(32),
+                    },
+                    profile.policies().get("ingest_ignore").unwrap(),
+                )
+                .unwrap();
         let policy_record = parsed
             .as_any()
             .downcast_ref::<
@@ -862,9 +865,11 @@ mod tests {
         }
 
         let state_root = tempfile::tempdir().unwrap();
-        let state_db =
-            ryeos_state::test_support::TestState::open(state_root.path(), Arc::new(ryeos_state::TrustStore::new()))
-                .unwrap();
+        let state_db = ryeos_state::test_support::TestState::open(
+            state_root.path(),
+            Arc::new(ryeos_state::TrustStore::new()),
+        )
+        .unwrap();
         let authority = state_db.pinned_authority().unwrap();
         let guard = authority.acquire_shared_guard().unwrap();
         let project_root = lillux::PinnedDirectory::open(project.path())

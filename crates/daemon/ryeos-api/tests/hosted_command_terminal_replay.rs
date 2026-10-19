@@ -1156,9 +1156,8 @@ async fn terminal_predecessor_command_history_refuses_with_schema_cutover() {
         let error =
             ryeos_app::dedicated_session_service::reconcile_command_outboxes(&state).unwrap_err();
         assert!(
-            format!("{error:#}").contains(
-                ryeos_app::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND
-            ),
+            format!("{error:#}")
+                .contains(ryeos_app::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND),
             "{error:#}"
         );
         assert_eq!(

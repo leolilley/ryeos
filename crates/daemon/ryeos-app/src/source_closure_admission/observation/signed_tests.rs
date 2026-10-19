@@ -167,7 +167,11 @@ external_content:
             label: Some("source observation fixture".into()),
         }]));
         let mut kind_roots = vec![self.kind_root.clone(), core.join(".ai/node/engine/kinds")];
-        kind_roots.extend(workflow.iter().map(|root| root.join(".ai/node/engine/kinds")));
+        kind_roots.extend(
+            workflow
+                .iter()
+                .map(|root| root.join(".ai/node/engine/kinds")),
+        );
         let kinds = ryeos_engine::kind_registry::KindRegistry::load_base(&kind_roots, &trust)?;
         let (parsers, _) =
             ryeos_engine::parsers::ParserRegistry::load_base(&roots, &trust, &kinds)?;

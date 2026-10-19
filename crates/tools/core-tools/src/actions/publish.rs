@@ -481,8 +481,7 @@ fn write_publisher_bytes(path: &Path, bytes: &[u8], create_mode: u32) -> Result<
         let mode = observed.permission_mode()?;
         let incumbent = expected.try_clone()?;
         let max = ryeos_engine::item_resolution::MAX_ITEM_SOURCE_BYTES.max(bytes.len() as u64);
-        let incumbent =
-            lillux::read_open_regular_file_stable_bounded(&incumbent, &observed, max)?;
+        let incumbent = lillux::read_open_regular_file_stable_bounded(&incumbent, &observed, max)?;
         if incumbent == bytes {
             parent.ensure_regular_entry_matches(name, Some(&expected))?;
             parent.ensure_path_binding()?;
@@ -500,8 +499,7 @@ fn write_publisher_bytes(path: &Path, bytes: &[u8], create_mode: u32) -> Result<
                     "publisher target metadata changed"
                 );
                 let current = current.try_clone()?;
-                let current =
-                    lillux::read_open_regular_file_stable_bounded(&current, &now, max)?;
+                let current = lillux::read_open_regular_file_stable_bounded(&current, &now, max)?;
                 anyhow::ensure!(current == expected_bytes, "publisher target changed");
                 Ok(())
             },

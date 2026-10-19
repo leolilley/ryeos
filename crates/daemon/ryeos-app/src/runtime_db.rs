@@ -9,33 +9,35 @@ use serde_json::Value;
 
 pub mod external_execution;
 mod inspection_cleanup;
-pub(crate) use inspection_cleanup::{InspectionCopyCleanup, InspectionCopyDisposal};
 pub use inspection_cleanup::MAX_INSPECTION_COPY_GROUP_PHYSICAL_REGISTRATIONS;
+pub(crate) use inspection_cleanup::{InspectionCopyCleanup, InspectionCopyDisposal};
 mod original_deadline;
 mod original_native;
-pub(crate) use original_native::{OriginalRuntimeAcquisitionFailure, OriginalRuntimeAcquisitionReleased};
 pub(crate) use original_inspection::RuntimeInspectionReferenceRelease;
 pub(crate) use original_inspection::retain_copy_inspection_terminal;
+pub(crate) use original_native::{
+    OriginalRuntimeAcquisitionFailure, OriginalRuntimeAcquisitionReleased,
+};
 mod live_native;
 pub(crate) use live_native::offline_live_execution_chains;
 mod original_inspection;
-#[cfg(any(test, feature = "test-support"))]
-pub mod test_native;
 #[cfg(all(test, target_os = "linux"))]
 mod original_mutation_reset_tests;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_native;
 #[doc(hidden)]
-pub use original_inspection::{
-    quote_inspection_outside_continuation,
-};
+pub use original_inspection::quote_inspection_outside_continuation;
 mod original_close;
-pub(crate) use original_close::{OriginalRuntimeAcquisitionOutsideCustody, OriginalLiveRuntimeOutsideCustody, OriginalRuntimeClosed, OriginalRuntimeCloseFailure};
 pub use original_close::MAX_LIVE_RUNTIME_NATIVE_PACKET_SOURCES;
+pub(crate) use original_close::{
+    OriginalLiveRuntimeOutsideCustody, OriginalRuntimeAcquisitionOutsideCustody,
+    OriginalRuntimeCloseFailure, OriginalRuntimeClosed,
+};
 #[doc(hidden)]
 pub use original_close::{
     quote_runtime_acquisition_outside_frame, quote_runtime_directory_transfer,
-    quote_runtime_host_context, quote_runtime_membership,
-    quote_runtime_outside_frame, quote_runtime_packet_sources,
-    quote_unused_runtime_bound_parts,
+    quote_runtime_host_context, quote_runtime_membership, quote_runtime_outside_frame,
+    quote_runtime_packet_sources, quote_unused_runtime_bound_parts,
 };
 pub mod process_resource_custody;
 pub mod process_resource_launch;
@@ -6848,7 +6850,8 @@ fn encode_current_launch_metadata(metadata: &RuntimeLaunchMetadata) -> Result<St
 
 /// The execution-history reset flag that discards an unreadable scope
 /// lifetime fence after an attested host reboot.
-pub const DISCARD_UNREADABLE_LIFETIME_FENCE_FLAG: &str = "--discard-unreadable-lifetime-fence-after-reboot";
+pub const DISCARD_UNREADABLE_LIFETIME_FENCE_FLAG: &str =
+    "--discard-unreadable-lifetime-fence-after-reboot";
 
 /// What an execution-history reset does with a scope lifetime fence this
 /// binary cannot read as a current witness.
@@ -6876,7 +6879,10 @@ pub struct LifetimeFenceDiscard {
 
 enum ScopeLifetimeFenceReading {
     Current(Option<lillux::ProcessHostLifetime>),
-    Unreadable { reason: String, stored_boot_id: Option<String> },
+    Unreadable {
+        reason: String,
+        stored_boot_id: Option<String>,
+    },
 }
 
 /// Read the singleton fence. The table and row shape are the stable
@@ -6955,7 +6961,9 @@ fn unreadable_lifetime_fence_refusal(reason: &str) -> anyhow::Error {
 fn read_scope_lifetime_fence(conn: &Connection) -> Result<Option<lillux::ProcessHostLifetime>> {
     match classify_scope_lifetime_fence(conn)? {
         ScopeLifetimeFenceReading::Current(lifetime) => Ok(lifetime),
-        ScopeLifetimeFenceReading::Unreadable { reason, .. } => Err(unreadable_lifetime_fence_refusal(&reason)),
+        ScopeLifetimeFenceReading::Unreadable { reason, .. } => {
+            Err(unreadable_lifetime_fence_refusal(&reason))
+        }
     }
 }
 
@@ -6968,14 +6976,18 @@ fn decide_unreadable_lifetime_fence(
 ) -> Result<Option<LifetimeFenceDiscard>> {
     let (reason, stored_boot_id) = match classify_scope_lifetime_fence(conn)? {
         ScopeLifetimeFenceReading::Current(_) => return Ok(None),
-        ScopeLifetimeFenceReading::Unreadable { reason, stored_boot_id } => (reason, stored_boot_id),
+        ScopeLifetimeFenceReading::Unreadable {
+            reason,
+            stored_boot_id,
+        } => (reason, stored_boot_id),
     };
     if policy == UnreadableLifetimeFence::Refuse {
         return Err(unreadable_lifetime_fence_refusal(&reason));
     }
     let boot_id_verified = match &stored_boot_id {
         Some(stored) => {
-            let current = lillux::ProcessHostLifetime::capture_current().map_err(anyhow::Error::msg)?;
+            let current =
+                lillux::ProcessHostLifetime::capture_current().map_err(anyhow::Error::msg)?;
             let current = serde_json::to_value(&current)?;
             let current = current
                 .pointer("/backend/boot_id")
@@ -6990,11 +7002,16 @@ fn decide_unreadable_lifetime_fence(
         }
         None => false,
     };
-    Ok(Some(LifetimeFenceDiscard { reason, stored_boot_id, boot_id_verified }))
+    Ok(Some(LifetimeFenceDiscard {
+        reason,
+        stored_boot_id,
+        boot_id_verified,
+    }))
 }
 
 fn ensure_scope_lifetime_resettable(conn: &Connection, stored_epoch: u32) -> Result<()> {
-    ensure_scope_lifetime_resettable_with(conn, stored_epoch, UnreadableLifetimeFence::Refuse).map(drop)
+    ensure_scope_lifetime_resettable_with(conn, stored_epoch, UnreadableLifetimeFence::Refuse)
+        .map(drop)
 }
 
 /// [`ensure_scope_lifetime_resettable`] with the reset's decision for an
@@ -7079,15 +7096,20 @@ fn ensure_scope_lifetime_resettable_with(
         return Ok(Some(discard));
     }
     if let Some(lifetime) = read_scope_lifetime_fence(conn)?
-        && !lifetime.has_ended().map_err(anyhow::Error::msg)? {
-            bail!(
-                "execution-history reset retains unsettled process-scope lifetime authority; settle all workspaces with the owning runtime before upgrading, or end that host lifetime; restarting only the daemon is not cleanup proof"
-            );
-        }
+        && !lifetime.has_ended().map_err(anyhow::Error::msg)?
+    {
+        bail!(
+            "execution-history reset retains unsettled process-scope lifetime authority; settle all workspaces with the owning runtime before upgrading, or end that host lifetime; restarting only the daemon is not cleanup proof"
+        );
+    }
     Ok(None)
 }
 
-fn initialize_current_runtime_schema(conn: &Connection, path: &Path, reference: &sqlite_schema::SchemaSqlDefinition) -> Result<()> {
+fn initialize_current_runtime_schema(
+    conn: &Connection,
+    path: &Path,
+    reference: &sqlite_schema::SchemaSqlDefinition,
+) -> Result<()> {
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
         .context("begin atomic runtime schema initialization")?;
     sqlite_schema::init_owned(&tx, &runtime_schema_spec(), &runtime_schema_sql(), path)?;
@@ -7096,7 +7118,11 @@ fn initialize_current_runtime_schema(conn: &Connection, path: &Path, reference: 
         .context("commit atomic runtime schema initialization")
 }
 
-fn validate_current_runtime_store(conn: &Connection, path: &Path, reference: &sqlite_schema::SchemaSqlDefinition) -> Result<()> {
+fn validate_current_runtime_store(
+    conn: &Connection,
+    path: &Path,
+    reference: &sqlite_schema::SchemaSqlDefinition,
+) -> Result<()> {
     validate_current_runtime_store_with(conn, path, reference, UnreadableLifetimeFence::Refuse)
 }
 
@@ -7370,8 +7396,15 @@ impl RuntimeConnection {
         operation: impl for<'connection> FnOnce(&'connection Connection) -> Result<T>,
     ) -> Result<T> {
         match self {
-            Self::OriginalMutation { owner, schema_reference: _ }
-            | Self::OriginalInspection { owner, factory: _, schema_reference: _ } => owner.with_sql(operation),
+            Self::OriginalMutation {
+                owner,
+                schema_reference: _,
+            }
+            | Self::OriginalInspection {
+                owner,
+                factory: _,
+                schema_reference: _,
+            } => owner.with_sql(operation),
             Self::Live(owner) => owner.with_sql(operation),
         }
     }
@@ -7380,10 +7413,15 @@ impl RuntimeConnection {
     fn schema_reference(&self) -> &sqlite_schema::SchemaSqlDefinition {
         match self {
             Self::Live(owner) => owner.schema_reference(),
-            Self::OriginalMutation { owner: _, schema_reference }
-            | Self::OriginalInspection { owner: _, factory: _, schema_reference } => {
-                schema_reference.definition()
+            Self::OriginalMutation {
+                owner: _,
+                schema_reference,
             }
+            | Self::OriginalInspection {
+                owner: _,
+                factory: _,
+                schema_reference,
+            } => schema_reference.definition(),
         }
     }
 
@@ -7392,14 +7430,18 @@ impl RuntimeConnection {
         operation: impl for<'connection> FnOnce(&'connection Connection) -> Result<T>,
     ) -> Result<T> {
         match self {
-            Self::OriginalMutation { owner, schema_reference: _ } => owner.with_sql(operation),
+            Self::OriginalMutation {
+                owner,
+                schema_reference: _,
+            } => owner.with_sql(operation),
             Self::Live(owner) => owner.with_sql(operation),
-            Self::OriginalInspection { owner: _, factory: _, schema_reference: _ } => {
-                Err(rusqlite::Error::InvalidQuery.into())
-            }
+            Self::OriginalInspection {
+                owner: _,
+                factory: _,
+                schema_reference: _,
+            } => Err(rusqlite::Error::InvalidQuery.into()),
         }
     }
-
 }
 
 pub struct RuntimeDb {
@@ -7932,7 +7974,11 @@ fn incompatible_runtime_operator_schema(stored: u32) -> anyhow::Error {
     .into()
 }
 
-fn assert_current_runtime_schema(conn: &Connection, path: &Path, reference: &sqlite_schema::SchemaSqlDefinition) -> Result<()> {
+fn assert_current_runtime_schema(
+    conn: &Connection,
+    path: &Path,
+    reference: &sqlite_schema::SchemaSqlDefinition,
+) -> Result<()> {
     let stored_epoch = runtime_operator_schema_epoch(conn, path)?;
     if stored_epoch != RUNTIME_OPERATOR_SCHEMA_EPOCH {
         return Err(incompatible_runtime_operator_schema(stored_epoch));
@@ -8039,7 +8085,12 @@ fn copy_sqlite_file_for_inspection(
 pub(crate) struct SqliteInspectionClosed {
     process: u32,
     proof: std::sync::Arc<lillux_sqlite::ClosedSqliteInspection>,
-    native: std::sync::Mutex<Option<(std::sync::Arc<lillux_sqlite::OriginalNativeFactory>, lillux_sqlite::OriginalNativeConnectionTerminal)>>,
+    native: std::sync::Mutex<
+        Option<(
+            std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
+            lillux_sqlite::OriginalNativeConnectionTerminal,
+        )>,
+    >,
     lease: std::sync::Arc<SqliteInspectionCopyLease>,
     sql: std::sync::Arc<dyn lillux_sqlite::SqliteInspectionSqlWork>,
     database_name: OsString,
@@ -8052,7 +8103,9 @@ impl std::fmt::Debug for SqliteInspectionClosed {
     }
 }
 impl SqliteInspectionClosed {
-    pub(crate) fn original_native_terminal(&self) -> Result<Option<lillux_sqlite::OriginalNativeConnectionTerminal>> {
+    pub(crate) fn original_native_terminal(
+        &self,
+    ) -> Result<Option<lillux_sqlite::OriginalNativeConnectionTerminal>> {
         original_inspection::terminal_snapshot(self.process, &self.native)
     }
     /// Release only the original production interval of this ACTUAL native
@@ -8062,10 +8115,19 @@ impl SqliteInspectionClosed {
     }
 
     pub(crate) fn require_original(&self) -> Result<()> {
-        ensure!(self.process == std::process::id(), "inspection proof belongs to original process");
-        let native = self.native.try_lock().map_err(|_| anyhow!("original inspection custody busy or poisoned"))?
-            .as_ref().map(|(factory, terminal)| (factory.clone(), terminal.clone()));
-        if let Some((factory, terminal)) = native { terminal.require_original(&factory)?; }
+        ensure!(
+            self.process == std::process::id(),
+            "inspection proof belongs to original process"
+        );
+        let native = self
+            .native
+            .try_lock()
+            .map_err(|_| anyhow!("original inspection custody busy or poisoned"))?
+            .as_ref()
+            .map(|(factory, terminal)| (factory.clone(), terminal.clone()));
+        if let Some((factory, terminal)) = native {
+            terminal.require_original(&factory)?;
+        }
         let opaque: lillux_sqlite::SqliteCopyLease = self.lease.clone();
         self.proof.require_original(
             self.lease.directory()?,
@@ -8132,7 +8194,12 @@ impl SqliteInspectionClosed {
 pub(crate) struct SqliteInspectionAcquisitionReleased {
     process: u32,
     proof: std::sync::Arc<lillux_sqlite::ReleasedSqliteInspection>,
-    native: std::sync::Mutex<Option<(std::sync::Arc<lillux_sqlite::OriginalNativeFactory>, lillux_sqlite::OriginalNativeConnectionTerminal)>>,
+    native: std::sync::Mutex<
+        Option<(
+            std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
+            lillux_sqlite::OriginalNativeConnectionTerminal,
+        )>,
+    >,
     lease: std::sync::Arc<SqliteInspectionCopyLease>,
     sql: std::sync::Arc<dyn lillux_sqlite::SqliteInspectionSqlWork>,
     database_name: OsString,
@@ -8145,7 +8212,9 @@ impl std::fmt::Debug for SqliteInspectionAcquisitionReleased {
     }
 }
 impl SqliteInspectionAcquisitionReleased {
-    pub(crate) fn original_native_terminal(&self) -> Result<Option<lillux_sqlite::OriginalNativeConnectionTerminal>> {
+    pub(crate) fn original_native_terminal(
+        &self,
+    ) -> Result<Option<lillux_sqlite::OriginalNativeConnectionTerminal>> {
         original_inspection::terminal_snapshot(self.process, &self.native)
     }
     /// Release only the original production interval of this ACTUAL native
@@ -8155,10 +8224,19 @@ impl SqliteInspectionAcquisitionReleased {
     }
 
     pub(crate) fn require_original(&self) -> Result<()> {
-        ensure!(self.process == std::process::id(), "inspection proof belongs to original process");
-        let native = self.native.try_lock().map_err(|_| anyhow!("original inspection custody busy or poisoned"))?
-            .as_ref().map(|(factory, terminal)| (factory.clone(), terminal.clone()));
-        if let Some((factory, terminal)) = native { terminal.require_original(&factory)?; }
+        ensure!(
+            self.process == std::process::id(),
+            "inspection proof belongs to original process"
+        );
+        let native = self
+            .native
+            .try_lock()
+            .map_err(|_| anyhow!("original inspection custody busy or poisoned"))?
+            .as_ref()
+            .map(|(factory, terminal)| (factory.clone(), terminal.clone()));
+        if let Some((factory, terminal)) = native {
+            terminal.require_original(&factory)?;
+        }
         let opaque: lillux_sqlite::SqliteCopyLease = self.lease.clone();
         self.proof.require_original(
             self.lease.directory()?,
@@ -8209,18 +8287,28 @@ impl RuntimeInspectionNativeFailure {
     /// never opened its main owner releases its reference alone.
     pub(crate) fn take_release(
         &self,
-    ) -> Result<(Option<RuntimeInspectionRelease>, Option<RuntimeInspectionReferenceRelease>)> {
+    ) -> Result<(
+        Option<RuntimeInspectionRelease>,
+        Option<RuntimeInspectionReferenceRelease>,
+    )> {
         let mut retained = self
             .custody
             .lock()
             .map_err(|_| anyhow::anyhow!("runtime native release custody poisoned"))?;
         match retained.take() {
             Some(RuntimeInspectionNativeCustody::Original(owner)) => {
-                match owner.into_release(self._copy.clone(), self._sql.clone(), self._namespace.clone(), self.database_name.clone()) {
+                match owner.into_release(
+                    self._copy.clone(),
+                    self._sql.clone(),
+                    self._namespace.clone(),
+                    self.database_name.clone(),
+                ) {
                     Ok((release, reference)) => Ok((release, Some(reference))),
                     Err(owner) => {
                         *retained = Some(RuntimeInspectionNativeCustody::Original(owner));
-                        anyhow::bail!("original Runtime inspection main owner or schema reference still pending close")
+                        anyhow::bail!(
+                            "original Runtime inspection main owner or schema reference still pending close"
+                        )
                     }
                 }
             }
@@ -8236,7 +8324,8 @@ impl RuntimeInspectionNativeFailure {
         let owner = retained.take();
         drop(retained);
         let result = match owner {
-            Some(RuntimeInspectionNativeCustody::Original(owner)) => owner.retry_close()
+            Some(RuntimeInspectionNativeCustody::Original(owner)) => owner
+                .retry_close()
                 .map(RuntimeInspectionNativeCustody::Original)
                 .map_err(RuntimeInspectionNativeCustody::Original),
             None => anyhow::bail!("runtime native closure disposition was already transferred"),
@@ -8927,7 +9016,13 @@ impl RuntimeDb {
             || self.reset_target.as_deref() != Some(path)
             || self._directory.is_none()
             || self._directory_lock.is_none()
-            || !matches!(&self.conn, RuntimeConnection::OriginalMutation { owner: _, schema_reference: _ })
+            || !matches!(
+                &self.conn,
+                RuntimeConnection::OriginalMutation {
+                    owner: _,
+                    schema_reference: _
+                }
+            )
         {
             bail!("offline reset requires the exact pinned reset database owner");
         }
@@ -8953,18 +9048,27 @@ impl RuntimeDb {
             ._directory_lock
             .as_ref()
             .context("offline database namespace lock absent")?;
-        let RuntimeConnection::OriginalMutation { owner, schema_reference: _ } = &self.conn else {
+        let RuntimeConnection::OriginalMutation {
+            owner,
+            schema_reference: _,
+        } = &self.conn
+        else {
             bail!("offline reset requires the original Runtime mutation owner");
         };
         namespace.ensure_protects(directory)?;
         ensure_runtime_directory_binding(directory)?;
-        let name = path.file_name().context("offline database target has no file name")?;
+        let name = path
+            .file_name()
+            .context("offline database target has no file name")?;
         let expected = owner.bound_main_identity()?;
-        let observed = directory.entry_no_follow(name)?
+        let observed = directory
+            .entry_no_follow(name)?
             .context("original Runtime target absent")?;
-        ensure!(observed.entry_type == lillux::secure_fs::PinnedEntryType::Regular
-            && expected == (observed.containing_device, observed.inode),
-            "original Runtime target changed from its retained Bound keeper");
+        ensure!(
+            observed.entry_type == lillux::secure_fs::PinnedEntryType::Regular
+                && expected == (observed.containing_device, observed.inode),
+            "original Runtime target changed from its retained Bound keeper"
+        );
         Ok(())
     }
 
@@ -9617,7 +9721,11 @@ impl RuntimeDb {
         remote_thread_id: &str,
     ) -> Result<()> {
         self.conn.with_sql(|conn| {
-            validate_bounded_runtime_text("dedicated placement thread id", placement_thread_id, 256)?;
+            validate_bounded_runtime_text(
+                "dedicated placement thread id",
+                placement_thread_id,
+                256,
+            )?;
             validate_bounded_runtime_text("remote thread id", remote_thread_id, 256)?;
             let matched: bool = conn.query_row(
                 "SELECT EXISTS(SELECT 1 FROM dedicated_session
@@ -10007,8 +10115,8 @@ impl RuntimeDb {
 
     pub fn credential_profile_projections(&self) -> Result<Vec<CredentialProfileRecord>> {
         self.conn.with_sql(|conn| {
-            let mut statement = conn
-                .prepare("SELECT profile_id FROM credential_profile ORDER BY profile_id")?;
+            let mut statement =
+                conn.prepare("SELECT profile_id FROM credential_profile ORDER BY profile_id")?;
             let ids = statement
                 .query_map([], |row| row.get::<_, String>(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -10299,14 +10407,13 @@ impl RuntimeDb {
             if changed != 1 {
                 bail!("credential profile is absent, not owned, locked, or deleting");
             }
-            conn
-                .query_row(
-                    "SELECT credential_generation FROM credential_profile WHERE profile_id=?1",
-                    [profile_id],
-                    |row| row.get::<_, i64>(0),
-                )
-                .map_err(Into::into)
-                .and_then(|value| u64::try_from(value).context("negative credential generation"))
+            conn.query_row(
+                "SELECT credential_generation FROM credential_profile WHERE profile_id=?1",
+                [profile_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(Into::into)
+            .and_then(|value| u64::try_from(value).context("negative credential generation"))
         })
     }
 
@@ -10744,9 +10851,14 @@ impl RuntimeDb {
     ) -> Result<u64> {
         self.conn.with_sql(|conn| {
             let account_json = serde_json::to_string(sanitized_account)?;
-            validate_bounded_runtime_text("sanitized credential account", &account_json, 16 * 1024)?;
+            validate_bounded_runtime_text(
+                "sanitized credential account",
+                &account_json,
+                16 * 1024,
+            )?;
             let now = lillux::time::timestamp_millis() as i64;
-            let login_epoch = i64::try_from(login_epoch).context("login epoch exceeds SQLite range")?;
+            let login_epoch =
+                i64::try_from(login_epoch).context("login epoch exceeds SQLite range")?;
             let changed = conn.execute(
                 "UPDATE credential_profile
                 SET state='active', active_login_id=NULL, login_expires_at_ms=NULL,
@@ -10766,14 +10878,13 @@ impl RuntimeDb {
             if changed != 1 {
                 bail!("credential enrollment completion lost its ceremony CAS");
             }
-            conn
-                .query_row(
-                    "SELECT credential_generation FROM credential_profile WHERE profile_id=?1",
-                    [profile_id],
-                    |row| row.get::<_, i64>(0),
-                )
-                .map_err(Into::into)
-                .and_then(|value| u64::try_from(value).context("negative credential generation"))
+            conn.query_row(
+                "SELECT credential_generation FROM credential_profile WHERE profile_id=?1",
+                [profile_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(Into::into)
+            .and_then(|value| u64::try_from(value).context("negative credential generation"))
         })
     }
 
@@ -10786,7 +10897,11 @@ impl RuntimeDb {
     ) -> Result<u64> {
         self.conn.with_sql(|conn| {
             let account_json = serde_json::to_string(sanitized_account)?;
-            validate_bounded_runtime_text("sanitized credential account", &account_json, 16 * 1024)?;
+            validate_bounded_runtime_text(
+                "sanitized credential account",
+                &account_json,
+                16 * 1024,
+            )?;
             let now = lillux::time::timestamp_millis() as i64;
             let tx = conn.unchecked_transaction()?;
             let profile: (String, String, i64) = tx.query_row(
@@ -11217,7 +11332,9 @@ impl RuntimeDb {
                 (
                     Kind::BudgetExhausted,
                     Some(
-                        Dimension::Duration | Dimension::WorkerExecutions | Dimension::ProviderContacts,
+                        Dimension::Duration
+                        | Dimension::WorkerExecutions
+                        | Dimension::ProviderContacts,
                     ),
                     None,
                 ) => {}
@@ -11399,7 +11516,11 @@ impl RuntimeDb {
         placement_thread_id: &str,
     ) -> Result<String> {
         self.conn.with_sql(|conn| {
-            validate_bounded_runtime_text("checkpoint placement thread id", placement_thread_id, 256)?;
+            validate_bounded_runtime_text(
+                "checkpoint placement thread id",
+                placement_thread_id,
+                256,
+            )?;
             let session = self
                 .dedicated_session(placement_thread_id)?
                 .ok_or_else(|| anyhow::anyhow!("checkpoint dedicated session is missing"))?;
@@ -11472,7 +11593,10 @@ impl RuntimeDb {
                     let (approval_id, epoch, request_digest, state, decision_digest) = row?;
                     if matches!(
                         state.as_str(),
-                        "pending" | "decision_reserved" | "delivery_contacting" | "delivery_unknown"
+                        "pending"
+                            | "decision_reserved"
+                            | "delivery_contacting"
+                            | "delivery_unknown"
                     ) {
                         bail!("checkpoint has an unresolved possible-contact approval");
                     }
@@ -11672,7 +11796,11 @@ impl RuntimeDb {
                 "retryable_uncontacted":true,
             }))?;
             let result_json = serde_json::to_string(result)?;
-            validate_bounded_runtime_text("budget refusal command result", &result_json, 256 * 1024)?;
+            validate_bounded_runtime_text(
+                "budget refusal command result",
+                &result_json,
+                256 * 1024,
+            )?;
             let changed = conn.execute(
                 "UPDATE dedicated_session_command
                 SET result_json=?4, updated_at_ms=?5
@@ -12726,24 +12854,23 @@ impl RuntimeDb {
             if !matches!(state, "expired" | "delivery_settled") {
                 bail!("approval exact-state query is outside its fixed vocabulary");
             }
-            conn
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM dedicated_session_approval
+            conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM dedicated_session_approval
                   WHERE placement_thread_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
                     AND request_digest=?4 AND reservation_token=?5
                     AND decision_digest=?6 AND state=?7)",
-                    params![
-                        placement_thread_id,
-                        approval_id,
-                        i64::try_from(worker_boot_epoch)?,
-                        request_digest,
-                        reservation_token,
-                        decision_digest,
-                        state,
-                    ],
-                    |row| row.get(0),
-                )
-                .map_err(Into::into)
+                params![
+                    placement_thread_id,
+                    approval_id,
+                    i64::try_from(worker_boot_epoch)?,
+                    request_digest,
+                    reservation_token,
+                    decision_digest,
+                    state,
+                ],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
         })
     }
 
@@ -13594,9 +13721,11 @@ impl RuntimeDb {
             let lifetime = allocation.host_lifetime().map_err(anyhow::Error::msg)?;
             let tx = conn.unchecked_transaction()?;
             if let Some(incumbent) = read_scope_lifetime_fence(&tx)?
-                && incumbent != lifetime && !incumbent.has_ended().map_err(anyhow::Error::msg)? {
-                    bail!("scope reservation requires retirement of the previous host-lifetime fence");
-                }
+                && incumbent != lifetime
+                && !incumbent.has_ended().map_err(anyhow::Error::msg)?
+            {
+                bail!("scope reservation requires retirement of the previous host-lifetime fence");
+            }
             let encoded_lifetime = lillux::canonical_json(&serde_json::to_value(&lifetime)?)?;
             tx.execute(
                 "UPDATE execution_lifetime_fence SET host_lifetime=?1 WHERE singleton=1",
@@ -14073,16 +14202,15 @@ impl RuntimeDb {
         expected_worker: Option<&str>,
     ) -> Result<bool> {
         self.conn.with_sql(|conn| {
-            conn
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM worker_process
+            conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM worker_process
                 WHERE placement_thread_id=?1
                   AND (?2 IS NULL OR worker_instance_id != ?2)
                   AND (state!='dead' OR cleanup_state!='reaped'))",
-                    params![placement_thread_id, expected_worker],
-                    |row| row.get(0),
-                )
-                .map_err(Into::into)
+                params![placement_thread_id, expected_worker],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
         })
     }
 
@@ -14095,15 +14223,14 @@ impl RuntimeDb {
         capsule_hash: &str,
     ) -> Result<bool> {
         self.conn.with_sql(|conn| {
-            conn
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM worker_process
+            conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM worker_process
                   WHERE placement_thread_id=?1 AND session_capsule_hash=?2
                     AND state='dead' AND cleanup_state='reaped')",
-                    params![placement_thread_id, capsule_hash],
-                    |row| row.get(0),
-                )
-                .map_err(Into::into)
+                params![placement_thread_id, capsule_hash],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
         })
     }
 
@@ -14315,13 +14442,18 @@ impl RuntimeDb {
     ) -> Result<()> {
         self.conn.with_sql(|conn| {
             validate_bounded_runtime_text("worker instance id", worker_instance_id, 256)?;
-            validate_bounded_runtime_text("dedicated placement thread id", placement_thread_id, 256)?;
+            validate_bounded_runtime_text(
+                "dedicated placement thread id",
+                placement_thread_id,
+                256,
+            )?;
             validate_bounded_runtime_text("worker cleanup state", cleanup_state, 32)?;
             validate_bounded_runtime_text("worker terminal reason", terminal_reason, 2048)?;
             if !matches!(cleanup_state, "reaped" | "unproved") || boot_epoch == 0 {
                 bail!("worker settlement is not canonical");
             }
-            let epoch = i64::try_from(boot_epoch).context("worker boot epoch exceeds SQLite range")?;
+            let epoch =
+                i64::try_from(boot_epoch).context("worker boot epoch exceeds SQLite range")?;
             let now = lillux::time::timestamp_millis() as i64;
             let tx = conn.unchecked_transaction()?;
             let worker_changed = tx.execute(
@@ -14391,8 +14523,9 @@ impl RuntimeDb {
                     params![worker_instance_id, placement_thread_id, epoch],
                     |row| row.get(0),
                 )?;
-                let worker_identity: ExecutionProcessIdentity = serde_json::from_str(&worker_identity)
-                    .context("decode settled dedicated resource owner")?;
+                let worker_identity: ExecutionProcessIdentity =
+                    serde_json::from_str(&worker_identity)
+                        .context("decode settled dedicated resource owner")?;
                 let owner_exists: bool = tx.query_row(
                     "SELECT EXISTS(SELECT 1 FROM process_resource_owner
                   WHERE owner_kind='dedicated_worker' AND owner_coordinate=?1)",
@@ -14546,7 +14679,11 @@ impl RuntimeDb {
         snapshot_hash: &str,
     ) -> Result<bool> {
         self.conn.with_sql(|conn| {
-            validate_bounded_runtime_text("dedicated placement thread id", placement_thread_id, 256)?;
+            validate_bounded_runtime_text(
+                "dedicated placement thread id",
+                placement_thread_id,
+                256,
+            )?;
             if !lillux::valid_hash(snapshot_hash) {
                 bail!("dedicated candidate snapshot hash is not canonical");
             }
@@ -14593,7 +14730,11 @@ impl RuntimeDb {
         snapshot_hash: &str,
     ) -> Result<()> {
         self.conn.with_sql(|conn| {
-            validate_bounded_runtime_text("dedicated placement thread id", placement_thread_id, 256)?;
+            validate_bounded_runtime_text(
+                "dedicated placement thread id",
+                placement_thread_id,
+                256,
+            )?;
             if !lillux::valid_hash(snapshot_hash) {
                 bail!("dedicated candidate snapshot hash is not canonical");
             }
@@ -15078,8 +15219,16 @@ impl RuntimeDb {
         disposition_operation_id: &str,
     ) -> Result<()> {
         self.conn.with_sql(|conn| {
-            validate_bounded_runtime_text("dedicated placement thread id", placement_thread_id, 256)?;
-            validate_bounded_runtime_text("candidate disposition root id", disposition_root_id, 256)?;
+            validate_bounded_runtime_text(
+                "dedicated placement thread id",
+                placement_thread_id,
+                256,
+            )?;
+            validate_bounded_runtime_text(
+                "candidate disposition root id",
+                disposition_root_id,
+                256,
+            )?;
             if !lillux::valid_hash(candidate_snapshot_hash) {
                 bail!("discarded candidate hash is not canonical");
             }
@@ -15205,7 +15354,11 @@ impl RuntimeDb {
         publication_operation_id: &str,
     ) -> Result<()> {
         self.conn.with_sql(|conn| {
-            validate_bounded_runtime_text("candidate publication root id", publication_root_id, 256)?;
+            validate_bounded_runtime_text(
+                "candidate publication root id",
+                publication_root_id,
+                256,
+            )?;
             if !lillux::valid_hash(publication_operation_id) {
                 bail!("candidate publication operation id is not canonical");
             }
@@ -15263,8 +15416,16 @@ impl RuntimeDb {
         publication_result: &str,
     ) -> Result<()> {
         self.conn.with_sql(|conn| {
-            validate_bounded_runtime_text("dedicated placement thread id", placement_thread_id, 256)?;
-            validate_bounded_runtime_text("candidate publication root id", publication_root_id, 256)?;
+            validate_bounded_runtime_text(
+                "dedicated placement thread id",
+                placement_thread_id,
+                256,
+            )?;
+            validate_bounded_runtime_text(
+                "candidate publication root id",
+                publication_root_id,
+                256,
+            )?;
             if !lillux::valid_hash(candidate_snapshot_hash) {
                 bail!("published candidate snapshot hash is not canonical");
             }
@@ -15651,7 +15812,8 @@ impl RuntimeDb {
         &self,
         fence: UnreadableLifetimeFence,
     ) -> Result<Option<LifetimeFenceDiscard>> {
-        self.conn.with_sql(|connection| decide_unreadable_lifetime_fence(connection, fence))
+        self.conn
+            .with_sql(|connection| decide_unreadable_lifetime_fence(connection, fence))
     }
 
     /// Clear an unreadable scope lifetime fence under the operator's attested
@@ -15675,7 +15837,10 @@ impl RuntimeDb {
                 "UPDATE execution_lifetime_fence SET host_lifetime=NULL WHERE singleton=1",
                 [],
             )?;
-            ensure!(cleared == 1, "scope lifetime fence row disappeared during its attested discard");
+            ensure!(
+                cleared == 1,
+                "scope lifetime fence row disappeared during its attested discard"
+            );
             Ok(Some(discard))
         })
     }
@@ -15860,7 +16025,8 @@ impl RuntimeDb {
                     seed.dispatch_key
                 );
             }
-            if chain_root_id != seed.chain_root_id || event != seed.event || hook_id != seed.hook_id {
+            if chain_root_id != seed.chain_root_id || event != seed.event || hook_id != seed.hook_id
+            {
                 bail!(
                     "hook dispatch key `{}` has divergent stored identity columns",
                     seed.dispatch_key
@@ -16364,7 +16530,9 @@ impl RuntimeDb {
             for (operation_id, created_at_ms) in operations {
                 let intent = self
                     .get_runtime_action_intent(&operation_id)?
-                    .ok_or_else(|| anyhow!("runtime action intent disappeared during observation"))?;
+                    .ok_or_else(|| {
+                        anyhow!("runtime action intent disappeared during observation")
+                    })?;
                 if intent.first_caller_thread_id != first_caller_thread_id {
                     bail!("workload child dispatch contradicts its placement caller");
                 }
@@ -16622,23 +16790,22 @@ impl RuntimeDb {
 
     pub fn recovery_wait(&self, thread_id: &str) -> Result<Option<RecoveryWaitDisposition>> {
         self.conn.with_sql(|conn| {
-            conn
-                .query_row(
-                    "SELECT thread_id, reason, detail, started_at_ms, deadline_at_ms
+            conn.query_row(
+                "SELECT thread_id, reason, detail, started_at_ms, deadline_at_ms
                    FROM thread_recovery_wait WHERE thread_id=?1",
-                    params![thread_id],
-                    |row| {
-                        Ok(RecoveryWaitDisposition {
-                            thread_id: row.get(0)?,
-                            reason: row.get(1)?,
-                            detail: row.get(2)?,
-                            started_at_ms: row.get(3)?,
-                            deadline_at_ms: row.get(4)?,
-                        })
-                    },
-                )
-                .optional()
-                .map_err(anyhow::Error::from)
+                params![thread_id],
+                |row| {
+                    Ok(RecoveryWaitDisposition {
+                        thread_id: row.get(0)?,
+                        reason: row.get(1)?,
+                        detail: row.get(2)?,
+                        started_at_ms: row.get(3)?,
+                        deadline_at_ms: row.get(4)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(anyhow::Error::from)
         })
     }
 
@@ -16874,11 +17041,22 @@ impl RuntimeDb {
             .and_then(|path| path.file_name())
             .context("runtime inspection lost original basename")?
             .to_os_string();
-        let RuntimeConnection::OriginalInspection { owner, factory, schema_reference } = self.conn else {
+        let RuntimeConnection::OriginalInspection {
+            owner,
+            factory,
+            schema_reference,
+        } = self.conn
+        else {
             anyhow::bail!("runtime inspection closes only its native inspection owner");
         };
         original_inspection::close_inspection(
-            owner, factory, schema_reference, copy, sql, namespace, database_name,
+            owner,
+            factory,
+            schema_reference,
+            copy,
+            sql,
+            namespace,
+            database_name,
         )
     }
 
@@ -16949,7 +17127,8 @@ impl RuntimeDb {
         self.conn.with_sql(|conn| {
             binding.validate_for(thread_id)?;
             self.authorize_workspace_binding(thread_id, binding, true)?;
-            let owner = lillux::canonical_json(&serde_json::to_value(&binding.borrower_launch_owner)?)?;
+            let owner =
+                lillux::canonical_json(&serde_json::to_value(&binding.borrower_launch_owner)?)?;
             let changed = conn.execute(
                 "UPDATE thread_runtime
                 SET workspace_id=?2, workspace_view_identity=?3, workspace_borrower_launch_owner=?4
@@ -16964,7 +17143,9 @@ impl RuntimeDb {
                 ],
             )?;
             if changed == 0 && self.thread_workspace_binding(thread_id)?.as_ref() != Some(binding) {
-                bail!("thread {thread_id} has an absent runtime row or conflicting workspace binding");
+                bail!(
+                    "thread {thread_id} has an absent runtime row or conflicting workspace binding"
+                );
             }
             Ok(())
         })
@@ -17018,13 +17199,12 @@ impl RuntimeDb {
 
     pub fn execution_workspace_has_members(&self, workspace_id: &str) -> Result<bool> {
         self.conn.with_sql(|conn| {
-            conn
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM thread_runtime WHERE workspace_id=?1)",
-                    [workspace_id],
-                    |row| row.get(0),
-                )
-                .map_err(Into::into)
+            conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM thread_runtime WHERE workspace_id=?1)",
+                [workspace_id],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
         })
     }
 
@@ -17106,9 +17286,8 @@ impl RuntimeDb {
         binding: &RuntimeWorkspaceBinding,
     ) -> Result<bool> {
         self.conn.with_sql(|conn| {
-            conn
-                .query_row(
-                    "WITH RECURSIVE parents(thread_id) AS (
+            conn.query_row(
+                "WITH RECURSIVE parents(thread_id) AS (
                 SELECT ?1
                 UNION
                 SELECT link.parent_thread_id FROM parents
@@ -17116,15 +17295,15 @@ impl RuntimeDb {
                   JOIN thread_runtime AS parent ON parent.thread_id=link.parent_thread_id
                  WHERE parent.workspace_id=?3 AND parent.workspace_view_identity=?4
              ) SELECT EXISTS(SELECT 1 FROM parents WHERE thread_id=?2)",
-                    params![
-                        thread_id,
-                        ancestor,
-                        binding.workspace_id,
-                        binding.view_identity
-                    ],
-                    |row| row.get(0),
-                )
-                .map_err(Into::into)
+                params![
+                    thread_id,
+                    ancestor,
+                    binding.workspace_id,
+                    binding.view_identity
+                ],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
         })
     }
 
@@ -17218,9 +17397,8 @@ impl RuntimeDb {
         view_identity: &str,
     ) -> Result<bool> {
         self.conn.with_sql(|conn| {
-            conn
-                .query_row(
-                    "WITH RECURSIVE descendants(thread_id) AS (
+            conn.query_row(
+                "WITH RECURSIVE descendants(thread_id) AS (
                 SELECT ?1
                 UNION
                 SELECT link.child_thread_id FROM descendants
@@ -17228,10 +17406,10 @@ impl RuntimeDb {
              ) SELECT EXISTS(
                 SELECT 1 FROM thread_runtime AS runtime JOIN descendants USING(thread_id)
                  WHERE runtime.workspace_id=?2 AND runtime.workspace_view_identity=?3)",
-                    params![child_thread_id, workspace_id, view_identity],
-                    |row| row.get(0),
-                )
-                .map_err(Into::into)
+                params![child_thread_id, workspace_id, view_identity],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
         })
     }
 
@@ -17241,9 +17419,8 @@ impl RuntimeDb {
         binding: &RuntimeWorkspaceBinding,
     ) -> Result<bool> {
         self.conn.with_sql(|conn| {
-            conn
-                .query_row(
-                    "WITH RECURSIVE descendants(thread_id) AS (
+            conn.query_row(
+                "WITH RECURSIVE descendants(thread_id) AS (
                 SELECT child_thread_id FROM thread_child_link WHERE parent_thread_id=?1
                 UNION
                 SELECT link.child_thread_id FROM descendants
@@ -17251,10 +17428,10 @@ impl RuntimeDb {
              ) SELECT EXISTS(
                 SELECT 1 FROM thread_runtime AS runtime JOIN descendants USING(thread_id)
                  WHERE runtime.workspace_id=?2 AND runtime.workspace_view_identity=?3)",
-                    params![thread_id, binding.workspace_id, binding.view_identity],
-                    |row| row.get(0),
-                )
-                .map_err(Into::into)
+                params![thread_id, binding.workspace_id, binding.view_identity],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
         })
     }
 
@@ -17266,7 +17443,8 @@ impl RuntimeDb {
         binding: &RuntimeWorkspaceBinding,
     ) -> Result<bool> {
         self.conn.with_sql(|conn| {
-            let owner = lillux::canonical_json(&serde_json::to_value(&binding.borrower_launch_owner)?)?;
+            let owner =
+                lillux::canonical_json(&serde_json::to_value(&binding.borrower_launch_owner)?)?;
             if self.workspace_descendants_have_members(thread_id, binding)? {
                 return Ok(false);
             }
@@ -17497,7 +17675,9 @@ impl RuntimeDb {
             match phase.as_deref() {
                 Some("running") => Ok(()),
                 Some(other) => {
-                    bail!("in-process handler reservation `{thread_id}` has invalid phase `{other}`")
+                    bail!(
+                        "in-process handler reservation `{thread_id}` has invalid phase `{other}`"
+                    )
                 }
                 None => bail!("in-process handler reservation `{thread_id}` is missing"),
             }
@@ -18104,13 +18284,11 @@ impl RuntimeDb {
     ) -> Result<ChainRecoveryPins> {
         self.conn.with_sql(|conn| {
             let count = |sql: &str| -> Result<u64> {
-                let value: i64 = conn
-                    .query_row(sql, params![chain_root_id], |row| row.get(0))?;
+                let value: i64 = conn.query_row(sql, params![chain_root_id], |row| row.get(0))?;
                 u64::try_from(value).context("negative recovery-pin count")
             };
             let count_thread = |sql: &str, thread_id: &str| -> Result<u64> {
-                let value: i64 = conn
-                    .query_row(sql, params![thread_id], |row| row.get(0))?;
+                let value: i64 = conn.query_row(sql, params![thread_id], |row| row.get(0))?;
                 u64::try_from(value).context("negative thread recovery-pin count")
             };
             let parent_follow_waiters =
@@ -18129,8 +18307,10 @@ impl RuntimeDb {
              WHERE child_chain_root_id=?1 AND cancelled_at_ms IS NOT NULL",
             )?;
             let mut pins = ChainRecoveryPins {
-                process_scope_obligations: self.unsettled_process_scope_count(Some(chain_root_id))?,
-                external_allocation_obligations: self.unsettled_external_chain_count(chain_root_id)?,
+                process_scope_obligations: self
+                    .unsettled_process_scope_count(Some(chain_root_id))?,
+                external_allocation_obligations: self
+                    .unsettled_external_chain_count(chain_root_id)?,
                 // A parent follow waiter owns the graph checkpoint until its
                 // successor is durably resumed or the waiter is otherwise settled.
                 required_checkpoint_consumers: parent_follow_waiters,
@@ -18318,7 +18498,9 @@ impl RuntimeDb {
                     let evaluation = qualification
                         .get("candidate_evaluation")
                         .cloned()
-                        .ok_or_else(|| anyhow!("pending candidate qualification has no evaluation"))?;
+                        .ok_or_else(|| {
+                            anyhow!("pending candidate qualification has no evaluation")
+                        })?;
                     evaluations.push((hash, evaluation));
                 }
                 for (hash, evaluation) in evaluations {
@@ -18365,8 +18547,8 @@ impl RuntimeDb {
 
     pub fn chain_has_live_state(&self, chain_root_id: &str) -> Result<bool> {
         self.conn.with_sql(|conn| {
-            let mut statement = conn
-                .prepare("SELECT thread_id FROM thread_runtime WHERE chain_root_id=?1")?;
+            let mut statement =
+                conn.prepare("SELECT thread_id FROM thread_runtime WHERE chain_root_id=?1")?;
             let thread_ids = statement
                 .query_map(params![chain_root_id], |row| row.get(0))?
                 .collect::<rusqlite::Result<Vec<String>>>()?;
@@ -18796,7 +18978,12 @@ impl RuntimeDb {
     ) -> Result<()> {
         self.conn.with_sql(|conn| {
             let tx = conn.unchecked_transaction()?;
-            attach_process_resource_owner(&tx, "pooled_session", owner_coordinate, process_identity)?;
+            attach_process_resource_owner(
+                &tx,
+                "pooled_session",
+                owner_coordinate,
+                process_identity,
+            )?;
             tx.commit()
                 .context("commit pooled resource-owner attachment")
         })
@@ -19051,7 +19238,9 @@ impl RuntimeDb {
         self.conn.with_sql(|conn| {
             let mut reservation = self
                 .process_resource_reservation(owner_kind, owner_coordinate)?
-                .ok_or_else(|| anyhow!("process resource scope binding has no allocation intent"))?;
+                .ok_or_else(|| {
+                    anyhow!("process resource scope binding has no allocation intent")
+                })?;
             if reservation.daemon_generation_id != daemon_generation_id() {
                 bail!("process resource scope binding lost its original allocation");
             }
@@ -19093,7 +19282,8 @@ impl RuntimeDb {
                 .optional()?;
             encoded
                 .map(|encoded| {
-                    let reservation: ProcessResourceReservationRecord = serde_json::from_str(&encoded)?;
+                    let reservation: ProcessResourceReservationRecord =
+                        serde_json::from_str(&encoded)?;
                     reservation.validate()?;
                     if lillux::canonical_json(&serde_json::to_value(&reservation)?)? != encoded {
                         bail!("retained process resource reservation is not canonical");
@@ -19175,12 +19365,7 @@ impl RuntimeDb {
         process_identity: &ExecutionProcessIdentity,
     ) -> Result<()> {
         self.conn.with_sql(|conn| {
-            clear_process_resource_owner(
-                conn,
-                "pooled_session",
-                owner_coordinate,
-                process_identity,
-            )
+            clear_process_resource_owner(conn, "pooled_session", owner_coordinate, process_identity)
         })
     }
 
@@ -19300,8 +19485,9 @@ impl RuntimeDb {
                         cleanup_evidence,
                         runtime_custody,
                     )| {
-                        let process_identity: ExecutionProcessIdentity = serde_json::from_str(&encoded)
-                            .context("decode durable process resource owner")?;
+                        let process_identity: ExecutionProcessIdentity =
+                            serde_json::from_str(&encoded)
+                                .context("decode durable process resource owner")?;
                         validate_execution_process_identity_shape(&process_identity)?;
                         if process_identity.owner_incarnation_digest()? != owner_incarnation {
                             bail!("durable process resource owner incarnation is contradictory");
@@ -19538,7 +19724,9 @@ impl RuntimeDb {
             if launch_metadata.launch_driver
                 == Some(ryeos_state::objects::ExecutionLaunchDriver::InProcessHandler)
             {
-                bail!("in-process launch metadata must be installed by the atomic birth reservation");
+                bail!(
+                    "in-process launch metadata must be installed by the atomic birth reservation"
+                );
             }
             let lm_json = encode_current_launch_metadata(launch_metadata)
                 .context("failed to encode launch_metadata")?;
@@ -20239,7 +20427,9 @@ impl RuntimeDb {
                     || (existing.state == WorkspaceState::Reserved
                         && (existing.thread_id.is_some() || existing.launch_owner.is_some()))
                 {
-                    bail!("workspace {workspace_id} cannot adopt a conflicting durable reservation");
+                    bail!(
+                        "workspace {workspace_id} cannot adopt a conflicting durable reservation"
+                    );
                 }
             }
             Ok(())
@@ -20467,8 +20657,7 @@ impl RuntimeDb {
                     .iter()
                     .map(|value| rusqlite::types::Value::from(value.as_str().to_owned())),
             );
-            let changed = conn
-                .execute(&sql, rusqlite::params_from_iter(values))?;
+            let changed = conn.execute(&sql, rusqlite::params_from_iter(values))?;
             if changed != 1 {
                 bail!("workspace {workspace_id} cannot transition to {next}");
             }
@@ -20514,8 +20703,7 @@ impl RuntimeDb {
                     .iter()
                     .map(|value| rusqlite::types::Value::from(value.as_str().to_owned())),
             );
-            let changed = conn
-                .execute(&sql, rusqlite::params_from_iter(values))?;
+            let changed = conn.execute(&sql, rusqlite::params_from_iter(values))?;
             if changed != 1 {
                 bail!("stale launch owner cannot transition workspace {workspace_id} to {next}");
             }
@@ -20645,7 +20833,8 @@ impl RuntimeDb {
                     |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
                 )
                 .optional()?;
-            let Some((workspace_thread, workspace_owner, state, process_identity)) = existing else {
+            let Some((workspace_thread, workspace_owner, state, process_identity)) = existing
+            else {
                 bail!("retained workspace {workspace_id} disappeared");
             };
             if workspace_thread.as_deref() != Some(thread_id)
@@ -20757,7 +20946,9 @@ impl RuntimeDb {
                 if abandoned_owner.thread_id != thread_id
                     || abandoned_owner.daemon_generation_id == daemon_generation_id()
                 {
-                    bail!("current or contradictory launch owner cannot use abandoned freeze recovery");
+                    bail!(
+                        "current or contradictory launch owner cannot use abandoned freeze recovery"
+                    );
                 }
             }
             let (
@@ -21075,8 +21266,8 @@ impl RuntimeDb {
                     let mut command = row?;
                     command.status = "claimed".to_string();
                     command.claimed_at = Some(now.clone());
-                    let encoded =
-                        serde_json::to_vec(&command).context("failed to size command claim record")?;
+                    let encoded = serde_json::to_vec(&command)
+                        .context("failed to size command claim record")?;
                     let candidate_bytes = response_bytes
                         .checked_add(encoded.len())
                         .and_then(|bytes| bytes.checked_add(usize::from(!commands.is_empty())))
@@ -21124,7 +21315,9 @@ impl RuntimeDb {
             let result_blob = json_blob_ref(result)?;
             let result_bytes = result_blob.as_ref().map_or(0, Vec::len);
             if result_bytes > MAX_COMMAND_RESULT_BYTES {
-                bail!("command result is {result_bytes} bytes; maximum is {MAX_COMMAND_RESULT_BYTES}");
+                bail!(
+                    "command result is {result_bytes} bytes; maximum is {MAX_COMMAND_RESULT_BYTES}"
+                );
             }
             let updated = conn.execute(
                 "UPDATE thread_commands
@@ -21439,14 +21632,13 @@ impl RuntimeDb {
 
     pub fn child_link_relation(&self, child_thread_id: &str) -> Result<Option<String>> {
         self.conn.with_sql(|conn| {
-            conn
-                .query_row(
-                    "SELECT relation FROM thread_child_link WHERE child_thread_id=?1",
-                    params![child_thread_id],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(Into::into)
+            conn.query_row(
+                "SELECT relation FROM thread_child_link WHERE child_thread_id=?1",
+                params![child_thread_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
         })
     }
 
@@ -21736,7 +21928,9 @@ impl RuntimeDb {
                 );
             }
             if w.parent_successor_thread_id.is_none() || !validate_terminal_completeness(&w)? {
-                bail!("follow waiter {follow_key} cannot resume without terminal envelope + successor");
+                bail!(
+                    "follow waiter {follow_key} cannot resume without terminal envelope + successor"
+                );
             }
             let changed = conn.execute(
                 "UPDATE follow_waiter SET phase='resuming', updated_at_ms=?2
@@ -21871,7 +22065,9 @@ impl RuntimeDb {
         self.conn.with_sql(|conn| {
             let waiter = conn
                 .query_row(
-                    &format!("SELECT {FOLLOW_WAITER_COLUMNS} FROM follow_waiter WHERE follow_key = ?1"),
+                    &format!(
+                        "SELECT {FOLLOW_WAITER_COLUMNS} FROM follow_waiter WHERE follow_key = ?1"
+                    ),
                     params![follow_key],
                     read_follow_waiter_row,
                 )
@@ -21885,18 +22081,17 @@ impl RuntimeDb {
         child_chain_root_id: &str,
     ) -> Result<Option<FollowWaiter>> {
         self.conn.with_sql(|conn| {
-            conn
-                .query_row(
-                    &format!(
-                        "SELECT {FOLLOW_WAITER_COLUMNS} FROM follow_waiter WHERE follow_key =
+            conn.query_row(
+                &format!(
+                    "SELECT {FOLLOW_WAITER_COLUMNS} FROM follow_waiter WHERE follow_key =
                      (SELECT follow_key FROM follow_waiter_child WHERE child_chain_root_id = ?1)"
-                    ),
-                    params![child_chain_root_id],
-                    read_follow_waiter_row,
-                )
-                .optional()?
-                .map(|w| self.with_follow_children(w))
-                .transpose()
+                ),
+                params![child_chain_root_id],
+                read_follow_waiter_row,
+            )
+            .optional()?
+            .map(|w| self.with_follow_children(w))
+            .transpose()
         })
     }
 
@@ -21911,18 +22106,17 @@ impl RuntimeDb {
         parent_thread_id: &str,
     ) -> Result<Option<FollowWaiter>> {
         self.conn.with_sql(|conn| {
-            conn
-                .query_row(
-                    &format!(
-                        "SELECT {FOLLOW_WAITER_COLUMNS} FROM follow_waiter \
+            conn.query_row(
+                &format!(
+                    "SELECT {FOLLOW_WAITER_COLUMNS} FROM follow_waiter \
                      WHERE parent_thread_id = ?1 ORDER BY created_at_ms DESC LIMIT 1"
-                    ),
-                    params![parent_thread_id],
-                    read_follow_waiter_row,
-                )
-                .optional()?
-                .map(|w| self.with_follow_children(w))
-                .transpose()
+                ),
+                params![parent_thread_id],
+                read_follow_waiter_row,
+            )
+            .optional()?
+            .map(|w| self.with_follow_children(w))
+            .transpose()
         })
     }
 
@@ -21936,18 +22130,17 @@ impl RuntimeDb {
         successor_thread_id: &str,
     ) -> Result<Option<FollowWaiter>> {
         self.conn.with_sql(|conn| {
-            conn
-                .query_row(
-                    &format!(
-                        "SELECT {FOLLOW_WAITER_COLUMNS} FROM follow_waiter \
+            conn.query_row(
+                &format!(
+                    "SELECT {FOLLOW_WAITER_COLUMNS} FROM follow_waiter \
                      WHERE parent_successor_thread_id = ?1"
-                    ),
-                    params![successor_thread_id],
-                    read_follow_waiter_row,
-                )
-                .optional()?
-                .map(|w| self.with_follow_children(w))
-                .transpose()
+                ),
+                params![successor_thread_id],
+                read_follow_waiter_row,
+            )
+            .optional()?
+            .map(|w| self.with_follow_children(w))
+            .transpose()
         })
     }
 
@@ -21976,8 +22169,8 @@ impl RuntimeDb {
             let query_limit = max_items
                 .checked_add(1)
                 .context("follow waiter summary limit overflow")?;
-            let query_limit =
-                i64::try_from(query_limit).context("follow waiter summary limit exceeds SQLite i64")?;
+            let query_limit = i64::try_from(query_limit)
+                .context("follow waiter summary limit exceeds SQLite i64")?;
             let mut summaries = std::collections::BTreeMap::new();
             for batch in thread_ids.chunks(FOLLOW_WAITER_SUMMARY_QUERY_BATCH) {
                 let requested_rows = std::iter::repeat_n("(?)", batch.len())
@@ -22033,8 +22226,8 @@ impl RuntimeDb {
             let query_limit = max_items
                 .checked_add(1)
                 .context("follow waiter summary limit overflow")?;
-            let query_limit =
-                i64::try_from(query_limit).context("follow waiter summary limit exceeds SQLite i64")?;
+            let query_limit = i64::try_from(query_limit)
+                .context("follow waiter summary limit exceeds SQLite i64")?;
             let mut stmt = conn.prepare(&format!(
                 "SELECT {FOLLOW_WAITER_SUMMARY_COLUMNS} FROM follow_waiter fw \
              ORDER BY fw.created_at_ms, fw.follow_key LIMIT ?1"
@@ -22957,8 +23150,8 @@ mod tests {
 
     use super::*;
     use crate::launch_metadata::RuntimeLaunchMetadata;
-    use std::fs;
     use ryeos_engine::contracts::CancellationMode;
+    use std::fs;
     use tempfile::TempDir;
 
     fn fresh_db() -> (TempDir, crate::runtime_db::test_native::TestRuntime) {
@@ -23016,13 +23209,19 @@ mod tests {
 
             conn.execute("UPDATE execution_lifetime_fence SET host_lifetime='{}'", [])
                 .unwrap();
-            assert!(ensure_scope_lifetime_resettable(conn, SCOPE_LIFETIME_FENCE_FIRST_EPOCH).is_err());
+            assert!(
+                ensure_scope_lifetime_resettable(conn, SCOPE_LIFETIME_FENCE_FIRST_EPOCH).is_err()
+            );
             conn.execute("DELETE FROM execution_lifetime_fence", [])
                 .unwrap();
-            assert!(ensure_scope_lifetime_resettable(conn, SCOPE_LIFETIME_FENCE_FIRST_EPOCH).is_err());
+            assert!(
+                ensure_scope_lifetime_resettable(conn, SCOPE_LIFETIME_FENCE_FIRST_EPOCH).is_err()
+            );
             conn.execute("DROP TABLE execution_lifetime_fence", [])
                 .unwrap();
-            assert!(ensure_scope_lifetime_resettable(conn, SCOPE_LIFETIME_FENCE_FIRST_EPOCH).is_err());
+            assert!(
+                ensure_scope_lifetime_resettable(conn, SCOPE_LIFETIME_FENCE_FIRST_EPOCH).is_err()
+            );
             Ok(())
         });
     }
@@ -23158,13 +23357,18 @@ mod tests {
 
     fn seed_bounded_idle_contact_session(db: &RuntimeDb) {
         create_locked_profile(db, "P-bounded-contact", "worker-bounded-contact");
-        db.conn.with_sql(|connection| Ok(connection.execute(
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
                 "UPDATE credential_profile SET state='active' WHERE profile_id='P-bounded-contact'",
                 [],
-            )?))
+            )?)
+            })
             .unwrap();
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "INSERT INTO worker_process (
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "INSERT INTO worker_process (
                 worker_instance_id, boot_identity_hash, session_capsule_hash,
                 boot_epoch, lifecycle_generation, process_identity,
                 control_channel_identity, state, daemon_generation_id,
@@ -23172,15 +23376,18 @@ mod tests {
              ) VALUES ('worker-bounded-contact', ?1, ?2, 1, 1, ?3,
                        'fd:bounded-contact', 'live', 'daemon-bounded-contact',
                        'T-bounded-contact', 'owned', 1, 1)",
-                params![
-                    "b".repeat(64),
-                    "a".repeat(64),
-                    serde_json::to_string(&fake_process_identity(123, 123)).unwrap()
-                ],
-            )?))
+                    params![
+                        "b".repeat(64),
+                        "a".repeat(64),
+                        serde_json::to_string(&fake_process_identity(123, 123)).unwrap()
+                    ],
+                )?)
+            })
             .unwrap();
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "INSERT INTO dedicated_session (
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "INSERT INTO dedicated_session (
                 placement_thread_id, chain_root_id, owner_principal, admitted_capsule_hash,
                 worker_instance_id, worker_boot_epoch, workspace_id,
                 candidate_required, candidate_disposition, credential_profile_id,
@@ -23189,8 +23396,9 @@ mod tests {
                        'worker-bounded-contact', 1, 'W-bounded-contact',
                        1, 'retained_for_review', 'P-bounded-contact',
                        1, 'idle', 'none', 1, 1)",
-                ["a".repeat(64)],
-            )?))
+                    ["a".repeat(64)],
+                )?)
+            })
             .unwrap();
     }
 
@@ -23215,11 +23423,14 @@ mod tests {
             expires_at_ms: lillux::time::timestamp_millis() + 60_000,
         })
         .unwrap();
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "UPDATE dedicated_session SET state='awaiting_approval'
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "UPDATE dedicated_session SET state='awaiting_approval'
               WHERE placement_thread_id='T-bounded-contact'",
-                [],
-            )?))
+                    [],
+                )?)
+            })
             .unwrap();
     }
 
@@ -23256,11 +23467,14 @@ mod tests {
                 .is_empty()
         );
         // Even an idle projection cannot hide an unresolved approval row.
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "UPDATE dedicated_session SET state='idle', current_turn_id=NULL
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "UPDATE dedicated_session SET state='idle', current_turn_id=NULL
               WHERE placement_thread_id='T-bounded-contact'",
-                [],
-            )?))
+                    [],
+                )?)
+            })
             .unwrap();
         assert!(
             db.reserve_dedicated_session_command(bounded_contact_command(&payload, &digest),)
@@ -23542,10 +23756,13 @@ mod tests {
             home_id: "home-P-handoff-retry",
         })
         .unwrap();
-        db.conn.with_sql(|connection| Ok(connection.execute(
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
                 "UPDATE credential_profile SET state='active' WHERE profile_id='P-handoff-retry'",
                 [],
-            )?))
+            )?)
+            })
             .unwrap();
         let first = NewCredentialProfileReservation {
             reservation_id: "reservation-first",
@@ -23720,14 +23937,17 @@ mod tests {
     fn startup_preserves_attached_worker_credential_fence() {
         let (_tmp, db) = fresh_db();
         create_locked_profile(&db, "P-fenced", "worker-fenced");
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "INSERT INTO execution_workspace (
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "INSERT INTO execution_workspace (
                     workspace_id, thread_id, launch_owner, backend_id,
                     base_snapshot, root_path, state, created_at_ms, updated_at_ms
                  ) VALUES ('W-fenced', 'T-fenced', 'owner', 'backend',
                            'a', '/tmp/workspace-fenced', 'ready', 1, 1)",
-                [],
-            )?))
+                    [],
+                )?)
+            })
             .unwrap();
         db.admit_dedicated_session(NewDedicatedSession {
             placement_thread_id: "T-fenced",
@@ -23801,33 +24021,59 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn unreadable_lifetime_fence_is_discarded_only_under_an_attested_reboot() {
-        use crate::runtime_db::{UnreadableLifetimeFence, DISCARD_UNREADABLE_LIFETIME_FENCE_FLAG};
+        use crate::runtime_db::{DISCARD_UNREADABLE_LIFETIME_FENCE_FLAG, UnreadableLifetimeFence};
         let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
-        let current = serde_json::to_value(lillux::ProcessHostLifetime::capture_current().unwrap()).unwrap();
-        let current_boot = current.pointer("/backend/boot_id").unwrap().as_str().unwrap().to_owned();
-        let store = |raw: String| {
-            db.conn.with_sql(|connection| Ok(connection.execute(
-                "UPDATE execution_lifetime_fence SET host_lifetime=?1 WHERE singleton=1", [raw])?))
-                .unwrap();
+        let current =
+            serde_json::to_value(lillux::ProcessHostLifetime::capture_current().unwrap()).unwrap();
+        let current_boot = current
+            .pointer("/backend/boot_id")
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let store =
+            |raw: String| {
+                db.conn
+                    .with_sql(|connection| {
+                        Ok(connection.execute(
+                "UPDATE execution_lifetime_fence SET host_lifetime=?1 WHERE singleton=1", [raw])?)
+                    })
+                    .unwrap();
+            };
+        let predecessor = |boot: &str| {
+            format!(
+                "{{\"backend\":{{\"boot_id\":\"{boot}\",\"cgroup_enclosure\":null,\"implementation\":\"linux_boot\"}},\"version\":1}}"
+            )
         };
-        let predecessor = |boot: &str| format!(
-            "{{\"backend\":{{\"boot_id\":\"{boot}\",\"cgroup_enclosure\":null,\"implementation\":\"linux_boot\"}},\"version\":1}}"
-        );
 
         store(predecessor("00000000-0000-4000-8000-000000000000"));
-        let refusal = format!("{:#}", db.unreadable_lifetime_fence_decision(UnreadableLifetimeFence::Refuse).unwrap_err());
-        assert!(refusal.contains(DISCARD_UNREADABLE_LIFETIME_FENCE_FLAG), "{refusal}");
+        let refusal = format!(
+            "{:#}",
+            db.unreadable_lifetime_fence_decision(UnreadableLifetimeFence::Refuse)
+                .unwrap_err()
+        );
+        assert!(
+            refusal.contains(DISCARD_UNREADABLE_LIFETIME_FENCE_FLAG),
+            "{refusal}"
+        );
         let discard = db
             .unreadable_lifetime_fence_decision(UnreadableLifetimeFence::DiscardAfterAttestedReboot)
             .unwrap()
             .expect("an attested reboot discards the unreadable fence");
         assert!(discard.boot_id_verified);
-        assert_eq!(discard.stored_boot_id.as_deref(), Some("00000000-0000-4000-8000-000000000000"));
+        assert_eq!(
+            discard.stored_boot_id.as_deref(),
+            Some("00000000-0000-4000-8000-000000000000")
+        );
 
         store(predecessor(&current_boot));
-        let same_boot = format!("{:#}", db
-            .unreadable_lifetime_fence_decision(UnreadableLifetimeFence::DiscardAfterAttestedReboot)
-            .unwrap_err());
+        let same_boot = format!(
+            "{:#}",
+            db.unreadable_lifetime_fence_decision(
+                UnreadableLifetimeFence::DiscardAfterAttestedReboot
+            )
+            .unwrap_err()
+        );
         assert!(same_boot.contains("has not rebooted"), "{same_boot}");
 
         store("{\"opaque\":true}".to_owned());
@@ -23837,10 +24083,19 @@ mod tests {
             .expect("an unreadable boot id rests on the attestation");
         assert!(!attested.boot_id_verified && attested.stored_boot_id.is_none());
 
-        db.conn.with_sql(|connection| Ok(connection.execute(
-            "UPDATE execution_lifetime_fence SET host_lifetime=NULL WHERE singleton=1", [])?))
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "UPDATE execution_lifetime_fence SET host_lifetime=NULL WHERE singleton=1",
+                    [],
+                )?)
+            })
             .unwrap();
-        assert!(db.unreadable_lifetime_fence_decision(UnreadableLifetimeFence::Refuse).unwrap().is_none());
+        assert!(
+            db.unreadable_lifetime_fence_decision(UnreadableLifetimeFence::Refuse)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -23853,14 +24108,17 @@ mod tests {
             let worker = format!("worker-{suffix}");
             let profile = format!("P-{suffix}");
             create_locked_profile(&db, &profile, &worker);
-            db.conn.with_sql(|connection| Ok(connection.execute(
-                    "INSERT INTO execution_workspace (
+            db.conn
+                .with_sql(|connection| {
+                    Ok(connection.execute(
+                        "INSERT INTO execution_workspace (
                     workspace_id, thread_id, launch_owner, backend_id,
                     base_snapshot, root_path, state, created_at_ms, updated_at_ms
                  ) VALUES (?1, ?2, 'dedicated_worker_session', 'fixture',
                            'a', '/fixture/workspace', 'ready', 1, 1)",
-                    params![workspace, placement],
-                )?))
+                        params![workspace, placement],
+                    )?)
+                })
                 .unwrap();
             db.admit_dedicated_session(NewDedicatedSession {
                 placement_thread_id: &placement,
@@ -23897,10 +24155,13 @@ mod tests {
                 true,
             )
             .unwrap();
-            db.conn.with_sql(|connection| Ok(connection.execute(
-                    "UPDATE execution_workspace SET state='closed' WHERE workspace_id=?1",
-                    [&workspace],
-                )?))
+            db.conn
+                .with_sql(|connection| {
+                    Ok(connection.execute(
+                        "UPDATE execution_workspace SET state='closed' WHERE workspace_id=?1",
+                        [&workspace],
+                    )?)
+                })
                 .unwrap();
             retirements.push(
                 db.reserve_closed_worker_scope_retirement(&workspace)
@@ -23908,20 +24169,33 @@ mod tests {
                     .unwrap(),
             );
         }
-        let witness = db.conn.with_sql(|connection| read_scope_lifetime_fence(connection)).unwrap();
+        let witness = db
+            .conn
+            .with_sql(|connection| read_scope_lifetime_fence(connection))
+            .unwrap();
         assert!(witness.is_some());
         let (first, reserved) = &retirements[0];
         db.complete_closed_worker_scope_retirement(first, reserved)
             .unwrap();
         db.complete_closed_worker_scope_retirement(first, reserved)
             .unwrap();
-        assert_eq!(db.conn.with_sql(|connection| read_scope_lifetime_fence(connection)).unwrap(), witness);
+        assert_eq!(
+            db.conn
+                .with_sql(|connection| read_scope_lifetime_fence(connection))
+                .unwrap(),
+            witness
+        );
         assert_eq!(db.unsettled_process_scope_count(None).unwrap(), 1);
         let (second, reserved) = &retirements[1];
         db.complete_closed_worker_scope_retirement(second, reserved)
             .unwrap();
         assert_eq!(db.unsettled_process_scope_count(None).unwrap(), 0);
-        assert!(db.conn.with_sql(|connection| read_scope_lifetime_fence(connection)).unwrap().is_none());
+        assert!(
+            db.conn
+                .with_sql(|connection| read_scope_lifetime_fence(connection))
+                .unwrap()
+                .is_none()
+        );
     }
 
     fn check_dedicated_worker_attachment(
@@ -23932,14 +24206,17 @@ mod tests {
     ) {
         let (_tmp, db) = fresh_db();
         create_locked_profile(&db, "P-one", "worker-one");
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "INSERT INTO execution_workspace (
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "INSERT INTO execution_workspace (
                     workspace_id, thread_id, launch_owner, backend_id,
                     base_snapshot, root_path, state, created_at_ms, updated_at_ms
                  ) VALUES ('W-one', 'T-one', 'dedicated_worker_session', 'trusted-daemon',
                            'a', '/tmp/workspace-one', 'ready', 1, 1)",
-                [],
-            )?))
+                    [],
+                )?)
+            })
             .unwrap();
         db.admit_dedicated_session(NewDedicatedSession {
             placement_thread_id: "T-one",
@@ -24008,13 +24285,18 @@ mod tests {
                     .is_err()
             );
             assert!(
-                db.conn.with_sql(|connection| read_scope_lifetime_fence(connection)).unwrap().is_none(),
+                db.conn
+                    .with_sql(|connection| read_scope_lifetime_fence(connection))
+                    .unwrap()
+                    .is_none(),
                 "failed reservation must roll back the coarse fence as well as the session"
             );
             db.reserve_dedicated_worker_scope("T-one", "worker-one", 1, &allocation)
                 .unwrap();
             assert_eq!(
-                db.conn.with_sql(|connection| read_scope_lifetime_fence(connection)).unwrap(),
+                db.conn
+                    .with_sql(|connection| read_scope_lifetime_fence(connection))
+                    .unwrap(),
                 Some(allocation.host_lifetime().unwrap())
             );
             assert!(db.worker_process("worker-one").unwrap().is_none());
@@ -24175,11 +24457,14 @@ mod tests {
                     .is_none()
             );
             let retained: String = db
-                .conn.with_sql(|connection| Ok(connection.query_row(
+                .conn
+                .with_sql(|connection| {
+                    Ok(connection.query_row(
                     "SELECT worker_scope FROM dedicated_session WHERE placement_thread_id='T-one'",
                     [],
                     |row| row.get(0),
-                )?))
+                )?)
+                })
                 .unwrap();
             assert_eq!(
                 serde_json::from_str::<DedicatedWorkerScopeReservation>(&retained).unwrap(),
@@ -24191,18 +24476,24 @@ mod tests {
         db.attach_worker_process(&record).unwrap();
         assert_eq!(db.worker_process("worker-one").unwrap(), Some(record));
         let workspace_state: String = db
-            .conn.with_sql(|connection| Ok(connection.query_row(
-                "SELECT state FROM execution_workspace WHERE workspace_id = 'W-one'",
-                [],
-                |row| row.get(0),
-            )?))
+            .conn
+            .with_sql(|connection| {
+                Ok(connection.query_row(
+                    "SELECT state FROM execution_workspace WHERE workspace_id = 'W-one'",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
             .unwrap();
         let session_state: String = db
-            .conn.with_sql(|connection| Ok(connection.query_row(
-                "SELECT state FROM dedicated_session WHERE placement_thread_id = 'T-one'",
-                [],
-                |row| row.get(0),
-            )?))
+            .conn
+            .with_sql(|connection| {
+                Ok(connection.query_row(
+                    "SELECT state FROM dedicated_session WHERE placement_thread_id = 'T-one'",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
             .unwrap();
         assert_eq!(workspace_state, "active");
         assert_eq!(session_state, "binding");
@@ -24213,26 +24504,35 @@ mod tests {
             WorkerProcessState::Live
         );
         let session_state: String = db
-            .conn.with_sql(|connection| Ok(connection.query_row(
-                "SELECT state FROM dedicated_session WHERE placement_thread_id = 'T-one'",
-                [],
-                |row| row.get(0),
-            )?))
+            .conn
+            .with_sql(|connection| {
+                Ok(connection.query_row(
+                    "SELECT state FROM dedicated_session WHERE placement_thread_id = 'T-one'",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
             .unwrap();
         assert_eq!(session_state, "idle");
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "UPDATE execution_workspace SET state='closed' WHERE workspace_id='W-one'",
-                [],
-            )?))
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "UPDATE execution_workspace SET state='closed' WHERE workspace_id='W-one'",
+                    [],
+                )?)
+            })
             .unwrap();
         assert!(
             db.reserve_closed_worker_scope_retirement("W-one").is_err(),
             "closed workspace must not hide a live worker owner"
         );
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "UPDATE execution_workspace SET state='active' WHERE workspace_id='W-one'",
-                [],
-            )?))
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "UPDATE execution_workspace SET state='active' WHERE workspace_id='W-one'",
+                    [],
+                )?)
+            })
             .unwrap();
         assert_eq!(
             db.begin_credential_enrollment(
@@ -24295,10 +24595,13 @@ mod tests {
         // evidence and cancelled profile facts committed, but the historical
         // terminal writer retained the enrolling revision. Every authority
         // predicate must be present before reconciliation may advance it.
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "UPDATE credential_profile SET authority_revision=2 WHERE profile_id='P-one'",
-                [],
-            )?))
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "UPDATE credential_profile SET authority_revision=2 WHERE profile_id='P-one'",
+                    [],
+                )?)
+            })
             .unwrap();
         for (table, mutation, restoration) in [
             (
@@ -24327,33 +24630,43 @@ mod tests {
                 "UPDATE worker_process SET placement_thread_id='T-one' WHERE worker_instance_id='worker-one'",
             ),
         ] {
-            db.conn.with_sql(|connection| Ok(connection.execute(mutation, [])?)).unwrap();
+            db.conn
+                .with_sql(|connection| Ok(connection.execute(mutation, [])?))
+                .unwrap();
             assert!(
                 !db.reconcile_terminal_credential_profile_authority(&stable_enrolling)
                     .unwrap(),
                 "{table} mismatch must not authorize terminal credential reconciliation"
             );
-            db.conn.with_sql(|connection| Ok(connection.execute(restoration, [])?)).unwrap();
+            db.conn
+                .with_sql(|connection| Ok(connection.execute(restoration, [])?))
+                .unwrap();
         }
         let transition_timestamp = db
             .credential_profile("P-one")
             .unwrap()
             .unwrap()
             .updated_at_ms;
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "UPDATE dedicated_session SET updated_at_ms=?2 WHERE placement_thread_id=?1",
-                params!["T-one", transition_timestamp + 1],
-            )?))
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "UPDATE dedicated_session SET updated_at_ms=?2 WHERE placement_thread_id=?1",
+                    params!["T-one", transition_timestamp + 1],
+                )?)
+            })
             .unwrap();
         assert!(
             !db.reconcile_terminal_credential_profile_authority(&stable_enrolling)
                 .unwrap(),
             "a later session timestamp must not be folded into the earlier profile transition"
         );
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "UPDATE dedicated_session SET updated_at_ms=?2 WHERE placement_thread_id=?1",
-                params!["T-one", transition_timestamp],
-            )?))
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "UPDATE dedicated_session SET updated_at_ms=?2 WHERE placement_thread_id=?1",
+                    params!["T-one", transition_timestamp],
+                )?)
+            })
             .unwrap();
         let mut wrong_stable = stable_enrolling.clone();
         wrong_stable.credential_generation += 1;
@@ -24369,8 +24682,10 @@ mod tests {
                 .unwrap(),
             "a different stable login epoch cannot authorize reconciliation"
         );
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "INSERT INTO credential_profile_reservation (
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "INSERT INTO credential_profile_reservation (
                     reservation_id, operation_id, successor_thread_id, profile_id,
                     owner_principal, credential_generation, subject_contract_digest,
                     subject_digest, checkpoint_manifest_hash, upstream_session_id,
@@ -24379,8 +24694,9 @@ mod tests {
                  ) VALUES ('reservation-live', 'operation-live', 'T-successor', 'P-one',
                            'fp:operator', 1, ?1, ?1, ?1, 'T-upstream',
                            'fp:project', ?1, ?1, 'active', 'reserved', ?2, ?2)",
-                params!["f".repeat(64), transition_timestamp],
-            )?))
+                    params!["f".repeat(64), transition_timestamp],
+                )?)
+            })
             .unwrap();
         assert!(
             !db.reconcile_terminal_credential_profile_authority(&stable_enrolling)
@@ -24413,39 +24729,54 @@ mod tests {
             // is proved dead and reaped. The historical worker journal, not
             // absence of a current PID or an empty host scope, authorizes the
             // subsequent resource retirement.
-            db.conn.with_sql(|connection| Ok(connection.execute(
-                    "UPDATE dedicated_session
+            db.conn
+                .with_sql(|connection| {
+                    Ok(connection.execute(
+                        "UPDATE dedicated_session
                         SET worker_instance_id=NULL, worker_boot_epoch=NULL,
                             worker_scope=NULL, state='recovering', send_boundary='none'
                       WHERE placement_thread_id='T-one'",
-                    [],
-                )?))
+                        [],
+                    )?)
+                })
                 .unwrap();
-            db.conn.with_sql(|connection| Ok(connection.execute(
-                    "UPDATE execution_workspace SET state='closed' WHERE workspace_id='W-one'",
-                    [],
-                )?))
+            db.conn
+                .with_sql(|connection| {
+                    Ok(connection.execute(
+                        "UPDATE execution_workspace SET state='closed' WHERE workspace_id='W-one'",
+                        [],
+                    )?)
+                })
                 .unwrap();
-            db.conn.with_sql(|connection| Ok(connection.execute(
-                    "UPDATE dedicated_session SET admitted_capsule_hash=?1
+            db.conn
+                .with_sql(|connection| {
+                    Ok(connection.execute(
+                        "UPDATE dedicated_session SET admitted_capsule_hash=?1
                       WHERE placement_thread_id='T-one'",
-                    ["c".repeat(64)],
-                )?))
+                        ["c".repeat(64)],
+                    )?)
+                })
                 .unwrap();
             assert!(
                 db.reserve_closed_worker_scope_retirement("W-one").is_err(),
                 "reaped history for another capsule cannot settle current recovery"
             );
-            db.conn.with_sql(|connection| Ok(connection.execute(
-                    "UPDATE dedicated_session SET admitted_capsule_hash=?1
+            db.conn
+                .with_sql(|connection| {
+                    Ok(connection.execute(
+                        "UPDATE dedicated_session SET admitted_capsule_hash=?1
                       WHERE placement_thread_id='T-one'",
-                    ["a".repeat(64)],
-                )?))
+                        ["a".repeat(64)],
+                    )?)
+                })
                 .unwrap();
-            db.conn.with_sql(|connection| Ok(connection.execute(
-                    "UPDATE execution_workspace SET state='active' WHERE workspace_id='W-one'",
-                    [],
-                )?))
+            db.conn
+                .with_sql(|connection| {
+                    Ok(connection.execute(
+                        "UPDATE execution_workspace SET state='active' WHERE workspace_id='W-one'",
+                        [],
+                    )?)
+                })
                 .unwrap();
         }
         check_closed_worker_scope_retirement(&db, usize::from(scoped));
@@ -24475,11 +24806,14 @@ mod tests {
         }
         if expected_scopes != 0 && db.worker_process("worker-one").unwrap().is_some() {
             let retained: Option<String> = db
-                .conn.with_sql(|connection| Ok(connection.query_row(
+                .conn
+                .with_sql(|connection| {
+                    Ok(connection.query_row(
                     "SELECT worker_scope FROM dedicated_session WHERE placement_thread_id='T-one'",
                     [],
                     |row| row.get(0),
-                )?))
+                )?)
+                })
                 .unwrap();
             db.conn.with_sql(|connection| Ok(connection.execute("UPDATE dedicated_session SET worker_scope=NULL WHERE placement_thread_id='T-one'", [])?)).unwrap();
             assert_eq!(
@@ -24495,10 +24829,13 @@ mod tests {
             db.reserve_closed_worker_scope_retirement("W-one").is_err(),
             "reaped processes do not authorize removal before workspace close"
         );
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "UPDATE execution_workspace SET state='closed' WHERE workspace_id='W-one'",
-                [],
-            )?))
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "UPDATE execution_workspace SET state='closed' WHERE workspace_id='W-one'",
+                    [],
+                )?)
+            })
             .unwrap();
         let worker_history = db.worker_process("worker-one").unwrap();
         let (placement, reserved) = db
@@ -24550,7 +24887,12 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(completed.state, ScopeRetirementState::Retired);
-        assert!(db.conn.with_sql(|connection| read_scope_lifetime_fence(connection)).unwrap().is_none());
+        assert!(
+            db.conn
+                .with_sql(|connection| read_scope_lifetime_fence(connection))
+                .unwrap()
+                .is_none()
+        );
         db.fixture_discard_all_thread_history(true).unwrap();
         assert_eq!(
             db.inspect_chain_recovery_pins("T-one", &[])
@@ -24574,14 +24916,17 @@ mod tests {
     fn dedicated_worker_recovery_retains_prior_boot_and_attaches_next_epoch() {
         let (_tmp, db) = fresh_db();
         create_locked_profile(&db, "P-recover", "worker-recover-1");
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "INSERT INTO execution_workspace (
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "INSERT INTO execution_workspace (
                     workspace_id, thread_id, launch_owner, backend_id,
                     base_snapshot, root_path, state, created_at_ms, updated_at_ms
                  ) VALUES ('W-recover', 'T-recover', 'owner', 'backend',
                            'a', '/tmp/workspace-recover', 'ready', 1, 1)",
-                [],
-            )?))
+                    [],
+                )?)
+            })
             .unwrap();
         db.admit_dedicated_session(NewDedicatedSession {
             placement_thread_id: "T-recover",
@@ -24621,14 +24966,17 @@ mod tests {
 
         db.acquire_credential_profile("P-recover", "fp:operator", "worker-recover-2")
             .unwrap();
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "INSERT INTO execution_workspace (
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "INSERT INTO execution_workspace (
                 workspace_id, thread_id, launch_owner, backend_id,
                 base_snapshot, root_path, state, created_at_ms, updated_at_ms
              ) VALUES ('W-recover-next', 'T-recover', 'owner-next', 'backend',
                        'a', '/tmp/workspace-recover-next', 'ready', 1, 1)",
-                [],
-            )?))
+                    [],
+                )?)
+            })
             .unwrap();
         assert_eq!(
             db.prepare_dedicated_session_recovery(
@@ -24860,11 +25208,14 @@ mod tests {
             2
         );
         let history_count: i64 = db
-            .conn.with_sql(|connection| Ok(connection.query_row(
-                "SELECT COUNT(*) FROM worker_process WHERE placement_thread_id='T-recover'",
-                [],
-                |row| row.get(0),
-            )?))
+            .conn
+            .with_sql(|connection| {
+                Ok(connection.query_row(
+                    "SELECT COUNT(*) FROM worker_process WHERE placement_thread_id='T-recover'",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
             .unwrap();
         assert_eq!(history_count, 2);
     }
@@ -24872,15 +25223,18 @@ mod tests {
     #[test]
     fn retained_workspace_recovery_is_exact_claim_and_owner_fenced() {
         let (_tmp, db) = fresh_db();
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "INSERT INTO execution_workspace (
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "INSERT INTO execution_workspace (
                     workspace_id, thread_id, launch_owner, backend_id, backend_version,
                     pinned_root_identities, mount_identity, base_snapshot, root_path,
                     state, created_at_ms, updated_at_ms
                  ) VALUES ('W-retained', 'T-retained', 'old-owner', 'backend', 'v1',
                            '{}', 'mount', ?1, '/tmp/W-retained', 'ready', 1, 1)",
-                [&"a".repeat(64)],
-            )?))
+                    [&"a".repeat(64)],
+                )?)
+            })
             .unwrap();
         assert!(matches!(
             db.fixture_claim_thread_launch("T-retained", "claim-retained", "daemon-new")
@@ -24909,12 +25263,15 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "INSERT INTO thread_runtime(thread_id, chain_root_id, workspace_id,
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "INSERT INTO thread_runtime(thread_id, chain_root_id, workspace_id,
                 workspace_view_identity, workspace_borrower_launch_owner)
              VALUES ('T-retained','T-retained','W-retained','different-old-view',?1)",
-                [&borrower_owner],
-            )?))
+                    [&borrower_owner],
+                )?)
+            })
             .unwrap();
         assert!(db.execution_workspace_has_members("W-retained").unwrap());
         assert_eq!(
@@ -24957,15 +25314,18 @@ mod tests {
         );
         assert!(retained.process_identity.is_none());
 
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "INSERT INTO execution_workspace (
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "INSERT INTO execution_workspace (
                     workspace_id, thread_id, launch_owner, backend_id, backend_version,
                     pinned_root_identities, mount_identity, base_snapshot,
                     frozen_snapshot_hash, root_path, state, created_at_ms, updated_at_ms
                  ) VALUES ('W-frozen', 'T-frozen', 'old-frozen-owner', 'backend', 'v1',
                            '{}', 'mount', ?1, ?2, '/tmp/W-frozen', 'freezing', 1, 1)",
-                rusqlite::params!["b".repeat(64), "c".repeat(64)],
-            )?))
+                    rusqlite::params!["b".repeat(64), "c".repeat(64)],
+                )?)
+            })
             .unwrap();
         assert!(matches!(
             db.fixture_claim_thread_launch("T-frozen", "claim-frozen", "daemon-new")
@@ -25029,21 +25389,27 @@ mod tests {
         create_locked_profile(&db, "P-handoff", "worker-handoff");
         let root_identity = serde_json::to_string(&fake_process_identity(124, 124)).unwrap();
         let stale_identity = serde_json::to_string(&fake_process_identity(125, 125)).unwrap();
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "INSERT INTO thread_runtime (thread_id, chain_root_id, process_identity)
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "INSERT INTO thread_runtime (thread_id, chain_root_id, process_identity)
                  VALUES ('T-handoff', 'T-handoff', ?1)",
-                [&root_identity],
-            )?))
+                    [&root_identity],
+                )?)
+            })
             .unwrap();
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "INSERT INTO execution_workspace (
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "INSERT INTO execution_workspace (
                     workspace_id, thread_id, launch_owner, backend_id,
                     base_snapshot, root_path, state, process_identity,
                     created_at_ms, updated_at_ms
                  ) VALUES ('W-handoff', 'T-handoff', 'owner', 'backend',
                            'a', '/tmp/workspace-handoff', 'active', ?1, 1, 1)",
-                [&stale_identity],
-            )?))
+                    [&stale_identity],
+                )?)
+            })
             .unwrap();
         db.admit_dedicated_session(NewDedicatedSession {
             placement_thread_id: "T-handoff",
@@ -25076,21 +25442,27 @@ mod tests {
 
         assert!(db.attach_worker_process(&record).is_err());
         assert!(db.worker_process("worker-handoff").unwrap().is_none());
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "UPDATE execution_workspace SET process_identity=?2
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "UPDATE execution_workspace SET process_identity=?2
                   WHERE workspace_id=?1",
-                params!["W-handoff", root_identity],
-            )?))
+                    params!["W-handoff", root_identity],
+                )?)
+            })
             .unwrap();
         db.attach_worker_process(&record).unwrap();
 
         let (state, process_identity): (String, String) = db
-            .conn.with_sql(|connection| Ok(connection.query_row(
-                "SELECT state, process_identity FROM execution_workspace
+            .conn
+            .with_sql(|connection| {
+                Ok(connection.query_row(
+                    "SELECT state, process_identity FROM execution_workspace
                   WHERE workspace_id='W-handoff'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )?))
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?)
+            })
             .unwrap();
         assert_eq!(state, "active");
         assert_eq!(
@@ -25102,15 +25474,18 @@ mod tests {
     #[test]
     fn live_workspace_retry_retains_only_exact_view_after_process_settlement() {
         let (_tmp, db) = fresh_db();
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "INSERT INTO execution_workspace (
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "INSERT INTO execution_workspace (
                 workspace_id, thread_id, launch_owner, backend_id, backend_version,
                 pinned_root_identities, mount_identity, base_snapshot, root_path,
                 state, created_at_ms, updated_at_ms
              ) VALUES ('W-live-retry','T-live-retry','old-owner','backend','v1',
                 '{}','retained-view','base','/tmp/W-live-retry','active',1,1)",
-                [],
-            )?))
+                    [],
+                )?)
+            })
             .unwrap();
         db.fixture_claim_thread_launch("T-live-retry", "new-claim", "daemon-test")
             .unwrap();
@@ -25131,11 +25506,14 @@ mod tests {
             )
             .is_err()
         );
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "INSERT INTO thread_runtime(thread_id, chain_root_id, pid, pgid)
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "INSERT INTO thread_runtime(thread_id, chain_root_id, pid, pgid)
             VALUES ('T-live-retry','T-live-retry',123,123)",
-                [],
-            )?))
+                    [],
+                )?)
+            })
             .unwrap();
         assert!(
             db.handoff_workspace_for_live_retry(
@@ -25150,10 +25528,13 @@ mod tests {
             .is_err(),
             "unsettled root process must fence an otherwise exact live view"
         );
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "UPDATE thread_runtime SET pid=NULL, pgid=NULL WHERE thread_id='T-live-retry'",
-                [],
-            )?))
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "UPDATE thread_runtime SET pid=NULL, pgid=NULL WHERE thread_id='T-live-retry'",
+                    [],
+                )?)
+            })
             .unwrap();
         db.handoff_workspace_for_live_retry(
             "W-live-retry",
@@ -25189,15 +25570,18 @@ mod tests {
             ),
         ] {
             let (_tmp, db) = fresh_db();
-            db.conn.with_sql(|connection| Ok(connection.execute(
-                    "INSERT INTO execution_workspace(
+            db.conn
+                .with_sql(|connection| {
+                    Ok(connection.execute(
+                        "INSERT INTO execution_workspace(
                 workspace_id, thread_id, launch_owner, backend_id, backend_version,
                 pinned_root_identities, mount_identity, base_snapshot, root_path,
                 state, frozen_snapshot_hash, created_at_ms, updated_at_ms)
                 VALUES('W-phase','T-phase','old-owner','backend','v1','{}','same-view',
                     'base','/tmp/W-phase',?1,?2,1,1)",
-                    params![phase.as_str(), frozen],
-                )?))
+                        params![phase.as_str(), frozen],
+                    )?)
+                })
                 .unwrap();
             db.fixture_claim_thread_launch("T-phase", "next-claim", "daemon-test")
                 .unwrap();
@@ -25229,14 +25613,17 @@ mod tests {
     fn credential_revocation_fences_worker_attachment() {
         let (_tmp, db) = fresh_db();
         create_locked_profile(&db, "P-fence", "worker-fence");
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "INSERT INTO execution_workspace (
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "INSERT INTO execution_workspace (
                     workspace_id, thread_id, launch_owner, backend_id,
                     base_snapshot, root_path, state, created_at_ms, updated_at_ms
                  ) VALUES ('W-fence', 'T-fence', 'owner', 'backend',
                            'a', '/tmp/workspace-fence', 'ready', 1, 1)",
-                [],
-            )?))
+                    [],
+                )?)
+            })
             .unwrap();
         db.admit_dedicated_session(NewDedicatedSession {
             placement_thread_id: "T-fence",
@@ -25278,14 +25665,17 @@ mod tests {
     fn proved_abandoned_worker_fence_releases_credential_atomically() {
         let (_tmp, db) = fresh_db();
         create_locked_profile(&db, "P-abandoned", "worker-abandoned");
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "INSERT INTO execution_workspace (
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "INSERT INTO execution_workspace (
                 workspace_id, thread_id, launch_owner, backend_id,
                 base_snapshot, root_path, state, created_at_ms, updated_at_ms
              ) VALUES ('W-abandoned', 'T-abandoned', 'owner', 'backend',
                        'a', '/tmp/workspace-abandoned', 'ready', 1, 1)",
-                [],
-            )?))
+                    [],
+                )?)
+            })
             .unwrap();
         db.admit_dedicated_session(NewDedicatedSession {
             placement_thread_id: "T-abandoned",
@@ -25368,14 +25758,17 @@ mod tests {
     fn unproved_abandoned_worker_retains_identity_and_credential_fence() {
         let (_tmp, db) = fresh_db();
         create_locked_profile(&db, "P-unproved", "worker-unproved");
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "INSERT INTO execution_workspace (
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "INSERT INTO execution_workspace (
                     workspace_id, thread_id, launch_owner, backend_id,
                     base_snapshot, root_path, state, created_at_ms, updated_at_ms
                  ) VALUES ('W-unproved', 'T-unproved', 'owner', 'backend',
                            'a', '/tmp/workspace-unproved', 'ready', 1, 1)",
-                [],
-            )?))
+                    [],
+                )?)
+            })
             .unwrap();
         db.admit_dedicated_session(NewDedicatedSession {
             placement_thread_id: "T-unproved",
@@ -25457,14 +25850,17 @@ mod tests {
     fn unproved_attachment_failure_persists_exact_worker_and_credential_fence() {
         let (_tmp, db) = fresh_db();
         create_locked_profile(&db, "P-start-unproved", "worker-start-unproved");
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "INSERT INTO execution_workspace (
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "INSERT INTO execution_workspace (
                     workspace_id, thread_id, launch_owner, backend_id,
                     base_snapshot, root_path, state, created_at_ms, updated_at_ms
                  ) VALUES ('W-start-unproved', 'T-start-unproved', 'owner', 'backend',
                            'a', '/tmp/workspace-start-unproved', 'ready', 1, 1)",
-                [],
-            )?))
+                    [],
+                )?)
+            })
             .unwrap();
         db.admit_dedicated_session(NewDedicatedSession {
             placement_thread_id: "T-start-unproved",
@@ -25528,14 +25924,17 @@ mod tests {
     fn readiness_failure_terminalizes_a_recovering_dedicated_session() {
         let (_tmp, db) = fresh_db();
         create_locked_profile(&db, "P-ready-fail", "worker-ready-fail");
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "INSERT INTO execution_workspace (
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "INSERT INTO execution_workspace (
                     workspace_id, thread_id, launch_owner, backend_id,
                     base_snapshot, root_path, state, created_at_ms, updated_at_ms
                  ) VALUES ('W-ready-fail', 'T-ready-fail', 'owner', 'backend',
                            'a', '/tmp/workspace-ready-fail', 'ready', 1, 1)",
-                [],
-            )?))
+                    [],
+                )?)
+            })
             .unwrap();
         db.admit_dedicated_session(NewDedicatedSession {
             placement_thread_id: "T-ready-fail",
@@ -25601,29 +26000,37 @@ mod tests {
     #[test]
     fn observation_batches_are_epoch_ordered_and_rebuild_only_from_root_facts() {
         let (_tmp, db) = fresh_db();
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "INSERT INTO credential_profile(
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "INSERT INTO credential_profile(
                     profile_id, owner_principal, home_id, credential_generation, state,
                     active_login_id, login_epoch, login_expires_at_ms, sanitized_account_json,
                     lock_owner, created_at_ms, updated_at_ms, authority_revision
                  ) VALUES ('P-observe', 'fp:operator', 'home-observe', 1, 'active',
                            NULL, 0, NULL, NULL, 'worker-observe', 1, 1, 1)",
-                [],
-            )?))
+                    [],
+                )?)
+            })
             .unwrap();
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "INSERT INTO worker_process(
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "INSERT INTO worker_process(
                     worker_instance_id, boot_identity_hash, session_capsule_hash,
                     boot_epoch, lifecycle_generation, process_identity,
                     control_channel_identity, state, daemon_generation_id,
                     placement_thread_id, cleanup_state, created_at_ms, updated_at_ms
                  ) VALUES ('worker-observe', ?1, ?2, 3, 1, '{}', 'fd:observe',
                            'live', 'daemon-observe', 'T-observe', 'owned', 1, 1)",
-                [&"e".repeat(64), &"a".repeat(64)],
-            )?))
+                    [&"e".repeat(64), &"a".repeat(64)],
+                )?)
+            })
             .unwrap();
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "INSERT INTO dedicated_session(
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "INSERT INTO dedicated_session(
                     placement_thread_id, chain_root_id, owner_principal, admitted_capsule_hash,
                     worker_instance_id, worker_boot_epoch, workspace_id,
                     candidate_required, candidate_disposition, credential_profile_id,
@@ -25634,8 +26041,9 @@ mod tests {
                  ) VALUES ('T-observe', 'T-observe', 'fp:operator', ?1,
                            'worker-observe', 3, 'W-observe', 0, 'owner_decision', 'P-observe', 1,
                            NULL, NULL, 'idle', 'none', NULL, NULL, NULL, NULL, 1, 1)",
-                [&"a".repeat(64)],
-            )?))
+                    [&"a".repeat(64)],
+                )?)
+            })
             .unwrap();
         let canonical_batch = serde_json::json!({
             "events": [],
@@ -25776,31 +26184,37 @@ mod tests {
         db.settle_dedicated_observation_batch("T-observe", 3, 3, &"c".repeat(64))
             .unwrap();
         let frontier = db
-            .conn.with_sql(|connection| Ok(connection.query_row(
-                "SELECT COUNT(*), first_sequence, cumulative_event_count
+            .conn
+            .with_sql(|connection| {
+                Ok(connection.query_row(
+                    "SELECT COUNT(*), first_sequence, cumulative_event_count
                    FROM dedicated_session_observation_batch
                   WHERE placement_thread_id='T-observe' AND state='settled'",
-                [],
-                |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.get::<_, i64>(2)?,
-                    ))
-                },
-            )?))
+                    [],
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, i64>(2)?,
+                        ))
+                    },
+                )?)
+            })
             .unwrap();
         assert_eq!(frontier, (1, 3, 3));
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "UPDATE dedicated_session_observation_batch
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "UPDATE dedicated_session_observation_batch
                     SET cumulative_event_count=?2
                   WHERE placement_thread_id=?1 AND state='settled'",
-                params![
-                    "T-observe",
-                    i64::try_from(ryeos_state::objects::MAX_HOSTED_SESSION_OBSERVATION_EVENTS)
-                        .unwrap()
-                ],
-            )?))
+                    params![
+                        "T-observe",
+                        i64::try_from(ryeos_state::objects::MAX_HOSTED_SESSION_OBSERVATION_EVENTS)
+                            .unwrap()
+                    ],
+                )?)
+            })
             .unwrap();
         let ceiling = db
             .reserve_dedicated_observation_batch(
@@ -25919,14 +26333,17 @@ mod tests {
         db.release_credential_profile("P-one", "login-owner")
             .unwrap();
 
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "INSERT INTO execution_workspace (
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "INSERT INTO execution_workspace (
                     workspace_id, thread_id, launch_owner, backend_id,
                     base_snapshot, root_path, state, created_at_ms, updated_at_ms
                  ) VALUES ('W-ledger', 'T-ledger', 'dedicated_worker_session', 'trusted-daemon',
                            'a', '/tmp/workspace-ledger', 'ready', 1, 1)",
-                [],
-            )?))
+                    [],
+                )?)
+            })
             .unwrap();
         assert_eq!(
             db.acquire_credential_profile("P-one", "fp:operator", "worker-ledger")
@@ -26053,8 +26470,10 @@ mod tests {
             &approval_decision_digest,
         )
         .unwrap();
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "INSERT INTO dedicated_session_approval (
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "INSERT INTO dedicated_session_approval (
                     placement_thread_id, approval_id, worker_instance_id, worker_boot_epoch,
                     request_digest, operation_class, requested_authority_json, state,
                     decision_principal, decision_json, decision_digest, reservation_token,
@@ -26063,13 +26482,14 @@ mod tests {
                  ) VALUES ('T-ledger', 'approval-recovered', 'worker-ledger', 1,
                            ?1, 'fixture', '{}', 'delivery_unknown', 'fp:operator',
                            ?2, ?3, 'reservation-recovered', ?4, 1, 1, 1, NULL)",
-                params![
-                    "9".repeat(64),
-                    serde_json::to_string(&approval_decision).unwrap(),
-                    approval_decision_digest,
-                    lillux::time::timestamp_millis() as i64 + 60_000,
-                ],
-            )?))
+                    params![
+                        "9".repeat(64),
+                        serde_json::to_string(&approval_decision).unwrap(),
+                        approval_decision_digest,
+                        lillux::time::timestamp_millis() as i64 + 60_000,
+                    ],
+                )?)
+            })
             .unwrap();
         db.settle_recovered_dedicated_approval_delivery(
             "T-ledger",
@@ -26090,7 +26510,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            db.conn.with_sql(|connection| Ok(connection.query_row(
+            db.conn
+                .with_sql(|connection| Ok(connection.query_row(
                     "SELECT state FROM dedicated_session_approval
                       WHERE placement_thread_id='T-ledger' AND approval_id='approval-recovered'",
                     [],
@@ -26126,7 +26547,8 @@ mod tests {
         db.reconcile_dedicated_approval_stale_epoch("T-ledger", "approval-uncontacted", 1)
             .unwrap();
         assert_eq!(
-            db.conn.with_sql(|connection| Ok(connection.query_row(
+            db.conn
+                .with_sql(|connection| Ok(connection.query_row(
                     "SELECT state FROM dedicated_session_approval
                       WHERE placement_thread_id='T-ledger' AND approval_id='approval-uncontacted'",
                     [],
@@ -26350,8 +26772,10 @@ mod tests {
             let (tmp, db) = fresh_db();
             let candidate = "c".repeat(64);
             let operation = "a".repeat(64);
-            db.conn.with_sql(|connection| Ok(connection.execute(
-                    "INSERT INTO dedicated_session (
+            db.conn
+                .with_sql(|connection| {
+                    Ok(connection.execute(
+                        "INSERT INTO dedicated_session (
                     placement_thread_id, chain_root_id, owner_principal,
                     admitted_capsule_hash, workspace_id, candidate_required,
                     candidate_disposition, credential_profile_id, credential_generation,
@@ -26360,14 +26784,15 @@ mod tests {
                  ) VALUES ('T-discard-source', 'T-discard-source', 'fp:operator', ?1,
                            'W-discard-source', 1, ?2, 'P-discard-source', 1, ?3,
                            'settled', ?4, ?5, 'completed', 1, 1)",
-                    params![
-                        "b".repeat(64),
-                        disposition,
-                        resume_state,
-                        candidate,
-                        retained
-                    ],
-                )?))
+                        params![
+                            "b".repeat(64),
+                            disposition,
+                            resume_state,
+                            candidate,
+                            retained
+                        ],
+                    )?)
+                })
                 .unwrap();
             assert!(
                 db.reserve_dedicated_candidate_discard(
@@ -26396,7 +26821,8 @@ mod tests {
 
             // A crash before the owner fact leaves an exact, discoverable
             // journal and retains both its candidate and service-root pins.
-            let db = crate::runtime_db::test_native::TestRuntime::open(&tmp.path().join("runtime.db"));
+            let db =
+                crate::runtime_db::test_native::TestRuntime::open(&tmp.path().join("runtime.db"));
             let pending = db.dedicated_sessions_in_state("discarding").unwrap();
             assert_eq!(pending.len(), 1);
             assert_eq!(
@@ -26474,10 +26900,13 @@ mod tests {
             );
             // Source-history retirement owns deleting this runtime row. Its
             // dependency pins then disappear without a self-retention cycle.
-            db.conn.with_sql(|connection| Ok(connection.execute(
+            db.conn
+                .with_sql(|connection| {
+                    Ok(connection.execute(
                     "DELETE FROM dedicated_session WHERE placement_thread_id='T-discard-source'",
                     [],
-                )?))
+                )?)
+                })
                 .unwrap();
             assert_eq!(
                 db.candidate_evidence_pin_count("T-discard-committed")
@@ -26496,14 +26925,17 @@ mod tests {
     fn frozen_candidate_requires_exact_verification_before_publish_or_discard() {
         let (_tmp, db) = fresh_db();
         create_locked_profile(&db, "P-candidate", "worker-candidate");
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "INSERT INTO execution_workspace (
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "INSERT INTO execution_workspace (
                     workspace_id, thread_id, launch_owner, backend_id,
                     base_snapshot, root_path, state, created_at_ms, updated_at_ms
                  ) VALUES ('W-candidate', 'T-candidate', 'owner', 'trusted-daemon',
                            'a', '/tmp/candidate', 'ready', 1, 1)",
-                [],
-            )?))
+                    [],
+                )?)
+            })
             .unwrap();
         db.admit_dedicated_session(NewDedicatedSession {
             placement_thread_id: "T-candidate",
@@ -26573,11 +27005,14 @@ mod tests {
             .unwrap();
         db.terminalize_dedicated_session("T-candidate", "worker-candidate", 1, "completed")
             .unwrap();
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "UPDATE execution_workspace SET state='closed', frozen_snapshot_hash=?1
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "UPDATE execution_workspace SET state='closed', frozen_snapshot_hash=?1
                   WHERE workspace_id='W-candidate'",
-                params!["c".repeat(64)],
-            )?))
+                    params!["c".repeat(64)],
+                )?)
+            })
             .unwrap();
         let candidate = "c".repeat(64);
         assert!(
@@ -26723,12 +27158,15 @@ mod tests {
 
         // Reuse the fully constructed candidate to retain independent discard
         // settlement coverage in this state-machine test.
-        db.conn.with_sql(|connection| Ok(connection.execute(
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
                 "UPDATE dedicated_session SET state='publish_ready', publication_result='retained',
                     candidate_disposition_root_id=NULL, candidate_disposition_operation_id=NULL
                   WHERE placement_thread_id='T-candidate'",
                 [],
-            )?))
+            )?)
+            })
             .unwrap();
         db.reserve_dedicated_candidate_discard(
             "T-candidate",
@@ -26753,14 +27191,17 @@ mod tests {
     fn retained_for_review_is_completion_fenced_and_requires_owner_evaluator_adoption() {
         let (_tmp, db) = fresh_db();
         create_locked_profile(&db, "P-retained", "worker-retained");
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "INSERT INTO execution_workspace (
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "INSERT INTO execution_workspace (
                     workspace_id, thread_id, launch_owner, backend_id,
                     base_snapshot, root_path, state, created_at_ms, updated_at_ms
                  ) VALUES ('W-retained', 'T-retained', 'owner', 'trusted-daemon',
                            'a', '/tmp/retained', 'ready', 1, 1)",
-                [],
-            )?))
+                    [],
+                )?)
+            })
             .unwrap();
         db.admit_dedicated_session(NewDedicatedSession {
             placement_thread_id: "T-retained",
@@ -26829,40 +27270,52 @@ mod tests {
         // retained completion fence must continue to name the epoch that
         // observed that turn, while retirement remains fenced to the current
         // live worker.
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "UPDATE worker_process SET state='dead', cleanup_state='reaped'
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "UPDATE worker_process SET state='dead', cleanup_state='reaped'
                   WHERE worker_instance_id='worker-retained' AND boot_epoch=1",
-                [],
-            )?))
+                    [],
+                )?)
+            })
             .unwrap();
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "INSERT INTO worker_process (
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "INSERT INTO worker_process (
                     worker_instance_id, boot_identity_hash, session_capsule_hash,
                     boot_epoch, lifecycle_generation, process_identity,
                     control_channel_identity, state, daemon_generation_id,
                     placement_thread_id, cleanup_state, created_at_ms, updated_at_ms
                  ) VALUES ('worker-retained-2', ?1, ?2, 2, 1, ?3,
                            'fd:13', 'live', 'daemon-two', 'T-retained', 'owned', 3, 3)",
-                params![
-                    "c".repeat(64),
-                    "a".repeat(64),
-                    serde_json::to_string(&fake_process_identity(127, 127)).unwrap()
-                ],
-            )?))
+                    params![
+                        "c".repeat(64),
+                        "a".repeat(64),
+                        serde_json::to_string(&fake_process_identity(127, 127)).unwrap()
+                    ],
+                )?)
+            })
             .unwrap();
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "UPDATE dedicated_session
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "UPDATE dedicated_session
                     SET worker_instance_id='worker-retained-2', worker_boot_epoch=2,
                         state='idle', current_turn_id=NULL
                   WHERE placement_thread_id='T-retained'",
-                [],
-            )?))
+                    [],
+                )?)
+            })
             .unwrap();
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "UPDATE credential_profile SET lock_owner='worker-retained-2'
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "UPDATE credential_profile SET lock_owner='worker-retained-2'
                   WHERE profile_id='P-retained'",
-                [],
-            )?))
+                    [],
+                )?)
+            })
             .unwrap();
 
         db.reserve_dedicated_session_completion("T-retained", 2, &fence)
@@ -27156,10 +27609,13 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("runtime.db");
         let db = crate::runtime_db::test_native::TestRuntime::open(&path);
-        db.conn.with_sql(|connection| Ok(connection.execute_batch(
-                "DROP INDEX idx_in_process_handler_reservation_phase_thread;
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute_batch(
+                    "DROP INDEX idx_in_process_handler_reservation_phase_thread;
                  DROP TABLE in_process_handler_reservation;",
-            )?))
+                )?)
+            })
             .unwrap();
         drop(db);
 
@@ -27424,30 +27880,37 @@ mod tests {
         let (_tmp, db) = fresh_db();
         for (index, state) in WorkspaceState::ALL.into_iter().enumerate() {
             let workspace_id = format!("workspace-{index}");
-            db.conn.with_sql(|connection| Ok(connection.execute(
-                    "INSERT INTO execution_workspace
+            db.conn
+                .with_sql(|connection| {
+                    Ok(connection.execute(
+                        "INSERT INTO execution_workspace
                          (workspace_id, base_snapshot, root_path, state,
                           created_at_ms, updated_at_ms)
                      VALUES (?1, 'snapshot', ?2, ?3, 1, 1)",
-                    params![
-                        workspace_id,
-                        format!("/tmp/workspace-{index}"),
-                        state.as_str()
-                    ],
-                )?))
+                        params![
+                            workspace_id,
+                            format!("/tmp/workspace-{index}"),
+                            state.as_str()
+                        ],
+                    )?)
+                })
                 .unwrap();
             let persisted: WorkspaceState = db
-                .conn.with_sql(|connection| Ok(connection.query_row(
-                    "SELECT state FROM execution_workspace WHERE workspace_id=?1",
-                    [&workspace_id],
-                    |row| row.get(0),
-                )?))
+                .conn
+                .with_sql(|connection| {
+                    Ok(connection.query_row(
+                        "SELECT state FROM execution_workspace WHERE workspace_id=?1",
+                        [&workspace_id],
+                        |row| row.get(0),
+                    )?)
+                })
                 .unwrap();
             assert_eq!(persisted, state);
         }
 
         assert!(
-            db.conn.with_sql(|connection| Ok(connection.execute(
+            db.conn
+                .with_sql(|connection| Ok(connection.execute(
                     "INSERT INTO execution_workspace
                      (workspace_id, base_snapshot, root_path, state,
                       created_at_ms, updated_at_ms)
@@ -27523,45 +27986,60 @@ mod tests {
             )?))
             .unwrap();
 
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "INSERT INTO thread_runtime
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "INSERT INTO thread_runtime
                     (thread_id,chain_root_id,launch_metadata)
                  VALUES ('T-legacy-child','T-legacy-child',?1)",
-                [serde_json::json!({"schema_version": 2}).to_string()],
-            )?))
+                    [serde_json::json!({"schema_version": 2}).to_string()],
+                )?)
+            })
             .unwrap();
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "INSERT INTO follow_waiter
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "INSERT INTO follow_waiter
                     (follow_key,parent_thread_id,parent_chain_root_id,
                      parent_successor_thread_id,follow_node,graph_run_id,step_count,
                      child_thread_id,child_chain_root_id,phase,created_at_ms,updated_at_ms)
                  VALUES ('follow-old','T-parent','T-parent',?1,'fan','run-old',3,
                          'T-legacy-child','T-legacy-child',?2,10,11)",
-                params![parent_successor_thread_id, phase],
-            )?))
+                    params![parent_successor_thread_id, phase],
+                )?)
+            })
             .unwrap();
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "INSERT INTO follow_waiter_child
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "INSERT INTO follow_waiter_child
                     (follow_key,item_index,item_ref,spec_hash,child_thread_id,
                      child_chain_root_id,created_at_ms,updated_at_ms)
                  VALUES ('follow-old',0,'tool:test/old','spec-old','T-legacy-child',
                          'T-legacy-child',10,11)",
-                [],
-            )?))
+                    [],
+                )?)
+            })
             .unwrap();
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "INSERT INTO thread_child_link
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "INSERT INTO thread_child_link
                     (child_thread_id,parent_thread_id,relation,created_at_ms)
                  VALUES ('T-legacy-child','T-parent','follow',10)",
-                [],
-            )?))
+                    [],
+                )?)
+            })
             .unwrap();
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "INSERT INTO launch_window
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "INSERT INTO launch_window
                     (child_chain_root_id,window_key,width,created_at_ms)
                  VALUES ('T-legacy-child','follow:old',1,10)",
-                [],
-            )?))
+                    [],
+                )?)
+            })
             .unwrap();
     }
 
@@ -28159,10 +28637,15 @@ mod tests {
             operation_id: "turn-one".to_owned(),
             call_id: "call-two".to_owned(),
         };
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "UPDATE runtime_action_intent SET workload_invocation=?1",
-                params![lillux::canonical_json(&serde_json::to_value(altered).unwrap()).unwrap()],
-            )?))
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "UPDATE runtime_action_intent SET workload_invocation=?1",
+                    params![
+                        lillux::canonical_json(&serde_json::to_value(altered).unwrap()).unwrap()
+                    ],
+                )?)
+            })
             .unwrap();
         assert!(db.get_runtime_action_intent(&operation_id).is_err());
     }
@@ -28441,10 +28924,13 @@ mod tests {
         let response = hook_response();
         db.complete_hook_dispatch(&seed.dispatch_key, &seed.request_hash, &response)
             .unwrap();
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "UPDATE hook_dispatch_ledger SET response_json=?2 WHERE dispatch_key=?1",
-                params![seed.dispatch_key, b"{}".as_slice()],
-            )?))
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "UPDATE hook_dispatch_ledger SET response_json=?2 WHERE dispatch_key=?1",
+                    params![seed.dispatch_key, b"{}".as_slice()],
+                )?)
+            })
             .unwrap();
         assert!(db.reserve_hook_dispatch(&seed).is_err());
     }
@@ -28461,9 +28947,14 @@ mod tests {
             1
         );
         let count: i64 = db
-            .conn.with_sql(|connection| Ok(connection.query_row("SELECT count(*) FROM hook_dispatch_ledger", [], |row| {
-                row.get(0)
-            })?))
+            .conn
+            .with_sql(|connection| {
+                Ok(connection.query_row(
+                    "SELECT count(*) FROM hook_dispatch_ledger",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
             .unwrap();
         assert_eq!(count, 0);
     }
@@ -28686,10 +29177,13 @@ mod tests {
             ProcessCustodyPhysicalState::CleanupIntent;
         let encoded = lillux::canonical_json(&serde_json::to_value(&cleaning).unwrap()).unwrap();
         // Storage-only phase fixture: no physical, driver or process evidence.
-        db.conn.with_sql(|connection| Ok(connection.execute(
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
                 "UPDATE process_resource_reservation SET reservation=?1 WHERE reservation_id=?2",
                 params![encoded, birth],
-            )?))
+            )?)
+            })
             .unwrap();
         assert_eq!(process_resource_reservation_id(&cleaning).unwrap(), birth);
         assert!(db.begin_trusted_process_resource_spawn(&cleaning).is_err());
@@ -28701,14 +29195,17 @@ mod tests {
             unreachable!()
         };
         *phase = TrustedResourceLaunchPhase::SpawnIntent;
-        db.conn.with_sql(|connection| Ok(connection.execute(
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
                 "UPDATE process_resource_reservation SET reservation=?1 WHERE reservation_id=?2",
                 params![
                     lillux::canonical_json(&serde_json::to_value(&cleaning_issued).unwrap())
                         .unwrap(),
                     birth
                 ],
-            )?))
+            )?)
+            })
             .unwrap();
         assert!(
             db.attach_pooled_resource_owner(&reserved.owner_coordinate, &identity)
@@ -28731,14 +29228,17 @@ mod tests {
             unreachable!()
         };
         *phase = TrustedResourceLaunchPhase::SpawnIntent;
-        db.conn.with_sql(|connection| Ok(connection.execute(
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
                 "UPDATE process_resource_reservation SET reservation=?1 WHERE reservation_id=?2",
                 params![
                     lillux::canonical_json(&serde_json::to_value(&retained_issued).unwrap())
                         .unwrap(),
                     birth
                 ],
-            )?))
+            )?)
+            })
             .unwrap();
         db.attach_pooled_resource_owner(&reserved.owner_coordinate, &identity)
             .unwrap();
@@ -29074,7 +29574,10 @@ mod tests {
         );
         assert_eq!(db.process_resource_cas_roots().unwrap(), roots);
         assert!(db.process_resource_owners().unwrap().is_empty());
-        db.conn.with_sql(|connection| Ok(connection.execute_batch("DROP TRIGGER refuse_custody_attachment;")?))
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute_batch("DROP TRIGGER refuse_custody_attachment;")?)
+            })
             .unwrap();
         db.attach_pooled_resource_owner("custody-rollback", &identity)
             .unwrap();
@@ -29554,12 +30057,16 @@ mod tests {
         let mut dedicated = resource_process_identity(202, 202, "gpu-1", 2);
         reserve_test_resource_process(&db, "dedicated_worker", "worker-occurrence", &mut dedicated)
             .unwrap();
-        db.conn.with_sql(|connection| attach_process_resource_owner(connection,
-            "dedicated_worker",
-            "worker-occurrence",
-            &dedicated,
-        ))
-        .unwrap();
+        db.conn
+            .with_sql(|connection| {
+                attach_process_resource_owner(
+                    connection,
+                    "dedicated_worker",
+                    "worker-occurrence",
+                    &dedicated,
+                )
+            })
+            .unwrap();
         db.consume_dedicated_resource_owner_release_fence("worker-occurrence", &dedicated)
             .unwrap();
         assert!(
@@ -29781,7 +30288,11 @@ mod tests {
         };
         assert!(db.submit_command(&oversized_submit).is_err());
         let count: i64 = db
-            .conn.with_sql(|connection| Ok(connection.query_row("SELECT COUNT(*) FROM thread_commands", [], |row| row.get(0))?))
+            .conn
+            .with_sql(|connection| {
+                Ok(connection
+                    .query_row("SELECT COUNT(*) FROM thread_commands", [], |row| row.get(0))?)
+            })
             .unwrap();
         assert_eq!(count, 0, "oversized params must not create a command");
 
@@ -29829,11 +30340,14 @@ mod tests {
             );
         }
         let invalid_count: i64 = db
-            .conn.with_sql(|connection| Ok(connection.query_row(
-                "SELECT COUNT(*) FROM thread_commands WHERE thread_id = 'invalid-command'",
-                [],
-                |row| row.get(0),
-            )?))
+            .conn
+            .with_sql(|connection| {
+                Ok(connection.query_row(
+                    "SELECT COUNT(*) FROM thread_commands WHERE thread_id = 'invalid-command'",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
             .unwrap();
         assert_eq!(invalid_count, 0);
     }
@@ -29944,12 +30458,15 @@ mod tests {
             .is_err()
         );
         let open_count: i64 = db
-            .conn.with_sql(|connection| Ok(connection.query_row(
-                "SELECT COUNT(*) FROM thread_commands \
+            .conn
+            .with_sql(|connection| {
+                Ok(connection.query_row(
+                    "SELECT COUNT(*) FROM thread_commands \
                  WHERE thread_id = 'bounded-thread' AND status IN ('pending', 'claimed')",
-                [],
-                |row| row.get(0),
-            )?))
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
             .unwrap();
         assert_eq!(open_count as usize, MAX_OPEN_COMMANDS_PER_THREAD);
         assert_eq!(
@@ -30060,12 +30577,17 @@ mod tests {
         let (tmp, db) = fresh_db();
         let path = tmp.path().join("runtime.db");
         for table in ["runtime_action_intent", "follow_waiter"] {
-            let columns = db.conn.with_sql(|connection| {
-                let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
-                let columns = statement.query_map([], |row| row.get::<_, String>(1))?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                Ok(columns)
-            }).unwrap();
+            let columns = db
+                .conn
+                .with_sql(|connection| {
+                    let mut statement =
+                        connection.prepare(&format!("PRAGMA table_info({table})"))?;
+                    let columns = statement
+                        .query_map([], |row| row.get::<_, String>(1))?
+                        .collect::<rusqlite::Result<Vec<_>>>()?;
+                    Ok(columns)
+                })
+                .unwrap();
             assert!(
                 columns
                     .iter()
@@ -30382,7 +30904,10 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(hook_table, 0, "a refused open must create no tables");
-            assert!(path.is_file(), "a refused open must leave the database in place");
+            assert!(
+                path.is_file(),
+                "a refused open must leave the database in place"
+            );
             Ok(())
         });
     }
@@ -30408,11 +30933,14 @@ mod tests {
                 params![predecessor],
             )?))
             .unwrap();
-        db.conn.with_sql(|connection| Ok(connection.pragma_update(
-                None,
-                "application_id",
-                RUNTIME_OPERATOR_APP_ID_PREFIX | (RUNTIME_OPERATOR_SCHEMA_EPOCH - 1),
-            )?))
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.pragma_update(
+                    None,
+                    "application_id",
+                    RUNTIME_OPERATOR_APP_ID_PREFIX | (RUNTIME_OPERATOR_SCHEMA_EPOCH - 1),
+                )?)
+            })
             .unwrap();
         drop(db);
 
@@ -30448,21 +30976,27 @@ mod tests {
             "environment": { "kind": "none" }
         }))
         .unwrap();
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "INSERT INTO follow_waiter(
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "INSERT INTO follow_waiter(
                      follow_key, parent_thread_id, parent_chain_root_id, follow_node,
                      graph_run_id, step_count, phase, created_at_ms, updated_at_ms,
                      child_project_authority
                  ) VALUES ('follow-former', 'T-parent', 'T-parent', 'node',
                            'run', 1, 'reserved', 1, 1, ?1)",
-                params![predecessor],
-            )?))
+                    params![predecessor],
+                )?)
+            })
             .unwrap();
-        db.conn.with_sql(|connection| Ok(connection.pragma_update(
-                None,
-                "application_id",
-                RUNTIME_OPERATOR_APP_ID_PREFIX | (RUNTIME_OPERATOR_SCHEMA_EPOCH - 1),
-            )?))
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.pragma_update(
+                    None,
+                    "application_id",
+                    RUNTIME_OPERATOR_APP_ID_PREFIX | (RUNTIME_OPERATOR_SCHEMA_EPOCH - 1),
+                )?)
+            })
             .unwrap();
         drop(db);
 
@@ -30513,11 +31047,14 @@ mod tests {
         let decoded = decode_current_launch_metadata(&raw)
             .expect("historical protocol testimony is not a current wire request");
         assert_eq!(encode_current_launch_metadata(&decoded).unwrap(), raw);
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "INSERT INTO thread_runtime (thread_id, chain_root_id, launch_metadata)
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "INSERT INTO thread_runtime (thread_id, chain_root_id, launch_metadata)
                  VALUES (?1, ?1, ?2)",
-                params!["T-historical-adapter", raw],
-            )?))
+                    params!["T-historical-adapter", raw],
+                )?)
+            })
             .unwrap();
         drop(db);
 
@@ -30531,11 +31068,14 @@ mod tests {
             raw
         );
         let retained: String = reopened
-            .conn.with_sql(|connection| Ok(connection.query_row(
-                "SELECT launch_metadata FROM thread_runtime WHERE thread_id=?1",
-                ["T-historical-adapter"],
-                |row| row.get(0),
-            )?))
+            .conn
+            .with_sql(|connection| {
+                Ok(connection.query_row(
+                    "SELECT launch_metadata FROM thread_runtime WHERE thread_id=?1",
+                    ["T-historical-adapter"],
+                    |row| row.get(0),
+                )?)
+            })
             .unwrap();
         assert_eq!(retained, raw);
     }
@@ -30563,18 +31103,27 @@ mod tests {
             "child_policy": { "kind": "inherit" }
         });
         let predecessor = lillux::canonical_json(&predecessor).unwrap();
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "INSERT INTO thread_runtime (
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "INSERT INTO thread_runtime (
                      thread_id, chain_root_id, launch_metadata
                  ) VALUES (?1, ?2, ?3)",
-                params!["T-pre-isolation", "T-pre-isolation", predecessor],
-            )?))
+                    params!["T-pre-isolation", "T-pre-isolation", predecessor],
+                )?)
+            })
             .unwrap();
         drop(db);
 
         let refusal = crate::runtime_db::test_native::live_open_refusal(&path);
-        assert!(refusal.contains("stored launch metadata is not the exact current contract"), "{refusal}");
-        assert!(refusal.contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND), "{refusal}");
+        assert!(
+            refusal.contains("stored launch metadata is not the exact current contract"),
+            "{refusal}"
+        );
+        assert!(
+            refusal.contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND),
+            "{refusal}"
+        );
     }
 
     #[test]
@@ -30587,8 +31136,14 @@ mod tests {
         }))
         .unwrap();
         let refusal = format!("{:#}", decode_current_launch_metadata(&raw).unwrap_err());
-        assert!(refusal.contains("seals admitted launch capsule schema"), "{refusal}");
-        assert!(refusal.contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND), "{refusal}");
+        assert!(
+            refusal.contains("seals admitted launch capsule schema"),
+            "{refusal}"
+        );
+        assert!(
+            refusal.contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND),
+            "{refusal}"
+        );
     }
 
     #[test]
@@ -30614,8 +31169,14 @@ mod tests {
         }))
         .unwrap();
         let refusal = format!("{:#}", decode_current_launch_metadata(&raw).unwrap_err());
-        assert!(refusal.contains("not the exact current contract"), "{refusal}");
-        assert!(refusal.contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND), "{refusal}");
+        assert!(
+            refusal.contains("not the exact current contract"),
+            "{refusal}"
+        );
+        assert!(
+            refusal.contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND),
+            "{refusal}"
+        );
     }
 
     #[test]
@@ -30736,14 +31297,17 @@ mod tests {
         let path = tmp.path().join("runtime.db");
         let reopened = crate::runtime_db::test_native::TestRuntime::open(&path);
         let command_id = reopened
-            .conn.with_sql(|connection| Ok(connection.query_row(
-                "INSERT INTO thread_commands
+            .conn
+            .with_sql(|connection| {
+                Ok(connection.query_row(
+                    "INSERT INTO thread_commands
                     (thread_id, command_type, status, created_at)
                  VALUES ('T-new', 'cancel', 'pending', '2026-07-15T00:00:00Z')
                  RETURNING command_id",
-                [],
-                |row| row.get::<_, i64>(0),
-            )?))
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )?)
+            })
             .unwrap();
         assert_eq!(
             command_id, 1,
@@ -30811,11 +31375,14 @@ mod tests {
         // not silently degrade to None.
         let (_tmp, db) = fresh_db();
         db.insert_thread_runtime("t1", "c1").unwrap();
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "UPDATE thread_runtime SET pid = ?2, pgid = ?3, launch_metadata = ?4
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "UPDATE thread_runtime SET pid = ?2, pgid = ?3, launch_metadata = ?4
                  WHERE thread_id = ?1",
-                params!["t1", 1i64, 2i64, "{not valid json"],
-            )?))
+                    params!["t1", 1i64, 2i64, "{not valid json"],
+                )?)
+            })
             .unwrap();
         let err = db
             .get_runtime_info("t1")
@@ -31024,14 +31591,20 @@ mod tests {
         let mut payload = serde_json::to_value(RuntimeLaunchMetadata::default()).unwrap();
         payload["schema_version"] = serde_json::json!(999);
         let payload = serde_json::to_string(&payload).unwrap();
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "UPDATE thread_runtime SET launch_metadata = ?2
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "UPDATE thread_runtime SET launch_metadata = ?2
                  WHERE thread_id = ?1",
-                params!["t1", payload],
-            )?))
+                    params!["t1", payload],
+                )?)
+            })
             .unwrap();
         let refusal = format!("{:#}", db.get_runtime_info("t1").unwrap_err());
-        assert!(refusal.contains("not the exact current contract"), "{refusal}");
+        assert!(
+            refusal.contains("not the exact current contract"),
+            "{refusal}"
+        );
     }
 
     #[test]
@@ -31132,13 +31705,16 @@ mod tests {
     #[test]
     fn startup_sweep_clears_malformed_owner_rows_fail_closed() {
         let (_tmp, db) = fresh_db();
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "INSERT INTO thread_launch_claim
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "INSERT INTO thread_launch_claim
                      (thread_id, claim_id, claimed_at_ms, lease_expires_at_ms, claimed_by,
                       rearm_resume_budget_if_stale)
                  VALUES ('t-junk', 'c-junk', 0, 9223372036854775807, 'not json', 1)",
-                [],
-            )?))
+                    [],
+                )?)
+            })
             .unwrap();
         let cleared = db
             .fixture_clear_stale_launch_claims("daemon-current")
@@ -31161,14 +31737,24 @@ mod tests {
         db.fixture_claim_thread_launch("T-borrower", "claim-old", "daemon-old")
             .unwrap();
         let claim = db.get_launch_claim("T-borrower").unwrap().unwrap();
-        assert!(db.conn.with_sql(|connection| Ok(connection.execute(
+        assert!(
+            db.conn
+                .with_sql(|connection| {
+                    Ok(connection.execute(
             "UPDATE thread_runtime SET workspace_id='workspace' WHERE thread_id='T-borrower'", [],
-        )?)).is_err());
-        db.conn.with_sql(|connection| Ok(connection.execute(
+        )?)
+                })
+                .is_err()
+        );
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
             "UPDATE thread_runtime SET workspace_id='workspace', workspace_view_identity='view',
                     workspace_borrower_launch_owner=?1 WHERE thread_id='T-borrower'",
             params![claim.claimed_by],
-        )?)).unwrap();
+        )?)
+            })
+            .unwrap();
         let before = db.thread_workspace_binding("T-borrower").unwrap().unwrap();
         db.bump_resume_attempts("T-borrower").unwrap();
         let cleared = db
@@ -31322,7 +31908,8 @@ mod tests {
         );
         assert!(workspace.frozen_output_capture_hash.is_none());
         assert!(
-            db.conn.with_sql(|connection| Ok(connection.execute(
+            db.conn
+                .with_sql(|connection| Ok(connection.execute(
                     "UPDATE execution_workspace SET frozen_snapshot_hash=?2
                        WHERE workspace_id=?1",
                     params!["workspace-output", "d".repeat(64)],
@@ -31333,7 +31920,8 @@ mod tests {
         db.reserve_workspace("workspace-ordinary", &"e".repeat(64), "/fixture-ordinary")
             .unwrap();
         assert!(
-            db.conn.with_sql(|connection| Ok(connection.execute(
+            db.conn
+                .with_sql(|connection| Ok(connection.execute(
                     "UPDATE execution_workspace SET base_output_capture_hash=?2
                        WHERE workspace_id=?1",
                     params!["workspace-ordinary", "f".repeat(64)],
@@ -31869,11 +32457,14 @@ mod tests {
     fn follow_product_authority_cut_refuses_predecessor_epoch() {
         let (tmp, db) = fresh_db();
         let path = tmp.path().join("runtime.db");
-        db.conn.with_sql(|connection| Ok(connection.pragma_update(
-                None,
-                "application_id",
-                RUNTIME_OPERATOR_APP_ID_PREFIX | (RUNTIME_OPERATOR_SCHEMA_EPOCH - 1),
-            )?))
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.pragma_update(
+                    None,
+                    "application_id",
+                    RUNTIME_OPERATOR_APP_ID_PREFIX | (RUNTIME_OPERATOR_SCHEMA_EPOCH - 1),
+                )?)
+            })
             .unwrap();
         drop(db);
 
@@ -31936,12 +32527,15 @@ mod tests {
         db.mark_follow_waiting("fk1").unwrap();
         // A corrupt or oversized terminal envelope is reconciliation data. The
         // list projection must not fetch or decode it.
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "UPDATE follow_waiter_child \
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "UPDATE follow_waiter_child \
                  SET terminal_status = 'completed', terminal_envelope = '{not-json' \
                  WHERE follow_key = 'fk1'",
-                [],
-            )?))
+                    [],
+                )?)
+            })
             .unwrap();
 
         let requested = vec!["unrelated".to_string(), "succ-1".to_string()];
@@ -31990,7 +32584,8 @@ mod tests {
         db.reserve_follow(&seed_follow("fk1")).unwrap();
         // Exercise the CHECK constraint via a raw update.
         assert!(
-            db.conn.with_sql(|connection| Ok(connection.execute(
+            db.conn
+                .with_sql(|connection| Ok(connection.execute(
                     "UPDATE follow_waiter SET phase = 'bogus' WHERE follow_key = 'fk1'",
                     [],
                 )?))
@@ -32069,12 +32664,15 @@ mod tests {
         let (_tmp, db) = fresh_db();
         db.reserve_follow(&seed_follow("fk1")).unwrap();
         set_single_follow_child(&db, "fk1", "c", "chain-1").unwrap();
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "UPDATE follow_waiter_child
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "UPDATE follow_waiter_child
                     SET terminal_envelope = '{not json'
                   WHERE follow_key = 'fk1' AND item_index = 0",
-                [],
-            )?))
+                    [],
+                )?)
+            })
             .unwrap();
         assert!(db.get_follow_waiter_by_key("fk1").is_err());
     }
@@ -32140,24 +32738,32 @@ mod tests {
         db.reserve_launch_planning("L-bound", "T-bound", "fp:owner")
             .unwrap();
         assert!(db.bind_launch_planning("T-bound").unwrap());
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "UPDATE launch_planning SET finished_at_ms = 1 WHERE launch_id = 'L-bound'",
-                [],
-            )?))
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "UPDATE launch_planning SET finished_at_ms = 1 WHERE launch_id = 'L-bound'",
+                    [],
+                )?)
+            })
             .unwrap();
         // More than the terminal-row cap cannot evict a bound coordinate.
         for index in 0..4_100 {
-            db.conn.with_sql(|connection| Ok(connection.execute(
-                    "INSERT INTO launch_planning (
+            db.conn
+                .with_sql(|connection| {
+                    Ok(connection.execute(
+                        "INSERT INTO launch_planning (
                         launch_id, reserved_thread_id, requested_by,
                         daemon_generation_id, state, created_at_ms,
                         updated_at_ms, finished_at_ms, outcome_code
                      ) VALUES (?1, ?2, 'fp:owner', 'generation', 'failed', 1, 1, 1, 'failed')",
-                    params![format!("L-failed-{index}"), format!("T-failed-{index}")],
-                )?))
+                        params![format!("L-failed-{index}"), format!("T-failed-{index}")],
+                    )?)
+                })
                 .unwrap();
         }
-        db.conn.with_sql(|connection| prune_launch_planning(connection, 24 * 60 * 60 * 1_000 + 2)).unwrap();
+        db.conn
+            .with_sql(|connection| prune_launch_planning(connection, 24 * 60 * 60 * 1_000 + 2))
+            .unwrap();
         assert!(db.launch_planning_by_id("L-bound").unwrap().is_some());
 
         db.fixture_delete_chain_runtime("T-bound", &["T-bound".to_string()])
@@ -32172,12 +32778,15 @@ mod tests {
             .unwrap();
         db.reserve_launch_planning("L-current", "T-current", "fp:owner")
             .unwrap();
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "UPDATE launch_planning
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "UPDATE launch_planning
                     SET daemon_generation_id = 'previous-daemon-generation'
                   WHERE launch_id = 'L-stale'",
-                [],
-            )?))
+                    [],
+                )?)
+            })
             .unwrap();
 
         assert_eq!(db.expire_stale_launch_planning().unwrap(), 1);

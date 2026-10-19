@@ -29,7 +29,8 @@ const REPORT_REFS: [(&str, &str); 3] = [
     ("r1", "tool:ryeos/core/reporter/report_r1"),
     ("r2", "tool:ryeos/core/reporter/report_r2"),
 ];
-const MALFORMED_MANIFEST: &str = "name: scheduler-doctor-probe\nversion: \"0.1.0\"\nbogus_field: true\n";
+const MALFORMED_MANIFEST: &str =
+    "name: scheduler-doctor-probe\nversion: \"0.1.0\"\nbogus_field: true\n";
 
 /// The reporter's canonical JSON: keys sorted recursively, compact
 /// separators, non-ASCII left unescaped (Python
@@ -40,7 +41,12 @@ fn canonical(value: &Value) -> String {
             Value::Object(map) => {
                 let mut entries: Vec<(&String, &Value)> = map.iter().collect();
                 entries.sort_by(|a, b| a.0.cmp(b.0));
-                Value::Object(entries.into_iter().map(|(k, v)| (k.clone(), sorted(v))).collect())
+                Value::Object(
+                    entries
+                        .into_iter()
+                        .map(|(k, v)| (k.clone(), sorted(v)))
+                        .collect(),
+                )
             }
             Value::Array(items) => Value::Array(items.iter().map(sorted).collect()),
             other => other.clone(),
@@ -118,7 +124,10 @@ async fn run_to_result(
         status.is_success(),
         "{item_ref} was not admitted: {status} {envelope}"
     );
-    assert!(is_completed(&envelope), "{item_ref} did not complete: {envelope}");
+    assert!(
+        is_completed(&envelope),
+        "{item_ref} did not complete: {envelope}"
+    );
     let thread_id = envelope["thread"]["thread_id"]
         .as_str()
         .unwrap_or_else(|| panic!("{item_ref}: envelope without thread id: {envelope}"))
@@ -186,7 +195,9 @@ impl NativeSet {
             .arg("--interpreter")
             .arg(&self.interpreter);
         for (label, path) in &self.binaries {
-            command.arg("--binary").arg(format!("{label}={}", path.display()));
+            command
+                .arg("--binary")
+                .arg(format!("{label}={}", path.display()));
         }
         let output = command.output().expect("run native-set inspector");
         assert!(
@@ -204,7 +215,10 @@ impl NativeSet {
             "native set digest moved after {after}"
         );
         assert_eq!(&current, baseline, "native set record moved after {after}");
-        eprintln!("[f4] native set unchanged after {after}: {}", current["digest"]);
+        eprintln!(
+            "[f4] native set unchanged after {after}: {}",
+            current["digest"]
+        );
     }
 }
 
@@ -215,7 +229,11 @@ fn report_sealed_correctly(report: &Value) {
         .to_string();
     let mut body = report.clone();
     body.as_object_mut().unwrap().remove("report_sha256");
-    assert_eq!(sha256_of(&body), claimed, "report seal does not match its content");
+    assert_eq!(
+        sha256_of(&body),
+        claimed,
+        "report seal does not match its content"
+    );
 }
 
 fn check<'a>(report: &'a Value, name: &str) -> &'a Value {
@@ -250,10 +268,7 @@ async fn reporter_revisions_run_on_one_unchanged_native_set() {
 
     // Interpreter identity for the evidence record.
     let interpreter = path_python();
-    eprintln!(
-        "[f4] RYE_PYTHON={:?}",
-        std::env::var("RYE_PYTHON").ok()
-    );
+    eprintln!("[f4] RYE_PYTHON={:?}", std::env::var("RYE_PYTHON").ok());
     let native = NativeSet {
         interpreter: interpreter.clone(),
         script: common::workspace_root().join("scripts/release/inspect-core-native-set.py"),
@@ -341,8 +356,12 @@ async fn reporter_revisions_run_on_one_unchanged_native_set() {
         if revision == "r2" {
             params["prior_report"] = r1.clone().expect("r1 report precedes r2");
         }
-        let (thread, report) = run_to_result(&h, reporter_ref, Some(&reporter_project), params).await;
-        eprintln!("[f4] {revision} thread={thread} report_sha256={}", report["report_sha256"]);
+        let (thread, report) =
+            run_to_result(&h, reporter_ref, Some(&reporter_project), params).await;
+        eprintln!(
+            "[f4] {revision} thread={thread} report_sha256={}",
+            report["report_sha256"]
+        );
         assert_eq!(report["schema"], "ryeos.doctor_report.v1");
         assert_eq!(report["revision"], revision);
         assert_eq!(report["reporter"], reporter_ref);
@@ -356,11 +375,11 @@ async fn reporter_revisions_run_on_one_unchanged_native_set() {
                 assert_eq!(report["verdict"], "findings_present");
                 assert_eq!(check(&report, "manifest")["classification"], "finding");
                 for c in doctor_result["checks"].as_array().unwrap() {
-                    let classification = check(&report, c["name"].as_str().unwrap())
-                        ["classification"]
-                        .as_str()
-                        .unwrap()
-                        .to_string();
+                    let classification =
+                        check(&report, c["name"].as_str().unwrap())["classification"]
+                            .as_str()
+                            .unwrap()
+                            .to_string();
                     match c["status"].as_str().unwrap() {
                         "ok" => assert_eq!(classification, "passed"),
                         "fail" => assert_eq!(classification, "finding"),
@@ -436,9 +455,15 @@ async fn reporter_revisions_run_on_one_unchanged_native_set() {
             params["prior_report"] = r1.clone().unwrap();
         }
         let text = run_expecting_refusal(&h, reporter_ref, Some(&reporter_project), params).await;
-        let found = string_matching(&serde_json::from_str::<Value>(&text).unwrap_or(Value::Null), "doctor_identity_mismatch")
-            .map(str::to_owned)
-            .or_else(|| text.contains("doctor_identity_mismatch").then(|| text.clone()));
+        let found = string_matching(
+            &serde_json::from_str::<Value>(&text).unwrap_or(Value::Null),
+            "doctor_identity_mismatch",
+        )
+        .map(str::to_owned)
+        .or_else(|| {
+            text.contains("doctor_identity_mismatch")
+                .then(|| text.clone())
+        });
         let found = found.unwrap_or_else(|| {
             panic!("{revision}: refusal does not name doctor_identity_mismatch: {text}")
         });
@@ -484,7 +509,10 @@ async fn reporter_revisions_run_on_one_unchanged_native_set() {
         copy_params.clone(),
     )
     .await;
-    assert_eq!(positive["revision"], "r0", "signed copy must run: {positive}");
+    assert_eq!(
+        positive["revision"], "r0",
+        "signed copy must run: {positive}"
+    );
     for (name, bytes) in [("tampered", &tampered), ("unsigned", &unsigned_body)] {
         let project = copy_project(name, bytes);
         let evidence = run_expecting_refusal(

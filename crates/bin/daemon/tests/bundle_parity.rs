@@ -44,7 +44,12 @@ const WORKFLOW_BUNDLES: [&str; 3] = ["knowledge", "directive", "graph"];
 fn workflow_kinds_dirs() -> Vec<PathBuf> {
     WORKFLOW_BUNDLES
         .iter()
-        .map(|name| workspace_root().join("bundles").join(name).join(".ai/node/engine/kinds"))
+        .map(|name| {
+            workspace_root()
+                .join("bundles")
+                .join(name)
+                .join(".ai/node/engine/kinds")
+        })
         .collect()
 }
 

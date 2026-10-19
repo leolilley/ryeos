@@ -156,7 +156,9 @@ mod tests {
             foreign_db.close().unwrap();
             authority
         };
-        let db = crate::test_support::TestState::open(root.path(), Arc::new(crate::TrustStore::new())).unwrap();
+        let db =
+            crate::test_support::TestState::open(root.path(), Arc::new(crate::TrustStore::new()))
+                .unwrap();
         let authority = db.pinned_authority().unwrap();
         let guard = authority.acquire_shared_guard().unwrap();
         let cas = authority.cas_store().unwrap();
@@ -485,11 +487,7 @@ mod tests {
                 .snapshot_hash(),
             candidate_hash
         );
-        assert!(
-            retained
-                .content_for_store(&foreign_authority)
-                .is_err()
-        );
+        assert!(retained.content_for_store(&foreign_authority).is_err());
         let mut other_binding = binding.clone();
         other_binding.channel_nonce = "8".repeat(64);
         assert!(
@@ -537,7 +535,8 @@ mod tests {
         assert!(cas.open_blob(&unused).unwrap().is_none());
         drop(db);
         let reopened =
-            crate::test_support::TestState::open(root.path(), Arc::new(crate::TrustStore::new())).unwrap();
+            crate::test_support::TestState::open(root.path(), Arc::new(crate::TrustStore::new()))
+                .unwrap();
         let reopened_authority = reopened.pinned_authority().unwrap();
         let reopened_guard = reopened_authority.acquire_shared_guard().unwrap();
         imported
@@ -622,7 +621,9 @@ mod tests {
     #[test]
     fn external_export_rejects_authority_objects_and_stays_failed() {
         let root = tempfile::tempdir().unwrap();
-        let db = crate::test_support::TestState::open(root.path(), Arc::new(crate::TrustStore::new())).unwrap();
+        let db =
+            crate::test_support::TestState::open(root.path(), Arc::new(crate::TrustStore::new()))
+                .unwrap();
         let authority = db.pinned_authority().unwrap();
         let guard = authority.acquire_shared_guard().unwrap();
         let (base_hash, _) = base(&authority.cas_store().unwrap());

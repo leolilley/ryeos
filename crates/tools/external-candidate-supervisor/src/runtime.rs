@@ -25,9 +25,6 @@ use ryeos_external_execution::transport::{
 };
 use ryeos_external_execution_contract::guest_supervisor_descriptors::rebind_fixed_guest_descriptors;
 use ryeos_external_execution_contract::{ExternalGuestInputProjection, GuestMountContentAuthority};
-use ryeos_state::external_execution::{
-    ExecutionChannelBinding, ExecutionChannelPayload, SignedExecutionFrame,
-};
 use ryeos_state::external_execution::guest_journal::{
     GuestJournalStoreIdentity, LiveGuestJournal, PreparedGuestJournal, ReservedGuestJournal,
 };
@@ -41,6 +38,9 @@ use ryeos_state::external_execution::supervisor_journal::{
 use ryeos_state::external_execution::transport::{
     ExternalCapturedNetworkInputs, ExternalNetworkInputPolicy, ExternalNetworkInputSelection,
     ExternalSupervisorBootstrap, ExternalSupervisorNativeEnvelope,
+};
+use ryeos_state::external_execution::{
+    ExecutionChannelBinding, ExecutionChannelPayload, SignedExecutionFrame,
 };
 use ryeos_state::operational::{CarriedOwners, RetainTerminal};
 use serde::{Deserialize, Serialize};
@@ -1236,14 +1236,15 @@ impl LiveExternalCandidateSupervisor {
                 runtime.ready_frame().as_bytes(),
                 report.as_bytes(),
                 expiry_deadline,
-            ) {
-                let (journal, cleanup) = runtime.abort_and_reap();
-                drop(transport);
-                let error = error.context(format!(
-                    "leased guest Ready and capability report; launcher cleanup={cleanup:?}"
-                ));
-                return Err(native.refuse("live guest journal", error, journal.close()));
-            }
+            )
+        {
+            let (journal, cleanup) = runtime.abort_and_reap();
+            drop(transport);
+            let error = error.context(format!(
+                "leased guest Ready and capability report; launcher cleanup={cleanup:?}"
+            ));
+            return Err(native.refuse("live guest journal", error, journal.close()));
+        }
         let driver = match ExternalCandidateTransportDriver::try_new(runtime, transport) {
             Ok(driver) => driver,
             Err((runtime, transport, error)) => {
@@ -1315,11 +1316,8 @@ fn lease_handshake<T: ExternalExecutionChannelTransport>(
     report: &[u8],
     deadline: lillux::time::MonotonicDeadline,
 ) -> Result<()> {
-    let ready_frame = SignedExecutionFrame::decode_and_verify(
-        ready,
-        binding,
-        lillux::time::timestamp_millis(),
-    )?;
+    let ready_frame =
+        SignedExecutionFrame::decode_and_verify(ready, binding, lillux::time::timestamp_millis())?;
     ensure!(
         ready_frame.frame().sequence == 1
             && matches!(
@@ -1328,11 +1326,8 @@ fn lease_handshake<T: ExternalExecutionChannelTransport>(
             ),
         "a leased guest starts from a Ready that names its boot"
     );
-    let report_frame = SignedExecutionFrame::decode_and_verify(
-        report,
-        binding,
-        lillux::time::timestamp_millis(),
-    )?;
+    let report_frame =
+        SignedExecutionFrame::decode_and_verify(report, binding, lillux::time::timestamp_millis())?;
     ensure!(
         report_frame.frame().sequence == 2
             && matches!(
@@ -1387,9 +1382,7 @@ fn exchange_exact<T: ExternalExecutionChannelTransport>(
                 );
                 return Ok(exchange);
             }
-            Err(ExternalTransportStepFailure::AmbiguousTransport(_))
-                if !deadline.has_elapsed() =>
-            {
+            Err(ExternalTransportStepFailure::AmbiguousTransport(_)) if !deadline.has_elapsed() => {
                 lillux::time::sleep(IDLE_POLL.min(deadline.remaining()));
             }
             Err(ExternalTransportStepFailure::AmbiguousTransport(error)) => {
@@ -2769,17 +2762,15 @@ mod tests {
             // native host could be funded from it.
             let mut enlarged_envelope = bootstrap("occurrence-one", deadline);
             enlarged_envelope.native_journal.storage_bytes += 4096;
-            let enlarged_envelope_error = match LockedSupervisorRoot::lock(
-                pinned(root.path()),
-                &enlarged_envelope,
-                false,
-            ) {
-                Ok(_) => panic!("a changed native journal envelope reached the native host"),
-                Err(error) => error,
-            };
+            let enlarged_envelope_error =
+                match LockedSupervisorRoot::lock(pinned(root.path()), &enlarged_envelope, false) {
+                    Ok(_) => panic!("a changed native journal envelope reached the native host"),
+                    Err(error) => error,
+                };
             assert!(
-                format!("{enlarged_envelope_error:#}")
-                    .contains("external supervisor restart changed its sealed native journal envelope"),
+                format!("{enlarged_envelope_error:#}").contains(
+                    "external supervisor restart changed its sealed native journal envelope"
+                ),
                 "{enlarged_envelope_error:#}"
             );
 
@@ -2974,9 +2965,9 @@ mod tests {
                 HandshakeReply::Ambiguous => Err(ExternalTransportStepFailure::AmbiguousTransport(
                     anyhow::anyhow!("scripted transport loss"),
                 )),
-                HandshakeReply::Fatal => Err(ExternalTransportStepFailure::Fatal(
-                    anyhow::anyhow!("scripted controller refusal"),
-                )),
+                HandshakeReply::Fatal => Err(ExternalTransportStepFailure::Fatal(anyhow::anyhow!(
+                    "scripted controller refusal"
+                ))),
             }
         }
     }
@@ -3055,11 +3046,7 @@ mod tests {
         }
     }
 
-    fn handshake_answer(
-        sequence: u64,
-        digest: &str,
-        incoming_new: bool,
-    ) -> HandshakeReply {
+    fn handshake_answer(sequence: u64, digest: &str, incoming_new: bool) -> HandshakeReply {
         HandshakeReply::Answer(ExternalTransportExchange {
             schema: 1,
             incoming_new,
@@ -3096,7 +3083,11 @@ mod tests {
         .unwrap();
         assert_eq!(
             transport.sent,
-            vec![frames.ready.clone(), frames.ready.clone(), frames.report.clone()]
+            vec![
+                frames.ready.clone(),
+                frames.ready.clone(),
+                frames.report.clone()
+            ]
         );
     }
 

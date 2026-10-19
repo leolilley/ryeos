@@ -503,7 +503,8 @@ fn validate_chain_state_transition(
                     next_entry.last_thread_seq,
                     check,
                 )?;
-                let snapshot = load_hashed_snapshot_with_budget(cas, &next_entry.snapshot_hash, budget)?;
+                let snapshot =
+                    load_hashed_snapshot_with_budget(cas, &next_entry.snapshot_hash, budget)?;
                 validate_published_snapshot(next, thread_id, next_entry, &snapshot, events)?;
                 let continuation_source = snapshot
                     .base_project_snapshot_hash
@@ -534,11 +535,8 @@ fn validate_chain_state_transition(
                         &previous_entry.snapshot_hash,
                         budget,
                     )?;
-                    let next_snapshot = load_hashed_snapshot_with_budget(
-                        cas,
-                        &next_entry.snapshot_hash,
-                        budget,
-                    )?;
+                    let next_snapshot =
+                        load_hashed_snapshot_with_budget(cas, &next_entry.snapshot_hash, budget)?;
                     validate_published_snapshot(
                         next,
                         thread_id,
@@ -789,8 +787,8 @@ fn load_hashed_chain_state_with_budget(
         Some(budget) => budget.get_object(cas, hash, u64::MAX),
         None => cas.get_object(hash),
     }
-        .with_context(|| format!("read authoritative ChainState object {hash}"))?
-        .ok_or_else(|| anyhow::anyhow!("authoritative ChainState object {hash} is absent"))?;
+    .with_context(|| format!("read authoritative ChainState object {hash}"))?
+    .ok_or_else(|| anyhow::anyhow!("authoritative ChainState object {hash} is absent"))?;
     let state: ChainState = serde_json::from_value(value)
         .with_context(|| format!("decode authoritative ChainState object {hash}"))?;
     let canonical = lillux::canonical_json(&state.to_value())
@@ -831,8 +829,8 @@ fn load_hashed_snapshot_with_budget(
         Some(budget) => budget.get_object(cas, hash, u64::MAX),
         None => cas.get_object(hash),
     }
-        .with_context(|| format!("read authoritative snapshot object {hash}"))?
-        .ok_or_else(|| anyhow::anyhow!("authoritative snapshot object {hash} is absent"))?;
+    .with_context(|| format!("read authoritative snapshot object {hash}"))?
+    .ok_or_else(|| anyhow::anyhow!("authoritative snapshot object {hash} is absent"))?;
     let snapshot = ThreadSnapshot::from_current_value(value)
         .with_context(|| format!("decode authoritative snapshot object {hash}"))?;
     match budget.as_deref_mut() {
@@ -859,8 +857,8 @@ fn load_hashed_event_with_budget(
         Some(budget) => budget.get_object(cas, hash, u64::MAX),
         None => cas.get_object(hash),
     }
-        .with_context(|| format!("read authoritative event object {hash}"))?
-        .ok_or_else(|| anyhow::anyhow!("authoritative event object {hash} is absent"))?;
+    .with_context(|| format!("read authoritative event object {hash}"))?
+    .ok_or_else(|| anyhow::anyhow!("authoritative event object {hash} is absent"))?;
     let event: ThreadEvent = serde_json::from_value(value)
         .with_context(|| format!("decode authoritative event object {hash}"))?;
     let canonical = lillux::canonical_json(&event.to_value())

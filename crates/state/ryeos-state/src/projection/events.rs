@@ -525,8 +525,8 @@ fn project_thread_usage_latest(
     event: &crate::ThreadEvent,
 ) -> anyhow::Result<()> {
     db.with_sql(|connection| {
-        let usage: crate::ThreadUsage =
-            serde_json::from_value(event.payload.clone()).context("invalid thread_usage payload")?;
+        let usage: crate::ThreadUsage = serde_json::from_value(event.payload.clone())
+            .context("invalid thread_usage payload")?;
         usage.validate()?;
 
         connection
@@ -718,7 +718,9 @@ fn project_provider_attempt_budget_latest(
             }
             let previous = ryeos_accounting::AttemptBudgetState::parse(&existing_transition)
                 .ok_or_else(|| {
-                    anyhow::anyhow!("projected budget row has unknown state `{existing_transition}`")
+                    anyhow::anyhow!(
+                        "projected budget row has unknown state `{existing_transition}`"
+                    )
                 })?;
             let legal = previous.may_transition_to(transition.transition)
                 || (transition.observation

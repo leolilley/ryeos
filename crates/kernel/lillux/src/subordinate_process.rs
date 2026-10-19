@@ -375,7 +375,9 @@ impl SubordinateProcess {
 
     pub fn cooperative_termination(&self) -> Result<CooperativeChildTermination, String> {
         CooperativeChildTermination::for_child(
-            self.child.as_ref().expect("ordinary subordinate owns exact child"),
+            self.child
+                .as_ref()
+                .expect("ordinary subordinate owns exact child"),
         )
     }
 
@@ -504,7 +506,10 @@ mod terminal_failure_tests {
         }) {
             Ok(_) => panic!("spawned while this thread held a descriptor lease"),
             Err(error) => {
-                assert!(error.contains("retains fork-sensitive descriptor authority"), "{error}");
+                assert!(
+                    error.contains("retains fork-sensitive descriptor authority"),
+                    "{error}"
+                );
             }
         }
         drop(lease);
@@ -521,7 +526,10 @@ mod terminal_failure_tests {
         let mut process = child_with_pipes();
         let waited = started.elapsed();
         holder.join().unwrap();
-        assert!(waited >= hold - std::time::Duration::from_millis(50), "{waited:?}");
+        assert!(
+            waited >= hold - std::time::Duration::from_millis(50),
+            "{waited:?}"
+        );
         let exit = process
             .wait_exact_child_until(MonotonicDeadline::after(std::time::Duration::from_secs(5)))
             .unwrap()
@@ -547,7 +555,10 @@ mod terminal_failure_tests {
         terminal.reaped = true;
         assert_eq!(transferred_pid, pid);
         assert_eq!(terminal._stdin.as_ref().unwrap().input.as_raw_fd(), input);
-        assert_eq!(terminal._stdout.as_ref().unwrap().output.as_raw_fd(), output);
+        assert_eq!(
+            terminal._stdout.as_ref().unwrap().output.as_raw_fd(),
+            output
+        );
         assert_eq!(terminal._stderr.as_ref().unwrap().output.as_raw_fd(), error);
     }
 
@@ -557,7 +568,12 @@ mod terminal_failure_tests {
         let output = process.take_output().expect("take exact output owner");
         let descriptor = output.output.as_raw_fd();
         let mut terminal = process.into_root_terminal_failure();
-        terminal.child.as_mut().unwrap().wait().expect("reap test child");
+        terminal
+            .child
+            .as_mut()
+            .unwrap()
+            .wait()
+            .expect("reap test child");
         terminal.reaped = true;
         assert!(terminal._stdout.is_none());
         assert_eq!(output.output.as_raw_fd(), descriptor);

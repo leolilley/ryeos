@@ -240,13 +240,19 @@ impl AdmittedReleaseInput {
             "owned payload Cargo features must be sorted and unique"
         );
         anyhow::ensure!(
-            input.cargo_feature_selections.iter().all(|selection| {
-                selection.features.windows(2).all(|f| f[0] < f[1])
-            }) && input
+            input
                 .cargo_feature_selections
                 .iter()
-                .map(|selection| selection.cargo_package.as_str())
-                .eq(input.payloads.iter().map(|p| p.cargo_package.as_str()).collect::<BTreeSet<_>>()),
+                .all(|selection| { selection.features.windows(2).all(|f| f[0] < f[1]) })
+                && input
+                    .cargo_feature_selections
+                    .iter()
+                    .map(|selection| selection.cargo_package.as_str())
+                    .eq(input
+                        .payloads
+                        .iter()
+                        .map(|p| p.cargo_package.as_str())
+                        .collect::<BTreeSet<_>>()),
             "Cargo feature selections disagree with owned payloads"
         );
         anyhow::ensure!(
@@ -420,8 +426,10 @@ impl AdmittedNativeBundleAuthorities {
     }
 
     fn build_exact(&self, request: GenerationBuildRequest) -> anyhow::Result<Value> {
-        let input =
-            AdmittedReleaseInput::from_value_with_ownership(&request.release_input, &self.ownership)?;
+        let input = AdmittedReleaseInput::from_value_with_ownership(
+            &request.release_input,
+            &self.ownership,
+        )?;
         let project_identity = Path::new(&input.project_path);
         self.source
             .verify_project_snapshot(project_identity, &input.source_snapshot_hash)?;
@@ -443,8 +451,10 @@ impl AdmittedNativeBundleAuthorities {
     }
 
     fn qualify_exact(&self, request: GenerationQualifyRequest) -> anyhow::Result<Value> {
-        let input =
-            AdmittedReleaseInput::from_value_with_ownership(&request.release_input, &self.ownership)?;
+        let input = AdmittedReleaseInput::from_value_with_ownership(
+            &request.release_input,
+            &self.ownership,
+        )?;
         let digest = input.digest()?;
         let coordinate = QualificationCoordinate {
             release_input: input,

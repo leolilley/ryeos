@@ -244,7 +244,8 @@ impl RuntimeDb {
             let request = proof
                 .canary_request()
                 .context("Q canary has no exact signed selection")?;
-            let ExternalAllocationOwner::QualificationCandidate(owner) = &allocation.reservation.owner
+            let ExternalAllocationOwner::QualificationCandidate(owner) =
+                &allocation.reservation.owner
             else {
                 bail!("Q canary has wrong owner")
             };
@@ -279,7 +280,9 @@ impl RuntimeDb {
                     .into(),
                 program_digest: owner.program.digest()?,
                 guest_input_identity: guest_input_identity.into(),
-                template_request_digest: ryeos_state::objects::canonical_value_digest(&request.body)?,
+                template_request_digest: ryeos_state::objects::canonical_value_digest(
+                    &request.body,
+                )?,
                 reserved_at_ms: now,
                 provider_declaration_id: selected.provider_declaration_id.into(),
                 configuration_adapter_artifact_hash: selected
@@ -318,8 +321,8 @@ impl RuntimeDb {
             );
             require_current_start(&tx, &current)?;
             require_live_credential_custody(&tx, &current)?;
-            let allocation =
-                read(&tx, &current.placement_thread_id)?.context("Q canary bind lost allocation")?;
+            let allocation = read(&tx, &current.placement_thread_id)?
+                .context("Q canary bind lost allocation")?;
             require_new_owner(&tx, &allocation.reservation, None, Some(proof))?;
             proof
                 .canary_request()

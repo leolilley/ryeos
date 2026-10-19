@@ -12,7 +12,9 @@ mod common;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use common::fast_fixture::{FastFixture, register_config_fixture_bundle, register_workflow_bundles};
+use common::fast_fixture::{
+    FastFixture, register_config_fixture_bundle, register_workflow_bundles,
+};
 use common::mock_provider::{MockProvider, MockResponse, MockToolCallSpec};
 use common::runtime_phase_cut::RuntimePhaseCutGate;
 use common::{DaemonHarness, build_signed_headers_for_bytes};

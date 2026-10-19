@@ -123,7 +123,11 @@ fn admit_signed_codex_worker() -> anyhow::Result<admitted_worker_evidence::Admit
     roots.push(codex);
     let trust = ryeos_engine::test_support::live_trust_store();
     let mut kind_roots = vec![core.join(".ai/node/engine/kinds")];
-    kind_roots.extend(workflow.iter().map(|root| root.join(".ai/node/engine/kinds")));
+    kind_roots.extend(
+        workflow
+            .iter()
+            .map(|root| root.join(".ai/node/engine/kinds")),
+    );
     let kinds = ryeos_engine::kind_registry::KindRegistry::load_base(&kind_roots, &trust)?;
     let (parsers, _) = ryeos_engine::parsers::ParserRegistry::load_base(&roots, &trust, &kinds)?;
     let handlers = ryeos_engine::test_support::load_live_handler_registry();

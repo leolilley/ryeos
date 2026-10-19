@@ -354,8 +354,11 @@ mod tests {
     #[test]
     fn repeated_product_imports_receive_independent_fresh_stages() {
         let temp = tempfile::tempdir().unwrap();
-        let db = ryeos_state::test_support::TestState::open(temp.path(), Arc::new(ryeos_state::TrustStore::new()))
-            .unwrap();
+        let db = ryeos_state::test_support::TestState::open(
+            temp.path(),
+            Arc::new(ryeos_state::TrustStore::new()),
+        )
+        .unwrap();
         let authority = db.pinned_authority().unwrap();
         let guard = authority.acquire_shared_guard().unwrap();
         let manifest_hash = authority

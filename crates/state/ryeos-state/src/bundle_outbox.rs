@@ -374,10 +374,18 @@ mod tests {
         std::fs::create_dir_all(&refs_root).unwrap();
         let signer = TestSigner::default();
         let trust = trust_store(&signer);
-        let appended =
-            append_bundle_event(&cas_root, &refs_root, append_request(chain_id), &signer, &trust)
-                .unwrap();
-        BundleEventRecord { event_hash: appended.event_hash, event: appended.event }
+        let appended = append_bundle_event(
+            &cas_root,
+            &refs_root,
+            append_request(chain_id),
+            &signer,
+            &trust,
+        )
+        .unwrap();
+        BundleEventRecord {
+            event_hash: appended.event_hash,
+            event: appended.event,
+        }
     }
 
     /// Run `work` against a fresh outbox schema on a transient native
@@ -425,7 +433,11 @@ mod tests {
     }
 
     fn only(claimed: &[BundleOutboxMessage]) -> anyhow::Result<&BundleOutboxMessage> {
-        anyhow::ensure!(claimed.len() == 1, "expected exactly one claimed message, got {}", claimed.len());
+        anyhow::ensure!(
+            claimed.len() == 1,
+            "expected exactly one claimed message, got {}",
+            claimed.len()
+        );
         Ok(&claimed[0])
     }
 

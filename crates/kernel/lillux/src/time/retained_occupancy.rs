@@ -26,8 +26,11 @@ pub struct RetainedOccupancyClock {
 
 // Same persisted canonical clock binding, written directly into the hash.
 // Only these validated ASCII digests enter the string fields.
-fn fixed_binding_digest(device: u64, inode: u64, start: &OccupancyCoordinate)
-    -> Result<[u8; 64], &'static str> {
+fn fixed_binding_digest(
+    device: u64,
+    inode: u64,
+    start: &OccupancyCoordinate,
+) -> Result<[u8; 64], &'static str> {
     use sha2::Digest;
     if !crate::valid_hash(&start.contract_digest) || !crate::valid_hash(&start.incarnation_digest) {
         return Err("original clock digest is not canonical");
@@ -42,22 +45,28 @@ fn fixed_binding_digest(device: u64, inode: u64, start: &OccupancyCoordinate)
     struct HashWriter(sha2::Sha256);
     impl std::io::Write for HashWriter {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0.update(bytes); Ok(bytes.len())
+            self.0.update(bytes);
+            Ok(bytes.len())
         }
-        fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
     }
     let wire = Wire {
-        clock_namespace_device: device, clock_namespace_inode: inode,
+        clock_namespace_device: device,
+        clock_namespace_inode: inode,
         contract_digest: &start.contract_digest,
         incarnation_digest: &start.incarnation_digest,
     };
     let mut writer = HashWriter(sha2::Sha256::new());
-    serde_json::to_writer(&mut writer, &wire).map_err(|_| "canonical clock binding encoding failed")?;
+    serde_json::to_writer(&mut writer, &wire)
+        .map_err(|_| "canonical clock binding encoding failed")?;
     let digest = writer.0.finalize();
     let mut bytes = [0u8; 64];
     const HEX: &[u8; 16] = b"0123456789abcdef";
     for (out, byte) in bytes.chunks_exact_mut(2).zip(digest) {
-        out[0] = HEX[(byte >> 4) as usize]; out[1] = HEX[(byte & 15) as usize];
+        out[0] = HEX[(byte >> 4) as usize];
+        out[1] = HEX[(byte & 15) as usize];
     }
     Ok(bytes)
 }
@@ -96,8 +105,8 @@ impl RetainedOccupancyClock {
             .file()
             .metadata()
             .map_err(|error| error.to_string())?;
-        let binding = fixed_binding_digest(identity.dev(), identity.ino(), &start)
-            .map_err(str::to_owned)?;
+        let binding =
+            fixed_binding_digest(identity.dev(), identity.ino(), &start).map_err(str::to_owned)?;
         Ok(Self {
             process_id: std::process::id(),
             start,
@@ -133,32 +142,48 @@ impl RetainedOccupancyClock {
         let OccupancyWindowState::Service { remaining } = self.window(limit, cleanup)? else {
             return Err("original service interval exhausted during endpoint capture".into());
         };
-        let total = remaining.checked_add(cleanup)
+        let total = remaining
+            .checked_add(cleanup)
             .ok_or("original cleanup interval overflow")?;
-        let service = anchor.checked_add(remaining)
+        let service = anchor
+            .checked_add(remaining)
             .ok_or("original service endpoint overflow")?;
-        let cleanup = anchor.checked_add(total)
+        let cleanup = anchor
+            .checked_add(total)
             .ok_or("original cleanup endpoint overflow")?;
-        Ok((super::MonotonicDeadline { deadline: service },
-            super::MonotonicDeadline { deadline: cleanup }))
+        Ok((
+            super::MonotonicDeadline { deadline: service },
+            super::MonotonicDeadline { deadline: cleanup },
+        ))
     }
 
     /// Exact same live namespace and boot, original start and fresh BOOTTIME.
     /// Ordinary callers receive owned diagnostics; admission keeps fixed errors.
-    pub fn window(&self, limit: &OccupancyLimit, cleanup: Duration)
-        -> Result<OccupancyWindowState, String> {
+    pub fn window(
+        &self,
+        limit: &OccupancyLimit,
+        cleanup: Duration,
+    ) -> Result<OccupancyWindowState, String> {
         self.window_fixed(limit, cleanup).map_err(str::to_owned)
     }
     #[cfg(not(target_os = "linux"))]
-    pub fn window_fixed(&self, _: &OccupancyLimit, _: Duration)
-        -> Result<OccupancyWindowState, &'static str> {
+    pub fn window_fixed(
+        &self,
+        _: &OccupancyLimit,
+        _: Duration,
+    ) -> Result<OccupancyWindowState, &'static str> {
         Err("retained occupancy clock unavailable on this platform")
     }
     #[cfg(target_os = "linux")]
-    pub fn window_fixed(&self, limit: &OccupancyLimit, cleanup: Duration)
-        -> Result<OccupancyWindowState, &'static str> {
+    pub fn window_fixed(
+        &self,
+        limit: &OccupancyLimit,
+        cleanup: Duration,
+    ) -> Result<OccupancyWindowState, &'static str> {
         use std::os::fd::AsRawFd as _;
-        if limit.start != self.start { return Err("retained clock selects another original start"); }
+        if limit.start != self.start {
+            return Err("retained clock selects another original start");
+        }
         let mut expected: libc::stat = unsafe { std::mem::zeroed() };
         if unsafe { libc::fstat(self.namespace.file().as_raw_fd(), &mut expected) } != 0 {
             return Err("original clock namespace descriptor observation refused");
@@ -166,7 +191,10 @@ impl RetainedOccupancyClock {
         if (expected.st_dev, expected.st_ino) != (self.namespace_device, self.namespace_inode) {
             return Err("original clock namespace descriptor changed");
         }
-        for path in [c"/proc/thread-self/ns/time", c"/proc/thread-self/ns/time_for_children"] {
+        for path in [
+            c"/proc/thread-self/ns/time",
+            c"/proc/thread-self/ns/time_for_children",
+        ] {
             let mut current: libc::stat = unsafe { std::mem::zeroed() };
             // These two procfs namespace magic links are the exact clock
             // observations used by the retained-clock contract; follow them.
@@ -178,8 +206,17 @@ impl RetainedOccupancyClock {
             }
         }
         let mut bytes = [0u8; 64];
-        let length = unsafe { libc::pread(self.boot.file().as_raw_fd(), bytes.as_mut_ptr().cast(), bytes.len(), 0) };
-        if length < 0 { return Err("retained boot identity observation refused"); }
+        let length = unsafe {
+            libc::pread(
+                self.boot.file().as_raw_fd(),
+                bytes.as_mut_ptr().cast(),
+                bytes.len(),
+                0,
+            )
+        };
+        if length < 0 {
+            return Err("retained boot identity observation refused");
+        }
         let length = length as usize;
         if length != self.boot_length || bytes[..length] != self.boot_bytes[..self.boot_length] {
             return Err("retained occupancy boot identity changed");
@@ -190,18 +227,29 @@ impl RetainedOccupancyClock {
     /// once here, then the edge needs only a BOOTTIME read. Computed from the
     /// immutable start and limit, so it renews nothing and equals the
     /// Service boundary of the full observation exactly.
-    pub fn service_edge(&self, limit: &OccupancyLimit, cleanup: Duration)
-        -> Result<OccupancyServiceEdge, &'static str> {
+    pub fn service_edge(
+        &self,
+        limit: &OccupancyLimit,
+        cleanup: Duration,
+    ) -> Result<OccupancyServiceEdge, &'static str> {
         let OccupancyWindowState::Service { .. } = self.window_fixed(limit, cleanup)? else {
             return Err("original service interval exhausted before edge capture");
         };
-        let cleanup_ns = u64::try_from(cleanup.as_nanos())
-            .map_err(|_| "cleanup allowance overflow")?;
-        let service = limit.maximum_occupancy_ns.checked_sub(cleanup_ns)
+        let cleanup_ns =
+            u64::try_from(cleanup.as_nanos()).map_err(|_| "cleanup allowance overflow")?;
+        let service = limit
+            .maximum_occupancy_ns
+            .checked_sub(cleanup_ns)
             .ok_or("cleanup consumes original limit")?;
-        let end_tick_ns = limit.start.tick_ns.checked_add(service)
+        let end_tick_ns = limit
+            .start
+            .tick_ns
+            .checked_add(service)
             .ok_or("retained occupancy interval overflow")?;
-        Ok(OccupancyServiceEdge { start_tick_ns: limit.start.tick_ns, end_tick_ns })
+        Ok(OccupancyServiceEdge {
+            start_tick_ns: limit.start.tick_ns,
+            end_tick_ns,
+        })
     }
     fn window_at_tick(
         &self,
@@ -220,8 +268,8 @@ impl RetainedOccupancyClock {
         let elapsed = tick
             .checked_sub(self.start.tick_ns)
             .ok_or("retained occupancy clock moved backwards")?;
-        let cleanup_ns = u64::try_from(cleanup.as_nanos())
-            .map_err(|_| "cleanup allowance overflow")?;
+        let cleanup_ns =
+            u64::try_from(cleanup.as_nanos()).map_err(|_| "cleanup allowance overflow")?;
         if cleanup_ns >= limit.maximum_occupancy_ns {
             return Err("cleanup consumes original limit".into());
         }
@@ -261,18 +309,27 @@ impl OccupancyServiceEdge {
     /// start is the window start.
     pub fn sleep_until_before_edge(&self, before: Duration) -> Result<(), &'static str> {
         let before = u64::try_from(before.as_nanos()).map_err(|_| "edge offset overflow")?;
-        let tick = self.end_tick_ns.saturating_sub(before).max(self.start_tick_ns);
+        let tick = self
+            .end_tick_ns
+            .saturating_sub(before)
+            .max(self.start_tick_ns);
         sleep_until_tick(tick)
     }
     fn require_service_at(&self, tick: u64) -> Result<(), &'static str> {
-        if tick < self.start_tick_ns { return Err("retained occupancy clock moved backwards"); }
-        if tick >= self.end_tick_ns { return Err("original native service edge reached"); }
+        if tick < self.start_tick_ns {
+            return Err("retained occupancy clock moved backwards");
+        }
+        if tick >= self.end_tick_ns {
+            return Err("original native service edge reached");
+        }
         Ok(())
     }
 }
 
 #[cfg(target_os = "linux")]
-fn occupancy_tick() -> Result<u64, &'static str> { super::occupancy_tick_ns_fixed() }
+fn occupancy_tick() -> Result<u64, &'static str> {
+    super::occupancy_tick_ns_fixed()
+}
 #[cfg(target_os = "linux")]
 fn sleep_until_tick(tick_ns: u64) -> Result<(), &'static str> {
     let request = libc::timespec {
@@ -285,7 +342,12 @@ fn sleep_until_tick(tick_ns: u64) -> Result<(), &'static str> {
         // SAFETY: `request` is a valid timespec for the call; no remainder is
         // requested with an absolute expiry.
         let code = unsafe {
-            libc::clock_nanosleep(libc::CLOCK_BOOTTIME, libc::TIMER_ABSTIME, &request, std::ptr::null_mut())
+            libc::clock_nanosleep(
+                libc::CLOCK_BOOTTIME,
+                libc::TIMER_ABSTIME,
+                &request,
+                std::ptr::null_mut(),
+            )
         };
         match code {
             0 => return Ok(()),
@@ -310,20 +372,27 @@ mod controls {
         for (device, inode) in [(0, 1), (u64::MAX, u64::MAX)] {
             for digest in ["a".repeat(64), "F".repeat(64)] {
                 let start = super::OccupancyCoordinate {
-                    contract_digest: digest.clone(), incarnation_digest: digest,
+                    contract_digest: digest.clone(),
+                    incarnation_digest: digest,
                     tick_ns: 123,
                 };
                 let canonical = crate::canonical_json(&serde_json::json!({
                     "clock_namespace_device": device, "clock_namespace_inode": inode,
                     "contract_digest": start.contract_digest,
                     "incarnation_digest": start.incarnation_digest,
-                })).unwrap();
+                }))
+                .unwrap();
                 let actual = super::fixed_binding_digest(device, inode, &start).unwrap();
-                assert_eq!(std::str::from_utf8(&actual).unwrap(), crate::sha256_hex(canonical.as_bytes()));
+                assert_eq!(
+                    std::str::from_utf8(&actual).unwrap(),
+                    crate::sha256_hex(canonical.as_bytes())
+                );
             }
         }
         let invalid = super::OccupancyCoordinate {
-            contract_digest: "é".repeat(32), incarnation_digest: "a".repeat(64), tick_ns: 1,
+            contract_digest: "é".repeat(32),
+            incarnation_digest: "a".repeat(64),
+            tick_ns: 1,
         };
         assert!(super::fixed_binding_digest(1, 1, &invalid).is_err());
     }
@@ -335,10 +404,22 @@ mod controls {
         let cleanup = Duration::from_secs(60);
         let edge = clock.service_edge(&limit, cleanup).unwrap();
         let start = clock.start.tick_ns;
-        for tick in [start, start + 1, edge.end_tick_ns - 1, edge.end_tick_ns, edge.end_tick_ns + 1] {
-            let service = matches!(clock.window_at_tick(&limit, cleanup, tick).unwrap(),
-                OccupancyWindowState::Service { .. });
-            assert_eq!(edge.require_service_at(tick).is_ok(), service, "tick {tick}");
+        for tick in [
+            start,
+            start + 1,
+            edge.end_tick_ns - 1,
+            edge.end_tick_ns,
+            edge.end_tick_ns + 1,
+        ] {
+            let service = matches!(
+                clock.window_at_tick(&limit, cleanup, tick).unwrap(),
+                OccupancyWindowState::Service { .. }
+            );
+            assert_eq!(
+                edge.require_service_at(tick).is_ok(),
+                service,
+                "tick {tick}"
+            );
         }
         assert!(edge.require_service_at(start - 1).is_err());
         assert!(clock.window_at_tick(&limit, cleanup, start - 1).is_err());

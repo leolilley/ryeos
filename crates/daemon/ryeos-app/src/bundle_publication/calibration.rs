@@ -5,11 +5,11 @@
 //! release object and cannot be consumed by release finalization.
 
 use anyhow::{Context as _, bail};
-use ryeos_state::{objects::Attestation, signer::Signer};
-use serde::{Deserialize, Serialize};
 use ryeos_node_runtime::calibration_policy::{
     CalibrationEnvironmentEvidence, CalibrationEnvironmentSelection, validate_calibration_hash,
 };
+use ryeos_state::{objects::Attestation, signer::Signer};
+use serde::{Deserialize, Serialize};
 
 pub const AUTHORITY_CALIBRATION_SCHEMA: &str = "ryeos.bundle_publication_authority_calibration.v3";
 pub const AUTHORITY_CALIBRATION_CLAIM: &str = "bundle_publication_authority_calibration_v3";
@@ -140,7 +140,10 @@ impl AuthorityCalibrationEvidence {
         ryeos_node_runtime::node_policy::generation::validate_init_profile_name(&self.node_profile)
             .context("calibration node profile")?;
         if !ryeos_engine::isolation::valid_host_class_name(&self.host_class) {
-            bail!("calibration host class `{}` is not a canonical name", self.host_class);
+            bail!(
+                "calibration host class `{}` is not a canonical name",
+                self.host_class
+            );
         }
         self.portable.validate("portable")?;
         self.native.validate("native")?;
@@ -268,7 +271,6 @@ impl AuthorityCalibrationEvidence {
         Ok(evidence)
     }
 }
-
 
 #[cfg(test)]
 mod tests {

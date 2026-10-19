@@ -6,12 +6,12 @@ use std::sync::Arc;
 use base64::Engine as _;
 use ryeos_api::handlers::external_content_import;
 use ryeos_app::handler_context::HandlerContext;
+use ryeos_app::operator_external_content::{ImportRequest, RetainedBindingImportRequest};
+use ryeos_app::state::AppState;
 use ryeos_node_runtime::identity::{AuthorizedKeyPrincipalClass, NodeIdentity, WildcardPolicy};
 use ryeos_node_runtime::node_policy::sections::external_content::{
     ExternalContentImportLimits, ExternalContentImportPolicyRecord, ManagedExternalContentPolicy,
 };
-use ryeos_app::operator_external_content::{ImportRequest, RetainedBindingImportRequest};
-use ryeos_app::state::AppState;
 use ryeos_state::objects::{ExternalContentBinding, ExternalContentConsumerAuthority};
 use serde_json::json;
 
@@ -133,7 +133,14 @@ fn fixture(
         })
         .unwrap();
     drop(guard);
-    (tmp, store_owner, Arc::new(state), context, binding_hash, manifest)
+    (
+        tmp,
+        store_owner,
+        Arc::new(state),
+        context,
+        binding_hash,
+        manifest,
+    )
 }
 
 fn request(hash: &str, maximum_bytes: u64) -> ImportRequest {
@@ -270,22 +277,33 @@ fn fixture_bundle_engine(
     let workflow = ryeos_engine::test_support::workflow_bundle_roots();
     let ui = ryeos_engine::test_support::workspace_root().join("bundles/ryeos-ui");
     let mut kind_roots = vec![core.join(".ai/node/engine/kinds")];
-    kind_roots.extend(workflow.iter().map(|root| root.join(".ai/node/engine/kinds")));
+    kind_roots.extend(
+        workflow
+            .iter()
+            .map(|root| root.join(".ai/node/engine/kinds")),
+    );
     let kinds = ryeos_engine::kind_registry::KindRegistry::load_base(&kind_roots, &trust).unwrap();
     let mut roots = vec![core];
     roots.extend(workflow);
     roots.push(ui);
     roots.push(bundle_root.to_path_buf());
-    let registered = ["core", "knowledge", "directive", "graph", "ryeos-ui", "f05-fixture"]
-        .into_iter()
-        .zip(roots.iter().cloned())
-        .map(
-            |(name, canonical_root)| ryeos_engine::item_resolution::RegisteredBundleRoot {
-                name: name.to_owned(),
-                canonical_root,
-            },
-        )
-        .collect();
+    let registered = [
+        "core",
+        "knowledge",
+        "directive",
+        "graph",
+        "ryeos-ui",
+        "f05-fixture",
+    ]
+    .into_iter()
+    .zip(roots.iter().cloned())
+    .map(
+        |(name, canonical_root)| ryeos_engine::item_resolution::RegisteredBundleRoot {
+            name: name.to_owned(),
+            canonical_root,
+        },
+    )
+    .collect();
     let (parsers, _) =
         ryeos_engine::parsers::ParserRegistry::load_base(&roots, &trust, &kinds).unwrap();
     let handlers = ryeos_engine::test_support::load_live_handler_registry();

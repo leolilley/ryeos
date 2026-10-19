@@ -198,8 +198,10 @@ fn precontact_resource_scope_recovery_discards_without_relaunch() {
 #[test]
 fn unattached_resource_owner_startup_releases_hold_and_fences_without_relaunch() {
     let (tmpdir, _state_owner, mut state) = build_test_state();
-    let accounting_owner =
-        ryeos_app::test_support::TestAccountingDb::open(&tmpdir.path().join("unattached-resource-accounting")).unwrap();
+    let accounting_owner = ryeos_app::test_support::TestAccountingDb::open(
+        &tmpdir.path().join("unattached-resource-accounting"),
+    )
+    .unwrap();
     let accounting = accounting_owner.shared();
     let execution_budget_id = "exec-unattached-resource";
     let root_chain_id = "T-unattached-resource";
@@ -386,8 +388,10 @@ fn unattached_resource_owner_startup_releases_hold_and_fences_without_relaunch()
 #[test]
 fn unattached_resource_owner_without_settlement_authority_remains_quarantined() {
     let (tmpdir, _state_owner, mut state) = build_test_state();
-    let accounting_owner =
-        ryeos_app::test_support::TestAccountingDb::open(&tmpdir.path().join("unknown-resource-accounting")).unwrap();
+    let accounting_owner = ryeos_app::test_support::TestAccountingDb::open(
+        &tmpdir.path().join("unknown-resource-accounting"),
+    )
+    .unwrap();
     let accounting = accounting_owner.shared();
     let budget = "exec-unknown-resource";
     let root = "T-unknown-resource";
@@ -445,7 +449,8 @@ fn unattached_resource_owner_without_settlement_authority_remains_quarantined() 
 fn resource_owner_startup_reconciliation_retries_settlement_after_cleanup() {
     let (tmpdir, _state_owner, mut state) = build_test_state();
     let accounting_owner =
-        ryeos_app::test_support::TestAccountingDb::open(&tmpdir.path().join("resource-accounting")).unwrap();
+        ryeos_app::test_support::TestAccountingDb::open(&tmpdir.path().join("resource-accounting"))
+            .unwrap();
     let accounting = accounting_owner.shared();
     let execution_budget_id = "exec-resource-recovery";
     let root_chain_id = "T-resource-recovery";
@@ -720,7 +725,13 @@ fn build_test_state() -> (
         *identity.verifying_key(),
     );
     let write_barrier = ryeos_app::write_barrier::WriteBarrier::new();
-    let store_owner = ryeos_app::test_support::TestStateStore::open_with_barrier(tmpdir.path(), signer, write_barrier.clone(), Arc::new(head_trust)).unwrap();
+    let store_owner = ryeos_app::test_support::TestStateStore::open_with_barrier(
+        tmpdir.path(),
+        signer,
+        write_barrier.clone(),
+        Arc::new(head_trust),
+    )
+    .unwrap();
     let state_store = std::sync::Arc::clone(store_owner.store());
     let engine = Arc::new(ryeos_engine::engine::Engine::new(
         ryeos_engine::kind_registry::KindRegistry::empty(),
@@ -1960,7 +1971,9 @@ fn store_structured_session_capsule(state: &AppState) -> (String, String, serde_
             protocol_content_hash: "c".repeat(64),
             protocol_signer_fingerprint: "f".repeat(64),
             execution_plan_hash: lillux::sha256_hex(
-                lillux::canonical_json(&serde_json::json!({})).unwrap().as_bytes(),
+                lillux::canonical_json(&serde_json::json!({}))
+                    .unwrap()
+                    .as_bytes(),
             ),
             executable_identity: DirectExecutableIdentity::CapturedContent {
                 content_hash: executable_blob_hash.clone(),

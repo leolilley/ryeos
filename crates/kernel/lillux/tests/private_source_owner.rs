@@ -364,12 +364,12 @@ fn held_source_target(
         && let Err(cleanup) = held
             .held()
             .terminate_namespace_for_export(Duration::from_secs(5))
-        {
-            eprintln!(
-                "held source probe failed ({error}) and exact namespace cleanup failed ({cleanup})"
-            );
-            lillux::sandbox::exit_with_linux_sandbox_status(LinuxSandboxExit::Code(125));
-        }
+    {
+        eprintln!(
+            "held source probe failed ({error}) and exact namespace cleanup failed ({cleanup})"
+        );
+        lillux::sandbox::exit_with_linux_sandbox_status(LinuxSandboxExit::Code(125));
+    }
     outcome
 }
 
@@ -419,7 +419,12 @@ fn child(
         .create_child(OsStr::new(name), 0o700)
         .map_err(|error| error.to_string())?;
     child
-        .atomic_create_pinned_regular(OsStr::new("payload"), b"private-source", 0o600, TEST_PURPOSE)
+        .atomic_create_pinned_regular(
+            OsStr::new("payload"),
+            b"private-source",
+            0o600,
+            TEST_PURPOSE,
+        )
         .map_err(|error| error.to_string())?
         .ok_or("private source payload already exists")?;
     if wrong_source {

@@ -25,7 +25,7 @@ use crate::facade::{
     StageObservation, UploadObservation,
 };
 use crate::provider_spec::{
-    RUN_STDIN_BYTES, STAGE_CHUNK_BYTES, STAGE_SLOT_BYTES, LAUNCHER_UPLOAD_BYTES, valid_sandbox_id,
+    LAUNCHER_UPLOAD_BYTES, RUN_STDIN_BYTES, STAGE_CHUNK_BYTES, STAGE_SLOT_BYTES, valid_sandbox_id,
 };
 
 /// Slot names are opaque to the facade; these are the adapter's fixed choice.
@@ -148,7 +148,10 @@ impl SealedInput for DescriptorInput<'_> {
             self.required_mode
                 .is_none_or(|mode| observation.full_permission_mode().is_ok_and(|m| m == mode))
                 && observation.size() == self.bytes
-                && self.authority.digest_regular_file_stable_exact(&observation)? == self.sha256,
+                && self
+                    .authority
+                    .digest_regular_file_stable_exact(&observation)?
+                    == self.sha256,
             "inherited activation input changed its declared identity"
         );
         Ok(())
@@ -211,7 +214,9 @@ fn preflight(inputs: &ActivationInputs<'_>) -> Result<Vec<u8>> {
             (1..=STAGE_SLOT_BYTES).contains(&input.bytes()),
             "{name} is outside the facade's slot bound"
         );
-        input.verify().with_context(|| format!("{name} failed preflight"))?;
+        input
+            .verify()
+            .with_context(|| format!("{name} failed preflight"))?;
     }
     ensure!(
         (1..=LAUNCHER_UPLOAD_BYTES).contains(&inputs.launcher.bytes())
@@ -222,7 +227,10 @@ fn preflight(inputs: &ActivationInputs<'_>) -> Result<Vec<u8>> {
         (1..=RUN_STDIN_BYTES).contains(&(inputs.assignment.len() as u64)),
         "signed assignment is outside the facade's stdin bound"
     );
-    inputs.launcher.verify().context("launcher failed preflight")?;
+    inputs
+        .launcher
+        .verify()
+        .context("launcher failed preflight")?;
     let launcher = inputs.launcher.read_all().context("launcher read failed")?;
     ensure!(
         lillux::sha256_hex(&launcher) == inputs.launcher_sha256,
@@ -353,8 +361,12 @@ pub struct PreparedActivation {
 /// The trusted lifecycle runner must have installed the named descriptor once
 /// for this process and no other owner may hold it.
 unsafe fn adopt_env_descriptor(name: &str) -> Result<InheritedDescriptorAuthority> {
-    let value = std::env::var(name).with_context(|| format!("missing inherited descriptor {name}"))?;
-    ensure!(value.len() <= 32, "inherited descriptor {name} exceeds its bound");
+    let value =
+        std::env::var(name).with_context(|| format!("missing inherited descriptor {name}"))?;
+    ensure!(
+        value.len() <= 32,
+        "inherited descriptor {name} exceeds its bound"
+    );
     let descriptor: u32 = value
         .parse()
         .with_context(|| format!("inherited descriptor {name} is invalid"))?;
@@ -372,8 +384,8 @@ impl PreparedActivation {
     pub unsafe fn from_environment(request: &LifecycleAdapterRequest) -> Result<Self> {
         use ryeos_external_execution_contract::{
             LIFECYCLE_GUEST_RUNTIME_FD_ENV, LIFECYCLE_LAUNCHER_FD_ENV,
-            LIFECYCLE_SIGNED_ASSIGNMENT_FD_ENV,
-            LIFECYCLE_SIGNED_IMPORT_FD_ENV, LIFECYCLE_SUPERVISOR_FD_ENV,
+            LIFECYCLE_SIGNED_ASSIGNMENT_FD_ENV, LIFECYCLE_SIGNED_IMPORT_FD_ENV,
+            LIFECYCLE_SUPERVISOR_FD_ENV,
         };
         let LifecycleAdapterRequest::ActivateSupervisor {
             common: _,
@@ -486,9 +498,7 @@ impl PreparedActivation {
 /// Decide what a contact sequence means for the response. A stop before any
 /// contact is an adapter refusal; any sequence that may have reached the
 /// facade, complete or not, leaves the activation pending.
-pub(crate) fn pending_unless_refused(
-    outcome: std::result::Result<(), Stopped>,
-) -> Result<()> {
+pub(crate) fn pending_unless_refused(outcome: std::result::Result<(), Stopped>) -> Result<()> {
     match outcome {
         Err(Stopped::BeforeContact(error)) => Err(error),
         Ok(()) | Err(Stopped::AfterContact(_)) => Ok(()),
@@ -742,11 +752,7 @@ mod tests {
         }
     }
 
-    fn run(
-        set: &Set,
-        fake: &Scripted,
-        chunk: u64,
-    ) -> std::result::Result<(), Stopped> {
+    fn run(set: &Set, fake: &Scripted, chunk: u64) -> std::result::Result<(), Stopped> {
         let pin = pin();
         let launcher_sha = sha(LAUNCHER);
         let inputs = ActivationInputs {
@@ -826,9 +832,10 @@ mod tests {
             .map(|(_, body)| {
                 (
                     body["offset"].as_u64().unwrap(),
-                    PACKAGE.len().min(
-                        usize::try_from(body["offset"].as_u64().unwrap()).unwrap() + 4,
-                    ) - usize::try_from(body["offset"].as_u64().unwrap()).unwrap(),
+                    PACKAGE
+                        .len()
+                        .min(usize::try_from(body["offset"].as_u64().unwrap()).unwrap() + 4)
+                        - usize::try_from(body["offset"].as_u64().unwrap()).unwrap(),
                 )
             })
             .collect();
@@ -848,14 +855,23 @@ mod tests {
         let mut set = set();
         set.package.verify_fails = true;
         let fake = Scripted::new(vec![]);
-        assert!(matches!(run(&set, &fake, 1024), Err(Stopped::BeforeContact(_))));
+        assert!(matches!(
+            run(&set, &fake, 1024),
+            Err(Stopped::BeforeContact(_))
+        ));
         assert!(fake.requests.borrow().is_empty());
         let mut set = self::set();
         set.runtime.verify_fails = true;
-        assert!(matches!(run(&set, &fake, 1024), Err(Stopped::BeforeContact(_))));
+        assert!(matches!(
+            run(&set, &fake, 1024),
+            Err(Stopped::BeforeContact(_))
+        ));
         let mut set = self::set();
         set.launcher.declared = sha(b"other");
-        assert!(matches!(run(&set, &fake, 1024), Err(Stopped::BeforeContact(_))));
+        assert!(matches!(
+            run(&set, &fake, 1024),
+            Err(Stopped::BeforeContact(_))
+        ));
         assert!(fake.requests.borrow().is_empty());
     }
 
@@ -866,7 +882,10 @@ mod tests {
             stage_ok(SLOT_RUNTIME, 0, RUNTIME),
             Step::Fail(crate::facade::TransportFailure::MayHaveBeenSent),
         ]);
-        assert!(matches!(run(&set, &fake, 1024), Err(Stopped::AfterContact(_))));
+        assert!(matches!(
+            run(&set, &fake, 1024),
+            Err(Stopped::AfterContact(_))
+        ));
         assert_eq!(fake.requests.borrow().len(), 2);
         assert!(fake.exhausted());
     }
@@ -884,7 +903,10 @@ mod tests {
             let count = steps.len();
             let set = set();
             let fake = Scripted::new(steps);
-            assert!(matches!(run(&set, &fake, 1024), Err(Stopped::AfterContact(_))));
+            assert!(matches!(
+                run(&set, &fake, 1024),
+                Err(Stopped::AfterContact(_))
+            ));
             assert_eq!(fake.requests.borrow().len(), count);
         }
     }
@@ -896,7 +918,10 @@ mod tests {
         steps.pop();
         steps.push(refusal("run_once", "slot_not_sealed"));
         let fake = Scripted::new(steps);
-        assert!(matches!(run(&set, &fake, 1024), Err(Stopped::AfterContact(_))));
+        assert!(matches!(
+            run(&set, &fake, 1024),
+            Err(Stopped::AfterContact(_))
+        ));
         assert_eq!(fake.requests.borrow().len(), 8);
     }
 
@@ -966,7 +991,11 @@ mod tests {
             .unwrap();
         assert_eq!(
             seen,
-            [(0, b"abc".to_vec()), (3, b"def".to_vec()), (6, b"g".to_vec())]
+            [
+                (0, b"abc".to_vec()),
+                (3, b"def".to_vec()),
+                (6, b"g".to_vec())
+            ]
         );
         assert_eq!(input.read_all().unwrap(), b"abcdefg");
         input.verify().unwrap();
@@ -977,8 +1006,13 @@ mod tests {
         let digest = sha(RUNTIME);
         let bytes = RUNTIME.len() as u64;
         assert!(require_runtime_matches_intent(bytes, &digest, Some(bytes), Some(&digest)).is_ok());
-        assert!(require_runtime_matches_intent(bytes, &sha(b"other"), Some(bytes), Some(&digest)).is_err());
-        assert!(require_runtime_matches_intent(bytes + 1, &digest, Some(bytes), Some(&digest)).is_err());
+        assert!(
+            require_runtime_matches_intent(bytes, &sha(b"other"), Some(bytes), Some(&digest))
+                .is_err()
+        );
+        assert!(
+            require_runtime_matches_intent(bytes + 1, &digest, Some(bytes), Some(&digest)).is_err()
+        );
         assert!(require_runtime_matches_intent(bytes, &digest, None, None).is_err());
     }
 

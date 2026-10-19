@@ -9,22 +9,36 @@ use lillux_sqlite::{
 use std::sync::{Arc, Weak};
 
 pub fn quote_inspection_outside_continuation()
-    -> anyhow::Result<lillux_sqlite::original_physical_custody::OutsideWork> {
+-> anyhow::Result<lillux_sqlite::original_physical_custody::OutsideWork> {
     let bytes = std::mem::size_of::<InspectionOutsideContinuation>()
-        .checked_add(std::mem::size_of::<lillux_sqlite::OriginalDestinationOutsideCustody>())
-        .and_then(|n| n.checked_add(4 * std::mem::size_of::<lillux_sqlite::OriginalDestinationPhysicalSource>()))
+        .checked_add(std::mem::size_of::<
+            lillux_sqlite::OriginalDestinationOutsideCustody,
+        >())
+        .and_then(|n| {
+            n.checked_add(
+                4 * std::mem::size_of::<lillux_sqlite::OriginalDestinationPhysicalSource>(),
+            )
+        })
         .context("inspection outside custody quote overflow")?;
     Ok(lillux_sqlite::original_physical_custody::OutsideWork {
-        bytes: u64::try_from(bytes)?, steps: 24,
+        bytes: u64::try_from(bytes)?,
+        steps: 24,
     })
 }
 
 pub(super) fn terminal_snapshot(
     process: u32,
-    native: &std::sync::Mutex<Option<(Arc<OriginalNativeFactory>, OriginalNativeConnectionTerminal)>>,
+    native: &std::sync::Mutex<
+        Option<(Arc<OriginalNativeFactory>, OriginalNativeConnectionTerminal)>,
+    >,
 ) -> Result<Option<OriginalNativeConnectionTerminal>> {
-    ensure!(process == std::process::id(), "inspection terminal belongs to original process");
-    let native = native.try_lock().map_err(|_| anyhow!("original inspection native custody busy or poisoned"))?;
+    ensure!(
+        process == std::process::id(),
+        "inspection terminal belongs to original process"
+    );
+    let native = native
+        .try_lock()
+        .map_err(|_| anyhow!("original inspection native custody busy or poisoned"))?;
     Ok(native.as_ref().map(|(_, terminal)| terminal.clone()))
 }
 
@@ -45,37 +59,73 @@ impl OriginalNativeDestinationAuthority for InspectionDestination {
         aggregate: &lillux_sqlite::OriginalNativeTerminal,
         leaf: &lillux_sqlite::OriginalNativeOutsideLeafEvidence,
         prepay: &dyn Fn(u64, u64) -> Result<()>,
-    ) -> std::result::Result<lillux_sqlite::OriginalDestinationOutsideCustody,
-        lillux_sqlite::OriginalDestinationCustodyFailure> {
+    ) -> std::result::Result<
+        lillux_sqlite::OriginalDestinationOutsideCustody,
+        lillux_sqlite::OriginalDestinationCustodyFailure,
+    > {
         let checked = (|| -> Result<()> {
             let authority: Arc<dyn OriginalNativeDestinationAuthority> = self.clone();
             leaf.require_original_authority(&authority, factory, aggregate)?;
             drop(authority);
-            let original = self.factory.upgrade().context("original inspection factory absent")?;
-            ensure!(Arc::ptr_eq(&original, factory), "foreign inspection outside factory");
-            ensure!(Arc::ptr_eq(&self.copy._copy_work, &self.work),
-                "inspection outside handoff changes actual copy work");
+            let original = self
+                .factory
+                .upgrade()
+                .context("original inspection factory absent")?;
+            ensure!(
+                Arc::ptr_eq(&original, factory),
+                "foreign inspection outside factory"
+            );
+            ensure!(
+                Arc::ptr_eq(&self.copy._copy_work, &self.work),
+                "inspection outside handoff changes actual copy work"
+            );
             // Service checkpoint and runtime Ready checks are forbidden here.
-            self.work.require_original_outside_master(factory, aggregate)?;
-            ensure!(Arc::strong_count(&self) == 1,
-                "inspection destination still has actual authority aliases");
+            self.work
+                .require_original_outside_master(factory, aggregate)?;
+            ensure!(
+                Arc::strong_count(&self) == 1,
+                "inspection destination still has actual authority aliases"
+            );
             let quote = quote_inspection_outside_continuation()?;
-            lillux_sqlite::original_physical_custody::retain_callback_refusal(
-                &|| prepay(quote.bytes, quote.steps))?;
-            self.work.require_original_outside_master(factory, aggregate)
+            lillux_sqlite::original_physical_custody::retain_callback_refusal(&|| {
+                prepay(quote.bytes, quote.steps)
+            })?;
+            self.work
+                .require_original_outside_master(factory, aggregate)
         })();
         if let Err(error) = checked {
-            return Err(lillux_sqlite::OriginalDestinationCustodyFailure::retain(factory.clone(), self, error));
+            return Err(lillux_sqlite::OriginalDestinationCustodyFailure::retain(
+                factory.clone(),
+                self,
+                error,
+            ));
         }
         let original = match Arc::try_unwrap(self) {
             Ok(original) => original,
-            Err(original) => return Err(lillux_sqlite::OriginalDestinationCustodyFailure::retain(
-                factory.clone(), original, anyhow!("inspection authority alias appeared during handoff"))),
+            Err(original) => {
+                return Err(lillux_sqlite::OriginalDestinationCustodyFailure::retain(
+                    factory.clone(),
+                    original,
+                    anyhow!("inspection authority alias appeared during handoff"),
+                ));
+            }
         };
-        let Self { factory: _, runtime, root, source, namespace, copy, sql, work } = original;
+        let Self {
+            factory: _,
+            runtime,
+            root,
+            source,
+            namespace,
+            copy,
+            sql,
+            work,
+        } = original;
         let continuation = Box::new(InspectionOutsideContinuation {
-            process: std::process::id(), leaf: leaf.clone(),
-            _copy: copy, _sql: sql, work,
+            process: std::process::id(),
+            leaf: leaf.clone(),
+            _copy: copy,
+            _sql: sql,
+            work,
         });
         let sources = vec![
             lillux_sqlite::OriginalDestinationPhysicalSource::Directory(runtime),
@@ -86,7 +136,9 @@ impl OriginalNativeDestinationAuthority for InspectionDestination {
         // SAFETY: genuine exact leaf/account checks and original prepayment
         // precede allocation. Every copy/SQL/work holder moves into the
         // continuation, which keeps it until the consuming group join.
-        Ok(unsafe { lillux_sqlite::OriginalDestinationOutsideCustody::issued(sources, continuation) })
+        Ok(unsafe {
+            lillux_sqlite::OriginalDestinationOutsideCustody::issued(sources, continuation)
+        })
     }
 
     fn require_original(&self, factory: &Arc<OriginalNativeFactory>) -> Result<()> {
@@ -136,34 +188,66 @@ impl OriginalNativeDestinationAuthority for InspectionReferenceDestination {
         aggregate: &lillux_sqlite::OriginalNativeTerminal,
         leaf: &lillux_sqlite::OriginalNativeOutsideLeafEvidence,
         prepay: &dyn Fn(u64, u64) -> Result<()>,
-    ) -> std::result::Result<lillux_sqlite::OriginalDestinationOutsideCustody,
-        lillux_sqlite::OriginalDestinationCustodyFailure> {
+    ) -> std::result::Result<
+        lillux_sqlite::OriginalDestinationOutsideCustody,
+        lillux_sqlite::OriginalDestinationCustodyFailure,
+    > {
         let checked = (|| -> Result<()> {
             let authority: Arc<dyn OriginalNativeDestinationAuthority> = self.clone();
             leaf.require_original_authority(&authority, factory, aggregate)?;
             drop(authority);
-            let original = self.factory.upgrade().context("original inspection reference factory absent")?;
-            ensure!(Arc::ptr_eq(&original, factory), "foreign inspection reference outside factory");
-            ensure!(Arc::strong_count(&self) == 1,
-                "inspection reference destination still has authority aliases");
+            let original = self
+                .factory
+                .upgrade()
+                .context("original inspection reference factory absent")?;
+            ensure!(
+                Arc::ptr_eq(&original, factory),
+                "foreign inspection reference outside factory"
+            );
+            ensure!(
+                Arc::strong_count(&self) == 1,
+                "inspection reference destination still has authority aliases"
+            );
             let bytes = std::mem::size_of::<InspectionReferenceContinuation>()
-                .checked_add(std::mem::size_of::<lillux_sqlite::OriginalDestinationOutsideCustody>())
-                .and_then(|n| n.checked_add(3 * std::mem::size_of::<lillux_sqlite::OriginalDestinationPhysicalSource>()))
+                .checked_add(std::mem::size_of::<
+                    lillux_sqlite::OriginalDestinationOutsideCustody,
+                >())
+                .and_then(|n| {
+                    n.checked_add(
+                        3 * std::mem::size_of::<lillux_sqlite::OriginalDestinationPhysicalSource>(),
+                    )
+                })
                 .context("inspection reference outside custody quote overflow")?;
-            lillux_sqlite::original_physical_custody::retain_callback_refusal(
-                &|| prepay(u64::try_from(bytes)?, 16))
+            lillux_sqlite::original_physical_custody::retain_callback_refusal(&|| {
+                prepay(u64::try_from(bytes)?, 16)
+            })
         })();
         if let Err(error) = checked {
-            return Err(lillux_sqlite::OriginalDestinationCustodyFailure::retain(factory.clone(), self, error));
+            return Err(lillux_sqlite::OriginalDestinationCustodyFailure::retain(
+                factory.clone(),
+                self,
+                error,
+            ));
         }
         let original = match Arc::try_unwrap(self) {
             Ok(original) => original,
-            Err(original) => return Err(lillux_sqlite::OriginalDestinationCustodyFailure::retain(
-                factory.clone(), original, anyhow!("inspection reference authority alias appeared during handoff"))),
+            Err(original) => {
+                return Err(lillux_sqlite::OriginalDestinationCustodyFailure::retain(
+                    factory.clone(),
+                    original,
+                    anyhow!("inspection reference authority alias appeared during handoff"),
+                ));
+            }
         };
-        let Self { factory: _, runtime, source, namespace } = original;
+        let Self {
+            factory: _,
+            runtime,
+            source,
+            namespace,
+        } = original;
         let continuation = Box::new(InspectionReferenceContinuation {
-            process: std::process::id(), leaf: leaf.clone(),
+            process: std::process::id(),
+            leaf: leaf.clone(),
         });
         let sources = vec![
             lillux_sqlite::OriginalDestinationPhysicalSource::Directory(runtime),
@@ -172,7 +256,9 @@ impl OriginalNativeDestinationAuthority for InspectionReferenceDestination {
         ];
         // SAFETY: genuine leaf and factory checks and original prepayment
         // precede allocation; every descriptor moves to a physical source.
-        Ok(unsafe { lillux_sqlite::OriginalDestinationOutsideCustody::issued(sources, continuation) })
+        Ok(unsafe {
+            lillux_sqlite::OriginalDestinationOutsideCustody::issued(sources, continuation)
+        })
     }
 
     fn require_original(&self, factory: &Arc<OriginalNativeFactory>) -> Result<()> {
@@ -197,27 +283,39 @@ struct InspectionReferenceContinuation {
     leaf: lillux_sqlite::OriginalNativeOutsideLeafEvidence,
 }
 // SAFETY: no resource is owned here; the leaf binds the same original factory.
-unsafe impl lillux_sqlite::OriginalOutsideDestinationContinuation for InspectionReferenceContinuation {
+unsafe impl lillux_sqlite::OriginalOutsideDestinationContinuation
+    for InspectionReferenceContinuation
+{
     fn require_original_process(&self) -> Result<()> {
-        ensure!(self.process == std::process::id(), "foreign inspection reference continuation");
+        ensure!(
+            self.process == std::process::id(),
+            "foreign inspection reference continuation"
+        );
         Ok(())
     }
-    fn retire_native_references(&mut self, factory: &Arc<OriginalNativeFactory>,
+    fn retire_native_references(
+        &mut self,
+        factory: &Arc<OriginalNativeFactory>,
         aggregate: &lillux_sqlite::OriginalNativeTerminal,
-        _prepay: &dyn Fn(u64, u64) -> Result<()>) -> Result<()> {
+        _prepay: &dyn Fn(u64, u64) -> Result<()>,
+    ) -> Result<()> {
         self.require_original_process()?;
         self.leaf.require_original(factory, aggregate)
     }
-    unsafe fn register_shared_roots(&mut self,
+    unsafe fn register_shared_roots(
+        &mut self,
         _registry: &mut lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry,
-        _prepay: &dyn Fn(u64, u64) -> Result<()>) -> Result<()> {
+        _prepay: &dyn Fn(u64, u64) -> Result<()>,
+    ) -> Result<()> {
         self.require_original_process()
     }
     fn physical_holders_retired(&self) -> Result<bool> {
         self.require_original_process()?;
         Ok(true)
     }
-    fn physical_holders_retirement_quote(&self) -> Result<lillux_sqlite::original_physical_custody::OutsideWork> {
+    fn physical_holders_retirement_quote(
+        &self,
+    ) -> Result<lillux_sqlite::original_physical_custody::OutsideWork> {
         self.require_original_process()?;
         Ok(lillux_sqlite::original_physical_custody::OutsideWork { bytes: 0, steps: 4 })
     }
@@ -264,32 +362,47 @@ struct InspectionOutsideContinuation {
 }
 // SAFETY: all actual resources remain owned, including on unwind/refusal.
 // Incomplete group consumption explicitly blocks physical retirement.
-unsafe impl lillux_sqlite::OriginalOutsideDestinationContinuation for InspectionOutsideContinuation {
+unsafe impl lillux_sqlite::OriginalOutsideDestinationContinuation
+    for InspectionOutsideContinuation
+{
     fn require_original_process(&self) -> Result<()> {
-        ensure!(self.process == std::process::id(), "foreign inspection outside continuation");
+        ensure!(
+            self.process == std::process::id(),
+            "foreign inspection outside continuation"
+        );
         Ok(())
     }
-    fn retire_native_references(&mut self, factory: &Arc<OriginalNativeFactory>,
+    fn retire_native_references(
+        &mut self,
+        factory: &Arc<OriginalNativeFactory>,
         aggregate: &lillux_sqlite::OriginalNativeTerminal,
-        _prepay: &dyn Fn(u64, u64) -> Result<()>) -> Result<()> {
+        _prepay: &dyn Fn(u64, u64) -> Result<()>,
+    ) -> Result<()> {
         self.require_original_process()?;
         self.leaf.require_original(factory, aggregate)?;
-        self.work.require_original_outside_master(factory, aggregate)?;
+        self.work
+            .require_original_outside_master(factory, aggregate)?;
         // Copy work still owns the original account/native controls; with no
         // outside receiver this is never a completed retirement.
         anyhow::bail!("inspection copy native/account holders have no outside retirement")
     }
-    unsafe fn register_shared_roots(&mut self,
+    unsafe fn register_shared_roots(
+        &mut self,
         _registry: &mut lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry,
-        _prepay: &dyn Fn(u64, u64) -> Result<()>) -> Result<()> {
+        _prepay: &dyn Fn(u64, u64) -> Result<()>,
+    ) -> Result<()> {
         self.require_original_process()?;
-        anyhow::bail!("inspection source pins, scratch guard and cleanup proof have no outside retirement")
+        anyhow::bail!(
+            "inspection source pins, scratch guard and cleanup proof have no outside retirement"
+        )
     }
     fn physical_holders_retired(&self) -> Result<bool> {
         self.require_original_process()?;
         Ok(false)
     }
-    fn physical_holders_retirement_quote(&self) -> Result<lillux_sqlite::original_physical_custody::OutsideWork> {
+    fn physical_holders_retirement_quote(
+        &self,
+    ) -> Result<lillux_sqlite::original_physical_custody::OutsideWork> {
         self.require_original_process()?;
         Ok(lillux_sqlite::original_physical_custody::OutsideWork { bytes: 0, steps: 8 })
     }
@@ -316,26 +429,45 @@ pub(super) struct OriginalInspectionCustody {
 }
 impl OriginalInspectionCustody {
     pub(super) fn retry_close(self) -> std::result::Result<Self, Self> {
-        let Self { factory, body, reference } = self;
+        let Self {
+            factory,
+            body,
+            reference,
+        } = self;
         let reference = match reference {
             InspectionSchemaReference::Refused(failure) => match failure.close_retained() {
                 Ok(released) => InspectionSchemaReference::Released(released),
                 Err(failure) => {
-                    return Err(Self { factory, body, reference: InspectionSchemaReference::Refused(failure) });
+                    return Err(Self {
+                        factory,
+                        body,
+                        reference: InspectionSchemaReference::Refused(failure),
+                    });
                 }
             },
-            reference @ (InspectionSchemaReference::Closed(_) | InspectionSchemaReference::Released(_)) => reference,
+            reference @ (InspectionSchemaReference::Closed(_)
+            | InspectionSchemaReference::Released(_)) => reference,
         };
         let Some(body) = body else {
-            return Ok(Self { factory, body: None, reference });
+            return Ok(Self {
+                factory,
+                body: None,
+                reference,
+            });
         };
         let attempted = match body {
             NativeBody::Open(mut owner) => {
                 if owner.retained_admission().is_some()
-                    && owner.recover_retained_admission().is_err() {
-                        return Err(Self { factory, body: Some(NativeBody::Open(owner)), reference });
-                    }
-                owner.retry_close()
+                    && owner.recover_retained_admission().is_err()
+                {
+                    return Err(Self {
+                        factory,
+                        body: Some(NativeBody::Open(owner)),
+                        reference,
+                    });
+                }
+                owner
+                    .retry_close()
                     .map(OriginalNativeConnectionTerminal::Released)
                     .map_err(NativeBody::Open)
             }
@@ -355,7 +487,11 @@ impl OriginalInspectionCustody {
                 body: Some(NativeBody::Terminal(terminal)),
                 reference,
             }),
-            Err(body) => Err(Self { factory, body: Some(body), reference }),
+            Err(body) => Err(Self {
+                factory,
+                body: Some(body),
+                reference,
+            }),
         }
     }
     /// Share only the actual primitive proof owned by the actual native ticket.
@@ -368,12 +504,23 @@ impl OriginalInspectionCustody {
         sql: Arc<dyn lillux_sqlite::SqliteInspectionSqlWork>,
         namespace: lillux::PinnedDirectoryLock,
         database_name: OsString,
-    ) -> std::result::Result<(Option<RuntimeInspectionRelease>, RuntimeInspectionReferenceRelease), Self> {
+    ) -> std::result::Result<
+        (
+            Option<RuntimeInspectionRelease>,
+            RuntimeInspectionReferenceRelease,
+        ),
+        Self,
+    > {
         let reference_ready = match &self.reference {
             InspectionSchemaReference::Closed(reference) => reference
-                .require_original_closed(&self.factory, OriginalNativeDomain::NodeRuntimeSchemaReference)
+                .require_original_closed(
+                    &self.factory,
+                    OriginalNativeDomain::NodeRuntimeSchemaReference,
+                )
                 .is_ok(),
-            InspectionSchemaReference::Released(released) => released.terminal(&self.factory).is_ok(),
+            InspectionSchemaReference::Released(released) => {
+                released.terminal(&self.factory).is_ok()
+            }
             InspectionSchemaReference::Refused(_) => false,
         };
         if !reference_ready {
@@ -386,7 +533,9 @@ impl OriginalInspectionCustody {
                     return Err(self);
                 }
                 let proofs = match terminal {
-                    OriginalNativeConnectionTerminal::Closed(owner) => (owner.inspection_closed(), None),
+                    OriginalNativeConnectionTerminal::Closed(owner) => {
+                        (owner.inspection_closed(), None)
+                    }
                     OriginalNativeConnectionTerminal::Released(owner) => {
                         (owner.inspection_closed(), owner.inspection_released())
                     }
@@ -396,17 +545,31 @@ impl OriginalInspectionCustody {
                 }
                 Some(proofs)
             }
-            Some(NativeBody::Open(_) | NativeBody::Live(_) | NativeBody::Close(_)) => return Err(self),
+            Some(NativeBody::Open(_) | NativeBody::Live(_) | NativeBody::Close(_)) => {
+                return Err(self);
+            }
         };
-        let Self { factory, body, reference } = self;
+        let Self {
+            factory,
+            body,
+            reference,
+        } = self;
         let reference = match reference {
-            InspectionSchemaReference::Closed(reference) => RuntimeInspectionReferenceRelease::Closed(reference),
-            InspectionSchemaReference::Released(released) => RuntimeInspectionReferenceRelease::Released {
-                factory: Arc::clone(&factory),
-                released,
-            },
+            InspectionSchemaReference::Closed(reference) => {
+                RuntimeInspectionReferenceRelease::Closed(reference)
+            }
+            InspectionSchemaReference::Released(released) => {
+                RuntimeInspectionReferenceRelease::Released {
+                    factory: Arc::clone(&factory),
+                    released,
+                }
+            }
             InspectionSchemaReference::Refused(failure) => {
-                return Err(Self { factory, body, reference: InspectionSchemaReference::Refused(failure) });
+                return Err(Self {
+                    factory,
+                    body,
+                    reference: InspectionSchemaReference::Refused(failure),
+                });
             }
         };
         let (terminal, (closed, released)) = match (body, proofs) {
@@ -415,8 +578,25 @@ impl OriginalInspectionCustody {
             _ => unreachable!("main terminal and proofs checked above"),
         };
         if let Some(proof) = closed {
-            return Ok((Some(RuntimeInspectionRelease::Closed(Arc::new(
-                SqliteInspectionClosed {
+            return Ok((
+                Some(RuntimeInspectionRelease::Closed(Arc::new(
+                    SqliteInspectionClosed {
+                        process: std::process::id(),
+                        proof,
+                        native: std::sync::Mutex::new(Some((factory, terminal))),
+                        lease,
+                        sql,
+                        database_name,
+                        _namespace: Some(namespace),
+                    },
+                ))),
+                reference,
+            ));
+        }
+        let proof = released.expect("released inspection proof checked above");
+        Ok((
+            Some(RuntimeInspectionRelease::Acquisition(
+                SqliteInspectionAcquisitionReleased {
                     process: std::process::id(),
                     proof,
                     native: std::sync::Mutex::new(Some((factory, terminal))),
@@ -425,20 +605,9 @@ impl OriginalInspectionCustody {
                     database_name,
                     _namespace: Some(namespace),
                 },
-            ))), reference));
-        }
-        let proof = released.expect("released inspection proof checked above");
-        Ok((Some(RuntimeInspectionRelease::Acquisition(
-            SqliteInspectionAcquisitionReleased {
-                process: std::process::id(),
-                proof,
-                native: std::sync::Mutex::new(Some((factory, terminal))),
-                lease,
-                sql,
-                database_name,
-                _namespace: Some(namespace),
-            },
-        )), reference))
+            )),
+            reference,
+        ))
     }
 }
 
@@ -467,7 +636,23 @@ pub(crate) fn retain_copy_inspection_terminal(
         }
     };
     if let Some(proof) = closed {
-        return Ok(RuntimeInspectionRelease::Closed(Arc::new(SqliteInspectionClosed {
+        return Ok(RuntimeInspectionRelease::Closed(Arc::new(
+            SqliteInspectionClosed {
+                process: std::process::id(),
+                proof,
+                native: std::sync::Mutex::new(Some((factory, terminal))),
+                lease,
+                sql,
+                database_name,
+                _namespace: Some(namespace),
+            },
+        )));
+    }
+    let Some(proof) = released else {
+        return Err((factory, terminal));
+    };
+    Ok(RuntimeInspectionRelease::Acquisition(
+        SqliteInspectionAcquisitionReleased {
             process: std::process::id(),
             proof,
             native: std::sync::Mutex::new(Some((factory, terminal))),
@@ -475,20 +660,8 @@ pub(crate) fn retain_copy_inspection_terminal(
             sql,
             database_name,
             _namespace: Some(namespace),
-        })));
-    }
-    let Some(proof) = released else {
-        return Err((factory, terminal));
-    };
-    Ok(RuntimeInspectionRelease::Acquisition(SqliteInspectionAcquisitionReleased {
-        process: std::process::id(),
-        proof,
-        native: std::sync::Mutex::new(Some((factory, terminal))),
-        lease,
-        sql,
-        database_name,
-        _namespace: Some(namespace),
-    }))
+        },
+    ))
 }
 
 /// The inspection phase's schema reference after its phase ended: closed,
@@ -542,14 +715,21 @@ pub(super) fn close_inspection(
     sql: Arc<dyn lillux_sqlite::SqliteInspectionSqlWork>,
     namespace: lillux::PinnedDirectoryLock,
     name: OsString,
-) -> Result<(Arc<SqliteInspectionClosed>, sqlite_schema::ClosedNativeSchemaSqlReference)> {
+) -> Result<(
+    Arc<SqliteInspectionClosed>,
+    sqlite_schema::ClosedNativeSchemaSqlReference,
+)> {
     let reference = InspectionSchemaReference::Closed(schema_reference);
     let terminal = match owner.close() {
         Ok(proof) => OriginalNativeConnectionTerminal::Closed(proof),
         Err(owner) => {
             return Err(failure(
                 anyhow!("original Runtime inspection close pending"),
-                OriginalInspectionCustody { factory, body: Some(NativeBody::Close(owner)), reference },
+                OriginalInspectionCustody {
+                    factory,
+                    body: Some(NativeBody::Close(owner)),
+                    reference,
+                },
                 copy,
                 sql,
                 namespace,
@@ -598,7 +778,8 @@ struct RuntimeInspectionUnexpectedRelease {
 }
 impl std::fmt::Debug for RuntimeInspectionUnexpectedRelease {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RuntimeInspectionUnexpectedRelease").finish_non_exhaustive()
+        f.debug_struct("RuntimeInspectionUnexpectedRelease")
+            .finish_non_exhaustive()
     }
 }
 impl std::fmt::Display for RuntimeInspectionUnexpectedRelease {
@@ -656,7 +837,11 @@ impl RuntimeDb {
             // destination holds only independent runtime/source descriptors and
             // the source namespace, never the copy, SQL or copy-work owners.
             let reference_inputs = issue_inspection_reference_inputs(
-                &factory, &authority.runtime, &authority.source, &directory_lock)?;
+                &factory,
+                &authority.runtime,
+                &authority.source,
+                &directory_lock,
+            )?;
             let schema_reference = match sqlite_schema::prepare_native_schema_sql_reference(
                 factory.clone(),
                 reference_inputs,
@@ -770,7 +955,11 @@ impl RuntimeDb {
                 }
             };
             Ok(Self {
-                conn: RuntimeConnection::OriginalInspection { owner, factory, schema_reference },
+                conn: RuntimeConnection::OriginalInspection {
+                    owner,
+                    factory,
+                    schema_reference,
+                },
                 incarnation: RuntimeDbIncarnation(Arc::new(PrivateRuntimeDbIncarnation)),
                 reset_target: Some(inspection_path),
                 original_deadline_active: std::cell::Cell::new(false),
@@ -798,7 +987,13 @@ mod outside_quote_tests {
         let continuation_bytes = size_of::<InspectionOutsideContinuation>()
             + size_of::<lillux_sqlite::OriginalDestinationOutsideCustody>()
             + 4 * size_of::<lillux_sqlite::OriginalDestinationPhysicalSource>();
-        assert_eq!(continuation, OutsideWork { bytes: continuation_bytes as u64, steps: 24 });
+        assert_eq!(
+            continuation,
+            OutsideWork {
+                bytes: continuation_bytes as u64,
+                steps: 24
+            }
+        );
     }
 }
 
@@ -811,33 +1006,98 @@ mod reference_destination_tests {
     /// the lease matters here, no copy or SQL runs.
     struct InertWork;
     impl lillux_sqlite::SqliteInspectionCopyWork for InertWork {
-        fn require_original_native_factory(&self, _: &Arc<OriginalNativeFactory>) -> Result<()> { anyhow::bail!("inert") }
-        fn begin_copy_production(&self, _: &lillux::PinnedDirectory, _: &lillux::PinnedDirectory, _: &std::ffi::OsStr)
-            -> Result<lillux_sqlite::SqliteInspectionProductionPermit> { anyhow::bail!("inert") }
-        fn issue_sql_work(self: Arc<Self>, _: &lillux::PinnedDirectory)
-            -> Result<Arc<dyn lillux_sqlite::SqliteInspectionSqlWork>> { anyhow::bail!("inert") }
-        fn create_destination(self: Arc<Self>, _: &lillux::PinnedDirectory, _: &std::ffi::OsStr)
-            -> Result<lillux_sqlite::SqliteInspectionCopyDestination> { anyhow::bail!("inert") }
-        fn admit_role(&self, _: &lillux::PinnedDirectory, _: &lillux::PinnedDirectory, _: &std::ffi::OsStr,
-            _: Option<&lillux_sqlite::SqliteRoleIdentity>, _: u64, _: u64) -> Result<()> { anyhow::bail!("inert") }
-        fn retain_destination_role(&self, _: &lillux::PinnedDirectory, _: &std::ffi::OsStr,
-            _: Arc<lillux_sqlite::RetainedSqliteDestinationRole>) -> Result<()> { anyhow::bail!("inert") }
-        fn cleanup_checkpoint(&self) -> Result<std::time::Duration> { anyhow::bail!("inert") }
-        fn remaining_cleanup_steps(&self) -> Result<u64> { anyhow::bail!("inert") }
-        fn debit_destination_retirement(&self, _: u32) -> Result<()> { anyhow::bail!("inert") }
-        fn debit_cleanup_steps(&self, _: u64) -> Result<()> { anyhow::bail!("inert") }
-        fn retained_destination_role(&self, _: &lillux::PinnedDirectory, _: &std::ffi::OsStr)
-            -> Result<Option<Arc<lillux_sqlite::RetainedSqliteDestinationRole>>> { anyhow::bail!("inert") }
-        fn checkpoint(&self) -> Result<()> { anyhow::bail!("inert") }
-        fn remaining_service_window(&self) -> Result<std::time::Duration> { anyhow::bail!("inert") }
+        fn require_original_native_factory(&self, _: &Arc<OriginalNativeFactory>) -> Result<()> {
+            anyhow::bail!("inert")
+        }
+        fn begin_copy_production(
+            &self,
+            _: &lillux::PinnedDirectory,
+            _: &lillux::PinnedDirectory,
+            _: &std::ffi::OsStr,
+        ) -> Result<lillux_sqlite::SqliteInspectionProductionPermit> {
+            anyhow::bail!("inert")
+        }
+        fn issue_sql_work(
+            self: Arc<Self>,
+            _: &lillux::PinnedDirectory,
+        ) -> Result<Arc<dyn lillux_sqlite::SqliteInspectionSqlWork>> {
+            anyhow::bail!("inert")
+        }
+        fn create_destination(
+            self: Arc<Self>,
+            _: &lillux::PinnedDirectory,
+            _: &std::ffi::OsStr,
+        ) -> Result<lillux_sqlite::SqliteInspectionCopyDestination> {
+            anyhow::bail!("inert")
+        }
+        fn admit_role(
+            &self,
+            _: &lillux::PinnedDirectory,
+            _: &lillux::PinnedDirectory,
+            _: &std::ffi::OsStr,
+            _: Option<&lillux_sqlite::SqliteRoleIdentity>,
+            _: u64,
+            _: u64,
+        ) -> Result<()> {
+            anyhow::bail!("inert")
+        }
+        fn retain_destination_role(
+            &self,
+            _: &lillux::PinnedDirectory,
+            _: &std::ffi::OsStr,
+            _: Arc<lillux_sqlite::RetainedSqliteDestinationRole>,
+        ) -> Result<()> {
+            anyhow::bail!("inert")
+        }
+        fn cleanup_checkpoint(&self) -> Result<std::time::Duration> {
+            anyhow::bail!("inert")
+        }
+        fn remaining_cleanup_steps(&self) -> Result<u64> {
+            anyhow::bail!("inert")
+        }
+        fn debit_destination_retirement(&self, _: u32) -> Result<()> {
+            anyhow::bail!("inert")
+        }
+        fn debit_cleanup_steps(&self, _: u64) -> Result<()> {
+            anyhow::bail!("inert")
+        }
+        fn retained_destination_role(
+            &self,
+            _: &lillux::PinnedDirectory,
+            _: &std::ffi::OsStr,
+        ) -> Result<Option<Arc<lillux_sqlite::RetainedSqliteDestinationRole>>> {
+            anyhow::bail!("inert")
+        }
+        fn checkpoint(&self) -> Result<()> {
+            anyhow::bail!("inert")
+        }
+        fn remaining_service_window(&self) -> Result<std::time::Duration> {
+            anyhow::bail!("inert")
+        }
     }
     impl lillux_sqlite::SqliteInspectionSqlWork for InertWork {
-        fn begin_native_production(&self, _: &lillux::PinnedDirectory, _: &std::ffi::OsStr)
-            -> Result<lillux_sqlite::SqliteInspectionProductionPermit> { anyhow::bail!("inert") }
-        fn require_copy_work(&self, _: &Arc<dyn lillux_sqlite::SqliteInspectionCopyWork>) -> Result<()> { anyhow::bail!("inert") }
-        fn require_destination(&self, _: &lillux::PinnedDirectory) -> Result<()> { anyhow::bail!("inert") }
-        fn checkpoint(&self) -> Result<()> { anyhow::bail!("inert") }
-        fn debit_vm_steps(&self, _: u64) -> Result<()> { anyhow::bail!("inert") }
+        fn begin_native_production(
+            &self,
+            _: &lillux::PinnedDirectory,
+            _: &std::ffi::OsStr,
+        ) -> Result<lillux_sqlite::SqliteInspectionProductionPermit> {
+            anyhow::bail!("inert")
+        }
+        fn require_copy_work(
+            &self,
+            _: &Arc<dyn lillux_sqlite::SqliteInspectionCopyWork>,
+        ) -> Result<()> {
+            anyhow::bail!("inert")
+        }
+        fn require_destination(&self, _: &lillux::PinnedDirectory) -> Result<()> {
+            anyhow::bail!("inert")
+        }
+        fn checkpoint(&self) -> Result<()> {
+            anyhow::bail!("inert")
+        }
+        fn debit_vm_steps(&self, _: u64) -> Result<()> {
+            anyhow::bail!("inert")
+        }
     }
 
     #[test]
@@ -846,21 +1106,29 @@ mod reference_destination_tests {
         let source = lillux::PinnedDirectory::open(dir.path()).unwrap().unwrap();
         let namespace = source.lock_exclusive().unwrap();
         std::fs::create_dir(dir.path().join("scratch")).unwrap();
-        let scratch = Arc::new(lillux::PinnedDirectory::open(&dir.path().join("scratch")).unwrap().unwrap());
+        let scratch = Arc::new(
+            lillux::PinnedDirectory::open(&dir.path().join("scratch"))
+                .unwrap()
+                .unwrap(),
+        );
         let copy = Arc::new(SqliteInspectionCopyLease {
             cleanup: std::sync::Mutex::new(None),
             _source_pins: Vec::new(),
             source_receipts: std::sync::OnceLock::new(),
             _guard: crate::temp_dir_guard::TempDirGuard::new_pinned(
-                source.try_clone().unwrap(), OsString::from("scratch"), scratch),
+                source.try_clone().unwrap(),
+                OsString::from("scratch"),
+                scratch,
+            ),
             _source_lock: namespace.clone(),
             _copy_work: Arc::new(InertWork),
         });
         let sql: Arc<dyn lillux_sqlite::SqliteInspectionSqlWork> = Arc::new(InertWork);
         let host = TestNativeHost::acquire();
 
-        let inputs = issue_inspection_reference_inputs(host.factory(), &source, &source, &namespace)
-            .expect("inspection reference inputs");
+        let inputs =
+            issue_inspection_reference_inputs(host.factory(), &source, &source, &namespace)
+                .expect("inspection reference inputs");
         let reference = match sqlite_schema::prepare_native_schema_sql_reference(
             Arc::clone(host.factory()),
             inputs,
@@ -871,7 +1139,11 @@ mod reference_destination_tests {
             Err(failure) => panic!("inspection reference refused under the gate: {failure}"),
         };
         // The live reference terminal holds no alias of the copy lease.
-        assert_eq!(Arc::strong_count(&copy), 1, "copy lease stays unique while the reference lives");
+        assert_eq!(
+            Arc::strong_count(&copy),
+            1,
+            "copy lease stays unique while the reference lives"
+        );
 
         // A phase whose main owner never opened releases its reference alone,
         // and the paid ticket reaches the census.
@@ -881,13 +1153,19 @@ mod reference_destination_tests {
             reference: InspectionSchemaReference::Closed(reference),
         };
         let (release, reference) = match custody.into_release(
-            copy, sql, namespace.clone(), OsString::from("runtime.sqlite3"))
-        {
+            copy,
+            sql,
+            namespace.clone(),
+            OsString::from("runtime.sqlite3"),
+        ) {
             Ok(released) => released,
             Err(_) => panic!("reference-only phase must release its reference"),
         };
         assert!(release.is_none(), "no main owner, no inspection release");
-        let terminal = reference.census_terminal().unwrap().expect("paid reference ticket");
+        let terminal = reference
+            .census_terminal()
+            .unwrap()
+            .expect("paid reference ticket");
         host.retain_terminal(terminal);
         drop(reference);
         assert_eq!(host.ticket_census(), (1, 1));

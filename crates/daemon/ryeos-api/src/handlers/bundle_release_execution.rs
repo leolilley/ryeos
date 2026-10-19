@@ -840,15 +840,16 @@ pub(crate) async fn execute_protected_qualification(
                 |status| {
                     status.is_terminal() && status != ryeos_state::objects::ThreadStatus::Continued
                 },
-            ) {
-                let envelope = json!({"thread":{"thread_id": thread_id}});
-                return normalize_retained_dispatch_terminal(envelope, Some(&thread_id), |id| {
-                    Ok(state
-                        .threads
-                        .build_execute_result(id)?
-                        .map(|terminal| (thread.status.clone(), terminal)))
-                });
-            }
+            )
+        {
+            let envelope = json!({"thread":{"thread_id": thread_id}});
+            return normalize_retained_dispatch_terminal(envelope, Some(&thread_id), |id| {
+                Ok(state
+                    .threads
+                    .build_execute_result(id)?
+                    .map(|terminal| (thread.status.clone(), terminal)))
+            });
+        }
         anyhow::ensure!(
             tokio::time::Instant::now() < deadline,
             "protected release qualification did not reach a terminal within 30 minutes; query launch/status for {launch_id}"
@@ -1110,7 +1111,9 @@ mod tests {
     async fn cancelled_release_request_retains_snapshot_until_protected_refusal_settles() {
         use base64::Engine as _;
         use ryeos_app::handler_context::HandlerContext;
-        use ryeos_node_runtime::identity::{AuthorizedKeyPrincipalClass, NodeIdentity, WildcardPolicy};
+        use ryeos_node_runtime::identity::{
+            AuthorizedKeyPrincipalClass, NodeIdentity, WildcardPolicy,
+        };
         use ryeos_state::external_content::products::transfer::ProductWitnessSource;
         use std::{sync::Arc, time::Duration};
 
@@ -1228,9 +1231,11 @@ mod tests {
                 .state_store
                 .launch_planning_status(&launch_id, &context.fingerprint)
                 .unwrap()
-                && status.status == "failed" && !staged_contains_snapshot() {
-                    break status;
-                }
+                && status.status == "failed"
+                && !staged_contains_snapshot()
+            {
+                break status;
+            }
             assert!(
                 tokio::time::Instant::now() < deadline,
                 "protected refusal did not settle and release the staged snapshot"

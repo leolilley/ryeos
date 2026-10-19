@@ -57,16 +57,18 @@ pub async fn try_offline_dispatch(
     // Freeze one registered generation before consuming command or bundle
     // records. The caller's earlier snapshot is only a fast dispatch hint; a
     // standalone execution re-verifies it with the retained trust snapshot.
-    let node_config = ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
-        app_root: Some(app_root.to_path_buf()),
-        ..Default::default()
-    })
-    .map_err(local_err)?;
-    let isolation =
-        ryeos_node_runtime::engine_init::load_locked_registered_definition_isolation(&node_config.app_root)
-            .map_err(|error| CliError::Local {
-                detail: format!("load node isolation policy: {error:#}"),
-            })?;
+    let node_config =
+        ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
+            app_root: Some(app_root.to_path_buf()),
+            ..Default::default()
+        })
+        .map_err(local_err)?;
+    let isolation = ryeos_node_runtime::engine_init::load_locked_registered_definition_isolation(
+        &node_config.app_root,
+    )
+    .map_err(|error| CliError::Local {
+        detail: format!("load node isolation policy: {error:#}"),
+    })?;
     // One generation operation spans descriptor resolution, binary capture,
     // and any direct client/tool exec handoff. A TUI/help launch must never
     // resolve its surface under one installed generation and execute a client
@@ -176,8 +178,10 @@ pub async fn try_offline_dispatch(
             .is_some()
     {
         let execution_isolation =
-            ryeos_node_runtime::engine_init::load_locked_registered_isolation(&node_config.app_root)
-                .map_err(local_err)?;
+            ryeos_node_runtime::engine_init::load_locked_registered_isolation(
+                &node_config.app_root,
+            )
+            .map_err(local_err)?;
         let execution_engine = boot_engine(
             &node_config,
             project_path,
@@ -1718,8 +1722,10 @@ else:
     fn registered_definition_discovery_retains_generation_fencing() {
         let fixture = Fixture::new();
         let definitions =
-            ryeos_node_runtime::engine_init::load_locked_registered_definition_isolation(&fixture.system)
-                .unwrap();
+            ryeos_node_runtime::engine_init::load_locked_registered_definition_isolation(
+                &fixture.system,
+            )
+            .unwrap();
         let guard = definitions.begin_registered_generation_operation().unwrap();
         assert!(definitions.registered_generation_node_trust().is_some());
         assert!(
@@ -1734,7 +1740,8 @@ else:
                 .is_err()
         );
         let execution =
-            ryeos_node_runtime::engine_init::load_locked_registered_isolation(&fixture.system).unwrap();
+            ryeos_node_runtime::engine_init::load_locked_registered_isolation(&fixture.system)
+                .unwrap();
         assert_eq!(definitions.digest(), execution.digest());
         definitions.ensure_registered_generation_current().unwrap();
         drop(guard);

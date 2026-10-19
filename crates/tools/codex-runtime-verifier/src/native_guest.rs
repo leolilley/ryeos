@@ -329,7 +329,7 @@ pub fn run_production_probe(encoded_challenge: &str) -> Result<()> {
         0o400,
         crate::VERIFIER_TEMP_PURPOSE,
     )?
-        .context("consumer native observation already exists")?;
+    .context("consumer native observation already exists")?;
     Ok(())
 }
 
@@ -710,15 +710,15 @@ pub(crate) fn run_prepared_protocol(
                 && let Some(receipt) = held
                     .try_observe_applied_launch()
                     .map_err(anyhow::Error::msg)?
-                {
-                    ensure!(
-                        receipt
-                            .matches_request(&expected_native)
-                            .map_err(anyhow::Error::msg)?,
-                        "native guest applied launch differs from signed request"
-                    );
-                    applied_launch = Some(receipt);
-                }
+            {
+                ensure!(
+                    receipt
+                        .matches_request(&expected_native)
+                        .map_err(anyhow::Error::msg)?,
+                    "native guest applied launch differs from signed request"
+                );
+                applied_launch = Some(receipt);
+            }
             if pending.is_empty() {
                 let mut bytes = [0; CHUNK];
                 match input.try_read_chunk(&mut bytes, Some(active)) {
@@ -731,10 +731,7 @@ pub(crate) fn run_prepared_protocol(
                         if matches!(
                             e.kind(),
                             std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
-                        ) =>
-                    {
-                        
-                    }
+                        ) => {}
                     Err(e) => return Err(e).context("read controller protocol"),
                 }
             }
@@ -759,10 +756,7 @@ pub(crate) fn run_prepared_protocol(
                         if matches!(
                             e.kind(),
                             std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
-                        ) =>
-                    {
-                        
-                    }
+                        ) => {}
                     Err(e) => return Err(e.into()),
                 }
                 if offset == pending.len() {
@@ -782,10 +776,7 @@ pub(crate) fn run_prepared_protocol(
                         if matches!(
                             e.kind(),
                             std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
-                        ) =>
-                    {
-                        
-                    }
+                        ) => {}
                     Err(e) => return Err(e.into()),
                 }
             }
@@ -805,10 +796,7 @@ pub(crate) fn run_prepared_protocol(
                         if matches!(
                             e.kind(),
                             std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
-                        ) =>
-                    {
-                        
-                    }
+                        ) => {}
                     Err(e) => return Err(e).context("write controller protocol"),
                 }
             }
@@ -818,10 +806,7 @@ pub(crate) fn run_prepared_protocol(
                     if matches!(
                         e.kind(),
                         std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
-                    ) =>
-                {
-                    
-                }
+                    ) => {}
                 Err(e) => return Err(e.into()),
             }
             ensure!(
@@ -889,8 +874,8 @@ mod tests {
             0o400,
             crate::VERIFIER_TEMP_PURPOSE,
         )
-            .unwrap()
-            .unwrap();
+        .unwrap()
+        .unwrap();
         assert!(capture_requested(&root).unwrap());
 
         let other = tempfile::tempdir().unwrap();
@@ -1030,8 +1015,8 @@ mod tests {
             0o755,
             crate::VERIFIER_TEMP_PURPOSE,
         )
-            .unwrap()
-            .unwrap();
+        .unwrap()
+        .unwrap();
         let members = BTreeMap::from([(
             "bin/fixture".to_owned(),
             Member {

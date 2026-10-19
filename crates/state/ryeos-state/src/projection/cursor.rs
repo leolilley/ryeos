@@ -28,8 +28,8 @@ impl ProjectionDb {
                 &format!("DELETE FROM event_replay_index WHERE thread_id IN ({thread_ids})"),
                 [chain_root_id],
             )?;
-            deleted += connection
-                .execute("DELETE FROM events WHERE chain_root_id=?1", [chain_root_id])?;
+            deleted +=
+                connection.execute("DELETE FROM events WHERE chain_root_id=?1", [chain_root_id])?;
             deleted += connection.execute(
                 "DELETE FROM thread_edges WHERE chain_root_id=?1",
                 [chain_root_id],

@@ -2056,7 +2056,9 @@ fn validate_recorded_invocation(
         .next()
         .flatten()
         .context("recorded remote-worker invocation root is absent")?;
-    let placement = state.state_store.recorded_thread_placement(invocation_root)?;
+    let placement = state
+        .state_store
+        .recorded_thread_placement(invocation_root)?;
     if root.thread_id != invocation_root
         || !recorded_invocation_placement_admitted(&root.thread_id, &root.chain_root_id, &placement)
         || root.item_ref != service_ref
@@ -3049,7 +3051,8 @@ mod tests {
     /// The owner dereferences to the Store and closes it when dropped.
     fn test_state_store(root: &Path) -> ryeos_app::test_support::TestStateStore {
         let identity =
-            ryeos_node_runtime::identity::NodeIdentity::create(&root.join("identity/node-key.pem")).unwrap();
+            ryeos_node_runtime::identity::NodeIdentity::create(&root.join("identity/node-key.pem"))
+                .unwrap();
         let signer = Arc::new(ryeos_app::state_store::NodeIdentitySigner::from_identity(
             &identity,
         ));
@@ -4084,8 +4087,10 @@ mod tests {
         });
         let directory = tempfile::tempdir().unwrap();
         let identity = Arc::new(
-            ryeos_node_runtime::identity::NodeIdentity::create(&directory.path().join("operator.pem"))
-                .unwrap(),
+            ryeos_node_runtime::identity::NodeIdentity::create(
+                &directory.path().join("operator.pem"),
+            )
+            .unwrap(),
         );
         let client = RemoteClient::new(&format!("http://{address}"), "fp:peer", identity);
 

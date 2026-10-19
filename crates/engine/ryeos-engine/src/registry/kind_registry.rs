@@ -1068,8 +1068,9 @@ pub enum ExecutionTargetRequestFormat {
     #[serde(rename = "ryeos.execution_target.v1")]
     CurrentV1,
 }
-fn deserialize_present_request_format<'de, D: serde::Deserializer<'de>>(d: D)
-    -> Result<Option<ExecutionTargetRequestFormat>, D::Error> {
+fn deserialize_present_request_format<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<ExecutionTargetRequestFormat>, D::Error> {
     <ExecutionTargetRequestFormat as serde::Deserialize>::deserialize(d).map(Some)
 }
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1079,7 +1080,11 @@ pub struct ExecutionTargetDecl {
     #[serde(default)]
     pub required: bool,
     pub limits: crate::contracts::ExecutionTargetLimits,
-    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "deserialize_present_request_format")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present_request_format"
+    )]
     pub request_format: Option<ExecutionTargetRequestFormat>,
 }
 
@@ -1365,11 +1370,15 @@ impl ExecutionSchema {
         })
     }
 
-    pub fn project_target_requirement(&self, composed: &Value)
-        -> Result<Option<crate::contracts::ExecutionTargetRequirement>, EngineError> {
+    pub fn project_target_requirement(
+        &self,
+        composed: &Value,
+    ) -> Result<Option<crate::contracts::ExecutionTargetRequirement>, EngineError> {
         let (ordinary, current) = self.project_target_data(composed)?;
         if current.is_some() {
-            return Err(EngineError::SchemaLoaderError { reason: "ordinary projection cannot discard current target request".into() });
+            return Err(EngineError::SchemaLoaderError {
+                reason: "ordinary projection cannot discard current target request".into(),
+            });
         }
         Ok(ordinary)
     }
@@ -1377,7 +1386,13 @@ impl ExecutionSchema {
     pub fn project_target_data(
         &self,
         composed: &Value,
-    ) -> Result<(Option<crate::contracts::ExecutionTargetRequirement>, Option<crate::contracts::CurrentExecutionTargetRequest>), EngineError> {
+    ) -> Result<
+        (
+            Option<crate::contracts::ExecutionTargetRequirement>,
+            Option<crate::contracts::CurrentExecutionTargetRequest>,
+        ),
+        EngineError,
+    > {
         let Some(declaration) = self.target.as_ref() else {
             return Ok((None, None));
         };
@@ -1397,11 +1412,21 @@ impl ExecutionSchema {
             value = next;
         }
         let (target, current) = if declaration.request_format.is_some() {
-            crate::contracts::project_current_target_data(value)
-                .map_err(|error| EngineError::SchemaLoaderError { reason: format!("invalid signed current target: {error}") })?
+            crate::contracts::project_current_target_data(value).map_err(|error| {
+                EngineError::SchemaLoaderError {
+                    reason: format!("invalid signed current target: {error}"),
+                }
+            })?
         } else {
-            (serde_json::from_value::<crate::contracts::ExecutionTargetRequirement>(value.clone())
-                .map_err(|error| EngineError::SchemaLoaderError { reason: format!("invalid signed execution target: {error}") })?, None)
+            (
+                serde_json::from_value::<crate::contracts::ExecutionTargetRequirement>(
+                    value.clone(),
+                )
+                .map_err(|error| EngineError::SchemaLoaderError {
+                    reason: format!("invalid signed execution target: {error}"),
+                })?,
+                None,
+            )
         };
         target
             .validate_against_limits(declaration.limits)
@@ -2309,10 +2334,17 @@ fn parse_kind_schema_content(display: &str, content: &str) -> Result<KindSchema,
     };
     validate_inventory_policy(&inventory_policy, display)?;
 
-    if execution.as_ref().and_then(|e| e.target.as_ref())
+    if execution
+        .as_ref()
+        .and_then(|e| e.target.as_ref())
         .is_some_and(|t| t.request_format.is_some())
-        && resolution.iter().any(|step| matches!(step, ResolutionStepDecl::ResolveExtendsChain { .. })) {
-        return Err(EngineError::SchemaLoaderError { reason: format!("{display}: current target request refuses inherited kind resolution") });
+        && resolution
+            .iter()
+            .any(|step| matches!(step, ResolutionStepDecl::ResolveExtendsChain { .. }))
+    {
+        return Err(EngineError::SchemaLoaderError {
+            reason: format!("{display}: current target request refuses inherited kind resolution"),
+        });
     }
     Ok(KindSchema {
         directory,
@@ -6520,7 +6552,9 @@ metadata:
         assert!(registry.contains("tool") && registry.contains("service"));
 
         // An untrusted trust store refuses the whole load.
-        assert!(KindRegistry::load_base(&[release_root], &TrustStore::from_signers(vec![])).is_err());
+        assert!(
+            KindRegistry::load_base(&[release_root], &TrustStore::from_signers(vec![])).is_err()
+        );
     }
 
     #[test]
@@ -6815,11 +6849,22 @@ mod current_target_declaration_controls {
         let decl: ExecutionTargetDecl = serde_json::from_value(ordinary.clone()).unwrap();
         assert!(decl.request_format.is_none());
         assert_eq!(serde_json::to_value(decl).unwrap(), ordinary);
-        for format in [Value::Null, Value::String("unknown".into()), serde_json::json!({})] {
-            let mut bad = ordinary.clone(); bad["request_format"] = format;
+        for format in [
+            Value::Null,
+            Value::String("unknown".into()),
+            serde_json::json!({}),
+        ] {
+            let mut bad = ordinary.clone();
+            bad["request_format"] = format;
             assert!(serde_json::from_value::<ExecutionTargetDecl>(bad).is_err());
         }
-        let mut current = ordinary; current["request_format"] = Value::String("ryeos.execution_target.v1".into());
-        assert!(serde_json::from_value::<ExecutionTargetDecl>(current).unwrap().request_format.is_some());
+        let mut current = ordinary;
+        current["request_format"] = Value::String("ryeos.execution_target.v1".into());
+        assert!(
+            serde_json::from_value::<ExecutionTargetDecl>(current)
+                .unwrap()
+                .request_format
+                .is_some()
+        );
     }
 }

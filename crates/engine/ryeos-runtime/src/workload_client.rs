@@ -773,9 +773,9 @@ impl WorkloadClientResponseFrame {
                 })
                 || message.len() > MAX_WORKLOAD_CLIENT_ERROR_MESSAGE_BYTES
                 || message.bytes().any(|byte| byte == 0))
-            {
-                anyhow::bail!("workload-client error is not canonical");
-            }
+        {
+            anyhow::bail!("workload-client error is not canonical");
+        }
         let encoded = serde_json::to_vec(self)?;
         if encoded.is_empty() || encoded.len() > MAX_WORKLOAD_CLIENT_FRAME_BYTES {
             anyhow::bail!("workload-client response exceeds its byte bound");

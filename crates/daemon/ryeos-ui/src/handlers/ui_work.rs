@@ -142,9 +142,9 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
             && !placements
                 .iter()
                 .any(|placement| placement.thread.project_root.as_deref() == project_root.to_str())
-            {
-                continue;
-            }
+        {
+            continue;
+        }
         let attention = attention_by_chain
             .remove(&chain_root_id)
             .unwrap_or_default()

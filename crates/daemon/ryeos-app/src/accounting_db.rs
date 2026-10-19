@@ -34,8 +34,8 @@ use std::ffi::OsStr;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension};
@@ -3700,7 +3700,13 @@ impl AccountingDb {
                 destination,
             )
         }?;
-        Ok(Self::open_native(factory, directory.try_clone()?, established, inputs, reference))
+        Ok(Self::open_native(
+            factory,
+            directory.try_clone()?,
+            established,
+            inputs,
+            reference,
+        ))
     }
 
     fn open_native(
@@ -8726,13 +8732,12 @@ impl AccountingDb {
                        AND thread_id = ?3 AND state = 'open'
                      ORDER BY launch_generation",
                     )?;
-                    
-                    stmt
-                        .query_map(
-                            rusqlite::params![self.site_id, self.epoch_i64(), placement_thread_id],
-                            |row| row.get::<_, String>(0),
-                        )?
-                        .collect::<std::result::Result<Vec<_>, _>>()?
+
+                    stmt.query_map(
+                        rusqlite::params![self.site_id, self.epoch_i64(), placement_thread_id],
+                        |row| row.get::<_, String>(0),
+                    )?
+                    .collect::<std::result::Result<Vec<_>, _>>()?
                 };
                 let now_ms = wall_clock_ms();
                 for generation in open_generations {
@@ -11393,7 +11398,13 @@ fn load_or_create_credential_binding_key(
     let mut encoded: String = key.iter().map(|byte| format!("{byte:02x}")).collect();
     encoded.push('\n');
     directory
-        .atomic_write_if_same(name, None, encoded.as_bytes(), 0o600, crate::APP_TEMP_PURPOSE)
+        .atomic_write_if_same(
+            name,
+            None,
+            encoded.as_bytes(),
+            0o600,
+            crate::APP_TEMP_PURPOSE,
+        )
         .context("publish accounting credential-binding key")?;
     Ok(key)
 }
@@ -11477,7 +11488,8 @@ pub(crate) unsafe fn offline_unsettled_provider_attempt_count(
             destination,
         )
     }?;
-    let (ledger, opened) = native::AccountingNativeLedger::open(Arc::clone(factory), inputs, reference);
+    let (ledger, opened) =
+        native::AccountingNativeLedger::open(Arc::clone(factory), inputs, reference);
     let counted = opened.and_then(|()| {
         verify()?;
         ledger.with_sql_against_reference(|conn, definition| {
@@ -11498,12 +11510,18 @@ pub(crate) unsafe fn offline_unsettled_provider_attempt_count(
             Ok(_) => error,
             Err(counted) => counted.context(format!("ledger close also refused: {error:#}")),
         };
-        return Err(CarriedOwners::carry(error.context("close accounting ledger after inspection"), ledger));
+        return Err(CarriedOwners::carry(
+            error.context("close accounting ledger after inspection"),
+            ledger,
+        ));
     }
     let terminals = match ledger.into_census(factory) {
         Ok(terminals) => terminals,
         Err((ledger, error)) => {
-            return Err(CarriedOwners::carry(error.context("closed accounting ledger census refused"), ledger));
+            return Err(CarriedOwners::carry(
+                error.context("closed accounting ledger census refused"),
+                ledger,
+            ));
         }
     };
     let mut refused = Vec::new();
@@ -11516,7 +11534,10 @@ pub(crate) unsafe fn offline_unsettled_provider_attempt_count(
     }
     if !refused.is_empty() {
         return Err(CarriedOwners::carry(
-            anyhow::anyhow!("accounting ledger terminal not retained: {}", reasons.join("; ")),
+            anyhow::anyhow!(
+                "accounting ledger terminal not retained: {}",
+                reasons.join("; ")
+            ),
             refused,
         ));
     }
@@ -12417,7 +12438,6 @@ mod tests {
             }
         }
     }
-
 
     #[test]
     fn bounded_resource_operation_uses_shared_account_and_exact_usage() {
@@ -13423,7 +13443,9 @@ mod tests {
                 db.execution_resource_budget_snapshot(EXEC).unwrap(),
                 Some(original)
             );
-            sql(&db, |conn| { conn.execute(mutation, []).unwrap(); });
+            sql(&db, |conn| {
+                conn.execute(mutation, []).unwrap();
+            });
             assert!(
                 db.execution_resource_budget_snapshot(EXEC).is_err(),
                 "{mutation}"
@@ -14153,7 +14175,10 @@ mod tests {
         .unwrap();
         sql(&db, |conn| {
             assert_eq!(
-                db.load_gate(conn, THREAD, GENERATION).unwrap().unwrap().state,
+                db.load_gate(conn, THREAD, GENERATION)
+                    .unwrap()
+                    .unwrap()
+                    .state,
                 "open"
             );
             assert_eq!(
@@ -14390,9 +14415,6 @@ mod tests {
                 .is_err()
         );
     }
-
-
-
 
     #[test]
     fn account_birth_and_gate_are_idempotent_and_fail_closed() {
@@ -15977,8 +15999,6 @@ mod tests {
         assert_healthy_verify(&db);
     }
 
-
-
     #[test]
     fn j4_original_sql_deadline_interrupts_vm_and_restores_handlers() {
         use lillux::time::{Duration, MonotonicDeadline};
@@ -15991,7 +16011,12 @@ mod tests {
         assert!(error.to_string().contains("interrupt") || error.to_string().contains("expired"));
         // A subsequent VM run passes even though the old deadline is expired:
         // the scope restored the debit-only hook.
-        assert_eq!(sql(&db, |conn| conn.query_row("WITH RECURSIVE seq(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM seq WHERE n<1000) SELECT sum(n) FROM seq", [], |row| row.get::<_, i64>(0)).unwrap()), 500500);
+        assert_eq!(
+            sql(&db, |conn| {
+                conn.query_row("WITH RECURSIVE seq(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM seq WHERE n<1000) SELECT sum(n) FROM seq", [], |row| row.get::<_, i64>(0)).unwrap()
+            }),
+            500500
+        );
     }
 
     #[test]

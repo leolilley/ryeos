@@ -49,17 +49,19 @@ pub enum ResumeMode {
     Continuation,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-#[derive(Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum ResumeDisposition {
     #[default]
     ContinueProvider,
     ParseRetainedResponse,
-    AfterSettledToolBatch { turn: u32 },
+    AfterSettledToolBatch {
+        turn: u32,
+    },
     CheckContinuation,
-    FinalizeDirectiveReturn { outputs: Value },
+    FinalizeDirectiveReturn {
+        outputs: Value,
+    },
 }
-
 
 #[derive(Debug, Clone)]
 pub struct StartedToolOccurrence {

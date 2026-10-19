@@ -76,19 +76,19 @@ impl Walker {
             && let Err(error) = self
                 .emit_dispatch_observation(graph_run_id, current, step, &observation)
                 .await
-            {
-                return self
-                    .commit_observation_failure(
-                        graph_run_id,
-                        step,
-                        state,
-                        suppressed_errors,
-                        guard,
-                        inputs,
-                        error,
-                    )
-                    .await;
-            }
+        {
+            return self
+                .commit_observation_failure(
+                    graph_run_id,
+                    step,
+                    state,
+                    suppressed_errors,
+                    guard,
+                    inputs,
+                    error,
+                )
+                .await;
+        }
 
         // State mutation: `assign` was already evaluated in
         // run_action_body (a failure there became a node error

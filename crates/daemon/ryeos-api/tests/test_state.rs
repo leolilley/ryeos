@@ -160,8 +160,8 @@ fn build_live_bundle_engine() -> ryeos_engine::engine::Engine {
             .map(|root| root.join(".ai/node/engine/kinds")),
     );
     kind_roots.push(ryeos_ui_bundle.join(".ai/node/engine/kinds"));
-    let kinds = KindRegistry::load_base(&kind_roots, &trust_store)
-    .expect("load live kind registry");
+    let kinds =
+        KindRegistry::load_base(&kind_roots, &trust_store).expect("load live kind registry");
 
     let mut bundle_roots = vec![core_bundle];
     bundle_roots.extend(workflow_bundles);
@@ -242,8 +242,6 @@ fn build_app_state(
     let test_command_registry =
         Arc::new(ryeos_runtime::CommandRegistry::from_records(&[], &Default::default()).unwrap());
     let test_auth = Arc::new(ryeos_runtime::authorizer::Authorizer::new());
-
-    
 
     AppState {
         config: Arc::new(config),

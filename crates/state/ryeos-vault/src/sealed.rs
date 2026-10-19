@@ -305,9 +305,8 @@ fn toml_quote(s: &str) -> zeroize::Zeroizing<String> {
     } else {
         let mut tmp = std::collections::BTreeMap::new();
         tmp.insert("v", s);
-        let serialized = zeroize::Zeroizing::new(
-            toml::to_string(&tmp).unwrap_or_else(|_| format!("\"{s}\"")),
-        );
+        let serialized =
+            zeroize::Zeroizing::new(toml::to_string(&tmp).unwrap_or_else(|_| format!("\"{s}\"")));
         zeroize::Zeroizing::new(
             serialized
                 .trim()

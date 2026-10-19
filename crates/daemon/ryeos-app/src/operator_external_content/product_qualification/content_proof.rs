@@ -17,11 +17,11 @@ use super::{
 };
 use crate::handler_context::HandlerContext;
 use crate::managed_external_content_operation::AcquisitionMode;
-use ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy;
 use crate::operator_external_content::content_qualification::{
     ContentQualificationLaunchRequest, prepare_source,
 };
 use crate::state::AppState;
+use ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

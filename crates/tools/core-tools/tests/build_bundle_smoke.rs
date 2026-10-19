@@ -381,9 +381,7 @@ const RUNTIME_BINARIES: [(&str, &str); 3] = [
     ("knowledge", "ryeos-knowledge-runtime"),
 ];
 
-fn bundle_manifest_item_hashes(
-    bundle: &Path,
-) -> Option<std::collections::HashMap<String, String>> {
+fn bundle_manifest_item_hashes(bundle: &Path) -> Option<std::collections::HashMap<String, String>> {
     let ref_path = bundle.join(".ai/refs/bundles/manifest");
     if !ref_path.exists() {
         return None; // bundle not built

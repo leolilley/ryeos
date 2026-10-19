@@ -15,7 +15,8 @@ use serde::{Deserialize, Serialize};
 
 use super::creation_evidence::{CreatedDirectoryRecord, evidence_name};
 use super::inspection_destination::{
-    InspectionDestinationPlan, OriginalInspectionMode, OriginalInspectionPlan, destination_plans, validate_destinations,
+    InspectionDestinationPlan, OriginalInspectionMode, OriginalInspectionPlan, destination_plans,
+    validate_destinations,
 };
 use super::inspection_plan::{
     InspectionSourcePlan, OperationalSourcePins, OperationalSourcePlan, capture_sources,
@@ -89,21 +90,38 @@ impl ClaimRecord {
     /// Authenticate one signed reservation. A reservation under a retired
     /// schema is refused by name, before its exact shape is decoded.
     fn verified(bytes: &[u8], identity: &NodeIdentity) -> Result<Self> {
-        ensure!(!bytes.is_empty() && bytes.len() <= MAX_RECORD_BYTES,
-            "offline quota claim exceeds record bound");
+        ensure!(
+            !bytes.is_empty() && bytes.len() <= MAX_RECORD_BYTES,
+            "offline quota claim exceeds record bound"
+        );
         let raw = std::str::from_utf8(bytes)?;
-        let (body, header) = lillux::signature::strip_canonical_signature_with_envelope(raw, "#", None, false)?;
+        let (body, header) =
+            lillux::signature::strip_canonical_signature_with_envelope(raw, "#", None, false)?;
         let header = header.context("offline quota claim is unsigned")?;
-        ensure!(lillux::signature::is_valid_signature_for(
-            &header.content_hash, &header.signature_b64, &header.signer_fingerprint,
-            &body, identity.verifying_key(), identity.fingerprint()),
-            "offline quota claim signature is invalid");
-        super::creation_evidence::require_current_record(&body, "quota claim", CLAIM_SCHEMA, CLAIM_PURPOSE)?;
+        ensure!(
+            lillux::signature::is_valid_signature_for(
+                &header.content_hash,
+                &header.signature_b64,
+                &header.signer_fingerprint,
+                &body,
+                identity.verifying_key(),
+                identity.fingerprint()
+            ),
+            "offline quota claim signature is invalid"
+        );
+        super::creation_evidence::require_current_record(
+            &body,
+            "quota claim",
+            CLAIM_SCHEMA,
+            CLAIM_PURPOSE,
+        )?;
         let record: Self = serde_json::from_str(&body)?;
         record.validate()?;
-        ensure!(record.signer == identity.fingerprint()
-            && lillux::canonical_json(&serde_json::to_value(&record)?)? == body,
-            "offline quota claim has foreign signer or noncanonical body");
+        ensure!(
+            record.signer == identity.fingerprint()
+                && lillux::canonical_json(&serde_json::to_value(&record)?)? == body,
+            "offline quota claim has foreign signer or noncanonical body"
+        );
         Ok(record)
     }
     fn validate(&self) -> Result<()> {
@@ -141,7 +159,8 @@ impl ClaimRecord {
                 .bytes(),
         )?;
         ensure!(
-            host_bytes.checked_add(self.reserved.max_native_storage_bytes)
+            host_bytes
+                .checked_add(self.reserved.max_native_storage_bytes)
                 .is_some_and(|bytes| bytes <= self.reserved.max_memory_bytes),
             "offline claim memory cannot hold the host region and native arena"
         );
@@ -190,7 +209,10 @@ impl StaleReservation {
     /// Authenticate one stale reservation as this node's current-schema
     /// record.
     pub(super) fn verified(bytes: &[u8], identity: &NodeIdentity) -> Result<Self> {
-        Ok(Self { record: ClaimRecord::verified(bytes, identity)?, sha256: lillux::sha256_hex(bytes) })
+        Ok(Self {
+            record: ClaimRecord::verified(bytes, identity)?,
+            sha256: lillux::sha256_hex(bytes),
+        })
     }
 
     pub(super) fn operation_id(&self) -> &str {
@@ -237,7 +259,11 @@ impl StaleReservation {
 
     /// The creation witness must be this reservation's own, for the
     /// destination `directory`.
-    pub(super) fn require_witness(&self, evidence: &CreatedDirectoryRecord, directory: &str) -> Result<()> {
+    pub(super) fn require_witness(
+        &self,
+        evidence: &CreatedDirectoryRecord,
+        directory: &str,
+    ) -> Result<()> {
         let index = self
             .record
             .destinations
@@ -252,7 +278,8 @@ impl StaleReservation {
                 && evidence.clock_binding == self.record.clock_binding
                 && evidence.source_purpose == self.record.sources[index].purpose
                 && evidence.destination_name == directory
-                && serde_json::to_string(&evidence.parent_identity)? == self.record.copy_root_identity,
+                && serde_json::to_string(&evidence.parent_identity)?
+                    == self.record.copy_root_identity,
             "creation witness differs from its stale reservation"
         );
         Ok(())
@@ -271,7 +298,9 @@ pub(super) fn fixture_signed_reservation(
     quota: &OfflineResetQuota,
 ) -> Vec<u8> {
     let [app_root, runtime, copy_root] = roots;
-    let json = |directory: &lillux::PinnedDirectory| serde_json::to_string(&directory.identity().unwrap()).unwrap();
+    let json = |directory: &lillux::PinnedDirectory| {
+        serde_json::to_string(&directory.identity().unwrap()).unwrap()
+    };
     let sources = ["runtime", "scheduler"].map(|purpose| InspectionSourcePlan {
         purpose: purpose.into(),
         directory_identity: json(runtime),
@@ -339,7 +368,10 @@ impl Drop for FixtureLiveClaim {
 /// Lock taken by a native service boundary check. A lock momentarily held by
 /// another thread refuses only this call and does not latch service refusal;
 /// a poisoned lock leaves its state indeterminate and is a fact refusal.
-fn boundary_lock<'a, T>(lock: &'a Mutex<T>, what: &'static str) -> Result<std::sync::MutexGuard<'a, T>> {
+fn boundary_lock<'a, T>(
+    lock: &'a Mutex<T>,
+    what: &'static str,
+) -> Result<std::sync::MutexGuard<'a, T>> {
     lock.try_lock().map_err(|error| match error {
         std::sync::TryLockError::WouldBlock => {
             anyhow::Error::new(lillux_sqlite::NativeCheckContended).context(what)
@@ -406,7 +438,9 @@ pub(super) struct OriginalQuotaClaim {
 static LIVE_CLAIMS: Mutex<Vec<(lillux::PinnedDirectoryIdentity, usize)>> = Mutex::new(Vec::new());
 
 fn register_live_claim(ledger: lillux::PinnedDirectoryIdentity) {
-    let mut live = LIVE_CLAIMS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut live = LIVE_CLAIMS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     match live.iter_mut().find(|(identity, _)| *identity == ledger) {
         Some((_, count)) => *count += 1,
         None => live.push((ledger, 1)),
@@ -414,7 +448,9 @@ fn register_live_claim(ledger: lillux::PinnedDirectoryIdentity) {
 }
 
 fn deregister_live_claim(ledger: &lillux::PinnedDirectoryIdentity) {
-    let mut live = LIVE_CLAIMS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut live = LIVE_CLAIMS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(at) = live.iter().position(|(identity, _)| identity == ledger) {
         live[at].1 -= 1;
         if live[at].1 == 0 {
@@ -538,12 +574,18 @@ impl OriginalSettlementAdmission {
             .phase
             .try_lock()
             .map_err(|_| anyhow::anyhow!("reservation release phase busy or poisoned"))?;
-        let next = from.next().context("reservation release is already unlinked")?;
+        let next = from
+            .next()
+            .context("reservation release is already unlinked")?;
         if *phase == next {
             // An earlier attempt of the same step already advanced it.
             return Ok(());
         }
-        ensure!(*phase == from, "reservation release phase is {:?}, not {from:?}", *phase);
+        ensure!(
+            *phase == from,
+            "reservation release phase is {:?}, not {from:?}",
+            *phase
+        );
         *phase = next;
         Ok(())
     }
@@ -629,11 +671,15 @@ impl OriginalSettlementAdmission {
                     // The released record's own unlink is in progress, so its
                     // name may already be gone; the reservation and the
                     // disposition it follows must be.
-                    let disposed =
-                        super::inspection_destination::disposition_name(&self.claim.record.operation_id);
+                    let disposed = super::inspection_destination::disposition_name(
+                        &self.claim.record.operation_id,
+                    );
                     for name in [self.original.reservation_name.as_str(), disposed.as_str()] {
                         ensure!(
-                            self.claim.ledger.entry_no_follow(OsStr::new(name))?.is_none(),
+                            self.claim
+                                .ledger
+                                .entry_no_follow(OsStr::new(name))?
+                                .is_none(),
                             "released record unlink began with ledger coordinate `{name}` present"
                         );
                     }
@@ -658,11 +704,19 @@ impl OriginalSettlementAdmission {
                 self.released_publication()?
                     .original_retirement_receipt()?
                     .context("unlinked released record descriptor was not retired")?;
-                let disposed =
-                    super::inspection_destination::disposition_name(&self.claim.record.operation_id);
-                for name in [self.original.reservation_name.as_str(), disposed.as_str(), released_name.as_str()] {
+                let disposed = super::inspection_destination::disposition_name(
+                    &self.claim.record.operation_id,
+                );
+                for name in [
+                    self.original.reservation_name.as_str(),
+                    disposed.as_str(),
+                    released_name.as_str(),
+                ] {
                     ensure!(
-                        self.claim.ledger.entry_no_follow(OsStr::new(name))?.is_none(),
+                        self.claim
+                            .ledger
+                            .entry_no_follow(OsStr::new(name))?
+                            .is_none(),
                         "unlinked reservation release left ledger coordinate `{name}`"
                     );
                 }
@@ -779,8 +833,14 @@ impl OriginalSettlementAdmission {
     }
 }
 impl lillux_sqlite::OriginalWitnessCleanupWork for OriginalSettlementAdmission {
-    fn retain_original_witness_progress(&self, progress: &lillux_sqlite::OriginalWitnessRemovalProgress) -> Result<()> {
-        ensure!(self.claim.process == std::process::id(), "foreign original account removal observer");
+    fn retain_original_witness_progress(
+        &self,
+        progress: &lillux_sqlite::OriginalWitnessRemovalProgress,
+    ) -> Result<()> {
+        ensure!(
+            self.claim.process == std::process::id(),
+            "foreign original account removal observer"
+        );
         // Inspection witnesses and the ledger records share this cleanup
         // work. The reservation's own removal is admitted only once the
         // release is committed.
@@ -791,8 +851,14 @@ impl lillux_sqlite::OriginalWitnessCleanupWork for OriginalSettlementAdmission {
         );
         Ok(())
     }
-    fn retain_original_removed_witness(&self, removed: &lillux_sqlite::RemovedOriginalWitnessFile) -> Result<()> {
-        ensure!(self.claim.process == std::process::id(), "foreign original durable removal observer");
+    fn retain_original_removed_witness(
+        &self,
+        removed: &lillux_sqlite::RemovedOriginalWitnessFile,
+    ) -> Result<()> {
+        ensure!(
+            self.claim.process == std::process::id(),
+            "foreign original durable removal observer"
+        );
         ensure!(
             !removed.is_original_owner(&self.reservation_publication)?
                 || self.reservation_unlink_admitted()?,
@@ -801,16 +867,25 @@ impl lillux_sqlite::OriginalWitnessCleanupWork for OriginalSettlementAdmission {
         Ok(())
     }
     fn prepay_original_removal_parent(&self, bytes: u64, steps: u64) -> Result<()> {
-        ensure!(bytes > 0 && steps == 2, "invalid original witness parent quote");
+        ensure!(
+            bytes > 0 && steps == 2,
+            "invalid original witness parent quote"
+        );
         self.debit_original(steps)?;
-        let mut used = self.claim.copy_usage.try_lock()
-            .map_err(|_| anyhow::anyhow!("original witness parent memory debit busy or poisoned"))?;
-        let memory = used.buffer_bytes.checked_add(bytes)
+        let mut used = self.claim.copy_usage.try_lock().map_err(|_| {
+            anyhow::anyhow!("original witness parent memory debit busy or poisoned")
+        })?;
+        let memory = used
+            .buffer_bytes
+            .checked_add(bytes)
             .context("original witness parent memory overflow")?;
-        ensure!(memory.checked_add(used.native_storage_bytes)
-            .and_then(|total| total.checked_add(used.host_region_bytes))
-            .is_some_and(|total| total <= self.claim.record.reserved.max_memory_bytes),
-            "original witness parent exceeds same signed memory envelope");
+        ensure!(
+            memory
+                .checked_add(used.native_storage_bytes)
+                .and_then(|total| total.checked_add(used.host_region_bytes))
+                .is_some_and(|total| total <= self.claim.record.reserved.max_memory_bytes),
+            "original witness parent exceeds same signed memory envelope"
+        );
         used.buffer_bytes = memory;
         drop(used);
         self.checkpoint_original()
@@ -882,15 +957,12 @@ impl OriginalSettlementAdmission {
             let coordinate = std::ffi::OsString::from(name);
             self.debit_original(1)?;
             publication.attempted = true;
-            match self.claim
-                .ledger
-                .atomic_create_regular(
-                    OsStr::new(name),
-                    signed,
-                    0o600,
-                    crate::execution_history_reset::RESET_TEMP_PURPOSE,
-                )
-            {
+            match self.claim.ledger.atomic_create_regular(
+                OsStr::new(name),
+                signed,
+                0o600,
+                crate::execution_history_reset::RESET_TEMP_PURPOSE,
+            ) {
                 Ok(Some(file)) => {
                     publication.owner = Some(Arc::new(
                         lillux_sqlite::RetainedOriginalWitnessFile::created(
@@ -931,13 +1003,13 @@ impl OriginalSettlementAdmission {
         self.debit_original(4)?;
         let identity = owner.identity_original()?;
         owner.require_original(&self.claim.ledger, OsStr::new(name))?;
-        self
-            .debit_original_read((MAX_RECORD_BYTES + 1) as u64)?;
+        self.debit_original_read((MAX_RECORD_BYTES + 1) as u64)?;
         ensure!(
             owner.read_original(MAX_RECORD_BYTES)? == signed,
             "original durable record bytes changed"
         );
-        let entry = self.claim
+        let entry = self
+            .claim
             .ledger
             .entry_no_follow(OsStr::new(name))?
             .context("original durable record coordinate disappeared")?;
@@ -985,7 +1057,8 @@ struct OriginalSettlementProgress {
     /// finished; no factory, terminal or region owner is kept here.
     native: Option<OfflineNativeFacts>,
     /// The host's region release fact, captured when the host is released.
-    native_region: Option<lillux_sqlite::original_host_owner::backing::HostStorageRegionReleaseFact>,
+    native_region:
+        Option<lillux_sqlite::original_host_owner::backing::HostStorageRegionReleaseFact>,
 }
 /// One ledger record's unlink: its durable removal, then its descriptor's
 /// retirement.
@@ -1049,16 +1122,25 @@ impl std::error::Error for OriginalSealCustodyFailure {
 }
 impl OriginalQuotaClaim {
     fn debit_original_record_working_storage(&self, bytes: u64) -> Result<()> {
-        ensure!(self.process == std::process::id() && bytes > 0,
-            "foreign or empty original record working quote");
-        let mut used = self.copy_usage.try_lock()
+        ensure!(
+            self.process == std::process::id() && bytes > 0,
+            "foreign or empty original record working quote"
+        );
+        let mut used = self
+            .copy_usage
+            .try_lock()
             .map_err(|_| anyhow::anyhow!("original record working debit busy or poisoned"))?;
-        let total = used.buffer_bytes.checked_add(bytes)
+        let total = used
+            .buffer_bytes
+            .checked_add(bytes)
             .context("original record working memory overflow")?;
-        ensure!(total.checked_add(used.native_storage_bytes)
-            .and_then(|memory| memory.checked_add(used.host_region_bytes))
-            .is_some_and(|memory| memory <= self.record.reserved.max_memory_bytes),
-            "original record working quote exceeds same signed memory envelope");
+        ensure!(
+            total
+                .checked_add(used.native_storage_bytes)
+                .and_then(|memory| memory.checked_add(used.host_region_bytes))
+                .is_some_and(|memory| memory <= self.record.reserved.max_memory_bytes),
+            "original record working quote exceeds same signed memory envelope"
+        );
         used.buffer_bytes = total;
         Ok(())
     }
@@ -1274,7 +1356,8 @@ impl OriginalQuotaClaim {
             admission.reserve_records((2 * MAX_RECORD_BYTES) as u64)?;
             admission.debit_original(2)?;
             admission.debit_original(1)?;
-            let storage = lillux::cas::canonical_record_storage_quote(&disposition, MAX_RECORD_BYTES)?;
+            let storage =
+                lillux::cas::canonical_record_storage_quote(&disposition, MAX_RECORD_BYTES)?;
             self.debit_original_record_working_storage(storage.working_bytes())?;
             let signed_disposition = disposition.signed_bytes(&self.signer, &storage)?;
             Ok(Arc::new(OriginalInspectionSettlement {
@@ -1325,7 +1408,12 @@ impl OriginalInspectionSettlement {
             _owner: self.clone(),
         })
     }
-    fn publish_record(&self, name: &str, signed: &[u8], publication: &mut OriginalRecordPublication) -> Result<()> {
+    fn publish_record(
+        &self,
+        name: &str,
+        signed: &[u8],
+        publication: &mut OriginalRecordPublication,
+    ) -> Result<()> {
         self.admission.publish_record(name, signed, publication)
     }
     pub(super) fn disposition_record(self: &Arc<Self>) -> Result<()> {
@@ -1423,9 +1511,10 @@ impl OriginalInspectionSettlement {
     /// witness is retired and absent. The reservation enters `Disposed`.
     pub(super) fn seal_disposition(self: &Arc<Self>) -> Result<()> {
         let result = (|| -> Result<()> {
-            let progress = self.progress.try_lock().map_err(|_| {
-                anyhow::anyhow!("original settlement progress busy or poisoned")
-            })?;
+            let progress = self
+                .progress
+                .try_lock()
+                .map_err(|_| anyhow::anyhow!("original settlement progress busy or poisoned"))?;
             ensure!(
                 progress.disposition.acknowledged,
                 "disposal lacks durable disposition acknowledgement"
@@ -1441,7 +1530,8 @@ impl OriginalInspectionSettlement {
                 }
             }
             drop(progress);
-            self.admission.advance_phase(ReservationReleasePhase::Held)?;
+            self.admission
+                .advance_phase(ReservationReleasePhase::Held)?;
             self.admission.checkpoint_original()
         })();
         result.map_err(|error| self.retain_error(error))
@@ -1460,7 +1550,10 @@ impl OriginalInspectionSettlement {
                 .try_lock()
                 .map_err(|_| anyhow::anyhow!("original settlement progress busy or poisoned"))?;
             match &progress.native {
-                Some(captured) => ensure!(*captured == facts, "offline native host facts changed after capture"),
+                Some(captured) => ensure!(
+                    *captured == facts,
+                    "offline native host facts changed after capture"
+                ),
                 None => progress.native = Some(facts),
             }
             Ok(())
@@ -1475,63 +1568,76 @@ impl OriginalInspectionSettlement {
     /// called; a retry after success finds them already gone. Returns the
     /// names of the owners this call ended.
     pub(super) fn quiesce_native_owners(self: &Arc<Self>) -> Result<Vec<&'static str>> {
-        let result = (|| -> Result<Vec<&'static str>> {
-            let mut progress = self
-                .progress
-                .try_lock()
-                .map_err(|_| anyhow::anyhow!("original settlement progress busy or poisoned"))?;
-            ensure!(progress.native.is_some(), "quiesce before the host backend facts were captured");
-            if let Some(pins) = &progress.release_pins {
-                pins.require_original(&self.seal.claim, &self.seal.work, &pins.factory, &pins.terminal)?;
-                ensure!(!progress.pins.is_empty(), "quiesce before the retired pin facts were captured");
-            }
-            ensure!(
-                progress.post_ack.is_none() || progress.state_ack.is_some(),
-                "quiesce before the State acknowledgement was captured"
-            );
-            // Taken before any owner ends, so a busy slot refuses with
-            // nothing ended.
-            let mut disposals = self
-                ._disposals
-                .try_lock()
-                .map_err(|_| anyhow::anyhow!("original settlement disposals busy or poisoned"))?;
-            let OriginalSettlementProgress {
-                release_pins,
-                post_ack,
-                state_ack: _,
-                acknowledgement_expected: _,
-                disposition: _,
-                witnesses: _,
-                released: _,
-                released_publication: _,
-                unlinked: _,
-                pins: _,
-                native: _,
-                native_region: _,
-            } = &mut *progress;
-            // Post-acknowledgement owners joined the pin owner, so they end
-            // first.
-            let post_ack = post_ack.take();
-            let release_pins = release_pins.take();
-            let disposals_taken = disposals.take();
-            drop(disposals);
-            drop(progress);
-            let disposals = disposals_taken;
-            let mut ended = Vec::new();
-            if post_ack.is_some() {
-                ended.push("settlement post-acknowledgement owner");
-            }
-            if release_pins.is_some() {
-                ended.push("settlement release pins");
-            }
-            drop(post_ack);
-            drop(release_pins);
-            if disposals.as_ref().is_some_and(|disposals| !disposals.is_empty()) {
-                ended.push("settlement copy disposals");
-            }
-            drop(disposals);
-            Ok(ended)
-        })();
+        let result =
+            (|| -> Result<Vec<&'static str>> {
+                let mut progress = self.progress.try_lock().map_err(|_| {
+                    anyhow::anyhow!("original settlement progress busy or poisoned")
+                })?;
+                ensure!(
+                    progress.native.is_some(),
+                    "quiesce before the host backend facts were captured"
+                );
+                if let Some(pins) = &progress.release_pins {
+                    pins.require_original(
+                        &self.seal.claim,
+                        &self.seal.work,
+                        &pins.factory,
+                        &pins.terminal,
+                    )?;
+                    ensure!(
+                        !progress.pins.is_empty(),
+                        "quiesce before the retired pin facts were captured"
+                    );
+                }
+                ensure!(
+                    progress.post_ack.is_none() || progress.state_ack.is_some(),
+                    "quiesce before the State acknowledgement was captured"
+                );
+                // Taken before any owner ends, so a busy slot refuses with
+                // nothing ended.
+                let mut disposals = self._disposals.try_lock().map_err(|_| {
+                    anyhow::anyhow!("original settlement disposals busy or poisoned")
+                })?;
+                let OriginalSettlementProgress {
+                    release_pins,
+                    post_ack,
+                    state_ack: _,
+                    acknowledgement_expected: _,
+                    disposition: _,
+                    witnesses: _,
+                    released: _,
+                    released_publication: _,
+                    unlinked: _,
+                    pins: _,
+                    native: _,
+                    native_region: _,
+                } = &mut *progress;
+                // Post-acknowledgement owners joined the pin owner, so they end
+                // first.
+                let post_ack = post_ack.take();
+                let release_pins = release_pins.take();
+                let disposals_taken = disposals.take();
+                drop(disposals);
+                drop(progress);
+                let disposals = disposals_taken;
+                let mut ended = Vec::new();
+                if post_ack.is_some() {
+                    ended.push("settlement post-acknowledgement owner");
+                }
+                if release_pins.is_some() {
+                    ended.push("settlement release pins");
+                }
+                drop(post_ack);
+                drop(release_pins);
+                if disposals
+                    .as_ref()
+                    .is_some_and(|disposals| !disposals.is_empty())
+                {
+                    ended.push("settlement copy disposals");
+                }
+                drop(disposals);
+                Ok(ended)
+            })();
         result.map_err(|error| self.retain_error(error))
     }
     /// The settlement's share of the host release: keep the released host's region release
@@ -1545,10 +1651,14 @@ impl OriginalInspectionSettlement {
                 .progress
                 .try_lock()
                 .map_err(|_| anyhow::anyhow!("original settlement progress busy or poisoned"))?;
-            let native = progress.native.as_ref().context("region released before the host facts were captured")?;
+            let native = progress
+                .native
+                .as_ref()
+                .context("region released before the host facts were captured")?;
             ensure!(
                 region.generation().map_err(anyhow::Error::msg)? == native.generation
-                    && u64::try_from(region.bytes().map_err(anyhow::Error::msg)?)? == native.region_bytes,
+                    && u64::try_from(region.bytes().map_err(anyhow::Error::msg)?)?
+                        == native.region_bytes,
                 "offline native host region release fact differs from the finished host"
             );
             if let Some(captured) = &progress.native_region {
@@ -1574,10 +1684,16 @@ impl OriginalInspectionSettlement {
                 .phase
                 .try_lock()
                 .map_err(|_| anyhow::anyhow!("reservation release phase busy or poisoned"))?;
-            if matches!(phase, ReservationReleasePhase::Committed | ReservationReleasePhase::Unlinked) {
+            if matches!(
+                phase,
+                ReservationReleasePhase::Committed | ReservationReleasePhase::Unlinked
+            ) {
                 return Ok(());
             }
-            ensure!(phase == ReservationReleasePhase::Disposed, "release commit requires the sealed disposal");
+            ensure!(
+                phase == ReservationReleasePhase::Disposed,
+                "release commit requires the sealed disposal"
+            );
             let mut progress = self
                 .progress
                 .try_lock()
@@ -1586,8 +1702,11 @@ impl OriginalInspectionSettlement {
                 Some(signed) => signed.clone(),
                 None => {
                     let record = self.completed_release_record(&progress)?;
-                    let storage = lillux::cas::canonical_record_storage_quote(&record, MAX_RECORD_BYTES)?;
-                    self.seal.claim.debit_original_record_working_storage(storage.working_bytes())?;
+                    let storage =
+                        lillux::cas::canonical_record_storage_quote(&record, MAX_RECORD_BYTES)?;
+                    self.seal
+                        .claim
+                        .debit_original_record_working_storage(storage.working_bytes())?;
                     let signed = record.signed_bytes(&self.seal.claim.signer, &storage)?;
                     progress.released = Some(signed.clone());
                     signed
@@ -1612,11 +1731,15 @@ impl OriginalInspectionSettlement {
                     .try_lock()
                     .map_err(|_| anyhow::anyhow!("released record publication busy or poisoned"))?;
                 match &*slot {
-                    Some(existing) => ensure!(Arc::ptr_eq(existing, &owner), "released record publication changed"),
+                    Some(existing) => ensure!(
+                        Arc::ptr_eq(existing, &owner),
+                        "released record publication changed"
+                    ),
                     None => *slot = Some(owner),
                 }
             }
-            self.admission.advance_phase(ReservationReleasePhase::Disposed)?;
+            self.admission
+                .advance_phase(ReservationReleasePhase::Disposed)?;
             self.admission.checkpoint_original()
         })();
         result.map_err(|error| self.retain_error(error))
@@ -1634,34 +1757,49 @@ impl OriginalInspectionSettlement {
             if phase == ReservationReleasePhase::Unlinked {
                 return Ok(());
             }
-            ensure!(phase == ReservationReleasePhase::Committed, "release unlink requires the committed release");
+            ensure!(
+                phase == ReservationReleasePhase::Committed,
+                "release unlink requires the committed release"
+            );
             let owners = {
-                let progress = self
-                    .progress
-                    .try_lock()
-                    .map_err(|_| anyhow::anyhow!("original settlement progress busy or poisoned"))?;
+                let progress = self.progress.try_lock().map_err(|_| {
+                    anyhow::anyhow!("original settlement progress busy or poisoned")
+                })?;
                 [
                     self.admission.reservation_publication.clone(),
-                    progress.disposition.owner.clone().context("disposition descriptor absent")?,
-                    progress.released_publication.owner.clone().context("released record descriptor absent")?,
+                    progress
+                        .disposition
+                        .owner
+                        .clone()
+                        .context("disposition descriptor absent")?,
+                    progress
+                        .released_publication
+                        .owner
+                        .clone()
+                        .context("released record descriptor absent")?,
                 ]
             };
             let work: Arc<dyn lillux_sqlite::OriginalWitnessCleanupWork> = self.admission.clone();
             for (index, owner) in owners.iter().enumerate() {
                 if index == 2 {
-                    self.admission.released_unlinking.store(true, Ordering::Release);
+                    self.admission
+                        .released_unlinking
+                        .store(true, Ordering::Release);
                 }
-                let mut progress = self
-                    .progress
-                    .try_lock()
-                    .map_err(|_| anyhow::anyhow!("original settlement progress busy or poisoned"))?;
+                let mut progress = self.progress.try_lock().map_err(|_| {
+                    anyhow::anyhow!("original settlement progress busy or poisoned")
+                })?;
                 let unlink = &mut progress.unlinked[index];
                 if unlink.retired.is_some() {
                     continue;
                 }
                 if unlink.removed.is_none() {
                     let removed = owner
-                        .remove_original_planned(work.clone(), &self.seal.claim.ledger, self.admission.deadline)
+                        .remove_original_planned(
+                            work.clone(),
+                            &self.seal.claim.ledger,
+                            self.admission.deadline,
+                        )
                         .map_err(anyhow::Error::new)?;
                     unlink.removed = Some(Arc::new(removed));
                 }
@@ -1674,14 +1812,18 @@ impl OriginalInspectionSettlement {
                         .min(i32::MAX as u64),
                 )?;
                 let retired = owner.retire_removed_original(
-                    unlink.removed.as_ref().expect("actual ledger record removal"),
+                    unlink
+                        .removed
+                        .as_ref()
+                        .expect("actual ledger record removal"),
                     maximum,
                 )?;
                 unlink.retired = Some(Arc::new(retired));
                 drop(progress);
                 self.admission.checkpoint_original()?;
             }
-            self.admission.advance_phase(ReservationReleasePhase::Committed)?;
+            self.admission
+                .advance_phase(ReservationReleasePhase::Committed)?;
             self.admission.checkpoint_original()
         })();
         result.map_err(|error| self.retain_error(error))
@@ -1692,82 +1834,95 @@ impl OriginalInspectionSettlement {
             .progress
             .try_lock()
             .map_err(|_| anyhow::anyhow!("original settlement progress busy or poisoned"))?;
-        Ok(lillux::sha256_hex(progress.released.as_ref().context("released record not signed")?))
+        Ok(lillux::sha256_hex(
+            progress
+                .released
+                .as_ref()
+                .context("released record not signed")?,
+        ))
     }
     /// The completion gate. It reads the release phase and the facts and
     /// receipts captured during the release only; no factory, terminal or
     /// region owner is consulted.
     pub(super) fn require_completed(self: &Arc<Self>) -> Result<()> {
-        let result = (|| -> Result<()> {
-            self.admission.checkpoint_original()?;
-            self.seal
-                .require_original(&self.seal.claim, &self.seal.work)?;
-            let progress = self
-                .progress
-                .try_lock()
-                .map_err(|_| anyhow::anyhow!("original settlement progress busy or poisoned"))?;
-            ensure!(
-                progress.disposition.acknowledged,
-                "original durable disposition acknowledgement incomplete"
-            );
-            for witness in &progress.witnesses {
-                if let Some(evidence) = &witness.evidence {
-                    witness
-                        .retired
-                        .as_ref()
-                        .context("original witness close pending")?
-                        .require_original(&evidence.pin)?;
-                    self.require_witness_absence(evidence)?;
-                }
-            }
-            let native = progress
-                .native
-                .as_ref()
-                .context("offline native host backend facts not captured")?;
-            ensure!(
-                native.arena == lillux_sqlite::OriginalNativeArenaDisposition::Released,
-                "offline native host arena not released"
-            );
-            let region = progress
-                .native_region
-                .as_ref()
-                .context("offline native host region release pending; the host has not been released")?;
-            ensure!(
-                region.generation().map_err(anyhow::Error::msg)? == native.generation
-                    && u64::try_from(region.bytes().map_err(anyhow::Error::msg)?)? == native.region_bytes,
-                "offline native host region release fact differs from the finished host"
-            );
-            let phase = *self
-                .admission
-                .phase
-                .try_lock()
-                .map_err(|_| anyhow::anyhow!("reservation release phase busy or poisoned"))?;
-            ensure!(
-                phase == ReservationReleasePhase::Unlinked,
-                "reservation release incomplete at phase {phase:?}"
-            );
-            ensure!(
-                progress.released_publication.acknowledged
-                    && progress.unlinked.iter().all(|unlink| unlink.retired.is_some()),
-                "released record or ledger unlink receipts incomplete"
-            );
-            let operation = &self.seal.claim.record.operation_id;
-            let names = self.seal.claim.ledger.entry_names_bounded(MAX_CLAIMS * 5 + 1)?;
-            ensure!(
-                names.len() <= MAX_CLAIMS * 5,
-                "offline quota ledger exceeds complete inventory capacity"
-            );
-            for name in names {
+        let result =
+            (|| -> Result<()> {
+                self.admission.checkpoint_original()?;
+                self.seal
+                    .require_original(&self.seal.claim, &self.seal.work)?;
+                let progress = self.progress.try_lock().map_err(|_| {
+                    anyhow::anyhow!("original settlement progress busy or poisoned")
+                })?;
                 ensure!(
-                    !name.to_str().is_some_and(|text| text.ends_with(operation.as_str())),
-                    "released reservation left a ledger name for its operation"
+                    progress.disposition.acknowledged,
+                    "original durable disposition acknowledgement incomplete"
                 );
-            }
-            // Every held obligation is discharged by captured facts: the
-            // completed record built from them must validate.
-            self.completed_release_record(&progress)?;
-            Ok(())
-        })();
+                for witness in &progress.witnesses {
+                    if let Some(evidence) = &witness.evidence {
+                        witness
+                            .retired
+                            .as_ref()
+                            .context("original witness close pending")?
+                            .require_original(&evidence.pin)?;
+                        self.require_witness_absence(evidence)?;
+                    }
+                }
+                let native = progress
+                    .native
+                    .as_ref()
+                    .context("offline native host backend facts not captured")?;
+                ensure!(
+                    native.arena == lillux_sqlite::OriginalNativeArenaDisposition::Released,
+                    "offline native host arena not released"
+                );
+                let region = progress.native_region.as_ref().context(
+                    "offline native host region release pending; the host has not been released",
+                )?;
+                ensure!(
+                    region.generation().map_err(anyhow::Error::msg)? == native.generation
+                        && u64::try_from(region.bytes().map_err(anyhow::Error::msg)?)?
+                            == native.region_bytes,
+                    "offline native host region release fact differs from the finished host"
+                );
+                let phase =
+                    *self.admission.phase.try_lock().map_err(|_| {
+                        anyhow::anyhow!("reservation release phase busy or poisoned")
+                    })?;
+                ensure!(
+                    phase == ReservationReleasePhase::Unlinked,
+                    "reservation release incomplete at phase {phase:?}"
+                );
+                ensure!(
+                    progress.released_publication.acknowledged
+                        && progress
+                            .unlinked
+                            .iter()
+                            .all(|unlink| unlink.retired.is_some()),
+                    "released record or ledger unlink receipts incomplete"
+                );
+                let operation = &self.seal.claim.record.operation_id;
+                let names = self
+                    .seal
+                    .claim
+                    .ledger
+                    .entry_names_bounded(MAX_CLAIMS * 5 + 1)?;
+                ensure!(
+                    names.len() <= MAX_CLAIMS * 5,
+                    "offline quota ledger exceeds complete inventory capacity"
+                );
+                for name in names {
+                    ensure!(
+                        !name
+                            .to_str()
+                            .is_some_and(|text| text.ends_with(operation.as_str())),
+                        "released reservation left a ledger name for its operation"
+                    );
+                }
+                // Every held obligation is discharged by captured facts: the
+                // completed record built from them must validate.
+                self.completed_release_record(&progress)?;
+                Ok(())
+            })();
         result.map_err(|error| self.retain_error(error))
     }
 
@@ -1776,7 +1931,9 @@ impl OriginalInspectionSettlement {
         &self,
         progress: &OriginalSettlementProgress,
     ) -> Result<super::creation_evidence::OfflineResetReleasedRecord> {
-        use super::creation_evidence::{CompletedReleaseFacts, OfflineResetReleasedRecord, ReleasedBinding};
+        use super::creation_evidence::{
+            CompletedReleaseFacts, OfflineResetReleasedRecord, ReleasedBinding,
+        };
         let claim = &self.seal.claim;
         // A mutating reset that applied its history change joined the State
         // acknowledgement; one that found the schema already current never
@@ -1804,8 +1961,14 @@ impl OriginalInspectionSettlement {
             CompletedReleaseFacts {
                 mode: claim.record.inspection.mode,
                 disposition_sha256: lillux::sha256_hex(&self.signed_disposition),
-                native: progress.native.as_ref().context("offline native host facts not captured")?,
-                region: progress.native_region.as_ref().context("offline native host region release pending")?,
+                native: progress
+                    .native
+                    .as_ref()
+                    .context("offline native host facts not captured")?,
+                region: progress
+                    .native_region
+                    .as_ref()
+                    .context("offline native host region release pending")?,
                 held: &self.disposition.held,
                 pins: progress.pins.clone(),
                 state_ack,
@@ -1958,8 +2121,10 @@ impl std::fmt::Debug for ResetNativeAuthority {
 }
 impl ResetNativeAuthority {
     fn require_custody(&self, cleanup: bool) -> Result<()> {
-        ensure!(self.claim.process == std::process::id(),
-            "inherited offline native authority refused before custody traversal");
+        ensure!(
+            self.claim.process == std::process::id(),
+            "inherited offline native authority refused before custody traversal"
+        );
         let lifelines = &self.lifelines;
         self.claim
             .state_lease
@@ -1982,10 +2147,12 @@ impl ResetNativeAuthority {
             "native host authority lacks actual original publication ACK"
         );
         self.claim.ledger.ensure_path_binding()?;
-        let publication = boundary_lock(&self.claim.reservation_publication,
-                "native original publication busy")?
-            .clone()
-            .context("native original publication descriptor missing")?;
+        let publication = boundary_lock(
+            &self.claim.reservation_publication,
+            "native original publication busy",
+        )?
+        .clone()
+        .context("native original publication descriptor missing")?;
         let name = format!("{PREFIX}{}", self.claim.record.operation_id);
         publication.require_original(&self.claim.ledger, OsStr::new(&name))?;
         let original = publication.identity_original()?;
@@ -2006,7 +2173,9 @@ impl ResetNativeAuthority {
         // still refuses. Before binding no lease of this host can exist.
         let bound = self.factory.get().and_then(std::sync::Weak::upgrade);
         let bytes = match bound {
-            Some(factory) => factory.read_original_witness(&publication, MAX_RECORD_BYTES, cleanup)?,
+            Some(factory) => {
+                factory.read_original_witness(&publication, MAX_RECORD_BYTES, cleanup)?
+            }
             None => publication.read_original(MAX_RECORD_BYTES)?,
         };
         ensure!(
@@ -2041,11 +2210,18 @@ struct SqlVmCeiling {
 }
 impl SqlVmCeiling {
     fn new(limit: u64, service: lillux::time::MonotonicDeadline) -> Self {
-        Self { used: std::sync::atomic::AtomicU64::new(0), limit, service }
+        Self {
+            used: std::sync::atomic::AtomicU64::new(0),
+            limit,
+            service,
+        }
     }
     fn charge(&self, steps: u64) -> Result<()> {
         ensure!(steps > 0, "empty original SQL VM debit");
-        ensure!(!self.service.has_elapsed(), "original SQL service window elapsed; statement stopped");
+        ensure!(
+            !self.service.has_elapsed(),
+            "original SQL service window elapsed; statement stopped"
+        );
         self.used
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
                 used.checked_add(steps).filter(|total| *total <= self.limit)
@@ -2101,15 +2277,31 @@ impl OfflineNativeAuthority for ResetNativeAuthority {
     }
 }
 impl lillux_sqlite::OriginalNativeProjectionLeaseAuthority for ResetNativeAuthority {
-    fn require_original(&self, factory: &Arc<lillux_sqlite::OriginalNativeFactory>, cleanup: bool) -> Result<()> {
+    fn require_original(
+        &self,
+        factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
+        cleanup: bool,
+    ) -> Result<()> {
         self.checkpoint(cleanup)?;
         self.require_factory(factory)
     }
-    fn fork_deadline(&self, factory: &Arc<lillux_sqlite::OriginalNativeFactory>, cleanup: bool)
-        -> Result<lillux::time::MonotonicDeadline> {
-        lillux_sqlite::OriginalNativeProjectionLeaseAuthority::require_original(self, factory, cleanup)?;
-        let deadline = if cleanup { self.claim.native_cleanup_deadline } else { self.claim.native_service_deadline };
-        ensure!(!deadline.has_elapsed(), "original offline lease endpoint elapsed");
+    fn fork_deadline(
+        &self,
+        factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
+        cleanup: bool,
+    ) -> Result<lillux::time::MonotonicDeadline> {
+        lillux_sqlite::OriginalNativeProjectionLeaseAuthority::require_original(
+            self, factory, cleanup,
+        )?;
+        let deadline = if cleanup {
+            self.claim.native_cleanup_deadline
+        } else {
+            self.claim.native_service_deadline
+        };
+        ensure!(
+            !deadline.has_elapsed(),
+            "original offline lease endpoint elapsed"
+        );
         Ok(deadline)
     }
 }
@@ -2192,7 +2384,8 @@ impl OriginalQuotaClaim {
             .map_err(|refusal| anyhow::anyhow!("offline native funding refused: {refusal}"))?;
             Ok((authority, raw))
         })();
-        let (authority, raw) = funded.map_err(|error| OfflineNativeHostFailure { host: None, error })?;
+        let (authority, raw) =
+            funded.map_err(|error| OfflineNativeHostFailure { host: None, error })?;
         let host_authority: Arc<dyn OfflineNativeAuthority> = authority.clone();
         // SAFETY: `issue`'s contract holds: the authority's lifelines keep the
         // StateLock and runtime namespace lock for the host's life, `raw` was
@@ -2207,7 +2400,10 @@ impl OriginalQuotaClaim {
         });
         match bound {
             Ok(()) => Ok(host),
-            Err(error) => Err(OfflineNativeHostFailure { host: Some(host), error }),
+            Err(error) => Err(OfflineNativeHostFailure {
+                host: Some(host),
+                error,
+            }),
         }
     }
     fn native_authority(&self) -> Result<Arc<ResetNativeAuthority>> {
@@ -2226,11 +2422,20 @@ impl OriginalQuotaClaim {
     fn issued_native_factory(&self) -> Result<Arc<lillux_sqlite::OriginalNativeFactory>> {
         self.native_authority()?.issued_factory()
     }
-    pub(super) fn native_projection_lease_authority(self: &Arc<Self>, factory: &Arc<lillux_sqlite::OriginalNativeFactory>)
-        -> Result<Arc<dyn lillux_sqlite::OriginalNativeProjectionLeaseAuthority>> {
-        ensure!(self.process == std::process::id(), "foreign offline lease issuance");
+    pub(super) fn native_projection_lease_authority(
+        self: &Arc<Self>,
+        factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
+    ) -> Result<Arc<dyn lillux_sqlite::OriginalNativeProjectionLeaseAuthority>> {
+        ensure!(
+            self.process == std::process::id(),
+            "foreign offline lease issuance"
+        );
         let authority = self.native_authority()?;
-        lillux_sqlite::OriginalNativeProjectionLeaseAuthority::require_original(authority.as_ref(), factory, false)?;
+        lillux_sqlite::OriginalNativeProjectionLeaseAuthority::require_original(
+            authority.as_ref(),
+            factory,
+            false,
+        )?;
         Ok(authority)
     }
     fn native_quota_evidence(
@@ -2270,11 +2475,16 @@ impl OriginalQuotaClaim {
     /// host has no outside receiver: every destination of this claim ends in
     /// process with its host census, so the handoff always refuses and keeps
     /// its owner; a foreign process, factory or terminal is named first.
-    fn destination_outside_transfer_refusal(self: &Arc<Self>,
+    fn destination_outside_transfer_refusal(
+        self: &Arc<Self>,
         factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
-        aggregate: &lillux_sqlite::OriginalNativeTerminal) -> anyhow::Error {
+        aggregate: &lillux_sqlite::OriginalNativeTerminal,
+    ) -> anyhow::Error {
         let foreign = (|| -> Result<()> {
-            ensure!(self.process == std::process::id(), "foreign offline destination account");
+            ensure!(
+                self.process == std::process::id(),
+                "foreign offline destination account"
+            );
             factory.require_original_process()?;
             aggregate.require_original(factory)
         })();
@@ -2295,14 +2505,25 @@ struct OriginalOperationalAuthority {
     namespace: lillux::PinnedDirectoryLock,
 }
 impl lillux_sqlite::OriginalNativeDestinationAuthority for OriginalOperationalAuthority {
-    fn into_outside_custody(self: Arc<Self>, factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
+    fn into_outside_custody(
+        self: Arc<Self>,
+        factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
         aggregate: &lillux_sqlite::OriginalNativeTerminal,
         _leaf: &lillux_sqlite::OriginalNativeOutsideLeafEvidence,
-        _prepay: &dyn Fn(u64, u64) -> Result<()>)
-        -> std::result::Result<lillux_sqlite::OriginalDestinationOutsideCustody, lillux_sqlite::OriginalDestinationCustodyFailure> {
+        _prepay: &dyn Fn(u64, u64) -> Result<()>,
+    ) -> std::result::Result<
+        lillux_sqlite::OriginalDestinationOutsideCustody,
+        lillux_sqlite::OriginalDestinationCustodyFailure,
+    > {
         // The refusal keeps this authority, with its root and namespace.
-        let error = self.claim.destination_outside_transfer_refusal(factory, aggregate);
-        Err(lillux_sqlite::OriginalDestinationCustodyFailure::retain(factory.clone(), self, error))
+        let error = self
+            .claim
+            .destination_outside_transfer_refusal(factory, aggregate);
+        Err(lillux_sqlite::OriginalDestinationCustodyFailure::retain(
+            factory.clone(),
+            self,
+            error,
+        ))
     }
 
     fn require_original(&self, factory: &Arc<lillux_sqlite::OriginalNativeFactory>) -> Result<()> {
@@ -2477,14 +2698,25 @@ struct OriginalSchedulerReferenceAuthority {
     namespace: lillux::PinnedDirectoryLock,
 }
 impl lillux_sqlite::OriginalNativeDestinationAuthority for OriginalSchedulerReferenceAuthority {
-    fn into_outside_custody(self: Arc<Self>, factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
+    fn into_outside_custody(
+        self: Arc<Self>,
+        factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
         aggregate: &lillux_sqlite::OriginalNativeTerminal,
         _leaf: &lillux_sqlite::OriginalNativeOutsideLeafEvidence,
-        _prepay: &dyn Fn(u64, u64) -> Result<()>)
-        -> std::result::Result<lillux_sqlite::OriginalDestinationOutsideCustody, lillux_sqlite::OriginalDestinationCustodyFailure> {
+        _prepay: &dyn Fn(u64, u64) -> Result<()>,
+    ) -> std::result::Result<
+        lillux_sqlite::OriginalDestinationOutsideCustody,
+        lillux_sqlite::OriginalDestinationCustodyFailure,
+    > {
         // The refusal keeps this authority, with its root and namespace.
-        let error = self.claim.destination_outside_transfer_refusal(factory, aggregate);
-        Err(lillux_sqlite::OriginalDestinationCustodyFailure::retain(factory.clone(), self, error))
+        let error = self
+            .claim
+            .destination_outside_transfer_refusal(factory, aggregate);
+        Err(lillux_sqlite::OriginalDestinationCustodyFailure::retain(
+            factory.clone(),
+            self,
+            error,
+        ))
     }
 
     fn require_original(&self, factory: &Arc<lillux_sqlite::OriginalNativeFactory>) -> Result<()> {
@@ -2537,14 +2769,25 @@ struct OriginalSchedulerInspectionAuthority {
     work: Arc<dyn lillux_sqlite::SqliteInspectionCopyWork>,
 }
 impl lillux_sqlite::OriginalNativeDestinationAuthority for OriginalSchedulerInspectionAuthority {
-    fn into_outside_custody(self: Arc<Self>, factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
+    fn into_outside_custody(
+        self: Arc<Self>,
+        factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
         aggregate: &lillux_sqlite::OriginalNativeTerminal,
         _leaf: &lillux_sqlite::OriginalNativeOutsideLeafEvidence,
-        _prepay: &dyn Fn(u64, u64) -> Result<()>)
-        -> std::result::Result<lillux_sqlite::OriginalDestinationOutsideCustody, lillux_sqlite::OriginalDestinationCustodyFailure> {
+        _prepay: &dyn Fn(u64, u64) -> Result<()>,
+    ) -> std::result::Result<
+        lillux_sqlite::OriginalDestinationOutsideCustody,
+        lillux_sqlite::OriginalDestinationCustodyFailure,
+    > {
         // The refusal keeps this authority with every copy, SQL and root owner.
-        let error = self.claim.destination_outside_transfer_refusal(factory, aggregate);
-        Err(lillux_sqlite::OriginalDestinationCustodyFailure::retain(factory.clone(), self, error))
+        let error = self
+            .claim
+            .destination_outside_transfer_refusal(factory, aggregate);
+        Err(lillux_sqlite::OriginalDestinationCustodyFailure::retain(
+            factory.clone(),
+            self,
+            error,
+        ))
     }
 
     fn require_original(&self, factory: &Arc<lillux_sqlite::OriginalNativeFactory>) -> Result<()> {
@@ -2566,7 +2809,8 @@ impl lillux_sqlite::OriginalNativeDestinationAuthority for OriginalSchedulerInsp
         self.sql.require_copy_work(&self.work)?;
         self.source_namespace.ensure_protects(&self.source)?;
         self.source.ensure_path_binding()?;
-        self.claim.require_scheduler_inspection_source(&self.source)?;
+        self.claim
+            .require_scheduler_inspection_source(&self.source)?;
         self.root.ensure_path_binding()?;
         self.namespace.ensure_protects(&self.root)?;
         ensure!(
@@ -2591,14 +2835,25 @@ struct OriginalRuntimeMutationAuthority {
     main_identity: (u64, u64),
 }
 impl lillux_sqlite::OriginalNativeDestinationAuthority for OriginalRuntimeMutationAuthority {
-    fn into_outside_custody(self: Arc<Self>, factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
+    fn into_outside_custody(
+        self: Arc<Self>,
+        factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
         aggregate: &lillux_sqlite::OriginalNativeTerminal,
         _leaf: &lillux_sqlite::OriginalNativeOutsideLeafEvidence,
-        _prepay: &dyn Fn(u64, u64) -> Result<()>)
-        -> std::result::Result<lillux_sqlite::OriginalDestinationOutsideCustody, lillux_sqlite::OriginalDestinationCustodyFailure> {
+        _prepay: &dyn Fn(u64, u64) -> Result<()>,
+    ) -> std::result::Result<
+        lillux_sqlite::OriginalDestinationOutsideCustody,
+        lillux_sqlite::OriginalDestinationCustodyFailure,
+    > {
         // The refusal keeps this authority, with its root and namespace.
-        let error = self.claim.destination_outside_transfer_refusal(factory, aggregate);
-        Err(lillux_sqlite::OriginalDestinationCustodyFailure::retain(factory.clone(), self, error))
+        let error = self
+            .claim
+            .destination_outside_transfer_refusal(factory, aggregate);
+        Err(lillux_sqlite::OriginalDestinationCustodyFailure::retain(
+            factory.clone(),
+            self,
+            error,
+        ))
     }
 
     fn require_original(&self, factory: &Arc<lillux_sqlite::OriginalNativeFactory>) -> Result<()> {
@@ -2806,11 +3061,15 @@ impl OriginalQuotaClaim {
         state.active.insert(ticket, kind);
         drop(state);
         let native_kind = match kind {
-            OriginalProducerKind::Native(_) => lillux_sqlite::SqliteInspectionProductionKind::Native,
+            OriginalProducerKind::Native(_) => {
+                lillux_sqlite::SqliteInspectionProductionKind::Native
+            }
             OriginalProducerKind::Copy(_) => lillux_sqlite::SqliteInspectionProductionKind::Copy,
             OriginalProducerKind::Issuer
             | OriginalProducerKind::Namespace(_)
-            | OriginalProducerKind::SqlIssue(_) => lillux_sqlite::SqliteInspectionProductionKind::Namespace,
+            | OriginalProducerKind::SqlIssue(_) => {
+                lillux_sqlite::SqliteInspectionProductionKind::Namespace
+            }
         };
         Ok(lillux_sqlite::SqliteInspectionProductionPermit::issued(
             native_kind,
@@ -2924,8 +3183,11 @@ impl OriginalQuotaClaim {
             occupancy_nanoseconds(&reserved)?,
         )
         .map_err(anyhow::Error::msg)?;
-        let (native_service_deadline, native_cleanup_deadline) = clock.original_local_deadlines(
-            &occupancy, std::time::Duration::from_millis(reserved.max_cleanup_millis))
+        let (native_service_deadline, native_cleanup_deadline) = clock
+            .original_local_deadlines(
+                &occupancy,
+                std::time::Duration::from_millis(reserved.max_cleanup_millis),
+            )
             .map_err(anyhow::Error::msg)?;
         ensure!(
             owner.quota()?.max_retained_operations as usize <= MAX_CLAIMS,
@@ -3004,7 +3266,8 @@ impl OriginalQuotaClaim {
             signed.len() <= MAX_RECORD_BYTES,
             "offline quota claim exceeds record bound"
         );
-        let sql_steps = SqlVmCeiling::new(record.reserved.max_sql_vm_steps, native_service_deadline);
+        let sql_steps =
+            SqlVmCeiling::new(record.reserved.max_sql_vm_steps, native_service_deadline);
         let ledger_identity = ledger.identity()?;
         let app_root = app_root.try_clone()?;
         let runtime = runtime.try_clone()?;
@@ -3016,7 +3279,8 @@ impl OriginalQuotaClaim {
             process: std::process::id(),
             state_lease: ResetStateLease::new(state_lease),
             clock,
-            native_service_deadline, native_cleanup_deadline,
+            native_service_deadline,
+            native_cleanup_deadline,
             sql_steps,
             signer: identity.clone(),
             signed,
@@ -3152,7 +3416,8 @@ impl OriginalQuotaClaim {
         namespace: &lillux::PinnedDirectoryLock,
         target: &std::path::Path,
     ) -> Result<lillux_sqlite::OriginalNativeTransientInputs> {
-        let (authority, _name) = self.runtime_mutation_authority(factory, &root, namespace, target)?;
+        let (authority, _name) =
+            self.runtime_mutation_authority(factory, &root, namespace, target)?;
         // SAFETY: same genuine signed source, retained main pin, root,
         // namespace and funding as the bound Runtime mutation; the fixed
         // reference purpose is chosen here and builds only declared schema.
@@ -3173,7 +3438,8 @@ impl OriginalQuotaClaim {
         namespace: &lillux::PinnedDirectoryLock,
         target: &std::path::Path,
     ) -> Result<lillux_sqlite::OriginalNativeBoundInputs> {
-        let (authority, name) = self.runtime_mutation_authority(factory, &root, namespace, target)?;
+        let (authority, name) =
+            self.runtime_mutation_authority(factory, &root, namespace, target)?;
         // Safety: exact signed claim source[0]/Config target, actual original
         // main pin, root/namespace and SAME real issued factory retained above.
         unsafe {
@@ -3241,7 +3507,13 @@ impl OriginalQuotaClaim {
         Arc<lillux_sqlite::OriginalNativeFactory>,
         lillux_sqlite::OriginalNativeBoundInputs,
     )> {
-        let SchedulerInspectionCopyOwners { root, namespace, copy, sql, work } = owners;
+        let SchedulerInspectionCopyOwners {
+            root,
+            namespace,
+            copy,
+            sql,
+            work,
+        } = owners;
         self.require_scheduler_inspection_source(source)?;
         source_namespace.ensure_protects(source)?;
         let factory = self.issued_native_factory()?;
@@ -3530,12 +3802,18 @@ impl OriginalQuotaClaim {
         let mut original_present = false;
         for name in self.ledger.entry_names_bounded(2)? {
             let bytes = if name == OsStr::new(&selected_name) {
-                lillux_sqlite::read_regular_without_sqlite_alias(&self.ledger, &name, MAX_RECORD_BYTES)?
+                lillux_sqlite::read_regular_without_sqlite_alias(
+                    &self.ledger,
+                    &name,
+                    MAX_RECORD_BYTES,
+                )?
             } else {
                 None
             };
             match bytes {
-                Some(bytes) if self.publication_entered.load(Ordering::Acquire) && bytes == self.signed => {
+                Some(bytes)
+                    if self.publication_entered.load(Ordering::Acquire) && bytes == self.signed =>
+                {
                     original_present = true;
                 }
                 Some(_) => {
@@ -3563,13 +3841,18 @@ impl OriginalQuotaClaim {
         let own_deposit = |name: &str| {
             let name = name.strip_prefix("cleanup.").unwrap_or(name);
             let name = name.strip_prefix("created.").unwrap_or(name);
-            self.record.destinations.iter().any(|plan| plan.directory_name == name)
+            self.record
+                .destinations
+                .iter()
+                .any(|plan| plan.directory_name == name)
         };
         for name in self.copy_root.entry_names_bounded(8)? {
             let text = name.to_string_lossy();
             if !(original_present && own_deposit(&text)) {
                 return Err(super::creation_evidence::ResetScratchRepairRequired {
-                    what: format!("offline reset inspections hold `{text}` before this reset's reservation"),
+                    what: format!(
+                        "offline reset inspections hold `{text}` before this reset's reservation"
+                    ),
                     foreign: super::scratch::foreign_inspections_path(&name),
                 }
                 .into());
@@ -3778,8 +4061,14 @@ struct OriginalSqlWork {
 }
 impl OriginalSqlWork {
     fn service_root(&self) -> Result<Arc<lillux::PinnedDirectory>> {
-        ensure!(self.copy.claim.process == std::process::id(), "foreign original SQL root");
-        let root = self.root.try_lock().map_err(|_| anyhow::anyhow!("original SQL root custody busy or poisoned"))?;
+        ensure!(
+            self.copy.claim.process == std::process::id(),
+            "foreign original SQL root"
+        );
+        let root = self
+            .root
+            .try_lock()
+            .map_err(|_| anyhow::anyhow!("original SQL root custody busy or poisoned"))?;
         match &*root {
             OriginalSqlRootCustody::Owned(root) => Ok(root.clone()),
             _ => anyhow::bail!("original SQL root transferred; service re-entry refused"),
@@ -3822,26 +4111,42 @@ impl OriginalSqlWork {
     }
 }
 impl lillux_sqlite::SqliteInspectionSqlWork for OriginalSqlWork {
-    unsafe fn register_original_outside_roots(&self,
-        factory: &Arc<lillux_sqlite::OriginalNativeFactory>, aggregate: &lillux_sqlite::OriginalNativeTerminal,
+    unsafe fn register_original_outside_roots(
+        &self,
+        factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
+        aggregate: &lillux_sqlite::OriginalNativeTerminal,
         leaf: &lillux_sqlite::OriginalNativeOutsideLeafEvidence,
         registry: &mut lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry,
-        prepay: &dyn Fn(u64, u64) -> Result<()>) -> Result<()> {
-        ensure!(self.copy.claim.process == std::process::id(), "foreign original SQL outside root");
+        prepay: &dyn Fn(u64, u64) -> Result<()>,
+    ) -> Result<()> {
+        ensure!(
+            self.copy.claim.process == std::process::id(),
+            "foreign original SQL outside root"
+        );
         leaf.require_original(factory, aggregate)?;
-        self.copy.require_original_outside_master(factory, aggregate)?;
+        self.copy
+            .require_original_outside_master(factory, aggregate)?;
         lillux_sqlite::original_physical_custody::retain_callback_refusal(&|| prepay(0, 4))?;
         let original = {
-            let mut root = self.root.try_lock()
+            let mut root = self
+                .root
+                .try_lock()
                 .map_err(|_| anyhow::anyhow!("actual SQL root checkout busy or poisoned"))?;
             match &*root {
-                OriginalSqlRootCustody::Registered(binding) => { registry.require_membership(binding)?; return Ok(()); }
-                OriginalSqlRootCustody::InFlight => anyhow::bail!("actual SQL root already transferring"),
-                OriginalSqlRootCustody::Owned(_) => {},
+                OriginalSqlRootCustody::Registered(binding) => {
+                    registry.require_membership(binding)?;
+                    return Ok(());
+                }
+                OriginalSqlRootCustody::InFlight => {
+                    anyhow::bail!("actual SQL root already transferring")
+                }
+                OriginalSqlRootCustody::Owned(_) => {}
             }
             std::mem::replace(&mut *root, OriginalSqlRootCustody::InFlight)
         };
-        let OriginalSqlRootCustody::Owned(original) = original else { unreachable!() };
+        let OriginalSqlRootCustody::Owned(original) = original else {
+            unreachable!()
+        };
         // SAFETY: actual paid SQL source owner from the SAME original claim.
         let result = unsafe { registry.register_directory(original, prepay) };
         let (custody, error) = match result {
@@ -3849,12 +4154,20 @@ impl lillux_sqlite::SqliteInspectionSqlWork for OriginalSqlWork {
             Err((original, error)) => (OriginalSqlRootCustody::Owned(original), Some(error)),
         };
         *self.root.lock().unwrap_or_else(|p| p.into_inner()) = custody;
-        if let Some(error) = error { return Err(error); }
+        if let Some(error) = error {
+            return Err(error);
+        }
         Ok(())
     }
     fn original_outside_roots_retired(&self) -> Result<bool> {
-        ensure!(self.copy.claim.process == std::process::id(), "foreign original SQL root receipt");
-        let root = self.root.try_lock().map_err(|_| anyhow::anyhow!("actual SQL root receipt busy or poisoned"))?;
+        ensure!(
+            self.copy.claim.process == std::process::id(),
+            "foreign original SQL root receipt"
+        );
+        let root = self
+            .root
+            .try_lock()
+            .map_err(|_| anyhow::anyhow!("actual SQL root receipt busy or poisoned"))?;
         Ok(matches!(&*root, OriginalSqlRootCustody::Registered(binding) if binding.retired()))
     }
 
@@ -3899,8 +4212,8 @@ impl lillux_sqlite::SqliteInspectionSqlWork for OriginalSqlWork {
         // Producer interval and the full clock window are boundary checks;
         // the per-step debit below reads only in-memory facts.
         {
-            let producer = boundary_lock(&self.copy.claim.production,
-                "original native interval busy")?;
+            let producer =
+                boundary_lock(&self.copy.claim.production, "original native interval busy")?;
             ensure!(
                 producer
                     .active
@@ -3947,12 +4260,17 @@ impl OriginalCopyWork {
             .map_err(|_| anyhow::anyhow!("moved reservation pin slot busy or poisoned"))?;
         if let ReservationPinCustody::Held(pin) = &*custody {
             let identity = pin.observed_identity()?;
-            ensure!(identity == self.reservation_identity, "issued reservation pin changed before release");
+            ensure!(
+                identity == self.reservation_identity,
+                "issued reservation pin changed before release"
+            );
             ensure!(moved.is_none(), "reservation pin moved twice");
             *moved = Some(pin.clone());
             *custody = ReservationPinCustody::Retired(identity);
         }
-        moved.clone().context("issued reservation pin left without its release")
+        moved
+            .clone()
+            .context("issued reservation pin left without its release")
     }
     fn require_custody(&self) -> Result<()> {
         self.claim
@@ -4022,7 +4340,8 @@ impl OriginalCopyWork {
         };
         self.debit_cleanup_steps(1)?;
         let storage = lillux::cas::canonical_record_storage_quote(&record, MAX_RECORD_BYTES)?;
-        self.claim.debit_original_record_working_storage(storage.working_bytes())?;
+        self.claim
+            .debit_original_record_working_storage(storage.working_bytes())?;
         let mut used = self
             .claim
             .copy_usage
@@ -4040,7 +4359,8 @@ impl OriginalCopyWork {
         );
         used.retained_evidence_bytes = retained;
         drop(used);
-        self.claim.debit_original_record_working_storage(MAX_RECORD_BYTES as u64)?;
+        self.claim
+            .debit_original_record_working_storage(MAX_RECORD_BYTES as u64)?;
         let signed = record.signed_bytes(&self.claim.signer, &storage)?;
         let name = evidence_name(&record.destination_name);
         lillux_sqlite::SqliteInspectionCopyWork::checkpoint(self)?;
@@ -4187,7 +4507,6 @@ impl OriginalCopyWork {
 }
 
 impl lillux_sqlite::SqliteInspectionCopyWork for OriginalCopyWork {
-
     fn require_original_native_factory(
         &self,
         factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
@@ -4231,18 +4550,18 @@ impl lillux_sqlite::SqliteInspectionCopyWork for OriginalCopyWork {
         for store in 0..2 {
             if let Some(root) = &roots[store]
                 && root.is_same_directory(destination)?
-                    && self.claim._source_roots[store].is_same_directory(source)?
-                {
-                    let names = super::inspection_plan::role_names(
-                        &self.claim.record.sources[store].database_name,
-                    )?;
-                    if let Some(role) = names.iter().position(|candidate| candidate == name) {
-                        ensure!(
-                            selected.replace(store * 4 + role).is_none(),
-                            "ambiguous original copy interval"
-                        );
-                    }
+                && self.claim._source_roots[store].is_same_directory(source)?
+            {
+                let names = super::inspection_plan::role_names(
+                    &self.claim.record.sources[store].database_name,
+                )?;
+                if let Some(role) = names.iter().position(|candidate| candidate == name) {
+                    ensure!(
+                        selected.replace(store * 4 + role).is_none(),
+                        "ambiguous original copy interval"
+                    );
                 }
+            }
         }
         self.claim.enter_production(
             OriginalProducerKind::Copy(
@@ -4384,12 +4703,20 @@ impl lillux_sqlite::SqliteInspectionCopyWork for OriginalCopyWork {
                 .all(|charged| *charged),
             "SQL inspection precedes original fixed copy role admission"
         );
-        let controls = u64::try_from(std::mem::size_of::<OriginalSqlWork>() + 2 * std::mem::size_of::<usize>())?;
-        let buffers = used.buffer_bytes.checked_add(controls).context("original SQL owner storage debit overflow")?;
-        ensure!(buffers.checked_add(used.native_storage_bytes)
-            .and_then(|n| n.checked_add(used.host_region_bytes))
-            .is_some_and(|n| n <= self.claim.record.reserved.max_memory_bytes),
-            "original SQL owner exceeds same reserved host memory");
+        let controls = u64::try_from(
+            std::mem::size_of::<OriginalSqlWork>() + 2 * std::mem::size_of::<usize>(),
+        )?;
+        let buffers = used
+            .buffer_bytes
+            .checked_add(controls)
+            .context("original SQL owner storage debit overflow")?;
+        ensure!(
+            buffers
+                .checked_add(used.native_storage_bytes)
+                .and_then(|n| n.checked_add(used.host_region_bytes))
+                .is_some_and(|n| n <= self.claim.record.reserved.max_memory_bytes),
+            "original SQL owner exceeds same reserved host memory"
+        );
         used.buffer_bytes = buffers;
         used.sql_admitted[index] = true;
         drop(used);
@@ -4397,7 +4724,9 @@ impl lillux_sqlite::SqliteInspectionCopyWork for OriginalCopyWork {
         Ok(Arc::new(OriginalSqlWork {
             store: index,
             copy: self,
-            root: Mutex::new(OriginalSqlRootCustody::Owned(roots[index].as_ref().unwrap().clone())),
+            root: Mutex::new(OriginalSqlRootCustody::Owned(
+                roots[index].as_ref().unwrap().clone(),
+            )),
         }))
     }
 
@@ -4846,8 +5175,8 @@ fn validate_aggregate(records: &[OfflineResetQuota], quota: &OfflineResetQuota) 
 
 #[cfg(test)]
 mod clock_controls {
-    use super::*;
     use super::super::inspection_destination::InspectionAccountingRequirement;
+    use super::*;
     use lillux::PinnedDirectory;
 
     struct SealDuringPhysicalCopy {
@@ -5087,19 +5416,31 @@ mod clock_controls {
         for field in ["resident_process", "resident_generation", "resident_bytes"] {
             let mut extra = serde_json::to_value(&original).unwrap();
             extra[field] = serde_json::json!(1);
-            assert!(serde_json::from_value::<ClaimRecord>(extra).is_err(), "{field}");
+            assert!(
+                serde_json::from_value::<ClaimRecord>(extra).is_err(),
+                "{field}"
+            );
         }
         let mut wrong = original.clone();
         wrong.reserved.max_memory_bytes = wrong.reserved.max_native_storage_bytes;
-        assert!(wrong.validate().is_err(), "native arena cannot consume the host region's memory");
+        assert!(
+            wrong.validate().is_err(),
+            "native arena cannot consume the host region's memory"
+        );
         let mut undersized = original.clone();
         undersized.reserved.max_native_allocator_steps = 1048576;
         let error = undersized.validate().unwrap_err();
-        assert!(format!("{error:#}").contains("SQL VM step ceiling"), "{error:#}");
+        assert!(
+            format!("{error:#}").contains("SQL VM step ceiling"),
+            "{error:#}"
+        );
         let mut short = original.clone();
         short.reserved.max_native_allocator_steps = short.reserved.max_sql_vm_steps + 1;
         let error = short.validate().unwrap_err();
-        assert!(format!("{error:#}").contains("allocation funding margin"), "{error:#}");
+        assert!(
+            format!("{error:#}").contains("allocation funding margin"),
+            "{error:#}"
+        );
         let mut missing = serde_json::to_value(&original).unwrap();
         missing
             .as_object_mut()
@@ -5117,12 +5458,18 @@ mod clock_controls {
 
     #[test]
     fn native_sql_is_refused_at_the_shared_signed_ceiling() {
-        let ceiling = SqlVmCeiling::new(1_000, lillux::time::MonotonicDeadline::after(std::time::Duration::from_secs(3600)));
+        let ceiling = SqlVmCeiling::new(
+            1_000,
+            lillux::time::MonotonicDeadline::after(std::time::Duration::from_secs(3600)),
+        );
         for _ in 0..1_000 {
             ceiling.charge(1).unwrap();
         }
         let error = ceiling.charge(1).unwrap_err();
-        assert!(format!("{error:#}").contains("ceiling exhausted"), "{error:#}");
+        assert!(
+            format!("{error:#}").contains("ceiling exhausted"),
+            "{error:#}"
+        );
         assert_eq!(ceiling.used(), 1_000, "a refused charge is not recorded");
     }
 
@@ -5147,11 +5494,17 @@ mod clock_controls {
 
     #[test]
     fn sql_is_stopped_once_the_service_window_edge_passes() {
-        let ceiling = SqlVmCeiling::new(u64::MAX, lillux::time::MonotonicDeadline::after(std::time::Duration::from_millis(50)));
+        let ceiling = SqlVmCeiling::new(
+            u64::MAX,
+            lillux::time::MonotonicDeadline::after(std::time::Duration::from_millis(50)),
+        );
         ceiling.charge(1).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(80));
         let error = ceiling.charge(1).unwrap_err();
-        assert!(format!("{error:#}").contains("service window elapsed"), "{error:#}");
+        assert!(
+            format!("{error:#}").contains("service window elapsed"),
+            "{error:#}"
+        );
         assert_eq!(ceiling.used(), 1);
     }
 
@@ -5185,9 +5538,16 @@ mod clock_controls {
         claim.signer = signer.fingerprint().to_owned();
         claim.copy_root_identity = serde_json::to_string(&root.identity().unwrap()).unwrap();
         let claim_body = lillux::canonical_json(&serde_json::to_value(&claim).unwrap()).unwrap();
-        let claim_bytes = lillux::signature::sign_content(&claim_body, signer.signing_key(), "#", None).into_bytes();
+        let claim_bytes =
+            lillux::signature::sign_content(&claim_body, signer.signing_key(), "#", None)
+                .into_bytes();
         let hash = lillux::sha256_hex(&claim_bytes);
-        assert_eq!(ClaimRecord::verified(&claim_bytes, &signer).unwrap().operation_id, claim.operation_id);
+        assert_eq!(
+            ClaimRecord::verified(&claim_bytes, &signer)
+                .unwrap()
+                .operation_id,
+            claim.operation_id
+        );
         use super::super::creation_evidence::{
             DISPOSITION_PURPOSE, DISPOSITION_SCHEMA, InspectionDispositionRecord,
             InspectionStoreDispositionRecord, OriginalLocalSettlementObligation,
@@ -5204,8 +5564,11 @@ mod clock_controls {
             parent_identity: root.identity().unwrap(),
             inspection: claim.inspection.clone(),
             native_quota: super::super::creation_evidence::OriginalNativeQuotaEvidence {
-                storage_bytes: 1, allocator_steps: 0,
-                cleanup_reserved: 1, cleanup_steps: 0, connections_issued: 0,
+                storage_bytes: 1,
+                allocator_steps: 0,
+                cleanup_reserved: 1,
+                cleanup_steps: 0,
+                connections_issued: 0,
             },
             stores: std::array::from_fn(|index| InspectionStoreDispositionRecord::NeverStarted {
                 purpose: claim.destinations[index].purpose.clone(),
@@ -5218,7 +5581,13 @@ mod clock_controls {
                 OriginalLocalSettlementObligation::IssuedReservationPin,
             ],
         };
-        let signed = disposition.signed_bytes(&signer, &lillux::cas::canonical_record_storage_quote(&disposition, MAX_RECORD_BYTES).unwrap()).unwrap();
+        let signed = disposition
+            .signed_bytes(
+                &signer,
+                &lillux::cas::canonical_record_storage_quote(&disposition, MAX_RECORD_BYTES)
+                    .unwrap(),
+            )
+            .unwrap();
         let mut missing_native = serde_json::to_value(&disposition).unwrap();
         missing_native
             .as_object_mut()
@@ -5247,7 +5616,12 @@ mod clock_controls {
         require_disposition_claim(&verified, &claim, &hash).unwrap();
         let mut wrong = verified.clone();
         wrong.claim_nonce = "2".repeat(32);
-        let signed_wrong = wrong.signed_bytes(&signer, &lillux::cas::canonical_record_storage_quote(&wrong, MAX_RECORD_BYTES).unwrap()).unwrap();
+        let signed_wrong = wrong
+            .signed_bytes(
+                &signer,
+                &lillux::cas::canonical_record_storage_quote(&wrong, MAX_RECORD_BYTES).unwrap(),
+            )
+            .unwrap();
         let wrong = InspectionDispositionRecord::verified(&signed_wrong, &signer).unwrap();
         assert!(require_disposition_claim(&wrong, &claim, &hash).is_err());
         assert!(
@@ -5267,16 +5641,31 @@ mod clock_controls {
         claim["signer"] = serde_json::json!(signer.fingerprint());
         claim["schema"] = serde_json::json!(9);
         claim["purpose"] = serde_json::json!("offline_reset_local_quota_reservation_v9");
-        for (field, value) in [("resident_process", 1), ("resident_generation", 1), ("resident_bytes", 4096)] {
+        for (field, value) in [
+            ("resident_process", 1),
+            ("resident_generation", 1),
+            ("resident_bytes", 4096),
+        ] {
             claim[field] = serde_json::json!(value);
         }
         let body = lillux::canonical_json(&claim).unwrap();
-        let bytes = lillux::signature::sign_content(&body, signer.signing_key(), "#", None).into_bytes();
+        let bytes =
+            lillux::signature::sign_content(&body, signer.signing_key(), "#", None).into_bytes();
         let error = ClaimRecord::verified(&bytes, &signer).unwrap_err();
         let message = format!("{error:#}");
-        assert!(message.contains("quota claim record uses retired schema 9"), "{message}");
-        assert!(message.contains(ryeos_state::EXECUTION_HISTORY_SCRATCH_REPAIR), "{message}");
-        assert!(error.downcast_ref::<super::super::creation_evidence::ResetScratchRepairRequired>().is_some());
+        assert!(
+            message.contains("quota claim record uses retired schema 9"),
+            "{message}"
+        );
+        assert!(
+            message.contains(ryeos_state::EXECUTION_HISTORY_SCRATCH_REPAIR),
+            "{message}"
+        );
+        assert!(
+            error
+                .downcast_ref::<super::super::creation_evidence::ResetScratchRepairRequired>()
+                .is_some()
+        );
     }
 
     #[test]
@@ -5360,7 +5749,10 @@ mod clock_controls {
         let mut excess = one.clone();
         excess.max_cleanup_steps = 513;
         let error = validate_aggregate(&[one, excess], &quota).unwrap_err();
-        assert!(format!("{error:#}").contains("aggregate resource quota exhausted"), "{error:#}");
+        assert!(
+            format!("{error:#}").contains("aggregate resource quota exhausted"),
+            "{error:#}"
+        );
     }
 
     #[test]
@@ -5424,8 +5816,16 @@ mod live_claim_tests {
     fn live_claims_are_counted_per_ledger_and_deregistered() {
         let first = tempfile::tempdir().unwrap();
         let second = tempfile::tempdir().unwrap();
-        let first = lillux::PinnedDirectory::open(first.path()).unwrap().unwrap().identity().unwrap();
-        let second = lillux::PinnedDirectory::open(second.path()).unwrap().unwrap().identity().unwrap();
+        let first = lillux::PinnedDirectory::open(first.path())
+            .unwrap()
+            .unwrap()
+            .identity()
+            .unwrap();
+        let second = lillux::PinnedDirectory::open(second.path())
+            .unwrap()
+            .unwrap()
+            .identity()
+            .unwrap();
         assert_eq!(live_claims_on(&first), 0);
         register_live_claim(first);
         register_live_claim(first);
@@ -5490,10 +5890,12 @@ impl OriginalReleasePins {
             .context("State ACK original memory overflow")?;
         ensure!(
             read <= self.admission.claim.record.reserved.max_read_bytes
-                && memory.checked_add(used.native_storage_bytes)
-                    .and_then(|bytes| bytes.checked_add(used.host_region_bytes)).is_some_and(
-                    |total| total <= self.admission.claim.record.reserved.max_memory_bytes
-                ),
+                && memory
+                    .checked_add(used.native_storage_bytes)
+                    .and_then(|bytes| bytes.checked_add(used.host_region_bytes))
+                    .is_some_and(
+                        |total| total <= self.admission.claim.record.reserved.max_memory_bytes
+                    ),
             "State ACK attempt exceeds original read/memory envelope"
         );
         used.read_bytes = read;
@@ -5672,7 +6074,10 @@ impl OriginalInspectionSettlement {
                     .admission
                     .original
                     .take_reservation_pin(&self.moved_reservation_pin)?;
-                inventory.push((super::creation_evidence::ISSUED_RESERVATION_PIN_SLOT, reservation));
+                inventory.push((
+                    super::creation_evidence::ISSUED_RESERVATION_PIN_SLOT,
+                    reservation,
+                ));
                 let mut facts = Vec::new();
                 let mut pins = Vec::new();
                 for (slot, pin) in inventory {
@@ -5709,7 +6114,9 @@ impl OriginalInspectionSettlement {
                 drop(
                     self.moved_reservation_pin
                         .try_lock()
-                        .map_err(|_| anyhow::anyhow!("moved reservation pin slot busy or poisoned"))?
+                        .map_err(|_| {
+                            anyhow::anyhow!("moved reservation pin slot busy or poisoned")
+                        })?
                         .take(),
                 );
                 owner
@@ -5752,16 +6159,20 @@ impl OriginalInspectionSettlement {
             // Every pin is retired: keep its captured identity as the
             // release's plain fact, once.
             {
-                let mut progress = self.progress.try_lock().map_err(|_| {
-                    anyhow::anyhow!("retired pin facts busy or poisoned")
-                })?;
+                let mut progress = self
+                    .progress
+                    .try_lock()
+                    .map_err(|_| anyhow::anyhow!("retired pin facts busy or poisoned"))?;
                 if progress.pins.is_empty() {
                     progress.pins.extend(owner.facts.iter().cloned());
                     progress.pins.sort_by_key(|fact| fact.slot);
                 } else {
                     let mut captured = owner.facts.clone();
                     captured.sort_by_key(|fact| fact.slot);
-                    ensure!(progress.pins == captured, "retired pin facts changed after capture");
+                    ensure!(
+                        progress.pins == captured,
+                        "retired pin facts changed after capture"
+                    );
                 }
             }
             Ok(owner)
@@ -5782,7 +6193,9 @@ pub(super) struct OriginalPostAckFinalization {
 }
 
 impl OriginalPostAckFinalization {
-    fn original_state_inputs(&self) -> Result<(
+    fn original_state_inputs(
+        &self,
+    ) -> Result<(
         Arc<ryeos_state::state_db::ClosedOriginalState>,
         Arc<ryeos_state::state_db::OriginalStateAcknowledgement>,
     )> {
@@ -5792,7 +6205,10 @@ impl OriginalPostAckFinalization {
     fn require_state_ack(&self) -> Result<()> {
         let (state, acknowledgement) = self.original_state_inputs()?;
         acknowledgement.require_original(
-            &state, &self.ready.factory, &self.ready.terminal, &self.operation,
+            &state,
+            &self.ready.factory,
+            &self.ready.terminal,
+            &self.operation,
         )
     }
 }
@@ -5860,7 +6276,10 @@ impl OriginalInspectionSettlement {
                     "post-ACK requires actual retained ready producer"
                 );
                 ensure!(
-                    progress.state_ack.as_ref().is_none_or(|captured| captured == operation),
+                    progress
+                        .state_ack
+                        .as_ref()
+                        .is_none_or(|captured| captured == operation),
                     "post-ACK State acknowledgement changed after capture"
                 );
                 progress.post_ack.clone()
@@ -5874,14 +6293,22 @@ impl OriginalInspectionSettlement {
                 let bytes = std::mem::size_of::<OriginalPostAckFinalization>()
                     .checked_add(2 * std::mem::size_of::<usize>())
                     .context("original post-ACK parent storage overflow")?;
-                let mut used = self.admission.claim.copy_usage.try_lock()
-                    .map_err(|_| anyhow::anyhow!("original post-ACK parent storage debit busy or poisoned"))?;
-                let memory = used.buffer_bytes.checked_add(u64::try_from(bytes)?)
+                let mut used = self.admission.claim.copy_usage.try_lock().map_err(|_| {
+                    anyhow::anyhow!("original post-ACK parent storage debit busy or poisoned")
+                })?;
+                let memory = used
+                    .buffer_bytes
+                    .checked_add(u64::try_from(bytes)?)
                     .context("original post-ACK parent memory overflow")?;
-                ensure!(memory.checked_add(used.native_storage_bytes)
-                    .and_then(|total| total.checked_add(used.host_region_bytes))
-                    .is_some_and(|total| total <= self.admission.claim.record.reserved.max_memory_bytes),
-                    "original post-ACK parent exceeds same signed memory envelope");
+                ensure!(
+                    memory
+                        .checked_add(used.native_storage_bytes)
+                        .and_then(|total| total.checked_add(used.host_region_bytes))
+                        .is_some_and(
+                            |total| total <= self.admission.claim.record.reserved.max_memory_bytes
+                        ),
+                    "original post-ACK parent exceeds same signed memory envelope"
+                );
                 used.buffer_bytes = memory;
                 drop(used);
                 self.admission.checkpoint_original()?;
@@ -5913,4 +6340,3 @@ impl OriginalInspectionSettlement {
         result.map_err(|error| self.retain_error(error))
     }
 }
-

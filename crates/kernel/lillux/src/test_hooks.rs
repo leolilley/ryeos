@@ -84,8 +84,8 @@ pub(crate) fn atomic_create_hook_point(purpose: TempPurpose, target: &OsStr) -> 
     drop(armed);
     match action {
         AtomicCreateHookAction::Abort => std::process::abort(),
-        AtomicCreateHookAction::Fail => anyhow::bail!(
-            "secure publication interrupted by an armed test hook before rename"
-        ),
+        AtomicCreateHookAction::Fail => {
+            anyhow::bail!("secure publication interrupted by an armed test hook before rename")
+        }
     }
 }

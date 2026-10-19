@@ -76,8 +76,14 @@ mod tests {
 
     fn fixture() -> DeliveredSecretEnv {
         DeliveredSecretEnv::from_authorized([
-            ("ZED_TOKEN".to_owned(), Zeroizing::new("zed-secret-value".to_owned())),
-            ("API_KEY".to_owned(), Zeroizing::new("api-secret-value".to_owned())),
+            (
+                "ZED_TOKEN".to_owned(),
+                Zeroizing::new("zed-secret-value".to_owned()),
+            ),
+            (
+                "API_KEY".to_owned(),
+                Zeroizing::new("api-secret-value".to_owned()),
+            ),
         ])
     }
 

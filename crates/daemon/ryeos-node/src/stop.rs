@@ -347,7 +347,11 @@ mod tests {
         };
         let bundles = config.app_root.join(".ai/node/bundles");
         std::fs::create_dir_all(&bundles).unwrap();
-        std::fs::write(bundles.join("core.yaml"), "# ryeos:signed:test\nkind: node\n").unwrap();
+        std::fs::write(
+            bundles.join("core.yaml"),
+            "# ryeos:signed:test\nkind: node\n",
+        )
+        .unwrap();
         let state = ryeos_engine::roots::RuntimeRoot::new(config.app_root.clone()).state();
         std::fs::create_dir_all(&state).unwrap();
         let started_at = crate::lifecycle_marker::record_running(
@@ -384,11 +388,18 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (env, _state) = failed_start_env(tmp.path());
         let failed = crate::status::status(&env).await.unwrap();
-        let LifecycleStatus::Failed { metadata, startup: _ } = &failed else {
+        let LifecycleStatus::Failed {
+            metadata,
+            startup: _,
+        } = &failed
+        else {
             panic!("expected retained startup failure, got {failed:?}")
         };
         let recorded = metadata.pid.unwrap();
-        assert!(!failure_names_exited_target(&failed, recorded.wrapping_add(1)));
+        assert!(!failure_names_exited_target(
+            &failed,
+            recorded.wrapping_add(1)
+        ));
         let stopped = LifecycleStatus::Stopped {
             app_root: env.config().app_root.clone(),
             capacity: None,

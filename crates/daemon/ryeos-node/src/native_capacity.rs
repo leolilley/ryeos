@@ -34,15 +34,26 @@ mod reservation;
 pub const MAX_FINALIZATION_ATTEMPTS: u8 = 4;
 
 pub use account::NativeCapacityAccountBinding;
-pub use account::{CapacityAccountSummary, inspect_capacity_account};
-pub use account::reissue::{CapacityReissueEvidence, ReissueReport, ReissueRequest, read_capacity_reissuances, reissue_capacity};
 pub(crate) use account::load_existing_capacity_binding;
 pub(crate) use account::prepare_initial_capacity_binding;
-pub use factory::{LiveNativeFactory, LiveNativeFactoryFailure, LiveNativeProducerPublicationFailure, LiveNativeProducerPreparationFailure, LiveProducerControlCensus, ServiceRefusalLatch, ServiceRefusalWake, service_refusal};
-pub use reservation::RolloverClaim;
+pub use account::reissue::{
+    CapacityReissueEvidence, ReissueReport, ReissueRequest, read_capacity_reissuances,
+    reissue_capacity,
+};
+pub use account::{CapacityAccountSummary, inspect_capacity_account};
+pub use factory::{
+    LiveNativeFactory, LiveNativeFactoryFailure, LiveNativeProducerPreparationFailure,
+    LiveNativeProducerPublicationFailure, LiveProducerControlCensus, ServiceRefusalLatch,
+    ServiceRefusalWake, service_refusal,
+};
 #[cfg(target_os = "linux")]
 pub use reservation::OperatorLockCustody;
-pub use reservation::{FinalizedLiveNative, LiveNativeCapacityReservation, LiveNativeCapacityReservationFailure, SettledLiveNative, quote_operator_lock_handoff, required_cleanup_occupancy, required_rollover_drain_margin};
+pub use reservation::RolloverClaim;
+pub use reservation::{
+    FinalizedLiveNative, LiveNativeCapacityReservation, LiveNativeCapacityReservationFailure,
+    SettledLiveNative, quote_operator_lock_handoff, required_cleanup_occupancy,
+    required_rollover_drain_margin,
+};
 
 const MAX_COMPLETION_BYTES: u64 = 256 * 1024;
 
@@ -64,8 +75,11 @@ impl RetainedInput {
             .context("required native admission input is absent")?;
         let descriptor = file.try_clone_descriptor()?;
         let owner = lillux::require_effective_user_owned_regular(&descriptor)?;
-        file.require_owner_fixed(owner.owner()).map_err(anyhow::Error::msg)?;
-        parent.require_regular_entry_descriptor_fixed(name, &descriptor).map_err(anyhow::Error::msg)?;
+        file.require_owner_fixed(owner.owner())
+            .map_err(anyhow::Error::msg)?;
+        parent
+            .require_regular_entry_descriptor_fixed(name, &descriptor)
+            .map_err(anyhow::Error::msg)?;
         let observation = file.observation()?;
         let bytes = file.read_stable_bounded(&observation, maximum)?;
         let result = Self {
@@ -80,12 +94,17 @@ impl RetainedInput {
     }
 
     fn require_original(&self) -> Result<()> {
-        self.parent.ensure_path_binding_fixed().map_err(anyhow::Error::msg)?;
         self.parent
-            .require_regular_entry_descriptor_fixed(self.file.name(), &self.descriptor).map_err(anyhow::Error::msg)?;
+            .ensure_path_binding_fixed()
+            .map_err(anyhow::Error::msg)?;
+        self.parent
+            .require_regular_entry_descriptor_fixed(self.file.name(), &self.descriptor)
+            .map_err(anyhow::Error::msg)?;
         lillux::ensure_open_regular_file_unchanged(&self.descriptor, &self.observation)?;
         let owner = lillux::require_effective_user_owned_regular(&self.descriptor)?;
-        self.file.require_owner_fixed(owner.owner()).map_err(anyhow::Error::msg)
+        self.file
+            .require_owner_fixed(owner.owner())
+            .map_err(anyhow::Error::msg)
     }
 }
 
@@ -140,7 +159,10 @@ impl FinalizerDirectorySource {
         Self {
             held: Held::new(
                 KIND,
-                DirectorySourceParts { owner: Some(owner), registration: None },
+                DirectorySourceParts {
+                    owner: Some(owner),
+                    registration: None,
+                },
                 |parts| parts.owner.is_none(),
             ),
         }
@@ -159,10 +181,14 @@ impl FinalizerDirectorySource {
 
     /// Put an owner back into an empty slot; an occupied slot refuses and
     /// hands the offered owner back, so nothing is replaced.
-    pub(super) fn restore_owner(&mut self, owner: Arc<PinnedDirectory>)
-        -> std::result::Result<(), Arc<PinnedDirectory>> {
+    pub(super) fn restore_owner(
+        &mut self,
+        owner: Arc<PinnedDirectory>,
+    ) -> std::result::Result<(), Arc<PinnedDirectory>> {
         let parts = self.held.get_mut();
-        if parts.owner.is_some() { return Err(owner); }
+        if parts.owner.is_some() {
+            return Err(owner);
+        }
         parts.owner = Some(owner);
         Ok(())
     }
@@ -172,9 +198,14 @@ impl FinalizerDirectorySource {
     pub(super) fn set_registration(
         &mut self,
         registration: lillux_sqlite::original_physical_custody::OriginalPhysicalRegistration,
-    ) -> std::result::Result<(), lillux_sqlite::original_physical_custody::OriginalPhysicalRegistration> {
+    ) -> std::result::Result<
+        (),
+        lillux_sqlite::original_physical_custody::OriginalPhysicalRegistration,
+    > {
         let parts = self.held.get_mut();
-        if parts.registration.is_some() { return Err(registration); }
+        if parts.registration.is_some() {
+            return Err(registration);
+        }
         parts.registration = Some(registration);
         Ok(())
     }
@@ -215,12 +246,18 @@ impl FinalizerControlSource {
     }
     pub(super) fn pinned_file(file: PinnedRegularFile) -> Self {
         Self::held(ControlSourceParts {
-            pinned_file: Some(file), duplicate: None, owner: None, registration: None,
+            pinned_file: Some(file),
+            duplicate: None,
+            owner: None,
+            registration: None,
         })
     }
     pub(super) fn duplicate(file: File) -> Self {
         Self::held(ControlSourceParts {
-            pinned_file: None, duplicate: Some(file), owner: None, registration: None,
+            pinned_file: None,
+            duplicate: Some(file),
+            owner: None,
+            registration: None,
         })
     }
 
@@ -241,16 +278,22 @@ impl FinalizerControlSource {
     }
 
     /// Move the close owner out.
-    pub(super) fn take_owner(&mut self) -> Option<Arc<lillux_sqlite::RetainedOriginalFinalizerFile>> {
+    pub(super) fn take_owner(
+        &mut self,
+    ) -> Option<Arc<lillux_sqlite::RetainedOriginalFinalizerFile>> {
         self.held.get_mut().owner.take()
     }
 
     /// Put a close owner into an empty slot; an occupied slot refuses and
     /// hands the offered owner back, so nothing is replaced.
-    pub(super) fn set_owner(&mut self, owner: Arc<lillux_sqlite::RetainedOriginalFinalizerFile>)
-        -> std::result::Result<(), Arc<lillux_sqlite::RetainedOriginalFinalizerFile>> {
+    pub(super) fn set_owner(
+        &mut self,
+        owner: Arc<lillux_sqlite::RetainedOriginalFinalizerFile>,
+    ) -> std::result::Result<(), Arc<lillux_sqlite::RetainedOriginalFinalizerFile>> {
         let parts = self.held.get_mut();
-        if parts.owner.is_some() { return Err(owner); }
+        if parts.owner.is_some() {
+            return Err(owner);
+        }
         parts.owner = Some(owner);
         Ok(())
     }
@@ -260,9 +303,14 @@ impl FinalizerControlSource {
     pub(super) fn set_registration(
         &mut self,
         registration: lillux_sqlite::original_physical_custody::OriginalPhysicalRegistration,
-    ) -> std::result::Result<(), lillux_sqlite::original_physical_custody::OriginalPhysicalRegistration> {
+    ) -> std::result::Result<
+        (),
+        lillux_sqlite::original_physical_custody::OriginalPhysicalRegistration,
+    > {
         let parts = self.held.get_mut();
-        if parts.registration.is_some() { return Err(registration); }
+        if parts.registration.is_some() {
+            return Err(registration);
+        }
         parts.registration = Some(registration);
         Ok(())
     }
@@ -291,11 +339,16 @@ pub(super) struct InputSourcesParts {
 }
 impl InputSourcesParts {
     fn consumed(&self) -> bool {
-        self.root.is_none() && self.runtime.is_none()
-            && self.completion_parent.is_none() && self.completion_file.is_none()
-            && self.completion_duplicate.is_none() && self.policy_parent.is_none()
-            && self.policy_file.is_none() && self.policy_duplicate.is_none()
-            && self.exclusion_alias.is_none() && self.clock_alias.is_none()
+        self.root.is_none()
+            && self.runtime.is_none()
+            && self.completion_parent.is_none()
+            && self.completion_file.is_none()
+            && self.completion_duplicate.is_none()
+            && self.policy_parent.is_none()
+            && self.policy_file.is_none()
+            && self.policy_duplicate.is_none()
+            && self.exclusion_alias.is_none()
+            && self.clock_alias.is_none()
     }
 }
 
@@ -309,7 +362,9 @@ pub(super) struct NativeCapacityInputFinalizationSources {
 impl NativeCapacityInputFinalizationSources {
     fn held(parts: InputSourcesParts) -> Self {
         const KIND: &str = "ryeos-node::native-capacity-input-sources";
-        Self { held: Held::new(KIND, parts, InputSourcesParts::consumed) }
+        Self {
+            held: Held::new(KIND, parts, InputSourcesParts::consumed),
+        }
     }
 
     /// True once every source and both aliases moved on: the frame holds
@@ -321,15 +376,22 @@ impl NativeCapacityInputFinalizationSources {
     /// The four directory slots, in registration order.
     pub(super) fn directory_slots(&mut self) -> [&mut Option<FinalizerDirectorySource>; 4] {
         let parts = self.held.get_mut();
-        [&mut parts.root, &mut parts.runtime, &mut parts.completion_parent, &mut parts.policy_parent]
+        [
+            &mut parts.root,
+            &mut parts.runtime,
+            &mut parts.completion_parent,
+            &mut parts.policy_parent,
+        ]
     }
 
     /// The four control slots, in registration order.
     pub(super) fn control_slots(&mut self) -> [&mut Option<FinalizerControlSource>; 4] {
         let parts = self.held.get_mut();
         [
-            &mut parts.completion_file, &mut parts.completion_duplicate,
-            &mut parts.policy_file, &mut parts.policy_duplicate,
+            &mut parts.completion_file,
+            &mut parts.completion_duplicate,
+            &mut parts.policy_file,
+            &mut parts.policy_duplicate,
         ]
     }
 
@@ -345,10 +407,14 @@ impl NativeCapacityInputFinalizationSources {
 
     /// Put the clock alias back into an empty slot; an occupied slot refuses
     /// and hands the offered alias back, so nothing is replaced.
-    pub(super) fn restore_clock_alias(&mut self, alias: Arc<lillux::time::RetainedOccupancyClock>)
-        -> std::result::Result<(), Arc<lillux::time::RetainedOccupancyClock>> {
+    pub(super) fn restore_clock_alias(
+        &mut self,
+        alias: Arc<lillux::time::RetainedOccupancyClock>,
+    ) -> std::result::Result<(), Arc<lillux::time::RetainedOccupancyClock>> {
         let parts = self.held.get_mut();
-        if parts.clock_alias.is_some() { return Err(alias); }
+        if parts.clock_alias.is_some() {
+            return Err(alias);
+        }
         parts.clock_alias = Some(alias);
         Ok(())
     }
@@ -377,12 +443,13 @@ impl std::ops::Deref for NativeCapacityInputFinalizationSources {
 }
 
 fn quote_native_capacity_input_finalization_sources()
-    -> Result<lillux_sqlite::original_physical_custody::OutsideWork> {
+-> Result<lillux_sqlite::original_physical_custody::OutsideWork> {
     let directory_owner = std::mem::size_of::<PinnedDirectory>()
         .checked_add(2 * std::mem::size_of::<usize>())
         .and_then(|bytes| bytes.checked_add(std::mem::align_of::<PinnedDirectory>() - 1))
         .context("native input directory owner layout overflow")?;
-    let directory_bytes = directory_owner.checked_mul(4)
+    let directory_bytes = directory_owner
+        .checked_mul(4)
         .context("native input directory source quote overflow")?;
     let bytes = u64::try_from(std::mem::size_of::<InputSourcesParts>())?
         .checked_add(u64::try_from(directory_bytes)?)
@@ -395,7 +462,13 @@ fn quote_native_capacity_input_finalization_sources()
 
 impl RetainedInput {
     fn into_finalization_parts(self) -> (PinnedDirectory, PinnedRegularFile, File) {
-        let Self { parent, file, descriptor, observation: _, bytes: _ } = self;
+        let Self {
+            parent,
+            file,
+            descriptor,
+            observation: _,
+            bytes: _,
+        } = self;
         (parent, file, descriptor)
     }
 }
@@ -412,7 +485,8 @@ impl LiveNativeCapacityInputs {
         // Authentication and preparation consume the same original interval.
         // Capture before path construction, input reads or owned policy work;
         // learning the signed bound later never renews this start instant.
-        let clock = Arc::new(lillux::time::RetainedOccupancyClock::capture().map_err(anyhow::Error::msg)?);
+        let clock =
+            Arc::new(lillux::time::RetainedOccupancyClock::capture().map_err(anyhow::Error::msg)?);
         exclusion.ensure_protects_app_root(app_root)?;
         let root = PinnedDirectory::open(app_root)?.context("native node root is absent")?;
         let roots = RuntimeRoot::new(app_root.to_owned());
@@ -475,14 +549,18 @@ impl LiveNativeCapacityInputs {
                 .context("native occupancy overflow")?,
         )
         .map_err(anyhow::Error::msg)?;
-        let (sql_deadline, cleanup_deadline) = clock.original_local_deadlines(
-            &occupancy,
-            Duration::from_millis(policy.incarnation.cleanup_occupancy_ms),
-        ).map_err(anyhow::Error::msg)?;
-        let service_edge = clock.service_edge(
-            &occupancy,
-            Duration::from_millis(policy.incarnation.cleanup_occupancy_ms),
-        ).map_err(anyhow::Error::msg)?;
+        let (sql_deadline, cleanup_deadline) = clock
+            .original_local_deadlines(
+                &occupancy,
+                Duration::from_millis(policy.incarnation.cleanup_occupancy_ms),
+            )
+            .map_err(anyhow::Error::msg)?;
+        let service_edge = clock
+            .service_edge(
+                &occupancy,
+                Duration::from_millis(policy.incarnation.cleanup_occupancy_ms),
+            )
+            .map_err(anyhow::Error::msg)?;
         let process = lillux::process_control::capture_current_process_identity()
             .map_err(anyhow::Error::msg)?;
         let result = Arc::new(Self {
@@ -551,25 +629,42 @@ impl LiveNativeCapacityInputs {
         }
 
         let Self {
-            root, runtime, exclusion, completion, policy_file, clock,
-            policy: _, snapshot: _, node_fingerprint: _, operator_fingerprint: _,
-            capacity_account: _, occupancy: _,
-            sql_deadline: _, cleanup_deadline: _, service_edge: _, process: _,
+            root,
+            runtime,
+            exclusion,
+            completion,
+            policy_file,
+            clock,
+            policy: _,
+            snapshot: _,
+            node_fingerprint: _,
+            operator_fingerprint: _,
+            capacity_account: _,
+            occupancy: _,
+            sql_deadline: _,
+            cleanup_deadline: _,
+            service_edge: _,
+            process: _,
         } = self;
-        let (completion_parent, completion_file, completion_duplicate) = completion.into_finalization_parts();
+        let (completion_parent, completion_file, completion_duplicate) =
+            completion.into_finalization_parts();
         let (policy_parent, policy_file, policy_duplicate) = policy_file.into_finalization_parts();
-        Ok(NativeCapacityInputFinalizationSources::held(InputSourcesParts {
-            root: Some(FinalizerDirectorySource::retained(Arc::new(root))),
-            runtime: Some(FinalizerDirectorySource::retained(runtime.into())),
-            completion_parent: Some(FinalizerDirectorySource::retained(Arc::new(completion_parent))),
-            completion_file: Some(FinalizerControlSource::pinned_file(completion_file)),
-            completion_duplicate: Some(FinalizerControlSource::duplicate(completion_duplicate)),
-            policy_parent: Some(FinalizerDirectorySource::retained(Arc::new(policy_parent))),
-            policy_file: Some(FinalizerControlSource::pinned_file(policy_file)),
-            policy_duplicate: Some(FinalizerControlSource::duplicate(policy_duplicate)),
-            exclusion_alias: Some(exclusion),
-            clock_alias: Some(clock),
-        }))
+        Ok(NativeCapacityInputFinalizationSources::held(
+            InputSourcesParts {
+                root: Some(FinalizerDirectorySource::retained(Arc::new(root))),
+                runtime: Some(FinalizerDirectorySource::retained(runtime.into())),
+                completion_parent: Some(FinalizerDirectorySource::retained(Arc::new(
+                    completion_parent,
+                ))),
+                completion_file: Some(FinalizerControlSource::pinned_file(completion_file)),
+                completion_duplicate: Some(FinalizerControlSource::duplicate(completion_duplicate)),
+                policy_parent: Some(FinalizerDirectorySource::retained(Arc::new(policy_parent))),
+                policy_file: Some(FinalizerControlSource::pinned_file(policy_file)),
+                policy_duplicate: Some(FinalizerControlSource::duplicate(policy_duplicate)),
+                exclusion_alias: Some(exclusion),
+                clock_alias: Some(clock),
+            },
+        ))
     }
 
     pub(crate) fn require_original(&self, cleanup: bool) -> Result<()> {
@@ -577,8 +672,12 @@ impl LiveNativeCapacityInputs {
         // admission descriptors. Child cleanup cannot traverse original owners.
         self.require_original_process()?;
         self.exclusion.ensure_protects_app_root(self.root.path())?;
-        self.root.ensure_path_binding_fixed().map_err(anyhow::Error::msg)?;
-        self.runtime.ensure_path_binding_fixed().map_err(anyhow::Error::msg)?;
+        self.root
+            .ensure_path_binding_fixed()
+            .map_err(anyhow::Error::msg)?;
+        self.runtime
+            .ensure_path_binding_fixed()
+            .map_err(anyhow::Error::msg)?;
         self.completion.require_original()?;
         self.policy_file.require_original()?;
         let window = self
@@ -605,7 +704,9 @@ impl LiveNativeCapacityInputs {
     /// In-memory service-edge check for one native VM step: one BOOTTIME read,
     /// no file, procfs or digest work.
     pub(crate) fn require_service_edge(&self) -> Result<()> {
-        self.service_edge.require_service_fixed().map_err(anyhow::Error::msg)
+        self.service_edge
+            .require_service_fixed()
+            .map_err(anyhow::Error::msg)
     }
 }
 
@@ -614,7 +715,9 @@ impl LiveNativeCapacityInputs {
 #[cfg(test)]
 pub(super) fn abandoned_custody_serial() -> std::sync::MutexGuard<'static, ()> {
     static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    SERIAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 #[cfg(test)]
@@ -649,14 +752,24 @@ mod custody_drop_tests {
         assert!(!source.owner_transferred());
         let before = lillux::custody::abandoned_custody().count(DIRECTORY);
         drop(source);
-        assert_eq!(lillux::custody::abandoned_custody().count(DIRECTORY), before + 1);
-        assert_eq!(Arc::strong_count(&owner), 2, "the directory alias stays retained");
+        assert_eq!(
+            lillux::custody::abandoned_custody().count(DIRECTORY),
+            before + 1
+        );
+        assert_eq!(
+            Arc::strong_count(&owner),
+            2,
+            "the directory alias stays retained"
+        );
 
         let mut transferred = FinalizerDirectorySource::retained(Arc::clone(&owner));
         drop(transferred.take_owner());
         assert!(transferred.owner_transferred());
         drop(transferred);
-        assert_eq!(lillux::custody::abandoned_custody().count(DIRECTORY), before + 1);
+        assert_eq!(
+            lillux::custody::abandoned_custody().count(DIRECTORY),
+            before + 1
+        );
         assert_eq!(Arc::strong_count(&owner), 2);
     }
 
@@ -669,7 +782,10 @@ mod custody_drop_tests {
         assert!(!source.source_transferred());
         let before = lillux::custody::abandoned_custody().count(CONTROL);
         drop(source);
-        assert_eq!(lillux::custody::abandoned_custody().count(CONTROL), before + 1);
+        assert_eq!(
+            lillux::custody::abandoned_custody().count(CONTROL),
+            before + 1
+        );
 
         let mut transferred = FinalizerControlSource::duplicate(
             File::create(directory.path().join("transferred")).unwrap(),
@@ -677,7 +793,10 @@ mod custody_drop_tests {
         drop(transferred.take_duplicate());
         assert!(transferred.source_transferred());
         drop(transferred);
-        assert_eq!(lillux::custody::abandoned_custody().count(CONTROL), before + 1);
+        assert_eq!(
+            lillux::custody::abandoned_custody().count(CONTROL),
+            before + 1
+        );
     }
 
     #[test]
@@ -700,6 +819,10 @@ mod custody_drop_tests {
         assert_eq!(after.count(FRAME), before.count(FRAME) + 1);
         // The directory source went with its frame; its own Drop never ran.
         assert_eq!(after.count(DIRECTORY), before.count(DIRECTORY));
-        assert_eq!(Arc::strong_count(&owner), 2, "the root alias stays retained");
+        assert_eq!(
+            Arc::strong_count(&owner),
+            2,
+            "the root alias stays retained"
+        );
     }
 }

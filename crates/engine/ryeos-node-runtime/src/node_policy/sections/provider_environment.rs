@@ -198,7 +198,10 @@ mod tests {
                 name: "OPENAI_API_KEY".to_owned(),
                 recipients: ProviderEnvironmentRecipients {
                     principals: principals.iter().map(|value| (*value).to_owned()).collect(),
-                    capabilities: capabilities.iter().map(|value| (*value).to_owned()).collect(),
+                    capabilities: capabilities
+                        .iter()
+                        .map(|value| (*value).to_owned())
+                        .collect(),
                 },
             }],
         }
@@ -210,8 +213,16 @@ mod tests {
         policy(&["ANTHROPIC_API_KEY", "OPENAI_API_KEY"])
             .validate()
             .unwrap();
-        assert!(policy(&["OPENAI_API_KEY", "ANTHROPIC_API_KEY"]).validate().is_err());
-        assert!(policy(&["OPENAI_API_KEY", "OPENAI_API_KEY"]).validate().is_err());
+        assert!(
+            policy(&["OPENAI_API_KEY", "ANTHROPIC_API_KEY"])
+                .validate()
+                .is_err()
+        );
+        assert!(
+            policy(&["OPENAI_API_KEY", "OPENAI_API_KEY"])
+                .validate()
+                .is_err()
+        );
         let mut previous = policy(&[]);
         previous.schema = 1;
         assert!(previous.validate().is_err());
@@ -265,7 +276,9 @@ mod tests {
             (&[][..], &["ryeos.receive.provider_env.OPENAI_API_KEY"][..]),
         ] {
             assert!(
-                with_recipients(principals, capabilities).validate().is_err(),
+                with_recipients(principals, capabilities)
+                    .validate()
+                    .is_err(),
                 "{principals:?} {capabilities:?}"
             );
         }
@@ -296,7 +309,11 @@ mod tests {
                 }]}),
             )
             .unwrap();
-        assert!(section.parse(&context, &serde_json::json!({"schema": 2})).is_err());
+        assert!(
+            section
+                .parse(&context, &serde_json::json!({"schema": 2}))
+                .is_err()
+        );
         assert!(
             section
                 .parse(

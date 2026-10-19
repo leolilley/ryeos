@@ -11,13 +11,13 @@ use ryeos_external_execution_contract::{
     LifecycleCapability, MAX_LEASE_BUDGET_WEIGHT, MAX_LIFECYCLE_PROVIDER_SPEC_BYTES,
     from_json_slice_strict, valid_lease_budget_weight,
 };
+#[cfg(test)]
+pub(crate) use ryeos_remote_lease_core::EgressProtocol;
 pub(crate) use ryeos_remote_lease_core::{
     EgressPolicy, EgressRule, GUEST_READY_AUTHENTICATED, GuestChannelProfile, LEASE_CREATE_BOUND,
     LEASE_LIFETIME_BOUND, LEASE_NETWORK_POLICY, LEASE_TERMINATE_OBSERVED, NetworkPolicyCapability,
     NetworkPolicyType,
 };
-#[cfg(test)]
-pub(crate) use ryeos_remote_lease_core::EgressProtocol;
 
 /// Provider id on the evidence this adapter derives from the signed spec, so
 /// a requirement entry can accept or refuse it by `providers`. Refusals name
@@ -1373,14 +1373,21 @@ mod tests {
                 "{refusal}"
             );
         }
-        for refused in [serde_json::json!(-1), serde_json::json!(1.5), serde_json::json!("1")] {
+        for refused in [
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+            serde_json::json!("1"),
+        ] {
             let mut malformed = value.clone();
             malformed["budget_weight"] = refused;
             assert!(parse(&malformed).is_err());
         }
         let mut heavy = value;
         heavy["budget_weight"] = serde_json::json!(MAX_LEASE_BUDGET_WEIGHT);
-        assert_eq!(parse(&heavy).unwrap().budget_weight(), MAX_LEASE_BUDGET_WEIGHT);
+        assert_eq!(
+            parse(&heavy).unwrap().budget_weight(),
+            MAX_LEASE_BUDGET_WEIGHT
+        );
     }
 
     #[test]

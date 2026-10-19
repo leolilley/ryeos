@@ -30,8 +30,9 @@ impl NodePolicySection for NodeMaintenancePolicySection {
                 .context("validate offline reset quota against the native host")?;
         }
         for (class, quota) in &policy.offline_native {
-            validate_offline_native_quota(quota)
-                .with_context(|| format!("validate offline native quota `{class}` against the native host"))?;
+            validate_offline_native_quota(quota).with_context(|| {
+                format!("validate offline native quota `{class}` against the native host")
+            })?;
         }
         Ok(Arc::new(policy))
     }
@@ -39,17 +40,22 @@ impl NodePolicySection for NodeMaintenancePolicySection {
 
 /// Check an offline native quota against the bounds the native host owns, so
 /// a policy is refused when it is applied rather than when it is first used.
-pub fn validate_offline_native_quota(quota: &ryeos_scheduler_contract::OfflineNativeQuota) -> anyhow::Result<()> {
+pub fn validate_offline_native_quota(
+    quota: &ryeos_scheduler_contract::OfflineNativeQuota,
+) -> anyhow::Result<()> {
     quota.validate_native(
         lillux_sqlite::CONTROL_STORAGE,
-        u32::try_from(lillux_sqlite::MAX_NATIVE_CONNECTIONS).context("native ticket capacity exceeds u32")?,
+        u32::try_from(lillux_sqlite::MAX_NATIVE_CONNECTIONS)
+            .context("native ticket capacity exceeds u32")?,
         lillux_sqlite::offline_host::offline_native_required_cleanup_steps,
     )
 }
 
 /// Check the signed offline reset quota's native step budget against the
 /// native host's minimum allocation funding margin and exact cleanup quote.
-pub fn validate_offline_reset_quota(quota: &ryeos_scheduler_contract::OfflineResetQuota) -> anyhow::Result<()> {
+pub fn validate_offline_reset_quota(
+    quota: &ryeos_scheduler_contract::OfflineResetQuota,
+) -> anyhow::Result<()> {
     quota.validate_native(
         lillux_sqlite::offline_host::offline_native_allocation_funding_margin_steps,
         lillux_sqlite::offline_host::offline_native_required_cleanup_steps,
@@ -87,9 +93,12 @@ mod tests {
         let policies = shipped_maintenance_policies();
         let mut checked = 0;
         for (path, policy) in &policies {
-            policy.validate().unwrap_or_else(|error| panic!("{path}: {error:#}"));
+            policy
+                .validate()
+                .unwrap_or_else(|error| panic!("{path}: {error:#}"));
             if let Some(quota) = &policy.offline_reset {
-                validate_offline_reset_quota(quota).unwrap_or_else(|error| panic!("{path}: {error:#}"));
+                validate_offline_reset_quota(quota)
+                    .unwrap_or_else(|error| panic!("{path}: {error:#}"));
                 checked += 1;
             }
         }
@@ -107,11 +116,17 @@ mod tests {
         // below the SQL ceiling that native SQL also charges.
         quota.max_native_allocator_steps = 1_048_576;
         let error = validate_offline_reset_quota(&quota).unwrap_err();
-        assert!(format!("{error:#}").contains("SQL VM step ceiling"), "{error:#}");
+        assert!(
+            format!("{error:#}").contains("SQL VM step ceiling"),
+            "{error:#}"
+        );
         // Above the ceiling but short of the allocation funding margin and
         // the cleanup quote.
         quota.max_native_allocator_steps = quota.max_sql_vm_steps + 1;
         let error = validate_offline_reset_quota(&quota).unwrap_err();
-        assert!(format!("{error:#}").contains("allocation funding margin"), "{error:#}");
+        assert!(
+            format!("{error:#}").contains("allocation funding margin"),
+            "{error:#}"
+        );
     }
 }

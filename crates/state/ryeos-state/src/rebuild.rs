@@ -14,7 +14,8 @@ use sha2::{Digest, Sha256};
 use crate::projection::{ProjectionDb, project_event, project_thread_snapshot};
 use crate::refs::{self, TrustStore};
 use crate::state_db::{
-    OriginalProjectionBuildContext, ProjectionRecoveryObserver, ProjectionRecoveryProgress, ProjectionRecoveryStage,
+    OriginalProjectionBuildContext, ProjectionRecoveryObserver, ProjectionRecoveryProgress,
+    ProjectionRecoveryStage,
 };
 use crate::{ChainState, ThreadEvent, ThreadSnapshot};
 
@@ -45,8 +46,7 @@ struct BoundedProjectionCasReader<'a> {
 
 impl ProjectionCasObjectReader for BoundedProjectionCasReader<'_> {
     fn get_object(&mut self, hash: &str) -> Result<Option<Value>> {
-        self
-            .budget
+        self.budget
             .get_object(self.cas, hash, self.limits.max_object_bytes)
     }
 }
@@ -562,8 +562,8 @@ fn rederive_expected_fingerprints(
     observer: Option<&dyn ProjectionRecoveryObserver>,
     rederive: impl FnOnce(&ProjectionDb) -> Result<()>,
 ) -> Result<Vec<ProjectionTableFingerprint>> {
-    let context = original
-        .context("projection verification requires the original native State context")?;
+    let context =
+        original.context("projection verification requires the original native State context")?;
     let expected = context.open_expected_projection()?;
     let fingerprints = match rederive(&expected)
         .and_then(|()| projection_content_fingerprints_with_observer(&expected, observer))
@@ -1114,10 +1114,18 @@ pub(crate) fn repair_one_chain_verified_with_cas_and_limits_and_budget(
         anyhow::bail!("invalid chain head hash: {head_hash}");
     }
     let closure = collect_complete_publication_closure(cas, [head_hash.to_owned()], limits)?;
-    if closure.object_hashes.iter().any(|hash| !budget.admits_hash(hash)) {
+    if closure
+        .object_hashes
+        .iter()
+        .any(|hash| !budget.admits_hash(hash))
+    {
         anyhow::bail!("bounded projection repair escaped its admitted publication closure");
     }
-    let mut reader = BoundedProjectionCasReader { cas, limits, budget };
+    let mut reader = BoundedProjectionCasReader {
+        cas,
+        limits,
+        budget,
+    };
     repair_one_chain_with_reader(projection, &mut reader, chain_root_id, head_hash, observer)
 }
 
@@ -1128,7 +1136,6 @@ fn repair_one_chain_with_reader<R: ProjectionCasObjectReader>(
     head_hash: &str,
     observer: Option<&dyn ProjectionRecoveryObserver>,
 ) -> Result<ChainRepairReport> {
-
     let current_meta = projection.get_projection_meta(chain_root_id)?;
     if current_meta
         .as_ref()
@@ -1273,12 +1280,12 @@ pub(crate) fn verify_repair_closure_anchored_with_existing_budget(
     limits: crate::object_closure::ObjectClosureLimits,
     budget: &mut crate::object_closure::BoundedCasObjectReadBudget,
 ) -> Result<crate::object_closure::ObjectClosureReport> {
-    let closure = collect_complete_publication_closure(
-        cas,
-        [head_hash.to_owned()],
-        limits,
-    )?;
-    if closure.object_hashes.iter().any(|hash| !budget.admits_hash(hash)) {
+    let closure = collect_complete_publication_closure(cas, [head_hash.to_owned()], limits)?;
+    if closure
+        .object_hashes
+        .iter()
+        .any(|hash| !budget.admits_hash(hash))
+    {
         anyhow::bail!("anchored publication frontier escaped its initially admitted closure");
     }
     validate_publication_history(
@@ -1298,13 +1305,14 @@ fn collect_complete_publication_closure(
     limits: crate::object_closure::ObjectClosureLimits,
 ) -> Result<crate::object_closure::ObjectClosureReport> {
     let mut cancellation_check = || Ok(());
-    let closure = crate::object_closure::collect_object_closure_with_cas_and_limits_and_check_and_verify(
-        cas,
-        roots,
-        limits,
-        &mut cancellation_check,
-        true,
-    )?;
+    let closure =
+        crate::object_closure::collect_object_closure_with_cas_and_limits_and_check_and_verify(
+            cas,
+            roots,
+            limits,
+            &mut cancellation_check,
+            true,
+        )?;
     if !closure.is_complete() {
         anyhow::bail!(
             "incomplete bounded publication closure: missing_objects={}, missing_blobs={}, malformed_objects={}, unsupported_objects={}",
@@ -1410,13 +1418,14 @@ fn verified_repair_closure_inner_with_limits(
 ) -> Result<crate::object_closure::ObjectClosureReport> {
     let mut cancellation_check = || ensure_not_cancelled(observer);
     cancellation_check()?;
-    let closure = crate::object_closure::collect_object_closure_with_cas_and_limits_and_check_and_verify(
-        cas,
-        [head_hash.to_string()],
-        limits,
-        &mut cancellation_check,
-        verify_all_hashes && verify_typed_during_traversal,
-    )?;
+    let closure =
+        crate::object_closure::collect_object_closure_with_cas_and_limits_and_check_and_verify(
+            cas,
+            [head_hash.to_string()],
+            limits,
+            &mut cancellation_check,
+            verify_all_hashes && verify_typed_during_traversal,
+        )?;
     if !closure.is_complete() {
         let summary = format!(
             "incomplete CAS closure for chain {chain_root_id}@{head_hash}: missing_objects={}, missing_blobs={}, malformed_objects={}, unsupported_objects={}",
@@ -1471,7 +1480,8 @@ fn verified_repair_closure_inner_with_limits(
                 .checked_sub(verified_blob_bytes)
                 .context("verified blob-byte accounting exceeded its admitted total")?;
             let maximum_bytes = limits.max_blob_bytes.min(remaining_bytes);
-            let bytes = cas.get_blob_bounded(hash, maximum_bytes)?
+            let bytes = cas
+                .get_blob_bounded(hash, maximum_bytes)?
                 .ok_or_else(|| anyhow::anyhow!("verified CAS blob {hash} disappeared"))?;
             verified_blob_bytes = verified_blob_bytes
                 .checked_add(u64::try_from(bytes.len())?)
@@ -1483,9 +1493,9 @@ fn verified_repair_closure_inner_with_limits(
         Some(budget) => budget.get_object(cas, head_hash, limits.max_object_bytes)?,
         None => cas.get_object(head_hash)?,
     }
-        .ok_or_else(|| anyhow::anyhow!("chain head object {head_hash} disappeared"))?;
+    .ok_or_else(|| anyhow::anyhow!("chain head object {head_hash} disappeared"))?;
     let state: crate::ChainState = serde_json::from_value(head_value)
-    .with_context(|| format!("decode chain head object {head_hash}"))?;
+        .with_context(|| format!("decode chain head object {head_hash}"))?;
     state.validate()?;
     ensure_repair_head_root(&state, chain_root_id)?;
     // A complete object closure may carry signed supporting evidence rooted in
@@ -1577,9 +1587,10 @@ fn head_projection_meta_with_reader<R: ProjectionCasObjectReader>(
     chain_root_id: &str,
     chain_state_hash: &str,
 ) -> Result<crate::projection::ProjectionMeta> {
-    let state = load_chain_state_with_reader(reader, chain_state_hash, chain_root_id).with_context(|| {
-        format!("derive projection cursor for {chain_root_id}@{chain_state_hash}")
-    })?;
+    let state = load_chain_state_with_reader(reader, chain_state_hash, chain_root_id)
+        .with_context(|| {
+            format!("derive projection cursor for {chain_root_id}@{chain_state_hash}")
+        })?;
     Ok(crate::projection::ProjectionMeta {
         chain_root_id: chain_root_id.to_string(),
         indexed_chain_state_hash: chain_state_hash.to_string(),
@@ -1610,13 +1621,9 @@ impl<'a> ProjectionBatch<'a> {
             // not start its own transaction; rusqlite/SQLite will reject nested
             // BEGINs on this connection. Keep sync-job immediate transactions
             // out of this path.
-            self.tx = Some(
-                self.connection
-                    .unchecked_transaction()
-                    .with_context(|| {
-                        format!("failed to begin projection {} transaction", self.stage)
-                    })?,
-            );
+            self.tx = Some(self.connection.unchecked_transaction().with_context(|| {
+                format!("failed to begin projection {} transaction", self.stage)
+            })?);
         }
         Ok(())
     }
@@ -1720,12 +1727,13 @@ fn rebuild_chain_with_reader<R: ProjectionCasObjectReader>(
             ensure_not_cancelled(observer)?;
             for (thread_id, entry) in &state.threads {
                 ensure_not_cancelled(observer)?;
-                let snapshot = load_thread_snapshot_with_reader(reader, &entry.snapshot_hash).with_context(|| {
-                    format!(
-                        "load snapshot {} for thread {thread_id} from ChainState {state_hash}",
-                        entry.snapshot_hash
-                    )
-                })?;
+                let snapshot = load_thread_snapshot_with_reader(reader, &entry.snapshot_hash)
+                    .with_context(|| {
+                        format!(
+                            "load snapshot {} for thread {thread_id} from ChainState {state_hash}",
+                            entry.snapshot_hash
+                        )
+                    })?;
                 validate_snapshot_entry(state, thread_id, entry, &snapshot).with_context(|| {
                     format!(
                         "validate snapshot {} for thread {thread_id} from ChainState {state_hash}",
@@ -1743,7 +1751,8 @@ fn rebuild_chain_with_reader<R: ProjectionCasObjectReader>(
         let (_, head_state) = states
             .last()
             .expect("a full ChainState traversal always contains its head");
-        report.events += walk_and_project_events_with_reader(projection, reader, head_state, observer)?;
+        report.events +=
+            walk_and_project_events_with_reader(projection, reader, head_state, observer)?;
 
         // Count unique threads
         let conn = connection;
@@ -2023,7 +2032,13 @@ fn walk_and_project_events_from_with_observer(
     observer: Option<&dyn ProjectionRecoveryObserver>,
 ) -> Result<Option<usize>> {
     let mut reader = LocalProjectionCasReader { cas };
-    walk_and_project_events_from_with_reader(projection, &mut reader, head_state, stop_state, observer)
+    walk_and_project_events_from_with_reader(
+        projection,
+        &mut reader,
+        head_state,
+        stop_state,
+        observer,
+    )
 }
 
 fn walk_and_project_events_from_with_reader<R: ProjectionCasObjectReader>(
@@ -2079,8 +2094,9 @@ fn walk_and_project_events_from_with_reader<R: ProjectionCasObjectReader>(
                 );
             }
             if let Some(cursor_hash) = stop_hash {
-                let cursor_event = load_thread_event_with_reader(reader, cursor_hash, &head_state.chain_root_id)
-                    .context("load excluded event replay cursor")?;
+                let cursor_event =
+                    load_thread_event_with_reader(reader, cursor_hash, &head_state.chain_root_id)
+                        .context("load excluded event replay cursor")?;
                 if cursor_event.chain_seq != stop_sequence {
                     anyhow::bail!(
                         "excluded event cursor {cursor_hash} has chain sequence {}, expected {stop_sequence}",
@@ -2591,20 +2607,26 @@ mod tests {
         assert_eq!(report.events_projected, 1);
 
         // Verify projection has the thread
-        let status: String = proj.with_sql(|connection| Ok(connection.query_row(
-                "SELECT status FROM threads WHERE thread_id = 'T-root'",
-                [],
-                |row| row.get(0),
-            )?))
+        let status: String = proj
+            .with_sql(|connection| {
+                Ok(connection.query_row(
+                    "SELECT status FROM threads WHERE thread_id = 'T-root'",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
             .unwrap();
         assert_eq!(status, "running");
 
         // Verify projection has the event
-        let event_count: usize = proj.with_sql(|connection| Ok(connection.query_row(
-                "SELECT COUNT(*) FROM events WHERE thread_id = 'T-root'",
-                [],
-                |row| row.get(0),
-            )?))
+        let event_count: usize = proj
+            .with_sql(|connection| {
+                Ok(connection.query_row(
+                    "SELECT COUNT(*) FROM events WHERE thread_id = 'T-root'",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
             .unwrap();
         assert_eq!(event_count, 1);
     }
@@ -2692,17 +2714,21 @@ mod tests {
             true,
             exact_transfer_limits,
         )
-        .expect("full two-state history validation accepts the exact unique-object transfer ceiling");
+        .expect(
+            "full two-state history validation accepts the exact unique-object transfer ceiling",
+        );
         let mut over_transfer_limits = exact_transfer_limits;
         over_transfer_limits.max_total_object_bytes = admitted.object_bytes_read - 1;
-        assert!(verified_repair_closure_with_cas_and_limits(
-            &cas,
-            "T-root",
-            &cs2_hash,
-            true,
-            over_transfer_limits,
-        )
-        .is_err());
+        assert!(
+            verified_repair_closure_with_cas_and_limits(
+                &cas,
+                "T-root",
+                &cs2_hash,
+                true,
+                over_transfer_limits,
+            )
+            .is_err()
+        );
 
         let proj = crate::test_support::TestProjection::open();
 
@@ -2713,11 +2739,14 @@ mod tests {
         assert_eq!(report.events_projected, 1);
 
         // Verify latest status
-        let status: String = proj.with_sql(|connection| Ok(connection.query_row(
-                "SELECT status FROM threads WHERE thread_id = 'T-root'",
-                [],
-                |row| row.get(0),
-            )?))
+        let status: String = proj
+            .with_sql(|connection| {
+                Ok(connection.query_row(
+                    "SELECT status FROM threads WHERE thread_id = 'T-root'",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
             .unwrap();
         assert_eq!(status, "running");
     }
@@ -2760,11 +2789,14 @@ mod tests {
         );
         let cursor = projection.get_projection_meta("T-root").unwrap().unwrap();
         assert_eq!(cursor.indexed_chain_state_hash, base_hash);
-        let status: String = projection.with_sql(|connection| Ok(connection.query_row(
-                "SELECT status FROM threads WHERE thread_id = 'T-root'",
-                [],
-                |row| row.get(0),
-            )?))
+        let status: String = projection
+            .with_sql(|connection| {
+                Ok(connection.query_row(
+                    "SELECT status FROM threads WHERE thread_id = 'T-root'",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
             .unwrap();
         assert_eq!(status, "created");
     }
@@ -2848,11 +2880,14 @@ mod tests {
         );
         let cursor = projection.get_projection_meta("T-root").unwrap().unwrap();
         assert_eq!(cursor.indexed_chain_state_hash, base_hash);
-        let status: String = projection.with_sql(|connection| Ok(connection.query_row(
-                "SELECT status FROM threads WHERE thread_id = 'T-root'",
-                [],
-                |row| row.get(0),
-            )?))
+        let status: String = projection
+            .with_sql(|connection| {
+                Ok(connection.query_row(
+                    "SELECT status FROM threads WHERE thread_id = 'T-root'",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
             .unwrap();
         assert_eq!(status, "created");
     }
@@ -2909,11 +2944,14 @@ mod tests {
         );
         let cursor = projection.get_projection_meta("T-root").unwrap().unwrap();
         assert_eq!(cursor.indexed_chain_state_hash, missing_cursor_hash);
-        let status: String = projection.with_sql(|connection| Ok(connection.query_row(
-                "SELECT status FROM threads WHERE thread_id = 'T-root'",
-                [],
-                |row| row.get(0),
-            )?))
+        let status: String = projection
+            .with_sql(|connection| {
+                Ok(connection.query_row(
+                    "SELECT status FROM threads WHERE thread_id = 'T-root'",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
             .unwrap();
         assert_eq!(status, "created");
     }
@@ -3075,13 +3113,19 @@ mod tests {
         walk_and_project_events_from(&projection, &cas_root, &newer_state, Some(&older_state))
             .unwrap();
 
-        let value: Vec<u8> = projection.with_sql(|connection| Ok(connection.query_row(
-                "SELECT value FROM thread_facets WHERE thread_id='T-root' AND key='phase'",
-                [],
-                |row| row.get(0),
-            )?))
+        let value: Vec<u8> = projection
+            .with_sql(|connection| {
+                Ok(connection.query_row(
+                    "SELECT value FROM thread_facets WHERE thread_id='T-root' AND key='phase'",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
             .unwrap();
-        let events: i64 = projection.with_sql(|connection| Ok(connection.query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))?))
+        let events: i64 = projection
+            .with_sql(|connection| {
+                Ok(connection.query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))?)
+            })
             .unwrap();
         assert_eq!(value, b"new");
         assert_eq!(events, 2);
@@ -3119,8 +3163,8 @@ mod tests {
     mod native_host {
         use super::*;
         use crate::state_db::{PreparedOfflineProjection, TestProjectionLeaseAuthority};
-        use lillux_sqlite::test_host::TestNativeHost;
         use lillux_sqlite::OriginalNativeConnectionTerminal;
+        use lillux_sqlite::test_host::TestNativeHost;
         use std::sync::Arc;
 
         struct Fixture {
@@ -3144,12 +3188,20 @@ mod tests {
             let root = lillux::PinnedDirectory::open(tmp.path()).unwrap().unwrap();
             let namespace = root.lock_exclusive().unwrap();
             let prepared =
-                PreparedOfflineProjection::capture(root, Arc::new(test_trust_store()), &namespace).unwrap();
+                PreparedOfflineProjection::capture(root, Arc::new(test_trust_store()), &namespace)
+                    .unwrap();
             let lease: Arc<dyn lillux_sqlite::OriginalNativeProjectionLeaseAuthority> =
                 Arc::new(TestProjectionLeaseAuthority);
             let context = OriginalProjectionBuildContext::for_test(host, prepared, &lease).unwrap();
-            Fixture { _tmp: tmp, cas_root, refs_root, trust: test_trust_store(), context, _lease: lease,
-                _namespace: namespace }
+            Fixture {
+                _tmp: tmp,
+                cas_root,
+                refs_root,
+                trust: test_trust_store(),
+                context,
+                _lease: lease,
+                _namespace: namespace,
+            }
         }
 
         fn open_subject(host: &TestNativeHost) -> ProjectionDb {
@@ -3164,11 +3216,17 @@ mod tests {
             ProjectionDb::open_original_transient(Arc::clone(host.factory()), inputs).unwrap()
         }
 
-        fn finish(host: &TestNativeHost, subject: ProjectionDb, context: OriginalProjectionBuildContext) {
+        fn finish(
+            host: &TestNativeHost,
+            subject: ProjectionDb,
+            context: OriginalProjectionBuildContext,
+        ) {
             let closed = subject
                 .close_original(host.factory())
                 .unwrap_or_else(|failure| panic!("subject close retained: {failure}"));
-            host.retain_terminal(OriginalNativeConnectionTerminal::Closed(closed.native_proof()));
+            host.retain_terminal(OriginalNativeConnectionTerminal::Closed(
+                closed.native_proof(),
+            ));
             let terminals = context
                 .into_test_terminals()
                 .unwrap_or_else(|_| panic!("test context retained non-transient custody"));
@@ -3190,26 +3248,46 @@ mod tests {
             let heads = RebuildHeads::Path(&fixture.refs_root);
             let observer = RecordingRecoveryObserver::default();
             let (report, baseline) = rebuild_projection_with_verified_baseline_inner(
-                &subject, &cas, heads, &fixture.trust, Some(&observer),
+                &subject,
+                &cas,
+                heads,
+                &fixture.trust,
+                Some(&observer),
             )
             .unwrap();
             assert_eq!(report.chains_rebuilt, 1);
             let updates_before_verification = observer.updates.lock().unwrap().len();
             let (verification, fingerprints) = verify_preverified_projection_inner(
-                &subject, &cas, heads, &fixture.trust, &baseline, Some(&observer),
+                &subject,
+                &cas,
+                heads,
+                &fixture.trust,
+                &baseline,
+                Some(&observer),
                 Some(&mut fixture.context),
             )
             .unwrap();
             assert_eq!(verification.signed_heads_verified, 1);
             assert_eq!(verification.projection_cursors_verified, 1);
-            assert_eq!(verification.projection_tables_verified, HEAD_DERIVED_PROJECTION_TABLES.len());
+            assert_eq!(
+                verification.projection_tables_verified,
+                HEAD_DERIVED_PROJECTION_TABLES.len()
+            );
             assert_eq!(fingerprints.len(), HEAD_DERIVED_PROJECTION_TABLES.len());
             assert_eq!(
                 observer.updates.lock().unwrap().len(),
                 updates_before_verification,
                 "internal expected-row rederivation must not publish a second rebuild cycle"
             );
-            let Fixture { _tmp, cas_root, refs_root, trust, context, _lease, _namespace } = fixture;
+            let Fixture {
+                _tmp,
+                cas_root,
+                refs_root,
+                trust,
+                context,
+                _lease,
+                _namespace,
+            } = fixture;
             drop((cas_root, refs_root, trust));
             finish(&host, subject, context);
         }
@@ -3221,24 +3299,54 @@ mod tests {
             let subject = open_subject(&host);
             let cas = lillux::CasStore::new(fixture.cas_root.clone());
             let heads = RebuildHeads::Path(&fixture.refs_root);
-            let (rebuilt, baseline) =
-                rebuild_projection_with_verified_baseline_inner(&subject, &cas, heads, &fixture.trust, None)
-                    .unwrap();
-            assert_eq!(rebuilt.chains_rebuilt, 1);
-            let report = verify_projection_with_authority(
-                &subject, &cas, heads, &fixture.trust, None, Some(&mut fixture.context),
+            let (rebuilt, baseline) = rebuild_projection_with_verified_baseline_inner(
+                &subject,
+                &cas,
+                heads,
+                &fixture.trust,
+                None,
             )
             .unwrap();
-            assert_eq!((report.signed_heads_verified, report.projection_cursors_verified), (1, 1));
+            assert_eq!(rebuilt.chains_rebuilt, 1);
+            let report = verify_projection_with_authority(
+                &subject,
+                &cas,
+                heads,
+                &fixture.trust,
+                None,
+                Some(&mut fixture.context),
+            )
+            .unwrap();
+            assert_eq!(
+                (
+                    report.signed_heads_verified,
+                    report.projection_cursors_verified
+                ),
+                (1, 1)
+            );
             assert!(report.projection_tables_verified > 0);
             assert_eq!(fixture.context.test_terminal_count(), 1);
             let (report, fingerprints) = verify_preverified_projection_inner(
-                &subject, &cas, heads, &fixture.trust, &baseline, None, Some(&mut fixture.context),
+                &subject,
+                &cas,
+                heads,
+                &fixture.trust,
+                &baseline,
+                None,
+                Some(&mut fixture.context),
             )
             .unwrap();
             assert_eq!(report.projection_tables_verified, fingerprints.len());
             assert_eq!(fixture.context.test_terminal_count(), 2);
-            let Fixture { _tmp, cas_root, refs_root, trust, context, _lease, _namespace } = fixture;
+            let Fixture {
+                _tmp,
+                cas_root,
+                refs_root,
+                trust,
+                context,
+                _lease,
+                _namespace,
+            } = fixture;
             drop((cas_root, refs_root, trust));
             finish(&host, subject, context);
             assert_eq!(host.ticket_census(), (3, 3));
@@ -3251,21 +3359,48 @@ mod tests {
             let subject = open_subject(&host);
             let cas = lillux::CasStore::new(fixture.cas_root.clone());
             let heads = RebuildHeads::Path(&fixture.refs_root);
-            rebuild_projection_with_verified_baseline_inner(&subject, &cas, heads, &fixture.trust, None).unwrap();
-            let refused = verify_projection_with_authority(&subject, &cas, heads, &fixture.trust, None, None)
-                .unwrap_err();
-            assert!(format!("{refused:#}").contains("original native State context"), "{refused:#}");
+            rebuild_projection_with_verified_baseline_inner(
+                &subject,
+                &cas,
+                heads,
+                &fixture.trust,
+                None,
+            )
+            .unwrap();
+            let refused =
+                verify_projection_with_authority(&subject, &cas, heads, &fixture.trust, None, None)
+                    .unwrap_err();
+            assert!(
+                format!("{refused:#}").contains("original native State context"),
+                "{refused:#}"
+            );
             assert_eq!(host.ticket_census(), (1, 0));
             subject
                 .with_sql(|connection| Ok(connection.execute("DELETE FROM threads", [])?))
                 .unwrap();
             let mismatch = verify_projection_with_authority(
-                &subject, &cas, heads, &fixture.trust, None, Some(&mut fixture.context),
+                &subject,
+                &cas,
+                heads,
+                &fixture.trust,
+                None,
+                Some(&mut fixture.context),
             )
             .unwrap_err();
-            assert!(!format!("{mismatch:#}").contains("original native State context"), "{mismatch:#}");
+            assert!(
+                !format!("{mismatch:#}").contains("original native State context"),
+                "{mismatch:#}"
+            );
             assert_eq!(fixture.context.test_terminal_count(), 1);
-            let Fixture { _tmp, cas_root, refs_root, trust, context, _lease, _namespace } = fixture;
+            let Fixture {
+                _tmp,
+                cas_root,
+                refs_root,
+                trust,
+                context,
+                _lease,
+                _namespace,
+            } = fixture;
             drop((cas_root, refs_root, trust));
             finish(&host, subject, context);
             assert_eq!(host.ticket_census(), (2, 2));
@@ -3274,12 +3409,18 @@ mod tests {
         /// Admits the offline transient; any generation lease still refuses.
         struct AdmittedTransientLease;
         impl lillux_sqlite::OriginalNativeProjectionLeaseAuthority for AdmittedTransientLease {
-            fn require_original(&self, _factory: &Arc<lillux_sqlite::OriginalNativeFactory>, _cleanup: bool)
-                -> anyhow::Result<()> {
+            fn require_original(
+                &self,
+                _factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
+                _cleanup: bool,
+            ) -> anyhow::Result<()> {
                 Ok(())
             }
-            fn fork_deadline(&self, _factory: &Arc<lillux_sqlite::OriginalNativeFactory>, _cleanup: bool)
-                -> anyhow::Result<lillux::time::MonotonicDeadline> {
+            fn fork_deadline(
+                &self,
+                _factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
+                _cleanup: bool,
+            ) -> anyhow::Result<lillux::time::MonotonicDeadline> {
                 anyhow::bail!("offline transient test admits no projection lease")
             }
         }
@@ -3295,13 +3436,16 @@ mod tests {
             let root = lillux::PinnedDirectory::open(tmp.path()).unwrap().unwrap();
             let namespace = root.lock_exclusive().unwrap();
             let prepared =
-                PreparedOfflineProjection::capture(root, Arc::new(test_trust_store()), &namespace).unwrap();
+                PreparedOfflineProjection::capture(root, Arc::new(test_trust_store()), &namespace)
+                    .unwrap();
             let lease: Arc<dyn lillux_sqlite::OriginalNativeProjectionLeaseAuthority> =
                 Arc::new(AdmittedTransientLease);
             // SAFETY: test-only admission under the host's own funded factory;
             // the namespace lock and exclusive guard outlive the State owner.
-            let state = unsafe { prepared.open_projection(Arc::clone(host.factory()), Arc::clone(&lease), &guard) }
-                .unwrap();
+            let state = unsafe {
+                prepared.open_projection(Arc::clone(host.factory()), Arc::clone(&lease), &guard)
+            }
+            .unwrap();
             assert_eq!(host.ticket_census(), (1, 0));
             let closed = state
                 .close_original_projection(Arc::clone(host.factory()), &guard, None)

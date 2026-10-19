@@ -173,12 +173,22 @@ fn required_call() -> ExecutionEvidenceRequiredCallWire {
 #[test]
 fn inline_participant_is_a_same_chain_child_of_its_parent() {
     use ryeos_state::objects::thread_snapshot::ThreadSnapshotBuilder;
-    let parent =
-        ThreadSnapshotBuilder::new("T-parent", "T-root", "graph_run", "graph:test/flow", "@graph")
-            .build();
-    let mut child =
-        ThreadSnapshotBuilder::new("T-child", "T-root", "tool_run", "tool:test/probe", "@subprocess")
-            .build();
+    let parent = ThreadSnapshotBuilder::new(
+        "T-parent",
+        "T-root",
+        "graph_run",
+        "graph:test/flow",
+        "@graph",
+    )
+    .build();
+    let mut child = ThreadSnapshotBuilder::new(
+        "T-child",
+        "T-root",
+        "tool_run",
+        "tool:test/probe",
+        "@subprocess",
+    )
+    .build();
     child.upstream_thread_id = Some("T-parent".into());
     require_inline_child_placement(&child, &parent, "T-child").unwrap();
     assert!(require_inline_child_placement(&child, &parent, "T-another-child").is_err());

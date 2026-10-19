@@ -613,8 +613,8 @@ fn fixture() -> Result<Fixture> {
         ryeos_state::external_content::products::qualification::PRODUCT_QUALIFICATION_POLICY_SCHEMA;
     let directory = tempfile::tempdir()?;
     let (store_owner, mut state) = crate::state::test_support::build(directory.path())?;
-    state.node_policy = Arc::new(ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(
-        vec![
+    state.node_policy = Arc::new(
+        ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![
             Arc::new(NodeObjectClosurePolicy {
                 schema: 1,
                 max_roots: 256,
@@ -629,9 +629,10 @@ fn fixture() -> Result<Fixture> {
                 local_verification: None,
             }),
             Arc::new(ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy()),
-        ],
-    ));
-    let operator = ryeos_node_runtime::identity::NodeIdentity::load(&state.config.operator_signing_key_path)?;
+        ]),
+    );
+    let operator =
+        ryeos_node_runtime::identity::NodeIdentity::load(&state.config.operator_signing_key_path)?;
     let scopes = vec!["ryeos.execute.service.external-content/launch-product-qualification".into()];
     ryeos_node_runtime::identity::write_authorized_key_toml(
         &state.config.authorized_keys_dir,
@@ -841,7 +842,11 @@ product_qualification_policy:
         label: Some("qualification fixture".into()),
     }]));
     let mut kind_roots = vec![core.join(".ai/node/engine/kinds")];
-    kind_roots.extend(workflow.iter().map(|root| root.join(".ai/node/engine/kinds")));
+    kind_roots.extend(
+        workflow
+            .iter()
+            .map(|root| root.join(".ai/node/engine/kinds")),
+    );
     let kinds = ryeos_engine::kind_registry::KindRegistry::load_base(&kind_roots, &trust)?;
     let (parsers, _) = ryeos_engine::parsers::ParserRegistry::load_base(&roots, &trust, &kinds)?;
     let handlers = ryeos_engine::test_support::load_live_handler_registry();
@@ -862,16 +867,22 @@ product_qualification_policy:
         state.isolation.clone(),
         &roots,
     )?;
-    let registered = ["core", "knowledge", "directive", "graph", "qualification-fixture"]
-        .into_iter()
-        .zip(roots.iter())
-        .map(
-            |(name, root)| ryeos_engine::item_resolution::RegisteredBundleRoot {
-                name: name.into(),
-                canonical_root: root.clone(),
-            },
-        )
-        .collect();
+    let registered = [
+        "core",
+        "knowledge",
+        "directive",
+        "graph",
+        "qualification-fixture",
+    ]
+    .into_iter()
+    .zip(roots.iter())
+    .map(
+        |(name, root)| ryeos_engine::item_resolution::RegisteredBundleRoot {
+            name: name.into(),
+            canonical_root: root.clone(),
+        },
+    )
+    .collect();
     state.engine = Arc::new(
         ryeos_engine::engine::Engine::new(
             kinds,

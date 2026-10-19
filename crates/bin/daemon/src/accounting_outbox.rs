@@ -25,7 +25,10 @@ fn now_ms() -> i64 {
 
 /// Wait out `delay` unless the stop signal arrives first. Returns true when
 /// the publisher must stop.
-async fn pause_or_stop(delay: lillux::time::Duration, stop: &mut tokio::sync::watch::Receiver<bool>) -> bool {
+async fn pause_or_stop(
+    delay: lillux::time::Duration,
+    stop: &mut tokio::sync::watch::Receiver<bool>,
+) -> bool {
     if *stop.borrow() {
         return true;
     }

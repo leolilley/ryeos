@@ -1200,8 +1200,10 @@ mod tests {
         drop(clock_namespace);
         drop(owner);
         drop(fixture);
-        let reopened =
-            crate::state_store::test_native::TestAccountingDb::open(&root.path().join("budget-fixture-ledger")).unwrap();
+        let reopened = crate::state_store::test_native::TestAccountingDb::open(
+            &root.path().join("budget-fixture-ledger"),
+        )
+        .unwrap();
         assert!(reopened.startup_verify().unwrap().hard_admission_enabled);
         sql(&reopened, |conn| {
             let row: (String, Option<String>) = conn.query_row(
@@ -1247,8 +1249,10 @@ mod tests {
         let original = owner.envelope.original_reservation_id.clone();
         drop(owner);
         drop(fixture);
-        let reopened =
-            crate::state_store::test_native::TestAccountingDb::open(&root.path().join("budget-fixture-ledger")).unwrap();
+        let reopened = crate::state_store::test_native::TestAccountingDb::open(
+            &root.path().join("budget-fixture-ledger"),
+        )
+        .unwrap();
         assert!(reopened.startup_verify().unwrap().hard_admission_enabled);
         sql(&reopened, |conn| {
             let row: (String, Option<String>) = conn.query_row("SELECT state,owner_incarnation FROM resource_owner_accounting_gate WHERE original_reservation_id=?1", [original], |row| Ok((row.get(0)?,row.get(1)?))).unwrap();

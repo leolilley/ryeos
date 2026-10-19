@@ -50,8 +50,13 @@ mod integration_tests {
 
         let write_barrier = WriteBarrier::new();
 
-        let store = ryeos_app::test_support::TestStateStore::open_with_barrier(tmpdir.path(), signer, write_barrier, Arc::new(head_trust))
-            .expect("StateStore creation should succeed");
+        let store = ryeos_app::test_support::TestStateStore::open_with_barrier(
+            tmpdir.path(),
+            signer,
+            write_barrier,
+            Arc::new(head_trust),
+        )
+        .expect("StateStore creation should succeed");
 
         (tmpdir, store)
     }
@@ -2087,7 +2092,12 @@ mod integration_tests {
                 let refs_root = db.refs_root().to_path_buf();
 
                 // Clear edges from projection
-                db.projection().with_sql(|connection| Ok(connection.execute_batch("DELETE FROM thread_edges; DELETE FROM projection_meta;")?))
+                db.projection()
+                    .with_sql(|connection| {
+                        Ok(connection.execute_batch(
+                            "DELETE FROM thread_edges; DELETE FROM projection_meta;",
+                        )?)
+                    })
                     .expect("clear projection should succeed");
 
                 // Rebuild from CAS
@@ -2161,7 +2171,12 @@ mod integration_tests {
         // Clear artifacts from projection
         store
             .with_state_db(|db| {
-                db.projection().with_sql(|connection| Ok(connection.execute_batch("DELETE FROM thread_artifacts; DELETE FROM projection_meta;")?))
+                db.projection()
+                    .with_sql(|connection| {
+                        Ok(connection.execute_batch(
+                            "DELETE FROM thread_artifacts; DELETE FROM projection_meta;",
+                        )?)
+                    })
                     .expect("clear artifacts should succeed");
                 Ok::<_, anyhow::Error>(())
             })
@@ -2227,7 +2242,8 @@ mod integration_tests {
                     .expect("update meta should succeed");
 
                 // Clear threads table to simulate drift
-                db.projection().with_sql(|connection| Ok(connection.execute_batch("DELETE FROM threads")?))
+                db.projection()
+                    .with_sql(|connection| Ok(connection.execute_batch("DELETE FROM threads")?))
                     .expect("clear threads should succeed");
 
                 Ok::<_, anyhow::Error>(())
@@ -2330,13 +2346,16 @@ mod integration_tests {
         // 5. Delete projection and rebuild — everything should recover
         store
             .with_state_db(|db| {
-                db.projection().with_sql(|connection| Ok(connection.execute_batch(
-                        "DELETE FROM thread_edges;
+                db.projection()
+                    .with_sql(|connection| {
+                        Ok(connection.execute_batch(
+                            "DELETE FROM thread_edges;
                  DELETE FROM thread_artifacts;
                  DELETE FROM threads;
                  DELETE FROM events;
                  DELETE FROM projection_meta;",
-                    )?))
+                        )?)
+                    })
                     .expect("clear projection");
 
                 let cas_root = db.cas_root().to_path_buf();

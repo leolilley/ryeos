@@ -1567,7 +1567,8 @@ pub mod test_support {
         let mut artifact =
             crate::external_content::products::qualification::test_support::launch_artifact_identity();
         if let crate::objects::AdmittedLaunchArtifactIdentity::DirectItemExecutor {
-            execution_plan_hash, ..
+            execution_plan_hash,
+            ..
         } = &mut artifact
         {
             *execution_plan_hash =
@@ -2496,7 +2497,8 @@ mod tests {
         ] {
             let mut wire = serde_json::to_value(&program).unwrap();
             wire[field] = serde_json::json!("0".repeat(64));
-            let Ok(changed) = serde_json::from_value::<AdmittedExternalCandidateProgram>(wire) else {
+            let Ok(changed) = serde_json::from_value::<AdmittedExternalCandidateProgram>(wire)
+            else {
                 assert_eq!(field, "runtime_source", "{field} must stay wire-decodable");
                 continue;
             };

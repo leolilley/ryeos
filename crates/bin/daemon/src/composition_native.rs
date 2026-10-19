@@ -22,7 +22,8 @@ struct CompositionNativeParts {
     accounting_native_reference_parts: Option<lillux_sqlite::OriginalNativeOutsideConnectionParts>,
     accounting_native_unused_reference: Option<lillux_sqlite::OriginalNativeTransientInputs>,
     #[cfg(feature = "scheduling")]
-    scheduler_native_finalization_owner: Option<ryeosd::scheduler::db::SchedulerNativeFinalizationOwner>,
+    scheduler_native_finalization_owner:
+        Option<ryeosd::scheduler::db::SchedulerNativeFinalizationOwner>,
     #[cfg(feature = "scheduling")]
     scheduler_native_outside_sources: Option<ryeosd::scheduler::db::SchedulerNativeOutsideSources>,
     #[cfg(feature = "scheduling")]

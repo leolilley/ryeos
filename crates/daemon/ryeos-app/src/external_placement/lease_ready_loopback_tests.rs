@@ -509,7 +509,9 @@ impl Loopback {
         store
             .install_external_placement_test_fixture(&reservation, &retained)
             .unwrap();
-        store.cancel_uncontacted_external_allocation(PLACEMENT).unwrap();
+        store
+            .cancel_uncontacted_external_allocation(PLACEMENT)
+            .unwrap();
         store
             .with_runtime_sql_for_test(|connection| {
                 Ok(connection.execute(
@@ -659,7 +661,13 @@ impl Loopback {
 
     /// Drop the app and store and reopen them as a restarted controller over
     /// the same node key, vault and script.
-    fn restart(self) -> (tempfile::TempDir, crate::state_store::test_native::TestStateStore, AppState) {
+    fn restart(
+        self,
+    ) -> (
+        tempfile::TempDir,
+        crate::state_store::test_native::TestStateStore,
+        AppState,
+    ) {
         let Self {
             root,
             store_owner,
@@ -781,7 +789,10 @@ fn payload_kind(binding: &ExecutionChannelBinding, wire: &[u8]) -> &'static str 
     let verified =
         SignedExecutionFrame::decode_and_verify(wire, binding, lillux::time::timestamp_millis())
             .unwrap();
-    assert_eq!(verified.frame().direction, ChannelDirection::OwnerToSupervisor);
+    assert_eq!(
+        verified.frame().direction,
+        ChannelDirection::OwnerToSupervisor
+    );
     match verified.frame().payload {
         ExecutionChannelPayload::Acknowledge { .. } => "acknowledge",
         ExecutionChannelPayload::Release => "release",
@@ -797,10 +808,19 @@ fn an_admitted_guest_is_journalled_released_and_launched() {
     // Frame 1: Ready is held, un-journalled, and answered with an idle reply.
     let ready = loopback.guest.ready.clone();
     let held = loopback.exchange(&ready).unwrap();
-    assert!(!held.incoming_new && held.outbound.is_empty() && held.acknowledgement_digest.is_none());
-    assert_eq!(loopback.script.judgements(), 0, "Ready alone asks the adapter nothing");
+    assert!(
+        !held.incoming_new && held.outbound.is_empty() && held.acknowledgement_digest.is_none()
+    );
+    assert_eq!(
+        loopback.script.judgements(),
+        0,
+        "Ready alone asks the adapter nothing"
+    );
     assert!(loopback.supervisor_frames_journalled().is_empty());
-    assert_eq!(loopback.lease().held_ready_frame.as_deref(), Some(ready.as_slice()));
+    assert_eq!(
+        loopback.lease().held_ready_frame.as_deref(),
+        Some(ready.as_slice())
+    );
 
     // Frame 2: the capability report triggers the adapter's verdict.
     let report = loopback.guest.report.clone();
@@ -828,10 +848,15 @@ fn an_admitted_guest_is_journalled_released_and_launched() {
 
     // Ready is journalled now, the record is admitted and keeps the adapter's
     // resume state and the digests of exactly the frames judged.
-    assert_eq!(loopback.supervisor_frames_journalled(), ["ready", "capability_report"]);
+    assert_eq!(
+        loopback.supervisor_frames_journalled(),
+        ["ready", "capability_report"]
+    );
     let record = loopback.lease();
     assert_eq!(record.state, ExternalLeaseRecordState::Admitted);
-    let admission = record.admission.expect("an admitted lease keeps its admission");
+    let admission = record
+        .admission
+        .expect("an admitted lease keeps its admission");
     assert_eq!(admission.ready_frame_digest, lillux::sha256_hex(&ready));
     assert_eq!(admission.report_frame_digest, lillux::sha256_hex(&report));
     assert_eq!(admission.resume_state_json, "{\"chain\":1}");
@@ -870,7 +895,8 @@ fn a_terminate_verdict_refuses_the_lease_durably_and_closes_its_stream() {
     let report = loopback.guest.report.clone();
     let refusal = refusal_of(loopback.exchange(&report));
     assert!(
-        refusal.contains("the lease was refused") && refusal.contains("the guest reports an open route"),
+        refusal.contains("the lease was refused")
+            && refusal.contains("the guest reports an open route"),
         "{refusal}"
     );
     assert_eq!(loopback.script.judgements(), 1);
@@ -904,9 +930,15 @@ fn a_terminate_verdict_refuses_the_lease_durably_and_closes_its_stream() {
     // adapter is not asked again.
     match external_channel_stream_admission(&loopback.state, PLACEMENT, OCCURRENCE) {
         Err(ExternalChannelStreamRefusal::OccurrenceRefused(reason)) => {
-            assert!(reason.contains("the guest reports an open route"), "{reason}");
+            assert!(
+                reason.contains("the guest reports an open route"),
+                "{reason}"
+            );
         }
-        other => panic!("a refused lease must close its stream: {:?}", other.map(|_| ())),
+        other => panic!(
+            "a refused lease must close its stream: {:?}",
+            other.map(|_| ())
+        ),
     }
     let retry = refusal_of(loopback.exchange(&report));
     assert!(retry.contains("the lease was refused"), "{retry}");
@@ -920,13 +952,19 @@ fn a_restart_refuses_the_lease_of_an_earlier_incarnation() {
     let report = loopback.guest.report.clone();
     loopback.exchange(&ready).unwrap();
     assert_eq!(loopback.lease().state, ExternalLeaseRecordState::Activated);
-    assert_eq!(loopback.lease().held_ready_frame.as_deref(), Some(ready.as_slice()));
+    assert_eq!(
+        loopback.lease().held_ready_frame.as_deref(),
+        Some(ready.as_slice())
+    );
 
     let (_root, _store_owner, state) = loopback.restart();
     terminate_predecessor_external_leases(&state).unwrap();
     let record = lease_of(&state);
     assert_eq!(record.state, ExternalLeaseRecordState::Refused);
-    assert_eq!(record.refusal_reason.as_deref(), Some("controller restarted"));
+    assert_eq!(
+        record.refusal_reason.as_deref(),
+        Some("controller restarted")
+    );
 
     // The earlier incarnation's guest redials the new controller: its stream
     // is refused and neither frame is judged or journalled.
@@ -934,7 +972,10 @@ fn a_restart_refuses_the_lease_of_an_earlier_incarnation() {
         Err(ExternalChannelStreamRefusal::OccurrenceRefused(reason)) => {
             assert_eq!(reason, "controller restarted");
         }
-        other => panic!("an earlier incarnation's lease must close its stream: {:?}", other.map(|_| ())),
+        other => panic!(
+            "an earlier incarnation's lease must close its stream: {:?}",
+            other.map(|_| ())
+        ),
     }
     for wire in [&ready, &report] {
         let refusal = refusal_of(exchange_on(&state, wire));
@@ -974,7 +1015,10 @@ fn a_release_authored_before_the_reports_exchange_strands_nothing() {
     .unwrap();
     assert_eq!(gate, super::lease_ready_gate::LeaseReadyGate::Proceed);
     assert_eq!(loopback.script.judgements(), 1);
-    assert_eq!(loopback.supervisor_frames_journalled(), ["ready", "capability_report"]);
+    assert_eq!(
+        loopback.supervisor_frames_journalled(),
+        ["ready", "capability_report"]
+    );
 
     let owner = owner_signing_key(&loopback.owner_key);
     let release = loopback
@@ -1002,5 +1046,8 @@ fn a_release_authored_before_the_reports_exchange_strands_nothing() {
     }
     assert!(saw_release, "the owner's Release reached the guest");
     assert_eq!(releases, 1, "the guest launched the candidate on Release");
-    assert_eq!(loopback.supervisor_frames_journalled(), ["ready", "capability_report"]);
+    assert_eq!(
+        loopback.supervisor_frames_journalled(),
+        ["ready", "capability_report"]
+    );
 }

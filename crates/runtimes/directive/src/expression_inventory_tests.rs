@@ -104,8 +104,8 @@ fn installable_directive_expression_fields_compile_through_live_loaders() {
         .iter()
         .map(|root| root.join(".ai/node/engine/kinds"))
         .collect();
-    let kinds = KindRegistry::load_base(&kind_roots, &trust)
-    .expect("load signed live kind schemas");
+    let kinds =
+        KindRegistry::load_base(&kind_roots, &trust).expect("load signed live kind schemas");
     let directive_schema = kinds.get("directive").expect("directive kind schema");
     let items = installable_refs("directive", directive_schema, &bundle_roots);
     assert!(

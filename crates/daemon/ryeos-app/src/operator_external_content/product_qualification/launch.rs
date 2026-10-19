@@ -18,8 +18,8 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
 use crate::handler_context::HandlerContext;
-use ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy;
 use crate::state::AppState;
+use ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy;
 
 use super::{require_bounded_name, require_canonical_hash};
 
@@ -712,8 +712,10 @@ mod tests {
         assert!(inner["qualification"]["policy_ref"].is_null());
 
         let verifier: serde_yaml::Value = serde_yaml::from_slice(
-            &fs::read(qualification.join(".ai/tools/ryeos/environments/qualification/gnu-python.yaml"))
-                .unwrap(),
+            &fs::read(
+                qualification.join(".ai/tools/ryeos/environments/qualification/gnu-python.yaml"),
+            )
+            .unwrap(),
         )
         .unwrap();
         assert!(

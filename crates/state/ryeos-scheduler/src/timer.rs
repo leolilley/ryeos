@@ -868,9 +868,11 @@ mod tests {
         let store = crate::test_native::TestSchedulerDb::open();
         let ctx = Arc::new(MockContext::new(store.shared()));
         let state_root = ctx.app_root.path().join(ryeos_engine::AI_DIR).join("state");
-        let state_db =
-            ryeos_state::test_support::TestState::open(&state_root, Arc::new(ryeos_state::TrustStore::new()))
-                .unwrap();
+        let state_db = ryeos_state::test_support::TestState::open(
+            &state_root,
+            Arc::new(ryeos_state::TrustStore::new()),
+        )
+        .unwrap();
         let state_authority = state_db.pinned_authority().unwrap();
         let selected_hash = "55".repeat(32);
         let project_authority = ryeos_state::objects::ExecutionProjectAuthority::pinned(

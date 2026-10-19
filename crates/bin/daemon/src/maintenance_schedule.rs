@@ -31,9 +31,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
+use ryeos_app::state::AppState;
 use ryeos_node_runtime::identity::NodeIdentity;
 use ryeos_node_runtime::node_document;
-use ryeos_app::state::AppState;
 use ryeos_scheduler_contract::{NodeMaintenancePolicy, NodeMaintenanceSchedulePolicy};
 
 /// Exact ownership discriminator written into generated schedule specs.
@@ -681,20 +681,18 @@ schedules:
         let policy = policy(POLICY);
         let mut body = maintenance_spec_body(&policy.schedules[0], false, 1234, &id);
         body["spec_version"] = serde_json::json!(1);
-        let path = node_document::write_signed_item(
-            &node_dir,
-            "schedules",
-            "maintenance-gc",
-            &body,
-            &id,
-        )
-        .unwrap();
+        let path =
+            node_document::write_signed_item(&node_dir, "schedules", "maintenance-gc", &body, &id)
+                .unwrap();
         let before = std::fs::read(&path).unwrap();
 
         let error = apply_maintenance_schedules(&node_dir, &id, &trust, &policy).unwrap_err();
 
         let message = format!("{error:#}");
-        assert!(message.contains("remove that file and restart the node"), "{message}");
+        assert!(
+            message.contains("remove that file and restart the node"),
+            "{message}"
+        );
         assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
@@ -821,7 +819,10 @@ schedules:
         };
 
         apply_maintenance_schedules(&node_dir, &id, &trust, &empty).unwrap();
-        assert!(!node_dir.exists(), "no declarations must not create the node root");
+        assert!(
+            !node_dir.exists(),
+            "no declarations must not create the node root"
+        );
 
         std::fs::create_dir_all(&node_dir).unwrap();
         apply_maintenance_schedules(&node_dir, &id, &trust, &empty).unwrap();
@@ -859,14 +860,20 @@ schedules:
         lillux::PinnedDirectory::open(&node_dir)
             .unwrap()
             .unwrap()
-            .create_symlink(std::ffi::OsStr::new("schedules"), target.as_os_str().as_encoded_bytes())
+            .create_symlink(
+                std::ffi::OsStr::new("schedules"),
+                target.as_os_str().as_encoded_bytes(),
+            )
             .unwrap();
         let refusal = apply_maintenance_schedules(&node_dir, &id, &trust, &empty)
             .unwrap_err()
             .to_string();
         assert!(refusal.contains("is not a directory"), "{refusal}");
         assert!(
-            std::fs::symlink_metadata(&schedules).unwrap().file_type().is_symlink(),
+            std::fs::symlink_metadata(&schedules)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
             "the refused symlink stays in place"
         );
     }

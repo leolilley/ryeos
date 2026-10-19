@@ -1364,8 +1364,15 @@ mod tests {
         fs::write(&foreign, b"another owner's debris").unwrap();
 
         let mut result = GcResult::default();
-        sweep_sharded_dir(&cas_root, "objects", ".json", &HashSet::new(), false, &mut result)
-            .unwrap();
+        sweep_sharded_dir(
+            &cas_root,
+            "objects",
+            ".json",
+            &HashSet::new(),
+            false,
+            &mut result,
+        )
+        .unwrap();
         assert_eq!(result.deleted_cas_staging_files, 1);
         assert!(!own.exists());
         assert!(foreign.is_file());
@@ -1382,7 +1389,10 @@ mod tests {
         )
         .unwrap_err();
         let message = error.to_string();
-        assert!(message.contains("without an exact owner token"), "{message}");
+        assert!(
+            message.contains("without an exact owner token"),
+            "{message}"
+        );
         assert!(message.contains("rerun GC"), "{message}");
         assert!(retired_format.is_file());
         assert!(foreign.is_file());

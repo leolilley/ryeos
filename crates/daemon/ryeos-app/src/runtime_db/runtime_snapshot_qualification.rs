@@ -163,9 +163,7 @@ impl RuntimeDb {
         &self,
         operation_id: &str,
     ) -> Result<Option<SnapshotQualificationRecord>> {
-        self.conn.with_sql(|conn| {
-            read(conn, operation_id)
-        })
+        self.conn.with_sql(|conn| read(conn, operation_id))
     }
 
     pub fn reserve_snapshot_qualification(
@@ -218,7 +216,8 @@ impl RuntimeDb {
     ) -> Result<SnapshotQualificationAttemptClaim> {
         self.conn.with_sql(|conn| {
             let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
-            let record = read(&tx, operation_id)?.context("snapshot qualification was not reserved")?;
+            let record =
+                read(&tx, operation_id)?.context("snapshot qualification was not reserved")?;
             match record.phase {
                 SnapshotQualificationPhase::OccurrenceBound => {
                     tx.commit()?;
@@ -602,11 +601,15 @@ pub(crate) mod tests {
         let expires_at =
             admitted_occurrence.created_at_ms + i64::from(intent.maximum_lifetime_seconds) * 1000;
         assert!(
-            db.conn.with_sql(|connection| super::super::restored_verifier_attempt::require_live_occurrence(connection,
-                &admitted_occurrence,
-                expires_at
-            ))
-            .is_err()
+            db.conn
+                .with_sql(|connection| {
+                    super::super::restored_verifier_attempt::require_live_occurrence(
+                        connection,
+                        &admitted_occurrence,
+                        expires_at,
+                    )
+                })
+                .is_err()
         );
         assert!(db.restored_verifier_blob_roots().unwrap().is_empty());
         assert!(
@@ -773,10 +776,16 @@ pub(crate) mod tests {
         );
         // A null owner selection is immutable, not an empty slot that may
         // later be converted into consumer placement authority.
-        assert!(db.conn.with_sql(|connection| Ok(connection.execute(
+        assert!(
+            db.conn
+                .with_sql(|connection| {
+                    Ok(connection.execute(
             "UPDATE restored_verifier_attempt SET consumer_selection_json=?2 WHERE operation_id=?1",
             params![verifier.operation_id, serde_json::to_string(&selection).unwrap()],
-        )?)).is_err());
+        )?)
+                })
+                .is_err()
+        );
         assert!(db.conn.with_sql(|connection| Ok(connection.execute(
             "UPDATE restored_verifier_attempt SET consumer_input_blob_hash=?2 WHERE operation_id=?1",
             params![verifier.operation_id, "f".repeat(64)],

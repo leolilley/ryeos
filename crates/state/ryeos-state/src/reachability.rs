@@ -256,7 +256,8 @@ fn merge_object_closure_with_cas_and_limits(
     set: &mut ReachableSet,
     limits: crate::object_closure::ObjectClosureLimits,
 ) -> Result<()> {
-    let closure = crate::object_closure::collect_object_closure_with_cas_and_limits(cas, roots, limits)?;
+    let closure =
+        crate::object_closure::collect_object_closure_with_cas_and_limits(cas, roots, limits)?;
     merge_complete_object_closure(closure, set)
 }
 

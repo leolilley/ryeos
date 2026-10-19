@@ -1300,7 +1300,9 @@ pub fn project_field_for_instance(
             },
             expansions,
             changes: local
-                .changes.values().filter_map(|change| {
+                .changes
+                .values()
+                .filter_map(|change| {
                     let kind = match change.kind.as_str() {
                         "entered" => RyeOsFieldChangeKind::Entered,
                         "exited" => RyeOsFieldChangeKind::Exited,
@@ -2456,7 +2458,10 @@ fn apply_grid_comparison(previews: &mut [RyeOsArtifactPreviewVm], compare: &[Str
                 .iter()
                 .zip(&right.cells)
                 .enumerate()
-                .filter(|&(_index, (left, right))| left != right).map(|(index, (_left, _right))| u32::try_from(index).expect("grid index is bounded"))
+                .filter(|&(_index, (left, right))| left != right)
+                .map(|(index, (_left, _right))| {
+                    u32::try_from(index).expect("grid index is bounded")
+                })
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();

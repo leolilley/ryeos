@@ -127,7 +127,8 @@ fn parser_only_admission_selects_the_parser_package_without_features() {
         vec![payload("web", "rye-parser-yaml-document", &[])],
         &[],
     );
-    let admitted = AdmittedReleaseInput::from_value_with_ownership(&value, &owner).expect("parser input is valid");
+    let admitted = AdmittedReleaseInput::from_value_with_ownership(&value, &owner)
+        .expect("parser input is valid");
     assert_eq!(admitted.payloads.len(), 1);
     assert!(admitted.payloads[0].required_features.is_empty());
     assert_eq!(admitted.cargo_feature_selections.len(), 1);
@@ -137,7 +138,10 @@ fn parser_only_admission_selects_the_parser_package_without_features() {
 
 #[test]
 fn core_and_mixed_admission_select_core_handlers() {
-    let owner = ownership("web", &[("ryeos-direct-execution-evidence", &["core-handlers"])]);
+    let owner = ownership(
+        "web",
+        &[("ryeos-direct-execution-evidence", &["core-handlers"])],
+    );
     let full = input(
         &owner,
         "web",
@@ -148,7 +152,8 @@ fn core_and_mixed_admission_select_core_handlers() {
         )],
         &["core-handlers"],
     );
-    let admitted = AdmittedReleaseInput::from_value_with_ownership(&full, &owner).expect("full input is valid");
+    let admitted = AdmittedReleaseInput::from_value_with_ownership(&full, &owner)
+        .expect("full input is valid");
     assert_eq!(
         admitted.cargo_feature_selections[0].features,
         ["core-handlers"]
@@ -176,8 +181,8 @@ fn core_and_mixed_admission_select_core_handlers() {
         &["core-handlers"],
     );
     assert!(AdmittedReleaseInput::from_value(&mixed).is_err());
-    let admitted =
-        AdmittedReleaseInput::from_core_seed_value_with_ownership(&mixed, &owner).expect("mixed Core seed input is valid");
+    let admitted = AdmittedReleaseInput::from_core_seed_value_with_ownership(&mixed, &owner)
+        .expect("mixed Core seed input is valid");
     let mut forged = mixed.clone();
     forged["payloads"][1]["required_features"] = json!(["graph-handlers"]);
     forged["cargo_feature_selections"][0]["features"] = json!(["graph-handlers"]);
@@ -210,7 +215,8 @@ fn graph_admission_selects_only_the_graph_composition() {
         ],
         &["graph-handlers"],
     );
-    let admitted = AdmittedReleaseInput::from_value_with_ownership(&value, &owner).expect("workflow input is valid");
+    let admitted = AdmittedReleaseInput::from_value_with_ownership(&value, &owner)
+        .expect("workflow input is valid");
     assert_eq!(
         admitted.cargo_feature_selections[0].features,
         ["graph-handlers"]
@@ -249,7 +255,8 @@ fn independent_handler_roots_are_not_collapsed_into_each_other() {
         ],
         &["directive-handlers", "graph-handlers"],
     );
-    let admitted = AdmittedReleaseInput::from_value_with_ownership(&value, &owner).expect("both independent roots are valid");
+    let admitted = AdmittedReleaseInput::from_value_with_ownership(&value, &owner)
+        .expect("both independent roots are valid");
     assert_eq!(
         admitted.cargo_feature_selections[0].features,
         ["directive-handlers", "graph-handlers"]
@@ -291,7 +298,8 @@ fn payload_and_aggregate_feature_tampering_are_rejected() {
         vec![payload("web", "rye-parser-yaml-document", &[])],
         &[],
     );
-    let _admitted = AdmittedReleaseInput::from_value_with_ownership(&valid, &owner).expect("parser input is valid");
+    let _admitted = AdmittedReleaseInput::from_value_with_ownership(&valid, &owner)
+        .expect("parser input is valid");
 
     let mut tampered_payload = valid.clone();
     tampered_payload["payloads"][0]["required_features"] = json!(["core-handlers"]);
@@ -413,7 +421,11 @@ fn core_seed_request_validation_enforces_the_ownership_features() {
         }))
         .unwrap()
     };
-    assert!(request(release_input.clone()).validate_with_ownership(&owner).is_ok());
+    assert!(
+        request(release_input.clone())
+            .validate_with_ownership(&owner)
+            .is_ok()
+    );
     let mut forged = release_input;
     forged["payloads"][0]["required_features"] = json!(["graph-handlers"]);
     forged["cargo_feature_selections"][0]["features"] = json!(["graph-handlers"]);

@@ -10617,9 +10617,12 @@ impl DispositionOperation {
                 session_chain_root_id,
                 placement,
             ),
-            Self::Discard => {
-                discard_placement_admitted(thread_id, chain_root_id, session_chain_root_id, placement)
-            }
+            Self::Discard => discard_placement_admitted(
+                thread_id,
+                chain_root_id,
+                session_chain_root_id,
+                placement,
+            ),
         }
     }
 }
@@ -10926,10 +10929,18 @@ mod tests {
         let check = |thread: &str, chain: &str, placement: &RecordedThreadPlacement| {
             qualification_placement_admitted(thread, chain, "T-session", placement)
         };
-        assert!(check("T-qualify", "T-qualify", &RecordedThreadPlacement::Root));
+        assert!(check(
+            "T-qualify",
+            "T-qualify",
+            &RecordedThreadPlacement::Root
+        ));
         // The session itself and an inline child of the session's own chain
         // are refused, as discard refuses them.
-        assert!(!check("T-session", "T-session", &RecordedThreadPlacement::Root));
+        assert!(!check(
+            "T-session",
+            "T-session",
+            &RecordedThreadPlacement::Root
+        ));
         assert!(!check("T-qualify", "T-session", &member("T-session")));
         assert!(!discard_placement_admitted(
             "T-qualify",
@@ -10958,7 +10969,10 @@ mod tests {
         ));
     }
 
-    fn placement_thread(thread_id: &str, chain_root_id: &str) -> ryeos_app::state_store::NewThreadRecord {
+    fn placement_thread(
+        thread_id: &str,
+        chain_root_id: &str,
+    ) -> ryeos_app::state_store::NewThreadRecord {
         let captured_history_policy = (thread_id == chain_root_id).then(|| {
             let hash = "a".repeat(64);
             ryeos_state::objects::CapturedThreadHistoryPolicy {
@@ -11040,7 +11054,9 @@ mod tests {
         let _session_child = birth_inline_child(store, "T-session", "T-session-child");
         let _operator_child = birth_inline_child(store, "T-operator", "T-operator-child");
         assert!(matches!(
-            store.recorded_thread_placement("T-session-child").expect("placement"),
+            store
+                .recorded_thread_placement("T-session-child")
+                .expect("placement"),
             RecordedThreadPlacement::InProcessMember {
                 chain_root_id: _,
                 upstream_thread_id: _
@@ -11060,20 +11076,29 @@ mod tests {
         // An inline child of the session's own chain is refused by both,
         // naming the reason. The judgement only reads, and both handlers run
         // it before their reservation, reconcile and fact append.
-        for operation in [DispositionOperation::Qualification, DispositionOperation::Discard] {
+        for operation in [
+            DispositionOperation::Qualification,
+            DispositionOperation::Discard,
+        ] {
             let message = refusal(judge("T-session-child", operation));
             assert!(
                 message.contains("runs inside the session's own chain `T-session`"),
                 "{message}"
             );
             let message = refusal(judge("T-session", operation));
-            assert!(message.contains("inside the session's own chain"), "{message}");
+            assert!(
+                message.contains("inside the session's own chain"),
+                "{message}"
+            );
         }
 
         // An inline child of another chain: discard admits it, qualification
         // refuses it.
         judge("T-operator-child", DispositionOperation::Discard).expect("inline discard");
-        let message = refusal(judge("T-operator-child", DispositionOperation::Qualification));
+        let message = refusal(judge(
+            "T-operator-child",
+            DispositionOperation::Qualification,
+        ));
         assert!(
             message.contains("is not a placement admitted for candidate qualification"),
             "{message}"
@@ -11092,10 +11117,18 @@ mod tests {
         let check = |thread: &str, chain: &str, placement: &RecordedThreadPlacement| {
             discard_placement_admitted(thread, chain, "T-session", placement)
         };
-        assert!(check("T-discard", "T-discard", &RecordedThreadPlacement::Root));
+        assert!(check(
+            "T-discard",
+            "T-discard",
+            &RecordedThreadPlacement::Root
+        ));
         assert!(check("T-discard", "T-operator", &member("T-operator")));
         // The session itself and work inside the session's chain.
-        assert!(!check("T-session", "T-session", &RecordedThreadPlacement::Root));
+        assert!(!check(
+            "T-session",
+            "T-session",
+            &RecordedThreadPlacement::Root
+        ));
         assert!(!check("T-discard", "T-session", &member("T-session")));
         // A chain other than the one its lineage proves.
         assert!(!check("T-discard", "T-unrelated", &member("T-operator")));
@@ -11563,7 +11596,11 @@ mod tests {
     #[test]
     fn status_finds_a_handoff_older_than_the_former_global_job_cap() {
         let tempdir = tempfile::tempdir().unwrap();
-        let db = ryeos_app::test_support::TestState::open(tempdir.path(), std::sync::Arc::new(TrustStore::new())).unwrap();
+        let db = ryeos_app::test_support::TestState::open(
+            tempdir.path(),
+            std::sync::Arc::new(TrustStore::new()),
+        )
+        .unwrap();
         for index in 0..520 {
             let chain_root_id = if index == 0 {
                 "T-sought".to_owned()

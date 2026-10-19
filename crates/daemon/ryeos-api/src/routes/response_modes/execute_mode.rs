@@ -953,7 +953,8 @@ impl ResponseMode for ExecuteMode {
             RawRequestBody::Json => {}
             RawRequestBody::ObjectsPutV1 => {
                 return Err(RouteConfigError::InvalidResponseSpec {
-                    id: raw.id.clone(), mode: "execute".into(),
+                    id: raw.id.clone(),
+                    mode: "execute".into(),
                     reason: "execute mode does not accept the objects_put_v1 body profile".into(),
                 });
             }
@@ -2457,8 +2458,12 @@ mod tests {
     /// A node delivering `OPENAI_API_KEY` to the listed principals only, and
     /// `ANTHROPIC_API_KEY` to holders of a dedicated receive capability.
     fn recipient_bound_provider_environment() -> ryeos_app::vault::ProviderEnvironment {
-        let strings =
-            |values: &[&str]| values.iter().map(|value| (*value).to_owned()).collect::<Vec<_>>();
+        let strings = |values: &[&str]| {
+            values
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect::<Vec<_>>()
+        };
         ryeos_app::vault::ProviderEnvironment::captured(
             vec![
                 ProviderEnvironmentName {
@@ -2613,15 +2618,24 @@ mod tests {
     fn provider_environment_admission_honours_capability_recipients() {
         let environment = recipient_bound_provider_environment();
         let policy = provider_policy(exact(&["ANTHROPIC_API_KEY"]));
-        let authority =
-            admit_provider(&environment, &policy, "fp:bob", &[RECEIVE_ANTHROPIC.to_owned()])
-                .unwrap();
+        let authority = admit_provider(
+            &environment,
+            &policy,
+            "fp:bob",
+            &[RECEIVE_ANTHROPIC.to_owned()],
+        )
+        .unwrap();
         assert_eq!(
             sealed_provider(&authority),
             (vec!["ANTHROPIC_API_KEY".to_owned()], "fp:bob".to_owned())
         );
         // Wildcard grants covering the listed capability are refused by name.
-        for wildcard in ["*", "ryeos.*", "ryeos.receive.*", "ryeos.receive.provider_env.*"] {
+        for wildcard in [
+            "*",
+            "ryeos.*",
+            "ryeos.receive.*",
+            "ryeos.receive.provider_env.*",
+        ] {
             let error = admit_provider(&environment, &policy, "fp:bob", &[wildcard.to_owned()])
                 .unwrap_err();
             let message = format!("{error:#}");
@@ -2688,32 +2702,30 @@ mod tests {
         };
         let names = vec!["OPENAI_API_KEY".to_owned()];
         // A child acting for another principal under the inherited authority.
-        let error =
-            ryeos_app::vault::authorize_secret_delivery(
-                &sources,
-                ryeos_app::vault::SecretRecipient {
-                    principal: "fp:child",
-                },
-                &names,
-                &authority,
-            )
-            .unwrap_err();
+        let error = ryeos_app::vault::authorize_secret_delivery(
+            &sources,
+            ryeos_app::vault::SecretRecipient {
+                principal: "fp:child",
+            },
+            &names,
+            &authority,
+        )
+        .unwrap_err();
         let message = error.to_string();
         assert!(
             message.contains("OPENAI_API_KEY") && message.contains("principal `fp:child`"),
             "{message}"
         );
         assert!(!message.contains(OPENAI_VALUE), "{message}");
-        let delivered =
-            ryeos_app::vault::authorize_secret_delivery(
-                &sources,
-                ryeos_app::vault::SecretRecipient {
-                    principal: "fp:alice",
-                },
-                &names,
-                &authority,
-            )
-            .unwrap();
+        let delivered = ryeos_app::vault::authorize_secret_delivery(
+            &sources,
+            ryeos_app::vault::SecretRecipient {
+                principal: "fp:alice",
+            },
+            &names,
+            &authority,
+        )
+        .unwrap();
         assert_eq!(delivered.get("OPENAI_API_KEY"), Some(OPENAI_VALUE));
     }
 
@@ -2723,8 +2735,12 @@ mod tests {
         openai_principals: &[&str],
         anthropic_capabilities: &[&str],
     ) -> ryeos_app::vault::ProviderEnvironment {
-        let strings =
-            |values: &[&str]| values.iter().map(|value| (*value).to_owned()).collect::<Vec<_>>();
+        let strings = |values: &[&str]| {
+            values
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect::<Vec<_>>()
+        };
         ryeos_app::vault::ProviderEnvironment::captured(
             vec![
                 ProviderEnvironmentName {
@@ -2761,8 +2777,7 @@ mod tests {
         principal: &str,
         name: &str,
         authority: &ryeos_state::objects::ExecutionProjectAuthority,
-    ) -> Result<ryeos_engine::contracts::DeliveredSecretEnv, ryeos_app::vault::VaultReadError>
-    {
+    ) -> Result<ryeos_engine::contracts::DeliveredSecretEnv, ryeos_app::vault::VaultReadError> {
         let vault = ryeos_app::vault::EmptyVault;
         ryeos_app::vault::authorize_secret_delivery(
             &ryeos_app::vault::SecretSources {
@@ -2781,7 +2796,10 @@ mod tests {
         principal: &str,
     ) {
         assert!(
-            matches!(error, ryeos_app::vault::VaultReadError::AuthorityViolation(_)),
+            matches!(
+                error,
+                ryeos_app::vault::VaultReadError::AuthorityViolation(_)
+            ),
             "{error}"
         );
         let message = error.to_string();
@@ -2827,8 +2845,7 @@ mod tests {
             &["fp:alice"],
             &["ryeos.receive.provider_env.other_key"],
         );
-        let error =
-            deliver(&narrowed_rule, "fp:bob", "ANTHROPIC_API_KEY", &authority).unwrap_err();
+        let error = deliver(&narrowed_rule, "fp:bob", "ANTHROPIC_API_KEY", &authority).unwrap_err();
         assert_plain_delivery_refusal(&error, "ANTHROPIC_API_KEY", "fp:bob");
     }
 
@@ -2859,7 +2876,10 @@ mod tests {
         };
         assert_eq!(
             recipient_scopes,
-            &["ryeos.execute.tool.*".to_owned(), RECEIVE_ANTHROPIC.to_owned()]
+            &[
+                "ryeos.execute.tool.*".to_owned(),
+                RECEIVE_ANTHROPIC.to_owned()
+            ]
         );
         // Delivery takes no scopes from the delivering execution: the root
         // launch, a child narrowed away from the receive capability and a
@@ -2877,8 +2897,7 @@ mod tests {
             },
         )
         .unwrap();
-        let error =
-            deliver(&environment, "fp:bob", "ANTHROPIC_API_KEY", &unsealed).unwrap_err();
+        let error = deliver(&environment, "fp:bob", "ANTHROPIC_API_KEY", &unsealed).unwrap_err();
         assert_plain_delivery_refusal(&error, "ANTHROPIC_API_KEY", "fp:bob");
     }
 

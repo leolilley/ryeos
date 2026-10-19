@@ -281,9 +281,7 @@ impl RuntimeDb {
         &self,
         operation_id: &str,
     ) -> Result<Option<RuntimeSnapshotRecord>> {
-        self.conn.with_sql(|conn| {
-            read(conn, operation_id)
-        })
+        self.conn.with_sql(|conn| read(conn, operation_id))
     }
 
     /// Exact replay returns the same row. No provider contact is implied.
@@ -444,8 +442,8 @@ impl RuntimeDb {
     ) -> Result<RuntimeSnapshotRecord> {
         self.conn.with_sql(|conn| {
             let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
-            let record =
-                read(&tx, &locator.operation_id)?.context("runtime snapshot has no attempt claim")?;
+            let record = read(&tx, &locator.operation_id)?
+                .context("runtime snapshot has no attempt claim")?;
             locator.validate_for(&record.intent)?;
             if matches!(
                 record.phase,
@@ -541,8 +539,8 @@ impl RuntimeDb {
                 changed == 1,
                 "runtime snapshot readiness lost its durable CAS"
             );
-            let current =
-                read(&tx, &observation.operation_id)?.context("runtime snapshot readiness vanished")?;
+            let current = read(&tx, &observation.operation_id)?
+                .context("runtime snapshot readiness vanished")?;
             tx.commit()?;
             Ok(current)
         })
@@ -574,7 +572,8 @@ impl RuntimeDb {
              WHERE operation_id=?1 AND phase='attempt_pending'",
                 params![operation_id, now],
             )?;
-            let current = read(&tx, operation_id)?.context("runtime snapshot quarantine vanished")?;
+            let current =
+                read(&tx, operation_id)?.context("runtime snapshot quarantine vanished")?;
             tx.commit()?;
             Ok(current)
         })
@@ -730,7 +729,9 @@ mod tests {
             db.bind_runtime_snapshot_locator(&changed_locator, false)
                 .is_err()
         );
-        db.conn.with_sql(|connection| validate_current(connection)).unwrap();
+        db.conn
+            .with_sql(|connection| validate_current(connection))
+            .unwrap();
     }
 
     #[test]
@@ -789,7 +790,9 @@ mod tests {
             size_bytes: 4096,
         };
         assert!(db.bind_runtime_snapshot_readiness(&readiness).is_err());
-        db.conn.with_sql(|connection| validate_current(connection)).unwrap();
+        db.conn
+            .with_sql(|connection| validate_current(connection))
+            .unwrap();
     }
 
     #[test]
@@ -812,7 +815,9 @@ mod tests {
             db.quarantine_runtime_snapshot_attempt(&intent.operation_id, &digest)
                 .is_err()
         );
-        db.conn.with_sql(|connection| validate_current(connection)).unwrap();
+        db.conn
+            .with_sql(|connection| validate_current(connection))
+            .unwrap();
     }
 
     #[test]
@@ -831,6 +836,8 @@ mod tests {
         assert_eq!(record.locator, Some(locator));
         assert_eq!(record.runner_deadline_exceeded, Some(false));
         assert_eq!(record.completion_at_ms, Some(intent.attempt_deadline_ms));
-        db.conn.with_sql(|connection| validate_current(connection)).unwrap();
+        db.conn
+            .with_sql(|connection| validate_current(connection))
+            .unwrap();
     }
 }

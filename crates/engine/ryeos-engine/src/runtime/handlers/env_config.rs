@@ -224,9 +224,11 @@ impl RuntimeHandler for EnvConfigHandler {
         // Other env/env_paths entries retain their normal layering below.
         if let Some(ic) = env_config.interpreter.as_ref() {
             if let InterpreterConfig::LocalBinary { var: Some(v), .. } = ic
-                && is_reserved_env_name(v) && v != "RYEOS_PYTHON" {
-                    return Err(EngineError::ReservedEnvKey { key: v.clone() });
-                }
+                && is_reserved_env_name(v)
+                && v != "RYEOS_PYTHON"
+            {
+                return Err(EngineError::ReservedEnvKey { key: v.clone() });
+            }
             // Realization coordinate validation is pure and must still reject
             // malformed losing declarations. Local resolution, by contrast,
             // inspects the host and belongs only to the selected declaration.

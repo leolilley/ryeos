@@ -36,8 +36,8 @@ pub use init::{
     load_verified_substrate_identity, preflight_existing_policy_generation,
     prepare_bundle_set_init_completion, prepare_prospective_init_completion, run_init,
     run_init_with_operator_ceremony, run_init_with_progress,
-    seal_init_completion_after_bundle_registration_change, seal_init_completion_after_policy_update,
-    verify_init_completion,
+    seal_init_completion_after_bundle_registration_change,
+    seal_init_completion_after_policy_update, verify_init_completion,
 };
 pub use init_check::{InitDiagnostics, InitState, require_initialized};
 pub use lifecycle_wire::{
@@ -77,15 +77,18 @@ pub struct NodeConfig {
 
 impl NodeConfig {
     pub fn default_local() -> Result<Self> {
-        let config = ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources::default())?;
+        let config = ryeos_node_runtime::config::Config::load(
+            &ryeos_node_runtime::config::ConfigSources::default(),
+        )?;
         Ok(Self::from_app_config(&config))
     }
 
     pub fn load_local(app_root: Option<PathBuf>) -> Result<Self> {
-        let config = ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
-            app_root,
-            ..Default::default()
-        })?;
+        let config =
+            ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
+                app_root,
+                ..Default::default()
+            })?;
         Ok(Self::from_app_config(&config))
     }
 
@@ -131,10 +134,12 @@ impl LocalLifecycleEnv {
     /// supervised Down intent after a configuration failure; it never supplies
     /// substitute endpoints or direct-launch authority.
     pub fn selected_app_root(app_root: Option<PathBuf>) -> Result<PathBuf> {
-        ryeos_node_runtime::config::Config::selected_app_root(&ryeos_node_runtime::config::ConfigSources {
-            app_root,
-            ..Default::default()
-        })
+        ryeos_node_runtime::config::Config::selected_app_root(
+            &ryeos_node_runtime::config::ConfigSources {
+                app_root,
+                ..Default::default()
+            },
+        )
     }
 
     pub fn from_config(config: NodeConfig) -> Self {

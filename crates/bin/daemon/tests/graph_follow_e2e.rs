@@ -37,7 +37,9 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use common::DaemonHarness;
-use common::fast_fixture::{FastFixture, register_config_fixture_bundle, register_workflow_bundles};
+use common::fast_fixture::{
+    FastFixture, register_config_fixture_bundle, register_workflow_bundles,
+};
 use common::mock_provider::{MockProvider, MockResponse};
 use lillux::crypto::SigningKey;
 use serde_json::Value;
@@ -228,7 +230,6 @@ config:
     std::fs::write(graphs_dir.join("parent_mutating.yaml"), signed)?;
     Ok(())
 }
-
 
 /// Threads visible to the test principal through `service:threads/list`.
 /// The test principal requests the parent and every child, successor and
@@ -644,11 +645,14 @@ async fn pinned_graph_follow_preserves_authority_after_an_ordinary_project_write
             // RPC. The test is finished with the daemon, so stop it and read
             // them from its Store.
             h.kill_daemon().await.expect("stop daemon");
-            let store = common::open_stopped_node_store(&h.state_path)
-                .expect("open stopped node store");
+            let store =
+                common::open_stopped_node_store(&h.state_path).expect("open stopped node store");
             let (parent_row, successor_row) = store
                 .with_state_db(|db| {
-                    Ok((db.get_thread(&parent_thread_id)?, db.get_thread(&successor_id)?))
+                    Ok((
+                        db.get_thread(&parent_thread_id)?,
+                        db.get_thread(&successor_id)?,
+                    ))
                 })
                 .expect("read thread rows");
             let parent_row = parent_row.expect("parent row");

@@ -763,9 +763,9 @@ impl Walker {
                     &inputs,
                 )
                 .await
-            {
-                return Ok(*result);
-            }
+        {
+            return Ok(*result);
+        }
 
         // ── F3 main loop: run_node_body → commit_step ───────────
         // Every iteration produces exactly one complete StepOutcome and routes

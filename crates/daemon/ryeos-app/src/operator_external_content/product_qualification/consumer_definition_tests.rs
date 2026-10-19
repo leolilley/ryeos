@@ -61,7 +61,11 @@ product_qualification_policy:
         label: Some("consumer qualification fixture".into()),
     }]));
     let mut kind_roots = vec![core.join(".ai/node/engine/kinds")];
-    kind_roots.extend(workflow.iter().map(|root| root.join(".ai/node/engine/kinds")));
+    kind_roots.extend(
+        workflow
+            .iter()
+            .map(|root| root.join(".ai/node/engine/kinds")),
+    );
     let kinds = ryeos_engine::kind_registry::KindRegistry::load_base(&kind_roots, &trust)?;
     let (parsers, _) = ryeos_engine::parsers::ParserRegistry::load_base(&roots, &trust, &kinds)?;
     let handlers = ryeos_engine::test_support::load_live_handler_registry();
@@ -317,8 +321,8 @@ product_qualification_policy:
 fn signed_consumer_environment_requires_its_exact_retained_binding() -> Result<()> {
     let root = tempfile::tempdir()?;
     let (_state_owner, mut state) = crate::state::test_support::build(root.path())?;
-    state.node_policy = Arc::new(ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(
-        vec![Arc::new(
+    state.node_policy = Arc::new(
+        ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![Arc::new(
             ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy {
                 schema: 1,
                 max_roots: 256,
@@ -332,8 +336,8 @@ fn signed_consumer_environment_requires_its_exact_retained_binding() -> Result<(
                 max_links_per_object: 100_000,
                 local_verification: None,
             },
-        )],
-    ));
+        )]),
+    );
     let authority = state.state_store.pinned_state_authority()?;
     let cas = authority.cas_store()?;
     let blob = cas.store_blob(b"tool fixture")?;
@@ -422,7 +426,11 @@ product_qualification_policy:
         label: Some("consumer environment fixture".into()),
     }]));
     let mut kind_roots = vec![core.join(".ai/node/engine/kinds")];
-    kind_roots.extend(workflow.iter().map(|root| root.join(".ai/node/engine/kinds")));
+    kind_roots.extend(
+        workflow
+            .iter()
+            .map(|root| root.join(".ai/node/engine/kinds")),
+    );
     let kinds = ryeos_engine::kind_registry::KindRegistry::load_base(&kind_roots, &trust)?;
     let (parsers, _) = ryeos_engine::parsers::ParserRegistry::load_base(&roots, &trust, &kinds)?;
     let handlers = ryeos_engine::test_support::load_live_handler_registry();
@@ -473,7 +481,8 @@ product_qualification_policy:
             &ryeos_engine::contracts::SubjectResolutionAuthority::Projectless,
         )
     })?;
-    let operator = ryeos_node_runtime::identity::NodeIdentity::load(&state.config.operator_signing_key_path)?;
+    let operator =
+        ryeos_node_runtime::identity::NodeIdentity::load(&state.config.operator_signing_key_path)?;
     ryeos_node_runtime::identity::write_authorized_key_toml(
         &state.config.authorized_keys_dir,
         operator.fingerprint(),

@@ -57,7 +57,10 @@ impl NativeCapacityUnits {
     pub fn validate(&self) -> std::result::Result<(), NativeCapacityUnitsRefusal> {
         for (value, refusal) in [
             (self.storage_bytes, NativeCapacityUnitsRefusal::Storage),
-            (self.host_control_storage_bytes, NativeCapacityUnitsRefusal::HostControlStorage),
+            (
+                self.host_control_storage_bytes,
+                NativeCapacityUnitsRefusal::HostControlStorage,
+            ),
             (self.allocator_steps, NativeCapacityUnitsRefusal::Work),
             (self.connection_tickets, NativeCapacityUnitsRefusal::Tickets),
             (self.cleanup_steps, NativeCapacityUnitsRefusal::Cleanup),
@@ -118,17 +121,29 @@ impl NativeRecoveryEnvelope {
     pub fn validate(&self) -> std::result::Result<(), NativeCapacityPolicyRefusal> {
         // Structural bounds only. The real account producer checks its actual
         // record/namespace/publication/descriptor quote before any mutation.
-        for value in [self.maximum_attempts, self.work_per_attempt, self.control_storage_bytes] {
+        for value in [
+            self.maximum_attempts,
+            self.work_per_attempt,
+            self.control_storage_bytes,
+        ] {
             if value == 0 || value > i64::MAX as u64 {
                 return Err(NativeCapacityPolicyRefusal::Recovery);
             }
         }
         if self.maximum_duration_ms == 0
-            || self.maximum_duration_ms.checked_mul(1_000_000).is_none() {
+            || self.maximum_duration_ms.checked_mul(1_000_000).is_none()
+        {
             return Err(NativeCapacityPolicyRefusal::Recovery);
         }
-        if self.maximum_attempts.checked_mul(self.work_per_attempt).is_none()
-            || self.maximum_attempts.checked_mul(self.control_storage_bytes).is_none() {
+        if self
+            .maximum_attempts
+            .checked_mul(self.work_per_attempt)
+            .is_none()
+            || self
+                .maximum_attempts
+                .checked_mul(self.control_storage_bytes)
+                .is_none()
+        {
             return Err(NativeCapacityPolicyRefusal::Recovery);
         }
         Ok(())
@@ -152,7 +167,9 @@ pub struct NativeRenewalEnvelope {
 
 /// A present key whose value may be `null`. The key itself stays required:
 /// an absent renewal bound is not a silent "unbounded".
-fn deserialize_required_nullable<'de, D, T>(deserializer: D) -> std::result::Result<Option<T>, D::Error>
+fn deserialize_required_nullable<'de, D, T>(
+    deserializer: D,
+) -> std::result::Result<Option<T>, D::Error>
 where
     D: serde::Deserializer<'de>,
     T: Deserialize<'de>,
@@ -165,9 +182,10 @@ impl NativeRenewalEnvelope {
         // The booleans are independent of the bound: `maximum_epochs: 1` with
         // both paths disabled is a legitimate "one epoch, ever" statement.
         if let Some(bound) = self.maximum_epochs
-            && (bound == 0 || bound > i64::MAX as u64) {
-                return Err(NativeCapacityPolicyRefusal::Renewal);
-            }
+            && (bound == 0 || bound > i64::MAX as u64)
+        {
+            return Err(NativeCapacityPolicyRefusal::Renewal);
+        }
         Ok(())
     }
 }
@@ -210,7 +228,9 @@ impl std::fmt::Display for NativeCapacityPolicyRefusal {
 }
 impl std::error::Error for NativeCapacityPolicyRefusal {}
 impl From<NativeCapacityUnitsRefusal> for NativeCapacityPolicyRefusal {
-    fn from(error: NativeCapacityUnitsRefusal) -> Self { Self::Units(error) }
+    fn from(error: NativeCapacityUnitsRefusal) -> Self {
+        Self::Units(error)
+    }
 }
 impl NativeIncarnationEnvelope {
     pub fn validate(&self) -> std::result::Result<(), NativeCapacityPolicyRefusal> {
@@ -221,19 +241,28 @@ impl NativeIncarnationEnvelope {
         if self.units.connection_tickets > MAX_CONNECTIONS_PER_INCARNATION {
             return Err(NativeCapacityPolicyRefusal::Tickets);
         }
-        if self.host_release_steps < 2 || self.outside_cleanup_steps == 0
-            || self.host_release_steps.checked_add(self.outside_cleanup_steps)
-                .is_none_or(|outside| outside >= self.units.cleanup_steps) {
-            return Err(NativeCapacityPolicyRefusal::Units(NativeCapacityUnitsRefusal::Cleanup));
+        if self.host_release_steps < 2
+            || self.outside_cleanup_steps == 0
+            || self
+                .host_release_steps
+                .checked_add(self.outside_cleanup_steps)
+                .is_none_or(|outside| outside >= self.units.cleanup_steps)
+        {
+            return Err(NativeCapacityPolicyRefusal::Units(
+                NativeCapacityUnitsRefusal::Cleanup,
+            ));
         }
-        if self.cleanup_occupancy_ms == 0 || self.cleanup_occupancy_ms >= self.maximum_occupancy_ms {
+        if self.cleanup_occupancy_ms == 0 || self.cleanup_occupancy_ms >= self.maximum_occupancy_ms
+        {
             return Err(NativeCapacityPolicyRefusal::OccupancyInterval);
         }
         if self.maximum_occupancy_ms.checked_mul(1_000_000).is_none() {
             return Err(NativeCapacityPolicyRefusal::OccupancyOverflow);
         }
         if self.rollover_drain_margin_ms == 0
-            || self.rollover_drain_margin_ms >= self.maximum_occupancy_ms - self.cleanup_occupancy_ms {
+            || self.rollover_drain_margin_ms
+                >= self.maximum_occupancy_ms - self.cleanup_occupancy_ms
+        {
             return Err(NativeCapacityPolicyRefusal::RolloverMargin);
         }
         Ok(())
@@ -256,9 +285,15 @@ pub struct NodeNativeCapacityPolicy {
 
 impl NodeNativeCapacityPolicy {
     pub fn validate(&self) -> std::result::Result<(), NativeCapacityPolicyRefusal> {
-        if self.schema != 6 { return Err(NativeCapacityPolicyRefusal::Schema); }
-        if self.issuance_nonce.len() != 32 || !self.issuance_nonce.bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+        if self.schema != 6 {
+            return Err(NativeCapacityPolicyRefusal::Schema);
+        }
+        if self.issuance_nonce.len() != 32
+            || !self
+                .issuance_nonce
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
             return Err(NativeCapacityPolicyRefusal::IssuanceNonce);
         }
         self.allowance.validate()?;
@@ -301,22 +336,34 @@ mod outside_cleanup_tests {
 
     fn policy() -> NodeNativeCapacityPolicy {
         let units = NativeCapacityUnits {
-            storage_bytes: 67_108_864, host_control_storage_bytes: 1_048_576,
-            allocator_steps: 20_000_000, connection_tickets: 64, cleanup_steps: 300_000,
+            storage_bytes: 67_108_864,
+            host_control_storage_bytes: 1_048_576,
+            allocator_steps: 20_000_000,
+            connection_tickets: 64,
+            cleanup_steps: 300_000,
         };
         NodeNativeCapacityPolicy {
-            schema: 6, issuance_nonce: "a".repeat(32), allowance: units,
+            schema: 6,
+            issuance_nonce: "a".repeat(32),
+            allowance: units,
             incarnation: NativeIncarnationEnvelope {
-                units, maximum_occupancy_ms: 7_200_000, cleanup_occupancy_ms: 120_000,
+                units,
+                maximum_occupancy_ms: 7_200_000,
+                cleanup_occupancy_ms: 120_000,
                 rollover_drain_margin_ms: 90_000,
-                host_release_steps: 64, outside_cleanup_steps: 32_768,
+                host_release_steps: 64,
+                outside_cleanup_steps: 32_768,
             },
             recovery: NativeRecoveryEnvelope {
-                maximum_attempts: 32, work_per_attempt: 65_536,
-                control_storage_bytes: 262_144, maximum_duration_ms: 120_000,
+                maximum_attempts: 32,
+                work_per_attempt: 65_536,
+                control_storage_bytes: 262_144,
+                maximum_duration_ms: 120_000,
             },
             renewal: NativeRenewalEnvelope {
-                at_orderly_rollover: true, operator_reissue: true, maximum_epochs: None,
+                at_orderly_rollover: true,
+                operator_reissue: true,
+                maximum_epochs: None,
             },
         }
     }
@@ -337,7 +384,10 @@ mod outside_cleanup_tests {
     fn outside_split_is_required_and_previous_schema_is_refused() {
         let mut policy = policy();
         let mut encoded = serde_json::to_value(&policy).unwrap();
-        encoded["incarnation"].as_object_mut().unwrap().remove("outside_cleanup_steps");
+        encoded["incarnation"]
+            .as_object_mut()
+            .unwrap()
+            .remove("outside_cleanup_steps");
         assert!(serde_json::from_value::<NodeNativeCapacityPolicy>(encoded).is_err());
         policy.schema = 5;
         assert!(policy.validate().is_err());
@@ -353,7 +403,10 @@ mod outside_cleanup_tests {
     fn renewal_bound_is_required_nullable_data_independent_of_the_paths() {
         let mut policy = policy();
         let mut absent_bound = serde_json::to_value(&policy).unwrap();
-        absent_bound["renewal"].as_object_mut().unwrap().remove("maximum_epochs");
+        absent_bound["renewal"]
+            .as_object_mut()
+            .unwrap()
+            .remove("maximum_epochs");
         assert!(serde_json::from_value::<NodeNativeCapacityPolicy>(absent_bound).is_err());
         let mut null_bound = serde_json::to_value(&policy).unwrap();
         null_bound["renewal"]["maximum_epochs"] = serde_json::Value::Null;
@@ -361,7 +414,9 @@ mod outside_cleanup_tests {
         assert_eq!(parsed.renewal.maximum_epochs, None);
         parsed.validate().unwrap();
         policy.renewal = NativeRenewalEnvelope {
-            at_orderly_rollover: false, operator_reissue: false, maximum_epochs: Some(1),
+            at_orderly_rollover: false,
+            operator_reissue: false,
+            maximum_epochs: Some(1),
         };
         policy.validate().unwrap();
         policy.renewal.maximum_epochs = Some(i64::MAX as u64 + 1);
@@ -376,10 +431,20 @@ mod outside_cleanup_tests {
         let mut encoded = serde_json::to_value(&policy).unwrap();
         encoded.as_object_mut().unwrap().remove("recovery");
         assert!(serde_json::from_value::<NodeNativeCapacityPolicy>(encoded).is_err());
-        for field in ["maximum_attempts", "work_per_attempt", "control_storage_bytes", "maximum_duration_ms"] {
+        for field in [
+            "maximum_attempts",
+            "work_per_attempt",
+            "control_storage_bytes",
+            "maximum_duration_ms",
+        ] {
             let mut invalid = serde_json::to_value(&policy).unwrap();
             invalid["recovery"][field] = 0.into();
-            assert!(serde_json::from_value::<NodeNativeCapacityPolicy>(invalid).unwrap().validate().is_err());
+            assert!(
+                serde_json::from_value::<NodeNativeCapacityPolicy>(invalid)
+                    .unwrap()
+                    .validate()
+                    .is_err()
+            );
         }
         policy.recovery.maximum_attempts = i64::MAX as u64;
         assert!(policy.validate().is_err());

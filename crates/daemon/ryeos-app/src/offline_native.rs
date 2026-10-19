@@ -41,16 +41,18 @@ pub(crate) fn load_signed_maintenance_snapshot(
     config: &Config,
     identity: &NodeIdentity,
 ) -> Result<NodePolicySnapshot> {
-    let trust = ryeos_engine::trust::TrustStore::from_signers(vec![
-        ryeos_engine::trust::TrustedSigner {
+    let trust =
+        ryeos_engine::trust::TrustStore::from_signers(vec![ryeos_engine::trust::TrustedSigner {
             fingerprint: identity.fingerprint().to_owned(),
             verifying_key: *identity.verifying_key(),
             label: Some("offline maintenance node operator".to_owned()),
-        },
-    ]);
-    let snapshot =
-        ryeos_node_runtime::node_policy::load_snapshot(&config.app_root, &trust, &NodePolicyTable::new())
-            .context("load complete node-signed maintenance policy generation")?;
+        }]);
+    let snapshot = ryeos_node_runtime::node_policy::load_snapshot(
+        &config.app_root,
+        &trust,
+        &NodePolicyTable::new(),
+    )
+    .context("load complete node-signed maintenance policy generation")?;
     let digest = snapshot.generation_digest();
     ensure!(
         digest.len() == 64
@@ -75,7 +77,10 @@ pub(crate) fn load_signed_maintenance_snapshot(
 pub(crate) fn require_started_once(runtime: &lillux::PinnedDirectory) -> Result<()> {
     let mut absent = Vec::new();
     let operational = ryeos_state::operational::OPERATIONAL_INITIALIZED_FILENAME;
-    if runtime.open_regular(OsStr::new(operational), false)?.is_none() {
+    if runtime
+        .open_regular(OsStr::new(operational), false)?
+        .is_none()
+    {
         absent.push(operational.to_owned());
     }
     let recovery = ryeos_state::recovery::RECOVERY_DIRECTORY_NAME;
@@ -110,7 +115,10 @@ struct SessionAuthority {
 
 impl OfflineNativeAuthority for SessionAuthority {
     fn checkpoint(&self, cleanup: bool) -> Result<()> {
-        ensure!(self.process == std::process::id(), "inherited offline native session refused");
+        ensure!(
+            self.process == std::process::id(),
+            "inherited offline native session refused"
+        );
         self.state_lock.ensure_protects_app_root(&self.app_root)?;
         self.runtime.ensure_path_binding()?;
         self.namespace.ensure_protects(&self.runtime)?;
@@ -180,8 +188,10 @@ impl OfflineNativeSession {
                 format!("node maintenance policy grants no offline native quota for `{class}`")
             })?
             .clone();
-        ryeos_node_runtime::node_policy::sections::maintenance::validate_offline_native_quota(&quota)
-            .with_context(|| format!("offline native `{class}` quota"))?;
+        ryeos_node_runtime::node_policy::sections::maintenance::validate_offline_native_quota(
+            &quota,
+        )
+        .with_context(|| format!("offline native `{class}` quota"))?;
         let operation = Duration::from_millis(quota.max_operation_millis);
         let cleanup = operation
             .checked_add(Duration::from_millis(quota.max_cleanup_millis))
@@ -259,12 +269,19 @@ impl OfflineNativeSession {
         match host.finish() {
             // The region release fact and the retired pin counts are plain
             // data the session does not report.
-            Ok(OfflineNativeReleased { facts, region: _, durability_pins: _ }) => {
-                facts.ok_or_else(|| {
-                    (None, anyhow::anyhow!("offline native session host released without backend facts"))
-                })
+            Ok(OfflineNativeReleased {
+                facts,
+                region: _,
+                durability_pins: _,
+            }) => facts.ok_or_else(|| {
+                (
+                    None,
+                    anyhow::anyhow!("offline native session host released without backend facts"),
+                )
+            }),
+            Err(OfflineNativeRetained { host, error }) => {
+                Err((Some(Self { authority, host }), error))
             }
-            Err(OfflineNativeRetained { host, error }) => Err((Some(Self { authority, host }), error)),
         }
     }
 }
@@ -280,7 +297,10 @@ pub struct ReplayIndexActivation {
 /// node StateLock; this pins and locks the runtime namespace, issues the
 /// `replay-indexes` native session, activates and closes the Operational
 /// database through it, and releases the host.
-pub fn reset_replay_indexes(config: &Config, state_lock: &StateLock) -> Result<ReplayIndexActivation> {
+pub fn reset_replay_indexes(
+    config: &Config,
+    state_lock: &StateLock,
+) -> Result<ReplayIndexActivation> {
     let runtime_dir = config.runtime_state_dir();
     let runtime = Arc::new(
         lillux::PinnedDirectory::open(&runtime_dir)?
@@ -349,10 +369,16 @@ fn require_no_live_execution(
 ) -> Result<()> {
     verify()?;
     let db_path = &config.db_path;
-    let parent_path = db_path.parent().context("Runtime database path has no parent")?;
+    let parent_path = db_path
+        .parent()
+        .context("Runtime database path has no parent")?;
     let parent = Arc::new(
-        lillux::PinnedDirectory::open(parent_path)?
-            .with_context(|| format!("Runtime database parent is absent: {}", parent_path.display()))?,
+        lillux::PinnedDirectory::open(parent_path)?.with_context(|| {
+            format!(
+                "Runtime database parent is absent: {}",
+                parent_path.display()
+            )
+        })?,
     );
     let parent_namespace = if runtime.is_same_directory(&parent)? {
         namespace.clone()
@@ -484,7 +510,12 @@ pub fn reset_external_content_bindings(
         };
         // This store opened only a transient projection: its census has
         // terminals and no generation lease or prior refusal.
-        let ryeos_state::state_db::LiveStateCensus { terminals, leases, lease_retirement, prior_refusal } = census;
+        let ryeos_state::state_db::LiveStateCensus {
+            terminals,
+            leases,
+            lease_retirement,
+            prior_refusal,
+        } = census;
         let mut refused = Vec::new();
         let mut reasons = Vec::new();
         for terminal in terminals {
@@ -510,7 +541,15 @@ pub fn reset_external_content_bindings(
             )),
             Err(original) => refusal.context(original),
         };
-        Err(CarriedOwners::carry(error, (refused, leases, lease_retirement, prior_refusal.map(|error| format!("{error:#}")))))
+        Err(CarriedOwners::carry(
+            error,
+            (
+                refused,
+                leases,
+                lease_retirement,
+                prior_refusal.map(|error| format!("{error:#}")),
+            ),
+        ))
     })();
     match (discarded, session.finish()) {
         (Ok(bindings), Ok(facts)) => Ok(ExternalContentBindingReset { bindings, facts }),
@@ -526,7 +565,11 @@ pub fn reset_external_content_bindings(
 
 /// Name the owners an operation refusal still carries, which keep the host's
 /// factory or terminals alive and so block its release.
-fn blocked_by_carried(original: &anyhow::Error, error: anyhow::Error, operation: &str) -> anyhow::Error {
+fn blocked_by_carried(
+    original: &anyhow::Error,
+    error: anyhow::Error,
+    operation: &str,
+) -> anyhow::Error {
     match original.downcast_ref::<CarriedOwners>() {
         Some(carried) => {
             let names = carried.owner_names();
@@ -544,7 +587,10 @@ fn blocked_by_carried(original: &anyhow::Error, error: anyhow::Error, operation:
 /// the owner survives until the process ends rather than being dropped.
 fn retained_session(session: Option<OfflineNativeSession>, error: anyhow::Error) -> anyhow::Error {
     match session {
-        Some(session) => anyhow::Error::new(RetainedOfflineNativeSession { error, _session: session }),
+        Some(session) => anyhow::Error::new(RetainedOfflineNativeSession {
+            error,
+            _session: session,
+        }),
         None => error,
     }
 }
@@ -555,7 +601,9 @@ struct RetainedOfflineNativeSession {
 }
 impl std::fmt::Debug for RetainedOfflineNativeSession {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RetainedOfflineNativeSession").field("error", &self.error).finish_non_exhaustive()
+        f.debug_struct("RetainedOfflineNativeSession")
+            .field("error", &self.error)
+            .finish_non_exhaustive()
     }
 }
 impl std::fmt::Display for RetainedOfflineNativeSession {
@@ -577,19 +625,32 @@ mod tests {
     fn never_started_root_is_refused_up_front_naming_the_absent_artefacts() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("recovery/thread-projection")).unwrap();
-        let error = require_started_once(&runtime(dir.path())).expect_err("an init-only root is refused");
+        let error =
+            require_started_once(&runtime(dir.path())).expect_err("an init-only root is refused");
         let message = format!("{error:#}");
-        assert!(message.contains("this node has never started; start it once, then rerun"), "{message}");
-        assert!(message.contains("operational.initialized") && message.contains("recovery/cas-mutation.lock"), "{message}");
+        assert!(
+            message.contains("this node has never started; start it once, then rerun"),
+            "{message}"
+        );
+        assert!(
+            message.contains("operational.initialized")
+                && message.contains("recovery/cas-mutation.lock"),
+            "{message}"
+        );
 
         std::fs::write(
-            dir.path().join(ryeos_state::operational::OPERATIONAL_INITIALIZED_FILENAME),
+            dir.path()
+                .join(ryeos_state::operational::OPERATIONAL_INITIALIZED_FILENAME),
             ryeos_state::operational::OPERATIONAL_INITIALIZED_CONTENT,
         )
         .unwrap();
-        let error = require_started_once(&runtime(dir.path())).expect_err("a missing CAS lock is still refused");
+        let error = require_started_once(&runtime(dir.path()))
+            .expect_err("a missing CAS lock is still refused");
         let message = format!("{error:#}");
-        assert!(message.contains("never started") && !message.contains("operational.initialized"), "{message}");
+        assert!(
+            message.contains("never started") && !message.contains("operational.initialized"),
+            "{message}"
+        );
 
         std::fs::write(dir.path().join("recovery/cas-mutation.lock"), b"").unwrap();
         require_started_once(&runtime(dir.path())).expect("a started root is admitted");

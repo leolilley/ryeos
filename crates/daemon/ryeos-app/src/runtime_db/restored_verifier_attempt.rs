@@ -487,8 +487,9 @@ impl RuntimeDb {
     /// after observation. Both are Blob roots owned by the existing attempt.
     pub(crate) fn restored_verifier_blob_roots(&self) -> Result<Vec<String>> {
         self.conn.with_sql(|conn| {
-            let mut statement = conn
-                .prepare("SELECT operation_id FROM restored_verifier_attempt ORDER BY operation_id")?;
+            let mut statement = conn.prepare(
+                "SELECT operation_id FROM restored_verifier_attempt ORDER BY operation_id",
+            )?;
             let ids = statement
                 .query_map([], |row| row.get::<_, String>(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -615,9 +616,7 @@ impl RuntimeDb {
         &self,
         operation_id: &str,
     ) -> Result<Option<RestoredVerifierAttemptRecord>> {
-        self.conn.with_sql(|conn| {
-            read(conn, operation_id)
-        })
+        self.conn.with_sql(|conn| read(conn, operation_id))
     }
 
     pub fn reserve_restored_verifier_attempt(
@@ -816,7 +815,8 @@ impl RuntimeDb {
              WHERE operation_id=?1 AND phase='attempt_pending'",
                 params![operation_id, now],
             )?;
-            let current = read(&tx, operation_id)?.context("restored verifier quarantine vanished")?;
+            let current =
+                read(&tx, operation_id)?.context("restored verifier quarantine vanished")?;
             tx.commit()?;
             Ok(current)
         })

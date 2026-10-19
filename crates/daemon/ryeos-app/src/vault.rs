@@ -57,7 +57,6 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Result, anyhow, bail};
 
-
 pub mod external_channel;
 pub mod external_connector;
 pub mod external_relay_bootstrap;
@@ -73,6 +72,7 @@ use placement::PlacementCredentialAccess;
 // `ryeos vault {put,list,remove,rewrap}` verbs without a circular
 // crate dependency. We re-export the pieces public callers (tests,
 // fixtures, dispatch) need so this module's surface is unchanged.
+pub use provider_env::{ProviderEnvironment, RecipientRefusal};
 pub use ryeos_vault::paths::default_sealed_store_path;
 pub use ryeos_vault::policy::{
     BLOCKED_NAMES, INTERNAL_RUNTIME_VAULT_PREFIX, MAX_VAULT_ENTRIES, MAX_VAULT_ENVELOPE_BYTES,
@@ -81,7 +81,6 @@ pub use ryeos_vault::policy::{
     validate_key_name, validate_secret_value,
 };
 pub use ryeos_vault::sealed::{recover_rewrap, with_store_lock, write_sealed_secrets};
-pub use provider_env::{ProviderEnvironment, RecipientRefusal};
 
 /// The principal a delivery is made to. Capability scopes are not part of
 /// it: a provider-environment authority carries the scopes its admission
@@ -423,9 +422,7 @@ pub fn authorize_secret_delivery(
             names: missing,
         });
     }
-    Ok(ryeos_engine::contracts::DeliveredSecretEnv::from_authorized(
-        present,
-    ))
+    Ok(ryeos_engine::contracts::DeliveredSecretEnv::from_authorized(present))
 }
 
 /// Names-only preflight over the same authority as
@@ -573,10 +570,9 @@ fn read_authorized_secret_values(
         // A name withheld only because its admission carried a covering
         // wildcard rather than the exact listed capability is refused by
         // that name and capability.
-        if let Some((name, refusal)) = withdrawn
-            .iter()
-            .find(|(_, refusal)| matches!(refusal, RecipientRefusal::WildcardOnly { capability: _ }))
-        {
+        if let Some((name, refusal)) = withdrawn.iter().find(|(_, refusal)| {
+            matches!(refusal, RecipientRefusal::WildcardOnly { capability: _ })
+        }) {
             return Err(VaultReadError::AuthorityViolation(
                 refusal.message(name, principal),
             ));
@@ -713,7 +709,6 @@ fn zeroize_secret_values(values: &mut HashMap<String, String>) {
         zeroize::Zeroize::zeroize(value);
     }
 }
-
 
 /// Stub vault — used only when the daemon is constructed for a unit
 /// test that doesn't want to depend on the operator's filesystem.
@@ -1420,10 +1415,6 @@ mod tests {
 
     const OP: SecretRecipient<'static> = SecretRecipient { principal: "op" };
 
-
-
-
-
     #[test]
     fn empty_vault_trait_returns_empty() {
         assert!(EmptyVault.read_all("op").unwrap().is_empty());
@@ -1494,13 +1485,9 @@ mod tests {
     #[test]
     fn authorized_delivery_skips_the_store_when_nothing_is_declared() {
         let vault = fixed_vault(&[("OPENAI_API_KEY", "sk-1")]);
-        let delivered = authorize_secret_delivery(
-            &vault_only_sources(&vault),
-            OP,
-            &[],
-            &operator_authority(),
-        )
-        .unwrap();
+        let delivered =
+            authorize_secret_delivery(&vault_only_sources(&vault), OP, &[], &operator_authority())
+                .unwrap();
         assert!(delivered.is_empty());
         assert_eq!(reads(&vault), 0);
     }
@@ -1538,9 +1525,16 @@ mod tests {
             &authority,
         )
         .unwrap_err();
-        assert!(matches!(error, VaultReadError::AuthorityViolation(_)), "{error}");
+        assert!(
+            matches!(error, VaultReadError::AuthorityViolation(_)),
+            "{error}"
+        );
         assert!(error.to_string().contains("OTHER"));
-        assert_eq!(reads(&vault), 0, "an unauthorized name must not read the store");
+        assert_eq!(
+            reads(&vault),
+            0,
+            "an unauthorized name must not read the store"
+        );
     }
 
     #[test]
@@ -1612,7 +1606,10 @@ mod tests {
             &authority,
         )
         .unwrap_err();
-        assert!(matches!(error, VaultReadError::AuthorityViolation(_)), "{error}");
+        assert!(
+            matches!(error, VaultReadError::AuthorityViolation(_)),
+            "{error}"
+        );
         assert!(!error.to_string().contains("from-overlay"));
     }
 
@@ -1620,8 +1617,10 @@ mod tests {
     fn host_environment_is_not_a_secret_source() {
         // Any variable the test process already has qualifies as host env.
         let (name, _) = std::env::vars()
-            .find(|(name, _)| validate_operator_secret_name(name).is_ok()
-                && crate::process::validate_spawn_secret_name(name).is_ok())
+            .find(|(name, _)| {
+                validate_operator_secret_name(name).is_ok()
+                    && crate::process::validate_spawn_secret_name(name).is_ok()
+            })
             .unwrap_or_else(|| ("RYE_TEST_ABSENT_HOST_SECRET".to_string(), String::new()));
         let vault = fixed_vault(&[]);
         let error = authorize_secret_delivery(
@@ -1631,7 +1630,10 @@ mod tests {
             &operator_authority(),
         )
         .unwrap_err();
-        assert!(matches!(error, VaultReadError::MissingSecrets { .. }), "{error}");
+        assert!(
+            matches!(error, VaultReadError::MissingSecrets { .. }),
+            "{error}"
+        );
     }
 
     fn provider_authority(
@@ -1655,7 +1657,10 @@ mod tests {
             values
                 .iter()
                 .map(|(name, value)| {
-                    ((*name).to_string(), zeroize::Zeroizing::new((*value).to_string()))
+                    (
+                        (*name).to_string(),
+                        zeroize::Zeroizing::new((*value).to_string()),
+                    )
                 })
                 .collect(),
         )
@@ -1679,10 +1684,13 @@ mod tests {
                 .unwrap();
         assert_eq!(delivered.get("OPENAI_API_KEY"), Some("sk-p"));
         assert!(!format!("{delivered:?}").contains("sk-p"));
-        assert_eq!(reads(&vault), 0, "the provider source never reads the store");
+        assert_eq!(
+            reads(&vault),
+            0,
+            "the provider source never reads the store"
+        );
         let presence =
-            report_secret_presence(&sources, OP, &names(&["OPENAI_API_KEY"]), &authority)
-                .unwrap();
+            report_secret_presence(&sources, OP, &names(&["OPENAI_API_KEY"]), &authority).unwrap();
         assert_eq!(presence, vec![("OPENAI_API_KEY".to_string(), true)]);
     }
 
@@ -1706,9 +1714,12 @@ mod tests {
         };
         assert_eq!(missing, &["B_KEY".to_string()]);
         assert!(!error.to_string().contains("value-a"));
-        let error = check_secret_availability(&sources, OP, &names(&["B_KEY"]), &authority)
-            .unwrap_err();
-        assert!(matches!(error, VaultReadError::MissingSecrets { .. }), "{error}");
+        let error =
+            check_secret_availability(&sources, OP, &names(&["B_KEY"]), &authority).unwrap_err();
+        assert!(
+            matches!(error, VaultReadError::MissingSecrets { .. }),
+            "{error}"
+        );
     }
 
     #[test]
@@ -1731,7 +1742,10 @@ mod tests {
         let error =
             authorize_secret_delivery(&sources, OP, &names(&["ALLOWED", "OTHER"]), &narrowed)
                 .unwrap_err();
-        assert!(matches!(error, VaultReadError::AuthorityViolation(_)), "{error}");
+        assert!(
+            matches!(error, VaultReadError::AuthorityViolation(_)),
+            "{error}"
+        );
         assert!(error.to_string().contains("OTHER"));
         assert!(!error.to_string().contains("o-value"));
         assert!(!error.to_string().contains("a-value"));
@@ -1742,7 +1756,10 @@ mod tests {
         let error =
             authorize_secret_delivery(&sources, OP, &names(&["ALLOWED", "OTHER"]), &undeclared)
                 .unwrap_err();
-        assert!(matches!(error, VaultReadError::AuthorityViolation(_)), "{error}");
+        assert!(
+            matches!(error, VaultReadError::AuthorityViolation(_)),
+            "{error}"
+        );
         assert!(!error.to_string().contains("o-value"));
         assert_eq!(reads(&vault), 0);
     }
@@ -1764,12 +1781,17 @@ mod tests {
         );
         let error = authorize_secret_delivery(
             &sources,
-            SecretRecipient { principal: "fp:child" },
+            SecretRecipient {
+                principal: "fp:child",
+            },
             &names(&["OPENAI_API_KEY"]),
             &inherited,
         )
         .unwrap_err();
-        assert!(matches!(error, VaultReadError::AuthorityViolation(_)), "{error}");
+        assert!(
+            matches!(error, VaultReadError::AuthorityViolation(_)),
+            "{error}"
+        );
         let message = error.to_string();
         assert!(
             message.contains("OPENAI_API_KEY") && message.contains("`fp:child`"),
@@ -1778,7 +1800,9 @@ mod tests {
         assert!(!message.contains("sk-parent"), "{message}");
         let error = report_secret_presence(
             &sources,
-            SecretRecipient { principal: "fp:child" },
+            SecretRecipient {
+                principal: "fp:child",
+            },
             &names(&["OPENAI_API_KEY"]),
             &inherited,
         )
@@ -1817,7 +1841,8 @@ mod tests {
                     declared_names: names(&["B_KEY"]),
                     recipient_principal: "op".to_string(),
                     recipient_scopes: names(scopes),
-                    name_authority: ryeos_state::objects::EnvironmentNameAuthority::DeclaredRequired,
+                    name_authority:
+                        ryeos_state::objects::EnvironmentNameAuthority::DeclaredRequired,
                 },
             )
             .unwrap()
@@ -1830,11 +1855,19 @@ mod tests {
         )
         .unwrap();
         assert_eq!(delivered.get("B_KEY"), Some("value-b"));
-        for wildcard in ["*", "ryeos.*", "ryeos.receive.*", "ryeos.receive.provider_env.*"] {
+        for wildcard in [
+            "*",
+            "ryeos.*",
+            "ryeos.receive.*",
+            "ryeos.receive.provider_env.*",
+        ] {
             let error =
                 authorize_secret_delivery(&sources, OP, &names(&["B_KEY"]), &sealed(&[wildcard]))
                     .unwrap_err();
-            assert!(matches!(error, VaultReadError::AuthorityViolation(_)), "{error}");
+            assert!(
+                matches!(error, VaultReadError::AuthorityViolation(_)),
+                "{error}"
+            );
             let message = error.to_string();
             assert!(
                 message.contains(
@@ -1896,7 +1929,10 @@ mod tests {
         let error =
             authorize_secret_delivery(&sources, OP, std::slice::from_ref(&name), &authority)
                 .unwrap_err();
-        assert!(matches!(error, VaultReadError::MissingSecrets { .. }), "{error}");
+        assert!(
+            matches!(error, VaultReadError::MissingSecrets { .. }),
+            "{error}"
+        );
     }
 
     impl NodeVault for FixedVault {
@@ -1922,15 +1958,6 @@ mod tests {
         }
     }
 
-
-
-
-
-
-
-
-
-
     // ── SealedEnvelopeVault tests ────────────────────────────────
 
     #[test]
@@ -1951,7 +1978,10 @@ mod tests {
             lillux::vault::VaultSecretKey::generate(),
         );
         for name in ["LD_PRELOAD", "PATH"] {
-            assert!(v.set_secret("op", name, "value").is_err(), "{name} was stored");
+            assert!(
+                v.set_secret("op", name, "value").is_err(),
+                "{name} was stored"
+            );
         }
         assert!(v.list_keys("op").unwrap().is_empty());
     }
@@ -2104,22 +2134,7 @@ mod tests {
         );
     }
 
-
     // ── .env overlay layering ────────────────────────────────────
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     // ── read_named_secret tests ──────────────────────────────────
 

@@ -262,8 +262,13 @@ mod tests {
 
     #[test]
     fn required_policy_without_protected_authority_is_not_ready() {
-        let readiness =
-            ProcessScopeReadiness::classify(required_policy(), floor(), false, None, BTreeSet::new());
+        let readiness = ProcessScopeReadiness::classify(
+            required_policy(),
+            floor(),
+            false,
+            None,
+            BTreeSet::new(),
+        );
         assert_eq!(readiness.authority, ProcessScopeAuthorityStatus::Absent);
         assert!(!readiness.exclusive_session.ready);
         assert_eq!(
@@ -300,9 +305,15 @@ mod tests {
         let wanted = policy.required_process_scope_capabilities();
         assert_eq!(wanted, floor());
         assert!(!wanted.contains(&lillux::ProcessScopeCapability::Quiescence));
-        policy.requires_capabilities =
-            vec!["quiescence:scope".into(), "recovery:scope".into(), "termination:scope".into()];
-        assert_eq!(policy.required_process_scope_capabilities(), complete_capabilities());
+        policy.requires_capabilities = vec![
+            "quiescence:scope".into(),
+            "recovery:scope".into(),
+            "termination:scope".into(),
+        ];
+        assert_eq!(
+            policy.required_process_scope_capabilities(),
+            complete_capabilities()
+        );
 
         let without_freeze: BTreeSet<_> = [
             lillux::ProcessScopeCapability::Termination,
@@ -320,8 +331,13 @@ mod tests {
         assert!(ready.exclusive_session.ready);
         let mut with_freeze = floor();
         with_freeze.insert(lillux::ProcessScopeCapability::Quiescence);
-        let refused =
-            ProcessScopeReadiness::classify(required_policy(), with_freeze, false, digest, without_freeze);
+        let refused = ProcessScopeReadiness::classify(
+            required_policy(),
+            with_freeze,
+            false,
+            digest,
+            without_freeze,
+        );
         assert_eq!(
             refused.exclusive_session.reason,
             ProcessControlReadinessReason::RequiredCapabilitiesMissing

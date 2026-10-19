@@ -20,8 +20,8 @@ use std::time::{Duration, Instant};
 
 use super::candidate_authoring::{qualification_policy_source, qualification_verifier_tool_source};
 use super::qualification_node::{
-    ManagedActivationGrant, RetainedTestRuntime, bind_manifests_to_tool, bind_typed_manifests_to_tool,
-    manifest_hash, operator_context,
+    ManagedActivationGrant, RetainedTestRuntime, bind_manifests_to_tool,
+    bind_typed_manifests_to_tool, manifest_hash, operator_context,
 };
 
 /// Mechanism claims a guest-runtime verifier may attest. A signed placement
@@ -599,7 +599,10 @@ pub async fn qualify_guest_runtime_subject(
         attestation_hash: qualification.qualification_hash,
         owner_principal: context.fingerprint.clone(),
         policy_ref: GUEST_RUNTIME_POLICY_REF.to_owned(),
-        required_claims: required_claims.iter().map(|claim| (*claim).to_owned()).collect(),
+        required_claims: required_claims
+            .iter()
+            .map(|claim| (*claim).to_owned())
+            .collect(),
         guest_runtime_manifest_hash: guest_hash,
         product_witness_hash: witness_hash,
     }
@@ -689,11 +692,7 @@ impl RuntimeArchive {
     }
 }
 
-fn walk_tree(
-    root: &Path,
-    prefix: &str,
-    visit: &mut dyn FnMut(&str, &Path, bool),
-) {
+fn walk_tree(root: &Path, prefix: &str, visit: &mut dyn FnMut(&str, &Path, bool)) {
     let mut names = std::fs::read_dir(root)
         .unwrap()
         .map(|entry| entry.unwrap().file_name().into_string().unwrap())
@@ -711,7 +710,10 @@ fn walk_tree(
 }
 
 fn tar_header(name: &str, mode: u32, size: u64, type_flag: u8) -> [u8; 512] {
-    assert!(name.len() <= 100, "synthetic archive path exceeds ustar name field");
+    assert!(
+        name.len() <= 100,
+        "synthetic archive path exceeds ustar name field"
+    );
     let mut header = [0u8; 512];
     header[..name.len()].copy_from_slice(name.as_bytes());
     let octal = |value: u64, width: usize| format!("{value:0width$o}\0", width = width - 1);
@@ -802,7 +804,10 @@ pub fn write_activated_runtime_sources(
     sources: &ActivatedRuntimeSources<'_>,
 ) {
     assert!(
-        sources.required_claims.windows(2).all(|pair| pair[0] < pair[1])
+        sources
+            .required_claims
+            .windows(2)
+            .all(|pair| pair[0] < pair[1])
             && sources
                 .required_claims
                 .iter()
@@ -971,22 +976,22 @@ pub async fn activate_and_qualify_runtime(
     let launch_state = state.clone();
     let launch_context = context.clone();
     let launch_id_for_launch = launch_id.clone();
-    let (launch, launch_runtime) = launch_on_retained_runtime(
-        "content-qualification-launch",
-        move |runtime| {
+    let (launch, launch_runtime) =
+        launch_on_retained_runtime("content-qualification-launch", move |runtime| {
             runtime
-                .block_on((ryeos_api::handlers::product_qualification_launch::CONTENT_DESCRIPTOR.handler)(
-                    serde_json::json!({
-                        "launch_id": launch_id_for_launch,
-                        "activation_ref": CONTENT_ACTIVATION_REF,
-                        "declaration_id": CONTENT_DECLARATION_ID,
-                    }),
-                    launch_context,
-                    launch_state,
-                ))
+                .block_on(
+                    (ryeos_api::handlers::product_qualification_launch::CONTENT_DESCRIPTOR.handler)(
+                        serde_json::json!({
+                            "launch_id": launch_id_for_launch,
+                            "activation_ref": CONTENT_ACTIVATION_REF,
+                            "declaration_id": CONTENT_DECLARATION_ID,
+                        }),
+                        launch_context,
+                        launch_state,
+                    ),
+                )
                 .unwrap_or_else(|error| panic!("content qualification launch refused: {error:?}"))
-        },
-    );
+        });
     let verifier_thread_id = launch["thread_id"]
         .as_str()
         .expect("content qualification launch returned no exact verifier thread")
@@ -1029,7 +1034,10 @@ pub async fn activate_and_qualify_runtime(
     .unwrap()
     .expect("content qualification is not published at its exact coordinate");
     drop(guard);
-    assert_eq!(published.evidence.purpose.subject_manifest_hash, runtime_manifest_hash);
+    assert_eq!(
+        published.evidence.purpose.subject_manifest_hash,
+        runtime_manifest_hash
+    );
     assert_eq!(
         published.evidence.purpose.policy_source.canonical_ref,
         CONTENT_POLICY_REF
@@ -1051,7 +1059,10 @@ pub async fn activate_and_qualify_runtime(
         attestation_hash: qualification.qualification_hash,
         owner_principal: context.fingerprint.clone(),
         policy_ref: CONTENT_POLICY_REF.to_owned(),
-        required_claims: required_claims.iter().map(|claim| (*claim).to_owned()).collect(),
+        required_claims: required_claims
+            .iter()
+            .map(|claim| (*claim).to_owned())
+            .collect(),
         runtime_manifest_hash: runtime_manifest_hash.to_owned(),
         declaration_id: CONTENT_DECLARATION_ID.to_owned(),
         activation_receipt_hash: receipt_hash,
@@ -1071,13 +1082,17 @@ async fn wait_for_activation(state: &ryeos_app::state::AppState, job_id: &str) -
                 let response: ryeos_api::handlers::external_content_activate::Response =
                     serde_json::from_value(job.result.expect("completed activation has no result"))
                         .unwrap();
-                return response.receipt_hash.expect("completed activation has no receipt");
+                return response
+                    .receipt_hash
+                    .expect("completed activation has no receipt");
             }
             ryeos_state::SyncJobState::Failed | ryeos_state::SyncJobState::Cancelled => {
                 panic!(
                     "managed activation ended {}: {}",
                     job.state.as_str(),
-                    job.last_error.as_deref().unwrap_or("no retained diagnostic")
+                    job.last_error
+                        .as_deref()
+                        .unwrap_or("no retained diagnostic")
                 )
             }
             _ => {}

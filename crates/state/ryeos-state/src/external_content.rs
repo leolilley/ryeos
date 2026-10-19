@@ -699,13 +699,9 @@ fn capture_large_directory(
                 };
                 lillux::ensure_open_regular_file_unchanged(&file, &before)
                     .with_context(|| format!("large-content file {path} changed during capture"))?;
-                directory
-                    .ensure_entry_observation(entry)
-                    .with_context(|| {
-                        format!(
-                            "large-content file {path} changed namespace binding during capture"
-                        )
-                    })?;
+                directory.ensure_entry_observation(entry).with_context(|| {
+                    format!("large-content file {path} changed namespace binding during capture")
+                })?;
                 state.entries.push(manifest_entry);
             }
             lillux::PinnedEntryType::Symlink => {

@@ -386,9 +386,9 @@ impl SessionCompiledUiBinding {
             && let Some(input) = surface_fields
                 .get_mut("input")
                 .and_then(Value::as_object_mut)
-            {
-                input.remove("route");
-            }
+        {
+            input.remove("route");
+        }
 
         if let Some(views) = surface_fields
             .get_mut("views")
@@ -406,9 +406,9 @@ impl SessionCompiledUiBinding {
                         .get("submit")
                         .and_then(Value::as_str)
                         .is_some_and(|id| !retained.is_some_and(|items| items.contains_key(id)))
-                    {
-                        input.remove("submit");
-                    }
+                {
+                    input.remove("submit");
+                }
             }
         }
         Ok(surface)

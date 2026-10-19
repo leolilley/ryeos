@@ -483,7 +483,7 @@ fn guest_parent() -> Result<()> {
         0o644,
         SYNTHETIC_TEMP_PURPOSE,
     )?
-        .context("guest handshake already present")?;
+    .context("guest handshake already present")?;
     let deadline = MonotonicDeadline::after(Duration::from_secs(45));
     while !deadline.has_elapsed() {
         ensure!(

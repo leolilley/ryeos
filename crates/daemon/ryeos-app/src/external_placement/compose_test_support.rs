@@ -131,5 +131,8 @@ pub(crate) fn provider_configuration(
 pub(crate) fn provider_configuration_coordinate(path: &Path) -> (String, u64) {
     let pinned = lillux::secure_fs::open_pinned_regular_file_no_follow(path).unwrap();
     let observation = pinned.observation().unwrap();
-    (pinned.digest_stable_exact(&observation).unwrap(), observation.size())
+    (
+        pinned.digest_stable_exact(&observation).unwrap(),
+        observation.size(),
+    )
 }

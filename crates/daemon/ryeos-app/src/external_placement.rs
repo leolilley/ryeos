@@ -36,11 +36,11 @@ use crate::runtime_db::external_execution::{
 };
 use crate::runtime_db::{WorkspaceRecord, WorkspaceState};
 use crate::state::AppState;
-use ryeos_node_runtime::state_lock::StateLockLease;
 use crate::vault::NodeVault;
 use crate::vault::external_channel::{ExternalChannelAuthority, ExternalChannelAuthorityAccess};
 use crate::vault::external_relay_bootstrap::ExternalRelayBootstrapAccess;
 use crate::vault::placement::PlacementCredential;
+use ryeos_node_runtime::state_lock::StateLockLease;
 
 /// Trusted controller adapter metadata and offline contract verification. This
 /// method must not perform provider I/O; all provider mutation is fenced by the
@@ -466,7 +466,8 @@ pub(crate) struct ExternalSupervisorActivation {
     guest_package: Option<SupervisorGuestPackage>,
     /// Sealed tar of the qualified guest runtime, present exactly when the
     /// selected provider's activation uploads the runtime itself.
-    guest_runtime: Option<ryeos_external_execution::guest_runtime_product::GuestOwnerSnapshotUpload>,
+    guest_runtime:
+        Option<ryeos_external_execution::guest_runtime_product::GuestOwnerSnapshotUpload>,
     import_authorization: Option<SignedGuestImportAuthorization>,
     signed_assignment: Option<SignedGuestOccurrenceAssignment>,
 }
@@ -694,7 +695,10 @@ impl ExternalCandidateConnectorRegistry {
     /// Exact artifact coordinate of the installed connector with this content
     /// identity, for composing a signed placement binding.
     pub(crate) fn coordinate_for_hash(&self, hash: &str) -> Result<(String, u64)> {
-        let mut matching = self.artifacts.keys().filter(|(candidate, _)| candidate == hash);
+        let mut matching = self
+            .artifacts
+            .keys()
+            .filter(|(candidate, _)| candidate == hash);
         let coordinate = matching
             .next()
             .context("installed external candidate connector is absent")?;
@@ -819,7 +823,10 @@ impl ExternalProviderConfigurationRegistry {
 
     /// Exact artifact coordinate of the installed configuration adapter for
     /// one provider declaration, for composing a signed placement binding.
-    pub(crate) fn coordinate_for_provider(&self, provider_declaration_id: &str) -> Result<(String, u64)> {
+    pub(crate) fn coordinate_for_provider(
+        &self,
+        provider_declaration_id: &str,
+    ) -> Result<(String, u64)> {
         let artifact = self
             .artifacts
             .get(provider_declaration_id)
@@ -1426,15 +1433,18 @@ impl ExternalPlacementBackendRegistry {
     /// Exact installed artifact coordinates of the one lifecycle generation
     /// registered under this backend id, for composing a signed placement
     /// binding.
-    pub(crate) fn installed_generation(&self, backend_id: &str) -> Result<InstalledLifecycleGeneration> {
+    pub(crate) fn installed_generation(
+        &self,
+        backend_id: &str,
+    ) -> Result<InstalledLifecycleGeneration> {
         let mut matching = self
             .backends
             .iter()
             .filter(|((id, _), _)| id == backend_id)
             .map(|(_, backend)| backend);
-        let backend = matching
-            .next()
-            .with_context(|| format!("external lifecycle backend `{backend_id}` is not installed"))?;
+        let backend = matching.next().with_context(|| {
+            format!("external lifecycle backend `{backend_id}` is not installed")
+        })?;
         ensure!(
             matching.next().is_none(),
             "external lifecycle backend `{backend_id}` has more than one installed generation"
@@ -2303,7 +2313,11 @@ pub(crate) fn preflight_external_qualification_program(
     // A new occurrence's supervisor journals must be funded for its whole
     // lifetime before any provider contact. A qualification reservation
     // carries the contract timeout, the value its activation later checks.
-    journal_funding.require(state.node_policy.as_ref(), &contract, contract.timeout_seconds)?;
+    journal_funding.require(
+        state.node_policy.as_ref(),
+        &contract,
+        contract.timeout_seconds,
+    )?;
     binding.retained_generation()
 }
 
@@ -2630,7 +2644,9 @@ pub enum ExternalChannelStreamStanding {
 }
 
 impl ExternalChannelStreamStanding {
-    pub(crate) fn of(record: Option<&crate::runtime_db::external_execution::ExternalLeaseRecord>) -> Self {
+    pub(crate) fn of(
+        record: Option<&crate::runtime_db::external_execution::ExternalLeaseRecord>,
+    ) -> Self {
         match record {
             Some(record)
                 if record.state
@@ -4537,9 +4553,10 @@ impl<'a> ExternalPlacementOwner<'a> {
             guest_inputs: None,
             qualification_activation: None,
             runtime_upload: None,
-            native_journal: crate::external_supervisor_native::SupervisorJournalEnvelopeSource::Policy(
-                Arc::clone(&self.state.node_policy),
-            ),
+            native_journal:
+                crate::external_supervisor_native::SupervisorJournalEnvelopeSource::Policy(
+                    Arc::clone(&self.state.node_policy),
+                ),
             record,
         })
     }
@@ -4612,9 +4629,10 @@ impl<'a> ExternalPlacementOwner<'a> {
             guest_inputs: None,
             qualification_activation: None,
             runtime_upload: None,
-            native_journal: crate::external_supervisor_native::SupervisorJournalEnvelopeSource::Policy(
-                Arc::clone(&self.state.node_policy),
-            ),
+            native_journal:
+                crate::external_supervisor_native::SupervisorJournalEnvelopeSource::Policy(
+                    Arc::clone(&self.state.node_policy),
+                ),
             record,
         })
     }
@@ -4704,9 +4722,10 @@ impl<'a> ExternalPlacementOwner<'a> {
             guest_inputs: None,
             qualification_activation: None,
             runtime_upload: None,
-            native_journal: crate::external_supervisor_native::SupervisorJournalEnvelopeSource::Policy(
-                Arc::clone(&self.state.node_policy),
-            ),
+            native_journal:
+                crate::external_supervisor_native::SupervisorJournalEnvelopeSource::Policy(
+                    Arc::clone(&self.state.node_policy),
+                ),
             record,
         })
     }
@@ -4820,9 +4839,10 @@ impl<'a> ExternalPlacementOwner<'a> {
             guest_inputs: None,
             qualification_activation: None,
             runtime_upload: None,
-            native_journal: crate::external_supervisor_native::SupervisorJournalEnvelopeSource::Policy(
-                Arc::clone(&self.state.node_policy),
-            ),
+            native_journal:
+                crate::external_supervisor_native::SupervisorJournalEnvelopeSource::Policy(
+                    Arc::clone(&self.state.node_policy),
+                ),
             record,
         })
     }
@@ -5049,9 +5069,10 @@ impl<'a> ExternalPlacementOwner<'a> {
             guest_inputs: None,
             qualification_activation: None,
             runtime_upload: None,
-            native_journal: crate::external_supervisor_native::SupervisorJournalEnvelopeSource::Policy(
-                Arc::clone(&self.state.node_policy),
-            ),
+            native_journal:
+                crate::external_supervisor_native::SupervisorJournalEnvelopeSource::Policy(
+                    Arc::clone(&self.state.node_policy),
+                ),
             record,
         })
     }
@@ -5226,10 +5247,10 @@ impl<'a> ExternalPlacementOwner<'a> {
             }
         };
         let admitted = AdmittedExternalExecutionProgram::StructuredSession(program.clone());
-        let backend = self
-            .state
-            .external_placement_backends
-            .qualify(&contract, &credential, &admitted)?;
+        let backend =
+            self.state
+                .external_placement_backends
+                .qualify(&contract, &credential, &admitted)?;
         if existing.is_none() {
             require_guest_package_artifact_floor(&contract, backend.as_ref())?;
             crate::external_supervisor_native::external_supervisor_journal_quota(
@@ -5376,9 +5397,10 @@ impl<'a> ExternalPlacementOwner<'a> {
             guest_inputs: None,
             qualification_activation: None,
             runtime_upload: None,
-            native_journal: crate::external_supervisor_native::SupervisorJournalEnvelopeSource::Policy(
-                Arc::clone(&self.state.node_policy),
-            ),
+            native_journal:
+                crate::external_supervisor_native::SupervisorJournalEnvelopeSource::Policy(
+                    Arc::clone(&self.state.node_policy),
+                ),
             record,
         })
     }
@@ -7974,7 +7996,10 @@ fn admit_fresh_lease_then_read_credential(
     contract: &ExternalPlacementBackendContract,
     credential_access: &crate::vault::placement::PlacementCredentialAccess,
 ) -> Result<(
-    Option<(String, crate::runtime_db::external_execution::ExternalLeaseCharge)>,
+    Option<(
+        String,
+        crate::runtime_db::external_execution::ExternalLeaseCharge,
+    )>,
     PlacementCredential,
 )> {
     let installed = state.external_placement_backends.installed(contract)?;
@@ -8004,7 +8029,12 @@ fn admit_session_lease(
     session_deadline: impl FnOnce() -> Result<Option<i64>>,
     contract: &ExternalPlacementBackendContract,
     backend: &dyn ExternalPlacementBackend,
-) -> Result<Option<(String, crate::runtime_db::external_execution::ExternalLeaseCharge)>> {
+) -> Result<
+    Option<(
+        String,
+        crate::runtime_db::external_execution::ExternalLeaseCharge,
+    )>,
+> {
     let Some(profile_contract) = profile_contract else {
         return Ok(None);
     };
@@ -8155,11 +8185,12 @@ mod lease_ready_loopback_tests;
 
 mod lease_lifecycle;
 mod lease_ready_gate;
-pub use lease_ready_gate::ExternalChannelExchangeUnavailable;
-pub use lease_lifecycle::{
-    terminate_predecessor_external_leases, PredecessorLeaseTermination, PREDECESSOR_LEASE_INTERRUPTION,
-};
 pub(crate) use lease_lifecycle::admit_turn_on_external_lease;
+pub use lease_lifecycle::{
+    PREDECESSOR_LEASE_INTERRUPTION, PredecessorLeaseTermination,
+    terminate_predecessor_external_leases,
+};
+pub use lease_ready_gate::ExternalChannelExchangeUnavailable;
 
 #[cfg(test)]
 mod guest_package_artifact_floor_tests {
@@ -8209,15 +8240,18 @@ fn external_lease_activation(
     let signed_import = ryeos_external_execution_contract::canonical_json(
         activation.signed_import_authorization()?,
     )?;
-    Ok(crate::runtime_db::external_execution::ExternalLeaseActivation {
-        lease_id: occurrence.occurrence_id.clone(),
-        activation_request_digest: intent.activation_request_digest.clone(),
-        signed_import_sha256: ryeos_external_execution_contract::lease_ready_inputs::signed_import_sha256(
-            &signed_import,
-        ),
-        guest_package_sha256: intent.delivery.payload_sha256.clone(),
-        ready_deadline_ms: reservation.startup_deadline_ms,
-    })
+    Ok(
+        crate::runtime_db::external_execution::ExternalLeaseActivation {
+            lease_id: occurrence.occurrence_id.clone(),
+            activation_request_digest: intent.activation_request_digest.clone(),
+            signed_import_sha256:
+                ryeos_external_execution_contract::lease_ready_inputs::signed_import_sha256(
+                    &signed_import,
+                ),
+            guest_package_sha256: intent.delivery.payload_sha256.clone(),
+            ready_deadline_ms: reservation.startup_deadline_ms,
+        },
+    )
 }
 
 fn supervisor_activation(
@@ -8228,7 +8262,9 @@ fn supervisor_activation(
     program: &AdmittedExternalExecutionProgram,
     guest_inputs: ryeos_external_execution::guest_inputs::ExternalGuestInputAuthority,
     backend: &dyn ExternalPlacementBackend,
-    guest_runtime: Option<ryeos_external_execution::guest_runtime_product::GuestOwnerSnapshotUpload>,
+    guest_runtime: Option<
+        ryeos_external_execution::guest_runtime_product::GuestOwnerSnapshotUpload,
+    >,
     package_parent: &lillux::PinnedDirectory,
     deadline: lillux::time::MonotonicDeadline,
     native_journal: ryeos_state::external_execution::transport::ExternalSupervisorNativeEnvelope,
@@ -8835,9 +8871,10 @@ pub mod test_support {
                 .checked_add(30_000)
                 .context("ordinary external fixture contact deadline overflow")?,
         };
-        let operator =
-            ryeos_node_runtime::identity::NodeIdentity::load(&state.config.operator_signing_key_path)?
-                .principal_id();
+        let operator = ryeos_node_runtime::identity::NodeIdentity::load(
+            &state.config.operator_signing_key_path,
+        )?
+        .principal_id();
         let project_authority = ryeos_state::objects::ExecutionProjectAuthority::pinned(
             "project:external-placement-test".to_owned(),
             Some(project_root.to_path_buf()),
@@ -9311,9 +9348,10 @@ pub mod test_support {
         let occurrence_id = format!("occ-{}", &reservation.request_digest[..48]);
         if let Some((project_root, lifeline)) = workspace {
             let session_owner = reservation.owner.dedicated_session()?;
-            let operator =
-                ryeos_node_runtime::identity::NodeIdentity::load(&state.config.operator_signing_key_path)?
-                    .principal_id();
+            let operator = ryeos_node_runtime::identity::NodeIdentity::load(
+                &state.config.operator_signing_key_path,
+            )?
+            .principal_id();
             let launch_metadata = composed_fixture_launch_metadata(
                 state,
                 project_root,
@@ -9409,11 +9447,13 @@ pub mod test_support {
                 &base_snapshot_hash,
                 &stored_capsule_hash,
             )?;
-            state.state_store.install_admitted_external_placement_test_fixture(
-                &reservation,
-                &retained,
-                &launch_metadata,
-            )?;
+            state
+                .state_store
+                .install_admitted_external_placement_test_fixture(
+                    &reservation,
+                    &retained,
+                    &launch_metadata,
+                )?;
         }
         let contact = state
             .state_store
@@ -10391,7 +10431,8 @@ mod tests {
     ) {
         let root = tempfile::tempdir().unwrap().keep();
         let lock_path = ryeos_node_runtime::state_lock::default_lock_path(&root);
-        let identity = ryeos_node_runtime::identity::NodeIdentity::create(&root.join("node-key.pem")).unwrap();
+        let identity =
+            ryeos_node_runtime::identity::NodeIdentity::create(&root.join("node-key.pem")).unwrap();
         let signer = Arc::new(crate::state_store::NodeIdentitySigner::from_identity(
             &identity,
         ));
@@ -10399,7 +10440,9 @@ mod tests {
         trust.insert(identity.fingerprint().to_owned(), *identity.verifying_key());
         // The owner holds this root's operator lock; the controller lifetime
         // is a lease on that same lock.
-        let store_owner = crate::state_store::test_native::TestStateStore::open(&root, signer, Arc::new(trust)).unwrap();
+        let store_owner =
+            crate::state_store::test_native::TestStateStore::open(&root, signer, Arc::new(trust))
+                .unwrap();
         let controller_lifetime = store_owner.controller_lifetime();
         let store = Arc::clone(store_owner.store());
         let binding = RetainedExternalExecutionBinding::test_fixture();
@@ -10431,12 +10474,20 @@ mod tests {
         store
             .install_external_placement_test_fixture(&reservation, &binding)
             .unwrap();
-        (store_owner, store, reservation, binding, controller_lifetime, lock_path)
+        (
+            store_owner,
+            store,
+            reservation,
+            binding,
+            controller_lifetime,
+            lock_path,
+        )
     }
 
     #[test]
     fn guest_assignment_is_signed_by_retained_node_for_only_the_bound_occurrence() {
-        let (_store_owner, store, reservation, binding, _lifetime, lock_path) = placement_store_fixture();
+        let (_store_owner, store, reservation, binding, _lifetime, lock_path) =
+            placement_store_fixture();
         assert!(matches!(
             store
                 .claim_external_allocation_contact("T-one", &reservation.request_digest)
@@ -10482,7 +10533,8 @@ mod tests {
             .author_external_guest_assignment(&reservation, &occurrence, &intent, &contract)
             .unwrap();
         let root = lock_path.ancestors().nth(3).unwrap();
-        let identity = ryeos_node_runtime::identity::NodeIdentity::load(&root.join("node-key.pem")).unwrap();
+        let identity =
+            ryeos_node_runtime::identity::NodeIdentity::load(&root.join("node-key.pem")).unwrap();
         let verified = ryeos_external_execution::guest_import_authorization::verify_signed_guest_occurrence_assignment(
             signed.clone(),
             identity.verifying_key(),
@@ -10636,16 +10688,26 @@ mod tests {
 
     fn reopen_placement_store(
         lock_path: &std::path::Path,
-    ) -> (crate::state_store::test_native::TestStateStore, Arc<crate::state_store::StateStore>, Arc<StateLockLease>) {
+    ) -> (
+        crate::state_store::test_native::TestStateStore,
+        Arc<crate::state_store::StateStore>,
+        Arc<StateLockLease>,
+    ) {
         let root = lock_path.ancestors().nth(3).unwrap().to_path_buf();
-        assert_eq!(ryeos_node_runtime::state_lock::default_lock_path(&root), lock_path);
-        let identity = ryeos_node_runtime::identity::NodeIdentity::load(&root.join("node-key.pem")).unwrap();
+        assert_eq!(
+            ryeos_node_runtime::state_lock::default_lock_path(&root),
+            lock_path
+        );
+        let identity =
+            ryeos_node_runtime::identity::NodeIdentity::load(&root.join("node-key.pem")).unwrap();
         let signer = Arc::new(crate::state_store::NodeIdentitySigner::from_identity(
             &identity,
         ));
         let mut trust = ryeos_state::refs::TrustStore::new();
         trust.insert(identity.fingerprint().to_owned(), *identity.verifying_key());
-        let reopened_owner = crate::state_store::test_native::TestStateStore::open(&root, signer, Arc::new(trust)).unwrap();
+        let reopened_owner =
+            crate::state_store::test_native::TestStateStore::open(&root, signer, Arc::new(trust))
+                .unwrap();
         let replacement_lifetime = reopened_owner.controller_lifetime();
         let reopened = Arc::clone(reopened_owner.store());
         (reopened_owner, reopened, replacement_lifetime)
@@ -10827,9 +10889,10 @@ mod tests {
             guest_inputs: None,
             qualification_activation: None,
             runtime_upload: None,
-            native_journal: crate::external_supervisor_native::SupervisorJournalEnvelopeSource::Fixed(
-                crate::external_supervisor_native::test_supervisor_journal_envelope(),
-            ),
+            native_journal:
+                crate::external_supervisor_native::SupervisorJournalEnvelopeSource::Fixed(
+                    crate::external_supervisor_native::test_supervisor_journal_envelope(),
+                ),
             record: store
                 .external_allocation(&reservation.placement_thread_id)
                 .unwrap()
@@ -11253,7 +11316,8 @@ mod tests {
     #[test]
     fn lifecycle_capabilities_do_not_allow_stronger_allocation_settlement() {
         for resolution in ["bound", "no_occurrence", "pending"] {
-            let (_store_owner, store, reservation, binding, lifetime, _) = placement_store_fixture();
+            let (_store_owner, store, reservation, binding, lifetime, _) =
+                placement_store_fixture();
             let backend = Arc::new(FaultBackend {
                 capabilities: BTreeSet::from([LifecycleCapability::ExactTerminalObservation]),
                 reconciled_allocation: resolution,
@@ -11318,7 +11382,8 @@ mod tests {
     #[test]
     fn lifecycle_capabilities_do_not_allow_stronger_activation_settlement() {
         for resolution in ["started", "not_started", "pending"] {
-            let (_store_owner, store, reservation, binding, lifetime, _) = placement_store_fixture();
+            let (_store_owner, store, reservation, binding, lifetime, _) =
+                placement_store_fixture();
             let mut capabilities = all_lifecycle_capabilities();
             capabilities.remove(&LifecycleCapability::ExactActivationReconciliation);
             let backend = Arc::new(FaultBackend {
@@ -11423,7 +11488,8 @@ mod tests {
     #[test]
     fn lifecycle_capabilities_do_not_allow_stronger_terminal_settlement() {
         for resolution in ["terminal", "pending"] {
-            let (_store_owner, store, reservation, binding, lifetime, _) = placement_store_fixture();
+            let (_store_owner, store, reservation, binding, lifetime, _) =
+                placement_store_fixture();
             let mut capabilities = all_lifecycle_capabilities();
             capabilities.remove(&LifecycleCapability::ExactTerminalObservation);
             let backend = Arc::new(FaultBackend {
@@ -12510,7 +12576,11 @@ mod tests {
         assert_ne!(reordered, guest_inputs);
         assert_ne!(
             guest_inputs.iter().map(String::as_str).collect::<Vec<_>>(),
-            [controller_inputs[1], controller_inputs[0], controller_inputs[2]]
+            [
+                controller_inputs[1],
+                controller_inputs[0],
+                controller_inputs[2]
+            ]
         );
         assert_ne!(
             signed.authorization.guest_runtime_manifest_hash,
@@ -12715,7 +12785,8 @@ mod tests {
 
     #[test]
     fn composed_permit_and_reconciliation_preserve_one_mutation_each() {
-        let (_store_owner, store, reservation, binding, controller_lifetime, _) = placement_store_fixture();
+        let (_store_owner, store, reservation, binding, controller_lifetime, _) =
+            placement_store_fixture();
         let backend = Arc::new(FaultBackend::new());
         let gate = Arc::new(AtomicBool::new(false));
         let guest_root = tempfile::tempdir().unwrap();
@@ -12843,7 +12914,8 @@ mod tests {
 
     #[test]
     fn unresolved_activation_can_terminate_its_exact_occurrence_without_retry() {
-        let (_store_owner, store, reservation, binding, controller_lifetime, _) = placement_store_fixture();
+        let (_store_owner, store, reservation, binding, controller_lifetime, _) =
+            placement_store_fixture();
         let backend = Arc::new(FaultBackend::with_reconciled_activation("pending"));
         let gate = Arc::new(AtomicBool::new(false));
         let guest_root = tempfile::tempdir().unwrap();
@@ -13100,7 +13172,8 @@ mod tests {
         drop(predecessor_lifetime);
         drop(predecessor_owner);
 
-        let (_replacement_store_owner, replacement_store, replacement_lifetime) = reopen_placement_store(&lock_path);
+        let (_replacement_store_owner, replacement_store, replacement_lifetime) =
+            reopen_placement_store(&lock_path);
         let app_root = tempfile::tempdir().unwrap();
         let replacement = crate::state::test_support::build_with_store(
             app_root.path(),
@@ -13203,7 +13276,8 @@ mod tests {
             // Use the normal fixture admission budget. Lateness is injected
             // only after provider entry through its explicit observation seam;
             // setup speed must not decide whether contact happens at all.
-            let (_store_owner, store, reservation, binding, lifetime, _) = placement_store_fixture();
+            let (_store_owner, store, reservation, binding, lifetime, _) =
+                placement_store_fixture();
             let backend = Arc::new(FaultBackend {
                 late_allocation: !late_activation,
                 late_activation,
@@ -13301,7 +13375,8 @@ mod tests {
 
     #[test]
     fn bounded_start_driver_never_repeats_an_ambiguous_mutation() {
-        let (_store_owner, store, reservation, binding, controller_lifetime, _) = placement_store_fixture();
+        let (_store_owner, store, reservation, binding, controller_lifetime, _) =
+            placement_store_fixture();
         let backend = Arc::new(FaultBackend::new());
         let gate = Arc::new(AtomicBool::new(false));
         let guest_root = tempfile::tempdir().unwrap();
@@ -13385,7 +13460,8 @@ mod tests {
                 ExternalCandidateStartProgress::CleanupRequired,
             ),
         ] {
-            let (_store_owner, store, reservation, binding, controller_lifetime, _) = placement_store_fixture();
+            let (_store_owner, store, reservation, binding, controller_lifetime, _) =
+                placement_store_fixture();
             let backend = Arc::new(FaultBackend::with_reconciled_activation(resolution));
             let gate = Arc::new(AtomicBool::new(false));
             let guest_root = tempfile::tempdir().unwrap();
@@ -13463,7 +13539,8 @@ mod tests {
         activation_resolution: &'static str,
         before_channel: ExternalCandidateStartProgress,
     ) {
-        let (_store_owner, store, reservation, retained, controller_lifetime, _) = placement_store_fixture();
+        let (_store_owner, store, reservation, retained, controller_lifetime, _) =
+            placement_store_fixture();
         let backend = Arc::new(FaultBackend::with_reconciled_activation(
             activation_resolution,
         ));
@@ -13649,7 +13726,8 @@ mod tests {
 
     #[test]
     fn cleanup_classification_is_derived_only_from_durable_external_state() {
-        let (store_owner, store, reservation, binding, controller_lifetime, _) = placement_store_fixture();
+        let (store_owner, store, reservation, binding, controller_lifetime, _) =
+            placement_store_fixture();
         assert_eq!(
             classify_external_start_cleanup(&store, "T-one"),
             ExternalCandidateStartCleanup::Proved
@@ -13664,13 +13742,16 @@ mod tests {
         drop(store_owner);
 
         let root = tempfile::tempdir().unwrap().keep();
-        let identity = ryeos_node_runtime::identity::NodeIdentity::create(&root.join("node-key.pem")).unwrap();
+        let identity =
+            ryeos_node_runtime::identity::NodeIdentity::create(&root.join("node-key.pem")).unwrap();
         let signer = Arc::new(crate::state_store::NodeIdentitySigner::from_identity(
             &identity,
         ));
         let mut trust = ryeos_state::refs::TrustStore::new();
         trust.insert(identity.fingerprint().to_owned(), *identity.verifying_key());
-        let contacted_owner = crate::state_store::test_native::TestStateStore::open(&root, signer, Arc::new(trust)).unwrap();
+        let contacted_owner =
+            crate::state_store::test_native::TestStateStore::open(&root, signer, Arc::new(trust))
+                .unwrap();
         let lifetime = contacted_owner.controller_lifetime();
         let contacted = Arc::clone(contacted_owner.store());
         contacted
@@ -13706,7 +13787,8 @@ mod tests {
 
     #[test]
     fn allocation_reconciliation_refuses_an_active_contact_lease_without_contact() {
-        let (_store_owner, store, reservation, binding, controller_lifetime, _) = placement_store_fixture();
+        let (_store_owner, store, reservation, binding, controller_lifetime, _) =
+            placement_store_fixture();
         let backend = Arc::new(FaultBackend::new());
         let gate = Arc::new(AtomicBool::new(false));
         let ExternalPlacementContactDecision::Contact(permit) = prepared_fixture(
@@ -13753,7 +13835,8 @@ mod tests {
     #[test]
     fn allocation_reconciliation_releases_lease_after_each_authoritative_resolution() {
         for resolution in ["bound", "pending", "no_occurrence"] {
-            let (_store_owner, store, reservation, binding, controller_lifetime, _) = placement_store_fixture();
+            let (_store_owner, store, reservation, binding, controller_lifetime, _) =
+                placement_store_fixture();
             let backend = Arc::new(FaultBackend {
                 reconciled_allocation: resolution,
                 ..FaultBackend::new()
@@ -13824,7 +13907,8 @@ mod tests {
 
     #[test]
     fn active_contact_permit_blocks_negative_reconciliation_settlement() {
-        let (_store_owner, store, reservation, binding, controller_lifetime, _) = placement_store_fixture();
+        let (_store_owner, store, reservation, binding, controller_lifetime, _) =
+            placement_store_fixture();
         let backend = Arc::new(FaultBackend::new());
         let gate = Arc::new(AtomicBool::new(false));
         let decision = prepared_fixture(
@@ -13876,7 +13960,8 @@ mod tests {
 
     #[test]
     fn active_supervisor_contact_blocks_termination_mutation() {
-        let (_store_owner, store, reservation, binding, controller_lifetime, _) = placement_store_fixture();
+        let (_store_owner, store, reservation, binding, controller_lifetime, _) =
+            placement_store_fixture();
         let backend = Arc::new(FaultBackend::new());
         let gate = Arc::new(AtomicBool::new(false));
         assert!(matches!(
@@ -13997,11 +14082,12 @@ mod tests {
             })])
         };
         let contract = InstalledExternalExecutionBinding::test_fixture().backend_contract();
-        let lifetime = crate::external_supervisor_native::external_supervisor_occurrence_lifetime_ms(
-            &contract,
-            contract.timeout_seconds,
-        )
-        .unwrap();
+        let lifetime =
+            crate::external_supervisor_native::external_supervisor_occurrence_lifetime_ms(
+                &contract,
+                contract.timeout_seconds,
+            )
+            .unwrap();
         let at_activation = policy(Some(lifetime));
         let shrunk = policy(Some(lifetime - 1));
         let revoked = policy(None);

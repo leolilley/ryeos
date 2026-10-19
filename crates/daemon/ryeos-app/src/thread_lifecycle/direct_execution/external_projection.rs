@@ -833,8 +833,7 @@ fn compile_direct_program_from_plan(
             }
         })
         .collect::<Result<Vec<_>>>()?;
-    let environment =
-        compile_direct_environment(spec, retained, thread_id, chain_root_id, source)?;
+    let environment = compile_direct_environment(spec, retained, thread_id, chain_root_id, source)?;
     match environment.get("PATH") {
         Some(path) => ensure!(
             path == &inputs.executable_search.join(":"),

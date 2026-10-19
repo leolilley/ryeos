@@ -16,7 +16,9 @@ use ryeos_state::objects::{ProjectSnapshot, ProjectTree};
 use ryeos_state::project_sync::ProjectSyncScope;
 use ryeos_state::{PinnedStateAuthority, StagedCasRootLease};
 
-use crate::remote::client::{BlobChunkUpload, BlobUpload, ObjectsPutResponse, RawObjectUpload, RemoteClient};
+use crate::remote::client::{
+    BlobChunkUpload, BlobUpload, ObjectsPutResponse, RawObjectUpload, RemoteClient,
+};
 use ryeos_app::state::AppState;
 
 const OBJECTS_PUT_BODY_BUDGET_BYTES: usize = 900 * 1024;
@@ -597,7 +599,10 @@ pub(crate) async fn upload_missing(
     // The final publication root must itself be bound to the server-issued
     // capability even when the remote already had a deduplicated copy.
     let mut object_hashes = missing_objects;
-    if !object_hashes.iter().any(|hash| hash == publication_root_hash) {
+    if !object_hashes
+        .iter()
+        .any(|hash| hash == publication_root_hash)
+    {
         object_hashes.push(publication_root_hash.to_owned());
     }
     object_hashes.sort();
@@ -798,25 +803,23 @@ fn load_canonical_object_for_upload(
         )?
         .ok_or_else(|| anyhow::anyhow!("local CAS object {hash} disappeared before upload"))?;
     let maximum = usize::try_from(maximum_bytes)?;
-    let value: serde_json::Value = serde_json::from_slice(&bytes)
-        .context("local CAS upload object is not JSON")?;
+    let value: serde_json::Value =
+        serde_json::from_slice(&bytes).context("local CAS upload object is not JSON")?;
     if lillux::canonical_json_bounded(&value, maximum)?.as_slice() != bytes.as_slice() {
         anyhow::bail!("local CAS upload object {hash} is not canonical JSON");
     }
     RawObjectUpload::from_canonical_bytes(hash.to_owned(), bytes)
 }
 
-fn object_put_envelope_bytes(
-    staging_id: &str,
-    project_path: &str,
-) -> Result<usize> {
+fn object_put_envelope_bytes(staging_id: &str, project_path: &str) -> Result<usize> {
     Ok(serde_json::to_vec(&serde_json::json!({
         "staging_id": staging_id,
         "project_path": project_path,
         "blobs": [],
         "blob_chunks": [],
         "objects": [],
-    }))?.len())
+    }))?
+    .len())
 }
 
 fn raw_object_entry_bytes(entry: &RawObjectUpload) -> usize {
@@ -831,7 +834,10 @@ async fn send_raw_object_batch(
     batch: &[RawObjectUpload],
     expected_previous_hash: Option<&str>,
 ) -> Result<()> {
-    let expected = batch.iter().map(|entry| entry.hash.clone()).collect::<Vec<_>>();
+    let expected = batch
+        .iter()
+        .map(|entry| entry.hash.clone())
+        .collect::<Vec<_>>();
     let response = client
         .objects_put_raw(Some(staging_id), project_path, &[], batch)
         .await?;
@@ -1070,9 +1076,8 @@ mod refuse_walking_root_tests {
 #[cfg(test)]
 mod upload_batch_tests {
     use super::{
-        OBJECTS_PUT_BODY_BUDGET_BYTES, RawObjectUpload, object_put_envelope_bytes,
-        raw_object_entry_bytes,
-        inline_blob_request_size, validate_blob_chunk_response,
+        OBJECTS_PUT_BODY_BUDGET_BYTES, RawObjectUpload, inline_blob_request_size,
+        object_put_envelope_bytes, raw_object_entry_bytes, validate_blob_chunk_response,
     };
 
     #[test]

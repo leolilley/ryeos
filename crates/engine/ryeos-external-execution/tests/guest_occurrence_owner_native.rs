@@ -218,7 +218,10 @@ fn run(
     // /var/tmp is deliberately read-only.
     let state_path = fixture_path.join("state");
     std::fs::create_dir(&state_path)?;
-    let db = ryeos_state::test_support::TestState::open(&state_path, Arc::new(ryeos_state::TrustStore::new()))?;
+    let db = ryeos_state::test_support::TestState::open(
+        &state_path,
+        Arc::new(ryeos_state::TrustStore::new()),
+    )?;
     let authority = db.pinned_authority()?;
     // Only the pinned authority is needed; close the native test host before
     // the probe enters namespaces or starts subprocesses.

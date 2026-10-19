@@ -209,14 +209,15 @@ pub(crate) fn configure_host_endpoints_while_locked(
         lillux::time::Duration::from_secs(30),
     )
     .context("endpoint configuration requires a stopped node")?;
-    let config = ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
-        app_root: Some(app_root.to_path_buf()),
-        bind,
-        uds_path,
-        force: true,
-        ..Default::default()
-    })
-    .context("resolve replacement node endpoints")?;
+    let config =
+        ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
+            app_root: Some(app_root.to_path_buf()),
+            bind,
+            uds_path,
+            force: true,
+            ..Default::default()
+        })
+        .context("resolve replacement node endpoints")?;
     ryeos_node_runtime::config::replace_bootstrap_config(&config, &state_lock)?;
     Ok(NodeConfig::from_app_config(&config))
 }
@@ -440,9 +441,9 @@ pub fn exec_host_service(app_root: &Path) -> Result<std::convert::Infallible> {
         if let Some(intent) = upgrade
             && executable.digest_stable_exact(&executable.observation()?)?
                 != intent.expected_daemon_sha256
-            {
-                bail!("service launch image differs from the restoring installation generation");
-            }
+        {
+            bail!("service launch image differs from the restoring installation generation");
+        }
         let root = service
             .binding
             .runtime
@@ -1066,9 +1067,10 @@ fn require_launch_allowed(desired: DesiredState, upgrade: Option<&UpgradeIntent>
         bail!("host service desired state is down");
     }
     if let Some(intent) = upgrade
-        && (intent.phase != UpgradePhase::RestoreReady || intent.desired != DesiredState::Up) {
-            bail!("host service startup is inhibited by an unfinished installation");
-        }
+        && (intent.phase != UpgradePhase::RestoreReady || intent.desired != DesiredState::Up)
+    {
+        bail!("host service startup is inhibited by an unfinished installation");
+    }
     Ok(())
 }
 
@@ -1112,12 +1114,13 @@ mod tests {
             &ryeos_node_runtime::state_lock::default_lock_path(&app_root),
         )
         .unwrap();
-        let initial = ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
-            app_root: Some(app_root.clone()),
-            uds_path: Some(tmp.path().join("first.sock")),
-            ..Default::default()
-        })
-        .unwrap();
+        let initial =
+            ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
+                app_root: Some(app_root.clone()),
+                uds_path: Some(tmp.path().join("first.sock")),
+                ..Default::default()
+            })
+            .unwrap();
         ryeos_node_runtime::config::seed_bootstrap_config(&initial, &lock).unwrap();
         drop(lock);
 
@@ -1262,7 +1265,11 @@ mod tests {
         other["daemon_executable"] = serde_json::json!("/usr/bin/other");
         let bytes = lillux::canonical_json(&other).unwrap();
         let error = require_current_binding(bytes.as_bytes(), &current, path).unwrap_err();
-        assert!(error.to_string().contains("ryeos node host setup --confirm"));
+        assert!(
+            error
+                .to_string()
+                .contains("ryeos node host setup --confirm")
+        );
     }
 
     #[test]

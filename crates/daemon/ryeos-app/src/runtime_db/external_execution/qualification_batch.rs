@@ -486,7 +486,6 @@ impl RuntimeDb {
             })
         })
     }
-
 }
 
 #[cfg(test)]

@@ -1,12 +1,12 @@
 use std::sync::{Arc, Mutex};
 
+use super::ProjectionDb;
 use anyhow::Context;
 use lillux_sqlite::{
     ClosedOriginalNativeConnection, OriginalNativeCloseFailure, OriginalNativeConnection,
     OriginalNativeConnectionTerminal, OriginalNativeFactory, OriginalNativeOpenFailure,
     OriginalNativeTransientInputs,
 };
-use super::ProjectionDb;
 
 /// The native connection of a projection and the original factory that
 /// issued its ticket.
@@ -35,25 +35,37 @@ impl OutsideOriginalProjectionCustody {
     /// Actual directory holder of a failed generation-lease setup. No lease
     /// owner or native receipt exists for it.
     pub(crate) fn lease_setup_directory(directory: lillux::PinnedDirectory) -> Self {
-        Self { _filesystem: None, _setup_directory: Some(directory) }
+        Self {
+            _filesystem: None,
+            _setup_directory: Some(directory),
+        }
     }
     /// Transfer actual filesystem holders without closing or duplicating them.
     /// Custody holding both a generation and a setup directory is refused.
     pub(crate) fn try_into_original_filesystem(
         self,
     ) -> std::result::Result<
-        Option<(lillux::PinnedDirectory, Option<Arc<super::OriginalGenerationLease>>)>,
+        Option<(
+            lillux::PinnedDirectory,
+            Option<Arc<super::OriginalGenerationLease>>,
+        )>,
         Self,
     > {
         match (self._filesystem, self._setup_directory) {
             (None, None) => Ok(None),
             (None, Some(directory)) => Ok(Some((directory, None))),
-            (Some(OriginalProjectionFilesystem {
-                directory,
-                name: _,
-                lease,
-            }), None) => Ok(Some((directory, Some(lease)))),
-            (filesystem, setup) => Err(Self { _filesystem: filesystem, _setup_directory: setup }),
+            (
+                Some(OriginalProjectionFilesystem {
+                    directory,
+                    name: _,
+                    lease,
+                }),
+                None,
+            ) => Ok(Some((directory, Some(lease)))),
+            (filesystem, setup) => Err(Self {
+                _filesystem: filesystem,
+                _setup_directory: setup,
+            }),
         }
     }
 }
@@ -148,8 +160,7 @@ impl OriginalProjectionFailure {
         if factory.require_original_process().is_err() {
             return Err(self);
         }
-        if !self.factory.same_original(factory) || self.filesystem.is_none()
-        {
+        if !self.factory.same_original(factory) || self.filesystem.is_none() {
             return Err(self);
         }
         let Self {
@@ -212,10 +223,16 @@ impl OriginalProjectionFailure {
                         error = lillux_sqlite::RefusalSupersedes::superseding(refusal, error);
                         Err(FailureCustody::Open(failure))
                     } else {
-                        failure.retry_close().map(OriginalNativeConnectionTerminal::Released).map_err(FailureCustody::Open)
+                        failure
+                            .retry_close()
+                            .map(OriginalNativeConnectionTerminal::Released)
+                            .map_err(FailureCustody::Open)
                     }
                 } else {
-                    failure.retry_close().map(OriginalNativeConnectionTerminal::Released).map_err(FailureCustody::Open)
+                    failure
+                        .retry_close()
+                        .map(OriginalNativeConnectionTerminal::Released)
+                        .map_err(FailureCustody::Open)
                 }
             }
             FailureCustody::Projection(mut db) => {
@@ -317,9 +334,26 @@ pub struct ReleasedOriginalProjectionAcquisition {
 impl ReleasedOriginalProjectionAcquisition {
     // Only the genuine post-ACK State continuation consumes this original
     // failure. Keep its exact refusal and filesystem owners beside the receipt.
-    pub(crate) fn into_outside_custody(self) -> (OutsideOriginalProjectionCustody, OriginalNativeConnectionTerminal, anyhow::Error) {
-        let Self { error, terminal, filesystem } = self;
-        (OutsideOriginalProjectionCustody { _filesystem: filesystem, _setup_directory: None }, terminal, error)
+    pub(crate) fn into_outside_custody(
+        self,
+    ) -> (
+        OutsideOriginalProjectionCustody,
+        OriginalNativeConnectionTerminal,
+        anyhow::Error,
+    ) {
+        let Self {
+            error,
+            terminal,
+            filesystem,
+        } = self;
+        (
+            OutsideOriginalProjectionCustody {
+                _filesystem: filesystem,
+                _setup_directory: None,
+            },
+            terminal,
+            error,
+        )
     }
     pub fn original_error(&self) -> &anyhow::Error {
         &self.error
@@ -558,7 +592,10 @@ impl ProjectionDb {
             (None, None, None) => None,
             _ => unreachable!("checked original projection filesystem custody"),
         };
-        let ProjectionConnection { connection, factory: original } = conn;
+        let ProjectionConnection {
+            connection,
+            factory: original,
+        } = conn;
         match connection.close() {
             Ok(proof) => Ok(ClosedOriginalProjection { proof, filesystem }),
             Err(failure) => Err(OriginalProjectionFailure {
@@ -667,7 +704,9 @@ impl RecoveredOriginalProjectionDurability {
 mod native_host_tests {
     use super::*;
     use lillux_sqlite::test_host::TestNativeHost;
-    use lillux_sqlite::{OriginalNativeConnectionTerminal, OriginalNativeDomain, OriginalNativeTransientInputs};
+    use lillux_sqlite::{
+        OriginalNativeConnectionTerminal, OriginalNativeDomain, OriginalNativeTransientInputs,
+    };
 
     /// The transient skips the reference comparison; its schema must still
     /// equal a reference prepared natively from the same DDL.
@@ -676,7 +715,10 @@ mod native_host_tests {
         let host = TestNativeHost::acquire();
         // SAFETY: test-only issuance under the host's own funded factory.
         let inputs = unsafe {
-            OriginalNativeTransientInputs::issued(OriginalNativeDomain::StateTransient, host.destination())
+            OriginalNativeTransientInputs::issued(
+                OriginalNativeDomain::StateTransient,
+                host.destination(),
+            )
         }
         .unwrap();
         let db = ProjectionDb::open_original_transient(Arc::clone(host.factory()), inputs).unwrap();
@@ -696,12 +738,18 @@ mod native_host_tests {
         )
         .unwrap_or_else(|failure| panic!("schema reference retained: {failure}"));
         host.retain_terminal(reference.terminal().clone());
-        db.with_sql(|connection| reference.definition().require_matches(connection, db.path()))
-            .unwrap();
+        db.with_sql(|connection| {
+            reference
+                .definition()
+                .require_matches(connection, db.path())
+        })
+        .unwrap();
         let closed = db
             .close_original(host.factory())
             .unwrap_or_else(|failure| panic!("transient close retained: {failure}"));
-        host.retain_terminal(OriginalNativeConnectionTerminal::Closed(closed.native_proof()));
+        host.retain_terminal(OriginalNativeConnectionTerminal::Closed(
+            closed.native_proof(),
+        ));
         assert_eq!(host.ticket_census(), (2, 2));
     }
 
@@ -751,26 +799,36 @@ mod native_host_tests {
             host.close(connection);
         }
         let first = costs[0];
-        assert!(costs.iter().all(|cost| *cost <= first * 2), "per-build cost grew with live blocks: {costs:?}");
-        assert!(first < 200_000, "one projection schema build costs {first} steps");
+        assert!(
+            costs.iter().all(|cost| *cost <= first * 2),
+            "per-build cost grew with live blocks: {costs:?}"
+        );
+        assert!(
+            first < 200_000,
+            "one projection schema build costs {first} steps"
+        );
     }
 }
 
 #[cfg(test)]
 mod refusal_layer_tests {
     use lillux_sqlite::original_host_owner::FixedHostRefusal;
-    use lillux_sqlite::{native_refusal_is_fact, NativeCheckContended, RefusalSupersedes};
+    use lillux_sqlite::{NativeCheckContended, RefusalSupersedes, native_refusal_is_fact};
 
     /// An admission recovery refusal met while settling a projection open
     /// refusal is classified by itself, not by the open refusal.
     #[test]
     fn a_later_refusal_classifies_over_the_earlier_one() {
         let fact = || anyhow::anyhow!("retained admission recovery refused");
-        let contended = || anyhow::Error::new(FixedHostRefusal::Contended).context("projection open");
+        let contended =
+            || anyhow::Error::new(FixedHostRefusal::Contended).context("projection open");
         let later_fact = fact().superseding(contended());
         assert!(native_refusal_is_fact(&later_fact), "{later_fact:#}");
         let later_contention = anyhow::Error::new(NativeCheckContended).superseding(fact());
-        assert!(!native_refusal_is_fact(&later_contention), "{later_contention:#}");
+        assert!(
+            !native_refusal_is_fact(&later_contention),
+            "{later_contention:#}"
+        );
         assert!(format!("{later_fact:#}").contains("projection open"));
     }
 }

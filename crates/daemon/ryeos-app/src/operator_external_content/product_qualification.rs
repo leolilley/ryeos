@@ -73,9 +73,9 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 use crate::handler_context::HandlerContext;
+use crate::state::AppState;
 use ryeos_node_runtime::node_policy::sections::execution::NodeExecutionAdmissionPolicy;
 use ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy;
-use crate::state::AppState;
 
 const QUALIFICATION_POLICY_FIELD: &str = "product_qualification_policy";
 const PRODUCER_RECIPE_FIELD: &str = "product_producer_recipe";
@@ -824,10 +824,7 @@ fn prove_unguarded(
     let (capsule, realization) = with_state_guard(authority, |_guard| {
         let cas = authority.cas_store()?;
         let capsule = ryeos_state::objects::AdmittedLaunchCapsule::from_current_value(
-            ryeos_state::object_closure::load_exact_capsule_object_with_cas(
-                &cas,
-                capsule_hash,
-            )?,
+            ryeos_state::object_closure::load_exact_capsule_object_with_cas(&cas, capsule_hash)?,
         )?;
         let realization = capsule.verify_retained_execution_realization(
             &cas,
@@ -1546,7 +1543,8 @@ pub(super) fn load_runtime_manifest_identity(
     let (entry_count, total_bytes) = match manifest.get("kind").and_then(serde_json::Value::as_str)
     {
         Some(ryeos_state::objects::EXTERNAL_CONTENT_MANIFEST_KIND) => {
-            let manifest = ryeos_state::objects::ExternalContentManifestObject::from_value(&manifest)?;
+            let manifest =
+                ryeos_state::objects::ExternalContentManifestObject::from_value(&manifest)?;
             (manifest.entry_count, manifest.total_bytes)
         }
         Some(ryeos_state::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND) => {
@@ -4695,8 +4693,7 @@ pub(in crate::operator_external_content) fn require_qualification_still_current(
             owner_principal,
             &proof.attestation_hash,
         )?;
-        if current.attestation_hash != proof.attestation_hash
-            || current.evidence != proof.evidence
+        if current.attestation_hash != proof.attestation_hash || current.evidence != proof.evidence
         {
             bail!("qualification witness changed while its current verifier was re-resolved");
         }

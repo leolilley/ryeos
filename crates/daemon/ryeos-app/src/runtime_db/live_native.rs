@@ -38,12 +38,20 @@ impl LiveRuntimeConnection {
     }
     pub(super) fn require_close_ready(&self) -> Result<()> {
         self.owner.require_original_process()?;
-        ensure!(!self.scope_active.get(), "live Runtime SQL scope remains active");
+        ensure!(
+            !self.scope_active.get(),
+            "live Runtime SQL scope remains active"
+        );
         Ok(())
     }
     /// The consuming Runtime close retains the exact schema receipt alongside
     /// native close custody. This transfers no SQL access or terminal grant.
-    pub(super) fn into_close_parts(self) -> (OriginalNativeConnection, sqlite_schema::ClosedNativeSchemaSqlReference) {
+    pub(super) fn into_close_parts(
+        self,
+    ) -> (
+        OriginalNativeConnection,
+        sqlite_schema::ClosedNativeSchemaSqlReference,
+    ) {
         (self.owner, self._schema_reference)
     }
 
@@ -105,7 +113,8 @@ impl RuntimeDb {
             // traversal or native acquisition; its definition is not authority.
             factory.require_original_process()?;
             schema_reference.require_original_closed(
-                &factory, OriginalNativeDomain::NodeRuntimeSchemaReference,
+                &factory,
+                OriginalNativeDomain::NodeRuntimeSchemaReference,
             )?;
             ensure!(
                 matches!(&custody, AcquisitionCustody::BeforeOpen(Some(inputs))
@@ -125,7 +134,8 @@ impl RuntimeDb {
             // The original caller's namespace exclusion spans this and open.
             let created = root.entry_no_follow(name)?.is_none();
             let inputs = match &mut custody {
-                AcquisitionCustody::BeforeOpen(inputs) => inputs.take()
+                AcquisitionCustody::BeforeOpen(inputs) => inputs
+                    .take()
                     .context("live Runtime admission inputs already consumed")?,
                 _ => anyhow::bail!("live Runtime admission phase changed"),
             };
@@ -183,7 +193,12 @@ impl RuntimeDb {
             Ok(directory) => directory,
             Err(error) => {
                 return Err(OriginalRuntimeAcquisitionFailure::retained(
-                    error, factory, root, namespace, custody, Some(schema_reference),
+                    error,
+                    factory,
+                    root,
+                    namespace,
+                    custody,
+                    Some(schema_reference),
                 ));
             }
         };
@@ -256,7 +271,9 @@ pub(crate) unsafe fn offline_live_execution_chains(
     retain: ryeos_state::operational::RetainTerminal<'_>,
 ) -> Result<Vec<String>> {
     use ryeos_state::operational::CarriedOwners;
-    let name = path.file_name().context("Runtime database path has no basename")?;
+    let name = path
+        .file_name()
+        .context("Runtime database path has no basename")?;
     // SAFETY: the caller's funded host issues this ticket under its locks.
     let reference_inputs = unsafe {
         lillux_sqlite::OriginalNativeTransientInputs::issued(
@@ -298,7 +315,9 @@ pub(crate) unsafe fn offline_live_execution_chains(
             return Err(match retain(terminal) {
                 Ok(()) => error,
                 Err((terminal, reason)) => CarriedOwners::carry(
-                    error.context(format!("Runtime schema reference terminal not retained: {reason:#}")),
+                    error.context(format!(
+                        "Runtime schema reference terminal not retained: {reason:#}"
+                    )),
                     terminal,
                 ),
             });
@@ -353,7 +372,10 @@ pub(crate) unsafe fn offline_live_execution_chains(
     let terminals = match closed.native_terminals() {
         Ok(terminals) => terminals,
         Err(refusal) => {
-            return Err(CarriedOwners::carry(refusal.context("closed Runtime census refused"), closed));
+            return Err(CarriedOwners::carry(
+                refusal.context("closed Runtime census refused"),
+                closed,
+            ));
         }
     };
     if let Err((refused, reasons)) = retain_all(terminals, retain) {
@@ -380,5 +402,9 @@ fn retain_all(
             reasons.push(format!("{reason:#}"));
         }
     }
-    if refused.is_empty() { Ok(()) } else { Err((refused, reasons.join("; "))) }
+    if refused.is_empty() {
+        Ok(())
+    } else {
+        Err((refused, reasons.join("; ")))
+    }
 }

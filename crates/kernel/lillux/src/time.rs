@@ -23,7 +23,10 @@ pub struct OriginalLocalDeadlineHandoff {
 
 #[cfg(target_os = "linux")]
 impl OriginalLocalDeadlineHandoff {
-    pub fn from_original(service: MonotonicDeadline, cleanup: MonotonicDeadline) -> Result<Self, String> {
+    pub fn from_original(
+        service: MonotonicDeadline,
+        cleanup: MonotonicDeadline,
+    ) -> Result<Self, String> {
         use std::os::unix::fs::MetadataExt as _;
         if cleanup.is_before(&service) || service.has_elapsed() {
             return Err("original local deadline pair is inverted or expired".into());
@@ -55,7 +58,12 @@ impl OriginalLocalDeadlineHandoff {
             return Err("local deadline packet exceeds fixed bound".into());
         }
         let bound = crate::sealed_memfd(c"original-local-deadlines", &bytes)?;
-        let handoff = Self { service, cleanup, bound, clock };
+        let handoff = Self {
+            service,
+            cleanup,
+            bound,
+            clock,
+        };
         handoff.require_live_pair()?;
         Ok(handoff)
     }
@@ -79,13 +87,22 @@ impl OriginalLocalDeadlineHandoff {
             bound: self.bound.duplicate_at_or_above(3)?,
             clock: self.clock.duplicate_at_or_above(3)?,
         };
-        let originals = [self.bound.inherited_descriptor()?, self.clock.inherited_descriptor()?];
+        let originals = [
+            self.bound.inherited_descriptor()?,
+            self.clock.inherited_descriptor()?,
+        ];
         for (source, target) in [(&self.bound, &copy.bound), (&self.clock, &copy.clock)] {
             if originals.contains(&target.inherited_descriptor()?) {
                 return Err("local deadline duplicate overlaps original role".into());
             }
-            let a = source.file().metadata().map_err(|error| error.to_string())?;
-            let b = target.file().metadata().map_err(|error| error.to_string())?;
+            let a = source
+                .file()
+                .metadata()
+                .map_err(|error| error.to_string())?;
+            let b = target
+                .file()
+                .metadata()
+                .map_err(|error| error.to_string())?;
             if (a.dev(), a.ino()) != (b.dev(), b.ino()) {
                 return Err("local deadline duplicate changed object identity".into());
             }
@@ -95,9 +112,18 @@ impl OriginalLocalDeadlineHandoff {
         Ok(copy)
     }
 
-    pub fn original_service(&self) -> MonotonicDeadline { self.service }
-    pub fn original_cleanup(&self) -> MonotonicDeadline { self.cleanup }
-    pub fn into_authorities(self) -> (crate::InheritedDescriptorAuthority, crate::InheritedDescriptorAuthority) {
+    pub fn original_service(&self) -> MonotonicDeadline {
+        self.service
+    }
+    pub fn original_cleanup(&self) -> MonotonicDeadline {
+        self.cleanup
+    }
+    pub fn into_authorities(
+        self,
+    ) -> (
+        crate::InheritedDescriptorAuthority,
+        crate::InheritedDescriptorAuthority,
+    ) {
         (self.bound, self.clock)
     }
 }
@@ -134,11 +160,13 @@ impl AdoptedOriginalLocalDeadlines {
         let now = occupancy_now()?;
         wire.validate(&now)?;
         let service = MonotonicDeadline {
-            deadline: anchor.checked_add(Duration::from_nanos(wire.service_tick - now.tick_ns))
+            deadline: anchor
+                .checked_add(Duration::from_nanos(wire.service_tick - now.tick_ns))
                 .ok_or("adopted service deadline overflow")?,
         };
         let cleanup = MonotonicDeadline {
-            deadline: anchor.checked_add(Duration::from_nanos(wire.cleanup_tick - now.tick_ns))
+            deadline: anchor
+                .checked_add(Duration::from_nanos(wire.cleanup_tick - now.tick_ns))
                 .ok_or("adopted cleanup deadline overflow")?,
         };
         original_window::require_same_clock_namespace(clock.file())?;
@@ -147,11 +175,19 @@ impl AdoptedOriginalLocalDeadlines {
             return Err("local deadline expired during adoption".into());
         }
         drop(bound);
-        Ok(Self { service, cleanup, _clock: clock })
+        Ok(Self {
+            service,
+            cleanup,
+            _clock: clock,
+        })
     }
 
-    pub fn service_deadline(&self) -> MonotonicDeadline { self.service }
-    pub fn cleanup_deadline(&self) -> MonotonicDeadline { self.cleanup }
+    pub fn service_deadline(&self) -> MonotonicDeadline {
+        self.service
+    }
+    pub fn cleanup_deadline(&self) -> MonotonicDeadline {
+        self.cleanup
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -174,9 +210,12 @@ mod local_deadline_wire {
     impl Wire {
         pub(super) fn validate(&self, now: &OccupancyCoordinate) -> Result<(), String> {
             now.validate()?;
-            if self.version != 1 || self.contract_digest != now.contract_digest
+            if self.version != 1
+                || self.contract_digest != now.contract_digest
                 || self.incarnation_digest != now.incarnation_digest
-                || self.service_tick <= now.tick_ns || self.cleanup_tick < self.service_tick {
+                || self.service_tick <= now.tick_ns
+                || self.cleanup_tick < self.service_tick
+            {
                 return Err("local deadline packet expired, inverted or wrong clock domain".into());
             }
             Ok(())
@@ -184,9 +223,13 @@ mod local_deadline_wire {
     }
 
     pub(super) fn expiry(tick: u64, remaining: Duration) -> Result<u64, String> {
-        if remaining.is_zero() { return Err("original local deadline expired".into()); }
-        tick.checked_add(u64::try_from(remaining.as_nanos()).map_err(|_| "local deadline duration overflow")?)
-            .ok_or_else(|| "local deadline tick overflow".into())
+        if remaining.is_zero() {
+            return Err("original local deadline expired".into());
+        }
+        tick.checked_add(
+            u64::try_from(remaining.as_nanos()).map_err(|_| "local deadline duration overflow")?,
+        )
+        .ok_or_else(|| "local deadline tick overflow".into())
     }
 
     pub(super) fn require_roles(bound: u32, clock: u32) -> Result<(), String> {
@@ -196,12 +239,17 @@ mod local_deadline_wire {
         Ok(())
     }
 
-    pub(super) fn read(bound: &crate::InheritedDescriptorAuthority, clock: &crate::InheritedDescriptorAuthority) -> Result<Wire, String> {
+    pub(super) fn read(
+        bound: &crate::InheritedDescriptorAuthority,
+        clock: &crate::InheritedDescriptorAuthority,
+    ) -> Result<Wire, String> {
         let bound_fd = bound.inherited_descriptor()?;
         require_roles(bound_fd, clock.inherited_descriptor()?)?;
         original_window::require_same_clock_namespace(clock.file())?;
-        let bytes = crate::sandbox::read_sealed_inherited_descriptor(bound_fd, original_window::MAX_BYTES)?;
-        let wire: Wire = serde_json::from_slice(&bytes).map_err(|error| format!("decode strict local deadlines: {error}"))?;
+        let bytes =
+            crate::sandbox::read_sealed_inherited_descriptor(bound_fd, original_window::MAX_BYTES)?;
+        let wire: Wire = serde_json::from_slice(&bytes)
+            .map_err(|error| format!("decode strict local deadlines: {error}"))?;
         let identity = clock.file().metadata().map_err(|error| error.to_string())?;
         if (wire.clock_dev, wire.clock_ino) != (identity.dev(), identity.ino()) {
             return Err("local deadline packet disagrees with pinned clock identity".into());
@@ -236,15 +284,24 @@ mod local_deadline_handoff_tests {
         let adopted = AdoptedOriginalLocalDeadlines::from_owned_roles(bound, clock).unwrap();
         assert!(adopted.service.deadline <= original.deadline);
         assert_eq!(adopted.service.deadline, adopted.cleanup.deadline);
-        assert_eq!(adopted.service_deadline().deadline, adopted.service_deadline().deadline);
+        assert_eq!(
+            adopted.service_deadline().deadline,
+            adopted.service_deadline().deadline
+        );
     }
 
     #[test]
     fn duplicates_preserve_objects_and_original_endpoints() {
         let original = pair();
         let copy = original.duplicate_retained_pair().unwrap();
-        for (a, b) in [(&original.bound, &copy.bound), (&original.clock, &copy.clock)] {
-            assert_ne!(a.inherited_descriptor().unwrap(), b.inherited_descriptor().unwrap());
+        for (a, b) in [
+            (&original.bound, &copy.bound),
+            (&original.clock, &copy.clock),
+        ] {
+            assert_ne!(
+                a.inherited_descriptor().unwrap(),
+                b.inherited_descriptor().unwrap()
+            );
             let a = a.file().metadata().unwrap();
             let b = b.file().metadata().unwrap();
             assert_eq!((a.dev(), a.ino()), (b.dev(), b.ino()));
@@ -258,7 +315,13 @@ mod local_deadline_handoff_tests {
         let earlier = MonotonicDeadline::after(Duration::from_secs(30));
         let later = MonotonicDeadline::after(Duration::from_secs(60));
         assert!(OriginalLocalDeadlineHandoff::from_original(later, earlier).is_err());
-        assert!(OriginalLocalDeadlineHandoff::from_original(MonotonicDeadline::after(Duration::ZERO), later).is_err());
+        assert!(
+            OriginalLocalDeadlineHandoff::from_original(
+                MonotonicDeadline::after(Duration::ZERO),
+                later
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -290,23 +353,33 @@ mod local_deadline_handoff_tests {
         let handoff = pair();
         let mut wire = local_deadline_wire::read(&handoff.bound, &handoff.clock).unwrap();
         wire.clock_ino ^= 1;
-        let wrong = crate::sealed_memfd(c"wrong-clock-identity", &serde_json::to_vec(&wire).unwrap()).unwrap();
+        let wrong =
+            crate::sealed_memfd(c"wrong-clock-identity", &serde_json::to_vec(&wire).unwrap())
+                .unwrap();
         assert!(local_deadline_wire::read(&wrong, &handoff.clock).is_err());
-        let oversized = crate::sealed_memfd(c"oversized-deadline", &vec![b' '; original_window::MAX_BYTES + 1]).unwrap();
+        let oversized = crate::sealed_memfd(
+            c"oversized-deadline",
+            &vec![b' '; original_window::MAX_BYTES + 1],
+        )
+        .unwrap();
         assert!(local_deadline_wire::read(&oversized, &handoff.clock).is_err());
         let foreign = crate::sealed_memfd(c"foreign-clock", b"not a namespace").unwrap();
         assert!(local_deadline_wire::read(&handoff.bound, &foreign).is_err());
         let lease = crate::exec::retain_fork_sensitive_descriptors_until(handoff.service).unwrap();
         let unsealed = crate::exec::InheritedDescriptorAuthority::from_owned_file(
-            std::fs::File::open("/dev/null").unwrap(), &lease,
-        ).unwrap();
+            std::fs::File::open("/dev/null").unwrap(),
+            &lease,
+        )
+        .unwrap();
         assert!(local_deadline_wire::read(&unsealed, &handoff.clock).is_err());
     }
 
     #[test]
     fn role_validation_precedes_ownership_and_arithmetic_refuses_overflow() {
         for (bound, clock) in [(0, 9), (9, 1), (2, 9), (9, 9)] {
-            assert!(unsafe { AdoptedOriginalLocalDeadlines::take_inherited(bound, clock) }.is_err());
+            assert!(
+                unsafe { AdoptedOriginalLocalDeadlines::take_inherited(bound, clock) }.is_err()
+            );
         }
         assert!(local_deadline_wire::expiry(u64::MAX, Duration::from_nanos(1)).is_err());
         assert!(local_deadline_wire::expiry(0, Duration::from_secs(u64::MAX)).is_err());
@@ -518,7 +591,10 @@ fn occupancy_tick_ns() -> Result<u64, String> {
 
 #[cfg(target_os = "linux")]
 fn occupancy_tick_ns_fixed() -> Result<u64, &'static str> {
-    let mut value = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    let mut value = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
     if unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut value) } != 0 {
         return Err("sample durable occupancy clock refused");
     }
@@ -526,8 +602,12 @@ fn occupancy_tick_ns_fixed() -> Result<u64, &'static str> {
         .map_err(|_| "occupancy clock returned a negative second coordinate")?;
     let nanoseconds = u64::try_from(value.tv_nsec)
         .map_err(|_| "occupancy clock returned a negative nanosecond coordinate")?;
-    if nanoseconds >= 1_000_000_000 { return Err("occupancy clock returned invalid nanoseconds"); }
-    seconds.checked_mul(1_000_000_000).and_then(|total| total.checked_add(nanoseconds))
+    if nanoseconds >= 1_000_000_000 {
+        return Err("occupancy clock returned invalid nanoseconds");
+    }
+    seconds
+        .checked_mul(1_000_000_000)
+        .and_then(|total| total.checked_add(nanoseconds))
         .ok_or("occupancy clock coordinate overflow")
 }
 
@@ -656,14 +736,17 @@ pub fn iso8601_now() -> String {
 /// encoding `iso8601_now` emits, for computing comparable cutoffs.
 pub fn iso8601_from_unix_secs(secs: u64) -> String {
     let mut output = String::new();
-    write_iso8601_from_unix_secs(secs, &mut output).expect("String timestamp formatting cannot fail");
+    write_iso8601_from_unix_secs(secs, &mut output)
+        .expect("String timestamp formatting cannot fail");
     output
 }
 
 /// The SAME production clock/format, written into caller-owned fixed storage.
 /// This is a timestamp observation, never an occupancy or execution allowance.
 pub(crate) fn iso8601_now_into(output: &mut dyn std::fmt::Write) -> std::fmt::Result {
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
     write_iso8601_from_unix_secs(now.as_secs(), output)
 }
 fn write_iso8601_from_unix_secs(secs: u64, output: &mut dyn std::fmt::Write) -> std::fmt::Result {
@@ -673,7 +756,10 @@ fn write_iso8601_from_unix_secs(secs: u64, output: &mut dyn std::fmt::Write) -> 
     let minutes = (day_secs % 3600) / 60;
     let seconds = day_secs % 60;
     let (year, month, day) = civil_from_days(days as i64);
-    std::fmt::write(output, format_args!("{year:04}-{month:02}-{day:02}T{hours:02}:{minutes:02}:{seconds:02}Z"))
+    std::fmt::write(
+        output,
+        format_args!("{year:04}-{month:02}-{day:02}T{hours:02}:{minutes:02}:{seconds:02}Z"),
+    )
 }
 
 /// Current wall-clock time as milliseconds since Unix epoch.
@@ -1565,7 +1651,10 @@ mod original_window_tests {
         };
         assert!(original.duplicate_retained_pair().is_err());
         assert_eq!(original.window.inherited_descriptor().unwrap(), fds[0]);
-        assert_eq!(original.clock_namespace.inherited_descriptor().unwrap(), fds[1]);
+        assert_eq!(
+            original.clock_namespace.inherited_descriptor().unwrap(),
+            fds[1]
+        );
         for fd in fds {
             assert_ne!(unsafe { libc::fcntl(fd as i32, libc::F_GETFD) }, -1);
         }

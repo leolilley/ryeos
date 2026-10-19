@@ -1,14 +1,15 @@
 //! Privileged original native owner. Signed issuance remains the host's job;
 //! no decoded quota or observed allocation count can construct a safe factory.
+use crate::original_host_owner::{
+    FixedHostRefusal, OriginalNativeRegionCBorrow, OriginalNativeRegionHandle,
+};
 use crate::{
     BoundSqliteConnection, BoundSqliteOpenFailure, ClosedSqliteInspection,
     ReadonlySqliteCloseFailure, ReadonlySqliteCopy, ReadonlySqliteOpenFailure,
-    ReleasedSqliteInspection, SqliteCopyLease, SqliteInspectionProductionPermit,
-    SqliteInspectionSqlWork, SqliteInspectionProductionKind,
+    ReleasedSqliteInspection, SqliteCopyLease, SqliteInspectionProductionKind,
+    SqliteInspectionProductionPermit, SqliteInspectionSqlWork,
 };
 use anyhow::{Context, Result, anyhow, ensure};
-use crate::original_host_owner::{FixedHostRefusal, OriginalNativeRegionHandle,
-    OriginalNativeRegionCBorrow};
 use lillux::PinnedDirectory;
 use rusqlite::Connection;
 use std::{
@@ -48,7 +49,9 @@ impl std::error::Error for NativeCheckContended {}
 pub struct NativeCheckUnobservable;
 impl std::fmt::Display for NativeCheckUnobservable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("native admission check could not observe its fact; this call refused without latching")
+        f.write_str(
+            "native admission check could not observe its fact; this call refused without latching",
+        )
     }
 }
 impl std::error::Error for NativeCheckUnobservable {}
@@ -80,7 +83,11 @@ impl SupersededRefusal {
 }
 impl std::fmt::Display for SupersededRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}; it supersedes an earlier refusal: {:#}", self.later, self.earlier)
+        write!(
+            f,
+            "{}; it supersedes an earlier refusal: {:#}",
+            self.later, self.earlier
+        )
     }
 }
 impl std::fmt::Debug for SupersededRefusal {
@@ -126,8 +133,12 @@ pub fn native_refusal_is_fact(error: &anyhow::Error) -> bool {
     error.downcast_ref::<NativeCheckContended>().is_none()
         && error.downcast_ref::<NativeCheckUnobservable>().is_none()
         && error.downcast_ref::<NativeServiceEdgeReached>().is_none()
-        && !error.downcast_ref::<FixedHostRefusal>().is_some_and(region_refusal_is_contention)
-        && error.downcast_ref::<anyhow::Error>().is_none_or(native_refusal_is_fact)
+        && !error
+            .downcast_ref::<FixedHostRefusal>()
+            .is_some_and(region_refusal_is_contention)
+        && error
+            .downcast_ref::<anyhow::Error>()
+            .is_none_or(native_refusal_is_fact)
         && !error.chain().any(cause_is_not_fact)
 }
 
@@ -135,7 +146,9 @@ fn cause_is_not_fact(cause: &(dyn std::error::Error + 'static)) -> bool {
     cause.is::<NativeCheckContended>()
         || cause.is::<NativeCheckUnobservable>()
         || cause.is::<NativeServiceEdgeReached>()
-        || cause.downcast_ref::<FixedHostRefusal>().is_some_and(region_refusal_is_contention)
+        || cause
+            .downcast_ref::<FixedHostRefusal>()
+            .is_some_and(region_refusal_is_contention)
         || cause_is_transient_resource(cause)
 }
 
@@ -194,44 +207,74 @@ mod refusal_class_tests {
             None,
         ));
         assert!(!super::native_refusal_is_fact(&nomem));
-        let unobservable = anyhow::anyhow!("proc unreadable").context(super::NativeCheckUnobservable);
+        let unobservable =
+            anyhow::anyhow!("proc unreadable").context(super::NativeCheckUnobservable);
         assert!(!super::native_refusal_is_fact(&unobservable));
-        assert!(!super::native_refusal_is_fact(&anyhow::Error::new(super::NativeCheckContended)));
+        assert!(!super::native_refusal_is_fact(&anyhow::Error::new(
+            super::NativeCheckContended
+        )));
 
         // A region gate held past its wait bound is contention however the
         // caller converted it; every other region refusal is a fact.
         use crate::original_host_owner::FixedHostRefusal;
-        let contended = anyhow::Error::new(FixedHostRefusal::Contended).context("producer control claim");
+        let contended =
+            anyhow::Error::new(FixedHostRefusal::Contended).context("producer control claim");
         assert!(!super::native_refusal_is_fact(&contended));
         let as_context = anyhow::anyhow!("region gate").context(FixedHostRefusal::Contended);
         assert!(!super::native_refusal_is_fact(&as_context));
         let closed = anyhow::Error::new(FixedHostRefusal::Closed).context("producer control claim");
         assert!(super::native_refusal_is_fact(&closed));
-        assert!(super::native_refusal_is_fact(&anyhow::Error::new(FixedHostRefusal::Busy)));
+        assert!(super::native_refusal_is_fact(&anyhow::Error::new(
+            FixedHostRefusal::Busy
+        )));
 
         // A later refusal layered over an earlier attempt is classified by
         // the later refusal only, whatever wraps or labels the result: a fact
         // over a contended or transient attempt latches, and contention over
         // an earlier fact does not.
         use super::RefusalSupersedes as _;
-        let fact = || anyhow::anyhow!("original capacity debit no longer matches durable account/redo");
-        let contended_attempt = || anyhow::Error::new(FixedHostRefusal::Contended).context("producer control claim");
-        assert!(super::native_refusal_is_fact(&fact().superseding(contended_attempt())));
+        let fact =
+            || anyhow::anyhow!("original capacity debit no longer matches durable account/redo");
+        let contended_attempt =
+            || anyhow::Error::new(FixedHostRefusal::Contended).context("producer control claim");
+        assert!(super::native_refusal_is_fact(
+            &fact().superseding(contended_attempt())
+        ));
         let checked_attempt = anyhow::Error::new(super::NativeCheckContended);
-        assert!(super::native_refusal_is_fact(&fact().superseding(checked_attempt).context("retried close")));
+        assert!(super::native_refusal_is_fact(
+            &fact().superseding(checked_attempt).context("retried close")
+        ));
         let transient_attempt = anyhow::Error::new(std::io::Error::from_raw_os_error(libc::EMFILE));
-        assert!(super::native_refusal_is_fact(&fact().superseding(transient_attempt)));
-        let unobservable_attempt = anyhow::anyhow!("proc unreadable").context(super::NativeCheckUnobservable);
-        assert!(super::native_refusal_is_fact(&fact().superseding(unobservable_attempt)));
-        assert!(!super::native_refusal_is_fact(&contended_attempt().superseding(fact())));
+        assert!(super::native_refusal_is_fact(
+            &fact().superseding(transient_attempt)
+        ));
+        let unobservable_attempt =
+            anyhow::anyhow!("proc unreadable").context(super::NativeCheckUnobservable);
+        assert!(super::native_refusal_is_fact(
+            &fact().superseding(unobservable_attempt)
+        ));
         assert!(!super::native_refusal_is_fact(
-            &anyhow::Error::new(super::NativeCheckContended).superseding(fact()).context("retried close")));
+            &contended_attempt().superseding(fact())
+        ));
+        assert!(!super::native_refusal_is_fact(
+            &anyhow::Error::new(super::NativeCheckContended)
+                .superseding(fact())
+                .context("retried close")
+        ));
         // Repeated retries stack; only the latest refusal classifies.
         let stacked = fact().superseding(contended_attempt()).superseding(fact());
-        let stacked_over_contention = contended_attempt().superseding(fact()).superseding(contended_attempt());
-        assert!(super::native_refusal_is_fact(&fact().superseding(stacked_over_contention).context("retried close")));
+        let stacked_over_contention = contended_attempt()
+            .superseding(fact())
+            .superseding(contended_attempt());
+        assert!(super::native_refusal_is_fact(
+            &fact()
+                .superseding(stacked_over_contention)
+                .context("retried close")
+        ));
         assert!(super::native_refusal_is_fact(&stacked));
-        assert!(!super::native_refusal_is_fact(&contended_attempt().superseding(stacked)));
+        assert!(!super::native_refusal_is_fact(
+            &contended_attempt().superseding(stacked)
+        ));
 
         // Under a typed wrapper whose source is the layered refusal, only
         // the later refusal is in the cause chain.
@@ -243,28 +286,55 @@ mod refusal_class_tests {
             }
         }
         impl std::error::Error for Wrapper {
-            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> { Some(self.0.as_ref()) }
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(self.0.as_ref())
+            }
         }
         let wrapped_fact = anyhow::Error::new(Wrapper(fact().superseding(contended_attempt())));
         assert!(super::native_refusal_is_fact(&wrapped_fact));
         let wrapped_contention = anyhow::Error::new(Wrapper(
-            anyhow::Error::new(super::NativeCheckContended).context("lock").superseding(fact())));
+            anyhow::Error::new(super::NativeCheckContended)
+                .context("lock")
+                .superseding(fact()),
+        ));
         assert!(!super::native_refusal_is_fact(&wrapped_contention));
 
         // A label never hides a class, and refusals combined without the
         // explicit layer are read together: contention in either part
         // keeps the result from latching, in either order.
-        assert!(!super::native_refusal_is_fact(&contended_attempt().context("label").context("outer label")));
-        assert!(!super::native_refusal_is_fact(&fact().context(contended_attempt())));
-        assert!(!super::native_refusal_is_fact(&contended_attempt().context(fact())));
-        assert!(!super::native_refusal_is_fact(&anyhow::Error::new(Wrapper(contended_attempt())).context(fact())));
+        assert!(!super::native_refusal_is_fact(
+            &contended_attempt().context("label").context("outer label")
+        ));
+        assert!(!super::native_refusal_is_fact(
+            &fact().context(contended_attempt())
+        ));
+        assert!(!super::native_refusal_is_fact(
+            &contended_attempt().context(fact())
+        ));
+        assert!(!super::native_refusal_is_fact(
+            &anyhow::Error::new(Wrapper(contended_attempt())).context(fact())
+        ));
 
         // The later refusal stays downcastable and leads the display.
         let layered = anyhow::Error::new(FixedHostRefusal::Closed).superseding(contended_attempt());
-        assert_eq!(layered.downcast_ref::<FixedHostRefusal>(), Some(&FixedHostRefusal::Closed));
-        assert!(layered.to_string().contains("supersedes an earlier refusal"), "{layered}");
-        assert!(layered.downcast_ref::<super::SupersededRefusal>().is_some_and(|superseded|
-            superseded.earlier().downcast_ref::<FixedHostRefusal>() == Some(&FixedHostRefusal::Contended)));
+        assert_eq!(
+            layered.downcast_ref::<FixedHostRefusal>(),
+            Some(&FixedHostRefusal::Closed)
+        );
+        assert!(
+            layered
+                .to_string()
+                .contains("supersedes an earlier refusal"),
+            "{layered}"
+        );
+        assert!(
+            layered
+                .downcast_ref::<super::SupersededRefusal>()
+                .is_some_and(
+                    |superseded| superseded.earlier().downcast_ref::<FixedHostRefusal>()
+                        == Some(&FixedHostRefusal::Contended)
+                )
+        );
 
         // Facts still latch, including an I/O failure about the file itself.
         assert!(super::native_refusal_is_fact(&anyhow::anyhow!(
@@ -284,7 +354,9 @@ mod refusal_class_tests {
     #[test]
     fn a_swallowed_step_refusal_never_returns_ok() {
         assert_eq!(super::sql_scope_outcome(Ok(7), Ok(()), false).unwrap(), 7);
-        let swallowed = super::sql_scope_outcome(Ok(7), Ok(()), true).unwrap_err().to_string();
+        let swallowed = super::sql_scope_outcome(Ok(7), Ok(()), true)
+            .unwrap_err()
+            .to_string();
         assert!(swallowed.contains("refused"), "{swallowed}");
         assert!(super::sql_scope_outcome::<u8>(Err(anyhow::anyhow!("own")), Ok(()), true).is_err());
         assert!(super::sql_scope_outcome(Ok(7), Err(anyhow::anyhow!("boundary")), false).is_err());
@@ -292,11 +364,17 @@ mod refusal_class_tests {
         // refusal and alone classifies the result.
         use crate::original_host_owner::FixedHostRefusal;
         let contended = || anyhow::Error::new(FixedHostRefusal::Contended);
-        let fact = || anyhow::anyhow!("original capacity debit no longer matches durable account/redo");
-        let post_fact = super::sql_scope_outcome::<u8>(Err(contended()), Err(fact()), false).unwrap_err();
+        let fact =
+            || anyhow::anyhow!("original capacity debit no longer matches durable account/redo");
+        let post_fact =
+            super::sql_scope_outcome::<u8>(Err(contended()), Err(fact()), false).unwrap_err();
         assert!(super::native_refusal_is_fact(&post_fact), "{post_fact:#}");
-        let post_contended = super::sql_scope_outcome::<u8>(Err(fact()), Err(contended()), false).unwrap_err();
-        assert!(!super::native_refusal_is_fact(&post_contended), "{post_contended:#}");
+        let post_contended =
+            super::sql_scope_outcome::<u8>(Err(fact()), Err(contended()), false).unwrap_err();
+        assert!(
+            !super::native_refusal_is_fact(&post_contended),
+            "{post_contended:#}"
+        );
     }
 }
 
@@ -324,10 +402,9 @@ pub(crate) fn native_step_hook(
                 || (debit.0)().is_err()
         }))
         .unwrap_or(true);
-        if refuse
-            && let Some(refused) = &refused {
-                refused.store(true, Ordering::SeqCst);
-            }
+        if refuse && let Some(refused) = &refused {
+            refused.store(true, Ordering::SeqCst);
+        }
         refuse
     }
 }
@@ -375,9 +452,13 @@ struct NativeBoundaryScope {
 }
 impl NativeBoundaryScope {
     fn enter(authority: *const (), cleanup: bool) -> Self {
-        let previous = NATIVE_BOUNDARY.with(|frame| frame.replace(Some(NativeBoundaryFrame {
-            authority, cleanup, verified: false,
-        })));
+        let previous = NATIVE_BOUNDARY.with(|frame| {
+            frame.replace(Some(NativeBoundaryFrame {
+                authority,
+                cleanup,
+                verified: false,
+            }))
+        });
         Self { previous }
     }
     fn verified(&self) {
@@ -401,9 +482,11 @@ impl Drop for NativeBoundaryScope {
 /// process. Nothing is reused across boundaries or threads.
 pub fn native_boundary_reuses_durable_check<T: ?Sized>(authority: &T, cleanup: bool) -> bool {
     let authority = authority as *const T as *const ();
-    NATIVE_BOUNDARY.with(|frame| frame.get().is_some_and(|frame| {
-        frame.verified && frame.cleanup == cleanup && std::ptr::eq(frame.authority, authority)
-    }))
+    NATIVE_BOUNDARY.with(|frame| {
+        frame.get().is_some_and(|frame| {
+            frame.verified && frame.cleanup == cleanup && std::ptr::eq(frame.authority, authority)
+        })
+    })
 }
 
 /// Fixed connection-ticket capacity of one native arena.
@@ -443,17 +526,36 @@ impl OriginalNativeBudget {
     /// The caller must have irreversibly reserved this exact storage, work and
     /// ticket envelope from ONE authentic original signed admission. It must
     /// retain that original clock/exclusions and use this object, never copies.
-    pub unsafe fn prepaid_by_original_issuer(storage_bytes: u64, allocator_steps: u64,
-        connections: u32, cleanup_reserved: u64) -> std::result::Result<Self, FixedHostRefusal> {
-        if unsafe { ryeos_native_process_matches() } != 1 { return Err(FixedHostRefusal::Process); }
-        if !(storage_bytes > CONTROL_STORAGE && storage_bytes <= i64::MAX as u64
-            && allocator_steps > cleanup_reserved && allocator_steps <= i64::MAX as u64
-            && cleanup_reserved > 0 && connections > 0 && connections as usize <= MAX_NATIVE_CONNECTIONS) {
+    pub unsafe fn prepaid_by_original_issuer(
+        storage_bytes: u64,
+        allocator_steps: u64,
+        connections: u32,
+        cleanup_reserved: u64,
+    ) -> std::result::Result<Self, FixedHostRefusal> {
+        if unsafe { ryeos_native_process_matches() } != 1 {
+            return Err(FixedHostRefusal::Process);
+        }
+        if !(storage_bytes > CONTROL_STORAGE
+            && storage_bytes <= i64::MAX as u64
+            && allocator_steps > cleanup_reserved
+            && allocator_steps <= i64::MAX as u64
+            && cleanup_reserved > 0
+            && connections > 0
+            && connections as usize <= MAX_NATIVE_CONNECTIONS)
+        {
             return Err(FixedHostRefusal::Layout);
         }
-        Ok(Self { storage_bytes, allocator_steps_limit: allocator_steps, cleanup_reserved,
-            connections_limit: connections, reserved: 0, allocator_steps: AtomicU64::new(0),
-            cleanup_steps: AtomicU64::new(0), connections_issued: AtomicU32::new(0), reserved_atomic: AtomicU32::new(0) })
+        Ok(Self {
+            storage_bytes,
+            allocator_steps_limit: allocator_steps,
+            cleanup_reserved,
+            connections_limit: connections,
+            reserved: 0,
+            allocator_steps: AtomicU64::new(0),
+            cleanup_steps: AtomicU64::new(0),
+            connections_issued: AtomicU32::new(0),
+            reserved_atomic: AtomicU32::new(0),
+        })
     }
     /// Connection tickets this exact envelope admits.
     pub fn connections_limit(&self) -> u32 {
@@ -507,7 +609,12 @@ impl OriginalNativeBudget {
                 next <= self.connections_limit,
                 "original native connection tickets exhausted"
             );
-            match self.connections_issued.compare_exchange(previous, next, Ordering::AcqRel, Ordering::Acquire) {
+            match self.connections_issued.compare_exchange(
+                previous,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
                 Ok(_) => return Ok(next),
                 Err(observed) => previous = observed,
             }
@@ -592,20 +699,34 @@ impl OriginalNativeProjectionLeaseAdmission {
     ) -> std::result::Result<Self, OriginalNativeProjectionLeaseAdmissionFailure> {
         // Retain the exact published producer before any fallible observation.
         // Validation refusal cannot abandon its issuer or manufacture a terminal.
-        Self { budget, ticket, producer }.validate_original()
+        Self {
+            budget,
+            ticket,
+            producer,
+        }
+        .validate_original()
     }
-    fn validate_original(self) -> std::result::Result<Self, OriginalNativeProjectionLeaseAdmissionFailure> {
+    fn validate_original(
+        self,
+    ) -> std::result::Result<Self, OriginalNativeProjectionLeaseAdmissionFailure> {
         let result = (|| -> Result<()> {
-            self.budget.require_original_process()
+            self.budget
+                .require_original_process()
                 .map_err(|error| anyhow!("original admission process refusal: {error:?}"))?;
-            ensure!(self.budget.contains_issued_ticket(self.ticket)?,
-                "invalid original projection lease ticket");
+            ensure!(
+                self.budget.contains_issued_ticket(self.ticket)?,
+                "invalid original projection lease ticket"
+            );
             Ok(())
         })();
         match result {
             Ok(()) => Ok(self),
             Err(error) => Err(OriginalNativeProjectionLeaseAdmissionFailure {
-                error, inner: lillux::custody::Held::until_taken(PROJECTION_LEASE_ADMISSION_FAILURE_KIND, ProjectionLeaseAdmissionFailureParts { original: self }),
+                error,
+                inner: lillux::custody::Held::until_taken(
+                    PROJECTION_LEASE_ADMISSION_FAILURE_KIND,
+                    ProjectionLeaseAdmissionFailureParts { original: self },
+                ),
             }),
         }
     }
@@ -613,9 +734,12 @@ impl OriginalNativeProjectionLeaseAdmission {
 
 /// Actual never-delivered admission, including its original published permit.
 /// Drop retains custody; it does not abandon production or acknowledge C cleanup.
-const PROJECTION_LEASE_ADMISSION_FAILURE_KIND: &str = "lillux-sqlite::projection-lease-admission-failure";
+const PROJECTION_LEASE_ADMISSION_FAILURE_KIND: &str =
+    "lillux-sqlite::projection-lease-admission-failure";
 /// The admission of a refused delivery. Constructible only in this module.
-struct ProjectionLeaseAdmissionFailureParts { original: OriginalNativeProjectionLeaseAdmission }
+struct ProjectionLeaseAdmissionFailureParts {
+    original: OriginalNativeProjectionLeaseAdmission,
+}
 pub struct OriginalNativeProjectionLeaseAdmissionFailure {
     error: anyhow::Error,
     inner: lillux::custody::Held<ProjectionLeaseAdmissionFailureParts>,
@@ -624,7 +748,13 @@ impl OriginalNativeProjectionLeaseAdmissionFailure {
     /// Retry only the SAME admission. No ticket, issuer, debit or clock is renewed.
     pub fn retry(self) -> std::result::Result<OriginalNativeProjectionLeaseAdmission, Self> {
         // Copied process must be checked before extracting or dropping any part.
-        if self.inner.original.budget.require_original_process().is_err() {
+        if self
+            .inner
+            .original
+            .budget
+            .require_original_process()
+            .is_err()
+        {
             return Err(self);
         }
         match self.into_fields() {
@@ -638,7 +768,9 @@ impl OriginalNativeProjectionLeaseAdmissionFailure {
     /// back still held. Any other end of the failure retains the admission,
     /// counted: its published producer interval and debited ticket stay held
     /// until the process exits, and no production is abandoned from here.
-    fn into_fields(self) -> std::result::Result<(OriginalNativeProjectionLeaseAdmission, anyhow::Error), Self> {
+    fn into_fields(
+        self,
+    ) -> std::result::Result<(OriginalNativeProjectionLeaseAdmission, anyhow::Error), Self> {
         let Self { error, inner } = self;
         match inner.take_whole() {
             Ok(parts) => Ok((parts.original, error)),
@@ -653,19 +785,31 @@ impl std::fmt::Debug for OriginalNativeProjectionLeaseAdmissionFailure {
 }
 impl std::fmt::Display for OriginalNativeProjectionLeaseAdmissionFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "original admission refused; actual published producer retained: {}", self.error)
+        write!(
+            f,
+            "original admission refused; actual published producer retained: {}",
+            self.error
+        )
     }
 }
 impl std::error::Error for OriginalNativeProjectionLeaseAdmissionFailure {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> { Some(self.error.as_ref()) }
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.error.as_ref())
+    }
 }
 #[derive(Clone, Copy)]
-pub enum OriginalProjectionLeaseMode { Shared, Exclusive }
+pub enum OriginalProjectionLeaseMode {
+    Shared,
+    Exclusive,
+}
 pub trait OriginalNativeProjectionLeaseAuthority: Send + Sync {
     fn require_original(&self, factory: &Arc<OriginalNativeFactory>, cleanup: bool) -> Result<()>;
     /// Return the actual original endpoint; never restart a duration for this operation.
-    fn fork_deadline(&self, factory: &Arc<OriginalNativeFactory>, cleanup: bool)
-        -> Result<lillux::time::MonotonicDeadline>;
+    fn fork_deadline(
+        &self,
+        factory: &Arc<OriginalNativeFactory>,
+        cleanup: bool,
+    ) -> Result<lillux::time::MonotonicDeadline>;
 }
 const PROJECTION_LEASE_INPUTS_KIND: &str = "lillux-sqlite::projection-lease-inputs";
 /// Only a completed lease close consumes the metadata descriptor, and it ends
@@ -693,8 +837,13 @@ impl OriginalProjectionLeaseInputs {
     ) -> Self {
         // Transfer custody before validation: even a contradictory data FD is
         // retained, never automatically closed while refusing unsafe issuance.
-        Self { root, metadata: lillux::custody::Held::until_taken(PROJECTION_LEASE_INPUTS_KIND, metadata),
-            mode, authority, identity: (0, 0) }
+        Self {
+            root,
+            metadata: lillux::custody::Held::until_taken(PROJECTION_LEASE_INPUTS_KIND, metadata),
+            mode,
+            authority,
+            identity: (0, 0),
+        }
     }
     /// End these inputs after native code consumed the metadata descriptor
     /// number exactly once. The File value is never closed again (its number
@@ -702,7 +851,13 @@ impl OriginalProjectionLeaseInputs {
     /// another process the copied descriptor is relinquished instead.
     fn release_consumed_metadata(self) {
         use std::os::fd::IntoRawFd;
-        let Self { root, metadata, mode: _, authority, identity: _ } = self;
+        let Self {
+            root,
+            metadata,
+            mode: _,
+            authority,
+            identity: _,
+        } = self;
         if let Ok(file) = metadata.take_whole() {
             let _consumed_number = file.into_raw_fd();
         }
@@ -775,7 +930,9 @@ pub struct OriginalProjectionLease {
 const PROJECTION_LEASE_FAILURE_KIND: &str = "lillux-sqlite::projection-lease-failure";
 /// The retained lease of a refused operation. Constructible only in this
 /// module.
-struct ProjectionLeaseFailureParts { owner: Mutex<OriginalProjectionLease> }
+struct ProjectionLeaseFailureParts {
+    owner: Mutex<OriginalProjectionLease>,
+}
 /// Only `into_owner` settles a lease refusal. Any other end retains the lease,
 /// counted, with its partial native and descriptor custody until the process
 /// exits.
@@ -787,14 +944,26 @@ impl OriginalProjectionLeaseFailure {
     /// Borrow the actual retained admission using exclusive outside custody;
     /// no mutex guard spans recovery or any native/authority effect.
     pub fn retained_admission(&mut self) -> Option<&OriginalNativeProjectionLeaseAdmissionFailure> {
-        let owner = self.inner.get_mut().owner.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner);
-        if owner.factory.require_process().is_err() { return None; }
+        let owner = self
+            .inner
+            .get_mut()
+            .owner
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if owner.factory.require_process().is_err() {
+            return None;
+        }
         owner.inner.admission_failure.as_ref()
     }
     /// Recover in place so the enclosing failure remains available on every
     /// refusal, including the SAME original callback panic evidence.
     pub fn recover_retained_admission(&mut self) -> Result<()> {
-        let owner = self.inner.get_mut().owner.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let owner = self
+            .inner
+            .get_mut()
+            .owner
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         owner.factory.require_process()?;
         let result = {
             let actual = std::cell::RefCell::new(owner);
@@ -803,27 +972,48 @@ impl OriginalProjectionLeaseFailure {
             })
         };
         if let Err(error) = result {
-            let previous = std::mem::replace(&mut self.error,
-                anyhow!("original lease failure evidence transferred"));
+            let previous = std::mem::replace(
+                &mut self.error,
+                anyhow!("original lease failure evidence transferred"),
+            );
             // The actual new refusal/panic supersedes the previous one: it
             // stays the error's own cause chain, directly downcastable, and
             // alone classifies the result; the previous error object is kept
             // whole for display.
             self.error = error.superseding(previous);
-            anyhow::bail!("original lease admission recovery refused; whole owner and evidence retained");
+            anyhow::bail!(
+                "original lease admission recovery refused; whole owner and evidence retained"
+            );
         }
         Ok(())
     }
-    pub fn error(&self) -> &anyhow::Error { &self.error }
+    pub fn error(&self) -> &anyhow::Error {
+        &self.error
+    }
     pub fn into_owner(mut self) -> std::result::Result<OriginalProjectionLease, Self> {
-        if require_current_native_process().is_err() { return Err(self); }
-        if self.inner.get_mut().owner.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner)
-            .factory.require_process().is_err() { return Err(self); }
+        if require_current_native_process().is_err() {
+            return Err(self);
+        }
+        if self
+            .inner
+            .get_mut()
+            .owner
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .factory
+            .require_process()
+            .is_err()
+        {
+            return Err(self);
+        }
         let Self { error, inner } = self;
         match inner.take_whole() {
             Ok(parts) => {
                 drop(error);
-                Ok(parts.owner.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner))
+                Ok(parts
+                    .owner
+                    .into_inner()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner))
             }
             Err(inner) => Err(Self { error, inner }),
         }
@@ -831,11 +1021,15 @@ impl OriginalProjectionLeaseFailure {
 }
 impl std::fmt::Debug for OriginalProjectionLeaseFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("OriginalProjectionLeaseFailure").field("error", &self.error).finish_non_exhaustive()
+        f.debug_struct("OriginalProjectionLeaseFailure")
+            .field("error", &self.error)
+            .finish_non_exhaustive()
     }
 }
 impl std::fmt::Display for OriginalProjectionLeaseFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { std::fmt::Display::fmt(&self.error, f) }
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.error, f)
+    }
 }
 impl std::error::Error for OriginalProjectionLeaseFailure {}
 /// Actual metadata-pin disposal before any lease ticket/producer/native acquisition.
@@ -849,12 +1043,16 @@ pub struct NotAcquiredOriginalProjectionLease {
 impl NotAcquiredOriginalProjectionLease {
     pub fn require_original(&self, factory: &Arc<OriginalNativeFactory>) -> Result<()> {
         factory.require_process()?;
-        ensure!(Arc::ptr_eq(&self.factory, factory) && self.pin_consumed,
-            "foreign/incomplete projection lease non-acquisition");
+        ensure!(
+            Arc::ptr_eq(&self.factory, factory) && self.pin_consumed,
+            "foreign/incomplete projection lease non-acquisition"
+        );
         Ok(())
     }
     /// Actual disposed metadata inode; diagnostic facts, no namespace/account authority.
-    pub fn disposed_metadata_identity(&self) -> (u64, u64) { self.metadata_identity }
+    pub fn disposed_metadata_identity(&self) -> (u64, u64) {
+        self.metadata_identity
+    }
 }
 pub enum OriginalProjectionLeaseDisposition {
     Closed(Arc<ClosedOriginalProjectionLease>),
@@ -867,39 +1065,66 @@ pub struct ClosedOriginalProjectionLease {
 impl ClosedOriginalProjectionLease {
     pub fn require_original(&self, factory: &Arc<OriginalNativeFactory>) -> Result<()> {
         factory.require_process()?;
-        ensure!(Arc::ptr_eq(&self.factory, factory) && self.ticket > 0
-            && self.ticket as usize <= MAX_NATIVE_CONNECTIONS
-            && factory.storage()?.tickets[self.ticket as usize - 1].load(Ordering::Acquire) == 4,
-            "projection lease terminal selects foreign or pending owner");
+        ensure!(
+            Arc::ptr_eq(&self.factory, factory)
+                && self.ticket > 0
+                && self.ticket as usize <= MAX_NATIVE_CONNECTIONS
+                && factory.storage()?.tickets[self.ticket as usize - 1].load(Ordering::Acquire)
+                    == 4,
+            "projection lease terminal selects foreign or pending owner"
+        );
         Ok(())
     }
 }
 impl OriginalProjectionLease {
     fn new(factory: Arc<OriginalNativeFactory>, inputs: OriginalProjectionLeaseInputs) -> Self {
         Self {
-            factory, ticket: None,
-            pin_consumed: false, native_closed: false, ticket_registered: false, close_refusal: false,
-            fd_consumed: false, fork_invariant_refused: false,
+            factory,
+            ticket: None,
+            pin_consumed: false,
+            native_closed: false,
+            ticket_registered: false,
+            close_refusal: false,
+            fd_consumed: false,
+            fork_invariant_refused: false,
             inner: lillux::custody::Held::until_taken(
                 PROJECTION_LEASE_KIND,
                 ProjectionLeaseParts {
-                    admission_failure: None, inputs, producer: None, native: None,
-                    fork_reservation: None, fork_registration: None,
-                }),
+                    admission_failure: None,
+                    inputs,
+                    producer: None,
+                    native: None,
+                    fork_reservation: None,
+                    fork_registration: None,
+                },
+            ),
         }
     }
     pub fn recover_retained_admission(&mut self) -> Result<()> {
         self.factory.require_original(true)?;
-        ensure!(self.inner.native.is_none() && self.ticket.is_none() && self.inner.producer.is_none()
-            && !self.ticket_registered && !self.pin_consumed && !self.native_closed,
-            "lease admission recovery conflicts with actual acquired/disposed owner");
-        let failure = self.inner.get_mut().admission_failure.take()
+        ensure!(
+            self.inner.native.is_none()
+                && self.ticket.is_none()
+                && self.inner.producer.is_none()
+                && !self.ticket_registered
+                && !self.pin_consumed
+                && !self.native_closed,
+            "lease admission recovery conflicts with actual acquired/disposed owner"
+        );
+        let failure = self
+            .inner
+            .get_mut()
+            .admission_failure
+            .take()
             .context("actual retained lease admission absent")?;
         let original = &failure.inner.original;
         let result = crate::original_physical_custody::retain_callback_refusal(&|| {
             self.factory.recover_undelivered_admission(
-                &original.budget, original.ticket, &original.producer,
-                SqliteInspectionProductionKind::ProjectionLease)
+                &original.budget,
+                original.ticket,
+                &original.producer,
+                SqliteInspectionProductionKind::ProjectionLease,
+            )
         });
         if let Err(error) = result {
             self.inner.get_mut().admission_failure = Some(failure);
@@ -918,36 +1143,81 @@ impl OriginalProjectionLease {
         Ok(())
     }
     pub fn retained_admission(&self) -> Option<&OriginalNativeProjectionLeaseAdmissionFailure> {
-        if self.factory.require_process().is_err() { return None; }
+        if self.factory.require_process().is_err() {
+            return None;
+        }
         self.inner.admission_failure.as_ref()
     }
-    pub fn metadata_pin_consumed(&self) -> bool { self.pin_consumed }
-    pub fn native_close_completed(&self) -> bool { self.native_closed }
-    pub fn consumed_close_refusal(&self) -> bool { self.close_refusal }
-    pub fn data_descriptor_consumed(&self) -> bool { self.fd_consumed }
-    pub fn fork_invariant_refused(&self) -> bool { self.fork_invariant_refused }
-    pub fn close(mut self) -> std::result::Result<OriginalProjectionLeaseDisposition, OriginalProjectionLeaseFailure> {
+    pub fn metadata_pin_consumed(&self) -> bool {
+        self.pin_consumed
+    }
+    pub fn native_close_completed(&self) -> bool {
+        self.native_closed
+    }
+    pub fn consumed_close_refusal(&self) -> bool {
+        self.close_refusal
+    }
+    pub fn data_descriptor_consumed(&self) -> bool {
+        self.fd_consumed
+    }
+    pub fn fork_invariant_refused(&self) -> bool {
+        self.fork_invariant_refused
+    }
+    pub fn close(
+        mut self,
+    ) -> std::result::Result<OriginalProjectionLeaseDisposition, OriginalProjectionLeaseFailure>
+    {
         let result = (|| -> Result<OriginalProjectionLeaseDisposition> {
             self.factory.require_original(true)?;
-            ensure!(self.inner.admission_failure.is_none(),
-                "actual published lease admission unresolved; no close or NotAcquired terminal");
-            self.inner.inputs.authority.require_original(&self.factory, true)?;
-            ensure!(!self.factory.storage()?.arena_released.load(Ordering::Acquire),
-                "lease input/native cleanup must precede actual arena release");
-            ensure!(!self.close_refusal, "projection lease consumed-close refusal retained; no replay");
-            ensure!(!self.fork_invariant_refused,
-                "projection lease fork invariant refused; owner/exclusion retained, no terminal");
+            ensure!(
+                self.inner.admission_failure.is_none(),
+                "actual published lease admission unresolved; no close or NotAcquired terminal"
+            );
+            self.inner
+                .inputs
+                .authority
+                .require_original(&self.factory, true)?;
+            ensure!(
+                !self
+                    .factory
+                    .storage()?
+                    .arena_released
+                    .load(Ordering::Acquire),
+                "lease input/native cleanup must precede actual arena release"
+            );
+            ensure!(
+                !self.close_refusal,
+                "projection lease consumed-close refusal retained; no replay"
+            );
+            ensure!(
+                !self.fork_invariant_refused,
+                "projection lease fork invariant refused; owner/exclusion retained, no terminal"
+            );
             // Establish a truthful disposition route BEFORE consuming any descriptor.
-            let not_acquired = !self.ticket_registered && self.ticket.is_none()
-                && self.inner.producer.is_none() && self.inner.native.is_none();
-            ensure!(self.ticket_registered || not_acquired,
-                "unregistered reported lease admission retained; no descriptor disposal");
-            let deadline = self.inner.inputs.authority.fork_deadline(&self.factory, true)?;
+            let not_acquired = !self.ticket_registered
+                && self.ticket.is_none()
+                && self.inner.producer.is_none()
+                && self.inner.native.is_none();
+            ensure!(
+                self.ticket_registered || not_acquired,
+                "unregistered reported lease admission retained; no descriptor disposal"
+            );
+            let deadline = self
+                .inner
+                .inputs
+                .authority
+                .fork_deadline(&self.factory, true)?;
             let fork_guard = lillux::exec::retain_fork_sensitive_descriptors_until(deadline)
                 .context("projection lease original cleanup fork deadline refused")?;
-            ensure!(!deadline.has_elapsed(), "projection lease original cleanup deadline elapsed");
+            ensure!(
+                !deadline.has_elapsed(),
+                "projection lease original cleanup deadline elapsed"
+            );
             self.factory.require_original(true)?;
-            self.inner.inputs.authority.require_original(&self.factory, true)?;
+            self.inner
+                .inputs
+                .authority
+                .require_original(&self.factory, true)?;
             let _effect = self.factory.enter_effect()?;
             let _scope = if let Some(arena) = self.factory.storage()?.arena.get() {
                 Some(arena.scope(true, 0)?)
@@ -960,12 +1230,17 @@ impl OriginalProjectionLease {
             #[cfg(target_os = "linux")]
             if !self.pin_consumed {
                 use std::os::{fd::AsRawFd, unix::fs::MetadataExt};
-                let flags = unsafe { libc::fcntl(self.inner.inputs.metadata.as_raw_fd(), libc::F_GETFL) };
-                ensure!(flags >= 0 && flags & libc::O_PATH != 0,
-                    "lease cleanup retains contradictory non-metadata descriptor");
+                let flags =
+                    unsafe { libc::fcntl(self.inner.inputs.metadata.as_raw_fd(), libc::F_GETFL) };
+                ensure!(
+                    flags >= 0 && flags & libc::O_PATH != 0,
+                    "lease cleanup retains contradictory non-metadata descriptor"
+                );
                 let metadata = self.inner.inputs.metadata.metadata()?;
                 ensure!(metadata.is_file(), "lease cleanup metadata is not regular");
-                if not_acquired { self.inner.get_mut().inputs.identity = (metadata.dev(), metadata.ino()); }
+                if not_acquired {
+                    self.inner.get_mut().inputs.identity = (metadata.dev(), metadata.ino());
+                }
             }
             if !self.native_closed {
                 if let Some(native) = &self.inner.native {
@@ -978,61 +1253,106 @@ impl OriginalProjectionLease {
                     }
                     // Commit real consumption before interpreting status/late failures.
                     if fd_consumed
-                        && let Some(registration) = self.inner.get_mut().fork_registration.take() {
-                            match unsafe { registration.unregister_consumed(&fork_guard) } {
-                                Ok(()) => {}
-                                Err(registration) => {
-                                    self.inner.get_mut().fork_registration = Some(registration);
-                                    self.fork_invariant_refused = true;
-                                    // Invariant-only fail-closed: prevent every protected fork
-                                    // from observing a stale consumed numeric registration.
-                                    fork_guard.hold_until_process_exit();
-                                    anyhow::bail!("lease consumed-FD fork deregistration invariant refused");
-                                }
+                        && let Some(registration) = self.inner.get_mut().fork_registration.take()
+                    {
+                        match unsafe { registration.unregister_consumed(&fork_guard) } {
+                            Ok(()) => {}
+                            Err(registration) => {
+                                self.inner.get_mut().fork_registration = Some(registration);
+                                self.fork_invariant_refused = true;
+                                // Invariant-only fail-closed: prevent every protected fork
+                                // from observing a stale consumed numeric registration.
+                                fork_guard.hold_until_process_exit();
+                                anyhow::bail!(
+                                    "lease consumed-FD fork deregistration invariant refused"
+                                );
                             }
                         }
-                    ensure!(code == libsqlite3_sys::SQLITE_OK, "projection lease native close refused ({code})");
+                    }
+                    ensure!(
+                        code == libsqlite3_sys::SQLITE_OK,
+                        "projection lease native close refused ({code})"
+                    );
                 } else {
                     if !self.pin_consumed {
                         use std::os::fd::AsRawFd;
                         self.factory.budget.debit_steps(80, true)?;
                         let outcome = crate::binding::close_original_metadata_pin(
-                            self.inner.inputs.metadata.as_raw_fd(), self.inner.inputs.identity.0, self.inner.inputs.identity.1);
+                            self.inner.inputs.metadata.as_raw_fd(),
+                            self.inner.inputs.identity.0,
+                            self.inner.inputs.identity.1,
+                        );
                         self.pin_consumed |= outcome.consumed;
-                        if outcome.consumed && (outcome.code != libsqlite3_sys::SQLITE_OK || outcome.observed_errno != 0) {
+                        if outcome.consumed
+                            && (outcome.code != libsqlite3_sys::SQLITE_OK
+                                || outcome.observed_errno != 0)
+                        {
                             self.close_refusal = true;
                         }
-                        ensure!(outcome.code == libsqlite3_sys::SQLITE_OK && outcome.consumed
-                            && outcome.observed_errno == 0, "projection lease unacquired pin close refused");
+                        ensure!(
+                            outcome.code == libsqlite3_sys::SQLITE_OK
+                                && outcome.consumed
+                                && outcome.observed_errno == 0,
+                            "projection lease unacquired pin close refused"
+                        );
                     }
                     self.native_closed = true;
                 }
             }
-            ensure!(self.inner.fork_registration.is_none() && self.inner.fork_reservation.is_none(),
-                "projection lease child-close inventory still retained");
+            ensure!(
+                self.inner.fork_registration.is_none() && self.inner.fork_reservation.is_none(),
+                "projection lease child-close inventory still retained"
+            );
             self.factory.require_original(true)?;
-            self.inner.inputs.authority.require_original(&self.factory, true)?;
+            self.inner
+                .inputs
+                .authority
+                .require_original(&self.factory, true)?;
             if not_acquired {
-                ensure!(self.pin_consumed && self.native_closed,
-                    "lease non-acquisition metadata disposal incomplete");
+                ensure!(
+                    self.pin_consumed && self.native_closed,
+                    "lease non-acquisition metadata disposal incomplete"
+                );
                 return Ok(OriginalProjectionLeaseDisposition::NotAcquired(
-                    NotAcquiredOriginalProjectionLease { factory: self.factory.clone(),
-                        metadata_identity: self.inner.inputs.identity, pin_consumed: self.pin_consumed }));
+                    NotAcquiredOriginalProjectionLease {
+                        factory: self.factory.clone(),
+                        metadata_identity: self.inner.inputs.identity,
+                        pin_consumed: self.pin_consumed,
+                    },
+                ));
             }
-            ensure!(self.ticket_registered, "projection lease has no registered original ticket");
-            let ticket = self.ticket.context("projection lease has no issued ticket; no terminal minted")?;
+            ensure!(
+                self.ticket_registered,
+                "projection lease has no registered original ticket"
+            );
+            let ticket = self
+                .ticket
+                .context("projection lease has no issued ticket; no terminal minted")?;
             if self.factory.storage()?.tickets[ticket as usize - 1].load(Ordering::Acquire) != 4 {
                 self.factory.require_original(true)?;
-                self.inner.inputs.authority.require_original(&self.factory, true)?;
-                ensure!(unsafe { ryeos_native_connection_closed(self.factory.arena()?.0.as_ptr(), ticket) }
-                    == libsqlite3_sys::SQLITE_OK, "projection lease native ticket close refused");
+                self.inner
+                    .inputs
+                    .authority
+                    .require_original(&self.factory, true)?;
+                ensure!(
+                    unsafe {
+                        ryeos_native_connection_closed(self.factory.arena()?.0.as_ptr(), ticket)
+                    } == libsqlite3_sys::SQLITE_OK,
+                    "projection lease native ticket close refused"
+                );
                 // Actual native success is retained before the fallible upper
                 // interval ACK; retries do not repeat the consumed C effect.
                 self.factory.storage()?.tickets[ticket as usize - 1].store(4, Ordering::Release);
             }
-            if let Some(producer) = self.inner.producer.as_ref() { producer.acknowledge_projection_lease_terminal()?; }
+            if let Some(producer) = self.inner.producer.as_ref() {
+                producer.acknowledge_projection_lease_terminal()?;
+            }
             Ok(OriginalProjectionLeaseDisposition::Closed(Arc::new(
-                ClosedOriginalProjectionLease { factory: self.factory.clone(), ticket })))
+                ClosedOriginalProjectionLease {
+                    factory: self.factory.clone(),
+                    ticket,
+                },
+            )))
         })();
         match result {
             Ok(receipt) => {
@@ -1042,8 +1362,14 @@ impl OriginalProjectionLease {
                 // disposition flags are plain copies.
                 match self.inner.take_whole() {
                     Ok(parts) => {
-                        let ProjectionLeaseParts { admission_failure, inputs, producer, native,
-                            fork_reservation, fork_registration } = parts;
+                        let ProjectionLeaseParts {
+                            admission_failure,
+                            inputs,
+                            producer,
+                            native,
+                            fork_reservation,
+                            fork_registration,
+                        } = parts;
                         drop(producer);
                         inputs.release_consumed_metadata();
                         drop(fork_registration);
@@ -1059,7 +1385,10 @@ impl OriginalProjectionLease {
                             error: anyhow!("projection lease belongs to another process"),
                             inner: lillux::custody::Held::until_taken(
                                 PROJECTION_LEASE_FAILURE_KIND,
-                                ProjectionLeaseFailureParts { owner: Mutex::new(self) }),
+                                ProjectionLeaseFailureParts {
+                                    owner: Mutex::new(self),
+                                },
+                            ),
                         })
                     }
                 }
@@ -1067,7 +1396,11 @@ impl OriginalProjectionLease {
             Err(error) => Err(OriginalProjectionLeaseFailure {
                 error,
                 inner: lillux::custody::Held::until_taken(
-                    PROJECTION_LEASE_FAILURE_KIND, ProjectionLeaseFailureParts { owner: Mutex::new(self) }),
+                    PROJECTION_LEASE_FAILURE_KIND,
+                    ProjectionLeaseFailureParts {
+                        owner: Mutex::new(self),
+                    },
+                ),
             }),
         }
     }
@@ -1089,20 +1422,34 @@ impl OriginalNativeConnectionAdmission {
     ) -> std::result::Result<Self, OriginalNativeConnectionAdmissionFailure> {
         // Retain the exact published producer before any fallible observation.
         // Validation refusal cannot abandon its issuer or manufacture a terminal.
-        Self { budget, ticket, producer }.validate_original()
+        Self {
+            budget,
+            ticket,
+            producer,
+        }
+        .validate_original()
     }
-    fn validate_original(self) -> std::result::Result<Self, OriginalNativeConnectionAdmissionFailure> {
+    fn validate_original(
+        self,
+    ) -> std::result::Result<Self, OriginalNativeConnectionAdmissionFailure> {
         let result = (|| -> Result<()> {
-            self.budget.require_original_process()
+            self.budget
+                .require_original_process()
                 .map_err(|error| anyhow!("original admission process refusal: {error:?}"))?;
-            ensure!(self.budget.contains_issued_ticket(self.ticket)?,
-                "invalid original native producer ticket");
+            ensure!(
+                self.budget.contains_issued_ticket(self.ticket)?,
+                "invalid original native producer ticket"
+            );
             Ok(())
         })();
         match result {
             Ok(()) => Ok(self),
             Err(error) => Err(OriginalNativeConnectionAdmissionFailure {
-                error, inner: lillux::custody::Held::until_taken(CONNECTION_ADMISSION_FAILURE_KIND, ConnectionAdmissionFailureParts { original: self }),
+                error,
+                inner: lillux::custody::Held::until_taken(
+                    CONNECTION_ADMISSION_FAILURE_KIND,
+                    ConnectionAdmissionFailureParts { original: self },
+                ),
             }),
         }
     }
@@ -1110,9 +1457,12 @@ impl OriginalNativeConnectionAdmission {
 
 /// Actual never-delivered admission, including its original published permit.
 /// Drop retains custody; it does not abandon production or acknowledge C cleanup.
-const CONNECTION_ADMISSION_FAILURE_KIND: &str = "lillux-sqlite::native-connection-admission-failure";
+const CONNECTION_ADMISSION_FAILURE_KIND: &str =
+    "lillux-sqlite::native-connection-admission-failure";
 /// The admission of a refused delivery. Constructible only in this module.
-struct ConnectionAdmissionFailureParts { original: OriginalNativeConnectionAdmission }
+struct ConnectionAdmissionFailureParts {
+    original: OriginalNativeConnectionAdmission,
+}
 pub struct OriginalNativeConnectionAdmissionFailure {
     error: anyhow::Error,
     inner: lillux::custody::Held<ConnectionAdmissionFailureParts>,
@@ -1121,7 +1471,13 @@ impl OriginalNativeConnectionAdmissionFailure {
     /// Retry only the SAME admission. No ticket, issuer, debit or clock is renewed.
     pub fn retry(self) -> std::result::Result<OriginalNativeConnectionAdmission, Self> {
         // Copied process must be checked before extracting or dropping any part.
-        if self.inner.original.budget.require_original_process().is_err() {
+        if self
+            .inner
+            .original
+            .budget
+            .require_original_process()
+            .is_err()
+        {
             return Err(self);
         }
         match self.into_fields() {
@@ -1135,7 +1491,9 @@ impl OriginalNativeConnectionAdmissionFailure {
     /// back still held. Any other end of the failure retains the admission,
     /// counted: its published producer interval and debited ticket stay held
     /// until the process exits, and no production is abandoned from here.
-    fn into_fields(self) -> std::result::Result<(OriginalNativeConnectionAdmission, anyhow::Error), Self> {
+    fn into_fields(
+        self,
+    ) -> std::result::Result<(OriginalNativeConnectionAdmission, anyhow::Error), Self> {
         let Self { error, inner } = self;
         match inner.take_whole() {
             Ok(parts) => Ok((parts.original, error)),
@@ -1150,19 +1508,27 @@ impl std::fmt::Debug for OriginalNativeConnectionAdmissionFailure {
 }
 impl std::fmt::Display for OriginalNativeConnectionAdmissionFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "original admission refused; actual published producer retained: {}", self.error)
+        write!(
+            f,
+            "original admission refused; actual published producer retained: {}",
+            self.error
+        )
     }
 }
 impl std::error::Error for OriginalNativeConnectionAdmissionFailure {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> { Some(self.error.as_ref()) }
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.error.as_ref())
+    }
 }
 pub trait OriginalNativeDestinationAuthority: Send + Sync {
     fn require_original(&self, factory: &Arc<OriginalNativeFactory>) -> Result<()>;
     /// Consumes this exact original domain authority after genuine aggregate
     /// acknowledgement. A refused transfer returns the SAME authority intact.
     fn into_outside_custody(
-        self: Arc<Self>, factory: &Arc<OriginalNativeFactory>,
-        aggregate: &OriginalNativeTerminal, leaf: &OriginalNativeOutsideLeafEvidence,
+        self: Arc<Self>,
+        factory: &Arc<OriginalNativeFactory>,
+        aggregate: &OriginalNativeTerminal,
+        leaf: &OriginalNativeOutsideLeafEvidence,
         prepay: &dyn Fn(u64, u64) -> Result<()>,
     ) -> std::result::Result<OriginalDestinationOutsideCustody, OriginalDestinationCustodyFailure>;
 }
@@ -1184,7 +1550,9 @@ struct OriginalExactArcAliasSlots<T: ?Sized + Send + Sync + 'static> {
 /// An inventory that still holds a canonical owner has not handed it to its
 /// typed receiver; that owner stays retained, counted, until the process
 /// exits. Empty slots hold only identities and release normally.
-fn arc_alias_slots_settled<T: ?Sized + Send + Sync + 'static>(parts: &OriginalExactArcAliasSlots<T>) -> bool {
+fn arc_alias_slots_settled<T: ?Sized + Send + Sync + 'static>(
+    parts: &OriginalExactArcAliasSlots<T>,
+) -> bool {
     parts.slots.iter().all(|slot| slot.original.is_none())
 }
 struct OriginalExactArcAliasSlot<T: ?Sized + Send + Sync + 'static> {
@@ -1204,95 +1572,179 @@ impl<T: ?Sized + Send + Sync + 'static> OriginalExactArcAliasInventory<T> {
     /// T is its real ordinary host owner, never an Arc over mapped payload.
     pub unsafe fn issued(maximum: usize, prepay: &dyn Fn(u64, u64) -> Result<()>) -> Result<Self> {
         ensure!(maximum > 0, "empty original Arc alias inventory capacity");
-        let bytes = maximum.checked_mul(std::mem::size_of::<OriginalExactArcAliasSlot<T>>())
-            .and_then(|bytes| bytes.checked_add(std::mem::size_of::<Self>() + 2 * std::mem::size_of::<usize>()))
+        let bytes = maximum
+            .checked_mul(std::mem::size_of::<OriginalExactArcAliasSlot<T>>())
+            .and_then(|bytes| {
+                bytes.checked_add(std::mem::size_of::<Self>() + 2 * std::mem::size_of::<usize>())
+            })
             .context("original Arc alias inventory quote overflow")?;
-        crate::original_physical_custody::retain_callback_refusal(&|| prepay(u64::try_from(bytes)?, u64::try_from(maximum)?))?;
-        Ok(Self { process: std::process::id(), identity: Arc::new(()), maximum, closed: false,
+        crate::original_physical_custody::retain_callback_refusal(&|| {
+            prepay(u64::try_from(bytes)?, u64::try_from(maximum)?)
+        })?;
+        Ok(Self {
+            process: std::process::id(),
+            identity: Arc::new(()),
+            maximum,
+            closed: false,
             inner: lillux::custody::Held::new(
                 ARC_ALIAS_INVENTORY_KIND,
-                OriginalExactArcAliasSlots { slots: Vec::with_capacity(maximum) },
-                arc_alias_slots_settled::<T>) })
+                OriginalExactArcAliasSlots {
+                    slots: Vec::with_capacity(maximum),
+                },
+                arc_alias_slots_settled::<T>,
+            ),
+        })
     }
     fn require_process(&self) -> Result<()> {
-        ensure!(!crate::foreign_process(self.process), "foreign original Arc alias inventory");
+        ensure!(
+            !crate::foreign_process(self.process),
+            "foreign original Arc alias inventory"
+        );
         Ok(())
     }
     fn require_binding(&self, binding: &OriginalExactArcAliasBinding<T>) -> Result<()> {
         self.require_process()?;
-        ensure!(binding.process == self.process && Arc::ptr_eq(&binding.inventory, &self.identity)
-            && binding.index < self.inner.slots.len(), "Arc alias binding selects another actual inventory");
+        ensure!(
+            binding.process == self.process
+                && Arc::ptr_eq(&binding.inventory, &self.identity)
+                && binding.index < self.inner.slots.len(),
+            "Arc alias binding selects another actual inventory"
+        );
         Ok(())
     }
-    pub fn retain_original(&mut self, original: Arc<T>, prepay: &dyn Fn(u64, u64) -> Result<()>)
-        -> std::result::Result<OriginalExactArcAliasBinding<T>, (Arc<T>, anyhow::Error)> {
+    pub fn retain_original(
+        &mut self,
+        original: Arc<T>,
+        prepay: &dyn Fn(u64, u64) -> Result<()>,
+    ) -> std::result::Result<OriginalExactArcAliasBinding<T>, (Arc<T>, anyhow::Error)> {
         let checked = (|| -> Result<()> {
             self.require_process()?;
             ensure!(!self.closed, "original Arc alias census already closed");
-            let work = u64::try_from(self.inner.slots.len())?.checked_add(4).context("original Arc alias scan overflow")?;
-            crate::original_physical_custody::retain_callback_refusal(&|| prepay(u64::try_from(std::mem::size_of::<OriginalExactArcAliasBinding<T>>())?, work))
+            let work = u64::try_from(self.inner.slots.len())?
+                .checked_add(4)
+                .context("original Arc alias scan overflow")?;
+            crate::original_physical_custody::retain_callback_refusal(&|| {
+                prepay(
+                    u64::try_from(std::mem::size_of::<OriginalExactArcAliasBinding<T>>())?,
+                    work,
+                )
+            })
         })();
-        if let Err(error) = checked { return Err((original, error)); }
+        if let Err(error) = checked {
+            return Err((original, error));
+        }
         for (index, slot) in self.inner.slots.iter().enumerate() {
-            if slot.original.as_ref().is_some_and(|canonical| Arc::ptr_eq(canonical, &original)) {
-                let binding = OriginalExactArcAliasBinding { process: self.process, inventory: self.identity.clone(),
-                    index, _owner: std::marker::PhantomData };
+            if slot
+                .original
+                .as_ref()
+                .is_some_and(|canonical| Arc::ptr_eq(canonical, &original))
+            {
+                let binding = OriginalExactArcAliasBinding {
+                    process: self.process,
+                    inventory: self.identity.clone(),
+                    index,
+                    _owner: std::marker::PhantomData,
+                };
                 drop(original); // Canonical actual owner already retained; alias only.
                 return Ok(binding);
             }
         }
         if self.inner.slots.len() == self.maximum {
-            return Err((original, anyhow!("original Arc alias inventory capacity exhausted")));
+            return Err((
+                original,
+                anyhow!("original Arc alias inventory capacity exhausted"),
+            ));
         }
         let index = self.inner.slots.len();
-        self.inner.get_mut().slots.push(OriginalExactArcAliasSlot { identity: Arc::downgrade(&original), original: Some(original), transferred: false });
-        Ok(OriginalExactArcAliasBinding { process: self.process, inventory: self.identity.clone(), index,
-            _owner: std::marker::PhantomData })
+        self.inner.get_mut().slots.push(OriginalExactArcAliasSlot {
+            identity: Arc::downgrade(&original),
+            original: Some(original),
+            transferred: false,
+        });
+        Ok(OriginalExactArcAliasBinding {
+            process: self.process,
+            inventory: self.identity.clone(),
+            index,
+            _owner: std::marker::PhantomData,
+        })
     }
-    pub fn require_retained_alias(&self, binding: &OriginalExactArcAliasBinding<T>, original: &Arc<T>) -> Result<()> {
+    pub fn require_retained_alias(
+        &self,
+        binding: &OriginalExactArcAliasBinding<T>,
+        original: &Arc<T>,
+    ) -> Result<()> {
         self.require_binding(binding)?;
-        ensure!(self.inner.slots[binding.index].original.as_ref().is_some_and(|canonical| Arc::ptr_eq(canonical, original)),
-            "actual canonical Arc owner is not retained for this alias");
+        ensure!(
+            self.inner.slots[binding.index]
+                .original
+                .as_ref()
+                .is_some_and(|canonical| Arc::ptr_eq(canonical, original)),
+            "actual canonical Arc owner is not retained for this alias"
+        );
         Ok(())
     }
     /// # Safety
     /// Domain supervisor has closed the COMPLETE actual leaf/parent census.
     /// This excludes new aliases only; it is not graph/physical/native proof.
     pub unsafe fn close_census(&mut self) -> Result<()> {
-        self.require_process()?; self.closed = true; Ok(())
+        self.require_process()?;
+        self.closed = true;
+        Ok(())
     }
     /// # Safety
     /// The typed original domain receiver must cache this entire real owner
     /// before every fallible step and preserve it on unwind/refusal. It may
     /// consume it ONCE in its original dependency order, returning the SAME
     /// whole owner here if transfer fails. Dropping it is not disposal proof.
-    pub unsafe fn take_original(&mut self, binding: &OriginalExactArcAliasBinding<T>) -> Result<Arc<T>> {
+    pub unsafe fn take_original(
+        &mut self,
+        binding: &OriginalExactArcAliasBinding<T>,
+    ) -> Result<Arc<T>> {
         self.require_binding(binding)?;
         ensure!(self.closed, "actual original Arc alias census still open");
-        self.inner.get_mut().slots[binding.index].original.take().context("actual canonical Arc owner already checked out")
+        self.inner.get_mut().slots[binding.index]
+            .original
+            .take()
+            .context("actual canonical Arc owner already checked out")
     }
-    pub fn restore_original(&mut self, binding: &OriginalExactArcAliasBinding<T>, original: Arc<T>)
-        -> std::result::Result<(), (Arc<T>, anyhow::Error)> {
+    pub fn restore_original(
+        &mut self,
+        binding: &OriginalExactArcAliasBinding<T>,
+        original: Arc<T>,
+    ) -> std::result::Result<(), (Arc<T>, anyhow::Error)> {
         let checked = (|| -> Result<()> {
             self.require_binding(binding)?;
             let slot = &self.inner.slots[binding.index];
-            ensure!(!slot.transferred && slot.original.is_none()
-                && std::sync::Weak::ptr_eq(&slot.identity, &Arc::downgrade(&original)),
-                "Arc refusal restoration selects another original owner or disposition");
+            ensure!(
+                !slot.transferred
+                    && slot.original.is_none()
+                    && std::sync::Weak::ptr_eq(&slot.identity, &Arc::downgrade(&original)),
+                "Arc refusal restoration selects another original owner or disposition"
+            );
             Ok(())
         })();
-        if let Err(error) = checked { return Err((original, error)); }
-        self.inner.get_mut().slots[binding.index].original = Some(original); Ok(())
+        if let Err(error) = checked {
+            return Err((original, error));
+        }
+        self.inner.get_mut().slots[binding.index].original = Some(original);
+        Ok(())
     }
     /// # Safety
     /// Actual typed domain receiver cached the entire consumed parent and
     /// genuine leaf evidence. No field/count/weak-null observation proves it.
-    pub unsafe fn record_actual_transfer(&mut self, binding: &OriginalExactArcAliasBinding<T>) -> Result<()> {
+    pub unsafe fn record_actual_transfer(
+        &mut self,
+        binding: &OriginalExactArcAliasBinding<T>,
+    ) -> Result<()> {
         self.require_binding(binding)?;
         let closed = self.closed;
         let slot = &mut self.inner.get_mut().slots[binding.index];
-        ensure!(closed && slot.original.is_none() && !slot.transferred, "actual canonical Arc owner has not transferred or already recorded");
-        slot.transferred = true; Ok(())
+        ensure!(
+            closed && slot.original.is_none() && !slot.transferred,
+            "actual canonical Arc owner has not transferred or already recorded"
+        );
+        slot.transferred = true;
+        Ok(())
     }
 }
 /// Actual retained sources, never reopened paths or inode-equivalence grants.
@@ -1308,11 +1760,17 @@ pub enum OriginalDestinationPhysicalSource {
 /// Returned booleans are observations; actual zero-loan sealing remains mandatory.
 pub unsafe trait OriginalOutsideDestinationContinuation: Send + Sync {
     fn require_original_process(&self) -> Result<()>;
-    fn retire_native_references(&mut self, factory: &Arc<OriginalNativeFactory>,
-        aggregate: &OriginalNativeTerminal, prepay: &dyn Fn(u64, u64) -> Result<()>) -> Result<()>;
-    unsafe fn register_shared_roots(&mut self,
+    fn retire_native_references(
+        &mut self,
+        factory: &Arc<OriginalNativeFactory>,
+        aggregate: &OriginalNativeTerminal,
+        prepay: &dyn Fn(u64, u64) -> Result<()>,
+    ) -> Result<()>;
+    unsafe fn register_shared_roots(
+        &mut self,
         registry: &mut crate::original_physical_custody::OriginalPhysicalRegistry,
-        prepay: &dyn Fn(u64, u64) -> Result<()>) -> Result<()>;
+        prepay: &dyn Fn(u64, u64) -> Result<()>,
+    ) -> Result<()>;
     fn physical_holders_retired(&self) -> Result<bool>;
     /// Upper bound for the owner's terminal holder census, derived from its
     /// retained source cardinality. The outside finalizer includes this work
@@ -1341,8 +1799,12 @@ fn destination_outside_settled(parts: &OriginalDestinationOutsideParts) -> bool 
     if !(parts.roots_registered && parts.native_references_retired) || !parts.sources.is_empty() {
         return false;
     }
-    let Some(registrations) = &parts.registrations else { return false; };
-    registrations.iter().all(|registration| registration.retired())
+    let Some(registrations) = &parts.registrations else {
+        return false;
+    };
+    registrations
+        .iter()
+        .all(|registration| registration.retired())
         && parts.continuation.require_original_process().is_ok()
         && matches!(parts.continuation.physical_holders_retired(), Ok(true))
 }
@@ -1367,54 +1829,82 @@ impl OriginalDestinationOutsideCustody {
     /// genuine aggregate, charged concrete Vec/Box storage before allocating,
     /// and moved all original roots/locks/semantics into these real inputs.
     /// This constructor grants no cleanup, zero-loan or account proof.
-    pub unsafe fn issued(sources: Vec<OriginalDestinationPhysicalSource>,
-        continuation: Box<dyn OriginalOutsideDestinationContinuation>) -> Self {
+    pub unsafe fn issued(
+        sources: Vec<OriginalDestinationPhysicalSource>,
+        continuation: Box<dyn OriginalOutsideDestinationContinuation>,
+    ) -> Self {
         Self {
             registry_identity: None,
             inner: lillux::custody::Held::new(
                 DESTINATION_OUTSIDE_CUSTODY_KIND,
                 OriginalDestinationOutsideParts {
-                    sources, continuation, registrations: None,
-                    roots_registered: false, native_references_retired: false,
+                    sources,
+                    continuation,
+                    registrations: None,
+                    roots_registered: false,
+                    native_references_retired: false,
                 },
                 destination_outside_settled,
             ),
         }
     }
     fn require_process(&self) -> Result<()> {
-        ensure!(!self.inner.is_foreign(), "foreign original destination outside custody");
+        ensure!(
+            !self.inner.is_foreign(),
+            "foreign original destination outside custody"
+        );
         self.inner.continuation.require_original_process()
     }
-    pub fn retire_native_references(&mut self, factory: &Arc<OriginalNativeFactory>,
-        aggregate: &OriginalNativeTerminal, prepay: &dyn Fn(u64, u64) -> Result<()>) -> Result<()> {
+    pub fn retire_native_references(
+        &mut self,
+        factory: &Arc<OriginalNativeFactory>,
+        aggregate: &OriginalNativeTerminal,
+        prepay: &dyn Fn(u64, u64) -> Result<()>,
+    ) -> Result<()> {
         self.require_process()?;
         factory.require_process()?;
         aggregate.require_original(factory)?;
-        if self.inner.native_references_retired { return Ok(()); }
-        ensure!(self.inner.roots_registered,
-            "original destination roots must join before native-reference retirement");
+        if self.inner.native_references_retired {
+            return Ok(());
+        }
+        ensure!(
+            self.inner.roots_registered,
+            "original destination roots must join before native-reference retirement"
+        );
         let continuation = std::cell::RefCell::new(&mut *self.inner.get_mut().continuation);
         crate::original_physical_custody::retain_callback_refusal(&|| {
-            continuation.borrow_mut().retire_native_references(factory, aggregate, prepay)
+            continuation
+                .borrow_mut()
+                .retire_native_references(factory, aggregate, prepay)
         })?;
         self.inner.get_mut().native_references_retired = true;
         Ok(())
     }
     /// # Safety
     /// SAME complete original supervisor inventory and irreversible prepay.
-    pub unsafe fn register_shared_roots(&mut self,
+    pub unsafe fn register_shared_roots(
+        &mut self,
         registry: &mut crate::original_physical_custody::OriginalPhysicalRegistry,
-        prepay: &dyn Fn(u64, u64) -> Result<()>) -> Result<()> {
+        prepay: &dyn Fn(u64, u64) -> Result<()>,
+    ) -> Result<()> {
         self.require_process()?;
         let registered = self.inner.registrations.as_ref().map_or(0, Vec::len);
-        let retained_sources = self.inner.sources.len().checked_add(registered)
+        let retained_sources = self
+            .inner
+            .sources
+            .len()
+            .checked_add(registered)
             .context("original destination source count overflow")?;
-        ensure!(retained_sources <= MAX_ORIGINAL_DESTINATION_PHYSICAL_SOURCES,
-            "original destination exceeds its selected four-source owner bound");
+        ensure!(
+            retained_sources <= MAX_ORIGINAL_DESTINATION_PHYSICAL_SOURCES,
+            "original destination exceeds its selected four-source owner bound"
+        );
         let registry_identity = registry.identity_token()?;
         if let Some(original) = &self.registry_identity {
-            ensure!(Arc::ptr_eq(original, &registry_identity),
-                "original destination registration changed physical registry");
+            ensure!(
+                Arc::ptr_eq(original, &registry_identity),
+                "original destination registration changed physical registry"
+            );
         } else {
             // Bind before any payer call or source move. A refused partial
             // transfer can only retry against this exact registry.
@@ -1430,43 +1920,80 @@ impl OriginalDestinationOutsideCustody {
         }
         if self.inner.registrations.is_none() {
             let count = self.inner.sources.len();
-            let bytes = count.checked_mul(std::mem::size_of::<crate::original_physical_custody::OriginalPhysicalRegistration>())
+            let bytes = count
+                .checked_mul(std::mem::size_of::<
+                    crate::original_physical_custody::OriginalPhysicalRegistration,
+                >())
                 .context("destination registration storage overflow")?;
-            registry.prepay_transfer(prepay, u64::try_from(bytes)?, u64::try_from(count)?.checked_add(1)
-                .context("destination registration work overflow")?)?;
+            registry.prepay_transfer(
+                prepay,
+                u64::try_from(bytes)?,
+                u64::try_from(count)?
+                    .checked_add(1)
+                    .context("destination registration work overflow")?,
+            )?;
             self.inner.get_mut().registrations = Some(Vec::with_capacity(count));
         }
         while let Some(source) = self.inner.get_mut().sources.pop() {
             let result = match source {
                 OriginalDestinationPhysicalSource::Directory(owner) => {
                     // SAFETY: actual source of this authentic consumed owner.
-                    unsafe { registry.register_directory(owner, prepay) }
-                        .map_err(|(owner, error)| (OriginalDestinationPhysicalSource::Directory(owner), error))
+                    unsafe { registry.register_directory(owner, prepay) }.map_err(
+                        |(owner, error)| {
+                            (OriginalDestinationPhysicalSource::Directory(owner), error)
+                        },
+                    )
                 }
                 OriginalDestinationPhysicalSource::Namespace(owner) => {
-                    unsafe { registry.register_namespace(owner, prepay) }
-                        .map_err(|(owner, error)| (OriginalDestinationPhysicalSource::Namespace(owner), error))
+                    unsafe { registry.register_namespace(owner, prepay) }.map_err(
+                        |(owner, error)| {
+                            (OriginalDestinationPhysicalSource::Namespace(owner), error)
+                        },
+                    )
                 }
             };
             match result {
-                Ok(binding) => self.inner.get_mut().registrations.as_mut().expect("prepaid exact registration storage").push(binding),
-                Err((owner, error)) => { self.inner.get_mut().sources.push(owner); return Err(error); }
+                Ok(binding) => self
+                    .inner
+                    .get_mut()
+                    .registrations
+                    .as_mut()
+                    .expect("prepaid exact registration storage")
+                    .push(binding),
+                Err((owner, error)) => {
+                    self.inner.get_mut().sources.push(owner);
+                    return Err(error);
+                }
             }
         }
         let continuation = std::cell::RefCell::new(&mut *self.inner.get_mut().continuation);
         let registry = std::cell::RefCell::new(registry);
         let result = crate::original_physical_custody::retain_callback_refusal(&|| {
             // SAFETY: same retained domain owner and actual supervisor registry.
-            unsafe { continuation.borrow_mut().register_shared_roots(&mut registry.borrow_mut(), prepay) }
+            unsafe {
+                continuation
+                    .borrow_mut()
+                    .register_shared_roots(&mut registry.borrow_mut(), prepay)
+            }
         });
-        if result.is_ok() { self.inner.get_mut().roots_registered = true; }
+        if result.is_ok() {
+            self.inner.get_mut().roots_registered = true;
+        }
         result
     }
     pub fn physical_holders_retired(&self) -> Result<bool> {
         self.require_process()?;
-        if !self.inner.sources.is_empty() { return Ok(false); }
-        let Some(registrations) = &self.inner.registrations else { return Ok(false); };
-        for registration in registrations { if !registration.retired() { return Ok(false); } }
+        if !self.inner.sources.is_empty() {
+            return Ok(false);
+        }
+        let Some(registrations) = &self.inner.registrations else {
+            return Ok(false);
+        };
+        for registration in registrations {
+            if !registration.retired() {
+                return Ok(false);
+            }
+        }
         self.inner.continuation.physical_holders_retired()
     }
     /// Capture the exact live terminal while the same physical registry and
@@ -1483,29 +2010,48 @@ impl OriginalDestinationOutsideCustody {
             self.require_process()?;
             factory.require_process()?;
             aggregate.require_original(factory)?;
-            ensure!(self.inner.roots_registered && self.inner.native_references_retired,
-                "original destination native-reference and registry joins are incomplete");
-            ensure!(self.inner.sources.is_empty(),
-                "original destination roots have not transferred to the shared registry");
-            let registry_identity = self.registry_identity.as_ref()
+            ensure!(
+                self.inner.roots_registered && self.inner.native_references_retired,
+                "original destination native-reference and registry joins are incomplete"
+            );
+            ensure!(
+                self.inner.sources.is_empty(),
+                "original destination roots have not transferred to the shared registry"
+            );
+            let registry_identity = self
+                .registry_identity
+                .as_ref()
                 .context("original destination registry identity absent")?;
             registry.require_identity_token(registry_identity)?;
-            let registrations = self.inner.registrations.as_ref()
+            let registrations = self
+                .inner
+                .registrations
+                .as_ref()
                 .context("original destination registration inventory absent")?;
             let quote = registry.membership_work_bound(u64::try_from(registrations.len())?, 0)?;
             registry.prepay_transfer(prepay, quote.bytes, quote.steps)?;
             self.require_process()?;
             factory.require_process()?;
             aggregate.require_original(factory)?;
-            ensure!(self.inner.roots_registered && self.inner.native_references_retired
-                && self.inner.sources.is_empty(),
-                "original destination registration changed during permit preparation");
-            registry.require_identity_token(self.registry_identity.as_ref()
-                .context("original destination registry identity disappeared")?)?;
-            for registration in registrations { registry.require_membership(registration)?; }
+            ensure!(
+                self.inner.roots_registered
+                    && self.inner.native_references_retired
+                    && self.inner.sources.is_empty(),
+                "original destination registration changed during permit preparation"
+            );
+            registry.require_identity_token(
+                self.registry_identity
+                    .as_ref()
+                    .context("original destination registry identity disappeared")?,
+            )?;
+            for registration in registrations {
+                registry.require_membership(registration)?;
+            }
             Ok(())
         })();
-        if let Err(error) = checked { return Err((self, error)); }
+        if let Err(error) = checked {
+            return Err((self, error));
+        }
         Ok(OriginalDestinationRetirement { destination: self })
     }
 }
@@ -1521,37 +2067,62 @@ impl OriginalDestinationRetirement {
         let checked = (|| -> Result<()> {
             let destination = &self.destination;
             destination.require_process()?;
-            ensure!(destination.inner.roots_registered && destination.inner.native_references_retired
-                && destination.inner.sources.is_empty(),
-                "original destination permit no longer matches its completed joins");
-            let registry_identity = destination.registry_identity.as_ref()
+            ensure!(
+                destination.inner.roots_registered
+                    && destination.inner.native_references_retired
+                    && destination.inner.sources.is_empty(),
+                "original destination permit no longer matches its completed joins"
+            );
+            let registry_identity = destination
+                .registry_identity
+                .as_ref()
                 .context("original destination permit lacks registry identity")?;
             registry.require_same_identity_token(registry_identity)?;
-            let registrations = destination.inner.registrations.as_ref()
+            let registrations = destination
+                .inner
+                .registrations
+                .as_ref()
                 .context("original destination registration inventory absent")?;
             let direct_checks = u64::try_from(registrations.len())?
                 .checked_mul(4)
                 .context("original destination retirement work quote overflow")?;
-            let continuation = destination.inner.continuation.physical_holders_retirement_quote()?;
+            let continuation = destination
+                .inner
+                .continuation
+                .physical_holders_retirement_quote()?;
             let quote = crate::original_physical_custody::OutsideWork {
                 bytes: 0,
-                steps: direct_checks.checked_add(4)
+                steps: direct_checks
+                    .checked_add(4)
                     .context("original destination retirement work quote overflow")?,
-            }.checked_add(continuation)?;
+            }
+            .checked_add(continuation)?;
             crate::original_physical_custody::retain_callback_refusal(&|| {
                 prepay(quote.bytes, quote.steps)
             })?;
             destination.require_process()?;
-            registry.require_same_identity_token(destination.registry_identity.as_ref()
-                .context("original destination registry identity disappeared")?)?;
-            for registration in registrations { registration.receipt()?; }
-            ensure!(destination.inner.sources.is_empty(),
-                "original destination retains unregistered physical sources");
-            ensure!(destination.inner.continuation.physical_holders_retired()?,
-                "original destination physical holders remain; custody retained");
+            registry.require_same_identity_token(
+                destination
+                    .registry_identity
+                    .as_ref()
+                    .context("original destination registry identity disappeared")?,
+            )?;
+            for registration in registrations {
+                registration.receipt()?;
+            }
+            ensure!(
+                destination.inner.sources.is_empty(),
+                "original destination retains unregistered physical sources"
+            );
+            ensure!(
+                destination.inner.continuation.physical_holders_retired()?,
+                "original destination physical holders remain; custody retained"
+            );
             Ok(())
         })();
-        if let Err(error) = checked { return Err((self, error)); }
+        if let Err(error) = checked {
+            return Err((self, error));
+        }
 
         // The checks above establish the settlement predicate: both joins, an
         // empty source vector, retired registrations and the continuation's
@@ -1562,8 +2133,10 @@ impl OriginalDestinationRetirement {
             Ok(_settled) => Ok(()),
             Err(held) => {
                 destination.inner = held;
-                Err((Self { destination },
-                    anyhow!("original destination settlement refused; custody retained")))
+                Err((
+                    Self { destination },
+                    anyhow!("original destination settlement refused; custody retained"),
+                ))
             }
         }
     }
@@ -1583,32 +2156,56 @@ pub struct OriginalDestinationCustodyFailure {
     inner: lillux::custody::Held<DestinationCustodyFailureParts>,
 }
 impl OriginalDestinationCustodyFailure {
-    pub fn retain(factory: Arc<OriginalNativeFactory>, authority: Arc<dyn OriginalNativeDestinationAuthority>, error: anyhow::Error) -> Self {
+    pub fn retain(
+        factory: Arc<OriginalNativeFactory>,
+        authority: Arc<dyn OriginalNativeDestinationAuthority>,
+        error: anyhow::Error,
+    ) -> Self {
         Self {
             error,
             inner: lillux::custody::Held::until_taken(
                 DESTINATION_CUSTODY_FAILURE_KIND,
-                DestinationCustodyFailureParts { factory, authority }),
+                DestinationCustodyFailureParts { factory, authority },
+            ),
         }
     }
-    pub fn into_original_inputs(self) -> std::result::Result<(Arc<OriginalNativeFactory>, Arc<dyn OriginalNativeDestinationAuthority>, anyhow::Error), Self> {
-        if self.inner.factory.require_process().is_err() { return Err(self); }
+    pub fn into_original_inputs(
+        self,
+    ) -> std::result::Result<
+        (
+            Arc<OriginalNativeFactory>,
+            Arc<dyn OriginalNativeDestinationAuthority>,
+            anyhow::Error,
+        ),
+        Self,
+    > {
+        if self.inner.factory.require_process().is_err() {
+            return Err(self);
+        }
         let Self { error, inner } = self;
         match inner.take_whole() {
             Ok(parts) => Ok((parts.factory, parts.authority, error)),
             Err(inner) => Err(Self { error, inner }),
         }
     }
-    pub fn error(&self) -> &anyhow::Error { &self.error }
+    pub fn error(&self) -> &anyhow::Error {
+        &self.error
+    }
 }
 impl std::fmt::Debug for OriginalDestinationCustodyFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str("actual destination authority retained") }
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("actual destination authority retained")
+    }
 }
 impl std::fmt::Display for OriginalDestinationCustodyFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "actual destination authority retained: {}", self.error) }
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "actual destination authority retained: {}", self.error)
+    }
 }
 impl std::error::Error for OriginalDestinationCustodyFailure {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> { Some(self.error.as_ref()) }
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.error.as_ref())
+    }
 }
 /// Host keeps the actual sealed original producer and authenticated intake
 /// authority. This does not supply domain mutation authority by itself.
@@ -1826,15 +2423,29 @@ pub struct OriginalNativeTransientInputs {
 }
 impl OriginalNativeTransientInputs {
     /// Purpose metadata only; this does not issue admission or a ticket.
-    pub fn domain(&self) -> OriginalNativeDomain { self.domain }
+    pub fn domain(&self) -> OriginalNativeDomain {
+        self.domain
+    }
 
     /// Consume an unused one-shot schema input only in its issuing process.
     /// This supplies no native terminal and no replacement admission.
     pub fn into_original_parts(
         self,
-    ) -> std::result::Result<(OriginalNativeDomain, Arc<dyn OriginalNativeDestinationAuthority>), Self> {
-        if crate::foreign_process(self.process) { return Err(self); }
-        let Self { process: _, domain, authority } = self;
+    ) -> std::result::Result<
+        (
+            OriginalNativeDomain,
+            Arc<dyn OriginalNativeDestinationAuthority>,
+        ),
+        Self,
+    > {
+        if crate::foreign_process(self.process) {
+            return Err(self);
+        }
+        let Self {
+            process: _,
+            domain,
+            authority,
+        } = self;
         Ok((domain, authority))
     }
 
@@ -1881,7 +2492,11 @@ impl OriginalNativeTransientInputs {
             ),
             "invalid transient native domain"
         );
-        Ok(Self { process: std::process::id(), domain, authority })
+        Ok(Self {
+            process: std::process::id(),
+            domain,
+            authority,
+        })
     }
 }
 /// The single destination input a native connection was opened with.
@@ -1905,8 +2520,12 @@ impl OriginalNativeDestinationInputs {
             Self::Transient(_) => None,
         }
     }
-    fn into_fields(this: Option<Self>)
-        -> (Option<OriginalNativeBoundInputs>, Option<Arc<dyn OriginalNativeDestinationAuthority>>) {
+    fn into_fields(
+        this: Option<Self>,
+    ) -> (
+        Option<OriginalNativeBoundInputs>,
+        Option<Arc<dyn OriginalNativeDestinationAuthority>>,
+    ) {
         match this {
             Some(Self::Bound(inputs)) => (Some(inputs), None),
             Some(Self::Transient(authority)) => (None, Some(authority)),
@@ -1916,19 +2535,24 @@ impl OriginalNativeDestinationInputs {
 }
 /// Weak authority identity cached when a receipt is built, so evidence stays
 /// stable after a take-capture moves the inputs out.
-fn destination_authority_witness(destination: &Option<OriginalNativeDestinationInputs>)
-    -> Option<std::sync::Weak<dyn OriginalNativeDestinationAuthority>> {
-    destination.as_ref().map(|inputs| Arc::downgrade(inputs.authority()))
+fn destination_authority_witness(
+    destination: &Option<OriginalNativeDestinationInputs>,
+) -> Option<std::sync::Weak<dyn OriginalNativeDestinationAuthority>> {
+    destination
+        .as_ref()
+        .map(|inputs| Arc::downgrade(inputs.authority()))
 }
 /// Poisoning is recovered: the slot holds plain owners with no invariant a
 /// panic could break. Only contention refuses.
-fn lock_destination(slot: &Mutex<Option<OriginalNativeDestinationInputs>>)
-    -> Result<std::sync::MutexGuard<'_, Option<OriginalNativeDestinationInputs>>> {
+fn lock_destination(
+    slot: &Mutex<Option<OriginalNativeDestinationInputs>>,
+) -> Result<std::sync::MutexGuard<'_, Option<OriginalNativeDestinationInputs>>> {
     match slot.try_lock() {
         Ok(guard) => Ok(guard),
         Err(std::sync::TryLockError::Poisoned(poisoned)) => Ok(poisoned.into_inner()),
-        Err(std::sync::TryLockError::WouldBlock) =>
-            anyhow::bail!("original destination inputs are busy"),
+        Err(std::sync::TryLockError::WouldBlock) => {
+            anyhow::bail!("original destination inputs are busy")
+        }
     }
 }
 pub struct OriginalNativeBoundInputs {
@@ -1942,7 +2566,9 @@ pub struct OriginalNativeBoundInputs {
 }
 pub struct OriginalNativeOutsideBoundCoordinate(crate::binding::BoundComponent);
 impl OriginalNativeOutsideBoundCoordinate {
-    pub fn as_os_str(&self) -> &OsStr { self.0.as_os_str() }
+    pub fn as_os_str(&self) -> &OsStr {
+        self.0.as_os_str()
+    }
 }
 pub struct OriginalNativeOutsideBoundParts {
     pub root: Arc<PinnedDirectory>,
@@ -1955,16 +2581,35 @@ pub struct OriginalNativeOutsideBoundParts {
 impl OriginalNativeBoundInputs {
     /// Move the exact resource/coordinate owners; this supplies no new grant.
     pub fn into_original_parts(self) -> std::result::Result<OriginalNativeOutsideBoundParts, Self> {
-        if crate::foreign_process(self.process) { return Err(self); }
-        let Self { process: _, root, name, mode, domain, authority, inspection } = self;
-        Ok(OriginalNativeOutsideBoundParts { root, name: OriginalNativeOutsideBoundCoordinate(name), mode, domain, authority, inspection })
+        if crate::foreign_process(self.process) {
+            return Err(self);
+        }
+        let Self {
+            process: _,
+            root,
+            name,
+            mode,
+            domain,
+            authority,
+            inspection,
+        } = self;
+        Ok(OriginalNativeOutsideBoundParts {
+            root,
+            name: OriginalNativeOutsideBoundCoordinate(name),
+            mode,
+            domain,
+            authority,
+            inspection,
+        })
     }
 
     /// Fixed scheduler role check before opening; no descriptor/authority escapes.
     pub fn require_scheduler_coordinate(&self) -> Result<()> {
-        ensure!(self.domain == OriginalNativeDomain::NodeScheduler
-            && self.name.as_os_str() == std::ffi::OsStr::new("scheduler.sqlite3"),
-            "scheduler admission selects another native coordinate");
+        ensure!(
+            self.domain == OriginalNativeDomain::NodeScheduler
+                && self.name.as_os_str() == std::ffi::OsStr::new("scheduler.sqlite3"),
+            "scheduler admission selects another native coordinate"
+        );
         Ok(())
     }
 
@@ -2181,8 +2826,7 @@ static NATIVE_COMMIT_TABLE: std::sync::RwLock<Option<Weak<NativeCommitTable>>> =
     std::sync::RwLock::new(None);
 
 extern "C" fn native_commit_verifier(ticket: std::ffi::c_uint) -> c_int {
-    std::panic::catch_unwind(|| verify_native_commit(ticket).is_ok())
-        .map_or(0, c_int::from)
+    std::panic::catch_unwind(|| verify_native_commit(ticket).is_ok()).map_or(0, c_int::from)
 }
 fn verify_native_commit(ticket: u32) -> Result<()> {
     let table = NATIVE_COMMIT_TABLE
@@ -2191,15 +2835,23 @@ fn verify_native_commit(ticket: u32) -> Result<()> {
         .as_ref()
         .and_then(Weak::upgrade)
         .context("native commit table absent")?;
-    let index = usize::try_from(ticket)?.checked_sub(1).context("native commit ticket zero")?;
-    let slot = table.slots.get(index).and_then(OnceLock::get)
+    let index = usize::try_from(ticket)?
+        .checked_sub(1)
+        .context("native commit ticket zero")?;
+    let slot = table
+        .slots
+        .get(index)
+        .and_then(OnceLock::get)
         .context("native commit on an unenrolled ticket")?;
     let verified = match slot.factory.upgrade() {
         Some(factory) => factory.boundary(BoundaryMode::CommitGate, || {
             if let Some(cell) = slot.cell {
                 producer_cell_checkpoint(&factory.region, cell)?;
             }
-            slot.control.upgrade().context("native commit producer owner vanished")?.checkpoint()?;
+            slot.control
+                .upgrade()
+                .context("native commit producer owner vanished")?
+                .checkpoint()?;
             slot.destination
                 .upgrade()
                 .context("native commit destination owner vanished")?
@@ -2215,19 +2867,40 @@ fn verify_native_commit(ticket: u32) -> Result<()> {
 /// No authority wrappers or region-owning backedges live inside the mapping.
 /// Fixed kernel control state and actual terminal observation are resident.
 pub(crate) struct NativeFactoryStorage {
-    installed: AtomicBool, arena: OnceLock<NativeArena>, arena_entered: AtomicBool, arena_attempt: AtomicU8,
-    initialized: AtomicBool, ready_acknowledged: AtomicBool, shutdown_completed: AtomicBool,
-    reclaim_completed: AtomicBool, arena_released: AtomicBool, finishing: AtomicBool,
+    installed: AtomicBool,
+    arena: OnceLock<NativeArena>,
+    arena_entered: AtomicBool,
+    arena_attempt: AtomicU8,
+    initialized: AtomicBool,
+    ready_acknowledged: AtomicBool,
+    shutdown_completed: AtomicBool,
+    reclaim_completed: AtomicBool,
+    arena_released: AtomicBool,
+    finishing: AtomicBool,
     terminal: Mutex<Option<Weak<OriginalNativeTerminal>>>,
-    terminal_body: OnceLock<OriginalNativeTerminalBody>, finalizer: AtomicBool,
+    terminal_body: OnceLock<OriginalNativeTerminalBody>,
+    finalizer: AtomicBool,
     tickets: [AtomicU8; MAX_NATIVE_CONNECTIONS],
 }
 impl NativeFactoryStorage {
-    fn new() -> Self { Self { installed: AtomicBool::new(false), arena: OnceLock::new(), arena_entered: AtomicBool::new(false),
-        arena_attempt: AtomicU8::new(0), initialized: AtomicBool::new(false), ready_acknowledged: AtomicBool::new(false),
-        shutdown_completed: AtomicBool::new(false), reclaim_completed: AtomicBool::new(false), arena_released: AtomicBool::new(false), finishing: AtomicBool::new(false),
-        terminal: Mutex::new(None), terminal_body: OnceLock::new(), finalizer: AtomicBool::new(false),
-        tickets: std::array::from_fn(|_| AtomicU8::new(0)) } }
+    fn new() -> Self {
+        Self {
+            installed: AtomicBool::new(false),
+            arena: OnceLock::new(),
+            arena_entered: AtomicBool::new(false),
+            arena_attempt: AtomicU8::new(0),
+            initialized: AtomicBool::new(false),
+            ready_acknowledged: AtomicBool::new(false),
+            shutdown_completed: AtomicBool::new(false),
+            reclaim_completed: AtomicBool::new(false),
+            arena_released: AtomicBool::new(false),
+            finishing: AtomicBool::new(false),
+            terminal: Mutex::new(None),
+            terminal_body: OnceLock::new(),
+            finalizer: AtomicBool::new(false),
+            tickets: std::array::from_fn(|_| AtomicU8::new(0)),
+        }
+    }
 }
 impl std::fmt::Debug for OriginalNativeFactory {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -2248,18 +2921,32 @@ impl OriginalNativeFactory {
     /// installing this object is not signature verification or mutation power.
     pub unsafe fn install_from_original_issuer(
         region: OriginalNativeRegionHandle,
-        authority: Arc<dyn OriginalNativeAdmissionAuthority>, producer: SqliteInspectionProductionPermit,
+        authority: Arc<dyn OriginalNativeAdmissionAuthority>,
+        producer: SqliteInspectionProductionPermit,
     ) -> std::result::Result<Arc<Self>, OriginalNativeFactoryFailure> {
         let budget = authority.budget();
-        let factory = Arc::new(Self { original_process: std::process::id(), region, authority, budget,
-            producer: Mutex::new(Some(producer)), budget_c_lease: OnceLock::new(),
-            commit_table: Arc::new(NativeCommitTable { slots: std::array::from_fn(|_| OnceLock::new()) }) });
+        let factory = Arc::new(Self {
+            original_process: std::process::id(),
+            region,
+            authority,
+            budget,
+            producer: Mutex::new(Some(producer)),
+            budget_c_lease: OnceLock::new(),
+            commit_table: Arc::new(NativeCommitTable {
+                slots: std::array::from_fn(|_| OnceLock::new()),
+            }),
+        });
         let result = (|| -> Result<()> {
             factory.require_original(false)?;
-            ensure!(factory.budget.same_region(&factory.region)?, "foreign resident budget region");
+            ensure!(
+                factory.budget.same_region(&factory.region)?,
+                "foreign resident budget region"
+            );
             factory.region.claim_factory_install()?;
             producer_kind_requires_region(&factory)?;
-            factory.budget_c_lease.set(factory.region.borrow_c()?)
+            factory
+                .budget_c_lease
+                .set(factory.region.borrow_c()?)
                 .map_err(|_| anyhow::anyhow!("native budget C loan already published"))?;
             Ok(())
         })();
@@ -2289,13 +2976,17 @@ impl OriginalNativeFactory {
     /// admission, acquisition or a ticket. The same concrete close path checks
     /// original cleanup authority, physically consumes the exact pin and
     /// retains an accessible owner on every refusal.
-    pub fn release_unacquired_projection_lease_inputs(self: &Arc<Self>, inputs: OriginalProjectionLeaseInputs)
-        -> std::result::Result<OriginalProjectionLeaseDisposition, OriginalProjectionLeaseFailure> {
+    pub fn release_unacquired_projection_lease_inputs(
+        self: &Arc<Self>,
+        inputs: OriginalProjectionLeaseInputs,
+    ) -> std::result::Result<OriginalProjectionLeaseDisposition, OriginalProjectionLeaseFailure>
+    {
         let owner = OriginalProjectionLease::new(self.clone(), inputs);
         owner.close()
     }
     pub fn acquire_projection_lease(
-        self: &Arc<Self>, inputs: OriginalProjectionLeaseInputs,
+        self: &Arc<Self>,
+        inputs: OriginalProjectionLeaseInputs,
     ) -> std::result::Result<OriginalProjectionLease, OriginalProjectionLeaseFailure> {
         let mut owner = OriginalProjectionLease::new(self.clone(), inputs);
         let result = (|| -> Result<()> {
@@ -2307,58 +2998,110 @@ impl OriginalNativeFactory {
             #[cfg(target_os = "linux")]
             {
                 use std::os::{fd::AsRawFd, unix::fs::MetadataExt};
-                let flags = unsafe { libc::fcntl(owner.inner.inputs.metadata.as_raw_fd(), libc::F_GETFL) };
-                ensure!(flags >= 0 && flags & libc::O_PATH != 0,
-                    "projection lease requires actual O_PATH metadata");
+                let flags =
+                    unsafe { libc::fcntl(owner.inner.inputs.metadata.as_raw_fd(), libc::F_GETFL) };
+                ensure!(
+                    flags >= 0 && flags & libc::O_PATH != 0,
+                    "projection lease requires actual O_PATH metadata"
+                );
                 let observed = owner.inner.inputs.metadata.metadata()?;
-                ensure!(observed.is_file(), "projection lease metadata is not regular");
+                ensure!(
+                    observed.is_file(),
+                    "projection lease metadata is not regular"
+                );
                 owner.inner.get_mut().inputs.identity = (observed.dev(), observed.ino());
                 owner.inner.inputs.root.ensure_path_binding()?;
-                owner.inner.inputs.root.ensure_open_regular_same_mount(&owner.inner.inputs.metadata)?;
+                owner
+                    .inner
+                    .inputs
+                    .root
+                    .ensure_open_regular_same_mount(&owner.inner.inputs.metadata)?;
             }
             let admission = match self.authority.begin_projection_lease() {
                 Ok(admission) => admission,
-                Err(error) => match error.downcast::<OriginalNativeProjectionLeaseAdmissionFailure>() {
-                    Ok(failure) => {
-                        owner.inner.get_mut().admission_failure = Some(failure);
-                        anyhow::bail!("actual published lease admission retained; validation recovery required");
+                Err(error) => {
+                    match error.downcast::<OriginalNativeProjectionLeaseAdmissionFailure>() {
+                        Ok(failure) => {
+                            owner.inner.get_mut().admission_failure = Some(failure);
+                            anyhow::bail!(
+                                "actual published lease admission retained; validation recovery required"
+                            );
+                        }
+                        Err(error) => return Err(error),
                     }
-                    Err(error) => return Err(error),
-                },
+                }
             };
             owner.ticket = Some(admission.ticket);
             owner.inner.get_mut().producer = Some(admission.producer);
-            owner.inner.producer.as_ref().context("lease producer missing")?.require_original_region(&self.region)?;
-            ensure!(admission.budget.same_original(&self.budget), "projection lease selects foreign budget");
+            owner
+                .inner
+                .producer
+                .as_ref()
+                .context("lease producer missing")?
+                .require_original_region(&self.region)?;
+            ensure!(
+                admission.budget.same_original(&self.budget),
+                "projection lease selects foreign budget"
+            );
             let ticket = owner.ticket.expect("actual issued lease ticket");
-            ensure!(ticket > 0 && ticket as usize <= MAX_NATIVE_CONNECTIONS
-                && self.storage()?.tickets[ticket as usize - 1].compare_exchange(0, 1,
-                    Ordering::AcqRel, Ordering::Acquire).is_ok(), "projection lease ticket is foreign/reused");
+            ensure!(
+                ticket > 0
+                    && ticket as usize <= MAX_NATIVE_CONNECTIONS
+                    && self.storage()?.tickets[ticket as usize - 1]
+                        .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+                        .is_ok(),
+                "projection lease ticket is foreign/reused"
+            );
             owner.ticket_registered = true;
             self.require_ready()?;
             owner.inner.inputs.authority.require_original(self, false)?;
             owner.inner.inputs.root.ensure_path_binding()?;
-            owner.inner.inputs.root.ensure_open_regular_same_mount(&owner.inner.inputs.metadata)?;
+            owner
+                .inner
+                .inputs
+                .root
+                .ensure_open_regular_same_mount(&owner.inner.inputs.metadata)?;
             let _scope = self.arena()?.scope(false, ticket)?;
-            owner.inner.producer.as_ref().context("lease producer missing")?.checkpoint()?;
+            owner
+                .inner
+                .producer
+                .as_ref()
+                .context("lease producer missing")?
+                .checkpoint()?;
             use std::os::fd::AsRawFd;
-            let mode = match owner.inner.inputs.mode { OriginalProjectionLeaseMode::Shared => 1,
-                OriginalProjectionLeaseMode::Exclusive => 2 };
+            let mode = match owner.inner.inputs.mode {
+                OriginalProjectionLeaseMode::Shared => 1,
+                OriginalProjectionLeaseMode::Exclusive => 2,
+            };
             let deadline = owner.inner.inputs.authority.fork_deadline(self, false)?;
             let fork_guard = lillux::exec::retain_fork_sensitive_descriptors_until(deadline)
                 .context("projection lease original service fork deadline refused")?;
-            ensure!(!deadline.has_elapsed(), "projection lease original service deadline elapsed");
+            ensure!(
+                !deadline.has_elapsed(),
+                "projection lease original service deadline elapsed"
+            );
             self.require_ready()?;
             owner.inner.inputs.authority.require_original(self, false)?;
-            let reservation = lillux::exec::reserve_borrowed_fork_child_close_descriptor(&fork_guard)
-                .map_err(|error| anyhow::anyhow!(error))?;
+            let reservation =
+                lillux::exec::reserve_borrowed_fork_child_close_descriptor(&fork_guard)
+                    .map_err(|error| anyhow::anyhow!(error))?;
             owner.inner.get_mut().fork_reservation = Some(reservation);
-            let (code, actual, actual_fd) = crate::binding::ProjectionLease::open(owner.inner.inputs.metadata.as_raw_fd(), mode);
+            let (code, actual, actual_fd) = crate::binding::ProjectionLease::open(
+                owner.inner.inputs.metadata.as_raw_fd(),
+                mode,
+            );
             owner.inner.get_mut().native = actual;
-            let reservation = owner.inner.get_mut().fork_reservation.take().expect("actual pre-effect fork reservation");
+            let reservation = owner
+                .inner
+                .get_mut()
+                .fork_reservation
+                .take()
+                .expect("actual pre-effect fork reservation");
             if let Some(actual_fd) = actual_fd {
                 match unsafe { reservation.bind(&fork_guard, actual_fd) } {
-                    Ok(registration) => owner.inner.get_mut().fork_registration = Some(registration),
+                    Ok(registration) => {
+                        owner.inner.get_mut().fork_registration = Some(registration)
+                    }
                     Err(reservation) => {
                         owner.inner.get_mut().fork_reservation = Some(reservation);
                         owner.fork_invariant_refused = true;
@@ -2377,8 +3120,10 @@ impl OriginalNativeFactory {
                 }
             }
             // Every actual partial FD is enrolled before status or late host checks.
-            ensure!(code == libsqlite3_sys::SQLITE_OK && owner.inner.native.is_some(),
-                "projection lease acquisition/flock refused ({code})");
+            ensure!(
+                code == libsqlite3_sys::SQLITE_OK && owner.inner.native.is_some(),
+                "projection lease acquisition/flock refused ({code})"
+            );
             self.require_ready()?;
             owner.inner.inputs.authority.require_original(self, false)
         })();
@@ -2387,7 +3132,11 @@ impl OriginalNativeFactory {
             Err(error) => Err(OriginalProjectionLeaseFailure {
                 error,
                 inner: lillux::custody::Held::until_taken(
-                    PROJECTION_LEASE_FAILURE_KIND, ProjectionLeaseFailureParts { owner: Mutex::new(owner) }),
+                    PROJECTION_LEASE_FAILURE_KIND,
+                    ProjectionLeaseFailureParts {
+                        owner: Mutex::new(owner),
+                    },
+                ),
             }),
         }
     }
@@ -2441,7 +3190,9 @@ impl OriginalNativeFactory {
     }
     /// Original process check only, usable before cleanup mutex traversal.
     /// It does not authorize native effects or renew a clock.
-    pub fn require_original_process(&self) -> Result<()> { self.require_process() }
+    pub fn require_original_process(&self) -> Result<()> {
+        self.require_process()
+    }
     fn require_process(&self) -> Result<()> {
         require_current_native_process()?;
         ensure!(
@@ -2469,7 +3220,8 @@ impl OriginalNativeFactory {
     fn boundary(&self, mode: BoundaryMode, service: impl FnOnce() -> Result<()>) -> Result<()> {
         let cleanup = mode == BoundaryMode::Cleanup;
         let checked = {
-            let scope = NativeBoundaryScope::enter(Arc::as_ptr(&self.authority) as *const (), cleanup);
+            let scope =
+                NativeBoundaryScope::enter(Arc::as_ptr(&self.authority) as *const (), cleanup);
             (|| -> Result<()> {
                 self.require_process()?;
                 self.require_original(cleanup)?;
@@ -2500,12 +3252,18 @@ impl OriginalNativeFactory {
             !self.storage()?.finalizer.swap(true, Ordering::AcqRel),
             "original native effect in progress"
         );
-        Ok(NativeEffectGuard(&self.storage()?.finalizer, self.original_process))
+        Ok(NativeEffectGuard(
+            &self.storage()?.finalizer,
+            self.original_process,
+        ))
     }
     fn arena(&self) -> Result<&NativeArena> {
         require_current_native_process()?;
         self.require_process()?;
-        self.storage()?.arena.get().context("original native arena absent")
+        self.storage()?
+            .arena
+            .get()
+            .context("original native arena absent")
     }
     /// Guarded evidence read run inside this factory's native scope. The
     /// alias gate's projection-lease census then answers for this genuine
@@ -2601,12 +3359,20 @@ impl OriginalNativeFactory {
                 self.budget.debit_steps(1, false)?;
                 let mut raw = std::ptr::null_mut();
                 self.storage()?.arena_attempt.store(1, Ordering::Release);
-                let code =
-                    unsafe { ryeos_native_arena_create(self.budget_c_lease.get().context("budget C loan absent")?.budget_pointer()?, &mut raw) };
+                let code = unsafe {
+                    ryeos_native_arena_create(
+                        self.budget_c_lease
+                            .get()
+                            .context("budget C loan absent")?
+                            .budget_pointer()?,
+                        &mut raw,
+                    )
+                };
                 // Retain actual effect before status/window checks.
                 if let Some(raw) = NonNull::new(raw) {
                     self.storage()?.arena_attempt.store(3, Ordering::Release);
-                    self.storage()?.arena
+                    self.storage()?
+                        .arena
                         .set(NativeArena(raw, std::process::id()))
                         .map_err(|_| anyhow::anyhow!("original arena registration conflict"))?;
                 } else if code != libsqlite3_sys::SQLITE_OK {
@@ -2621,11 +3387,14 @@ impl OriginalNativeFactory {
             }
             let arena = self.arena()?;
             ensure!(
-                unsafe { ryeos_native_commit_verifier_install(arena.0.as_ptr(), native_commit_verifier) }
-                    == libsqlite3_sys::SQLITE_OK,
+                unsafe {
+                    ryeos_native_commit_verifier_install(arena.0.as_ptr(), native_commit_verifier)
+                } == libsqlite3_sys::SQLITE_OK,
                 "original native commit verifier installation refused"
             );
-            *NATIVE_COMMIT_TABLE.write().map_err(|_| anyhow!("native commit table poisoned"))? =
+            *NATIVE_COMMIT_TABLE
+                .write()
+                .map_err(|_| anyhow!("native commit table poisoned"))? =
                 Some(Arc::downgrade(&self.commit_table));
             let _scope = arena.scope(false, 0)?;
             let code = unsafe { libsqlite3_sys::sqlite3_initialize() };
@@ -2653,7 +3422,9 @@ impl OriginalNativeFactory {
             .context("original native issuer interval missing")?
             .acknowledge_factory_handoff()?;
         // Publish Ready only after the actual issuer interval acknowledged it.
-        self.storage()?.ready_acknowledged.store(true, Ordering::Release);
+        self.storage()?
+            .ready_acknowledged
+            .store(true, Ordering::Release);
         Ok(())
     }
     fn acknowledge_terminal_issuer(&self, body: &OriginalNativeTerminalBody) -> Result<()> {
@@ -2684,13 +3455,19 @@ impl OriginalNativeFactory {
         self: &Arc<Self>,
         inputs: OriginalNativeTransientInputs,
     ) -> std::result::Result<OriginalNativeConnection, OriginalNativeOpenFailure> {
-        self.open_owned(inputs.domain, OriginalNativeDestinationInputs::Transient(inputs.authority))
+        self.open_owned(
+            inputs.domain,
+            OriginalNativeDestinationInputs::Transient(inputs.authority),
+        )
     }
     pub fn open_bound(
         self: &Arc<Self>,
         inputs: OriginalNativeBoundInputs,
     ) -> std::result::Result<OriginalNativeConnection, OriginalNativeOpenFailure> {
-        self.open_owned(inputs.domain, OriginalNativeDestinationInputs::Bound(inputs))
+        self.open_owned(
+            inputs.domain,
+            OriginalNativeDestinationInputs::Bound(inputs),
+        )
     }
     fn open_owned(
         self: &Arc<Self>,
@@ -2716,10 +3493,10 @@ impl OriginalNativeFactory {
                             | OriginalNativeDomain::NodeRuntimeSchemaReference
                             | OriginalNativeDomain::NodeOperationalSchemaReference
                             | OriginalNativeDomain::NodeProjectionSchemaReference
-                    | OriginalNativeDomain::NodeSchedulerSchemaReference
-                    | OriginalNativeDomain::NodeAccountingSchemaReference
-                    | OriginalNativeDomain::ExternalSupervisorJournalSchemaReference
-                    | OriginalNativeDomain::ExternalGuestJournalSchemaReference
+                            | OriginalNativeDomain::NodeSchedulerSchemaReference
+                            | OriginalNativeDomain::NodeAccountingSchemaReference
+                            | OriginalNativeDomain::ExternalSupervisorJournalSchemaReference
+                            | OriginalNativeDomain::ExternalGuestJournalSchemaReference
                     ),
                 "only admitted State domain may open transient SQLite"
             );
@@ -2729,7 +3506,9 @@ impl OriginalNativeFactory {
                 Err(error) => match error.downcast::<OriginalNativeConnectionAdmissionFailure>() {
                     Ok(failure) => {
                         admission_failure = Some(failure);
-                        anyhow::bail!("actual published SQL admission retained; validation recovery required");
+                        anyhow::bail!(
+                            "actual published SQL admission retained; validation recovery required"
+                        );
                     }
                     Err(error) => return Err(error),
                 },
@@ -2737,7 +3516,10 @@ impl OriginalNativeFactory {
             let original_ticket = admission.ticket;
             ticket = Some(original_ticket);
             producer = Some(admission.producer);
-            producer.as_ref().context("native producer missing")?.require_original_region(&self.region)?;
+            producer
+                .as_ref()
+                .context("native producer missing")?
+                .require_original_region(&self.region)?;
             // Preserve the genuine issuer interval even if custody/window
             // validation refuses before the first native acquisition.
             ensure!(
@@ -2817,7 +3599,11 @@ impl OriginalNativeFactory {
             let authority = self.authority.clone();
             body.connection().progress_handler(
                 1,
-                Some(native_step_hook(move || authority.debit_sql_vm_steps(1), None, Some(Arc::clone(&step_refused)))),
+                Some(native_step_hook(
+                    move || authority.debit_sql_vm_steps(1),
+                    None,
+                    Some(Arc::clone(&step_refused)),
+                )),
             );
             body.connection().busy_timeout(std::time::Duration::ZERO)?;
             body.connection().pragma_update(None, "mmap_size", 0)?;
@@ -2841,21 +3627,37 @@ impl OriginalNativeFactory {
                     crate::BoundSqliteOrigin::Created => true,
                     crate::BoundSqliteOrigin::Existing => {
                         writable_existing
-                            && owner.binding.as_ref().context("bound binding missing")?.main_empty()?
-                            && owner.connection()
-                                .query_row("PRAGMA page_count", [], |row| row.get::<_, i64>(0))? == 0
+                            && owner
+                                .binding
+                                .as_ref()
+                                .context("bound binding missing")?
+                                .main_empty()?
+                            && owner
+                                .connection()
+                                .query_row("PRAGMA page_count", [], |row| row.get::<_, i64>(0))?
+                                == 0
                     }
                 };
                 if stage {
-                    let staged: String = owner.connection()
-                        .query_row("PRAGMA journal_mode=MEMORY", [], |row| row.get(0))?;
-                    let mode: String = owner.connection()
-                        .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
-                    ensure!(staged == "memory" && mode == "wal", "empty bound database did not enter WAL");
+                    let staged: String =
+                        owner
+                            .connection()
+                            .query_row("PRAGMA journal_mode=MEMORY", [], |row| row.get(0))?;
+                    let mode: String =
+                        owner
+                            .connection()
+                            .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
+                    ensure!(
+                        staged == "memory" && mode == "wal",
+                        "empty bound database did not enter WAL"
+                    );
                 }
             }
             self.boundary(BoundaryMode::Service, || {
-                producer.as_ref().context("native producer missing")?.checkpoint()?;
+                producer
+                    .as_ref()
+                    .context("native producer missing")?
+                    .checkpoint()?;
                 destination.authority().require_original(self)
             })?;
             Ok(())
@@ -2898,46 +3700,65 @@ impl OriginalNativeFactory {
                         owner: open_owner_slot(acquired),
                         destination: Some(destination),
                     },
-                    native_open_failure_parts_released),
+                    native_open_failure_parts_released,
+                ),
             }),
         }
     }
     fn recover_undelivered_admission(
-        &self, budget: &OriginalNativeBudgetOwner, ticket: u32,
+        &self,
+        budget: &OriginalNativeBudgetOwner,
+        ticket: u32,
         producer: &SqliteInspectionProductionPermit,
         kind: SqliteInspectionProductionKind,
     ) -> Result<()> {
         self.require_original(true)?;
-        budget.require_original_process()
+        budget
+            .require_original_process()
             .map_err(|error| anyhow!("undelivered admission process refusal: {error:?}"))?;
         let _effect = self.enter_effect()?;
-        ensure!(budget.same_original(&self.budget) && budget.contains_issued_ticket(ticket)?,
-            "undelivered admission selects foreign original budget/ticket");
-        ensure!(producer.kind == kind, "undelivered admission has foreign purpose");
+        ensure!(
+            budget.same_original(&self.budget) && budget.contains_issued_ticket(ticket)?,
+            "undelivered admission selects foreign original budget/ticket"
+        );
+        ensure!(
+            producer.kind == kind,
+            "undelivered admission has foreign purpose"
+        );
         let crate::ProductionControlOwner::Region { core, .. } = &producer.control else {
             anyhow::bail!("undelivered admission lacks actual resident producer");
         };
-        ensure!(core.same_region(&self.region), "undelivered admission selects foreign region");
+        ensure!(
+            core.same_region(&self.region),
+            "undelivered admission selects foreign region"
+        );
         core.require_kind(kind)?;
         let cell = core.cell()?;
-        ensure!(cell.ticket.load(Ordering::Acquire) == ticket,
-            "undelivered admission selects another actual producer ticket");
+        ensure!(
+            cell.ticket.load(Ordering::Acquire) == ticket,
+            "undelivered admission selects another actual producer ticket"
+        );
         let slot = &self.storage()?.tickets[ticket as usize - 1];
         match cell.phase.load(Ordering::Acquire) {
             1 => {
-                ensure!(slot.load(Ordering::Acquire) == 0,
-                    "undelivered admission already has conflicting native activity");
+                ensure!(
+                    slot.load(Ordering::Acquire) == 0,
+                    "undelivered admission already has conflicting native activity"
+                );
                 // Only these private typed failure owners prove non-delivery.
                 // Phase/slot observations alone do not authorize this transition.
-                cell.phase.compare_exchange(1, 5, Ordering::AcqRel, Ordering::Acquire)
+                cell.phase
+                    .compare_exchange(1, 5, Ordering::AcqRel, Ordering::Acquire)
                     .map_err(|_| anyhow!("undelivered producer recovery busy"))?;
             }
             5 => {}
             _ => anyhow::bail!("undelivered producer has conflicting original phase"),
         }
         match slot.load(Ordering::Acquire) {
-            0 => { slot.compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
-                .map_err(|_| anyhow!("undelivered ticket recovery busy"))?; }
+            0 => {
+                slot.compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+                    .map_err(|_| anyhow!("undelivered ticket recovery busy"))?;
+            }
             1 => {}
             _ => anyhow::bail!("undelivered ticket has conflicting native disposition"),
         }
@@ -2949,19 +3770,32 @@ impl OriginalNativeFactory {
     /// The caller retains `core` and its outside preparation custody on every
     /// refusal. This produces a real C closed-ticket receipt; it neither opens
     /// a connection/lease nor substitutes an enum for native acknowledgement.
-    pub fn retire_unpublished_ticket(self: &Arc<Self>, core: &OriginalNativeProducerControl)
-        -> Result<Arc<ReleasedOriginalNativeAcquisition>> {
+    pub fn retire_unpublished_ticket(
+        self: &Arc<Self>,
+        core: &OriginalNativeProducerControl,
+    ) -> Result<Arc<ReleasedOriginalNativeAcquisition>> {
         self.require_original(true)?;
         let _effect = self.enter_effect()?;
-        ensure!(core.same_region(&self.region), "unpublished ticket selects foreign region");
+        ensure!(
+            core.same_region(&self.region),
+            "unpublished ticket selects foreign region"
+        );
         let cell = core.cell()?;
-        ensure!(matches!(cell.kind.load(Ordering::Acquire), 4 | 5),
-            "ticket recovery requires native or lease preparation");
+        ensure!(
+            matches!(cell.kind.load(Ordering::Acquire), 4 | 5),
+            "ticket recovery requires native or lease preparation"
+        );
         let ticket = cell.ticket.load(Ordering::Acquire);
-        ensure!(self.budget.contains_issued_ticket(ticket)?, "preparation lacks actual issued ticket");
+        ensure!(
+            self.budget.contains_issued_ticket(ticket)?,
+            "preparation lacks actual issued ticket"
+        );
         match cell.phase.load(Ordering::Acquire) {
-            0 => { cell.phase.compare_exchange(0, 5, Ordering::AcqRel, Ordering::Acquire)
-                .map_err(|_| anyhow::anyhow!("preparation publication/recovery busy"))?; }
+            0 => {
+                cell.phase
+                    .compare_exchange(0, 5, Ordering::AcqRel, Ordering::Acquire)
+                    .map_err(|_| anyhow::anyhow!("preparation publication/recovery busy"))?;
+            }
             5 => {}
             2 if self.storage()?.tickets[ticket as usize - 1].load(Ordering::Acquire) == 3 => {}
             _ => anyhow::bail!("published producer cannot use preparation recovery"),
@@ -2988,10 +3822,15 @@ impl OriginalNativeFactory {
         core.reference_retired();
         Ok(Arc::new(ReleasedOriginalNativeAcquisition {
             domain: None,
-            factory: self.clone(), ticket: Some(ticket),
-            original_error: anyhow::anyhow!("original producer preparation ended before publication"),
-            inspection: None, closed_inspection: None,
-            destination: Mutex::new(None), destination_authority: None,
+            factory: self.clone(),
+            ticket: Some(ticket),
+            original_error: anyhow::anyhow!(
+                "original producer preparation ended before publication"
+            ),
+            inspection: None,
+            closed_inspection: None,
+            destination: Mutex::new(None),
+            destination_authority: None,
         }))
     }
     fn mark_closed(&self, ticket: u32, acquisition: bool) -> Result<()> {
@@ -3002,7 +3841,8 @@ impl OriginalNativeFactory {
                 == libsqlite3_sys::SQLITE_OK,
             "original native closed ticket acknowledgement refused"
         );
-        self.storage()?.tickets[ticket as usize - 1].store(if acquisition { 3 } else { 2 }, Ordering::Release);
+        self.storage()?.tickets[ticket as usize - 1]
+            .store(if acquisition { 3 } else { 2 }, Ordering::Release);
         Ok(())
     }
     /// Original allocator cleanup scope only. Caller keeps its genuine
@@ -3087,7 +3927,10 @@ impl OriginalNativeFactory {
             completed = Some(operation(&context));
             Ok(())
         })();
-        Self::scope_outcome(entered.and_then(|()| self.require_original(false)), completed)
+        Self::scope_outcome(
+            entered.and_then(|()| self.require_original(false)),
+            completed,
+        )
     }
     /// Native work that holds no ticket of its own, such as a stopped
     /// owner's observations, role mutations, release and drop, inside a
@@ -3111,7 +3954,10 @@ impl OriginalNativeFactory {
             completed = Some(operation(&context));
             Ok(())
         })();
-        Self::scope_outcome(entered.and_then(|()| self.require_original(false)), completed)
+        Self::scope_outcome(
+            entered.and_then(|()| self.require_original(false)),
+            completed,
+        )
     }
     fn scope_outcome<T>(
         checked: Result<()>,
@@ -3135,14 +3981,22 @@ impl OriginalNativeFactory {
         leases: &[Arc<ClosedOriginalProjectionLease>],
         inputs: &OriginalNativeCleanupInputs,
     ) -> std::result::Result<Arc<OriginalNativeTerminal>, OriginalNativeFactoryFailure> {
-        self.finish_original_backend_owned(terminals, leases, OriginalNativeFinishIntake::Offline(inputs))
+        self.finish_original_backend_owned(
+            terminals,
+            leases,
+            OriginalNativeFinishIntake::Offline(inputs),
+        )
     }
     /// Drain an actual pre-Ready initialization refusal without inventing a
     /// connection terminal or requiring a seal blocked by the issuer interval.
     pub fn finish_original_initialization_refusal(
         self: &Arc<Self>,
     ) -> std::result::Result<Arc<OriginalNativeTerminal>, OriginalNativeFactoryFailure> {
-        self.finish_original_backend_owned(&[], &[], OriginalNativeFinishIntake::InitializationRefusal)
+        self.finish_original_backend_owned(
+            &[],
+            &[],
+            OriginalNativeFinishIntake::InitializationRefusal,
+        )
     }
     /// Genuine live factory drain permits a Ready zero-ticket census without
     /// inventing a connection terminal. SQL and lease receipts remain distinct;
@@ -3153,7 +4007,11 @@ impl OriginalNativeFactory {
         leases: &[Arc<ClosedOriginalProjectionLease>],
         inputs: &OriginalLiveNativeDrainInputs,
     ) -> std::result::Result<Arc<OriginalNativeTerminal>, OriginalNativeFactoryFailure> {
-        self.finish_original_backend_owned(terminals, leases, OriginalNativeFinishIntake::Live(inputs))
+        self.finish_original_backend_owned(
+            terminals,
+            leases,
+            OriginalNativeFinishIntake::Live(inputs),
+        )
     }
     fn require_finish_intake(
         self: &Arc<Self>,
@@ -3226,7 +4084,10 @@ impl OriginalNativeFactory {
             for lease in leases {
                 lease.require_original(self)?;
                 let index = lease.ticket as usize - 1;
-                ensure!(index < count && !seen[index], "foreign/duplicate projection lease census ticket");
+                ensure!(
+                    index < count && !seen[index],
+                    "foreign/duplicate projection lease census ticket"
+                );
                 seen[index] = true;
             }
             if let Some(proof) = self.retained_terminal() {
@@ -3242,25 +4103,44 @@ impl OriginalNativeFactory {
                     "original factory acquisition unresolved; no absence terminal"
                 );
                 let body = OriginalNativeTerminalBody {
-                    budget: self.budget.snapshot()?, arena_disposition: OriginalNativeArenaDisposition::NotAcquired,
+                    budget: self.budget.snapshot()?,
+                    arena_disposition: OriginalNativeArenaDisposition::NotAcquired,
                     issuer_acknowledged: AtomicBool::new(false),
                 };
-                self.storage()?.terminal_body
+                self.storage()?
+                    .terminal_body
                     .set(body)
                     .map_err(|_| anyhow::anyhow!("original refusal body conflict"))?;
-                let body = self.storage()?.terminal_body.get().context("retained absence body missing")?;
+                let body = self
+                    .storage()?
+                    .terminal_body
+                    .get()
+                    .context("retained absence body missing")?;
                 self.acknowledge_terminal_issuer(body)?;
                 self.require_original(true)?;
-                return Ok(Arc::new(OriginalNativeTerminal { factory: self.clone(), body: NonNull::from(body) }));
+                return Ok(Arc::new(OriginalNativeTerminal {
+                    factory: self.clone(),
+                    body: NonNull::from(body),
+                }));
             }
             if self.storage()?.arena_released.load(Ordering::Acquire) {
-                let body = OriginalNativeTerminalBody { budget: self.budget.snapshot()?,
-                    arena_disposition: OriginalNativeArenaDisposition::Released, issuer_acknowledged: AtomicBool::new(false) };
+                let body = OriginalNativeTerminalBody {
+                    budget: self.budget.snapshot()?,
+                    arena_disposition: OriginalNativeArenaDisposition::Released,
+                    issuer_acknowledged: AtomicBool::new(false),
+                };
                 let _ = self.storage()?.terminal_body.set(body);
-                let body = self.storage()?.terminal_body.get().context("actual release body absent")?;
+                let body = self
+                    .storage()?
+                    .terminal_body
+                    .get()
+                    .context("actual release body absent")?;
                 self.acknowledge_terminal_issuer(body)?;
                 self.require_original(true)?;
-                return Ok(Arc::new(OriginalNativeTerminal { factory: self.clone(), body: NonNull::from(body) }));
+                return Ok(Arc::new(OriginalNativeTerminal {
+                    factory: self.clone(),
+                    body: NonNull::from(body),
+                }));
             }
             let arena = self.arena()?;
             let _scope = arena.scope(true, 0)?;
@@ -3271,7 +4151,9 @@ impl OriginalNativeFactory {
                     code == libsqlite3_sys::SQLITE_OK,
                     "original native shutdown pending ({code})"
                 );
-                self.storage()?.shutdown_completed.store(true, Ordering::Release);
+                self.storage()?
+                    .shutdown_completed
+                    .store(true, Ordering::Release);
             }
             if !self.storage()?.reclaim_completed.load(Ordering::Acquire) {
                 ensure!(
@@ -3279,7 +4161,9 @@ impl OriginalNativeFactory {
                         == libsqlite3_sys::SQLITE_OK,
                     "original native pending allocations remain"
                 );
-                self.storage()?.reclaim_completed.store(true, Ordering::Release);
+                self.storage()?
+                    .reclaim_completed
+                    .store(true, Ordering::Release);
             }
             drop(_scope);
             self.budget.debit_steps(1, true)?;
@@ -3288,27 +4172,43 @@ impl OriginalNativeFactory {
                     == libsqlite3_sys::SQLITE_OK,
                 "original native arena release pending"
             );
-            self.storage()?.arena_released.store(true, Ordering::Release);
+            self.storage()?
+                .arena_released
+                .store(true, Ordering::Release);
             {
-                let mut current = NATIVE_COMMIT_TABLE.write()
+                let mut current = NATIVE_COMMIT_TABLE
+                    .write()
                     .map_err(|_| anyhow!("native commit table poisoned"))?;
-                if current.as_ref().is_some_and(|table| std::ptr::eq(table.as_ptr(), Arc::as_ptr(&self.commit_table))) {
+                if current.as_ref().is_some_and(|table| {
+                    std::ptr::eq(table.as_ptr(), Arc::as_ptr(&self.commit_table))
+                }) {
                     *current = None;
                 }
             }
             // Store irreversible actual release before any later clock/memo
             // check; retries return SAME body and never touch unmapped arena.
             let body = OriginalNativeTerminalBody {
-                budget: self.budget.snapshot()?, arena_disposition: OriginalNativeArenaDisposition::Released,
+                budget: self.budget.snapshot()?,
+                arena_disposition: OriginalNativeArenaDisposition::Released,
                 issuer_acknowledged: AtomicBool::new(false),
             };
-            self.storage()?.terminal_body
+            self.storage()?
+                .terminal_body
                 .set(body)
                 .map_err(|_| anyhow::anyhow!("original native terminal body conflict"))?;
-            let body = self.storage()?.terminal_body.get().context("retained release body missing")?;
+            let body = self
+                .storage()?
+                .terminal_body
+                .get()
+                .context("retained release body missing")?;
             self.acknowledge_terminal_issuer(body)?;
-            let proof = Arc::new(OriginalNativeTerminal { factory: self.clone(), body: NonNull::from(body) });
-            *self.storage()?.terminal
+            let proof = Arc::new(OriginalNativeTerminal {
+                factory: self.clone(),
+                body: NonNull::from(body),
+            });
+            *self
+                .storage()?
+                .terminal
                 .try_lock()
                 .map_err(|_| anyhow::anyhow!("native terminal memo busy"))? =
                 Some(Arc::downgrade(&proof));
@@ -3421,8 +4321,11 @@ impl NativeOriginalDeadlineScope<'_> {
         let authority = self.owner.inner.factory.authority.clone();
         self.connection.progress_handler(
             1,
-            Some(native_step_hook(move || authority.debit_sql_vm_steps(1), None,
-                Some(Arc::clone(&self.owner.inner.step_refused)))),
+            Some(native_step_hook(
+                move || authority.debit_sql_vm_steps(1),
+                None,
+                Some(Arc::clone(&self.owner.inner.step_refused)),
+            )),
         );
         let restored = self.connection.busy_timeout(self.prior_busy);
         self.owner.deadline_active.set(false);
@@ -3473,14 +4376,21 @@ impl ClosedOriginalNativeTicketReceipt {
     /// This remains valid after the factory value and resident mapping are gone.
     pub fn require_factory_witness(&self, factory: &Weak<OriginalNativeFactory>) -> Result<()> {
         require_current_native_process()?;
-        ensure!(!crate::foreign_process(self.process),
-            "closed native ticket receipt belongs to another process");
-        ensure!(self.domain == OriginalNativeDomain::NodeOperational
-            && self.ticket > 0 && self.ticket as usize <= MAX_NATIVE_CONNECTIONS
-            && self.bound_identity.is_some(),
-            "closed native ticket receipt has invalid Operational identity");
-        ensure!(Weak::ptr_eq(&self.factory, factory),
-            "closed native ticket receipt selects a foreign factory allocation");
+        ensure!(
+            !crate::foreign_process(self.process),
+            "closed native ticket receipt belongs to another process"
+        );
+        ensure!(
+            self.domain == OriginalNativeDomain::NodeOperational
+                && self.ticket > 0
+                && self.ticket as usize <= MAX_NATIVE_CONNECTIONS
+                && self.bound_identity.is_some(),
+            "closed native ticket receipt has invalid Operational identity"
+        );
+        ensure!(
+            Weak::ptr_eq(&self.factory, factory),
+            "closed native ticket receipt selects a foreign factory allocation"
+        );
         Ok(())
     }
 }
@@ -3518,12 +4428,18 @@ impl DurableLiveOperationalInitialization {
     ) -> Result<()> {
         self.factory.require_original_process()?;
         factory.require_original_process()?;
-        ensure!(Arc::ptr_eq(&self.factory, factory),
-            "live initialization retirement selects a foreign factory");
-        ensure!(self.ticket > 0 && self.ticket as usize <= MAX_NATIVE_CONNECTIONS,
-            "live initialization retirement ticket is outside the native bound");
-        ensure!(factory.storage()?.tickets[self.ticket as usize - 1].load(Ordering::Acquire) == 2,
-            "live initialization ticket remains open before metadata retirement");
+        ensure!(
+            Arc::ptr_eq(&self.factory, factory),
+            "live initialization retirement selects a foreign factory"
+        );
+        ensure!(
+            self.ticket > 0 && self.ticket as usize <= MAX_NATIVE_CONNECTIONS,
+            "live initialization retirement ticket is outside the native bound"
+        );
+        ensure!(
+            factory.storage()?.tickets[self.ticket as usize - 1].load(Ordering::Acquire) == 2,
+            "live initialization ticket remains open before metadata retirement"
+        );
         Ok(())
     }
 
@@ -3544,10 +4460,13 @@ impl DurableLiveOperationalInitialization {
         })
     }
 }
-const LIVE_INITIALIZATION_FAILURE_KIND: &str = "lillux-sqlite::live-operational-initialization-failure";
+const LIVE_INITIALIZATION_FAILURE_KIND: &str =
+    "lillux-sqlite::live-operational-initialization-failure";
 /// The live connection of a refused initialization. Constructible only in this
 /// module.
-struct LiveInitializationFailureParts { owner: OriginalNativeConnection }
+struct LiveInitializationFailureParts {
+    owner: OriginalNativeConnection,
+}
 /// Holds the SAME live owner and actual partial outcomes; no cleanup runs from
 /// here. Only `into_parts` settles an initialization refusal. Any other end
 /// retains the whole owner, counted, until the process exits.
@@ -3566,17 +4485,29 @@ impl LiveOperationalInitializationFailure {
     pub fn into_parts(
         self,
     ) -> std::result::Result<
-        (anyhow::Error, OriginalNativeConnection, LiveOperationalInitializationOutcome),
+        (
+            anyhow::Error,
+            OriginalNativeConnection,
+            LiveOperationalInitializationOutcome,
+        ),
         Self,
     > {
         if self.inner.owner.require_original_process().is_err() {
             return Err(self);
         }
         // Exactly this retained owner transfers once, together with its partial facts.
-        let Self { error, outcome, inner } = self;
+        let Self {
+            error,
+            outcome,
+            inner,
+        } = self;
         match inner.take_whole() {
             Ok(parts) => Ok((error, parts.owner, outcome)),
-            Err(inner) => Err(Self { error, outcome, inner }),
+            Err(inner) => Err(Self {
+                error,
+                outcome,
+                inner,
+            }),
         }
     }
 }
@@ -3623,7 +4554,9 @@ struct NativeConnectionParts {
 /// native side refuses, is never settled: dropping its fields would act on
 /// custody that process does not hold.
 fn factory_held_here(factory: &OriginalNativeFactory) -> bool {
-    process_held_here(factory.original_process, || factory.require_process().is_ok())
+    process_held_here(factory.original_process, || {
+        factory.require_process().is_ok()
+    })
 }
 fn process_held_here(original_process: u32, native_check: impl FnOnce() -> bool) -> bool {
     !crate::foreign_process(original_process) && native_check()
@@ -3637,9 +4570,13 @@ fn native_connection_parts_released(parts: &NativeConnectionParts) -> bool {
     factory_held_here(&parts.factory)
 }
 const NATIVE_CONNECTION_WRAPPER_KIND: &str = "lillux-sqlite::native-connection-wrapper";
-fn native_connection_body(body: NativeConnectionBody) -> lillux::custody::Held<NativeConnectionBody> {
+fn native_connection_body(
+    body: NativeConnectionBody,
+) -> lillux::custody::Held<NativeConnectionBody> {
     lillux::custody::Held::until_taken(
-        crate::AbandonedSqliteOwnerKind::NativeConnection.custody_kind(), body)
+        crate::AbandonedSqliteOwnerKind::NativeConnection.custody_kind(),
+        body,
+    )
 }
 impl OriginalNativeConnection {
     /// Check the actual factory process identity before changing wrapper state.
@@ -3662,27 +4599,36 @@ impl OriginalNativeConnection {
                 self.domain == OriginalNativeDomain::NodeOperational,
                 "live initialization durability requires NodeOperational"
             );
-            let Some(OriginalNativeDestinationInputs::Bound(inputs)) = self.inner.destination.as_ref() else {
+            let Some(OriginalNativeDestinationInputs::Bound(inputs)) =
+                self.inner.destination.as_ref()
+            else {
                 anyhow::bail!("live Bound inputs absent");
             };
             ensure!(
-                matches!(inputs.mode, OriginalNativeBoundMode::Existing
-                    | OriginalNativeBoundMode::CreateExclusive
-                    | OriginalNativeBoundMode::OpenOrCreate),
+                matches!(
+                    inputs.mode,
+                    OriginalNativeBoundMode::Existing
+                        | OriginalNativeBoundMode::CreateExclusive
+                        | OriginalNativeBoundMode::OpenOrCreate
+                ),
                 "live initialization durability requires writable Bound"
             );
             self.inner.factory.require_ready()?;
             let _effect = self.inner.factory.enter_effect()?;
             self.with_sql(|connection| {
-                let (busy, log, checkpointed): (i64, i64, i64) = connection.query_row(
-                    "PRAGMA wal_checkpoint(TRUNCATE)", [],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                )?;
-                ensure!(busy == 0 && log == 0 && checkpointed == 0,
-                    "live initialization checkpoint incomplete ({busy}, {log}, {checkpointed})");
+                let (busy, log, checkpointed): (i64, i64, i64) =
+                    connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+                        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                    })?;
+                ensure!(
+                    busy == 0 && log == 0 && checkpointed == 0,
+                    "live initialization checkpoint incomplete ({busy}, {log}, {checkpointed})"
+                );
                 outcome.checkpoint_completed = true;
                 self.service_boundary()?;
-                let NativeConnectionBody::Bound(owner) = self.inner.body.as_deref().context("live body absent")? else {
+                let NativeConnectionBody::Bound(owner) =
+                    self.inner.body.as_deref().context("live body absent")?
+                else {
                     anyhow::bail!("live initialization owner is not Bound")
                 };
                 let binding = owner.binding.as_ref().context("live Bound keeper absent")?;
@@ -3692,9 +4638,13 @@ impl OriginalNativeConnection {
                 // Retain actual irreversible effects before interpreting code or late authority.
                 outcome.wal_synced = synced.wal_synced;
                 outcome.main_synced = synced.main_synced;
-                ensure!(synced.code == libsqlite3_sys::SQLITE_OK
-                    && synced.wal_synced && synced.main_synced,
-                    "live Bound initialization sync refused ({})", synced.code);
+                ensure!(
+                    synced.code == libsqlite3_sys::SQLITE_OK
+                        && synced.wal_synced
+                        && synced.main_synced,
+                    "live Bound initialization sync refused ({})",
+                    synced.code
+                );
                 self.service_boundary()?;
                 self.inner.factory.budget.debit_steps(1, false)?;
                 inputs.root.sync()?;
@@ -3717,7 +4667,9 @@ impl OriginalNativeConnection {
                 error,
                 outcome,
                 inner: lillux::custody::Held::until_taken(
-                    LIVE_INITIALIZATION_FAILURE_KIND, LiveInitializationFailureParts { owner: self }),
+                    LIVE_INITIALIZATION_FAILURE_KIND,
+                    LiveInitializationFailureParts { owner: self },
+                ),
             }),
         }
     }
@@ -3907,16 +4859,25 @@ impl OriginalNativeConnection {
     /// metadata, not namespace or retirement authority; no connection escapes.
     pub fn scheduler_bound_origin(&self) -> Result<crate::BoundSqliteOrigin> {
         require_current_native_process()?;
-        ensure!(self.domain == OriginalNativeDomain::NodeScheduler,
-            "scheduler origin requires actual NodeScheduler owner");
+        ensure!(
+            self.domain == OriginalNativeDomain::NodeScheduler,
+            "scheduler origin requires actual NodeScheduler owner"
+        );
         self.inner.factory.require_ready()?;
         self.with_sql(|connection| {
-            let NativeConnectionBody::Bound(owner) = self.inner.body.as_deref()
-                .context("original scheduler connection closed")? else {
+            let NativeConnectionBody::Bound(owner) = self
+                .inner
+                .body
+                .as_deref()
+                .context("original scheduler connection closed")?
+            else {
                 anyhow::bail!("scheduler origin requires actual Bound keeper")
             };
             self.inner.factory.budget.debit_steps(1, false)?;
-            owner.binding.as_ref().context("original scheduler keeper missing")?
+            owner
+                .binding
+                .as_ref()
+                .context("original scheduler keeper missing")?
                 .validate(connection, false)?;
             Ok(owner.origin())
         })
@@ -3925,19 +4886,30 @@ impl OriginalNativeConnection {
     /// Matching a directory alone supplies no scheduler service authority.
     pub fn require_scheduler_runtime(&self, runtime: &PinnedDirectory) -> Result<()> {
         require_current_native_process()?;
-        ensure!(self.domain == OriginalNativeDomain::NodeScheduler,
-            "scheduler runtime check requires actual NodeScheduler owner");
+        ensure!(
+            self.domain == OriginalNativeDomain::NodeScheduler,
+            "scheduler runtime check requires actual NodeScheduler owner"
+        );
         self.inner.factory.require_ready()?;
         self.with_sql(|connection| {
-            let NativeConnectionBody::Bound(owner) = self.inner.body.as_deref()
-                .context("original scheduler connection closed")? else {
+            let NativeConnectionBody::Bound(owner) = self
+                .inner
+                .body
+                .as_deref()
+                .context("original scheduler connection closed")?
+            else {
                 anyhow::bail!("scheduler runtime check requires actual Bound keeper")
             };
-            ensure!(owner.runtime().is_same_directory(runtime)?,
-                "scheduler owner selects foreign runtime");
+            ensure!(
+                owner.runtime().is_same_directory(runtime)?,
+                "scheduler owner selects foreign runtime"
+            );
             runtime.ensure_path_binding()?;
             self.inner.factory.budget.debit_steps(1, false)?;
-            owner.binding.as_ref().context("original scheduler keeper missing")?
+            owner
+                .binding
+                .as_ref()
+                .context("original scheduler keeper missing")?
                 .validate(connection, false)
         })
     }
@@ -3946,12 +4918,18 @@ impl OriginalNativeConnection {
     /// success is not schema, durability, retirement or terminal evidence.
     pub fn establish_scheduler_wal_binding(&self) -> Result<()> {
         require_current_native_process()?;
-        ensure!(self.domain == OriginalNativeDomain::NodeScheduler,
-            "scheduler WAL requires actual NodeScheduler owner");
+        ensure!(
+            self.domain == OriginalNativeDomain::NodeScheduler,
+            "scheduler WAL requires actual NodeScheduler owner"
+        );
         self.inner.factory.require_ready()?;
         self.with_sql(|_| {
-            let NativeConnectionBody::Bound(owner) = self.inner.body.as_deref()
-                .context("original scheduler connection closed")? else {
+            let NativeConnectionBody::Bound(owner) = self
+                .inner
+                .body
+                .as_deref()
+                .context("original scheduler connection closed")?
+            else {
                 anyhow::bail!("scheduler WAL requires actual Bound keeper")
             };
             self.inner.factory.budget.debit_steps(1, false)?;
@@ -4002,12 +4980,15 @@ impl OriginalNativeConnection {
     /// authority facts, producer and destination.
     fn service_boundary(&self) -> Result<()> {
         self.inner.factory.boundary(BoundaryMode::Service, || {
-            self.inner.producer
+            self.inner
+                .producer
                 .as_ref()
                 .context("original native producer missing")?
                 .checkpoint()?;
             if let Some(destination) = &self.inner.destination {
-                destination.authority().require_original(&self.inner.factory)?;
+                destination
+                    .authority()
+                    .require_original(&self.inner.factory)?;
             }
             Ok(())
         })
@@ -4015,8 +4996,12 @@ impl OriginalNativeConnection {
     /// Exit of one scoped SQL operation. A scope that ended in a boundary,
     /// step-hook or commit-gate refusal with a transaction still open retains
     /// that transaction for close; the owner's own SQL errors do not.
-    fn finish_sql_scope<T>(&self, result: Result<T>, autocommit: bool,
-        refusal: &StepRefusalScope) -> Result<T> {
+    fn finish_sql_scope<T>(
+        &self,
+        result: Result<T>,
+        autocommit: bool,
+        refusal: &StepRefusalScope,
+    ) -> Result<T> {
         let post = self.service_boundary();
         let step_refused = refusal.refused();
         if (post.is_err() || step_refused) && !autocommit {
@@ -4073,14 +5058,20 @@ impl OriginalNativeConnection {
         mut self,
     ) -> std::result::Result<Arc<ClosedOriginalNativeConnection>, OriginalNativeCloseFailure> {
         let mut process_error = self.inner.factory.require_process().err();
-        let held = self.inner.get_mut().body.take().expect("original live native body");
+        let held = self
+            .inner
+            .get_mut()
+            .body
+            .take()
+            .expect("original live native body");
         // A copy in another process may not take the body: it stays with the
         // copy, which relinquishes it, and the failure carries no owner.
         let owner = match held.take_whole() {
             Ok(body) => Some(NativeCloseOwner::Live(body)),
             Err(held) => {
                 self.inner.get_mut().body = Some(held);
-                process_error.get_or_insert_with(|| anyhow!("native connection belongs to another process"));
+                process_error
+                    .get_or_insert_with(|| anyhow!("native connection belongs to another process"));
                 None
             }
         };
@@ -4099,7 +5090,8 @@ impl OriginalNativeConnection {
                     owner: close_owner_slot(owner),
                     destination,
                 },
-                native_close_failure_parts_released),
+                native_close_failure_parts_released,
+            ),
         }
         .retry()
     }
@@ -4123,7 +5115,9 @@ impl ClosedOriginalNativeConnection {
         require_current_native_process()?;
         ensure!(
             Arc::ptr_eq(&self.factory, factory)
-                && self.factory.storage()?.tickets[self.ticket as usize - 1].load(Ordering::Acquire) == 2,
+                && self.factory.storage()?.tickets[self.ticket as usize - 1]
+                    .load(Ordering::Acquire)
+                    == 2,
             "closed native proof selects foreign/pending owner"
         );
         Ok(())
@@ -4138,8 +5132,10 @@ impl ClosedOriginalNativeConnection {
         factory: &Arc<OriginalNativeFactory>,
     ) -> Result<ClosedOriginalNativeTicketReceipt> {
         self.require_original(factory)?;
-        ensure!(self.domain == OriginalNativeDomain::NodeOperational,
-            "closed ticket receipt requires NodeOperational");
+        ensure!(
+            self.domain == OriginalNativeDomain::NodeOperational,
+            "closed ticket receipt requires NodeOperational"
+        );
         Ok(ClosedOriginalNativeTicketReceipt {
             process: std::process::id(),
             domain: self.domain,
@@ -4324,23 +5320,35 @@ impl ClosedOriginalNativeConnection {
         self: &Arc<Self>,
         factory: &Arc<OriginalNativeFactory>,
         terminal: &OriginalNativeTerminal,
-    ) -> Result<Option<(OriginalNativeOutsideLeafEvidence, OriginalNativeDestinationInputs)>> {
+    ) -> Result<
+        Option<(
+            OriginalNativeOutsideLeafEvidence,
+            OriginalNativeDestinationInputs,
+        )>,
+    > {
         require_current_native_process()?;
         terminal.require_original(factory)?;
         self.require_original(factory)?;
-        ensure!(!self.durable_finalizer.load(Ordering::Acquire),
-            "original generated durability effect is in flight");
+        ensure!(
+            !self.durable_finalizer.load(Ordering::Acquire),
+            "original generated durability effect is in flight"
+        );
         let mut slot = lock_destination(&self.destination)?;
-        let Some(inputs) = slot.take() else { return Ok(None) };
-        Ok(Some((OriginalNativeOutsideLeafEvidence {
-            process: std::process::id(),
-            identity: OriginalNativeOutsideLeafIdentity::Closed(Arc::downgrade(self)),
-            factory: Arc::downgrade(&self.factory),
-            authority: self.destination_authority.clone(),
-            ticket: Some(self.ticket),
-            domain: Some(self.domain),
-            closed: true,
-        }, inputs)))
+        let Some(inputs) = slot.take() else {
+            return Ok(None);
+        };
+        Ok(Some((
+            OriginalNativeOutsideLeafEvidence {
+                process: std::process::id(),
+                identity: OriginalNativeOutsideLeafIdentity::Closed(Arc::downgrade(self)),
+                factory: Arc::downgrade(&self.factory),
+                authority: self.destination_authority.clone(),
+                ticket: Some(self.ticket),
+                domain: Some(self.domain),
+                closed: true,
+            },
+            inputs,
+        )))
     }
     /// Exact original generated Bound only, after real SQL/native close.
     /// No SQL reopen, raw connection, data descriptor or generic fsync grant.
@@ -4513,11 +5521,19 @@ pub enum OriginalSchedulerRetirementEffect {
 /// guessed counter. If the exact lower effect has no bounded implementation,
 /// prepay_effect MUST refuse before that effect; no fallback is permitted.
 pub unsafe trait OriginalSchedulerRetirementAuthority: Send + Sync {
-    fn require_original(&self, factory: &Arc<OriginalNativeFactory>,
-        generation: [u8; 16], cleanup: bool) -> Result<()>;
-    fn prepay_effect(&self, factory: &Arc<OriginalNativeFactory>,
-        generation: [u8; 16], effect: OriginalSchedulerRetirementEffect,
-        cleanup: bool) -> Result<()>;
+    fn require_original(
+        &self,
+        factory: &Arc<OriginalNativeFactory>,
+        generation: [u8; 16],
+        cleanup: bool,
+    ) -> Result<()>;
+    fn prepay_effect(
+        &self,
+        factory: &Arc<OriginalNativeFactory>,
+        generation: [u8; 16],
+        effect: OriginalSchedulerRetirementEffect,
+        cleanup: bool,
+    ) -> Result<()>;
 }
 pub struct OriginalSchedulerRetirementInputs {
     generation: [u8; 16],
@@ -4525,15 +5541,22 @@ pub struct OriginalSchedulerRetirementInputs {
 }
 impl OriginalSchedulerRetirementInputs {
     /// Immutable request identity, not authenticated retirement authority.
-    pub fn generation(&self) -> [u8; 16] { self.generation }
+    pub fn generation(&self) -> [u8; 16] {
+        self.generation
+    }
 
     /// # Safety
     /// These are genuine retained original intent and effect-funding owners,
     /// not coordinates or a permissive callback. Control storage must already
     /// be funded before this input or any failure owner is constructed.
-    pub unsafe fn issued(generation: [u8; 16],
-        authority: Arc<dyn OriginalSchedulerRetirementAuthority>) -> Self {
-        Self { generation, authority }
+    pub unsafe fn issued(
+        generation: [u8; 16],
+        authority: Arc<dyn OriginalSchedulerRetirementAuthority>,
+    ) -> Self {
+        Self {
+            generation,
+            authority,
+        }
     }
 }
 enum OriginalSchedulerRetirementPhase {
@@ -4559,7 +5582,9 @@ struct OriginalSchedulerRetirementBody {
 }
 impl OriginalSchedulerRetirementBody {
     fn factory(&self) -> &Arc<OriginalNativeFactory> {
-        if let Some(factory) = &self.factory { return factory; }
+        if let Some(factory) = &self.factory {
+            return factory;
+        }
         let Some(OriginalSchedulerRetirementPhase::Initial(owner)) = self.phase.as_ref() else {
             unreachable!("original retirement factory remains in initial owner until transfer")
         };
@@ -4577,7 +5602,9 @@ pub struct OriginalSchedulerRetirement {
 }
 /// The retained retirement of a refused step. Constructible only in this
 /// module.
-struct SchedulerRetirementFailureParts { owner: Mutex<OriginalSchedulerRetirement> }
+struct SchedulerRetirementFailureParts {
+    owner: Mutex<OriginalSchedulerRetirement>,
+}
 /// Only `into_owner` settles a retirement refusal. Any other end retains the
 /// retirement with every phase owner, counted, until the process exits.
 pub struct OriginalSchedulerRetirementFailure {
@@ -4586,24 +5613,42 @@ pub struct OriginalSchedulerRetirementFailure {
 }
 impl std::fmt::Debug for OriginalSchedulerRetirementFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("OriginalSchedulerRetirementFailure").field("error", &self.error).finish_non_exhaustive()
+        f.debug_struct("OriginalSchedulerRetirementFailure")
+            .field("error", &self.error)
+            .finish_non_exhaustive()
     }
 }
 impl std::fmt::Display for OriginalSchedulerRetirementFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { std::fmt::Display::fmt(&self.error, f) }
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.error, f)
+    }
 }
 impl std::error::Error for OriginalSchedulerRetirementFailure {}
 impl OriginalSchedulerRetirementFailure {
-    pub fn error(&self) -> &anyhow::Error { &self.error }
+    pub fn error(&self) -> &anyhow::Error {
+        &self.error
+    }
     pub fn into_owner(mut self) -> std::result::Result<OriginalSchedulerRetirement, Self> {
-        if require_current_native_process().is_err() { return Err(self); }
-        let owner = self.inner.get_mut().owner.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner);
-        if owner.body.factory().require_process().is_err() { return Err(self); }
+        if require_current_native_process().is_err() {
+            return Err(self);
+        }
+        let owner = self
+            .inner
+            .get_mut()
+            .owner
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if owner.body.factory().require_process().is_err() {
+            return Err(self);
+        }
         let Self { error, inner } = self;
         match inner.take_whole() {
             Ok(parts) => {
                 drop(error);
-                Ok(parts.owner.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner))
+                Ok(parts
+                    .owner
+                    .into_inner()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner))
             }
             Err(inner) => Err(Self { error, inner }),
         }
@@ -4613,18 +5658,30 @@ impl OriginalNativeConnection {
     /// Stop ordinary SQL by transferring this SAME scheduler connection into
     /// authenticated retirement. Failure retains the original connection or
     /// exact partial role owner; no ordinary Bound can escape.
-    pub fn begin_scheduler_retirement(self, inputs: OriginalSchedulerRetirementInputs)
-        -> std::result::Result<(OriginalSchedulerRetirement, crate::CapturedSqliteRoleFacts), OriginalSchedulerRetirementFailure> {
+    pub fn begin_scheduler_retirement(
+        self,
+        inputs: OriginalSchedulerRetirementInputs,
+    ) -> std::result::Result<
+        (OriginalSchedulerRetirement, crate::CapturedSqliteRoleFacts),
+        OriginalSchedulerRetirementFailure,
+    > {
         let owner = OriginalSchedulerRetirement {
             body: lillux::custody::Held::until_taken(
                 SCHEDULER_RETIREMENT_KIND,
                 OriginalSchedulerRetirementBody {
-                    factory: None, ticket: self.ticket, inputs,
-                    destination: None, producer: None,
+                    factory: None,
+                    ticket: self.ticket,
+                    inputs,
+                    destination: None,
+                    producer: None,
                     phase: Some(OriginalSchedulerRetirementPhase::Initial(self)),
-                    bound_identity: None, sql_consumed: false, c_sql_cleared: false,
-                    physical_release: false, terminal: None,
-                }),
+                    bound_identity: None,
+                    sql_consumed: false,
+                    c_sql_cleared: false,
+                    physical_release: false,
+                    terminal: None,
+                },
+            ),
         };
         owner.capture()
     }
@@ -4634,43 +5691,84 @@ impl OriginalSchedulerRetirement {
         OriginalSchedulerRetirementFailure {
             error,
             inner: lillux::custody::Held::until_taken(
-                SCHEDULER_RETIREMENT_FAILURE_KIND, SchedulerRetirementFailureParts { owner: Mutex::new(self) }),
+                SCHEDULER_RETIREMENT_FAILURE_KIND,
+                SchedulerRetirementFailureParts {
+                    owner: Mutex::new(self),
+                },
+            ),
         }
     }
     fn require_authority(&self, cleanup: bool) -> Result<()> {
         self.body.factory().require_original(cleanup)?;
-        self.body.inputs.authority.require_original(self.body.factory(),
-            self.body.inputs.generation, cleanup)
+        self.body.inputs.authority.require_original(
+            self.body.factory(),
+            self.body.inputs.generation,
+            cleanup,
+        )
     }
     // Commit known physical consumption BEFORE interpreting the overall lower
     // result. C phase3 alone is never a Rust terminal or producer ACK.
     fn observe_sql_consumption(&mut self) -> Result<()> {
-        let consumed = match self.body.phase.as_ref().context("retirement phase absent")? {
+        let consumed = match self
+            .body
+            .phase
+            .as_ref()
+            .context("retirement phase absent")?
+        {
             OriginalSchedulerRetirementPhase::Initial(owner) => {
-                ensure!(owner.inner.body.is_some(), "contradictory initial SQL custody"); false
+                ensure!(
+                    owner.inner.body.is_some(),
+                    "contradictory initial SQL custody"
+                );
+                false
             }
             OriginalSchedulerRetirementPhase::Bound(owner) => {
-                ensure!(owner.connection.is_some(), "contradictory Bound SQL custody"); false
+                ensure!(
+                    owner.connection.is_some(),
+                    "contradictory Bound SQL custody"
+                );
+                false
             }
             OriginalSchedulerRetirementPhase::Captured(_) => false,
             OriginalSchedulerRetirementPhase::Drained(owner) => {
-                ensure!(owner.stopped_plan.is_none(), "stopped source cannot clear live ticket"); true
+                ensure!(
+                    owner.stopped_plan.is_none(),
+                    "stopped source cannot clear live ticket"
+                );
+                true
             }
-            OriginalSchedulerRetirementPhase::Failed(failure) => failure.original_live_sql_consumed()?,
+            OriginalSchedulerRetirementPhase::Failed(failure) => {
+                failure.original_live_sql_consumed()?
+            }
             OriginalSchedulerRetirementPhase::Released => true,
         };
-        ensure!(!self.body.sql_consumed || consumed, "retirement cannot resurrect consumed SQL");
-        if consumed { self.body.get_mut().sql_consumed = true; }
+        ensure!(
+            !self.body.sql_consumed || consumed,
+            "retirement cannot resurrect consumed SQL"
+        );
+        if consumed {
+            self.body.get_mut().sql_consumed = true;
+        }
         if consumed && !self.body.c_sql_cleared {
             let arena = self.body.factory().arena()?;
-            let code = unsafe { ryeos_native_connection_closed(arena.0.as_ptr(), self.body.ticket) };
-            if code == libsqlite3_sys::SQLITE_OK { self.body.get_mut().c_sql_cleared = true; }
-            ensure!(code == libsqlite3_sys::SQLITE_OK, "retirement SQL census clear refused");
+            let code =
+                unsafe { ryeos_native_connection_closed(arena.0.as_ptr(), self.body.ticket) };
+            if code == libsqlite3_sys::SQLITE_OK {
+                self.body.get_mut().c_sql_cleared = true;
+            }
+            ensure!(
+                code == libsqlite3_sys::SQLITE_OK,
+                "retirement SQL census clear refused"
+            );
         }
         Ok(())
     }
-    fn effect<T>(&mut self, effect: OriginalSchedulerRetirementEffect, cleanup: bool,
-        operation: impl FnOnce(&mut OriginalSchedulerRetirementBody) -> Result<T>) -> Result<T> {
+    fn effect<T>(
+        &mut self,
+        effect: OriginalSchedulerRetirementEffect,
+        cleanup: bool,
+        operation: impl FnOnce(&mut OriginalSchedulerRetirementBody) -> Result<T>,
+    ) -> Result<T> {
         require_current_native_process()?;
         self.require_authority(cleanup)?;
         let factory = self.body.factory().clone();
@@ -4679,13 +5777,20 @@ impl OriginalSchedulerRetirement {
         if !cleanup {
             factory.require_ready()?;
             let producer = match self.body.phase.as_ref() {
-                Some(OriginalSchedulerRetirementPhase::Initial(owner)) => owner.inner.producer.as_ref(),
+                Some(OriginalSchedulerRetirementPhase::Initial(owner)) => {
+                    owner.inner.producer.as_ref()
+                }
                 _ => self.body.producer.as_ref(),
-            }.context("original retirement producer absent")?;
+            }
+            .context("original retirement producer absent")?;
             producer.checkpoint()?;
         }
-        self.body.inputs.authority.prepay_effect(&factory,
-            self.body.inputs.generation, effect, cleanup)?;
+        self.body.inputs.authority.prepay_effect(
+            &factory,
+            self.body.inputs.generation,
+            effect,
+            cleanup,
+        )?;
         self.require_authority(cleanup)?;
         let _scope = factory.arena()?.scope(cleanup, 0)?;
         let result = operation(self.body.get_mut());
@@ -4700,58 +5805,95 @@ impl OriginalSchedulerRetirement {
         }
     }
     fn prepare_initial(body: &mut OriginalSchedulerRetirementBody, cleanup: bool) -> Result<()> {
-            if let Some(OriginalSchedulerRetirementPhase::Initial(owner)) = body.phase.as_ref() {
-                ensure!(owner.domain == OriginalNativeDomain::NodeScheduler,
-                    "retirement requires actual NodeScheduler connection");
-                let Some(OriginalNativeDestinationInputs::Bound(destination)) = owner.inner.destination.as_ref() else {
-                    anyhow::bail!("scheduler destination absent");
-                };
-                ensure!(destination.name.as_os_str() == OsStr::new("scheduler.sqlite3"),
-                    "retirement requires exact fixed scheduler role");
-                if !cleanup { destination.authority.require_original(body.factory())?; }
-                let NativeConnectionBody::Bound(bound) = owner.inner.body.as_deref().context("scheduler SQL owner absent")? else {
-                    anyhow::bail!("retirement requires actual scheduler Bound keeper")
-                };
-                bound.binding.as_ref().context("scheduler keeper absent")?.validate(bound.connection(), false)?;
-                body.bound_identity = Some(bound.binding.as_ref().unwrap().main_identity()?);
+        if let Some(OriginalSchedulerRetirementPhase::Initial(owner)) = body.phase.as_ref() {
+            ensure!(
+                owner.domain == OriginalNativeDomain::NodeScheduler,
+                "retirement requires actual NodeScheduler connection"
+            );
+            let Some(OriginalNativeDestinationInputs::Bound(destination)) =
+                owner.inner.destination.as_ref()
+            else {
+                anyhow::bail!("scheduler destination absent");
+            };
+            ensure!(
+                destination.name.as_os_str() == OsStr::new("scheduler.sqlite3"),
+                "retirement requires exact fixed scheduler role"
+            );
+            if !cleanup {
+                destination.authority.require_original(body.factory())?;
             }
-            if matches!(body.phase.as_ref(), Some(OriginalSchedulerRetirementPhase::Initial(_))) {
-                let Some(OriginalSchedulerRetirementPhase::Initial(mut owner)) = body.phase.take() else { unreachable!() };
-                let held = owner.inner.get_mut().body.take();
-                let bound = match held.map(lillux::custody::Held::take_whole) {
-                    Some(Ok(NativeConnectionBody::Bound(bound))) => bound,
-                    Some(Ok(_)) | None => unreachable!(),
-                    Some(Err(held)) => {
-                        // A copy in another process keeps its body.
-                        owner.inner.get_mut().body = Some(held);
-                        body.phase = Some(OriginalSchedulerRetirementPhase::Initial(owner));
-                        anyhow::bail!("scheduler connection belongs to another process");
-                    }
-                };
-                body.factory = Some(Arc::clone(&owner.inner.factory));
-                body.destination = owner.inner.get_mut().destination.take();
-                body.producer = owner.inner.get_mut().producer.take();
-                body.phase = Some(OriginalSchedulerRetirementPhase::Bound(bound));
-            }
+            let NativeConnectionBody::Bound(bound) = owner
+                .inner
+                .body
+                .as_deref()
+                .context("scheduler SQL owner absent")?
+            else {
+                anyhow::bail!("retirement requires actual scheduler Bound keeper")
+            };
+            bound
+                .binding
+                .as_ref()
+                .context("scheduler keeper absent")?
+                .validate(bound.connection(), false)?;
+            body.bound_identity = Some(bound.binding.as_ref().unwrap().main_identity()?);
+        }
+        if matches!(
+            body.phase.as_ref(),
+            Some(OriginalSchedulerRetirementPhase::Initial(_))
+        ) {
+            let Some(OriginalSchedulerRetirementPhase::Initial(mut owner)) = body.phase.take()
+            else {
+                unreachable!()
+            };
+            let held = owner.inner.get_mut().body.take();
+            let bound = match held.map(lillux::custody::Held::take_whole) {
+                Some(Ok(NativeConnectionBody::Bound(bound))) => bound,
+                Some(Ok(_)) | None => unreachable!(),
+                Some(Err(held)) => {
+                    // A copy in another process keeps its body.
+                    owner.inner.get_mut().body = Some(held);
+                    body.phase = Some(OriginalSchedulerRetirementPhase::Initial(owner));
+                    anyhow::bail!("scheduler connection belongs to another process");
+                }
+            };
+            body.factory = Some(Arc::clone(&owner.inner.factory));
+            body.destination = owner.inner.get_mut().destination.take();
+            body.producer = owner.inner.get_mut().producer.take();
+            body.phase = Some(OriginalSchedulerRetirementPhase::Bound(bound));
+        }
         Ok(())
     }
-    pub fn capture(mut self) -> std::result::Result<(Self, crate::CapturedSqliteRoleFacts), OriginalSchedulerRetirementFailure> {
+    pub fn capture(
+        mut self,
+    ) -> std::result::Result<
+        (Self, crate::CapturedSqliteRoleFacts),
+        OriginalSchedulerRetirementFailure,
+    > {
         let result = self.effect(OriginalSchedulerRetirementEffect::Capture, false, |body| {
             Self::prepare_initial(body, false)?;
             let phase = body.phase.take().context("retirement phase absent")?;
             let result = match phase {
-                OriginalSchedulerRetirementPhase::Bound(owner) => owner.capture_projection_retirement(body.inputs.generation),
-                OriginalSchedulerRetirementPhase::Failed(failure) => failure.retry_capture(body.inputs.generation),
+                OriginalSchedulerRetirementPhase::Bound(owner) => {
+                    owner.capture_projection_retirement(body.inputs.generation)
+                }
+                OriginalSchedulerRetirementPhase::Failed(failure) => {
+                    failure.retry_capture(body.inputs.generation)
+                }
                 OriginalSchedulerRetirementPhase::Captured(owner) => {
                     let facts = owner.captured_roles().clone();
-                    body.phase = Some(OriginalSchedulerRetirementPhase::Captured(owner)); return Ok(facts);
+                    body.phase = Some(OriginalSchedulerRetirementPhase::Captured(owner));
+                    return Ok(facts);
                 }
-                other => { body.phase = Some(other); anyhow::bail!("invalid retirement capture phase") }
+                other => {
+                    body.phase = Some(other);
+                    anyhow::bail!("invalid retirement capture phase")
+                }
             };
             match result {
                 Ok(owner) => {
                     let facts = owner.captured_roles().clone();
-                    body.phase = Some(OriginalSchedulerRetirementPhase::Captured(owner)); Ok(facts)
+                    body.phase = Some(OriginalSchedulerRetirementPhase::Captured(owner));
+                    Ok(facts)
                 }
                 Err(failure) => {
                     body.phase = Some(OriginalSchedulerRetirementPhase::Failed(failure));
@@ -4759,9 +5901,17 @@ impl OriginalSchedulerRetirement {
                 }
             }
         });
-        match result { Ok(facts) => Ok((self, facts)), Err(error) => Err(self.failure(error)) }
+        match result {
+            Ok(facts) => Ok((self, facts)),
+            Err(error) => Err(self.failure(error)),
+        }
     }
-    pub fn drain(mut self) -> std::result::Result<(Self, crate::DrainedSqliteRoleFacts), OriginalSchedulerRetirementFailure> {
+    pub fn drain(
+        mut self,
+    ) -> std::result::Result<
+        (Self, crate::DrainedSqliteRoleFacts),
+        OriginalSchedulerRetirementFailure,
+    > {
         let result = self.effect(OriginalSchedulerRetirementEffect::Drain, true, |body| {
             let phase = body.phase.take().context("retirement phase absent")?;
             let result = match phase {
@@ -4769,14 +5919,19 @@ impl OriginalSchedulerRetirement {
                 OriginalSchedulerRetirementPhase::Failed(failure) => failure.retry_drain(),
                 OriginalSchedulerRetirementPhase::Drained(owner) => {
                     let facts = owner.role_facts().clone();
-                    body.phase = Some(OriginalSchedulerRetirementPhase::Drained(owner)); return Ok(facts);
+                    body.phase = Some(OriginalSchedulerRetirementPhase::Drained(owner));
+                    return Ok(facts);
                 }
-                other => { body.phase = Some(other); anyhow::bail!("invalid retirement drain phase") }
+                other => {
+                    body.phase = Some(other);
+                    anyhow::bail!("invalid retirement drain phase")
+                }
             };
             match result {
                 Ok(owner) => {
                     let facts = owner.role_facts().clone();
-                    body.phase = Some(OriginalSchedulerRetirementPhase::Drained(owner)); Ok(facts)
+                    body.phase = Some(OriginalSchedulerRetirementPhase::Drained(owner));
+                    Ok(facts)
                 }
                 Err(failure) => {
                     body.phase = Some(OriginalSchedulerRetirementPhase::Failed(failure));
@@ -4784,93 +5939,205 @@ impl OriginalSchedulerRetirement {
                 }
             }
         });
-        match result { Ok(facts) => Ok((self, facts)), Err(error) => Err(self.failure(error)) }
+        match result {
+            Ok(facts) => Ok((self, facts)),
+            Err(error) => Err(self.failure(error)),
+        }
     }
-    fn mutate(mut self, role: crate::SqliteRole, purge: bool)
-        -> std::result::Result<(Self, crate::SqliteRoleMutationOutcome), OriginalSchedulerRetirementFailure> {
-        let effect = if purge { OriginalSchedulerRetirementEffect::Purge(role) } else { OriginalSchedulerRetirementEffect::Quarantine(role) };
+    fn mutate(
+        mut self,
+        role: crate::SqliteRole,
+        purge: bool,
+    ) -> std::result::Result<
+        (Self, crate::SqliteRoleMutationOutcome),
+        OriginalSchedulerRetirementFailure,
+    > {
+        let effect = if purge {
+            OriginalSchedulerRetirementEffect::Purge(role)
+        } else {
+            OriginalSchedulerRetirementEffect::Quarantine(role)
+        };
         let result = self.effect(effect, true, |body| {
             let Some(OriginalSchedulerRetirementPhase::Drained(owner)) = body.phase.as_mut() else {
                 anyhow::bail!("role effect requires actual drained retirement owner")
             };
-            let result = if purge { owner.purge_role(role) } else { owner.quarantine_role(role) };
+            let result = if purge {
+                owner.purge_role(role)
+            } else {
+                owner.quarantine_role(role)
+            };
             result.map_err(anyhow::Error::new)
         });
-        match result { Ok(outcome) => Ok((self, outcome)), Err(error) => Err(self.failure(error)) }
+        match result {
+            Ok(outcome) => Ok((self, outcome)),
+            Err(error) => Err(self.failure(error)),
+        }
     }
-    pub fn quarantine(self, role: crate::SqliteRole)
-        -> std::result::Result<(Self, crate::SqliteRoleMutationOutcome), OriginalSchedulerRetirementFailure> { self.mutate(role, false) }
-    pub fn purge(self, role: crate::SqliteRole)
-        -> std::result::Result<(Self, crate::SqliteRoleMutationOutcome), OriginalSchedulerRetirementFailure> { self.mutate(role, true) }
+    pub fn quarantine(
+        self,
+        role: crate::SqliteRole,
+    ) -> std::result::Result<
+        (Self, crate::SqliteRoleMutationOutcome),
+        OriginalSchedulerRetirementFailure,
+    > {
+        self.mutate(role, false)
+    }
+    pub fn purge(
+        self,
+        role: crate::SqliteRole,
+    ) -> std::result::Result<
+        (Self, crate::SqliteRoleMutationOutcome),
+        OriginalSchedulerRetirementFailure,
+    > {
+        self.mutate(role, true)
+    }
     /// Observe actual retained role/failure coordinates under the same paid
     /// cleanup authority. These facts do not authorize namespace mutation.
-    pub fn observe_role_resolution(mut self, role: crate::SqliteRole)
-        -> std::result::Result<(Self, crate::SqliteRoleResolutionObservation), OriginalSchedulerRetirementFailure> {
-        let result = self.effect(OriginalSchedulerRetirementEffect::ObserveResolution(role), true, |body| {
-            let Some(OriginalSchedulerRetirementPhase::Drained(owner)) = body.phase.as_mut() else {
-                anyhow::bail!("resolution observation requires actual drained retirement owner")
-            };
-            owner.observe_role_resolution(role)
-        });
-        match result { Ok(observation) => Ok((self, observation)), Err(error) => Err(self.failure(error)) }
+    pub fn observe_role_resolution(
+        mut self,
+        role: crate::SqliteRole,
+    ) -> std::result::Result<
+        (Self, crate::SqliteRoleResolutionObservation),
+        OriginalSchedulerRetirementFailure,
+    > {
+        let result = self.effect(
+            OriginalSchedulerRetirementEffect::ObserveResolution(role),
+            true,
+            |body| {
+                let Some(OriginalSchedulerRetirementPhase::Drained(owner)) = body.phase.as_mut()
+                else {
+                    anyhow::bail!("resolution observation requires actual drained retirement owner")
+                };
+                owner.observe_role_resolution(role)
+            },
+        );
+        match result {
+            Ok(observation) => Ok((self, observation)),
+            Err(error) => Err(self.failure(error)),
+        }
     }
-    pub fn resolve(mut self, request: crate::SqliteRoleResolutionRequest)
-        -> std::result::Result<(Self, crate::SqliteRoleResolutionOutcome), OriginalSchedulerRetirementFailure> {
-        let result = self.effect(OriginalSchedulerRetirementEffect::Resolve(request.expected.role), true, |body| {
-            let Some(OriginalSchedulerRetirementPhase::Drained(owner)) = body.phase.as_mut() else {
-                anyhow::bail!("resolution requires actual drained retirement owner")
-            };
-            owner.resolve_role(request).map_err(anyhow::Error::new)
-        });
-        match result { Ok(outcome) => Ok((self, outcome)), Err(error) => Err(self.failure(error)) }
+    pub fn resolve(
+        mut self,
+        request: crate::SqliteRoleResolutionRequest,
+    ) -> std::result::Result<
+        (Self, crate::SqliteRoleResolutionOutcome),
+        OriginalSchedulerRetirementFailure,
+    > {
+        let result = self.effect(
+            OriginalSchedulerRetirementEffect::Resolve(request.expected.role),
+            true,
+            |body| {
+                let Some(OriginalSchedulerRetirementPhase::Drained(owner)) = body.phase.as_mut()
+                else {
+                    anyhow::bail!("resolution requires actual drained retirement owner")
+                };
+                owner.resolve_role(request).map_err(anyhow::Error::new)
+            },
+        );
+        match result {
+            Ok(outcome) => Ok((self, outcome)),
+            Err(error) => Err(self.failure(error)),
+        }
     }
-    pub fn release(self) -> std::result::Result<Arc<ClosedOriginalNativeConnection>, OriginalSchedulerRetirementFailure> { self.finish(false) }
-    pub fn abort(self) -> std::result::Result<Arc<ClosedOriginalNativeConnection>, OriginalSchedulerRetirementFailure> { self.finish(true) }
-    fn finish(mut self, abort: bool) -> std::result::Result<Arc<ClosedOriginalNativeConnection>, OriginalSchedulerRetirementFailure> {
+    pub fn release(
+        self,
+    ) -> std::result::Result<Arc<ClosedOriginalNativeConnection>, OriginalSchedulerRetirementFailure>
+    {
+        self.finish(false)
+    }
+    pub fn abort(
+        self,
+    ) -> std::result::Result<Arc<ClosedOriginalNativeConnection>, OriginalSchedulerRetirementFailure>
+    {
+        self.finish(true)
+    }
+    fn finish(
+        mut self,
+        abort: bool,
+    ) -> std::result::Result<Arc<ClosedOriginalNativeConnection>, OriginalSchedulerRetirementFailure>
+    {
         let result = (|| -> Result<()> {
             if !self.body.physical_release {
-                self.effect(if abort { OriginalSchedulerRetirementEffect::Abort } else { OriginalSchedulerRetirementEffect::Release }, true, |body| {
-                    if abort { Self::prepare_initial(body, true)?; }
-                    let phase = body.phase.take().context("retirement phase absent")?;
-                    let result = match phase {
-                        OriginalSchedulerRetirementPhase::Drained(owner) => if abort { owner.abort() } else { owner.release() },
-                        OriginalSchedulerRetirementPhase::Captured(owner) if abort => owner.abort(),
-                        OriginalSchedulerRetirementPhase::Bound(owner) if abort => owner.close().map_err(|failure| {
-                            let crate::BoundSqliteCloseFailure { owner, error } = failure;
-                            crate::SqliteProjectionRetirementFailure {
+                self.effect(
+                    if abort {
+                        OriginalSchedulerRetirementEffect::Abort
+                    } else {
+                        OriginalSchedulerRetirementEffect::Release
+                    },
+                    true,
+                    |body| {
+                        if abort {
+                            Self::prepare_initial(body, true)?;
+                        }
+                        let phase = body.phase.take().context("retirement phase absent")?;
+                        let result =
+                            match phase {
+                                OriginalSchedulerRetirementPhase::Drained(owner) => {
+                                    if abort {
+                                        owner.abort()
+                                    } else {
+                                        owner.release()
+                                    }
+                                }
+                                OriginalSchedulerRetirementPhase::Captured(owner) if abort => {
+                                    owner.abort()
+                                }
+                                OriginalSchedulerRetirementPhase::Bound(owner) if abort => {
+                                    owner.close().map_err(|failure| {
+                                        let crate::BoundSqliteCloseFailure { owner, error } =
+                                            failure;
+                                        crate::SqliteProjectionRetirementFailure {
                                 owner: crate::SqliteProjectionRetirementOwner::Releasing(owner),
                                 error: crate::SqliteProjectionRetirementError::NativeRelease(error),
                             }
-                        }),
-                        OriginalSchedulerRetirementPhase::Failed(failure) => if abort { failure.abort() } else { failure.retry_release() },
-                        other => { body.phase = Some(other); anyhow::bail!("invalid retirement release phase") }
-                    };
-                    match result {
-                        Ok(()) => {
-                            body.physical_release = true;
-                            body.phase = Some(OriginalSchedulerRetirementPhase::Released); Ok(())
+                                    })
+                                }
+                                OriginalSchedulerRetirementPhase::Failed(failure) => {
+                                    if abort {
+                                        failure.abort()
+                                    } else {
+                                        failure.retry_release()
+                                    }
+                                }
+                                other => {
+                                    body.phase = Some(other);
+                                    anyhow::bail!("invalid retirement release phase")
+                                }
+                            };
+                        match result {
+                            Ok(()) => {
+                                body.physical_release = true;
+                                body.phase = Some(OriginalSchedulerRetirementPhase::Released);
+                                Ok(())
+                            }
+                            Err(failure) => {
+                                body.phase =
+                                    Some(OriginalSchedulerRetirementPhase::Failed(failure));
+                                anyhow::bail!("scheduler retirement physical release retained")
+                            }
                         }
-                        Err(failure) => {
-                            body.phase = Some(OriginalSchedulerRetirementPhase::Failed(failure));
-                            anyhow::bail!("scheduler retirement physical release retained")
-                        }
-                    }
-                })?;
+                    },
+                )?;
             }
             self.effect(OriginalSchedulerRetirementEffect::Terminal, true, |body| {
-                ensure!(body.physical_release && body.sql_consumed && body.c_sql_cleared,
-                    "scheduler retirement terminal lacks actual complete release");
+                ensure!(
+                    body.physical_release && body.sql_consumed && body.c_sql_cleared,
+                    "scheduler retirement terminal lacks actual complete release"
+                );
                 if body.terminal.is_none() {
                     let receipt = Arc::new(ClosedOriginalNativeConnection {
-                        factory: body.factory().clone(), ticket: body.ticket,
-                        domain: OriginalNativeDomain::NodeScheduler, body: ClosedNativeBody::Plain,
+                        factory: body.factory().clone(),
+                        ticket: body.ticket,
+                        domain: OriginalNativeDomain::NodeScheduler,
+                        body: ClosedNativeBody::Plain,
                         _scheduler_retirement: Some(OriginalSchedulerRetirementInputs {
                             generation: body.inputs.generation,
                             authority: body.inputs.authority.clone(),
                         }),
                         bound_identity: body.bound_identity,
                         destination_authority: destination_authority_witness(&body.destination),
-                        destination: Mutex::new(body.destination.take()), durable_body: OnceLock::new(),
+                        destination: Mutex::new(body.destination.take()),
+                        durable_body: OnceLock::new(),
                         durable_finalizer: AtomicBool::new(false),
                     });
                     // Actual receipt and destination custody survive every
@@ -4878,12 +6145,22 @@ impl OriginalSchedulerRetirement {
                     // until the SAME original Rust ticket is really terminal.
                     body.terminal = Some(receipt);
                 }
-                body.producer.as_ref().context("retirement producer absent")?.acknowledge_native_terminal()?;
+                body.producer
+                    .as_ref()
+                    .context("retirement producer absent")?
+                    .acknowledge_native_terminal()?;
                 body.factory().mark_closed(body.ticket, false)
             })
         })();
-        if let Err(error) = result { return Err(self.failure(error)); }
-        let receipt = self.body.get_mut().terminal.take().expect("actual retained retirement terminal");
+        if let Err(error) = result {
+            return Err(self.failure(error));
+        }
+        let receipt = self
+            .body
+            .get_mut()
+            .terminal
+            .take()
+            .expect("actual retained retirement terminal");
         // Explicit successful physical release and terminal completed; only
         // Rust custody is disposed here, with no automatic native close.
         match self.body.take_whole() {
@@ -4901,7 +6178,8 @@ impl OriginalSchedulerRetirement {
 }
 
 const NATIVE_CLOSE_FAILURE_WRAPPER_KIND: &str = "lillux-sqlite::native-close-failure-wrapper";
-const NATIVE_CLOSE_OWNER_KIND: &str = crate::AbandonedSqliteOwnerKind::NativeCloseFailure.custody_kind();
+const NATIVE_CLOSE_OWNER_KIND: &str =
+    crate::AbandonedSqliteOwnerKind::NativeCloseFailure.custody_kind();
 /// A failed close keeps every field here so a copy in another process can give
 /// up the whole failure at once. Settled only while this process holds its
 /// factory: then its fields drop normally while a still-present close owner retains itself,
@@ -4923,8 +6201,12 @@ struct OriginalNativeCloseFailureParts {
     owner: Mutex<Option<lillux::custody::Held<NativeCloseOwner>>>,
     destination: Option<OriginalNativeDestinationInputs>,
 }
-fn close_owner_slot(owner: Option<NativeCloseOwner>) -> Mutex<Option<lillux::custody::Held<NativeCloseOwner>>> {
-    Mutex::new(owner.map(|owner| lillux::custody::Held::until_taken(NATIVE_CLOSE_OWNER_KIND, owner)))
+fn close_owner_slot(
+    owner: Option<NativeCloseOwner>,
+) -> Mutex<Option<lillux::custody::Held<NativeCloseOwner>>> {
+    Mutex::new(
+        owner.map(|owner| lillux::custody::Held::until_taken(NATIVE_CLOSE_OWNER_KIND, owner)),
+    )
 }
 impl OriginalNativeCloseFailure {
     pub fn error(&self) -> Option<&anyhow::Error> {
@@ -4944,17 +6226,18 @@ impl OriginalNativeCloseFailure {
             // Snapshot from the genuine live Bound keeper before taking it.
             // Failed metadata validation retains the actual Live owner.
             if parts.bound_identity.is_none()
-                && let Some(NativeCloseOwner::Live(NativeConnectionBody::Bound(owner))) = slot_peek(&mut parts.owner)
-                {
-                    owner
-                        .binding
-                        .as_ref()
-                        .context("original bound keeper missing")?
-                        .validate(owner.connection(), false)?;
-                    parts.bound_identity = Some(owner.binding.as_ref().unwrap().main_identity()?);
-                }
-            let owner = slot_take(&mut parts.owner)
-                .context("original native close owner missing")?;
+                && let Some(NativeCloseOwner::Live(NativeConnectionBody::Bound(owner))) =
+                    slot_peek(&mut parts.owner)
+            {
+                owner
+                    .binding
+                    .as_ref()
+                    .context("original bound keeper missing")?
+                    .validate(owner.connection(), false)?;
+                parts.bound_identity = Some(owner.binding.as_ref().unwrap().main_identity()?);
+            }
+            let owner =
+                slot_take(&mut parts.owner).context("original native close owner missing")?;
             match owner {
                 NativeCloseOwner::Closed(body) => Ok(body),
                 NativeCloseOwner::Live(body) => match body.close() {
@@ -4967,21 +6250,33 @@ impl OriginalNativeCloseFailure {
                 NativeCloseOwner::Transient(c, _) => match c.close() {
                     Ok(()) => Ok(ClosedNativeBody::Plain),
                     Err((c, e)) => {
-                        slot_put(&mut parts.owner, NATIVE_CLOSE_OWNER_KIND, NativeCloseOwner::Transient(c, e));
+                        slot_put(
+                            &mut parts.owner,
+                            NATIVE_CLOSE_OWNER_KIND,
+                            NativeCloseOwner::Transient(c, e),
+                        );
                         anyhow::bail!("original transient close pending")
                     }
                 },
                 NativeCloseOwner::Bound(f) => match f.retry() {
                     Ok(()) => Ok(ClosedNativeBody::Plain),
                     Err(f) => {
-                        slot_put(&mut parts.owner, NATIVE_CLOSE_OWNER_KIND, NativeCloseOwner::Bound(f));
+                        slot_put(
+                            &mut parts.owner,
+                            NATIVE_CLOSE_OWNER_KIND,
+                            NativeCloseOwner::Bound(f),
+                        );
                         anyhow::bail!("original bound close pending")
                     }
                 },
                 NativeCloseOwner::Inspection(f) => match f.retry_close() {
                     Ok(p) => Ok(ClosedNativeBody::Inspection(Arc::new(p))),
                     Err(f) => {
-                        slot_put(&mut parts.owner, NATIVE_CLOSE_OWNER_KIND, NativeCloseOwner::Inspection(f));
+                        slot_put(
+                            &mut parts.owner,
+                            NATIVE_CLOSE_OWNER_KIND,
+                            NativeCloseOwner::Inspection(f),
+                        );
                         anyhow::bail!("original inspection close pending")
                     }
                 },
@@ -4989,14 +6284,19 @@ impl OriginalNativeCloseFailure {
         })();
         match result {
             Ok(body) => {
-                slot_put(&mut self.parts.get_mut().owner, NATIVE_CLOSE_OWNER_KIND, NativeCloseOwner::Closed(body));
+                slot_put(
+                    &mut self.parts.get_mut().owner,
+                    NATIVE_CLOSE_OWNER_KIND,
+                    NativeCloseOwner::Closed(body),
+                );
                 let acknowledged = (|| -> Result<()> {
                     if let Some(NativeCloseOwner::Closed(ClosedNativeBody::Inspection(proof))) =
                         slot_peek(&mut self.parts.get_mut().owner)
                     {
                         proof.acknowledge_producer_terminal()?;
                     }
-                    self.parts.producer
+                    self.parts
+                        .producer
                         .as_ref()
                         .context("native connection producer missing")?
                         .acknowledge_native_terminal()
@@ -5009,7 +6309,8 @@ impl OriginalNativeCloseFailure {
                     self.retain_close_error(error);
                     return Err(self);
                 }
-                let Some(NativeCloseOwner::Closed(body)) = slot_take(&mut self.parts.get_mut().owner)
+                let Some(NativeCloseOwner::Closed(body)) =
+                    slot_take(&mut self.parts.get_mut().owner)
                 else {
                     unreachable!()
                 };
@@ -5052,7 +6353,8 @@ impl std::error::Error for OriginalNativeCloseFailure {
 }
 
 const NATIVE_OPEN_FAILURE_WRAPPER_KIND: &str = "lillux-sqlite::native-open-failure-wrapper";
-const NATIVE_OPEN_OWNER_KIND: &str = crate::AbandonedSqliteOwnerKind::NativeOpenFailure.custody_kind();
+const NATIVE_OPEN_OWNER_KIND: &str =
+    crate::AbandonedSqliteOwnerKind::NativeOpenFailure.custody_kind();
 /// A failed open keeps every field here so a copy in another process can give
 /// up the whole failure at once. Settled only while this process holds its
 /// factory: then its fields drop normally while a still-present open owner retains itself,
@@ -5064,27 +6366,40 @@ fn native_open_failure_parts_released(parts: &OriginalNativeOpenFailureParts) ->
 pub struct OriginalNativeOpenFailure {
     parts: lillux::custody::Held<OriginalNativeOpenFailureParts>,
 }
-fn open_owner_slot(owner: Option<NativeOpenOwner>) -> Mutex<Option<lillux::custody::Held<NativeOpenOwner>>> {
+fn open_owner_slot(
+    owner: Option<NativeOpenOwner>,
+) -> Mutex<Option<lillux::custody::Held<NativeOpenOwner>>> {
     Mutex::new(owner.map(|owner| lillux::custody::Held::until_taken(NATIVE_OPEN_OWNER_KIND, owner)))
 }
 /// Look at an owner slot's content through exclusive access.
 fn slot_peek<O: Send + 'static>(slot: &mut Mutex<Option<lillux::custody::Held<O>>>) -> Option<&O> {
-    slot.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner).as_deref()
+    slot.get_mut()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_deref()
 }
 /// Take an owner out of its slot. A copy in another process is refused: the
 /// owner stays in its slot and nothing is returned.
 fn slot_take<O: Send + 'static>(slot: &mut Mutex<Option<lillux::custody::Held<O>>>) -> Option<O> {
-    let cell = slot.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let cell = slot
+        .get_mut()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     match cell.take()?.take_whole() {
         Ok(owner) => Some(owner),
-        Err(held) => { *cell = Some(held); None }
+        Err(held) => {
+            *cell = Some(held);
+            None
+        }
     }
 }
 /// Put an owner into its slot, under the kind a retained end counts it as.
 fn slot_put<O: Send + 'static>(
-    slot: &mut Mutex<Option<lillux::custody::Held<O>>>, kind: &'static str, owner: O,
+    slot: &mut Mutex<Option<lillux::custody::Held<O>>>,
+    kind: &'static str,
+    owner: O,
 ) {
-    *slot.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner) =
+    *slot
+        .get_mut()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) =
         Some(lillux::custody::Held::until_taken(kind, owner));
 }
 struct OriginalNativeOpenFailureParts {
@@ -5155,36 +6470,56 @@ impl ReleasedOriginalNativeAcquisition {
         self: &Arc<Self>,
         factory: &Arc<OriginalNativeFactory>,
         terminal: &OriginalNativeTerminal,
-    ) -> Result<Option<(OriginalNativeOutsideLeafEvidence, OriginalNativeDestinationInputs)>> {
+    ) -> Result<
+        Option<(
+            OriginalNativeOutsideLeafEvidence,
+            OriginalNativeDestinationInputs,
+        )>,
+    > {
         require_current_native_process()?;
         terminal.require_original(factory)?;
         self.require_original(factory)?;
         let mut slot = lock_destination(&self.destination)?;
-        let Some(inputs) = slot.take() else { return Ok(None) };
-        Ok(Some((OriginalNativeOutsideLeafEvidence {
-            process: std::process::id(),
-            identity: OriginalNativeOutsideLeafIdentity::Released(Arc::downgrade(self)),
-            factory: Arc::downgrade(&self.factory),
-            authority: self.destination_authority.clone(),
-            ticket: self.ticket,
-            domain: self.domain,
-            closed: false,
-        }, inputs)))
+        let Some(inputs) = slot.take() else {
+            return Ok(None);
+        };
+        Ok(Some((
+            OriginalNativeOutsideLeafEvidence {
+                process: std::process::id(),
+                identity: OriginalNativeOutsideLeafIdentity::Released(Arc::downgrade(self)),
+                factory: Arc::downgrade(&self.factory),
+                authority: self.destination_authority.clone(),
+                ticket: self.ticket,
+                domain: self.domain,
+                closed: false,
+            },
+            inputs,
+        )))
     }
 }
 impl OriginalNativeOpenFailure {
     pub fn recover_retained_admission(&mut self) -> Result<()> {
         self.parts.factory.require_original(true)?;
-        ensure!(self.parts.ticket.is_none() && self.parts.producer.is_none()
-            && slot_peek(&mut self.parts.get_mut().owner).is_none(),
-            "SQL admission recovery conflicts with actual native owner");
-        let failure = self.parts.get_mut().admission_failure.take()
+        ensure!(
+            self.parts.ticket.is_none()
+                && self.parts.producer.is_none()
+                && slot_peek(&mut self.parts.get_mut().owner).is_none(),
+            "SQL admission recovery conflicts with actual native owner"
+        );
+        let failure = self
+            .parts
+            .get_mut()
+            .admission_failure
+            .take()
             .context("actual retained SQL admission absent")?;
         let original = &failure.inner.original;
         let result = crate::original_physical_custody::retain_callback_refusal(&|| {
             self.parts.factory.recover_undelivered_admission(
-                &original.budget, original.ticket, &original.producer,
-                SqliteInspectionProductionKind::Native)
+                &original.budget,
+                original.ticket,
+                &original.producer,
+                SqliteInspectionProductionKind::Native,
+            )
         });
         if let Err(error) = result {
             self.parts.get_mut().admission_failure = Some(failure);
@@ -5200,14 +6535,18 @@ impl OriginalNativeOpenFailure {
         // The recovered admission's own refusal is the cause the open
         // refusal deferred; it supersedes that placeholder refusal.
         let parts = self.parts.get_mut();
-        parts.error = error.superseding(std::mem::replace(&mut parts.error,
-            anyhow!("original admission error transferred")));
+        parts.error = error.superseding(std::mem::replace(
+            &mut parts.error,
+            anyhow!("original admission error transferred"),
+        ));
         parts.ticket = Some(original.ticket);
         parts.producer = Some(original.producer);
         Ok(())
     }
     pub fn retained_admission(&self) -> Option<&OriginalNativeConnectionAdmissionFailure> {
-        if self.parts.factory.require_process().is_err() { return None; }
+        if self.parts.factory.require_process().is_err() {
+            return None;
+        }
         self.parts.admission_failure.as_ref()
     }
     pub fn error(&self) -> &anyhow::Error {
@@ -5219,38 +6558,59 @@ impl OriginalNativeOpenFailure {
         let result = (|| -> Result<()> {
             let parts = self.parts.get_mut();
             parts.factory.require_original(true)?;
-            ensure!(parts.admission_failure.is_none(),
-                "actual published SQL admission unresolved; no close or no-ticket terminal");
+            ensure!(
+                parts.admission_failure.is_none(),
+                "actual published SQL admission unresolved; no close or no-ticket terminal"
+            );
             let _scope = parts.factory.arena()?.scope(true, 0)?;
-            if let Some(owner) = slot_take(&mut parts.owner)
-            {
+            if let Some(owner) = slot_take(&mut parts.owner) {
                 let closed = match owner {
                     NativeOpenOwner::Released(p) => {
-                        slot_put(&mut parts.owner, NATIVE_OPEN_OWNER_KIND, NativeOpenOwner::Released(p));
+                        slot_put(
+                            &mut parts.owner,
+                            NATIVE_OPEN_OWNER_KIND,
+                            NativeOpenOwner::Released(p),
+                        );
                         None
                     }
                     NativeOpenOwner::Closed(body) => Some(body),
                     NativeOpenOwner::Bound(f) => match f.retry_close() {
                         Ok(()) => Some(ClosedNativeBody::Plain),
                         Err(f) => {
-                            slot_put(&mut parts.owner, NATIVE_OPEN_OWNER_KIND, NativeOpenOwner::Bound(f));
+                            slot_put(
+                                &mut parts.owner,
+                                NATIVE_OPEN_OWNER_KIND,
+                                NativeOpenOwner::Bound(f),
+                            );
                             anyhow::bail!("original partial bound retained")
                         }
                     },
                     NativeOpenOwner::Inspection(f) => match f.retry_close() {
                         Ok(p) => {
-                            slot_put(&mut parts.owner, NATIVE_OPEN_OWNER_KIND, NativeOpenOwner::Released(Arc::new(p)));
+                            slot_put(
+                                &mut parts.owner,
+                                NATIVE_OPEN_OWNER_KIND,
+                                NativeOpenOwner::Released(Arc::new(p)),
+                            );
                             None
                         }
                         Err(f) => {
-                            slot_put(&mut parts.owner, NATIVE_OPEN_OWNER_KIND, NativeOpenOwner::Inspection(f));
+                            slot_put(
+                                &mut parts.owner,
+                                NATIVE_OPEN_OWNER_KIND,
+                                NativeOpenOwner::Inspection(f),
+                            );
                             anyhow::bail!("original partial inspection retained")
                         }
                     },
                     NativeOpenOwner::Live(body) => match body.close() {
                         Ok(body) => Some(body),
                         Err(owner) => {
-                            slot_put(&mut parts.owner, NATIVE_OPEN_OWNER_KIND, NativeOpenOwner::Closing(owner));
+                            slot_put(
+                                &mut parts.owner,
+                                NATIVE_OPEN_OWNER_KIND,
+                                NativeOpenOwner::Closing(owner),
+                            );
                             anyhow::bail!("factory acquisition close retained")
                         }
                     },
@@ -5274,30 +6634,40 @@ impl OriginalNativeOpenFailure {
                         match result {
                             Ok(body) => Some(body),
                             Err(owner) => {
-                                slot_put(&mut parts.owner, NATIVE_OPEN_OWNER_KIND, NativeOpenOwner::Closing(owner));
+                                slot_put(
+                                    &mut parts.owner,
+                                    NATIVE_OPEN_OWNER_KIND,
+                                    NativeOpenOwner::Closing(owner),
+                                );
                                 anyhow::bail!("original acquisition close retry retained")
                             }
                         }
                     }
                 };
                 if let Some(body) = closed {
-                    slot_put(&mut parts.owner, NATIVE_OPEN_OWNER_KIND, NativeOpenOwner::Closed(body));
+                    slot_put(
+                        &mut parts.owner,
+                        NATIVE_OPEN_OWNER_KIND,
+                        NativeOpenOwner::Closed(body),
+                    );
                 }
             }
-            if let Some(NativeOpenOwner::Released(proof)) = slot_peek(&mut parts.owner)
-            {
+            if let Some(NativeOpenOwner::Released(proof)) = slot_peek(&mut parts.owner) {
                 proof.acknowledge_producer_terminal()?;
             }
-            if let Some(NativeOpenOwner::Closed(ClosedNativeBody::Inspection(proof))) = slot_peek(&mut parts.owner)
+            if let Some(NativeOpenOwner::Closed(ClosedNativeBody::Inspection(proof))) =
+                slot_peek(&mut parts.owner)
             {
                 proof.acknowledge_producer_terminal()?;
             }
             if let Some(ticket) = parts.ticket
-                && parts.factory.storage()?.tickets[ticket as usize - 1].load(Ordering::Acquire) != 3 {
-                    parts.factory.budget.debit_steps(1, true)?;
-                    parts.factory.require_original(true)?;
-                    parts.factory.mark_closed(ticket, true)?;
-                }
+                && parts.factory.storage()?.tickets[ticket as usize - 1].load(Ordering::Acquire)
+                    != 3
+            {
+                parts.factory.budget.debit_steps(1, true)?;
+                parts.factory.require_original(true)?;
+                parts.factory.mark_closed(ticket, true)?;
+            }
             if let Some(producer) = &parts.producer {
                 producer.acknowledge_native_terminal()?;
             }
@@ -5305,15 +6675,17 @@ impl OriginalNativeOpenFailure {
         })();
         match result {
             Ok(()) => {
-                let (inspection, closed_inspection) = match slot_take(&mut self.parts.get_mut().owner)
-                {
-                    Some(NativeOpenOwner::Released(p)) => (Some(p), None),
-                    Some(NativeOpenOwner::Closed(ClosedNativeBody::Inspection(p))) => {
-                        (None, Some(p))
-                    }
-                    Some(NativeOpenOwner::Closed(ClosedNativeBody::Plain)) | None => (None, None),
-                    _ => unreachable!(),
-                };
+                let (inspection, closed_inspection) =
+                    match slot_take(&mut self.parts.get_mut().owner) {
+                        Some(NativeOpenOwner::Released(p)) => (Some(p), None),
+                        Some(NativeOpenOwner::Closed(ClosedNativeBody::Inspection(p))) => {
+                            (None, Some(p))
+                        }
+                        Some(NativeOpenOwner::Closed(ClosedNativeBody::Plain)) | None => {
+                            (None, None)
+                        }
+                        _ => unreachable!(),
+                    };
                 Ok(Arc::new(ReleasedOriginalNativeAcquisition {
                     domain: Some(self.parts.domain),
                     factory: self.parts.factory.clone(),
@@ -5330,8 +6702,10 @@ impl OriginalNativeOpenFailure {
             }
             Err(error) => {
                 let parts = self.parts.get_mut();
-                parts.error = error.superseding(
-                    std::mem::replace(&mut parts.error, anyhow::anyhow!("original error retained")));
+                parts.error = error.superseding(std::mem::replace(
+                    &mut parts.error,
+                    anyhow::anyhow!("original error retained"),
+                ));
                 Err(self)
             }
         }
@@ -5396,43 +6770,86 @@ impl OriginalNativeOutsideLeafEvidence {
     /// ticketless refusals. The retained Weak identities prevent allocation
     /// reuse from equating unrelated leaves; nullness is never used as proof.
     pub fn same_original_leaf(&self, other: &Self) -> Result<bool> {
-        ensure!(!crate::foreign_process(self.process) && other.process == self.process,
-            "foreign original leaf identity comparison");
+        ensure!(
+            !crate::foreign_process(self.process) && other.process == self.process,
+            "foreign original leaf identity comparison"
+        );
         Ok(match (&self.identity, &other.identity) {
-            (OriginalNativeOutsideLeafIdentity::Closed(a), OriginalNativeOutsideLeafIdentity::Closed(b)) => std::sync::Weak::ptr_eq(a, b),
-            (OriginalNativeOutsideLeafIdentity::Released(a), OriginalNativeOutsideLeafIdentity::Released(b)) => std::sync::Weak::ptr_eq(a, b),
+            (
+                OriginalNativeOutsideLeafIdentity::Closed(a),
+                OriginalNativeOutsideLeafIdentity::Closed(b),
+            ) => std::sync::Weak::ptr_eq(a, b),
+            (
+                OriginalNativeOutsideLeafIdentity::Released(a),
+                OriginalNativeOutsideLeafIdentity::Released(b),
+            ) => std::sync::Weak::ptr_eq(a, b),
             _ => false,
         })
     }
-    pub fn require_original(&self, factory: &Arc<OriginalNativeFactory>, aggregate: &OriginalNativeTerminal) -> Result<()> {
-        ensure!(!crate::foreign_process(self.process), "foreign original outside leaf evidence");
+    pub fn require_original(
+        &self,
+        factory: &Arc<OriginalNativeFactory>,
+        aggregate: &OriginalNativeTerminal,
+    ) -> Result<()> {
+        ensure!(
+            !crate::foreign_process(self.process),
+            "foreign original outside leaf evidence"
+        );
         factory.require_process()?;
         aggregate.require_original(factory)?;
-        ensure!(std::sync::Weak::ptr_eq(&self.factory, &Arc::downgrade(factory)),
-            "outside leaf evidence selects another actual factory allocation");
+        ensure!(
+            std::sync::Weak::ptr_eq(&self.factory, &Arc::downgrade(factory)),
+            "outside leaf evidence selects another actual factory allocation"
+        );
         if let Some(ticket) = self.ticket {
-            ensure!(ticket > 0 && ticket as usize <= MAX_NATIVE_CONNECTIONS,
-                "outside leaf has invalid original ticket");
+            ensure!(
+                ticket > 0 && ticket as usize <= MAX_NATIVE_CONNECTIONS,
+                "outside leaf has invalid original ticket"
+            );
             let phase = factory.storage()?.tickets[ticket as usize - 1].load(Ordering::Acquire);
-            ensure!(phase == if self.closed { 2 } else { 3 }, "outside leaf genuine native disposition changed");
+            ensure!(
+                phase == if self.closed { 2 } else { 3 },
+                "outside leaf genuine native disposition changed"
+            );
         } else {
-            ensure!(!self.closed, "actual closed leaf cannot lack its original ticket");
+            ensure!(
+                !self.closed,
+                "actual closed leaf cannot lack its original ticket"
+            );
         }
         Ok(())
     }
-    pub fn require_original_authority(&self, authority: &Arc<dyn OriginalNativeDestinationAuthority>,
-        factory: &Arc<OriginalNativeFactory>, aggregate: &OriginalNativeTerminal) -> Result<()> {
+    pub fn require_original_authority(
+        &self,
+        authority: &Arc<dyn OriginalNativeDestinationAuthority>,
+        factory: &Arc<OriginalNativeFactory>,
+        aggregate: &OriginalNativeTerminal,
+    ) -> Result<()> {
         self.require_original(factory, aggregate)?;
-        ensure!(self.authority.as_ref().is_some_and(|original|
-            std::sync::Weak::ptr_eq(original, &Arc::downgrade(authority))),
-            "outside leaf selects another actual destination authority");
+        ensure!(
+            self.authority
+                .as_ref()
+                .is_some_and(|original| std::sync::Weak::ptr_eq(
+                    original,
+                    &Arc::downgrade(authority)
+                )),
+            "outside leaf selects another actual destination authority"
+        );
         Ok(())
     }
     pub fn native_ticket(&self) -> Result<Option<u32>> {
-        ensure!(!crate::foreign_process(self.process), "foreign original leaf observation"); Ok(self.ticket)
+        ensure!(
+            !crate::foreign_process(self.process),
+            "foreign original leaf observation"
+        );
+        Ok(self.ticket)
     }
     pub fn domain(&self) -> Result<Option<OriginalNativeDomain>> {
-        ensure!(!crate::foreign_process(self.process), "foreign original leaf observation"); Ok(self.domain)
+        ensure!(
+            !crate::foreign_process(self.process),
+            "foreign original leaf observation"
+        );
+        Ok(self.domain)
     }
 }
 pub struct OriginalNativeOutsideConnectionParts {
@@ -5456,7 +6873,9 @@ impl OriginalNativeOutsideConnectionCustody {
     /// retains its descriptor, inspection and destination owners, counted,
     /// until the process exits; a copy in another process is refused here and
     /// relinquished on its own end.
-    pub fn into_original_parts(self) -> std::result::Result<OriginalNativeOutsideConnectionParts, Self> {
+    pub fn into_original_parts(
+        self,
+    ) -> std::result::Result<OriginalNativeOutsideConnectionParts, Self> {
         self.parts.take_whole().map_err(|parts| Self { parts })
     }
 }
@@ -5477,7 +6896,9 @@ impl OriginalNativeOutsideCustodyFailure {
     fn new(error: anyhow::Error, original: OriginalNativeConnectionTerminal) -> Self {
         Self {
             inner: lillux::custody::Held::until_taken(
-                NATIVE_OUTSIDE_CUSTODY_FAILURE_KIND, OutsideCustodyFailureParts { error, original }),
+                NATIVE_OUTSIDE_CUSTODY_FAILURE_KIND,
+                OutsideCustodyFailureParts { error, original },
+            ),
         }
     }
     pub fn into_original(self) -> std::result::Result<OriginalNativeConnectionTerminal, Self> {
@@ -5485,7 +6906,9 @@ impl OriginalNativeOutsideCustodyFailure {
             OriginalNativeConnectionTerminal::Closed(owner) => &owner.factory,
             OriginalNativeConnectionTerminal::Released(owner) => &owner.factory,
         };
-        if factory.require_process().is_err() { return Err(self); }
+        if factory.require_process().is_err() {
+            return Err(self);
+        }
         match self.inner.take_whole() {
             Ok(parts) => {
                 let OutsideCustodyFailureParts { error, original } = parts;
@@ -5498,11 +6921,15 @@ impl OriginalNativeOutsideCustodyFailure {
 }
 impl std::fmt::Debug for OriginalNativeOutsideCustodyFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("OriginalNativeOutsideCustodyFailure").field("error", &self.inner.error).finish_non_exhaustive()
+        f.debug_struct("OriginalNativeOutsideCustodyFailure")
+            .field("error", &self.inner.error)
+            .finish_non_exhaustive()
     }
 }
 impl std::fmt::Display for OriginalNativeOutsideCustodyFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { std::fmt::Display::fmt(&self.inner.error, f) }
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.inner.error, f)
+    }
 }
 impl std::error::Error for OriginalNativeOutsideCustodyFailure {}
 impl OriginalNativeConnectionTerminal {
@@ -5525,23 +6952,37 @@ impl OriginalNativeConnectionTerminal {
     /// Move actual input/descriptor owners only after the genuine aggregate
     /// native terminal and unique consuming receipt. Arc uniqueness is not the
     /// native proof: exact issuer ACK and ticket disposition are checked first.
-    pub fn into_outside_custody(self, terminal: &OriginalNativeTerminal)
-        -> std::result::Result<OriginalNativeOutsideConnectionCustody, OriginalNativeOutsideCustodyFailure> {
+    pub fn into_outside_custody(
+        self,
+        terminal: &OriginalNativeTerminal,
+    ) -> std::result::Result<
+        OriginalNativeOutsideConnectionCustody,
+        OriginalNativeOutsideCustodyFailure,
+    > {
         let (factory, _) = self.original();
-        if let Err(error) = terminal.require_original(factory).and_then(|()| self.require_original(factory)) {
+        if let Err(error) = terminal
+            .require_original(factory)
+            .and_then(|()| self.require_original(factory))
+        {
             return Err(OriginalNativeOutsideCustodyFailure::new(error, self));
         }
         // After a take-capture the inputs already joined a receiver; this
         // allocation must not report a destination-free handoff.
         let taken = match &self {
-            Self::Closed(owner) => owner.destination_authority.is_some()
-                && lock_destination(&owner.destination).map_or(true, |slot| slot.is_none()),
-            Self::Released(owner) => owner.destination_authority.is_some()
-                && lock_destination(&owner.destination).map_or(true, |slot| slot.is_none()),
+            Self::Closed(owner) => {
+                owner.destination_authority.is_some()
+                    && lock_destination(&owner.destination).map_or(true, |slot| slot.is_none())
+            }
+            Self::Released(owner) => {
+                owner.destination_authority.is_some()
+                    && lock_destination(&owner.destination).map_or(true, |slot| slot.is_none())
+            }
         };
         if taken {
             return Err(OriginalNativeOutsideCustodyFailure::new(
-                anyhow::anyhow!("original destination inputs were taken or are busy"), self));
+                anyhow::anyhow!("original destination inputs were taken or are busy"),
+                self,
+            ));
         }
         let process = std::process::id();
         let parts = match self {
@@ -5549,47 +6990,111 @@ impl OriginalNativeConnectionTerminal {
                 let identity = OriginalNativeOutsideLeafIdentity::Closed(Arc::downgrade(&owner));
                 let owner = match Arc::try_unwrap(owner) {
                     Ok(owner) => owner,
-                    Err(owner) => return Err(OriginalNativeOutsideCustodyFailure::new(
-                        anyhow::anyhow!("actual closed receipt still has aliases"), Self::Closed(owner))),
+                    Err(owner) => {
+                        return Err(OriginalNativeOutsideCustodyFailure::new(
+                            anyhow::anyhow!("actual closed receipt still has aliases"),
+                            Self::Closed(owner),
+                        ));
+                    }
                 };
-                let ClosedOriginalNativeConnection { durable_body, durable_finalizer: _, bound_identity: _,
-                    factory, ticket, domain, body, destination, destination_authority,
-                    _scheduler_retirement } = owner;
+                let ClosedOriginalNativeConnection {
+                    durable_body,
+                    durable_finalizer: _,
+                    bound_identity: _,
+                    factory,
+                    ticket,
+                    domain,
+                    body,
+                    destination,
+                    destination_authority,
+                    _scheduler_retirement,
+                } = owner;
                 let (_inputs, transient) = OriginalNativeDestinationInputs::into_fields(
-                    destination.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner));
+                    destination
+                        .into_inner()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner),
+                );
                 let durable_pins = match durable_body.into_inner() {
                     Some(body) => [Some(body.main.clone()), body.wal.clone()],
                     None => [None, None],
                 };
-                let inspection = match body { ClosedNativeBody::Plain => None, ClosedNativeBody::Inspection(owner) => Some(owner) };
+                let inspection = match body {
+                    ClosedNativeBody::Plain => None,
+                    ClosedNativeBody::Inspection(owner) => Some(owner),
+                };
                 // Only the direct native facade edge ends here. Every original
                 // descriptor/authority owner was moved intact into this packet.
-                let leaf_evidence = OriginalNativeOutsideLeafEvidence { process, identity,
-                    factory: Arc::downgrade(&factory), authority: destination_authority,
-                    ticket: Some(ticket), domain: Some(domain), closed: true };
+                let leaf_evidence = OriginalNativeOutsideLeafEvidence {
+                    process,
+                    identity,
+                    factory: Arc::downgrade(&factory),
+                    authority: destination_authority,
+                    ticket: Some(ticket),
+                    domain: Some(domain),
+                    closed: true,
+                };
                 drop(factory);
-                OriginalNativeOutsideConnectionParts { leaf_evidence, ticket: Some(ticket), domain: Some(domain),
-                    bound_inputs: _inputs, transient, scheduler_retirement: _scheduler_retirement,
-                    inspection, released_inspection: None, durable_pins, original_error: None }
+                OriginalNativeOutsideConnectionParts {
+                    leaf_evidence,
+                    ticket: Some(ticket),
+                    domain: Some(domain),
+                    bound_inputs: _inputs,
+                    transient,
+                    scheduler_retirement: _scheduler_retirement,
+                    inspection,
+                    released_inspection: None,
+                    durable_pins,
+                    original_error: None,
+                }
             }
             Self::Released(owner) => {
                 let identity = OriginalNativeOutsideLeafIdentity::Released(Arc::downgrade(&owner));
                 let owner = match Arc::try_unwrap(owner) {
                     Ok(owner) => owner,
-                    Err(owner) => return Err(OriginalNativeOutsideCustodyFailure::new(
-                        anyhow::anyhow!("actual released receipt still has aliases"), Self::Released(owner))),
+                    Err(owner) => {
+                        return Err(OriginalNativeOutsideCustodyFailure::new(
+                            anyhow::anyhow!("actual released receipt still has aliases"),
+                            Self::Released(owner),
+                        ));
+                    }
                 };
-                let ReleasedOriginalNativeAcquisition { domain, factory, ticket, original_error,
-                    inspection, closed_inspection, destination, destination_authority } = owner;
+                let ReleasedOriginalNativeAcquisition {
+                    domain,
+                    factory,
+                    ticket,
+                    original_error,
+                    inspection,
+                    closed_inspection,
+                    destination,
+                    destination_authority,
+                } = owner;
                 let (_inputs, transient) = OriginalNativeDestinationInputs::into_fields(
-                    destination.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner));
-                let leaf_evidence = OriginalNativeOutsideLeafEvidence { process, identity,
-                    factory: Arc::downgrade(&factory), authority: destination_authority,
-                    ticket, domain, closed: false };
+                    destination
+                        .into_inner()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner),
+                );
+                let leaf_evidence = OriginalNativeOutsideLeafEvidence {
+                    process,
+                    identity,
+                    factory: Arc::downgrade(&factory),
+                    authority: destination_authority,
+                    ticket,
+                    domain,
+                    closed: false,
+                };
                 drop(factory);
-                OriginalNativeOutsideConnectionParts { leaf_evidence, ticket, domain, bound_inputs: _inputs,
-                    transient, scheduler_retirement: None, inspection: closed_inspection,
-                    released_inspection: inspection, durable_pins: [None, None], original_error: Some(original_error) }
+                OriginalNativeOutsideConnectionParts {
+                    leaf_evidence,
+                    ticket,
+                    domain,
+                    bound_inputs: _inputs,
+                    transient,
+                    scheduler_retirement: None,
+                    inspection: closed_inspection,
+                    released_inspection: inspection,
+                    durable_pins: [None, None],
+                    original_error: Some(original_error),
+                }
             }
         };
         Ok(OriginalNativeOutsideConnectionCustody {
@@ -5624,18 +7129,33 @@ unsafe impl Sync for OriginalNativeTerminal {}
 impl OriginalNativeTerminal {
     fn body(&self) -> Result<&OriginalNativeTerminalBody> {
         self.factory.require_process()?;
-        let actual = self.factory.storage()?.terminal_body.get().context("native terminal body absent")?;
-        ensure!(NonNull::from(actual) == self.body, "native terminal body differs");
+        let actual = self
+            .factory
+            .storage()?
+            .terminal_body
+            .get()
+            .context("native terminal body absent")?;
+        ensure!(
+            NonNull::from(actual) == self.body,
+            "native terminal body differs"
+        );
         Ok(actual)
     }
     pub fn require_original(&self, factory: &Arc<OriginalNativeFactory>) -> Result<()> {
         require_current_native_process()?;
-        ensure!(Arc::ptr_eq(&self.factory, factory) && self.body()?.issuer_acknowledged.load(Ordering::Acquire),
-            "native terminal selects foreign original scope");
+        ensure!(
+            Arc::ptr_eq(&self.factory, factory)
+                && self.body()?.issuer_acknowledged.load(Ordering::Acquire),
+            "native terminal selects foreign original scope"
+        );
         Ok(())
     }
-    pub fn arena_disposition(&self) -> Result<OriginalNativeArenaDisposition> { Ok(self.body()?.arena_disposition) }
-    pub fn budget_snapshot(&self) -> Result<OriginalNativeBudgetSnapshot> { Ok(self.body()?.budget.clone()) }
+    pub fn arena_disposition(&self) -> Result<OriginalNativeArenaDisposition> {
+        Ok(self.body()?.arena_disposition)
+    }
+    pub fn budget_snapshot(&self) -> Result<OriginalNativeBudgetSnapshot> {
+        Ok(self.body()?.budget.clone())
+    }
 }
 
 /// Authentic original cleanup funding and exact source-pin ownership. No
@@ -5721,7 +7241,9 @@ fn pin_state_settled(state: &Mutex<OriginalMetadataPinState>) -> bool {
     use std::sync::TryLockError;
     match state.try_lock() {
         Ok(state) => !matches!(*state, OriginalMetadataPinState::Open(_)),
-        Err(TryLockError::Poisoned(poisoned)) => !matches!(*poisoned.into_inner(), OriginalMetadataPinState::Open(_)),
+        Err(TryLockError::Poisoned(poisoned)) => {
+            !matches!(*poisoned.into_inner(), OriginalMetadataPinState::Open(_))
+        }
         Err(TryLockError::WouldBlock) => false,
     }
 }
@@ -5755,13 +7277,21 @@ pub(crate) enum DurabilityPinClose {
 impl RetainedOriginalMetadataPin {
     /// A successful physical close memo can be observed before a late account
     /// callback finishes. Open/pending/error owners never supply a receipt.
-    pub fn original_retirement_receipt(self: &Arc<Self>) -> Result<Option<RetiredOriginalMetadataPin>> {
+    pub fn original_retirement_receipt(
+        self: &Arc<Self>,
+    ) -> Result<Option<RetiredOriginalMetadataPin>> {
         require_current_native_process()?;
-        let state = self.state.try_lock()
+        let state = self
+            .state
+            .try_lock()
             .map_err(|_| anyhow::anyhow!("actual metadata close observation busy or poisoned"))?;
         Ok(if matches!(*state, OriginalMetadataPinState::Retired) {
-            Some(RetiredOriginalMetadataPin { owner: self.clone() })
-        } else { None })
+            Some(RetiredOriginalMetadataPin {
+                owner: self.clone(),
+            })
+        } else {
+            None
+        })
     }
     /// Kernel-private original durability operation. No public File/FD/dup
     /// escape; callers retain the actual factory effect/service authorization.
@@ -5786,7 +7316,10 @@ impl RetainedOriginalMetadataPin {
         Arc::new(Self {
             process: std::process::id(),
             state: lillux::custody::Held::new(
-                ORIGINAL_METADATA_PIN_KIND, Mutex::new(OriginalMetadataPinState::Open(file)), pin_state_settled),
+                ORIGINAL_METADATA_PIN_KIND,
+                Mutex::new(OriginalMetadataPinState::Open(file)),
+                pin_state_settled,
+            ),
             identity: OnceLock::new(),
             consumed_error_reported: AtomicBool::new(false),
         })
@@ -5838,7 +7371,9 @@ impl RetainedOriginalMetadataPin {
         inputs.require_original(factory, terminal, self)?;
         // Flags, identity and one actual close have a fixed finite charge.
         // Host booking guards are released before descriptor-owner/native work.
-        inputs.authority.debit_original_steps(ORIGINAL_METADATA_PIN_RETIREMENT_STEPS)?;
+        inputs
+            .authority
+            .debit_original_steps(ORIGINAL_METADATA_PIN_RETIREMENT_STEPS)?;
         terminal.require_original(factory)?;
         inputs.require_original(factory, terminal, self)?;
         self.close_original_descriptor()?;
@@ -5860,17 +7395,24 @@ impl RetainedOriginalMetadataPin {
             Err(refusal) => refusal,
         };
         let consumed = match self.state.try_lock() {
-            Ok(state) => matches!(&*state, OriginalMetadataPinState::ConsumedError { code: _, errno: _ }),
-            Err(_) => return Err(refusal.context("original metadata close outcome busy or poisoned")),
+            Ok(state) => matches!(
+                &*state,
+                OriginalMetadataPinState::ConsumedError { code: _, errno: _ }
+            ),
+            Err(_) => {
+                return Err(refusal.context("original metadata close outcome busy or poisoned"));
+            }
         };
         if !consumed {
             return Err(refusal);
         }
-        Ok(if self.consumed_error_reported.swap(true, Ordering::AcqRel) {
-            DurabilityPinClose::NotClosedHere
-        } else {
-            DurabilityPinClose::ConsumedWithError
-        })
+        Ok(
+            if self.consumed_error_reported.swap(true, Ordering::AcqRel) {
+                DurabilityPinClose::NotClosedHere
+            } else {
+                DurabilityPinClose::ConsumedWithError
+            },
+        )
     }
     /// The identity-checked close of this pin's descriptor, shared by every
     /// retirement path. Returns whether this call closed it; an already
@@ -5957,7 +7499,11 @@ impl RetiredOriginalMetadataPin {
     /// This is data evidence, not permission to close or reuse a descriptor.
     pub fn original_identity(&self) -> Result<lillux::OpenFileIdentity> {
         self.require_original(&self.owner)?;
-        self.owner.identity.get().copied().context("actual retired metadata identity absent")
+        self.owner
+            .identity
+            .get()
+            .copied()
+            .context("actual retired metadata identity absent")
     }
     pub fn require_original(&self, owner: &Arc<RetainedOriginalMetadataPin>) -> Result<()> {
         require_current_native_process()?;
@@ -6052,22 +7598,29 @@ impl OriginalOutsideFinalizerFileRetirementInputs {
     ) -> Result<Self> {
         owner.require_original_process()?;
         authority.require_original(&owner)?;
-        Ok(Self { process: owner.process, owner, authority })
+        Ok(Self {
+            process: owner.process,
+            owner,
+            authority,
+        })
     }
     fn require_original(&self, owner: &Arc<RetainedOriginalFinalizerFile>) -> Result<()> {
-        ensure!(!crate::foreign_process(self.process), "outside descriptor grant belongs to original process");
+        ensure!(
+            !crate::foreign_process(self.process),
+            "outside descriptor grant belongs to original process"
+        );
         owner.require_original_process()?;
-        ensure!(Arc::ptr_eq(owner, &self.owner), "outside descriptor grant selects another actual owner");
+        ensure!(
+            Arc::ptr_eq(owner, &self.owner),
+            "outside descriptor grant selects another actual owner"
+        );
         self.authority.require_original(owner)
     }
 
     /// Verify that this outside capability is bound to the exact retained
     /// descriptor owner before a registry caches it. This validates custody;
     /// it performs no descriptor operation and grants no new authority.
-    pub fn require_original_owner(
-        &self,
-        owner: &Arc<RetainedOriginalFinalizerFile>,
-    ) -> Result<()> {
+    pub fn require_original_owner(&self, owner: &Arc<RetainedOriginalFinalizerFile>) -> Result<()> {
         self.require_original(owner)
     }
 }
@@ -6091,12 +7644,18 @@ impl RetainedOriginalFinalizerFile {
             process: std::process::id(),
             kind,
             state: lillux::custody::Held::new(
-                ORIGINAL_FINALIZER_FILE_KIND, Mutex::new(OriginalMetadataPinState::Open(file)), pin_state_settled),
+                ORIGINAL_FINALIZER_FILE_KIND,
+                Mutex::new(OriginalMetadataPinState::Open(file)),
+                pin_state_settled,
+            ),
             identity: OnceLock::new(),
         })
     }
     fn require_original_process(&self) -> Result<()> {
-        ensure!(!crate::foreign_process(self.process), "actual finalizer descriptor belongs to original process");
+        ensure!(
+            !crate::foreign_process(self.process),
+            "actual finalizer descriptor belongs to original process"
+        );
         require_current_native_process()
     }
     /// Actual descriptor-only retirement after a consuming outside handoff.
@@ -6112,9 +7671,13 @@ impl RetainedOriginalFinalizerFile {
             inputs.require_original(self)?;
             self.retire_original_descriptor(&|| inputs.require_original(self))
         })();
-        result.map_err(|error| anyhow::Error::new(OriginalOutsideFinalizerFileRetirementFailure {
-            error, owner: self.clone(), inputs: inputs.clone(),
-        }))
+        result.map_err(|error| {
+            anyhow::Error::new(OriginalOutsideFinalizerFileRetirementFailure {
+                error,
+                owner: self.clone(),
+                inputs: inputs.clone(),
+            })
+        })
     }
     pub fn kind(&self) -> OriginalFinalizerFileKind {
         self.kind
@@ -6128,18 +7691,24 @@ impl RetainedOriginalFinalizerFile {
         self: &Arc<Self>,
     ) -> Result<Option<RetiredOriginalFinalizerFile>> {
         self.require_original_process()?;
-        let state = self.state.try_lock()
+        let state = self
+            .state
+            .try_lock()
             .map_err(|_| anyhow::anyhow!("original finalizer pin owner busy or poisoned"))?;
-        Ok(matches!(*state, OriginalMetadataPinState::Retired).then(||
-            RetiredOriginalFinalizerFile { owner: Arc::clone(self) }))
+        Ok(
+            matches!(*state, OriginalMetadataPinState::Retired).then(|| {
+                RetiredOriginalFinalizerFile {
+                    owner: Arc::clone(self),
+                }
+            }),
+        )
     }
     fn require_kind(&self, metadata: std::fs::Metadata) -> Result<bool> {
         require_current_native_process()?;
         Ok(match self.kind {
-            OriginalFinalizerFileKind::ControlRecord | OriginalFinalizerFileKind::StateLock
-            | OriginalFinalizerFileKind::MetadataPin => {
-                metadata.is_file()
-            }
+            OriginalFinalizerFileKind::ControlRecord
+            | OriginalFinalizerFileKind::StateLock
+            | OriginalFinalizerFileKind::MetadataPin => metadata.is_file(),
             OriginalFinalizerFileKind::Directory | OriginalFinalizerFileKind::DirectoryLock => {
                 metadata.is_dir()
             }
@@ -6214,11 +7783,13 @@ impl RetainedOriginalFinalizerFile {
                 .get()
                 .context("original finalizer identity absent")?;
             let result = match self.kind {
-                OriginalFinalizerFileKind::MetadataPin => crate::binding::close_original_metadata_pin(
-                    *fd,
-                    identity.device(),
-                    identity.inode(),
-                ),
+                OriginalFinalizerFileKind::MetadataPin => {
+                    crate::binding::close_original_metadata_pin(
+                        *fd,
+                        identity.device(),
+                        identity.inode(),
+                    )
+                }
                 kind => crate::binding::close_original_finalizer_file(
                     *fd,
                     identity.device(),
@@ -6287,19 +7858,26 @@ impl OriginalOutsideFinalizerFileRetirementFailure {
     pub fn retry(&self) -> Result<RetiredOriginalFinalizerFile> {
         self.owner.retire_after_outside_handoff(&self.inputs)
     }
-    pub fn owner(&self) -> &Arc<RetainedOriginalFinalizerFile> { &self.owner }
+    pub fn owner(&self) -> &Arc<RetainedOriginalFinalizerFile> {
+        &self.owner
+    }
 }
 impl std::fmt::Debug for OriginalOutsideFinalizerFileRetirementFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OriginalOutsideFinalizerFileRetirementFailure")
-            .field("error", &self.error).finish_non_exhaustive()
+            .field("error", &self.error)
+            .finish_non_exhaustive()
     }
 }
 impl std::fmt::Display for OriginalOutsideFinalizerFileRetirementFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { self.error.fmt(f) }
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error.fmt(f)
+    }
 }
 impl std::error::Error for OriginalOutsideFinalizerFileRetirementFailure {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> { Some(self.error.as_ref()) }
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.error.as_ref())
+    }
 }
 
 /// Actual sole counter reference. This ordinary facade and its Arc control
@@ -6311,11 +7889,17 @@ pub struct OriginalNativeBudgetOwner {
 }
 impl OriginalNativeBudgetOwner {
     pub fn from_region(region: OriginalNativeRegionHandle) -> Arc<Self> {
-        Arc::new(Self { process: region.original_process(), region: Mutex::new(Some(region)),
-            retired_snapshot: OnceLock::new() })
+        Arc::new(Self {
+            process: region.original_process(),
+            region: Mutex::new(Some(region)),
+            retired_snapshot: OnceLock::new(),
+        })
     }
     fn require_original_process(&self) -> Result<()> {
-        ensure!(!crate::foreign_process(self.process), "foreign original budget facade");
+        ensure!(
+            !crate::foreign_process(self.process),
+            "foreign original budget facade"
+        );
         Ok(())
     }
     /// Waits for, rather than refuses on, another thread's charge: the
@@ -6325,12 +7909,19 @@ impl OriginalNativeBudgetOwner {
     /// reads only the process id and atomics. No SQL, SQLite callback, C
     /// allocator effect or other call into this facade can run on the holding
     /// thread, so the blocking lock cannot self-deadlock.
-    fn with_raw_budget<T>(&self, cleanup: bool,
-        apply: impl FnOnce(&OriginalNativeBudget) -> Result<T>) -> Result<T> {
+    fn with_raw_budget<T>(
+        &self,
+        cleanup: bool,
+        apply: impl FnOnce(&OriginalNativeBudget) -> Result<T>,
+    ) -> Result<T> {
         self.require_original_process()?;
-        let retained = self.region.lock()
+        let retained = self
+            .region
+            .lock()
             .map_err(|_| anyhow!("original budget facade poisoned"))?;
-        let region = retained.as_ref().context("actual original budget handle consumed")?;
+        let region = retained
+            .as_ref()
+            .context("actual original budget handle consumed")?;
         let borrow = region.borrow(cleanup)?;
         // Only local fixed raw-counter operations execute here. The genuine
         // handle and counted Rust loan remain alive throughout the use; no
@@ -6347,23 +7938,36 @@ impl OriginalNativeBudgetOwner {
         self.with_raw_budget(false, OriginalNativeBudget::debit_connection_ticket)
     }
     fn contains_issued_ticket(&self, ticket: u32) -> Result<bool> {
-        self.with_raw_budget(true, |budget| Ok(ticket > 0 && ticket <= budget.connections_limit
-            && ticket <= budget.connections_issued.load(Ordering::Acquire)))
+        self.with_raw_budget(true, |budget| {
+            Ok(ticket > 0
+                && ticket <= budget.connections_limit
+                && ticket <= budget.connections_issued.load(Ordering::Acquire))
+        })
     }
     fn connections_issued(&self) -> Result<u32> {
-        self.with_raw_budget(true, |budget| Ok(budget.connections_issued.load(Ordering::Acquire)))
+        self.with_raw_budget(true, |budget| {
+            Ok(budget.connections_issued.load(Ordering::Acquire))
+        })
     }
     fn same_region(&self, region: &OriginalNativeRegionHandle) -> Result<bool> {
         self.require_original_process()?;
         region.require_original_process()?;
-        let retained = self.region.lock()
+        let retained = self
+            .region
+            .lock()
             .map_err(|_| anyhow!("original budget provenance gate poisoned"))?;
-        Ok(retained.as_ref().is_some_and(|original| original.same_region(region)))
+        Ok(retained
+            .as_ref()
+            .is_some_and(|original| original.same_region(region)))
     }
     pub fn same_original(&self, other: &Self) -> bool {
-        if self.require_original_process().is_err() || other.require_original_process().is_err() { return false; }
+        if self.require_original_process().is_err() || other.require_original_process().is_err() {
+            return false;
+        }
         if std::ptr::eq(self, other) {
-            let Ok(original) = self.region.lock() else { return false; };
+            let Ok(original) = self.region.lock() else {
+                return false;
+            };
             return original.is_some();
         }
         // Both facade locks are taken in address order, so two threads
@@ -6373,8 +7977,12 @@ impl OriginalNativeBudgetOwner {
         } else {
             (other, self)
         };
-        let Ok(first) = first.region.lock() else { return false; };
-        let Ok(second) = second.region.lock() else { return false; };
+        let Ok(first) = first.region.lock() else {
+            return false;
+        };
+        let Ok(second) = second.region.lock() else {
+            return false;
+        };
         match (first.as_ref(), second.as_ref()) {
             (Some(first), Some(second)) => first.same_region(second),
             _ => false,
@@ -6383,27 +7991,44 @@ impl OriginalNativeBudgetOwner {
     /// Consume only this facade's counted handle after the SAME actual
     /// aggregate ACK. Native factory/C loans and host release credit remain
     /// independently owned. This does not dispose, unmap or settle anything.
-    pub fn retire_original_handle(self: &Arc<Self>, factory: &Arc<OriginalNativeFactory>,
-        aggregate: &OriginalNativeTerminal) -> Result<OriginalNativeBudgetSnapshot> {
+    pub fn retire_original_handle(
+        self: &Arc<Self>,
+        factory: &Arc<OriginalNativeFactory>,
+        aggregate: &OriginalNativeTerminal,
+    ) -> Result<OriginalNativeBudgetSnapshot> {
         self.require_original_process()?;
         factory.require_process()?;
-        ensure!(Arc::ptr_eq(self, &factory.budget), "budget retirement selects a different actual facade");
+        ensure!(
+            Arc::ptr_eq(self, &factory.budget),
+            "budget retirement selects a different actual facade"
+        );
         aggregate.require_original(factory)?;
-        let mut retained = self.region.lock()
+        let mut retained = self
+            .region
+            .lock()
             .map_err(|_| anyhow!("original budget handle retirement poisoned"))?;
         if retained.is_none() {
-            return self.retired_snapshot.get().cloned()
+            return self
+                .retired_snapshot
+                .get()
+                .cloned()
                 .context("actual retired budget evidence absent");
         }
-        let region = retained.as_ref().expect("same retained original budget handle");
-        ensure!(region.same_region(&factory.region), "budget retirement selects a foreign actual region");
+        let region = retained
+            .as_ref()
+            .expect("same retained original budget handle");
+        ensure!(
+            region.same_region(&factory.region),
+            "budget retirement selects a foreign actual region"
+        );
         let snapshot = {
             let borrow = region.borrow(true)?;
             borrow.state()?.budget.snapshot()
         };
         // Cache the real snapshot before making the handle unavailable. All
         // future mapped counter methods refuse; evidence is not a new grant.
-        self.retired_snapshot.set(snapshot.clone())
+        self.retired_snapshot
+            .set(snapshot.clone())
             .map_err(|_| anyhow!("actual original budget retirement evidence already cached"))?;
         let original = retained.take();
         drop(retained);
@@ -6412,13 +8037,30 @@ impl OriginalNativeBudgetOwner {
     }
     pub fn retained_retirement_snapshot(&self) -> Result<OriginalNativeBudgetSnapshot> {
         self.require_original_process()?;
-        self.retired_snapshot.get().cloned().context("actual budget handle not yet retired")
+        self.retired_snapshot
+            .get()
+            .cloned()
+            .context("actual budget handle not yet retired")
     }
 }
 
 const MAX_NATIVE_PRODUCER_CELLS: usize = 256;
-struct NativeProducerCell { phase: AtomicU8, kind: AtomicU8, ticket: AtomicU32, reference_retired: AtomicBool }
-impl NativeProducerCell { fn new() -> Self { Self { phase: AtomicU8::new(0), kind: AtomicU8::new(0), ticket: AtomicU32::new(0), reference_retired: AtomicBool::new(false) } } }
+struct NativeProducerCell {
+    phase: AtomicU8,
+    kind: AtomicU8,
+    ticket: AtomicU32,
+    reference_retired: AtomicBool,
+}
+impl NativeProducerCell {
+    fn new() -> Self {
+        Self {
+            phase: AtomicU8::new(0),
+            kind: AtomicU8::new(0),
+            ticket: AtomicU32::new(0),
+            reference_retired: AtomicBool::new(false),
+        }
+    }
+}
 pub(crate) struct NativeResidentState {
     pub(crate) budget: OriginalNativeBudget,
     factory: NativeFactoryStorage,
@@ -6426,35 +8068,56 @@ pub(crate) struct NativeResidentState {
     controls: [NativeProducerCell; MAX_NATIVE_PRODUCER_CELLS],
 }
 impl NativeResidentState {
-    pub(crate) fn new(budget: OriginalNativeBudget) -> Self { Self { budget, factory: NativeFactoryStorage::new(),
-        controls_next: AtomicU32::new(0), controls: std::array::from_fn(|_| NativeProducerCell::new()) } }
+    pub(crate) fn new(budget: OriginalNativeBudget) -> Self {
+        Self {
+            budget,
+            factory: NativeFactoryStorage::new(),
+            controls_next: AtomicU32::new(0),
+            controls: std::array::from_fn(|_| NativeProducerCell::new()),
+        }
+    }
     // Both methods are invoked under the concrete region gate. Installation
     // requires OPEN; retirement requires CLOSING, so absence cannot race an
     // actual lower factory publication.
     pub(crate) fn claim_factory_install(&self) -> std::result::Result<(), FixedHostRefusal> {
-        self.factory.installed.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .map(|_| ()).map_err(|_| FixedHostRefusal::Provenance)
+        self.factory
+            .installed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map(|_| ())
+            .map_err(|_| FixedHostRefusal::Provenance)
     }
-    pub(crate) fn retire_uninstalled_factory_issuer(&self, index: OriginalNativeProducerCellIndex)
-        -> std::result::Result<(), FixedHostRefusal> {
-        if self.factory.installed.load(Ordering::Acquire) || self.factory.arena.get().is_some()
+    pub(crate) fn retire_uninstalled_factory_issuer(
+        &self,
+        index: OriginalNativeProducerCellIndex,
+    ) -> std::result::Result<(), FixedHostRefusal> {
+        if self.factory.installed.load(Ordering::Acquire)
+            || self.factory.arena.get().is_some()
             || self.factory.arena_entered.load(Ordering::Acquire)
             || self.factory.arena_attempt.load(Ordering::Acquire) != 0
             || self.factory.initialized.load(Ordering::Acquire)
-            || self.budget.connections_issued.load(Ordering::Acquire) != 0 {
+            || self.budget.connections_issued.load(Ordering::Acquire) != 0
+        {
             return Err(FixedHostRefusal::TerminalRequired);
         }
         if index.0 as u32 >= self.controls_next.load(Ordering::Acquire) {
             return Err(FixedHostRefusal::Provenance);
         }
-        let cell = self.controls.get(index.0 as usize).ok_or(FixedHostRefusal::Provenance)?;
-        if cell.kind.load(Ordering::Acquire) != producer_kind(SqliteInspectionProductionKind::FactoryIssuer)
-            || cell.ticket.load(Ordering::Acquire) != 0 {
+        let cell = self
+            .controls
+            .get(index.0 as usize)
+            .ok_or(FixedHostRefusal::Provenance)?;
+        if cell.kind.load(Ordering::Acquire)
+            != producer_kind(SqliteInspectionProductionKind::FactoryIssuer)
+            || cell.ticket.load(Ordering::Acquire) != 0
+        {
             return Err(FixedHostRefusal::Purpose);
         }
         let phase = cell.phase.load(Ordering::Acquire);
-        if !matches!(phase, 0..=3) { return Err(FixedHostRefusal::Busy); }
-        cell.phase.compare_exchange(phase, 2, Ordering::AcqRel, Ordering::Acquire)
+        if !matches!(phase, 0..=3) {
+            return Err(FixedHostRefusal::Busy);
+        }
+        cell.phase
+            .compare_exchange(phase, 2, Ordering::AcqRel, Ordering::Acquire)
             .map_err(|_| FixedHostRefusal::Busy)?;
         // This ends only the never-installed issuer interval. Actual wrappers
         // retain their counted handles until outside retirement completes.
@@ -6467,24 +8130,43 @@ impl NativeResidentState {
         // producer/backend to acknowledge; concrete absence permits disposal,
         // while the outside account still requires its own durable settlement.
         if !self.factory.installed.load(Ordering::Acquire) {
-            if self.factory.arena.get().is_some() || self.factory.arena_entered.load(Ordering::Acquire)
+            if self.factory.arena.get().is_some()
+                || self.factory.arena_entered.load(Ordering::Acquire)
                 || self.factory.arena_attempt.load(Ordering::Acquire) != 0
                 || self.factory.initialized.load(Ordering::Acquire)
-                || self.budget.connections_issued.load(Ordering::Acquire) != 0 {
+                || self.budget.connections_issued.load(Ordering::Acquire) != 0
+            {
                 return Err(FixedHostRefusal::TerminalRequired);
             }
         } else {
-            let body = self.factory.terminal_body.get().ok_or(FixedHostRefusal::TerminalRequired)?;
-            if !body.issuer_acknowledged.load(Ordering::Acquire) { return Err(FixedHostRefusal::TerminalRequired); }
+            let body = self
+                .factory
+                .terminal_body
+                .get()
+                .ok_or(FixedHostRefusal::TerminalRequired)?;
+            if !body.issuer_acknowledged.load(Ordering::Acquire) {
+                return Err(FixedHostRefusal::TerminalRequired);
+            }
         }
-        if self.budget.connections_issued.load(Ordering::Acquire) as usize > MAX_NATIVE_CONNECTIONS { return Err(FixedHostRefusal::Provenance); }
-        for ticket in &self.factory.tickets[..self.budget.connections_issued.load(Ordering::Acquire) as usize] {
-            if !matches!(ticket.load(Ordering::Acquire), 2..=4) { return Err(FixedHostRefusal::TerminalRequired); }
+        if self.budget.connections_issued.load(Ordering::Acquire) as usize > MAX_NATIVE_CONNECTIONS
+        {
+            return Err(FixedHostRefusal::Provenance);
+        }
+        for ticket in
+            &self.factory.tickets[..self.budget.connections_issued.load(Ordering::Acquire) as usize]
+        {
+            if !matches!(ticket.load(Ordering::Acquire), 2..=4) {
+                return Err(FixedHostRefusal::TerminalRequired);
+            }
         }
         let count = self.controls_next.load(Ordering::Acquire) as usize;
-        if count > MAX_NATIVE_PRODUCER_CELLS { return Err(FixedHostRefusal::Provenance); }
+        if count > MAX_NATIVE_PRODUCER_CELLS {
+            return Err(FixedHostRefusal::Provenance);
+        }
         for control in &self.controls[..count] {
-            if control.phase.load(Ordering::Acquire) != 2 || !control.reference_retired.load(Ordering::Acquire) {
+            if control.phase.load(Ordering::Acquire) != 2
+                || !control.reference_retired.load(Ordering::Acquire)
+            {
                 return Err(FixedHostRefusal::TerminalRequired);
             }
         }
@@ -6496,32 +8178,59 @@ impl NativeResidentState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OriginalNativeProducerCellIndex(u16);
 /// Ordinary reference wrapper over one nonrecycled concrete resident cell.
-pub struct OriginalNativeProducerControl { region: OriginalNativeRegionHandle, index: OriginalNativeProducerCellIndex }
+pub struct OriginalNativeProducerControl {
+    region: OriginalNativeRegionHandle,
+    index: OriginalNativeProducerCellIndex,
+}
 /// Producer-cell check rebuilt from the factory's own counted region and a
 /// copied cell index; it takes no new counted region handle.
-fn producer_cell_checkpoint(region: &OriginalNativeRegionHandle, index: OriginalNativeProducerCellIndex)
-    -> std::result::Result<(), FixedHostRefusal> {
-    let cell = region.state_ref()?.controls.get(index.0 as usize).ok_or(FixedHostRefusal::Provenance)?;
-    if cell.phase.load(Ordering::Acquire) != 1 { return Err(FixedHostRefusal::Closed); }
+fn producer_cell_checkpoint(
+    region: &OriginalNativeRegionHandle,
+    index: OriginalNativeProducerCellIndex,
+) -> std::result::Result<(), FixedHostRefusal> {
+    let cell = region
+        .state_ref()?
+        .controls
+        .get(index.0 as usize)
+        .ok_or(FixedHostRefusal::Provenance)?;
+    if cell.phase.load(Ordering::Acquire) != 1 {
+        return Err(FixedHostRefusal::Closed);
+    }
     Ok(())
 }
 impl OriginalNativeProducerControl {
     pub fn try_clone(&self) -> std::result::Result<Self, FixedHostRefusal> {
-        Ok(Self { region: self.region.try_clone()?, index: self.index })
+        Ok(Self {
+            region: self.region.try_clone()?,
+            index: self.index,
+        })
     }
-    pub fn index(&self) -> OriginalNativeProducerCellIndex { self.index }
-    pub(crate) fn same_region(&self, region: &OriginalNativeRegionHandle) -> bool { self.region.same_region(region) }
+    pub fn index(&self) -> OriginalNativeProducerCellIndex {
+        self.index
+    }
+    pub(crate) fn same_region(&self, region: &OriginalNativeRegionHandle) -> bool {
+        self.region.same_region(region)
+    }
     fn cell(&self) -> std::result::Result<&NativeProducerCell, FixedHostRefusal> {
         let state = self.region.state_ref()?;
-        state.controls.get(self.index.0 as usize).ok_or(FixedHostRefusal::Provenance)
+        state
+            .controls
+            .get(self.index.0 as usize)
+            .ok_or(FixedHostRefusal::Provenance)
     }
     pub fn bind_ticket(&self, ticket: u32) -> std::result::Result<(), FixedHostRefusal> {
-        if ticket == 0 || ticket as usize > MAX_NATIVE_CONNECTIONS { return Err(FixedHostRefusal::Layout); }
+        if ticket == 0 || ticket as usize > MAX_NATIVE_CONNECTIONS {
+            return Err(FixedHostRefusal::Layout);
+        }
         let cell = self.cell()?;
-        cell.phase.compare_exchange(0, 4, Ordering::AcqRel, Ordering::Acquire)
+        cell.phase
+            .compare_exchange(0, 4, Ordering::AcqRel, Ordering::Acquire)
             .map_err(|_| FixedHostRefusal::Busy)?;
-        let result = cell.ticket.compare_exchange(0, ticket, Ordering::AcqRel, Ordering::Acquire)
-            .map(|_| ()).map_err(|_| FixedHostRefusal::Provenance);
+        let result = cell
+            .ticket
+            .compare_exchange(0, ticket, Ordering::AcqRel, Ordering::Acquire)
+            .map(|_| ())
+            .map_err(|_| FixedHostRefusal::Provenance);
         cell.phase.store(0, Ordering::Release);
         result
     }
@@ -6529,7 +8238,8 @@ impl OriginalNativeProducerControl {
     /// reused and every surviving wrapper still holds its counted region handle.
     pub fn retire_unbound_preparation(&self) -> std::result::Result<(), FixedHostRefusal> {
         let cell = self.cell()?;
-        cell.phase.compare_exchange(0, 4, Ordering::AcqRel, Ordering::Acquire)
+        cell.phase
+            .compare_exchange(0, 4, Ordering::AcqRel, Ordering::Acquire)
             .map_err(|_| FixedHostRefusal::Closed)?;
         if cell.ticket.load(Ordering::Acquire) != 0 {
             cell.phase.store(0, Ordering::Release);
@@ -6545,43 +8255,80 @@ impl OriginalNativeProducerControl {
         self.region.retire_uninstalled_factory_issuer(self.index)
     }
     pub fn checkpoint(&self) -> std::result::Result<(), FixedHostRefusal> {
-        if self.cell()?.phase.load(Ordering::Acquire) != 1 { return Err(FixedHostRefusal::Closed); }
+        if self.cell()?.phase.load(Ordering::Acquire) != 1 {
+            return Err(FixedHostRefusal::Closed);
+        }
         Ok(())
     }
-    pub(crate) fn require_kind(&self, kind: SqliteInspectionProductionKind) -> std::result::Result<(), FixedHostRefusal> {
-        if self.cell()?.kind.load(Ordering::Acquire) != producer_kind(kind) { return Err(FixedHostRefusal::Purpose); }
+    pub(crate) fn require_kind(
+        &self,
+        kind: SqliteInspectionProductionKind,
+    ) -> std::result::Result<(), FixedHostRefusal> {
+        if self.cell()?.kind.load(Ordering::Acquire) != producer_kind(kind) {
+            return Err(FixedHostRefusal::Purpose);
+        }
         Ok(())
     }
     pub(crate) fn published(&self) -> std::result::Result<(), FixedHostRefusal> {
-        self.cell()?.phase.compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire).map_err(|_| FixedHostRefusal::Provenance)?;
+        self.cell()?
+            .phase
+            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| FixedHostRefusal::Provenance)?;
         Ok(())
     }
     pub(crate) fn completed(&self) -> std::result::Result<(), FixedHostRefusal> {
-        self.cell()?.phase.store(2, Ordering::Release); Ok(())
+        self.cell()?.phase.store(2, Ordering::Release);
+        Ok(())
     }
     pub(crate) fn abandoned(&self) {
-        if let Ok(cell) = self.cell() { let _ = cell.phase.compare_exchange(1, 3, Ordering::AcqRel, Ordering::Acquire); }
+        if let Ok(cell) = self.cell() {
+            let _ = cell
+                .phase
+                .compare_exchange(1, 3, Ordering::AcqRel, Ordering::Acquire);
+        }
     }
     pub(crate) fn reference_retired(&self) {
-        if let Ok(cell) = self.cell() { cell.reference_retired.store(true, Ordering::Release); }
+        if let Ok(cell) = self.cell() {
+            cell.reference_retired.store(true, Ordering::Release);
+        }
     }
-    pub fn observation(&self) -> std::result::Result<OriginalNativeProducerObservation, FixedHostRefusal> {
+    pub fn observation(
+        &self,
+    ) -> std::result::Result<OriginalNativeProducerObservation, FixedHostRefusal> {
         let cell = self.cell()?;
-        Ok(OriginalNativeProducerObservation { index: self.index, phase: cell.phase.load(Ordering::Acquire),
-            ticket: cell.ticket.load(Ordering::Acquire), reference_retired: cell.reference_retired.load(Ordering::Acquire) })
+        Ok(OriginalNativeProducerObservation {
+            index: self.index,
+            phase: cell.phase.load(Ordering::Acquire),
+            ticket: cell.ticket.load(Ordering::Acquire),
+            reference_retired: cell.reference_retired.load(Ordering::Acquire),
+        })
     }
 }
 #[derive(Debug, Clone, Copy)]
-pub struct OriginalNativeProducerObservation { pub index: OriginalNativeProducerCellIndex, pub phase: u8,
-    pub ticket: u32, pub reference_retired: bool }
+pub struct OriginalNativeProducerObservation {
+    pub index: OriginalNativeProducerCellIndex,
+    pub phase: u8,
+    pub ticket: u32,
+    pub reference_retired: bool,
+}
 fn producer_kind(kind: SqliteInspectionProductionKind) -> u8 {
-    match kind { SqliteInspectionProductionKind::FactoryIssuer => 1, SqliteInspectionProductionKind::Namespace => 2,
-        SqliteInspectionProductionKind::Copy => 3, SqliteInspectionProductionKind::Native => 4, SqliteInspectionProductionKind::ProjectionLease => 5 }
+    match kind {
+        SqliteInspectionProductionKind::FactoryIssuer => 1,
+        SqliteInspectionProductionKind::Namespace => 2,
+        SqliteInspectionProductionKind::Copy => 3,
+        SqliteInspectionProductionKind::Native => 4,
+        SqliteInspectionProductionKind::ProjectionLease => 5,
+    }
 }
 impl OriginalNativeRegionHandle {
-    pub fn claim_producer_control(&self, kind: SqliteInspectionProductionKind)
-        -> std::result::Result<OriginalNativeProducerControl, FixedHostRefusal> {
-        if matches!(kind, SqliteInspectionProductionKind::Namespace | SqliteInspectionProductionKind::Copy) {
+    pub fn claim_producer_control(
+        &self,
+        kind: SqliteInspectionProductionKind,
+    ) -> std::result::Result<OriginalNativeProducerControl, FixedHostRefusal> {
+        if matches!(
+            kind,
+            SqliteInspectionProductionKind::Namespace | SqliteInspectionProductionKind::Copy
+        ) {
             return Err(FixedHostRefusal::Purpose);
         }
         // Preserve a real whole-region reference before reserving any cell.
@@ -6593,29 +8340,43 @@ impl OriginalNativeRegionHandle {
         // loss is another claim's success and the cell count caps those.
         loop {
             let next = previous.checked_add(1).ok_or(FixedHostRefusal::Overflow)?;
-            if next as usize > MAX_NATIVE_PRODUCER_CELLS { return Err(FixedHostRefusal::Exhausted); }
-            match state.controls_next.compare_exchange(previous, next, Ordering::AcqRel, Ordering::Acquire) {
+            if next as usize > MAX_NATIVE_PRODUCER_CELLS {
+                return Err(FixedHostRefusal::Exhausted);
+            }
+            match state.controls_next.compare_exchange(
+                previous,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
                 Ok(_) => break,
                 Err(observed) => previous = observed,
             }
         }
         let cell = &state.controls[previous as usize];
         cell.kind.store(producer_kind(kind), Ordering::Release);
-        Ok(OriginalNativeProducerControl { region, index: OriginalNativeProducerCellIndex(previous as u16) })
+        Ok(OriginalNativeProducerControl {
+            region,
+            index: OriginalNativeProducerCellIndex(previous as u16),
+        })
     }
     /// Observation only. The outside original owner must permanently close
     /// admission and retain the same factory/issuer join before using this
     /// result; a copied index cannot authorize cleanup or settle an account.
-    pub fn require_quiescent_nonissuer_producers(&self, issuer: OriginalNativeProducerCellIndex)
-        -> std::result::Result<(), FixedHostRefusal> {
+    pub fn require_quiescent_nonissuer_producers(
+        &self,
+        issuer: OriginalNativeProducerCellIndex,
+    ) -> std::result::Result<(), FixedHostRefusal> {
         let state = self.state_ref()?;
         let count = state.controls_next.load(Ordering::Acquire) as usize;
         if count > MAX_NATIVE_PRODUCER_CELLS || issuer.0 as usize >= count {
             return Err(FixedHostRefusal::Provenance);
         }
         let actual = &state.controls[issuer.0 as usize];
-        if actual.kind.load(Ordering::Acquire) != producer_kind(SqliteInspectionProductionKind::FactoryIssuer)
-            || actual.ticket.load(Ordering::Acquire) != 0 {
+        if actual.kind.load(Ordering::Acquire)
+            != producer_kind(SqliteInspectionProductionKind::FactoryIssuer)
+            || actual.ticket.load(Ordering::Acquire) != 0
+        {
             return Err(FixedHostRefusal::Purpose);
         }
         if !matches!(actual.phase.load(Ordering::Acquire), 1 | 2) {
@@ -6628,32 +8389,66 @@ impl OriginalNativeRegionHandle {
         }
         Ok(())
     }
-    pub fn producer_control_census(&self) -> std::result::Result<OriginalNativeProducerCensus, FixedHostRefusal> {
+    pub fn producer_control_census(
+        &self,
+    ) -> std::result::Result<OriginalNativeProducerCensus, FixedHostRefusal> {
         let state = self.state_ref()?;
         let count = state.controls_next.load(Ordering::Acquire) as usize;
-        if count > MAX_NATIVE_PRODUCER_CELLS { return Err(FixedHostRefusal::Provenance); }
-        let mut census = OriginalNativeProducerCensus { allocated: count, active: 0, completed: 0, abandoned: 0,
-            unpublished: 0, live_references: 0, unbound_nonissuer: 0, issuer_cells: 0 };
+        if count > MAX_NATIVE_PRODUCER_CELLS {
+            return Err(FixedHostRefusal::Provenance);
+        }
+        let mut census = OriginalNativeProducerCensus {
+            allocated: count,
+            active: 0,
+            completed: 0,
+            abandoned: 0,
+            unpublished: 0,
+            live_references: 0,
+            unbound_nonissuer: 0,
+            issuer_cells: 0,
+        };
         for cell in &state.controls[..count] {
-            if cell.kind.load(Ordering::Acquire) == producer_kind(SqliteInspectionProductionKind::FactoryIssuer) {
+            if cell.kind.load(Ordering::Acquire)
+                == producer_kind(SqliteInspectionProductionKind::FactoryIssuer)
+            {
                 census.issuer_cells += 1;
-            } else if cell.ticket.load(Ordering::Acquire) == 0 && cell.phase.load(Ordering::Acquire) != 2 {
+            } else if cell.ticket.load(Ordering::Acquire) == 0
+                && cell.phase.load(Ordering::Acquire) != 2
+            {
                 census.unbound_nonissuer += 1;
             }
-            match cell.phase.load(Ordering::Acquire) { 1 => census.active += 1, 2 => census.completed += 1,
-                3 => census.abandoned += 1, _ => census.unpublished += 1 }
-            if !cell.reference_retired.load(Ordering::Acquire) { census.live_references += 1; }
+            match cell.phase.load(Ordering::Acquire) {
+                1 => census.active += 1,
+                2 => census.completed += 1,
+                3 => census.abandoned += 1,
+                _ => census.unpublished += 1,
+            }
+            if !cell.reference_retired.load(Ordering::Acquire) {
+                census.live_references += 1;
+            }
         }
         Ok(census)
     }
 }
 #[derive(Debug, Clone, Copy)]
-pub struct OriginalNativeProducerCensus { pub allocated: usize, pub active: usize, pub completed: usize,
-    pub abandoned: usize, pub unpublished: usize, pub live_references: usize,
-    pub unbound_nonissuer: usize, pub issuer_cells: usize }
+pub struct OriginalNativeProducerCensus {
+    pub allocated: usize,
+    pub active: usize,
+    pub completed: usize,
+    pub abandoned: usize,
+    pub unpublished: usize,
+    pub live_references: usize,
+    pub unbound_nonissuer: usize,
+    pub issuer_cells: usize,
+}
 fn producer_kind_requires_region(factory: &OriginalNativeFactory) -> Result<()> {
-    factory.producer.try_lock().map_err(|_| anyhow::anyhow!("original issuer interval busy"))?
-        .as_ref().context("original issuer interval absent")?.require_original_region(&factory.region)
+    factory
+        .producer
+        .try_lock()
+        .map_err(|_| anyhow::anyhow!("original issuer interval busy"))?
+        .as_ref()
+        .context("original issuer interval absent")?
+        .require_original_region(&factory.region)
 }
 
 /// One admitted ticket armed around a raw open by this crate's own tests.
@@ -6682,19 +8477,25 @@ impl RawTestConnection for Connection {
 #[cfg(test)]
 impl<E> RawTestConnection for std::result::Result<Connection, E> {
     fn raw_test_handle(&self) -> Option<*mut libsqlite3_sys::sqlite3> {
-        self.as_ref().ok().and_then(RawTestConnection::raw_test_handle)
+        self.as_ref()
+            .ok()
+            .and_then(RawTestConnection::raw_test_handle)
     }
 }
 #[cfg(test)]
 impl RawTestConnection for crate::BoundSqliteConnection {
     fn raw_test_handle(&self) -> Option<*mut libsqlite3_sys::sqlite3> {
-        self.connection.as_ref().and_then(RawTestConnection::raw_test_handle)
+        self.connection
+            .as_ref()
+            .and_then(RawTestConnection::raw_test_handle)
     }
 }
 #[cfg(test)]
 impl<E> RawTestConnection for std::result::Result<crate::BoundSqliteConnection, E> {
     fn raw_test_handle(&self) -> Option<*mut libsqlite3_sys::sqlite3> {
-        self.as_ref().ok().and_then(RawTestConnection::raw_test_handle)
+        self.as_ref()
+            .ok()
+            .and_then(RawTestConnection::raw_test_handle)
     }
 }
 #[cfg(test)]
@@ -6706,7 +8507,9 @@ impl RawTestConnection for crate::ReadonlySqliteCopy {
 #[cfg(test)]
 impl<E> RawTestConnection for std::result::Result<crate::ReadonlySqliteCopy, E> {
     fn raw_test_handle(&self) -> Option<*mut libsqlite3_sys::sqlite3> {
-        self.as_ref().ok().and_then(RawTestConnection::raw_test_handle)
+        self.as_ref()
+            .ok()
+            .and_then(RawTestConnection::raw_test_handle)
     }
 }
 #[cfg(any(test, feature = "test-support"))]
@@ -6728,8 +8531,12 @@ impl OriginalNativeFactory {
     /// admission check without running the stages around it. A test sets
     /// both back to false before the host finishes its own backend.
     pub(crate) fn mark_lifecycle_for_test(&self, finishing: bool, shutdown: bool) -> Result<()> {
-        self.storage()?.finishing.store(finishing, Ordering::Release);
-        self.storage()?.shutdown_completed.store(shutdown, Ordering::Release);
+        self.storage()?
+            .finishing
+            .store(finishing, Ordering::Release);
+        self.storage()?
+            .shutdown_completed
+            .store(shutdown, Ordering::Release);
         Ok(())
     }
 }
@@ -6769,7 +8576,11 @@ impl OriginalNativeFactory {
             }
             value
         };
-        let raw = RawTestTicket { ticket, producer: admission.producer, _destination: destination };
+        let raw = RawTestTicket {
+            ticket,
+            producer: admission.producer,
+            _destination: destination,
+        };
         Ok((value, raw))
     }
     /// Recorded shared-mapping bytes and nonempty ledger slots.
@@ -6777,25 +8588,37 @@ impl OriginalNativeFactory {
         let arena = self.arena()?;
         let (mut bytes, mut slots) = (0u64, 0u32);
         let rc = unsafe { ryeos_native_shared_census(arena.0.as_ptr(), &mut bytes, &mut slots) };
-        ensure!(rc == libsqlite3_sys::SQLITE_OK, "native shared census refused: {rc}");
+        ensure!(
+            rc == libsqlite3_sys::SQLITE_OK,
+            "native shared census refused: {rc}"
+        );
         Ok((bytes, slots))
     }
     /// Close an armed ticket into a released terminal for the host census.
-    pub(crate) fn retire_raw_for_test(self: &Arc<Self>, raw: RawTestTicket) -> Result<OriginalNativeConnectionTerminal> {
-        let RawTestTicket { ticket, producer, _destination } = raw;
+    pub(crate) fn retire_raw_for_test(
+        self: &Arc<Self>,
+        raw: RawTestTicket,
+    ) -> Result<OriginalNativeConnectionTerminal> {
+        let RawTestTicket {
+            ticket,
+            producer,
+            _destination,
+        } = raw;
         self.budget.debit_steps(1, true)?;
         self.mark_closed(ticket, true)?;
         producer.acknowledge_native_terminal()?;
-        Ok(OriginalNativeConnectionTerminal::Released(Arc::new(ReleasedOriginalNativeAcquisition {
-            domain: None,
-            factory: self.clone(),
-            ticket: Some(ticket),
-            original_error: anyhow!("raw test ticket retired"),
-            inspection: None,
-            closed_inspection: None,
-            destination: Mutex::new(None),
-            destination_authority: None,
-        })))
+        Ok(OriginalNativeConnectionTerminal::Released(Arc::new(
+            ReleasedOriginalNativeAcquisition {
+                domain: None,
+                factory: self.clone(),
+                ticket: Some(ticket),
+                original_error: anyhow!("raw test ticket retired"),
+                inspection: None,
+                closed_inspection: None,
+                destination: Mutex::new(None),
+                destination_authority: None,
+            },
+        )))
     }
 }
 
@@ -6811,18 +8634,32 @@ mod original_native_counter_controls {
         const CLEANUP: u64 = 64;
         let limit = THREADS * DEBITS + CLEANUP;
         // SAFETY: test-only counter that funds no installed region.
-        let budget = Arc::new(unsafe {
-            OriginalNativeBudget::prepaid_by_original_issuer(16 * 1024 * 1024, limit, 1, CLEANUP)
-        }.unwrap());
+        let budget = Arc::new(
+            unsafe {
+                OriginalNativeBudget::prepaid_by_original_issuer(
+                    16 * 1024 * 1024,
+                    limit,
+                    1,
+                    CLEANUP,
+                )
+            }
+            .unwrap(),
+        );
         let barrier = Arc::new(std::sync::Barrier::new(THREADS as usize));
-        let workers: Vec<_> = (0..THREADS).map(|_| {
-            let (budget, barrier) = (budget.clone(), barrier.clone());
-            std::thread::spawn(move || {
-                barrier.wait();
-                for _ in 0..DEBITS { budget.debit_steps(1, false).unwrap(); }
+        let workers: Vec<_> = (0..THREADS)
+            .map(|_| {
+                let (budget, barrier) = (budget.clone(), barrier.clone());
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    for _ in 0..DEBITS {
+                        budget.debit_steps(1, false).unwrap();
+                    }
+                })
             })
-        }).collect();
-        for worker in workers { worker.join().unwrap(); }
+            .collect();
+        for worker in workers {
+            worker.join().unwrap();
+        }
         assert_eq!(budget.snapshot().allocator_steps, THREADS * DEBITS);
         let error = budget.debit_steps(1, false).unwrap_err();
         assert!(error.to_string().contains("exhausted"), "{error:#}");
@@ -6831,18 +8668,33 @@ mod original_native_counter_controls {
 
     /// One budget facade over a fresh resident region. The storage stays
     /// with the returned owner for the rest of the test process.
-    fn resident_facade(limit: u64, cleanup: u64)
-        -> (crate::original_host_owner::OriginalNativeRegionOwner, Arc<OriginalNativeBudgetOwner>) {
-        use crate::original_host_owner::{OriginalNativeRegionOwner, original_native_region_layout};
+    fn resident_facade(
+        limit: u64,
+        cleanup: u64,
+    ) -> (
+        crate::original_host_owner::OriginalNativeRegionOwner,
+        Arc<OriginalNativeBudgetOwner>,
+    ) {
+        use crate::original_host_owner::{
+            OriginalNativeRegionOwner, original_native_region_layout,
+        };
         // SAFETY: test-only counter funding a region that never installs a factory.
-        let raw = unsafe { OriginalNativeBudget::prepaid_by_original_issuer(16 * 1024 * 1024, limit, 1, cleanup) }
-            .unwrap();
+        let raw = unsafe {
+            OriginalNativeBudget::prepaid_by_original_issuer(16 * 1024 * 1024, limit, 1, cleanup)
+        }
+        .unwrap();
         let quote = original_native_region_layout().unwrap();
         // SAFETY: a fresh aligned allocation of the quoted layout, used only by
         // this region and never freed while the test process runs.
         let storage = NonNull::new(unsafe { std::alloc::alloc_zeroed(quote.layout) }).unwrap();
         let owner = match unsafe {
-            OriginalNativeRegionOwner::initialize(storage, quote.layout.size(), raw, std::process::id(), 1)
+            OriginalNativeRegionOwner::initialize(
+                storage,
+                quote.layout.size(),
+                raw,
+                std::process::id(),
+                1,
+            )
         } {
             Ok(owner) => owner,
             Err(failure) => panic!("initialization refused: {}", failure.refusal),
@@ -6859,18 +8711,22 @@ mod original_native_counter_controls {
         const CLEANUP: u64 = 64;
         let (owner, facade) = resident_facade(THREADS * DEBITS + CLEANUP, CLEANUP);
         let barrier = Arc::new(std::sync::Barrier::new(THREADS as usize));
-        let workers: Vec<_> = (0..THREADS).map(|_| {
-            let (facade, barrier) = (facade.clone(), barrier.clone());
-            std::thread::spawn(move || {
-                barrier.wait();
-                for _ in 0..DEBITS {
-                    // Contention on the facade lock or region gate waits;
-                    // below the limit no charge may refuse.
-                    facade.debit_steps(1, false).unwrap();
-                }
+        let workers: Vec<_> = (0..THREADS)
+            .map(|_| {
+                let (facade, barrier) = (facade.clone(), barrier.clone());
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    for _ in 0..DEBITS {
+                        // Contention on the facade lock or region gate waits;
+                        // below the limit no charge may refuse.
+                        facade.debit_steps(1, false).unwrap();
+                    }
+                })
             })
-        }).collect();
-        for worker in workers { worker.join().unwrap(); }
+            .collect();
+        for worker in workers {
+            worker.join().unwrap();
+        }
         assert_eq!(facade.snapshot().unwrap().allocator_steps, THREADS * DEBITS);
         // Every counted Rust loan was retired, directly or as published debt.
         owner.retire_pending().unwrap();
@@ -6883,12 +8739,16 @@ mod original_native_counter_controls {
         const SERVICE: u64 = 8;
         const CLEANUP: u64 = 4;
         let (_owner, facade) = resident_facade(SERVICE + CLEANUP, CLEANUP);
-        for _ in 0..SERVICE { facade.debit_steps(1, false).unwrap(); }
+        for _ in 0..SERVICE {
+            facade.debit_steps(1, false).unwrap();
+        }
         let error = facade.debit_steps(1, false).unwrap_err();
         assert!(error.to_string().contains("exhausted"), "{error:#}");
         assert!(native_refusal_is_fact(&error), "{error:#}");
         assert_eq!(facade.snapshot().unwrap().allocator_steps, SERVICE);
-        for _ in 0..CLEANUP { facade.debit_steps(1, true).unwrap(); }
+        for _ in 0..CLEANUP {
+            facade.debit_steps(1, true).unwrap();
+        }
         let error = facade.debit_steps(1, true).unwrap_err();
         assert!(error.to_string().contains("exhausted"), "{error:#}");
         assert_eq!(facade.snapshot().unwrap().cleanup_steps, CLEANUP);
@@ -6911,7 +8771,11 @@ mod custody_drop_controls {
         let empty = unsafe { OriginalExactArcAliasInventory::<u8>::issued(1, &prepay) }.unwrap();
         let before = abandoned(KIND);
         drop(empty);
-        assert_eq!(abandoned(KIND), before, "an inventory holding no original is settled");
+        assert_eq!(
+            abandoned(KIND),
+            before,
+            "an inventory holding no original is settled"
+        );
         // SAFETY: as above.
         let mut held = unsafe { OriginalExactArcAliasInventory::<u8>::issued(1, &prepay) }.unwrap();
         let original = Arc::new(7u8);
@@ -6921,17 +8785,30 @@ mod custody_drop_controls {
             .unwrap();
         drop(held);
         assert_eq!(abandoned(KIND), before + 1);
-        assert_eq!(Arc::strong_count(&original), 2, "the canonical owner stays retained");
+        assert_eq!(
+            Arc::strong_count(&original),
+            2,
+            "the canonical owner stays retained"
+        );
     }
 
     struct AdmittedLease;
     impl OriginalNativeProjectionLeaseAuthority for AdmittedLease {
-        fn require_original(&self, _factory: &Arc<OriginalNativeFactory>, _cleanup: bool) -> Result<()> {
+        fn require_original(
+            &self,
+            _factory: &Arc<OriginalNativeFactory>,
+            _cleanup: bool,
+        ) -> Result<()> {
             Ok(())
         }
-        fn fork_deadline(&self, _factory: &Arc<OriginalNativeFactory>, _cleanup: bool)
-            -> Result<lillux::time::MonotonicDeadline> {
-            Ok(lillux::time::MonotonicDeadline::after(std::time::Duration::from_secs(60)))
+        fn fork_deadline(
+            &self,
+            _factory: &Arc<OriginalNativeFactory>,
+            _cleanup: bool,
+        ) -> Result<lillux::time::MonotonicDeadline> {
+            Ok(lillux::time::MonotonicDeadline::after(
+                std::time::Duration::from_secs(60),
+            ))
         }
     }
 
@@ -6944,27 +8821,47 @@ mod custody_drop_controls {
         // code consumes this descriptor.
         let inputs = unsafe {
             OriginalProjectionLeaseInputs::issued(
-                Arc::clone(&root), tempfile::tempfile().unwrap(),
-                OriginalProjectionLeaseMode::Shared, Arc::new(AdmittedLease),
+                Arc::clone(&root),
+                tempfile::tempfile().unwrap(),
+                OriginalProjectionLeaseMode::Shared,
+                Arc::new(AdmittedLease),
             )
         };
         let before = abandoned(KIND);
         drop(inputs);
         assert_eq!(abandoned(KIND), before + 1);
-        assert_eq!(Arc::strong_count(&root), 1, "only the descriptor is retained");
+        assert_eq!(
+            Arc::strong_count(&root),
+            1,
+            "only the descriptor is retained"
+        );
     }
 
     /// A continuation whose holders never retire.
     struct HeldContinuation;
     // SAFETY: test-only continuation; it owns no original resource.
     unsafe impl OriginalOutsideDestinationContinuation for HeldContinuation {
-        fn require_original_process(&self) -> Result<()> { Ok(()) }
-        fn retire_native_references(&mut self, _factory: &Arc<OriginalNativeFactory>,
-            _aggregate: &OriginalNativeTerminal, _prepay: &dyn Fn(u64, u64) -> Result<()>) -> Result<()> { Ok(()) }
-        unsafe fn register_shared_roots(&mut self,
+        fn require_original_process(&self) -> Result<()> {
+            Ok(())
+        }
+        fn retire_native_references(
+            &mut self,
+            _factory: &Arc<OriginalNativeFactory>,
+            _aggregate: &OriginalNativeTerminal,
+            _prepay: &dyn Fn(u64, u64) -> Result<()>,
+        ) -> Result<()> {
+            Ok(())
+        }
+        unsafe fn register_shared_roots(
+            &mut self,
             _registry: &mut crate::original_physical_custody::OriginalPhysicalRegistry,
-            _prepay: &dyn Fn(u64, u64) -> Result<()>) -> Result<()> { Ok(()) }
-        fn physical_holders_retired(&self) -> Result<bool> { Ok(false) }
+            _prepay: &dyn Fn(u64, u64) -> Result<()>,
+        ) -> Result<()> {
+            Ok(())
+        }
+        fn physical_holders_retired(&self) -> Result<bool> {
+            Ok(false)
+        }
         fn physical_holders_retirement_quote(
             &self,
         ) -> Result<crate::original_physical_custody::OutsideWork> {
@@ -6976,7 +8873,9 @@ mod custody_drop_controls {
     fn dropped_unretired_destination_custody_retains_its_continuation() {
         const KIND: &str = "lillux-sqlite::destination-outside-custody";
         // SAFETY: test-only custody with no physical source.
-        let custody = unsafe { OriginalDestinationOutsideCustody::issued(Vec::new(), Box::new(HeldContinuation)) };
+        let custody = unsafe {
+            OriginalDestinationOutsideCustody::issued(Vec::new(), Box::new(HeldContinuation))
+        };
         let before = abandoned(KIND);
         drop(custody);
         assert_eq!(abandoned(KIND), before + 1);
@@ -7012,17 +8911,32 @@ mod process_held_tests {
         let before = count();
         drop(lillux::custody::Held::new(
             KIND,
-            Parts { process: std::process::id(), native_ok: true, _observed: Observed(dropped.clone()) },
-            settled));
+            Parts {
+                process: std::process::id(),
+                native_ok: true,
+                _observed: Observed(dropped.clone()),
+            },
+            settled,
+        ));
         assert!(dropped.load(Ordering::Acquire));
         assert_eq!(count(), before);
         // A different issuing process, and a refusing native check, are both
         // retained and counted, never dropped.
-        for (process, native_ok) in [(std::process::id().wrapping_add(1), true), (std::process::id(), false)] {
+        for (process, native_ok) in [
+            (std::process::id().wrapping_add(1), true),
+            (std::process::id(), false),
+        ] {
             let dropped = Arc::new(AtomicBool::new(false));
             let before = count();
             drop(lillux::custody::Held::new(
-                KIND, Parts { process, native_ok, _observed: Observed(dropped.clone()) }, settled));
+                KIND,
+                Parts {
+                    process,
+                    native_ok,
+                    _observed: Observed(dropped.clone()),
+                },
+                settled,
+            ));
             assert!(!dropped.load(Ordering::Acquire));
             assert_eq!(count(), before + 1);
         }

@@ -488,13 +488,13 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
                     json!({"previous_thread_id": resume_id}),
                 )
                 .await
-            {
-                tracing::warn!(
-                    thread_id = %envelope.thread_id,
-                    error = %e,
-                    "callback append_event(thread_continued) failed"
-                );
-            }
+        {
+            tracing::warn!(
+                thread_id = %envelope.thread_id,
+                error = %e,
+                "callback append_event(thread_continued) failed"
+            );
+        }
 
         // Operator follow-up: emit the new stimulus as a `cognition_in` AFTER
         // folding the chain (so the replay does not double-count it), then seed

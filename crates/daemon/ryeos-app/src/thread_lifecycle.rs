@@ -52,13 +52,14 @@ mod validation;
 #[cfg(test)]
 pub(crate) use direct_execution::external_direct_program_test_fixture;
 pub use direct_execution::{
-    ADMITTED_DIRECT_PROJECT_ROOT, ItemReleaseError, PreparedExternalDirectProjectFile, PreparedItemPlan, RunningItem,
-    SpawnItemFailure, SpawnItemFailureDisposition, SpawnItemParams, SpawnedItemAwaitingAttachment,
-    SpawnedPersistentSessionAwaitingAttachment, capsule_requires_external_direct,
-    effective_child_external_content_declarations, external_direct_environment,
-    prepare_bundle_item_plan_for_qualification, prepare_captured_item_plan,
-    prepare_external_direct_project_file, prepare_external_qualification_local_worker_plan,
-    prepare_item_plan, spawn_item, with_prepared_external_qualification_local_worker_plan,
+    ADMITTED_DIRECT_PROJECT_ROOT, ItemReleaseError, PreparedExternalDirectProjectFile,
+    PreparedItemPlan, RunningItem, SpawnItemFailure, SpawnItemFailureDisposition, SpawnItemParams,
+    SpawnedItemAwaitingAttachment, SpawnedPersistentSessionAwaitingAttachment,
+    capsule_requires_external_direct, effective_child_external_content_declarations,
+    external_direct_environment, prepare_bundle_item_plan_for_qualification,
+    prepare_captured_item_plan, prepare_external_direct_project_file,
+    prepare_external_qualification_local_worker_plan, prepare_item_plan, spawn_item,
+    with_prepared_external_qualification_local_worker_plan,
 };
 pub(crate) use direct_execution::{
     CompiledExternalDirectProgram, compile_external_direct_program,
@@ -3237,9 +3238,9 @@ impl RootExecutionAdmission {
                 != purpose.admitted_parameters_digest
                 || request.target_site_id.is_some()
                 || request.launch_mode != "wait")
-            {
-                bail!("qualification verifier request differs from its sealed purpose");
-            }
+        {
+            bail!("qualification verifier request differs from its sealed purpose");
+        }
         if !same_plan_context(&self.plan_context, &request.plan_context) {
             let mismatches = plan_context_mismatches(&self.plan_context, &request.plan_context);
             let project_context_detail = if mismatches.contains(&"project_context") {
@@ -3941,7 +3942,11 @@ impl ThreadLifecycleService {
     pub(crate) fn scheduler_participant(
         &self,
     ) -> Option<Arc<dyn crate::scheduler_boundary::SchedulerParticipant>> {
-        match &*self.scheduler.read().unwrap_or_else(std::sync::PoisonError::into_inner) {
+        match &*self
+            .scheduler
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
             SchedulerParticipantSlot::Installed(participant) => Some(Arc::clone(participant)),
             SchedulerParticipantSlot::Available | SchedulerParticipantSlot::Withdrawn => None,
         }
@@ -3951,7 +3956,10 @@ impl ThreadLifecycleService {
         &self,
         participant: Arc<dyn crate::scheduler_boundary::SchedulerParticipant>,
     ) -> Result<()> {
-        let mut slot = self.scheduler.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut slot = self
+            .scheduler
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         match &*slot {
             SchedulerParticipantSlot::Available => {
                 *slot = SchedulerParticipantSlot::Installed(participant);
@@ -3972,7 +3980,10 @@ impl ThreadLifecycleService {
     pub fn take_scheduler_participant_for_shutdown(
         &self,
     ) -> Option<Arc<dyn crate::scheduler_boundary::SchedulerParticipant>> {
-        let mut slot = self.scheduler.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut slot = self
+            .scheduler
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         match std::mem::replace(&mut *slot, SchedulerParticipantSlot::Withdrawn) {
             SchedulerParticipantSlot::Installed(participant) => Some(participant),
             SchedulerParticipantSlot::Available | SchedulerParticipantSlot::Withdrawn => None,
@@ -4471,7 +4482,10 @@ impl ThreadLifecycleService {
         initial_events: Vec<NewEventRecord>,
         launch_metadata: &crate::launch_metadata::RuntimeLaunchMetadata,
         owner: &crate::state_store::InProcessHandlerControl,
-    ) -> Result<(Vec<PersistedEventRecord>, crate::state_store::UnspawnedInProcessChild)> {
+    ) -> Result<(
+        Vec<PersistedEventRecord>,
+        crate::state_store::UnspawnedInProcessChild,
+    )> {
         if owner.has_committed_birth() {
             bail!(
                 "in-process owner of `{}` already committed a birth",
@@ -4493,14 +4507,12 @@ impl ThreadLifecycleService {
     /// inline child in its parent's chain, so this never scans a long-lived
     /// chain or exposes the admitted parameter values.
     pub fn recorded_service_parameters_digest(&self, thread_id: &str) -> Result<String> {
-        let chain_root_id = self.state_store.in_process_handler_chain_root_id(thread_id)?;
-        let page = self.state_store.replay_events(
-            &chain_root_id,
-            Some(thread_id),
-            None,
-            2,
-            32 * 1024,
-        )?;
+        let chain_root_id = self
+            .state_store
+            .in_process_handler_chain_root_id(thread_id)?;
+        let page =
+            self.state_store
+                .replay_events(&chain_root_id, Some(thread_id), None, 2, 32 * 1024)?;
         if page.events.len() != 2
             || page.events[0].event_type != ryeos_state::event_types::THREAD_CREATED
             || page.events[1].event_type != ryeos_state::event_types::THREAD_STARTED

@@ -356,10 +356,13 @@ impl<'a, T: FacadeTransport> FacadeClient<'a, T> {
 
     fn call(&self, route: RouteName, body: &Value) -> Result<Reply, CallError> {
         let body = canonical_json(body).map_err(|_| CallError::NoRequestSent)?;
-        let raw = self.transport.post(route, &body).map_err(|failure| match failure {
-            TransportFailure::NoRequestSent => CallError::NoRequestSent,
-            TransportFailure::MayHaveBeenSent => CallError::Ambiguous,
-        })?;
+        let raw = self
+            .transport
+            .post(route, &body)
+            .map_err(|failure| match failure {
+                TransportFailure::NoRequestSent => CallError::NoRequestSent,
+                TransportFailure::MayHaveBeenSent => CallError::Ambiguous,
+            })?;
         self.interpret(route, raw)
     }
 
@@ -385,7 +388,9 @@ impl<'a, T: FacadeTransport> FacadeClient<'a, T> {
         if text("facade_app") != Some(self.pin.app.as_str())
             || text("operation") != Some(route.operation())
         {
-            return Err(CallError::Unattested("envelope names another app or operation"));
+            return Err(CallError::Unattested(
+                "envelope names another app or operation",
+            ));
         }
         let ok = object
             .get("ok")
@@ -543,7 +548,11 @@ pub mod test_support {
         }
 
         pub fn routes(&self) -> Vec<RouteName> {
-            self.requests.borrow().iter().map(|(route, _)| *route).collect()
+            self.requests
+                .borrow()
+                .iter()
+                .map(|(route, _)| *route)
+                .collect()
         }
 
         pub fn exhausted(&self) -> bool {
@@ -556,7 +565,12 @@ pub mod test_support {
             self.requests
                 .borrow_mut()
                 .push((route, serde_json::from_slice(body).unwrap()));
-            match self.steps.borrow_mut().pop_front().expect("unscripted request") {
+            match self
+                .steps
+                .borrow_mut()
+                .pop_front()
+                .expect("unscripted request")
+            {
                 Step::Reply(raw) => Ok(raw),
                 Step::Fail(failure) => Err(failure),
             }
@@ -587,11 +601,19 @@ pub mod test_support {
     }
 
     pub fn refusal(operation: &str, code: &str) -> Step {
-        envelope(operation, 422, json!({"ok": false, "refusal": code, "detail": "fixed"}))
+        envelope(
+            operation,
+            422,
+            json!({"ok": false, "refusal": code, "detail": "fixed"}),
+        )
     }
 
     pub fn provider_error(operation: &str, class: &str) -> Step {
-        envelope(operation, 502, json!({"ok": false, "provider_error": class}))
+        envelope(
+            operation,
+            502,
+            json!({"ok": false, "provider_error": class}),
+        )
     }
 }
 
@@ -611,7 +633,10 @@ mod tests {
         sorted.dedup();
         assert_eq!(sorted.len(), KNOWN_REFUSALS.len());
         for code in KNOWN_REFUSALS {
-            assert!(code.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_'));
+            assert!(
+                code.bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+            );
         }
     }
 
@@ -619,12 +644,16 @@ mod tests {
     fn every_documented_refusal_maps_and_unknown_ones_are_unattested() {
         for code in KNOWN_REFUSALS {
             let (fake, pin) = client_for(vec![refusal("get", code)]);
-            let reply = FacadeClient::new(&fake, &pin).get_by_name("lease-a").unwrap();
+            let reply = FacadeClient::new(&fake, &pin)
+                .get_by_name("lease-a")
+                .unwrap();
             assert_eq!(reply.refusal(), Some(code));
         }
         let (fake, pin) = client_for(vec![refusal("get", "made_up_refusal")]);
         assert_eq!(
-            FacadeClient::new(&fake, &pin).get_by_name("lease-a").unwrap_err(),
+            FacadeClient::new(&fake, &pin)
+                .get_by_name("lease-a")
+                .unwrap_err(),
             CallError::Unattested("unrecognised refusal")
         );
     }
@@ -638,7 +667,9 @@ mod tests {
             json!({"ok": true, "found": false}),
         )]);
         assert_eq!(
-            FacadeClient::new(&fake, &pin).get_by_name("lease-a").unwrap_err(),
+            FacadeClient::new(&fake, &pin)
+                .get_by_name("lease-a")
+                .unwrap_err(),
             CallError::PinMismatch
         );
     }
@@ -653,7 +684,10 @@ mod tests {
             })
         };
         for (step, reason) in [
-            (plain(401, true, "{\"detail\":\"proxy auth\"}"), "reply is not a facade envelope"),
+            (
+                plain(401, true, "{\"detail\":\"proxy auth\"}"),
+                "reply is not a facade envelope",
+            ),
             (plain(200, false, "{}"), "reply is not JSON"),
             (plain(200, true, "[1]"), "reply is not a JSON object"),
             (plain(200, true, "not json"), "reply is not strict JSON"),
@@ -674,13 +708,19 @@ mod tests {
                 "status contradicts the envelope",
             ),
             (
-                envelope("get", 502, json!({"ok": false, "provider_error": "bad class!"})),
+                envelope(
+                    "get",
+                    502,
+                    json!({"ok": false, "provider_error": "bad class!"}),
+                ),
                 "provider failure without a class",
             ),
         ] {
             let (fake, pin) = client_for(vec![step]);
             assert_eq!(
-                FacadeClient::new(&fake, &pin).get_by_name("lease-a").unwrap_err(),
+                FacadeClient::new(&fake, &pin)
+                    .get_by_name("lease-a")
+                    .unwrap_err(),
                 CallError::Unattested(reason)
             );
         }
@@ -690,7 +730,11 @@ mod tests {
             body: vec![b' '; MAX_REPLY_BYTES + 1],
         });
         let (fake, pin) = client_for(vec![oversized]);
-        assert!(FacadeClient::new(&fake, &pin).get_by_name("lease-a").is_err());
+        assert!(
+            FacadeClient::new(&fake, &pin)
+                .get_by_name("lease-a")
+                .is_err()
+        );
     }
 
     #[test]
@@ -700,8 +744,14 @@ mod tests {
             Step::Fail(TransportFailure::MayHaveBeenSent),
         ]);
         let client = FacadeClient::new(&fake, &pin);
-        assert_eq!(client.get_by_name("lease-a").unwrap_err(), CallError::NoRequestSent);
-        assert_eq!(client.get_by_name("lease-a").unwrap_err(), CallError::Ambiguous);
+        assert_eq!(
+            client.get_by_name("lease-a").unwrap_err(),
+            CallError::NoRequestSent
+        );
+        assert_eq!(
+            client.get_by_name("lease-a").unwrap_err(),
+            CallError::Ambiguous
+        );
     }
 
     #[test]
@@ -711,8 +761,16 @@ mod tests {
             envelope("get", 200, json!({"ok": true, "found": false})),
             envelope("terminate", 200, json!({"ok": true, "found": false})),
             envelope("terminate", 200, json!({"ok": true, "found": false})),
-            envelope("upload", 200, json!({"ok": true, "sandbox_id": "sb-1", "bytes": 3, "sha256": lillux::sha256_hex(b"abc")})),
-            envelope("run_once", 200, json!({"ok": true, "sandbox_id": "sb-1", "released": true, "stdin_bytes": 1, "stdin_sha256": lillux::sha256_hex(b"x")})),
+            envelope(
+                "upload",
+                200,
+                json!({"ok": true, "sandbox_id": "sb-1", "bytes": 3, "sha256": lillux::sha256_hex(b"abc")}),
+            ),
+            envelope(
+                "run_once",
+                200,
+                json!({"ok": true, "sandbox_id": "sb-1", "released": true, "stdin_bytes": 1, "stdin_sha256": lillux::sha256_hex(b"x")}),
+            ),
         ]);
         let client = FacadeClient::new(&fake, &pin);
         client.get_by_name("lease-a").unwrap();
@@ -738,20 +796,33 @@ mod tests {
     #[test]
     fn stage_requests_are_fixed_shapes_over_the_stage_routes() {
         let (fake, pin) = client_for(vec![
-            envelope("stage", 200, json!({"ok": true, "sandbox_id": "sb-1", "slot": "pkg", "offset": 0, "bytes": 3, "slot_bytes": 3, "sha256": lillux::sha256_hex(b"abc")})),
-            envelope("stage_seal", 200, json!({"ok": true, "sandbox_id": "sb-1", "slot": "pkg", "sealed": true, "already_sealed": false, "bytes": 3, "sha256": lillux::sha256_hex(b"abc")})),
+            envelope(
+                "stage",
+                200,
+                json!({"ok": true, "sandbox_id": "sb-1", "slot": "pkg", "offset": 0, "bytes": 3, "slot_bytes": 3, "sha256": lillux::sha256_hex(b"abc")}),
+            ),
+            envelope(
+                "stage_seal",
+                200,
+                json!({"ok": true, "sandbox_id": "sb-1", "slot": "pkg", "sealed": true, "already_sealed": false, "bytes": 3, "sha256": lillux::sha256_hex(b"abc")}),
+            ),
             refusal("stage", "offset_mismatch"),
             refusal("stage_seal", "seal_digest_mismatch"),
         ]);
         let client = FacadeClient::new(&fake, &pin);
         let staged = client.stage("sb-1", "pkg", 0, b"abc").unwrap();
-        let sealed = client.stage_seal("sb-1", "pkg", 3, &lillux::sha256_hex(b"abc")).unwrap();
+        let sealed = client
+            .stage_seal("sb-1", "pkg", 3, &lillux::sha256_hex(b"abc"))
+            .unwrap();
         assert_eq!(
             client.stage("sb-1", "pkg", 9, b"x").unwrap().refusal(),
             Some("offset_mismatch")
         );
         assert_eq!(
-            client.stage_seal("sb-1", "pkg", 3, &"0".repeat(64)).unwrap().refusal(),
+            client
+                .stage_seal("sb-1", "pkg", 3, &"0".repeat(64))
+                .unwrap()
+                .refusal(),
             Some("seal_digest_mismatch")
         );
         let requests = fake.requests.borrow();
@@ -765,7 +836,10 @@ mod tests {
             requests[1].1,
             json!({"sandbox_id": "sb-1", "slot": "pkg", "total_bytes": 3, "sha256": lillux::sha256_hex(b"abc")})
         );
-        assert_eq!(staged.observation::<StageObservation>().unwrap().slot_bytes, 3);
+        assert_eq!(
+            staged.observation::<StageObservation>().unwrap().slot_bytes,
+            3
+        );
         assert!(sealed.observation::<SealObservation>().unwrap().sealed);
     }
 
@@ -778,7 +852,9 @@ mod tests {
             json!({"ok": true}),
         )]);
         assert_eq!(
-            FacadeClient::new(&fake, &pin).stage("sb-1", "pkg", 0, b"a").unwrap_err(),
+            FacadeClient::new(&fake, &pin)
+                .stage("sb-1", "pkg", 0, b"a")
+                .unwrap_err(),
             CallError::PinMismatch
         );
     }
@@ -787,7 +863,10 @@ mod tests {
     fn sorted_compact_digest_matches_a_python_style_canonical_form() {
         let value = json!({"b": [1, {"z": true, "a": null}], "a": "x\"y", "c": 3});
         let expected = "{\"a\":\"x\\\"y\",\"b\":[1,{\"a\":null,\"z\":true}],\"c\":3}";
-        assert_eq!(sorted_compact_sha256(&value), lillux::sha256_hex(expected.as_bytes()));
+        assert_eq!(
+            sorted_compact_sha256(&value),
+            lillux::sha256_hex(expected.as_bytes())
+        );
     }
 
     #[test]

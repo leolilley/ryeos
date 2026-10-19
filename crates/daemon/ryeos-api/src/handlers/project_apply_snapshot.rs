@@ -1173,10 +1173,8 @@ fn observe_surface_content(
                         anyhow::bail!("managed surface exceeds its total-byte bound");
                     }
                     let file = file;
-                    let (blob_hash, metadata) = lillux::digest_open_regular_file_stable_exact(
-                        &file,
-                        observation.size(),
-                    )?;
+                    let (blob_hash, metadata) =
+                        lillux::digest_open_regular_file_stable_exact(&file, observation.size())?;
                     files.push(SurfaceContentFile {
                         path: relative,
                         blob_hash,
@@ -1410,9 +1408,11 @@ fn settle_apply_job(
         state: job_state,
         phase: phase.to_owned(),
         roots: None,
-        heads: Some(
-            if job_state == SyncJobState::Completed { vec![operation.target_snapshot_hash.clone()] } else { Default::default() },
-        ),
+        heads: Some(if job_state == SyncJobState::Completed {
+            vec![operation.target_snapshot_hash.clone()]
+        } else {
+            Default::default()
+        }),
         uploaded_hashes: job.uploaded_hashes,
         fetched_hashes: job.fetched_hashes,
         last_error: error.clone(),

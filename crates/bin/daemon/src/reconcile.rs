@@ -2001,15 +2001,18 @@ async fn reconcile_active_threads_inner(
         // exactly the identity that stop proved, which this pass has just
         // cleared; any other identity means a later attachment, and the
         // ordinary crash accounting applies.
-        if let Some(proved) = latched
-            .and_then(|facts| facts.resume_attempts_reset_deferred.get(&thread.thread_id))
+        if let Some(proved) =
+            latched.and_then(|facts| facts.resume_attempts_reset_deferred.get(&thread.thread_id))
         {
             if identity == Some(proved) {
                 state
                     .state_store
                     .reset_resume_attempts(&thread.thread_id)
                     .with_context(|| {
-                        format!("re-arm resume budget after latched stop for {}", thread.thread_id)
+                        format!(
+                            "re-arm resume budget after latched stop for {}",
+                            thread.thread_id
+                        )
                     })?;
             } else {
                 tracing::warn!(
@@ -2378,9 +2381,8 @@ async fn terminate_predecessor_external_leases(state: &AppState) -> Result<()> {
     let (sender, receiver) = tokio::sync::oneshot::channel();
     let owner = state.clone();
     let task = lillux::task::spawn_host_task("external-lease-restart", move || {
-        let _ = sender.send(
-            ryeos_app::external_placement::terminate_predecessor_external_leases(&owner),
-        );
+        let _ = sender
+            .send(ryeos_app::external_placement::terminate_predecessor_external_leases(&owner));
     })
     .context("start Lillux predecessor lease termination owner")?;
     task.detach();
@@ -3275,18 +3277,18 @@ fn assert_abandoned_workspace_contacts_settled(
         if let Some(claim) = state.state_store.get_launch_claim(thread_id)?
             && (workspace.launch_owner.as_deref() != Some(claim.claimed_by.as_str())
                 || state.state_store.is_launch_owner_active(&claim.claimed_by))
-            {
-                anyhow::bail!("workspace has an active or replacement launch owner");
-            }
+        {
+            anyhow::bail!("workspace has an active or replacement launch owner");
+        }
         if let Some(identity) = state
             .state_store
             .get_thread(thread_id)?
             .and_then(|thread| thread.runtime.process_identity)
             && (execution_liveness(&identity) != IdentityLiveness::DeadOrStale
                 || !dead_identity_safe_to_clear(&identity, thread_id))
-            {
-                anyhow::bail!("workspace root process death is unproved");
-            }
+        {
+            anyhow::bail!("workspace root process death is unproved");
+        }
     }
     // During Constructing this is the held creator, not the root target. Once
     // dedicated attachment hands off the view it is the separately owned

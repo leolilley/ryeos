@@ -196,9 +196,7 @@ impl RuntimeDb {
         &self,
         operation_id: &str,
     ) -> Result<Option<QualificationTerminationRecord>> {
-        self.conn.with_sql(|conn| {
-            read(conn, operation_id)
-        })
+        self.conn.with_sql(|conn| read(conn, operation_id))
     }
 
     pub fn reserve_qualification_termination(

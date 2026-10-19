@@ -101,8 +101,8 @@ fn installable_graph_expression_fields_compile_through_live_loaders() {
         .iter()
         .map(|root| root.join(".ai/node/engine/kinds"))
         .collect();
-    let kinds = KindRegistry::load_base(&kind_roots, &trust)
-    .expect("load signed live kind schemas");
+    let kinds =
+        KindRegistry::load_base(&kind_roots, &trust).expect("load signed live kind schemas");
     let graph_schema = kinds.get("graph").expect("graph kind schema");
     let items = installable_refs("graph", graph_schema, &bundle_roots);
     if items.is_empty() {

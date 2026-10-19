@@ -253,7 +253,8 @@ impl RecoveryAcknowledgementCustody {
                 work.memory_bytes += (std::mem::size_of::<ThreadHistoryDiscardMarker>()
                     + acknowledged.kind.capacity()
                     + acknowledged.operation.operation_id.capacity()
-                    + acknowledged.operation.sha256.capacity()) as u64;
+                    + acknowledged.operation.sha256.capacity())
+                    as u64;
                 let acknowledged = acknowledged.canonical_bytes()?;
                 // The conditional write joins the directory path with the
                 // marker name for its identity check, and encodes the name.
@@ -402,7 +403,10 @@ fn sweep_state_temporaries_in(directory: &lillux::PinnedDirectory) -> Result<usi
             lillux::SecureTempOwnership::NotTemp | lillux::SecureTempOwnership::Foreign => {}
             lillux::SecureTempOwnership::Own => {
                 let file = directory.open_regular(&name, false)?.with_context(|| {
-                    format!("interrupted State publication disappeared: {}", path.display())
+                    format!(
+                        "interrupted State publication disappeared: {}",
+                        path.display()
+                    )
                 })?;
                 directory.remove_if_same(&name, &file).with_context(|| {
                     format!("remove interrupted State publication {}", path.display())
@@ -556,10 +560,17 @@ impl std::fmt::Display for ThreadHistoryDiscardAcknowledgementRefused {
         match self {
             Self::Absent => formatter
                 .write_str("thread-history discard acknowledgement found no marker to acknowledge"),
-            Self::OtherOperation { acknowledged, operation_id } => write!(
+            Self::OtherOperation {
+                acknowledged,
+                operation_id,
+            } => write!(
                 formatter,
                 "thread-history discard acknowledgement differs from its marker's operation (the {} marker names {operation_id})",
-                if *acknowledged { "acknowledged" } else { "active" }
+                if *acknowledged {
+                    "acknowledged"
+                } else {
+                    "active"
+                }
             ),
         }
     }
@@ -1300,10 +1311,11 @@ impl DurableCasUploadStage {
         self.recovery.ensure_guard(cas_mutation_guard)?;
         validate_hash("durable staged large-object root", hash)?;
         if self.record.large_object_hashes.insert(hash.to_owned())
-            && let Err(error) = self.persist_record(&self.record) {
-                self.record.large_object_hashes.remove(hash);
-                return Err(error);
-            }
+            && let Err(error) = self.persist_record(&self.record)
+        {
+            self.record.large_object_hashes.remove(hash);
+            return Err(error);
+        }
         Ok(())
     }
 
@@ -1528,10 +1540,11 @@ impl DurableCasUploadStage {
         self.ensure_active()?;
         validate_hash("durable staged object root", hash)?;
         if self.record.object_hashes.insert(hash.to_string())
-            && let Err(error) = self.persist_record(&self.record) {
-                self.record.object_hashes.remove(hash);
-                return Err(error);
-            }
+            && let Err(error) = self.persist_record(&self.record)
+        {
+            self.record.object_hashes.remove(hash);
+            return Err(error);
+        }
         Ok(())
     }
 
@@ -1539,10 +1552,11 @@ impl DurableCasUploadStage {
         self.ensure_active()?;
         validate_hash("durable staged blob root", hash)?;
         if self.record.blob_hashes.insert(hash.to_string())
-            && let Err(error) = self.persist_record(&self.record) {
-                self.record.blob_hashes.remove(hash);
-                return Err(error);
-            }
+            && let Err(error) = self.persist_record(&self.record)
+        {
+            self.record.blob_hashes.remove(hash);
+            return Err(error);
+        }
         Ok(())
     }
 }
@@ -1672,10 +1686,11 @@ impl StagedCasRootLease {
         self.recovery.ensure_guard(cas_mutation_guard)?;
         validate_hash("staged CAS object root", hash)?;
         if self.record.object_hashes.insert(hash.to_string())
-            && let Err(error) = self.persist_record(&self.record) {
-                self.record.object_hashes.remove(hash);
-                return Err(error);
-            }
+            && let Err(error) = self.persist_record(&self.record)
+        {
+            self.record.object_hashes.remove(hash);
+            return Err(error);
+        }
         Ok(())
     }
 
@@ -1688,10 +1703,11 @@ impl StagedCasRootLease {
         self.recovery.ensure_guard(cas_mutation_guard)?;
         validate_hash("staged CAS blob root", hash)?;
         if self.record.blob_hashes.insert(hash.to_string())
-            && let Err(error) = self.persist_record(&self.record) {
-                self.record.blob_hashes.remove(hash);
-                return Err(error);
-            }
+            && let Err(error) = self.persist_record(&self.record)
+        {
+            self.record.blob_hashes.remove(hash);
+            return Err(error);
+        }
         Ok(())
     }
 
@@ -1704,10 +1720,11 @@ impl StagedCasRootLease {
         self.recovery.ensure_guard(cas_mutation_guard)?;
         validate_hash("staged large-object root", hash)?;
         if self.record.large_object_hashes.insert(hash.to_owned())
-            && let Err(error) = self.persist_record(&self.record) {
-                self.record.large_object_hashes.remove(hash);
-                return Err(error);
-            }
+            && let Err(error) = self.persist_record(&self.record)
+        {
+            self.record.large_object_hashes.remove(hash);
+            return Err(error);
+        }
         Ok(())
     }
 
@@ -2218,7 +2235,9 @@ impl CasMutationGuard {
     }
 
     fn ensure_protects_runtime_state_dir(&self, runtime_state_dir: &Path) -> Result<()> {
-        let expected_path = runtime_state_dir.join(RECOVERY_DIRECTORY_NAME).join(CAS_MUTATION_LOCK_FILENAME);
+        let expected_path = runtime_state_dir
+            .join(RECOVERY_DIRECTORY_NAME)
+            .join(CAS_MUTATION_LOCK_FILENAME);
         let expected = secure_open_regular(&expected_path, false)?
             .ok_or_else(|| anyhow::anyhow!("CAS mutation lock is absent"))?;
         let expected = expected
@@ -2292,7 +2311,9 @@ impl CasMutationGuard {
             }
         }
 
-        let lock_path = runtime_state_dir.join(RECOVERY_DIRECTORY_NAME).join(CAS_MUTATION_LOCK_FILENAME);
+        let lock_path = runtime_state_dir
+            .join(RECOVERY_DIRECTORY_NAME)
+            .join(CAS_MUTATION_LOCK_FILENAME);
         let parent_path = lock_path
             .parent()
             .ok_or_else(|| anyhow::anyhow!("CAS mutation lock has no parent"))?;
@@ -2378,7 +2399,9 @@ fn current_guard_file_for(runtime_state_dir: &Path) -> Result<Rc<File>> {
             .cloned()
             .expect("reentrant CAS guard depth without lock file")
     });
-    let expected_path = runtime_state_dir.join(RECOVERY_DIRECTORY_NAME).join(CAS_MUTATION_LOCK_FILENAME);
+    let expected_path = runtime_state_dir
+        .join(RECOVERY_DIRECTORY_NAME)
+        .join(CAS_MUTATION_LOCK_FILENAME);
     let expected = secure_open_regular(&expected_path, false)?
         .ok_or_else(|| anyhow::anyhow!("CAS mutation lock is absent"))?;
     let expected = expected
@@ -2438,9 +2461,13 @@ impl RecoveryStore {
     /// Borrow the SAME pinned directory allocations while preserving the
     /// typed semantic recovery owner. This cannot acknowledge recovery or
     /// authorize descriptor retirement. Caller funds counted alias work first.
-    pub(crate) fn borrow_original_directory_custody(&self)
-        -> [std::sync::Arc<lillux::PinnedDirectory>; 2] {
-        [std::sync::Arc::clone(&self.runtime_directory), std::sync::Arc::clone(&self.directory)]
+    pub(crate) fn borrow_original_directory_custody(
+        &self,
+    ) -> [std::sync::Arc<lillux::PinnedDirectory>; 2] {
+        [
+            std::sync::Arc::clone(&self.runtime_directory),
+            std::sync::Arc::clone(&self.directory),
+        ]
     }
 
     /// Move the real pinned owners after the original controller has completed
@@ -2614,8 +2641,12 @@ impl RecoveryStore {
         let Some(pin) = self.directory.open_mount_entry(name)? else {
             return Ok(None);
         };
-        let Some(bytes) =
-            guarded_evidence_read(None, &self.directory, name, THREAD_HISTORY_DISCARD_MARKER_MAX_BYTES)?
+        let Some(bytes) = guarded_evidence_read(
+            None,
+            &self.directory,
+            name,
+            THREAD_HISTORY_DISCARD_MARKER_MAX_BYTES,
+        )?
         else {
             return Ok(None);
         };
@@ -2657,7 +2688,8 @@ impl RecoveryStore {
         .canonical_bytes()?;
         let name = std::ffi::OsStr::new(THREAD_HISTORY_DISCARD_MARKER);
         let mut work = AcknowledgementWork::default();
-        if let Some((pin, marker)) = pin_thread_history_discard_marker(&self.directory, &mut work)? {
+        if let Some((pin, marker)) = pin_thread_history_discard_marker(&self.directory, &mut work)?
+        {
             match marker.phase {
                 ThreadHistoryDiscardPhase::Active => {
                     anyhow::ensure!(
@@ -4572,10 +4604,17 @@ mod tests {
         for path in owned.iter().chain(&retained) {
             fs::write(path, b"bytes").unwrap();
         }
-        let parent = lillux::PinnedDirectory::open(&recovery_path).unwrap().unwrap();
-        let projection = lillux::PinnedDirectory::open(&projection_path).unwrap().unwrap();
+        let parent = lillux::PinnedDirectory::open(&recovery_path)
+            .unwrap()
+            .unwrap();
+        let projection = lillux::PinnedDirectory::open(&projection_path)
+            .unwrap()
+            .unwrap();
 
-        assert_eq!(sweep_interrupted_state_publications(&parent, &projection).unwrap(), 3);
+        assert_eq!(
+            sweep_interrupted_state_publications(&parent, &projection).unwrap(),
+            3
+        );
         for path in &owned {
             assert!(!path.exists(), "{}", path.display());
         }
@@ -4586,7 +4625,10 @@ mod tests {
         let retired_format = projection_path.join(".secure.tmp.16.1");
         fs::write(&retired_format, b"unattributed").unwrap();
         let error = sweep_interrupted_state_publications(&parent, &projection).unwrap_err();
-        assert!(error.to_string().contains("without an exact owner token"), "{error:#}");
+        assert!(
+            error.to_string().contains("without an exact owner token"),
+            "{error:#}"
+        );
         assert!(retired_format.is_file());
     }
 
@@ -4684,7 +4726,10 @@ mod tests {
             std::fs::read(&marker).unwrap(),
             marker_bytes(&operation, ThreadHistoryDiscardPhase::Active)
         );
-        assert_eq!(store.last_acknowledged_thread_history_discard().unwrap(), None);
+        assert_eq!(
+            store.last_acknowledged_thread_history_discard().unwrap(),
+            None
+        );
 
         store
             .finish_thread_history_discard(&guard, &operation)
@@ -4738,15 +4783,19 @@ mod tests {
                 .finish_thread_history_discard(&guard, &other)
                 .unwrap_err();
             assert!(
-                error.to_string().contains("differs from its marker's operation"),
+                error
+                    .to_string()
+                    .contains("differs from its marker's operation"),
                 "{error:#}"
             );
             assert_eq!(
                 error.downcast_ref::<ThreadHistoryDiscardAcknowledgementRefused>(),
-                Some(&ThreadHistoryDiscardAcknowledgementRefused::OtherOperation {
-                    acknowledged: true,
-                    operation_id: operation.operation_id.clone(),
-                }),
+                Some(
+                    &ThreadHistoryDiscardAcknowledgementRefused::OtherOperation {
+                        acknowledged: true,
+                        operation_id: operation.operation_id.clone(),
+                    }
+                ),
                 "a permanent refusal must be typed: {error:#}"
             );
             assert_eq!(std::fs::read(&marker).unwrap(), before);
@@ -4794,12 +4843,18 @@ mod tests {
             store.thread_history_discard_operation().unwrap(),
             Some(second.clone())
         );
-        assert_eq!(store.last_acknowledged_thread_history_discard().unwrap(), None);
+        assert_eq!(
+            store.last_acknowledged_thread_history_discard().unwrap(),
+            None
+        );
 
         let error = store
             .begin_thread_history_discard(&guard, &first)
             .unwrap_err();
-        assert!(error.to_string().contains("different operation"), "{error:#}");
+        assert!(
+            error.to_string().contains("different operation"),
+            "{error:#}"
+        );
         assert!(store.finish_thread_history_discard(&guard, &first).is_err());
         assert_eq!(std::fs::read(&marker).unwrap(), active);
         assert_eq!(
@@ -4878,18 +4933,15 @@ mod tests {
         );
 
         let mut retry = AcknowledgementWork::default();
-        custody.finish_counted(&guard, &operation, &mut retry).unwrap();
+        custody
+            .finish_counted(&guard, &operation, &mut retry)
+            .unwrap();
         assert!(within(retry), "{retry:?} exceeds {quote:?}");
         assert!(retry.steps < rewrite.steps);
 
         // The temporary-name scratch bounds the longest name a State writer
         // can generate: maximal pid and sequence digits.
-        let longest = format!(
-            ".secure.tmp.{}.{}.{}",
-            "x".repeat(16),
-            u32::MAX,
-            u64::MAX
-        );
+        let longest = format!(".secure.tmp.{}.{}.{}", "x".repeat(16), u32::MAX, u64::MAX);
         assert!(longest.len() as u64 + 1 <= ACK_TEMP_NAME_SCRATCH_BYTES);
         // The joined-path term is the directory's own path plus the name.
         let joined = store.root().join(THREAD_HISTORY_DISCARD_MARKER);
@@ -4898,7 +4950,10 @@ mod tests {
                 <= store.root().as_os_str().len() as u64 + ACK_MARKER_PATH_SCRATCH_BYTES
         );
         assert!(store.root().as_os_str().len() as u64 <= ACK_DIRECTORY_PATH_MAX_BYTES);
-        assert_eq!(quote.read_bytes, THREAD_HISTORY_DISCARD_MARKER_MAX_BYTES as u64 + 1);
+        assert_eq!(
+            quote.read_bytes,
+            THREAD_HISTORY_DISCARD_MARKER_MAX_BYTES as u64 + 1
+        );
     }
 
     #[test]

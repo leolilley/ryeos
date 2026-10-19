@@ -6,9 +6,7 @@ use crate::{
     RetainedOriginalFinalizerFile, RetiredOriginalFinalizerFile,
 };
 use anyhow::{Context, Result, ensure};
-use std::{
-    sync::{Arc, OnceLock},
-};
+use std::sync::{Arc, OnceLock};
 
 /// Preserve the original panic payload as evidence while returning the actual
 /// source to its supervisor. This opaque payload supplies no authority.
@@ -86,10 +84,24 @@ impl Source {
 /// owner, establish alias equality, or authorize physical retirement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OriginalPhysicalSourceIdentity {
-    Directory { device: u64, inode: u64 },
-    Namespace { device: u64, inode: u64 },
-    ControlRecord { device: u64, inode: u64 },
-    Operator { target_device: u64, target_inode: u64, parent_device: u64, parent_inode: u64 },
+    Directory {
+        device: u64,
+        inode: u64,
+    },
+    Namespace {
+        device: u64,
+        inode: u64,
+    },
+    ControlRecord {
+        device: u64,
+        inode: u64,
+    },
+    Operator {
+        target_device: u64,
+        target_inode: u64,
+        parent_device: u64,
+        parent_inode: u64,
+    },
 }
 impl Source {
     fn observe_identity(&self) -> Result<OriginalPhysicalSourceIdentity> {
@@ -100,18 +112,26 @@ impl Source {
             }
             Self::Namespace(actual) => {
                 let identity = actual.observe_retained_identity()?;
-                OriginalPhysicalSourceIdentity::Namespace { device: identity.device(), inode: identity.inode() }
+                OriginalPhysicalSourceIdentity::Namespace {
+                    device: identity.device(),
+                    inode: identity.inode(),
+                }
             }
             Self::ControlRecord(actual) => {
                 let identity = actual.observed_identity()?;
-                OriginalPhysicalSourceIdentity::ControlRecord { device: identity.device(), inode: identity.inode() }
+                OriginalPhysicalSourceIdentity::ControlRecord {
+                    device: identity.device(),
+                    inode: identity.inode(),
+                }
             }
             #[cfg(target_os = "linux")]
             Self::Operator(actual) => {
                 let identity = actual.observe_retained_descriptors()?;
                 OriginalPhysicalSourceIdentity::Operator {
-                    target_device: identity.target().device(), target_inode: identity.target().inode(),
-                    parent_device: identity.parent().device(), parent_inode: identity.parent().inode(),
+                    target_device: identity.target().device(),
+                    target_inode: identity.target().inode(),
+                    parent_device: identity.parent().device(),
+                    parent_inode: identity.parent().inode(),
                 }
             }
         })
@@ -148,9 +168,11 @@ impl OriginalPhysicalRegistration {
     /// Matching source roles or descriptor identities do not make memberships
     /// equivalent across registries.
     pub fn same_member(&self, other: &Self) -> Result<bool> {
-        ensure!(!crate::foreign_process(self.observation.process)
-            && !crate::foreign_process(other.observation.process),
-            "foreign original physical membership");
+        ensure!(
+            !crate::foreign_process(self.observation.process)
+                && !crate::foreign_process(other.observation.process),
+            "foreign original physical membership"
+        );
         Ok(Arc::ptr_eq(&self.observation, &other.observation))
     }
 
@@ -174,22 +196,28 @@ impl OriginalPhysicalRegistration {
     /// Ordinary descriptor retirement must leave this role pending until the
     /// original account finishes durable work under the retained lock.
     pub fn is_operator_lock(&self) -> Result<bool> {
-        ensure!(!crate::foreign_process(self.observation.process),
-            "foreign original physical membership");
+        ensure!(
+            !crate::foreign_process(self.observation.process),
+            "foreign original physical membership"
+        );
         Ok(self.observation.operator)
     }
     #[cfg(target_os = "linux")]
     pub fn operator_target_retired(&self) -> Result<bool> {
-        ensure!(!crate::foreign_process(self.observation.process),
-            "foreign original physical membership");
+        ensure!(
+            !crate::foreign_process(self.observation.process),
+            "foreign original physical membership"
+        );
         Ok(self.observation.operator && self.observation.operator_target_retired.get().is_some())
     }
     /// Actual registration-time source facts, not current-open or close
     /// evidence. The complete original registry must still establish membership
     /// and census; a decoded matching identity never substitutes for its owner.
     pub fn observed_source_identity(&self) -> Result<OriginalPhysicalSourceIdentity> {
-        ensure!(!crate::foreign_process(self.observation.process),
-            "foreign original physical source observation");
+        ensure!(
+            !crate::foreign_process(self.observation.process),
+            "foreign original physical source observation"
+        );
         Ok(self.observation.source_identity)
     }
     pub fn owner(&self) -> Result<Arc<RetainedOriginalFinalizerFile>> {
@@ -197,13 +225,14 @@ impl OriginalPhysicalRegistration {
             !crate::foreign_process(self.observation.process),
             "foreign original physical membership"
         );
-        self.observation
-            .owner
-            .get()
-            .cloned()
-            .with_context(|| format!(
+        self.observation.owner.get().cloned().with_context(|| {
+            format!(
                 "original physical owner not transferred (slot {}, operator {}, source {:?})",
-                self.observation.slot_index, self.observation.operator, self.observation.source_identity))
+                self.observation.slot_index,
+                self.observation.operator,
+                self.observation.source_identity
+            )
+        })
     }
     pub fn receipt(&self) -> Result<Arc<RetiredOriginalFinalizerFile>> {
         ensure!(
@@ -227,8 +256,10 @@ impl OriginalPhysicalRegistration {
         &self,
         retired_registry: &RetiredOriginalPhysicalRegistry,
     ) -> Result<Arc<RetiredOriginalFinalizerFile>> {
-        ensure!(!crate::foreign_process(self.observation.process),
-            "foreign original physical membership");
+        ensure!(
+            !crate::foreign_process(self.observation.process),
+            "foreign original physical membership"
+        );
         retired_registry.require_same_identity_token(&self.observation.registry)?;
         self.receipt()
     }
@@ -256,11 +287,15 @@ struct RegistrySlots {
 fn non_account_descriptors_retired_in(parts: &RegistrySlots) -> bool {
     parts.sealed
         && !parts.slots.is_empty()
-        && parts.slots.iter().filter(|slot| !slot.observation.operator).all(|slot| {
-            slot.source.is_none()
-                && slot.observation.owner.get().is_some()
-                && slot.observation.receipt.get().is_some()
-        })
+        && parts
+            .slots
+            .iter()
+            .filter(|slot| !slot.observation.operator)
+            .all(|slot| {
+                slot.source.is_none()
+                    && slot.observation.owner.get().is_some()
+                    && slot.observation.receipt.get().is_some()
+            })
 }
 /// Every slot's descriptor is retired.
 fn descriptors_retired_in(parts: &RegistrySlots) -> bool {
@@ -268,7 +303,8 @@ fn descriptors_retired_in(parts: &RegistrySlots) -> bool {
         && !parts.slots.is_empty()
         && parts.slots.iter().all(|slot| {
             slot.source.is_none()
-                && (!slot.observation.operator || slot.observation.operator_target_retired.get().is_some())
+                && (!slot.observation.operator
+                    || slot.observation.operator_target_retired.get().is_some())
                 && slot.observation.owner.get().is_some()
                 && slot.observation.receipt.get().is_some()
         })
@@ -330,18 +366,17 @@ impl RetiredOriginalPhysicalRegistry {
     /// post-disposal owners use this only to make receipt consumption
     /// idempotent for the same physical inventory.
     pub fn identity(&self) -> Result<OriginalPhysicalRegistryIdentity> {
-        ensure!(!crate::foreign_process(self.process),
-            "foreign retired original physical registry");
+        ensure!(
+            !crate::foreign_process(self.process),
+            "foreign retired original physical registry"
+        );
         Ok(OriginalPhysicalRegistryIdentity {
             process: self.process,
             identity: Arc::clone(&self.identity),
         })
     }
 
-    pub fn require_same_registry(
-        &self,
-        expected: &OriginalPhysicalRegistryIdentity,
-    ) -> Result<()> {
+    pub fn require_same_registry(&self, expected: &OriginalPhysicalRegistryIdentity) -> Result<()> {
         ensure!(
             !crate::foreign_process(self.process)
                 && !crate::foreign_process(expected.process)
@@ -372,18 +407,26 @@ impl OutsideWork {
 
     pub fn checked_add(self, other: Self) -> Result<Self> {
         Ok(Self {
-            bytes: self.bytes.checked_add(other.bytes)
+            bytes: self
+                .bytes
+                .checked_add(other.bytes)
                 .context("outside cleanup storage quote overflow")?,
-            steps: self.steps.checked_add(other.steps)
+            steps: self
+                .steps
+                .checked_add(other.steps)
                 .context("outside cleanup work quote overflow")?,
         })
     }
 
     pub fn checked_mul(self, count: u64) -> Result<Self> {
         Ok(Self {
-            bytes: self.bytes.checked_mul(count)
+            bytes: self
+                .bytes
+                .checked_mul(count)
                 .context("outside cleanup storage quote overflow")?,
-            steps: self.steps.checked_mul(count)
+            steps: self
+                .steps
+                .checked_mul(count)
                 .context("outside cleanup work quote overflow")?,
         })
     }
@@ -394,11 +437,19 @@ impl OriginalPhysicalRegistry {
     /// close owners are charged separately when actual sources transfer.
     pub fn storage_quote(maximum: usize) -> Result<OutsideWork> {
         ensure!(maximum > 0, "empty original physical inventory bound");
-        let bytes = maximum.checked_mul(std::mem::size_of::<Slot>())
-            .and_then(|bytes| bytes.checked_add(std::mem::size_of::<Self>() + 2 * std::mem::size_of::<usize>()))
+        let bytes = maximum
+            .checked_mul(std::mem::size_of::<Slot>())
+            .and_then(|bytes| {
+                bytes.checked_add(std::mem::size_of::<Self>() + 2 * std::mem::size_of::<usize>())
+            })
             .context("physical inventory storage overflow")?;
-        let work = u64::try_from(maximum)?.checked_mul(8).context("physical inventory work overflow")?;
-        Ok(OutsideWork { bytes: u64::try_from(bytes)?, steps: work })
+        let work = u64::try_from(maximum)?
+            .checked_mul(8)
+            .context("physical inventory work overflow")?;
+        Ok(OutsideWork {
+            bytes: u64::try_from(bytes)?,
+            steps: work,
+        })
     }
     /// Worst-case charge for bounded actual-source registration attempts at
     /// full inventory occupancy. The caller supplies a proven finite attempt
@@ -406,12 +457,15 @@ impl OriginalPhysicalRegistry {
     /// proof.
     pub fn registration_quote(maximum: usize, attempts: u64) -> Result<OutsideWork> {
         ensure!(maximum > 0, "empty original physical registration bound");
-        let per_attempt = u64::try_from(maximum)?.checked_add(8)
+        let per_attempt = u64::try_from(maximum)?
+            .checked_add(8)
             .context("physical registration work quote overflow")?;
         Ok(OutsideWork {
-            bytes: attempts.checked_mul(512)
+            bytes: attempts
+                .checked_mul(512)
                 .context("physical registration storage quote overflow")?,
-            steps: attempts.checked_mul(per_attempt)
+            steps: attempts
+                .checked_mul(per_attempt)
                 .context("physical registration work quote overflow")?,
         })
     }
@@ -422,9 +476,11 @@ impl OriginalPhysicalRegistry {
         ensure!(maximum > 0, "empty original physical descriptor bound");
         let slots = u64::try_from(maximum)?;
         Ok(OutsideWork {
-            bytes: slots.checked_mul(512)
+            bytes: slots
+                .checked_mul(512)
                 .context("physical descriptor storage quote overflow")?,
-            steps: slots.checked_mul(4)
+            steps: slots
+                .checked_mul(4)
                 .context("physical descriptor work quote overflow")?,
         })
     }
@@ -432,9 +488,11 @@ impl OriginalPhysicalRegistry {
     /// touching the target. `targets` must be derived from the source census.
     pub fn operator_target_retirement_quote(targets: u64) -> Result<OutsideWork> {
         Ok(OutsideWork {
-            bytes: targets.checked_mul(512)
+            bytes: targets
+                .checked_mul(512)
                 .context("operator retirement storage quote overflow")?,
-            steps: targets.checked_mul(8)
+            steps: targets
+                .checked_mul(8)
                 .context("operator retirement work quote overflow")?,
         })
     }
@@ -443,13 +501,17 @@ impl OriginalPhysicalRegistry {
     #[cfg(target_os = "linux")]
     pub fn operator_observation_quote(maximum: usize, operators: u64) -> Result<OutsideWork> {
         ensure!(maximum > 0, "empty operator observation inventory bound");
-        let per_observation = u64::try_from(std::mem::size_of::<lillux::ExactExclusiveFileLockObservation>())?;
-        let per_scan = u64::try_from(maximum)?.checked_add(8)
+        let per_observation =
+            u64::try_from(std::mem::size_of::<lillux::ExactExclusiveFileLockObservation>())?;
+        let per_scan = u64::try_from(maximum)?
+            .checked_add(8)
             .context("operator observation work quote overflow")?;
         Ok(OutsideWork {
-            bytes: operators.checked_mul(per_observation)
+            bytes: operators
+                .checked_mul(per_observation)
                 .context("operator observation storage quote overflow")?,
-            steps: operators.checked_mul(per_scan)
+            steps: operators
+                .checked_mul(per_scan)
                 .context("operator observation work quote overflow")?,
         })
     }
@@ -458,9 +520,13 @@ impl OriginalPhysicalRegistry {
     /// and does not scan the inventory. Dynamic callers should also use
     /// `membership_work_bound` to validate the projected slot count.
     pub fn membership_work_quote(maximum_slots: usize, queries: u64) -> Result<OutsideWork> {
-        ensure!(maximum_slots > 0, "empty original physical membership bound");
+        ensure!(
+            maximum_slots > 0,
+            "empty original physical membership bound"
+        );
         const MEMBERSHIP_CHECK_STEPS: u64 = 4;
-        let steps = queries.checked_mul(MEMBERSHIP_CHECK_STEPS)
+        let steps = queries
+            .checked_mul(MEMBERSHIP_CHECK_STEPS)
             .and_then(|work| work.checked_add(4))
             .context("original physical membership work quote overflow")?;
         Ok(OutsideWork { bytes: 0, steps })
@@ -482,7 +548,10 @@ impl OriginalPhysicalRegistry {
             maximum,
             inner: lillux::custody::Held::new(
                 REGISTRY_KIND,
-                RegistrySlots { sealed: false, slots },
+                RegistrySlots {
+                    sealed: false,
+                    slots,
+                },
                 registry_settled,
             ),
         })
@@ -510,10 +579,16 @@ impl OriginalPhysicalRegistry {
         additional_sources: usize,
     ) -> Result<OutsideWork> {
         self.require_process()?;
-        let future_slots = self.inner.slots.len().checked_add(additional_sources)
+        let future_slots = self
+            .inner
+            .slots
+            .len()
+            .checked_add(additional_sources)
             .context("original physical projected membership count overflow")?;
-        ensure!(future_slots <= self.maximum,
-            "projected original physical membership exceeds inventory capacity");
+        ensure!(
+            future_slots <= self.maximum,
+            "projected original physical membership exceeds inventory capacity"
+        );
         Self::membership_work_quote(future_slots, queries)
     }
     pub fn prepay_transfer(
@@ -570,11 +645,18 @@ impl OriginalPhysicalRegistry {
         &mut self,
         owner: Arc<RetainedOriginalFinalizerFile>,
         prepay: &dyn Fn(u64, u64) -> Result<()>,
-    ) -> std::result::Result<OriginalPhysicalRegistration, (Arc<RetainedOriginalFinalizerFile>, anyhow::Error)> {
-        if !matches!(owner.kind(),
-            OriginalFinalizerFileKind::ControlRecord | OriginalFinalizerFileKind::MetadataPin)
-        {
-            return Err((owner, anyhow::anyhow!("physical control registration has a foreign role")));
+    ) -> std::result::Result<
+        OriginalPhysicalRegistration,
+        (Arc<RetainedOriginalFinalizerFile>, anyhow::Error),
+    > {
+        if !matches!(
+            owner.kind(),
+            OriginalFinalizerFileKind::ControlRecord | OriginalFinalizerFileKind::MetadataPin
+        ) {
+            return Err((
+                owner,
+                anyhow::anyhow!("physical control registration has a foreign role"),
+            ));
         }
         match self.register(Source::ControlRecord(owner), prepay) {
             Ok(binding) => Ok(binding),
@@ -591,7 +673,10 @@ impl OriginalPhysicalRegistry {
         &mut self,
         owner: Arc<lillux::ExactExclusiveFileLock>,
         prepay: &dyn Fn(u64, u64) -> Result<()>,
-    ) -> std::result::Result<OriginalPhysicalRegistration, (Arc<lillux::ExactExclusiveFileLock>, anyhow::Error)> {
+    ) -> std::result::Result<
+        OriginalPhysicalRegistration,
+        (Arc<lillux::ExactExclusiveFileLock>, anyhow::Error),
+    > {
         if let Err(error) = owner.require_original_process() {
             return Err((owner, error));
         }
@@ -678,9 +763,13 @@ impl OriginalPhysicalRegistry {
     }
     pub fn registrations(&self) -> Result<impl Iterator<Item = OriginalPhysicalRegistration> + '_> {
         self.require_process()?;
-        Ok(self.inner.slots.iter().map(|slot| OriginalPhysicalRegistration {
-            observation: Arc::clone(&slot.observation),
-        }))
+        Ok(self
+            .inner
+            .slots
+            .iter()
+            .map(|slot| OriginalPhysicalRegistration {
+                observation: Arc::clone(&slot.observation),
+            }))
     }
     /// Opaque identity for binding a retained destination to this exact
     /// registry across its pre-disposal permit and post-disposal receipt check.
@@ -691,8 +780,10 @@ impl OriginalPhysicalRegistry {
     }
     pub(crate) fn require_identity_token(&self, identity: &Arc<()>) -> Result<()> {
         self.require_process()?;
-        ensure!(Arc::ptr_eq(&self.identity, identity),
-            "original physical registry identity changed");
+        ensure!(
+            Arc::ptr_eq(&self.identity, identity),
+            "original physical registry identity changed"
+        );
         Ok(())
     }
     /// Bind another retained owner to this exact registry before native
@@ -708,9 +799,7 @@ impl OriginalPhysicalRegistry {
     /// Consume bookkeeping only after actual same-owner receipts for every
     /// descriptor. The returned receipt binds to this exact pre-mapping
     /// registry. This grants no durable account settlement or native seal.
-    pub fn retire(
-        self,
-    ) -> std::result::Result<RetiredOriginalPhysicalRegistry, Self> {
+    pub fn retire(self) -> std::result::Result<RetiredOriginalPhysicalRegistry, Self> {
         if !self.descriptors_retired() {
             return Err(self);
         }
@@ -800,7 +889,11 @@ impl OriginalPhysicalRegistry {
                         _ => 0,
                     };
                     slot.source = Some(source);
-                    shared = Some((slot.observation.slot_index, slot.observation.source_identity, holders));
+                    shared = Some((
+                        slot.observation.slot_index,
+                        slot.observation.source_identity,
+                        holders,
+                    ));
                     break;
                 }
             }
@@ -826,9 +919,20 @@ impl OriginalPhysicalRegistry {
     ) -> Result<()> {
         self.require_process()?;
         ensure!(self.inner.sealed, "original physical inventory still open");
-        ensure!(self.non_account_descriptors_retired(), "original non-operator descriptors remain open");
-        for slot in self.inner.get_mut().slots.iter_mut().filter(|slot| slot.observation.operator) {
-            if slot.observation.operator_target_retired.get().is_some() && slot.observation.owner.get().is_some() {
+        ensure!(
+            self.non_account_descriptors_retired(),
+            "original non-operator descriptors remain open"
+        );
+        for slot in self
+            .inner
+            .get_mut()
+            .slots
+            .iter_mut()
+            .filter(|slot| slot.observation.operator)
+        {
+            if slot.observation.operator_target_retired.get().is_some()
+                && slot.observation.owner.get().is_some()
+            {
                 continue;
             }
             // Fund custody transfer, syscall and parent-owner publication
@@ -837,13 +941,21 @@ impl OriginalPhysicalRegistry {
             let quote = Self::operator_target_retirement_quote(1)?;
             original_prepay(prepay, quote.bytes, quote.steps)?;
             if slot.operator_body.is_none() {
-                let source = slot.source.take().context("actual operator source absent")?;
+                let source = slot
+                    .source
+                    .take()
+                    .context("actual operator source absent")?;
                 match source {
                     Source::Operator(actual) => match Arc::try_unwrap(actual) {
-                        Ok(body) => slot.operator_body = Some(lillux::custody::Held::until_taken(OPERATOR_LOCK_KIND, body)),
+                        Ok(body) => {
+                            slot.operator_body =
+                                Some(lillux::custody::Held::until_taken(OPERATOR_LOCK_KIND, body))
+                        }
                         Err(actual) => {
                             slot.source = Some(Source::Operator(actual));
-                            anyhow::bail!("actual operator lock still shared outside complete inventory");
+                            anyhow::bail!(
+                                "actual operator lock still shared outside complete inventory"
+                            );
                         }
                     },
                     source => {
@@ -852,13 +964,23 @@ impl OriginalPhysicalRegistry {
                     }
                 }
             }
-            let body = slot.operator_body.as_mut().context("actual operator body absent")?.get_mut();
-            ensure!(body.try_retire_registered_target(original)?, "original registered lock close deferred");
+            let body = slot
+                .operator_body
+                .as_mut()
+                .context("actual operator body absent")?
+                .get_mut();
+            ensure!(
+                body.try_retire_registered_target(original)?,
+                "original registered lock close deferred"
+            );
             // Only the genuine kernel success path reaches this observation.
             if slot.observation.operator_target_retired.get().is_none() {
                 assert!(slot.observation.operator_target_retired.set(()).is_ok());
             }
-            let held = slot.operator_body.take().expect("actual operator body retained");
+            let held = slot
+                .operator_body
+                .take()
+                .expect("actual operator body retained");
             let body = match held.take_whole() {
                 Ok(body) => body,
                 Err(held) => {
@@ -869,11 +991,14 @@ impl OriginalPhysicalRegistry {
             let parent = match body.into_retired_target_parent() {
                 Ok(parent) => parent,
                 Err((body, error)) => {
-                    slot.operator_body = Some(lillux::custody::Held::until_taken(OPERATOR_LOCK_KIND, body));
+                    slot.operator_body =
+                        Some(lillux::custody::Held::until_taken(OPERATOR_LOCK_KIND, body));
                     return Err(error);
                 }
             };
-            let owner = unsafe { RetainedOriginalFinalizerFile::issued(parent, OriginalFinalizerFileKind::Directory) };
+            let owner = unsafe {
+                RetainedOriginalFinalizerFile::issued(parent, OriginalFinalizerFileKind::Directory)
+            };
             assert!(slot.observation.owner.set(owner).is_ok());
         }
         Ok(())
@@ -899,12 +1024,17 @@ impl OriginalPhysicalRegistry {
         directory: &Arc<lillux::PinnedDirectory>,
     ) -> Result<()> {
         self.require_membership(registration)?;
-        let slot = self.inner.slots.iter().find(|slot|
-            Arc::ptr_eq(&slot.observation, &registration.observation))
+        let slot = self
+            .inner
+            .slots
+            .iter()
+            .find(|slot| Arc::ptr_eq(&slot.observation, &registration.observation))
             .context("actual original directory membership slot absent")?;
-        ensure!(matches!(slot.source.as_ref(), Some(Source::Directory(actual))
+        ensure!(
+            matches!(slot.source.as_ref(), Some(Source::Directory(actual))
             if Arc::ptr_eq(actual, directory)),
-            "original directory source is foreign or already transferred");
+            "original directory source is foreign or already transferred"
+        );
         Ok(())
     }
     /// Borrowed proof that `owner` is the exact control-record owner of this
@@ -917,17 +1047,33 @@ impl OriginalPhysicalRegistry {
         owner: &Arc<RetainedOriginalFinalizerFile>,
     ) -> Result<()> {
         self.require_membership(registration)?;
-        let slot = self.inner.slots.iter().find(|slot|
-            Arc::ptr_eq(&slot.observation, &registration.observation))
+        let slot = self
+            .inner
+            .slots
+            .iter()
+            .find(|slot| Arc::ptr_eq(&slot.observation, &registration.observation))
             .context("actual original control-record membership slot absent")?;
         let retained = match slot.source.as_ref() {
             Some(Source::ControlRecord(actual)) => Arc::ptr_eq(actual, owner),
             Some(_) => false,
-            None => matches!(slot.observation.source_identity,
-                    OriginalPhysicalSourceIdentity::ControlRecord { device: _, inode: _ })
-                && slot.observation.owner.get().is_some_and(|actual| Arc::ptr_eq(actual, owner)),
+            None => {
+                matches!(
+                    slot.observation.source_identity,
+                    OriginalPhysicalSourceIdentity::ControlRecord {
+                        device: _,
+                        inode: _
+                    }
+                ) && slot
+                    .observation
+                    .owner
+                    .get()
+                    .is_some_and(|actual| Arc::ptr_eq(actual, owner))
+            }
         };
-        ensure!(retained, "original control-record source is foreign or changed owner");
+        ensure!(
+            retained,
+            "original control-record source is foreign or changed owner"
+        );
         Ok(())
     }
     /// Prove that `lock` is the exact live allocation retained by this
@@ -941,14 +1087,22 @@ impl OriginalPhysicalRegistry {
         lock: &Arc<lillux::ExactExclusiveFileLock>,
     ) -> Result<()> {
         self.require_membership(registration)?;
-        ensure!(registration.is_operator_lock()?, "membership is not the original operator lock");
+        ensure!(
+            registration.is_operator_lock()?,
+            "membership is not the original operator lock"
+        );
         lock.require_original_process()?;
-        let slot = self.inner.slots.iter().find(|slot|
-            Arc::ptr_eq(&slot.observation, &registration.observation))
+        let slot = self
+            .inner
+            .slots
+            .iter()
+            .find(|slot| Arc::ptr_eq(&slot.observation, &registration.observation))
             .context("actual operator lock membership slot absent")?;
-        ensure!(matches!(slot.source.as_ref(), Some(Source::Operator(actual))
+        ensure!(
+            matches!(slot.source.as_ref(), Some(Source::Operator(actual))
             if Arc::ptr_eq(actual, lock)),
-            "operator alias is not the exact live lock retained by this registry");
+            "operator alias is not the exact live lock retained by this registry"
+        );
         Ok(())
     }
     /// Locate and validate the canonical operator membership when the Store
@@ -968,18 +1122,26 @@ impl OriginalPhysicalRegistry {
         let mut operator = None;
         for slot in self.inner.slots.iter() {
             if slot.observation.operator {
-                ensure!(operator.is_none(), "original inventory contains multiple operator locks");
-                ensure!(matches!(slot.source.as_ref(), Some(Source::Operator(actual))
+                ensure!(
+                    operator.is_none(),
+                    "original inventory contains multiple operator locks"
+                );
+                ensure!(
+                    matches!(slot.source.as_ref(), Some(Source::Operator(actual))
                     if Arc::ptr_eq(actual, lock)),
-                    "admission exclusion differs from the canonical live operator source");
+                    "admission exclusion differs from the canonical live operator source"
+                );
                 operator = Some(Arc::clone(&slot.observation));
             } else {
-                ensure!(slot.observation.receipt.get().is_some(),
-                    "non-operator original descriptor remains unretired before exclusion alias");
+                ensure!(
+                    slot.observation.receipt.get().is_some(),
+                    "non-operator original descriptor remains unretired before exclusion alias"
+                );
             }
         }
         Ok(OriginalPhysicalRegistration {
-            observation: operator.context("original operator membership absent from physical inventory")?,
+            observation: operator
+                .context("original operator membership absent from physical inventory")?,
         })
     }
     /// Observe the SAME operator target/parent while they are still retained
@@ -993,15 +1155,24 @@ impl OriginalPhysicalRegistry {
         prepay: &dyn Fn(u64, u64) -> Result<()>,
     ) -> Result<lillux::ExactExclusiveFileLockObservation> {
         self.require_membership(registration)?;
-        ensure!(registration.is_operator_lock()?, "membership is not the original operator lock");
+        ensure!(
+            registration.is_operator_lock()?,
+            "membership is not the original operator lock"
+        );
         let quote = Self::operator_observation_quote(self.maximum, 1)?;
         original_prepay(prepay, quote.bytes, quote.steps)?;
-        let slot = self.inner.slots.iter().find(|slot|
-            Arc::ptr_eq(&slot.observation, &registration.observation))
+        let slot = self
+            .inner
+            .slots
+            .iter()
+            .find(|slot| Arc::ptr_eq(&slot.observation, &registration.observation))
             .context("actual operator inventory slot absent")?;
         match slot.source.as_ref() {
             Some(Source::Operator(actual)) => actual.observe_retained_descriptors(),
-            _ => slot.operator_body.as_ref().context("actual operator descriptor body absent")?
+            _ => slot
+                .operator_body
+                .as_ref()
+                .context("actual operator descriptor body absent")?
                 .observe_retained_descriptors(),
         }
     }
@@ -1068,8 +1239,10 @@ impl OriginalPhysicalRegistry {
             let membership_quote = self.membership_work_bound(1, 0)?;
             self.prepay_transfer(prepay, membership_quote.bytes, membership_quote.steps)?;
             self.require_membership(&registration)?;
-            ensure!(!registration.is_operator_lock()?,
-                "operator exclusion entered the non-operator descriptor phase");
+            ensure!(
+                !registration.is_operator_lock()?,
+                "operator exclusion entered the non-operator descriptor phase"
+            );
 
             let inputs = issue_inputs(&registration, owner.clone())?;
             inputs.require_original_owner(&owner)?;
@@ -1081,15 +1254,18 @@ impl OriginalPhysicalRegistry {
                     }
                     return Err(error.context(format!(
                         "retire original descriptor (slot {}, role {:?}, source {:?})",
-                        registration.observation.slot_index, owner.kind(),
+                        registration.observation.slot_index,
+                        owner.kind(),
                         registration.observation.source_identity,
                     )));
                 }
             };
             self.retain_retirement(&registration, Arc::new(receipt))?;
         }
-        ensure!(self.non_account_descriptors_retired(),
-            "actual non-operator original descriptors remain pending");
+        ensure!(
+            self.non_account_descriptors_retired(),
+            "actual non-operator original descriptors remain pending"
+        );
         Ok(())
     }
     /// Close the actual operator parent descriptor only after the canonical
@@ -1130,8 +1306,10 @@ impl OriginalPhysicalRegistry {
             let registration = OriginalPhysicalRegistration {
                 observation: Arc::clone(observation),
             };
-            ensure!(registration.operator_target_retired()?,
-                "operator parent cannot close before its actual target");
+            ensure!(
+                registration.operator_target_retired()?,
+                "operator parent cannot close before its actual target"
+            );
             let owner = registration.owner()?;
             if let Some(receipt) = owner.completed_close_receipt()? {
                 self.retain_retirement(&registration, Arc::new(receipt))?;
@@ -1141,8 +1319,10 @@ impl OriginalPhysicalRegistry {
             let membership_quote = self.membership_work_bound(1, 0)?;
             self.prepay_transfer(prepay, membership_quote.bytes, membership_quote.steps)?;
             self.require_membership(&registration)?;
-            ensure!(registration.is_operator_lock()? && registration.operator_target_retired()?,
-                "operator parent retirement lost its exact target receipt");
+            ensure!(
+                registration.is_operator_lock()? && registration.operator_target_retired()?,
+                "operator parent retirement lost its exact target receipt"
+            );
 
             let inputs = issue_inputs(&registration, owner.clone())?;
             inputs.require_original_owner(&owner)?;
@@ -1154,16 +1334,22 @@ impl OriginalPhysicalRegistry {
                     }
                     return Err(error.context(format!(
                         "retire original descriptor (slot {}, role {:?}, source {:?})",
-                        registration.observation.slot_index, owner.kind(),
+                        registration.observation.slot_index,
+                        owner.kind(),
                         registration.observation.source_identity,
                     )));
                 }
             };
             self.retain_retirement(&registration, Arc::new(receipt))?;
         }
-        ensure!(found_operator, "original physical inventory lacks its canonical operator target");
-        ensure!(self.descriptors_retired(),
-            "original operator parent descriptor remains pending");
+        ensure!(
+            found_operator,
+            "original physical inventory lacks its canonical operator target"
+        );
+        ensure!(
+            self.descriptors_retired(),
+            "original operator parent descriptor remains pending"
+        );
         Ok(())
     }
     /// Finite ordinary-descriptor phase only. The operator exclusion source
@@ -1190,12 +1376,17 @@ mod tests {
     // admission, account settlement or a native lifecycle qualification.
     unsafe impl crate::OriginalOutsideFinalizerFileRetirementAuthority for FixtureClose {
         fn require_original(&self, owner: &Arc<RetainedOriginalFinalizerFile>) -> Result<()> {
-            ensure!(Arc::ptr_eq(owner, &self.owner), "fixture selected a foreign descriptor owner");
+            ensure!(
+                Arc::ptr_eq(owner, &self.owner),
+                "fixture selected a foreign descriptor owner"
+            );
             Ok(())
         }
         fn debit_original_steps(&self, work: u64) -> Result<()> {
             let mut remaining = self.work.lock().unwrap();
-            *remaining = remaining.checked_sub(work).context("fixture close work exhausted")?;
+            *remaining = remaining
+                .checked_sub(work)
+                .context("fixture close work exhausted")?;
             Ok(())
         }
     }
@@ -1208,12 +1399,19 @@ mod tests {
     }
     unsafe impl crate::OriginalOutsideFinalizerFileRetirementAuthority for FixtureCloseLateRefusal {
         fn require_original(&self, owner: &Arc<RetainedOriginalFinalizerFile>) -> Result<()> {
-            ensure!(Arc::ptr_eq(owner, &self.owner), "fixture selected a foreign descriptor owner");
-            ensure!(owner.completed_close_receipt()?.is_none(),
-                "fixture late authority refused after close");
+            ensure!(
+                Arc::ptr_eq(owner, &self.owner),
+                "fixture selected a foreign descriptor owner"
+            );
+            ensure!(
+                owner.completed_close_receipt()?.is_none(),
+                "fixture late authority refused after close"
+            );
             Ok(())
         }
-        fn debit_original_steps(&self, _work: u64) -> Result<()> { Ok(()) }
+        fn debit_original_steps(&self, _work: u64) -> Result<()> {
+            Ok(())
+        }
     }
 
     #[test]
@@ -1237,13 +1435,17 @@ mod tests {
             )
         };
         let mut registry = unsafe { OriginalPhysicalRegistry::issued(1, &|_, _| Ok(())) }.unwrap();
-        let _membership = unsafe {
-            registry.register_control_record(Arc::clone(&owner), &|_, _| Ok(()))
-        }.map_err(|(_, error)| error).unwrap();
+        let _membership =
+            unsafe { registry.register_control_record(Arc::clone(&owner), &|_, _| Ok(())) }
+                .map_err(|(_, error)| error)
+                .unwrap();
         let before = lillux::custody::abandoned_custody().count(KIND);
         drop(registry);
         assert_eq!(lillux::custody::abandoned_custody().count(KIND), before + 1);
-        assert!(Arc::strong_count(&owner) >= 2, "the registered owner stays retained");
+        assert!(
+            Arc::strong_count(&owner) >= 2,
+            "the registered owner stays retained"
+        );
     }
 
     #[test]
@@ -1258,19 +1460,32 @@ mod tests {
         let owner = issued();
         let foreign = issued();
         let mut registry = unsafe { OriginalPhysicalRegistry::issued(1, &|_, _| Ok(())) }.unwrap();
-        let membership = unsafe {
-            registry.register_control_record(Arc::clone(&owner), &|_, _| Ok(()))
-        }.map_err(|(_, error)| error).unwrap();
+        let membership =
+            unsafe { registry.register_control_record(Arc::clone(&owner), &|_, _| Ok(())) }
+                .map_err(|(_, error)| error)
+                .unwrap();
         // Before sealing, the owner is still the registry source and has not
         // been published to the observation.
         assert!(membership.owner().is_err());
-        registry.require_control_record_source(&membership, &owner).unwrap();
-        assert!(registry.require_control_record_source(&membership, &foreign).is_err());
+        registry
+            .require_control_record_source(&membership, &owner)
+            .unwrap();
+        assert!(
+            registry
+                .require_control_record_source(&membership, &foreign)
+                .is_err()
+        );
         unsafe { registry.seal_inventory() }.unwrap();
         unsafe { registry.prepare_descriptor_owners(&|_, _| Ok(())) }.unwrap();
         assert!(Arc::ptr_eq(&membership.owner().unwrap(), &owner));
-        registry.require_control_record_source(&membership, &owner).unwrap();
-        assert!(registry.require_control_record_source(&membership, &foreign).is_err());
+        registry
+            .require_control_record_source(&membership, &owner)
+            .unwrap();
+        assert!(
+            registry
+                .require_control_record_source(&membership, &foreign)
+                .is_err()
+        );
     }
 
     #[cfg(target_os = "linux")]
@@ -1279,41 +1494,71 @@ mod tests {
         let _serial = crate::test_host::serial_guard();
         let temporary = tempfile::tempdir().unwrap();
         std::fs::write(temporary.path().join("marker"), b"m").unwrap();
-        let directory = lillux::PinnedDirectory::open(temporary.path()).unwrap().unwrap();
-        let metadata_pin = || directory
-            .open_mount_entry(std::ffi::OsStr::new("marker")).unwrap().unwrap();
+        let directory = lillux::PinnedDirectory::open(temporary.path())
+            .unwrap()
+            .unwrap();
+        let metadata_pin = || {
+            directory
+                .open_mount_entry(std::ffi::OsStr::new("marker"))
+                .unwrap()
+                .unwrap()
+        };
         let inputs = |owner: Arc<RetainedOriginalFinalizerFile>| {
             let authority = Arc::new(FixtureClose {
                 owner: owner.clone(),
                 work: std::sync::Mutex::new(32),
             });
-            Arc::new(unsafe {
-                crate::OriginalOutsideFinalizerFileRetirementInputs::issued(owner, authority)
-            }.unwrap())
+            Arc::new(
+                unsafe {
+                    crate::OriginalOutsideFinalizerFileRetirementInputs::issued(owner, authority)
+                }
+                .unwrap(),
+            )
         };
 
         // A metadata-only pin cannot pass as a data control record, and a data
         // descriptor cannot pass as a metadata pin. Neither refusal consumes.
-        let mislabeled_pin = unsafe { RetainedOriginalFinalizerFile::issued(
-            metadata_pin(), crate::OriginalFinalizerFileKind::ControlRecord) };
-        assert!(mislabeled_pin.retire_after_outside_handoff(&inputs(mislabeled_pin.clone())).is_err());
+        let mislabeled_pin = unsafe {
+            RetainedOriginalFinalizerFile::issued(
+                metadata_pin(),
+                crate::OriginalFinalizerFileKind::ControlRecord,
+            )
+        };
+        assert!(
+            mislabeled_pin
+                .retire_after_outside_handoff(&inputs(mislabeled_pin.clone()))
+                .is_err()
+        );
         assert!(mislabeled_pin.completed_close_receipt().unwrap().is_none());
-        let mislabeled_data = unsafe { RetainedOriginalFinalizerFile::issued(
-            std::fs::File::open(temporary.path().join("marker")).unwrap(),
-            crate::OriginalFinalizerFileKind::MetadataPin) };
-        assert!(mislabeled_data.retire_after_outside_handoff(&inputs(mislabeled_data.clone())).is_err());
+        let mislabeled_data = unsafe {
+            RetainedOriginalFinalizerFile::issued(
+                std::fs::File::open(temporary.path().join("marker")).unwrap(),
+                crate::OriginalFinalizerFileKind::MetadataPin,
+            )
+        };
+        assert!(
+            mislabeled_data
+                .retire_after_outside_handoff(&inputs(mislabeled_data.clone()))
+                .is_err()
+        );
         assert!(mislabeled_data.completed_close_receipt().unwrap().is_none());
 
-        let owner = unsafe { RetainedOriginalFinalizerFile::issued(
-            metadata_pin(), crate::OriginalFinalizerFileKind::MetadataPin) };
+        let owner = unsafe {
+            RetainedOriginalFinalizerFile::issued(
+                metadata_pin(),
+                crate::OriginalFinalizerFileKind::MetadataPin,
+            )
+        };
         let mut registry = unsafe { OriginalPhysicalRegistry::issued(1, &|_, _| Ok(())) }.unwrap();
         unsafe { registry.register_control_record(Arc::clone(&owner), &|_, _| Ok(())) }
-            .map_err(|(_, error)| error).unwrap();
+            .map_err(|(_, error)| error)
+            .unwrap();
         unsafe { registry.seal_inventory() }.unwrap();
         unsafe { registry.prepare_descriptor_owners(&|_, _| Ok(())) }.unwrap();
         unsafe {
             registry.retire_non_operator_descriptors(&|_, _| Ok(()), &|_, owner| Ok(inputs(owner)))
-        }.unwrap();
+        }
+        .unwrap();
         assert!(registry.descriptors_retired());
         assert!(owner.completed_close_receipt().unwrap().is_some());
         assert!(registry.retire().is_ok());
@@ -1324,18 +1569,27 @@ mod tests {
     fn operator_alias_requires_the_exact_registered_lock_allocation() {
         let _serial = crate::test_host::serial_guard();
         let temporary = tempfile::tempdir().unwrap();
-        let registered = Arc::new(lillux::ExactExclusiveFileLock::acquire(
-            &temporary.path().join("operator.lock"),
-        ).unwrap());
-        let foreign = Arc::new(lillux::ExactExclusiveFileLock::acquire(
-            &temporary.path().join("foreign.lock"),
-        ).unwrap());
+        let registered = Arc::new(
+            lillux::ExactExclusiveFileLock::acquire(&temporary.path().join("operator.lock"))
+                .unwrap(),
+        );
+        let foreign = Arc::new(
+            lillux::ExactExclusiveFileLock::acquire(&temporary.path().join("foreign.lock"))
+                .unwrap(),
+        );
         let mut registry = unsafe { OriginalPhysicalRegistry::issued(1, &|_, _| Ok(())) }.unwrap();
-        let membership = unsafe {
-            registry.register_operator_lock(Arc::clone(&registered), &|_, _| Ok(()))
-        }.map_err(|(_, error)| error).unwrap();
-        registry.require_operator_lock_alias(&membership, &registered).unwrap();
-        assert!(registry.require_operator_lock_alias(&membership, &foreign).is_err());
+        let membership =
+            unsafe { registry.register_operator_lock(Arc::clone(&registered), &|_, _| Ok(())) }
+                .map_err(|(_, error)| error)
+                .unwrap();
+        registry
+            .require_operator_lock_alias(&membership, &registered)
+            .unwrap();
+        assert!(
+            registry
+                .require_operator_lock_alias(&membership, &foreign)
+                .is_err()
+        );
     }
 
     #[cfg(target_os = "linux")]
@@ -1345,14 +1599,19 @@ mod tests {
         let temporary = tempfile::tempdir().unwrap();
         let target = temporary.path().join("operator.lock");
         let lock = Arc::new(lillux::ExactExclusiveFileLock::acquire(&target).unwrap());
-        let record = unsafe { RetainedOriginalFinalizerFile::issued(
-            tempfile::tempfile().unwrap(), OriginalFinalizerFileKind::ControlRecord) };
+        let record = unsafe {
+            RetainedOriginalFinalizerFile::issued(
+                tempfile::tempfile().unwrap(),
+                OriginalFinalizerFileKind::ControlRecord,
+            )
+        };
         let mut registry = unsafe { OriginalPhysicalRegistry::issued(2, &|_, _| Ok(())) }.unwrap();
         let registry_identity = registry.identity().unwrap();
-        let control = match unsafe { registry.register_control_record(record.clone(), &|_, _| Ok(())) } {
-            Ok(member) => member,
-            Err(_) => panic!("original fixture record must register"),
-        };
+        let control =
+            match unsafe { registry.register_control_record(record.clone(), &|_, _| Ok(())) } {
+                Ok(member) => member,
+                Err(_) => panic!("original fixture record must register"),
+            };
         let alias = match unsafe { registry.register_control_record(record, &|_, _| Ok(())) } {
             Ok(member) => member,
             Err(_) => panic!("same original fixture allocation must join"),
@@ -1378,43 +1637,50 @@ mod tests {
         let issued_inputs = Arc::new(AtomicUsize::new(0));
         let issued_counter = Arc::clone(&issued_inputs);
         unsafe {
-            registry.retire_non_operator_descriptors(
-                &|_, _| Ok(()),
-                &|_, owner| {
+            registry
+                .retire_non_operator_descriptors(&|_, _| Ok(()), &|_, owner| {
                     issued_counter.fetch_add(1, Ordering::SeqCst);
                     let authority = Arc::new(FixtureClose {
                         owner: owner.clone(),
                         work: std::sync::Mutex::new(32),
                     });
-                    let inputs = crate::OriginalOutsideFinalizerFileRetirementInputs::issued(owner, authority)?;
+                    let inputs = crate::OriginalOutsideFinalizerFileRetirementInputs::issued(
+                        owner, authority,
+                    )?;
                     Ok(Arc::new(inputs))
-                },
-            ).unwrap();
+                })
+                .unwrap();
         }
         assert_eq!(issued_inputs.load(Ordering::SeqCst), 1);
         assert!(registry.non_account_descriptors_retired());
         assert!(!registry.descriptors_retired());
         unsafe {
-            registry.retire_non_operator_descriptors(
-                &|_, _| panic!("a completed descriptor phase must not recharge"),
-                &|_, _| panic!("a completed descriptor phase must not reissue inputs"),
-            ).unwrap();
+            registry
+                .retire_non_operator_descriptors(
+                    &|_, _| panic!("a completed descriptor phase must not recharge"),
+                    &|_, _| panic!("a completed descriptor phase must not reissue inputs"),
+                )
+                .unwrap();
         }
         assert_eq!(issued_inputs.load(Ordering::SeqCst), 1);
         unsafe { registry.retire_operator_targets(deadline, &|_, _| Ok(())) }.unwrap();
-        assert!(!registry.descriptors_retired(), "operator parent still requires its own actual close");
+        assert!(
+            !registry.descriptors_retired(),
+            "operator parent still requires its own actual close"
+        );
         unsafe {
-            registry.retire_operator_parent_descriptor(
-                &|_, _| Ok(()),
-                &|_, owner| {
+            registry
+                .retire_operator_parent_descriptor(&|_, _| Ok(()), &|_, owner| {
                     let authority = Arc::new(FixtureClose {
                         owner: owner.clone(),
                         work: std::sync::Mutex::new(32),
                     });
-                    let inputs = crate::OriginalOutsideFinalizerFileRetirementInputs::issued(owner, authority)?;
+                    let inputs = crate::OriginalOutsideFinalizerFileRetirementInputs::issued(
+                        owner, authority,
+                    )?;
                     Ok(Arc::new(inputs))
-                },
-            ).unwrap();
+                })
+                .unwrap();
         }
         assert!(registry.descriptors_retired());
         registry_identity
@@ -1428,31 +1694,42 @@ mod tests {
         control.receipt_in(&retired).unwrap();
         alias.receipt_in(&retired).unwrap();
         operator.receipt_in(&retired).unwrap();
-        let foreign_record = unsafe { RetainedOriginalFinalizerFile::issued(
-            tempfile::tempfile().unwrap(), OriginalFinalizerFileKind::ControlRecord) };
+        let foreign_record = unsafe {
+            RetainedOriginalFinalizerFile::issued(
+                tempfile::tempfile().unwrap(),
+                OriginalFinalizerFileKind::ControlRecord,
+            )
+        };
         let mut foreign = unsafe { OriginalPhysicalRegistry::issued(1, &|_, _| Ok(())) }.unwrap();
-        unsafe { foreign.register_control_record(foreign_record, &|_, _| Ok(())) }.map_err(|(_, error)| error).unwrap();
+        unsafe { foreign.register_control_record(foreign_record, &|_, _| Ok(())) }
+            .map_err(|(_, error)| error)
+            .unwrap();
         unsafe { foreign.seal_inventory() }.unwrap();
         unsafe { foreign.prepare_descriptor_owners(&|_, _| Ok(())) }.unwrap();
         unsafe {
-            foreign.retire_non_operator_descriptors(
-                &|_, _| Ok(()),
-                &|_, owner| {
+            foreign
+                .retire_non_operator_descriptors(&|_, _| Ok(()), &|_, owner| {
                     let authority = Arc::new(FixtureClose {
                         owner: owner.clone(),
                         work: std::sync::Mutex::new(32),
                     });
-                    let inputs = crate::OriginalOutsideFinalizerFileRetirementInputs::issued(owner, authority)?;
+                    let inputs = crate::OriginalOutsideFinalizerFileRetirementInputs::issued(
+                        owner, authority,
+                    )?;
                     Ok(Arc::new(inputs))
-                },
-            ).unwrap();
+                })
+                .unwrap();
         }
         let foreign_identity = foreign.identity().unwrap();
         let foreign = match foreign.retire() {
             Ok(receipt) => receipt,
             Err(_) => panic!("fully retired foreign inventory must produce a receipt"),
         };
-        assert!(registry_identity.require_same_registry(&foreign_identity).is_err());
+        assert!(
+            registry_identity
+                .require_same_registry(&foreign_identity)
+                .is_err()
+        );
         assert!(retired.require_same_registry(&foreign_identity).is_err());
         assert!(control.receipt_in(&foreign).is_err());
         assert!(control.source_slot_in(&foreign_identity).is_err());
@@ -1463,35 +1740,45 @@ mod tests {
     #[test]
     fn non_operator_close_caches_physical_receipt_before_late_authority_refusal() {
         let _serial = crate::test_host::serial_guard();
-        let record = unsafe { RetainedOriginalFinalizerFile::issued(
-            tempfile::tempfile().unwrap(), OriginalFinalizerFileKind::ControlRecord) };
+        let record = unsafe {
+            RetainedOriginalFinalizerFile::issued(
+                tempfile::tempfile().unwrap(),
+                OriginalFinalizerFileKind::ControlRecord,
+            )
+        };
         let mut registry = unsafe { OriginalPhysicalRegistry::issued(1, &|_, _| Ok(())) }.unwrap();
-        let member = unsafe { registry.register_control_record(record, &|_, _| Ok(())) }.map_err(|(_, error)| error).unwrap();
+        let member = unsafe { registry.register_control_record(record, &|_, _| Ok(())) }
+            .map_err(|(_, error)| error)
+            .unwrap();
         unsafe { registry.seal_inventory() }.unwrap();
         unsafe { registry.prepare_descriptor_owners(&|_, _| Ok(())) }.unwrap();
         let issued = Arc::new(AtomicUsize::new(0));
         let issue_count = Arc::clone(&issued);
         let result = unsafe {
-            registry.retire_non_operator_descriptors(
-                &|_, _| Ok(()),
-                &|_, owner| {
-                    issue_count.fetch_add(1, Ordering::SeqCst);
-                    let authority = Arc::new(FixtureCloseLateRefusal { owner: owner.clone() });
-                    let inputs = crate::OriginalOutsideFinalizerFileRetirementInputs::issued(owner, authority)?;
-                    Ok(Arc::new(inputs))
-                },
-            )
+            registry.retire_non_operator_descriptors(&|_, _| Ok(()), &|_, owner| {
+                issue_count.fetch_add(1, Ordering::SeqCst);
+                let authority = Arc::new(FixtureCloseLateRefusal {
+                    owner: owner.clone(),
+                });
+                let inputs =
+                    crate::OriginalOutsideFinalizerFileRetirementInputs::issued(owner, authority)?;
+                Ok(Arc::new(inputs))
+            })
         };
         assert!(result.is_err(), "late recheck must preserve its refusal");
-        assert!(registry.non_account_descriptors_retired(),
-            "the physical close receipt is retained despite late refusal");
+        assert!(
+            registry.non_account_descriptors_retired(),
+            "the physical close receipt is retained despite late refusal"
+        );
         assert!(member.receipt().is_ok());
         assert_eq!(issued.load(Ordering::SeqCst), 1);
         unsafe {
-            registry.retire_non_operator_descriptors(
-                &|_, _| panic!("a closed descriptor must not be charged again"),
-                &|_, _| panic!("a closed descriptor must not receive new inputs"),
-            ).unwrap();
+            registry
+                .retire_non_operator_descriptors(
+                    &|_, _| panic!("a closed descriptor must not be charged again"),
+                    &|_, _| panic!("a closed descriptor must not receive new inputs"),
+                )
+                .unwrap();
         }
         assert_eq!(issued.load(Ordering::SeqCst), 1);
     }
@@ -1511,22 +1798,37 @@ mod tests {
             Err(_) => panic!("actual fixture lock must register"),
         };
         assert!(binding.is_operator_lock().unwrap());
-        let observed = registry.observe_operator_lock(&binding, &|_, _| Ok(())).unwrap();
-        assert_eq!(observed.target().inode(), std::fs::metadata(&target).unwrap().ino());
+        let observed = registry
+            .observe_operator_lock(&binding, &|_, _| Ok(()))
+            .unwrap();
+        assert_eq!(
+            observed.target().inode(),
+            std::fs::metadata(&target).unwrap().ino()
+        );
         let original_identity = binding.observed_source_identity().unwrap();
-        assert_eq!(original_identity, OriginalPhysicalSourceIdentity::Operator {
-            target_device: observed.target().device(), target_inode: observed.target().inode(),
-            parent_device: observed.parent().device(), parent_inode: observed.parent().inode(),
-        });
+        assert_eq!(
+            original_identity,
+            OriginalPhysicalSourceIdentity::Operator {
+                target_device: observed.target().device(),
+                target_inode: observed.target().inode(),
+                parent_device: observed.parent().device(),
+                parent_inode: observed.parent().inode(),
+            }
+        );
         unsafe { registry.seal_inventory() }.unwrap();
         unsafe { registry.prepare_descriptor_owners(&|_, _| Ok(())) }.unwrap();
         // This SAME canonical allocation is now the only strong lock owner.
         // Preparing other descriptors must not invalidate account backedges.
-        let account_owner = account_backedge.upgrade().expect("original account authority retained");
+        let account_owner = account_backedge
+            .upgrade()
+            .expect("original account authority retained");
         account_owner.ensure_path_binding(&target).unwrap();
         assert!(lillux::ExactExclusiveFileLock::acquire(&target).is_err());
         assert!(binding.owner().is_err());
-        assert_eq!(binding.observed_source_identity().unwrap(), original_identity);
+        assert_eq!(
+            binding.observed_source_identity().unwrap(),
+            original_identity
+        );
         assert!(registry.non_account_descriptors_retired());
         assert!(!registry.descriptors_retired());
         drop(account_owner);
@@ -1549,20 +1851,42 @@ mod tests {
     fn directory_source_join_requires_same_allocation_not_matching_inode() {
         let _serial = crate::test_host::serial_guard();
         let temporary = tempfile::tempdir().unwrap();
-        let original = Arc::new(lillux::PinnedDirectory::open(temporary.path()).unwrap().unwrap());
-        let independently_opened = Arc::new(lillux::PinnedDirectory::open(temporary.path()).unwrap().unwrap());
-        assert_eq!(original.device_inode().unwrap(), independently_opened.device_inode().unwrap());
+        let original = Arc::new(
+            lillux::PinnedDirectory::open(temporary.path())
+                .unwrap()
+                .unwrap(),
+        );
+        let independently_opened = Arc::new(
+            lillux::PinnedDirectory::open(temporary.path())
+                .unwrap()
+                .unwrap(),
+        );
+        assert_eq!(
+            original.device_inode().unwrap(),
+            independently_opened.device_inode().unwrap()
+        );
         let mut registry = unsafe { OriginalPhysicalRegistry::issued(1, &|_, _| Ok(())) }.unwrap();
-        let binding = match unsafe { registry.register_directory(original.clone(), &|_, _| Ok(())) } {
+        let binding = match unsafe { registry.register_directory(original.clone(), &|_, _| Ok(())) }
+        {
             Ok(binding) => binding,
             Err(_) => panic!("actual directory fixture must register"),
         };
-        registry.require_directory_source(&binding, &original).unwrap();
-        assert!(registry.require_directory_source(&binding, &independently_opened).is_err());
+        registry
+            .require_directory_source(&binding, &original)
+            .unwrap();
+        assert!(
+            registry
+                .require_directory_source(&binding, &independently_opened)
+                .is_err()
+        );
         drop(original);
         unsafe { registry.seal_inventory() }.unwrap();
         unsafe { registry.prepare_descriptor_owners(&|_, _| Ok(())) }.unwrap();
-        assert!(registry.require_directory_source(&binding, &independently_opened).is_err());
+        assert!(
+            registry
+                .require_directory_source(&binding, &independently_opened)
+                .is_err()
+        );
         assert!(!registry.descriptors_retired());
         // Fixture cleanup is not an original production close receipt.
         drop(std::mem::take(&mut registry.inner.get_mut().slots));
@@ -1661,17 +1985,35 @@ mod tests {
         let mut registry = unsafe { OriginalPhysicalRegistry::issued(2, &|_, _| Ok(())) }.unwrap();
         // Three constant-time token checks at four steps each, plus the fixed
         // four-step quote; the projected slot count is checked, never priced.
-        assert_eq!(registry.membership_work_bound(3, 1).unwrap(), OutsideWork { bytes: 0, steps: 16 });
+        assert_eq!(
+            registry.membership_work_bound(3, 1).unwrap(),
+            OutsideWork {
+                bytes: 0,
+                steps: 16
+            }
+        );
         assert!(registry.membership_work_bound(0, 3).is_err());
 
         let binding = unsafe { registry.register_directory(original, &|_, _| Ok(())) }
             .unwrap_or_else(|_| panic!("fixture root must register"));
         assert!(registry.require_membership(&binding).is_ok());
-        assert_eq!(registry.membership_work_bound(3, 1).unwrap(), OutsideWork { bytes: 0, steps: 16 });
+        assert_eq!(
+            registry.membership_work_bound(3, 1).unwrap(),
+            OutsideWork {
+                bytes: 0,
+                steps: 16
+            }
+        );
         assert!(registry.membership_work_bound(0, 2).is_err());
         assert!(registry.membership_work_bound(u64::MAX, 0).is_err());
-        assert_eq!(OriginalPhysicalRegistry::membership_work_quote(2, 3).unwrap().steps,
-            OriginalPhysicalRegistry::membership_work_quote(200, 3).unwrap().steps);
+        assert_eq!(
+            OriginalPhysicalRegistry::membership_work_quote(2, 3)
+                .unwrap()
+                .steps,
+            OriginalPhysicalRegistry::membership_work_quote(200, 3)
+                .unwrap()
+                .steps
+        );
         drop(std::mem::take(&mut registry.inner.get_mut().slots));
     }
 
@@ -1679,24 +2021,74 @@ mod tests {
     fn physical_owner_quotes_cover_their_bounded_charges() {
         let _serial = crate::test_host::serial_guard();
         let inventory = OriginalPhysicalRegistry::storage_quote(2).unwrap();
-        assert_eq!(inventory.bytes, (2 * std::mem::size_of::<Slot>()
-            + std::mem::size_of::<OriginalPhysicalRegistry>()
-            + 2 * std::mem::size_of::<usize>()) as u64);
+        assert_eq!(
+            inventory.bytes,
+            (2 * std::mem::size_of::<Slot>()
+                + std::mem::size_of::<OriginalPhysicalRegistry>()
+                + 2 * std::mem::size_of::<usize>()) as u64
+        );
         assert_eq!(inventory.steps, 16);
-        assert_eq!(OriginalPhysicalRegistry::registration_quote(4, 3).unwrap(),
-            OutsideWork { bytes: 1536, steps: 36 });
-        assert_eq!(OriginalPhysicalRegistry::descriptor_owner_quote(4).unwrap(),
-            OutsideWork { bytes: 2048, steps: 16 });
-        assert_eq!(OriginalPhysicalRegistry::operator_target_retirement_quote(2).unwrap(),
-            OutsideWork { bytes: 1024, steps: 16 });
-        assert_eq!(OutsideWork { bytes: 10, steps: 12 }
-            .checked_add(OutsideWork { bytes: 5, steps: 9 }).unwrap(),
-            OutsideWork { bytes: 15, steps: 21 });
-        assert_eq!(OutsideWork { bytes: 10, steps: 12 }.checked_mul(3).unwrap(),
-            OutsideWork { bytes: 30, steps: 36 });
-        assert!(OutsideWork { bytes: u64::MAX, steps: 0 }
-            .checked_add(OutsideWork { bytes: 1, steps: 0 }).is_err());
-        assert!(OutsideWork { bytes: 0, steps: u64::MAX }.checked_mul(2).is_err());
+        assert_eq!(
+            OriginalPhysicalRegistry::registration_quote(4, 3).unwrap(),
+            OutsideWork {
+                bytes: 1536,
+                steps: 36
+            }
+        );
+        assert_eq!(
+            OriginalPhysicalRegistry::descriptor_owner_quote(4).unwrap(),
+            OutsideWork {
+                bytes: 2048,
+                steps: 16
+            }
+        );
+        assert_eq!(
+            OriginalPhysicalRegistry::operator_target_retirement_quote(2).unwrap(),
+            OutsideWork {
+                bytes: 1024,
+                steps: 16
+            }
+        );
+        assert_eq!(
+            OutsideWork {
+                bytes: 10,
+                steps: 12
+            }
+            .checked_add(OutsideWork { bytes: 5, steps: 9 })
+            .unwrap(),
+            OutsideWork {
+                bytes: 15,
+                steps: 21
+            }
+        );
+        assert_eq!(
+            OutsideWork {
+                bytes: 10,
+                steps: 12
+            }
+            .checked_mul(3)
+            .unwrap(),
+            OutsideWork {
+                bytes: 30,
+                steps: 36
+            }
+        );
+        assert!(
+            OutsideWork {
+                bytes: u64::MAX,
+                steps: 0
+            }
+            .checked_add(OutsideWork { bytes: 1, steps: 0 })
+            .is_err()
+        );
+        assert!(
+            OutsideWork {
+                bytes: 0,
+                steps: u64::MAX
+            }
+            .checked_mul(2)
+            .is_err()
+        );
     }
 
     #[cfg(target_os = "linux")]
@@ -1704,8 +2096,10 @@ mod tests {
     fn operator_observation_quote_covers_scans_and_fixed_results() {
         let _serial = crate::test_host::serial_guard();
         let quote = OriginalPhysicalRegistry::operator_observation_quote(4, 2).unwrap();
-        assert_eq!(quote.bytes,
-            2 * std::mem::size_of::<lillux::ExactExclusiveFileLockObservation>() as u64);
+        assert_eq!(
+            quote.bytes,
+            2 * std::mem::size_of::<lillux::ExactExclusiveFileLockObservation>() as u64
+        );
         assert_eq!(quote.steps, 24);
     }
 }

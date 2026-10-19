@@ -562,9 +562,8 @@ impl ryeos_engine::project_content::AuthoritativeProjectContent for PinnedProjec
             return Ok(None);
         };
         let observation = lillux::observe_open_regular_file(&file).map_err(Self::engine_error)?;
-        let bytes =
-            lillux::read_open_regular_file_stable_bounded(&file, &observation, max_bytes)
-                .map_err(Self::engine_error)?;
+        let bytes = lillux::read_open_regular_file_stable_bounded(&file, &observation, max_bytes)
+            .map_err(Self::engine_error)?;
         let digest = lillux::sha256_hex(&bytes);
         if self
             .observed

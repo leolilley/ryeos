@@ -38,21 +38,20 @@ use ryeos_external_execution_contract::runtime_snapshot_bootstrap::{
 };
 use ryeos_external_execution_contract::staging_package::GuestStagingExpected;
 use ryeos_external_execution_contract::{
-    AllocationReservation, BoundOccurrence, LIFECYCLE_ADAPTER_PROTOCOL, LIFECYCLE_BOOTSTRAP_FD_ENV,
-    LIFECYCLE_CREDENTIAL_FD_ENV, LIFECYCLE_GUEST_FRAMES_FD_ENV, LIFECYCLE_GUEST_PACKAGE_FD_ENV,
-    LIFECYCLE_GUEST_RUNTIME_FD_ENV,
-    LIFECYCLE_HOSTS_FD_ENV,
+    AllocationReservation, BoundOccurrence, LEASE_ADMISSION_FD_ENV, LIFECYCLE_ADAPTER_PROTOCOL,
+    LIFECYCLE_BOOTSTRAP_FD_ENV, LIFECYCLE_CREDENTIAL_FD_ENV, LIFECYCLE_GUEST_FRAMES_FD_ENV,
+    LIFECYCLE_GUEST_PACKAGE_FD_ENV, LIFECYCLE_GUEST_RUNTIME_FD_ENV, LIFECYCLE_HOSTS_FD_ENV,
     LIFECYCLE_HOSTS_SHA256_ENV, LIFECYCLE_LAUNCHER_FD_ENV, LIFECYCLE_NETWORK_POLICY_SHA256_ENV,
     LIFECYCLE_PROVIDER_SPEC_FD_ENV, LIFECYCLE_PROVIDER_SPEC_SHA256_ENV,
     LIFECYCLE_REMAINING_TIMEOUT_MS_ENV, LIFECYCLE_RESOLVER_FD_ENV, LIFECYCLE_RESOLVER_SHA256_ENV,
     LIFECYCLE_SETTINGS_FD_ENV, LIFECYCLE_SIGNED_ASSIGNMENT_FD_ENV, LIFECYCLE_SIGNED_IMPORT_FD_ENV,
-    LEASE_ADMISSION_FD_ENV, LIFECYCLE_SUPERVISOR_FD_ENV, LifecycleAdapterInspectionRequest,
+    LIFECYCLE_SUPERVISOR_FD_ENV, LifecycleAdapterInspectionRequest,
     LifecycleAdapterInspectionResponse, LifecycleAdapterRequest, LifecycleAdapterResponse,
     LifecycleArtifactInspection, LifecycleArtifactRole, LifecycleGuestPackageDelivery,
     LifecycleOperationCommon, LifecycleRuntimeProbeRequest, LifecycleRuntimeProbeResponse,
     LifecycleRuntimeProbeSource, MAX_LIFECYCLE_GUEST_FRAME_MESSAGE_BYTES,
-    MAX_LIFECYCLE_REQUEST_BYTES, MAX_LIFECYCLE_RESPONSE_BYTES,
-    SupervisorActivationIntent, TerminationIntent, from_json_slice_strict,
+    MAX_LIFECYCLE_REQUEST_BYTES, MAX_LIFECYCLE_RESPONSE_BYTES, SupervisorActivationIntent,
+    TerminationIntent, from_json_slice_strict,
 };
 use ryeos_state::objects::RetainedLifecycleExecutableRole;
 
@@ -181,12 +180,14 @@ pub(crate) fn refuse_credential_home_upload(
             "upload refused: its source is {}{}, under the node's credential-profile homes; \
              a credential home never leaves this node",
             opened.path.display(),
-            if opened.unlinked { " (since unlinked)" } else { "" }
+            if opened.unlinked {
+                " (since unlinked)"
+            } else {
+                ""
+            }
         );
     }
-    if let Some(found) =
-        find_home_credential_file(&root, (identity.device(), identity.inode()))?
-    {
+    if let Some(found) = find_home_credential_file(&root, (identity.device(), identity.inode()))? {
         anyhow::bail!(
             "upload refused: its source is {}, a file of the node's credential-profile homes; \
              a credential home never leaves this node",
@@ -2266,7 +2267,10 @@ impl ExecutableExternalPlacementBackend {
             ),
             (
                 LIFECYCLE_GUEST_FRAMES_FD_ENV.into(),
-                child.inherited_descriptor().map_err(anyhow::Error::msg)?.to_string(),
+                child
+                    .inherited_descriptor()
+                    .map_err(anyhow::Error::msg)?
+                    .to_string(),
             ),
         ];
         // The child's copy travels in `inherited`; dropping the parent's copy
@@ -2684,7 +2688,11 @@ fn guest_runtime_delivery<'a>(
         .inherited_descriptor()
         .map_err(anyhow::Error::msg)?
         .to_string();
-    Ok(Some((LIFECYCLE_GUEST_RUNTIME_FD_ENV.into(), descriptor, runtime)))
+    Ok(Some((
+        LIFECYCLE_GUEST_RUNTIME_FD_ENV.into(),
+        descriptor,
+        runtime,
+    )))
 }
 
 /// Seal the admitted adapter request a placement retains for one `operate`
@@ -2797,7 +2805,11 @@ mod tests {
             )
             .unwrap();
         std::fs::hard_link(&credential, outside.join("hard.json")).unwrap();
-        for path in [credential.clone(), outside.join("link.json"), outside.join("hard.json")] {
+        for path in [
+            credential.clone(),
+            outside.join("link.json"),
+            outside.join("hard.json"),
+        ] {
             let error = refuse_credential_home_upload(&root, &opened(&path)).unwrap_err();
             let text = format!("{error:#}");
             assert!(text.starts_with("upload refused: its source is "), "{text}");
@@ -2819,14 +2831,23 @@ mod tests {
         let error =
             refuse_credential_home_upload(&root, &opened(&sessions.join("rollout-0.jsonl")))
                 .unwrap_err();
-        assert!(format!("{error:#}").contains("rollout-0.jsonl"), "{error:#}");
+        assert!(
+            format!("{error:#}").contains("rollout-0.jsonl"),
+            "{error:#}"
+        );
         let error = refuse_credential_home_upload(&root, &opened(&credential)).unwrap_err();
-        assert!(format!("{error:#}").contains("credential-fixture/auth.json"), "{error:#}");
+        assert!(
+            format!("{error:#}").contains("credential-fixture/auth.json"),
+            "{error:#}"
+        );
         // A hard link outside the homes to a file below a home's top level
         // is named by neither the pathname nor the inode comparison; its
         // extra link refuses it.
-        std::fs::hard_link(sessions.join("rollout-1.jsonl"), outside.join("rollout.jsonl"))
-            .unwrap();
+        std::fs::hard_link(
+            sessions.join("rollout-1.jsonl"),
+            outside.join("rollout.jsonl"),
+        )
+        .unwrap();
         let error = refuse_credential_home_upload(&root, &opened(&outside.join("rollout.jsonl")))
             .unwrap_err();
         assert!(
@@ -2834,8 +2855,11 @@ mod tests {
             "{error:#}"
         );
         // So is any other multiply linked file, wherever its links are.
-        std::fs::hard_link(outside.join("workload.json"), outside.join("workload-2.json"))
-            .unwrap();
+        std::fs::hard_link(
+            outside.join("workload.json"),
+            outside.join("workload-2.json"),
+        )
+        .unwrap();
         let error = refuse_credential_home_upload(&root, &opened(&outside.join("workload.json")))
             .unwrap_err();
         assert!(format!("{error:#}").contains("2 hard links"), "{error:#}");
@@ -2865,7 +2889,10 @@ mod tests {
         let error = refuse_credential_home_upload(&root, &replaced).unwrap_err();
         let text = format!("{error:#}");
         assert!(text.starts_with("upload refused: its source is "), "{text}");
-        assert!(text.contains("credential-fixture/auth.json (since unlinked)"), "{text}");
+        assert!(
+            text.contains("credential-fixture/auth.json (since unlinked)"),
+            "{text}"
+        );
 
         // Opened, then renamed below the home's top level, where the inode
         // comparison does not read.
@@ -2873,7 +2900,10 @@ mod tests {
         std::fs::create_dir(home.join("archive")).unwrap();
         std::fs::rename(&credential, home.join("archive").join("auth.json")).unwrap();
         let error = refuse_credential_home_upload(&root, &moved).unwrap_err();
-        assert!(format!("{error:#}").contains("archive/auth.json"), "{error:#}");
+        assert!(
+            format!("{error:#}").contains("archive/auth.json"),
+            "{error:#}"
+        );
     }
 
     #[test]
@@ -2882,7 +2912,9 @@ mod tests {
         for name in ["a", "b"] {
             std::fs::write(state.path().join(name), b"x").unwrap();
         }
-        let directory = lillux::PinnedDirectory::open(state.path()).unwrap().unwrap();
+        let directory = lillux::PinnedDirectory::open(state.path())
+            .unwrap()
+            .unwrap();
         let entries = credential_home_entries(&directory, 2).unwrap();
         assert_eq!(entries.len(), 2);
         std::fs::write(state.path().join("c"), b"x").unwrap();
@@ -2920,7 +2952,9 @@ mod tests {
         assert!(spec_declares_staged_activation(&spec(
             "stage_then_upload_then_run_once"
         )));
-        assert!(!spec_declares_staged_activation(&spec("unsupported_pending")));
+        assert!(!spec_declares_staged_activation(&spec(
+            "unsupported_pending"
+        )));
         assert!(!spec_declares_staged_activation(b"{}"));
         assert!(!spec_declares_staged_activation(
             br#"{"operations":{"activate_supervisor":"stage_then_upload_then_run_once"}}"#
@@ -2935,7 +2969,9 @@ mod tests {
         assert!(contact_guest_runtime(Some(&upload), true).is_none());
         let first = contact_guest_runtime(Some(&upload), false).unwrap();
         assert_eq!(first.sha256(), upload.sha256());
-        assert!(contact_guest_runtime::<&lillux::InheritedDescriptorAuthority>(None, false).is_none());
+        assert!(
+            contact_guest_runtime::<&lillux::InheritedDescriptorAuthority>(None, false).is_none()
+        );
     }
 
     #[test]
@@ -2949,10 +2985,13 @@ mod tests {
                 .expect("declared activation delivers the runtime");
         assert_eq!(name, LIFECYCLE_GUEST_RUNTIME_FD_ENV);
         assert_eq!(descriptor, tar.inherited_descriptor().unwrap().to_string());
-        let read = lillux::read_sealed_inherited_descriptor(descriptor.parse().unwrap(), 64)
-            .unwrap();
+        let read =
+            lillux::read_sealed_inherited_descriptor(descriptor.parse().unwrap(), 64).unwrap();
         assert_eq!(read, b"runtime tar");
-        assert_eq!(runtime.inherited_descriptor().unwrap().to_string(), descriptor);
+        assert_eq!(
+            runtime.inherited_descriptor().unwrap().to_string(),
+            descriptor
+        );
 
         // Not declared: nothing crosses, and a descriptor is refused.
         assert!(

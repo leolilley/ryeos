@@ -586,7 +586,11 @@ pub struct ExecutionPlan {
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub target_requirement: Option<super::ExecutionTargetRequirement>,
     /// Current signed request DATA; absent preserves ordinary plan identity.
-    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "deserialize_present_current_request")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present_current_request"
+    )]
     pub current_target_request: Option<super::CurrentExecutionTargetRequest>,
     /// Signed placement intent, separate from platform/resource suitability.
     /// Required even for local plans; predecessor plans are not reinterpreted.
@@ -645,7 +649,11 @@ struct ExecutionPlanWire {
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub target_requirement: Option<super::ExecutionTargetRequirement>,
     /// Current signed request DATA; absent preserves ordinary plan identity.
-    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "deserialize_present_current_request")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present_current_request"
+    )]
     pub current_target_request: Option<super::CurrentExecutionTargetRequest>,
     /// Signed placement intent, separate from platform/resource suitability.
     /// Required even for local plans; predecessor plans are not reinterpreted.
@@ -680,8 +688,9 @@ struct ExecutionPlanWire {
     pub debug_raw: bool,
 }
 
-fn deserialize_present_current_request<'de, D: serde::Deserializer<'de>>(d: D)
-    -> Result<Option<super::CurrentExecutionTargetRequest>, D::Error> {
+fn deserialize_present_current_request<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<super::CurrentExecutionTargetRequest>, D::Error> {
     super::CurrentExecutionTargetRequest::deserialize(d).map(Some)
 }
 impl TryFrom<ExecutionPlanWire> for ExecutionPlan {
@@ -711,7 +720,8 @@ impl TryFrom<ExecutionPlanWire> for ExecutionPlan {
             runtime_identity: wire.runtime_identity,
             debug_raw: wire.debug_raw,
         };
-        plan.validate_current_target_data().map_err(|e| e.to_string())?;
+        plan.validate_current_target_data()
+            .map_err(|e| e.to_string())?;
         Ok(plan)
     }
 }
@@ -719,9 +729,14 @@ impl TryFrom<ExecutionPlanWire> for ExecutionPlan {
 impl ExecutionPlan {
     pub fn validate_current_target_data(&self) -> anyhow::Result<()> {
         if let Some(current) = self.current_target_request.as_ref() {
-            anyhow::ensure!(self.item_kind == "worker", "current target DATA requires Worker structural identity");
-            anyhow::ensure!(self.target_requirement.as_ref() == Some(current.ordinary()),
-                "current target DATA contradicts ordinary target requirement");
+            anyhow::ensure!(
+                self.item_kind == "worker",
+                "current target DATA requires Worker structural identity"
+            );
+            anyhow::ensure!(
+                self.target_requirement.as_ref() == Some(current.ordinary()),
+                "current target DATA contradicts ordinary target requirement"
+            );
         }
         Ok(())
     }
@@ -749,8 +764,10 @@ impl ExecutionPlan {
     /// revalidate the installed signed generation before any provider contact.
     pub fn validate_endpoint_for_sealing(&self) -> anyhow::Result<()> {
         self.validate_current_target_data()?;
-        anyhow::ensure!(self.current_target_request.is_none(),
-            "current target request DATA has no admitted physical execution authority");
+        anyhow::ensure!(
+            self.current_target_request.is_none(),
+            "current target request DATA has no admitted physical execution authority"
+        );
         let mut file_inputs = 0usize;
         for node in &self.nodes {
             if let PlanNode::DispatchSubprocess { spec, .. } = node {
@@ -993,7 +1010,8 @@ mod current_plan_data_controls {
         let ordinary: ExecutionPlan = serde_json::from_value(wire()).unwrap();
         let before = serde_json::to_value(&ordinary).unwrap();
         assert!(before.get("current_target_request").is_none());
-        let mut null = wire(); null["current_target_request"] = Value::Null;
+        let mut null = wire();
+        null["current_target_request"] = Value::Null;
         assert!(serde_json::from_value::<ExecutionPlan>(null).is_err());
         let mut current = wire();
         current["current_target_request"] = serde_json::json!({"schema":"ryeos.execution_target.v1",
@@ -1007,7 +1025,8 @@ mod current_plan_data_controls {
         current["target_requirement"]["arch"] = Value::String("x86_64".into());
         current["item_kind"] = Value::String("tool".into());
         assert!(serde_json::from_value::<ExecutionPlan>(current).is_err());
-        let mut mutated = plan; mutated.target_requirement = None;
+        let mut mutated = plan;
+        mutated.target_requirement = None;
         assert!(mutated.validate_endpoint_for_planning().is_err());
         let restored: ExecutionPlan = serde_json::from_value(before.clone()).unwrap();
         assert_eq!(serde_json::to_value(restored).unwrap(), before);

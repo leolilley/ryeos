@@ -802,7 +802,10 @@ fn validate_frame(frame: &ExecutionFrame, binding: &ExecutionChannelBinding) -> 
             "external readiness must be the first supervisor observation"
         );
     }
-    if matches!(frame.payload, ExecutionChannelPayload::CapabilityReport { .. }) {
+    if matches!(
+        frame.payload,
+        ExecutionChannelPayload::CapabilityReport { .. }
+    ) {
         ensure!(
             frame.sequence > 1,
             "a capability report cannot precede the supervisor's readiness"
@@ -1659,7 +1662,10 @@ mod tests {
         }
     }
 
-    fn ready_with(binding: &ExecutionChannelBinding, boot: Option<SupervisorReadyBoot>) -> ExecutionChannelPayload {
+    fn ready_with(
+        binding: &ExecutionChannelBinding,
+        boot: Option<SupervisorReadyBoot>,
+    ) -> ExecutionChannelPayload {
         ExecutionChannelPayload::Ready {
             supervisor_runtime_hash: binding.supervisor_runtime_hash.clone(),
             base_snapshot_hash: binding.base_snapshot_hash.clone(),
@@ -1685,7 +1691,10 @@ mod tests {
         )
         .unwrap();
         let wire = lillux::canonical_json(&serde_json::to_value(&without).unwrap()).unwrap();
-        assert!(!wire.contains("\"boot\""), "an absent boot leaves the wire unchanged");
+        assert!(
+            !wire.contains("\"boot\""),
+            "an absent boot leaves the wire unchanged"
+        );
         SignedExecutionFrame::decode_and_verify(wire.as_bytes(), &binding, 50).unwrap();
         let mut explicit_null = serde_json::to_value(&without).unwrap();
         explicit_null["frame"]["payload"]["boot"] = serde_json::Value::Null;
@@ -1718,7 +1727,8 @@ mod tests {
         let mut empty_inputs = ready_boot();
         empty_inputs.verified_input_digests.clear();
         let mut too_many_inputs = ready_boot();
-        too_many_inputs.verified_input_digests = vec!["1".repeat(64); MAX_READY_VERIFIED_INPUTS + 1];
+        too_many_inputs.verified_input_digests =
+            vec!["1".repeat(64); MAX_READY_VERIFIED_INPUTS + 1];
         let mut bad_digest = ready_boot();
         bad_digest.verified_input_digests = vec!["X".repeat(64)];
         let mut before_issue = ready_boot();
@@ -1792,8 +1802,12 @@ mod tests {
         assert_eq!(verified.frame().payload, report);
 
         assert!(
-            SignedExecutionFrame::sign(supervisor_frame(&binding, 1, report.clone()), &binding, &supervisor)
-                .is_err(),
+            SignedExecutionFrame::sign(
+                supervisor_frame(&binding, 1, report.clone()),
+                &binding,
+                &supervisor
+            )
+            .is_err(),
             "a report cannot take readiness's place"
         );
         let mut from_owner = supervisor_frame(&binding, 2, report);
@@ -1821,8 +1835,12 @@ mod tests {
         }
         for payload in [contradictory, control_character, oversized, bad_boot] {
             assert!(
-                SignedExecutionFrame::sign(supervisor_frame(&binding, 2, payload), &binding, &supervisor)
-                    .is_err()
+                SignedExecutionFrame::sign(
+                    supervisor_frame(&binding, 2, payload),
+                    &binding,
+                    &supervisor
+                )
+                .is_err()
             );
         }
     }

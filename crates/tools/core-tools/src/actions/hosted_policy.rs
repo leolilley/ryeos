@@ -31,9 +31,12 @@ pub fn load_hosted_policy(app_root: &Path) -> Result<LoadedHostedNodePolicy> {
         &ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).config(),
     )
     .context("hosted policy: load trust store")?;
-    let snapshot =
-        ryeos_node_runtime::node_policy::load_snapshot(app_root, &trust_store, &NodePolicyTable::new())
-            .context("hosted policy: load verified node policy generation")?;
+    let snapshot = ryeos_node_runtime::node_policy::load_snapshot(
+        app_root,
+        &trust_store,
+        &NodePolicyTable::new(),
+    )
+    .context("hosted policy: load verified node policy generation")?;
     Ok(LoadedHostedNodePolicy {
         policy: snapshot.require::<HostedNodePolicy>()?.clone(),
         source_file: snapshot.source_file::<HostedNodePolicy>()?.to_path_buf(),

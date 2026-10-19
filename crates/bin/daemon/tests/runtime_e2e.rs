@@ -750,7 +750,9 @@ async fn e2e_rotated_native_resume_reconstruction_failure_retains_launch_failure
         serde_json::Value::String(text) => {
             serde_json::from_str(text).expect("projected failure error is JSON")
         }
-        serde_json::Value::Null => panic!("rotated reconstruction failure retains structured error"),
+        serde_json::Value::Null => {
+            panic!("rotated reconstruction failure retains structured error")
+        }
         structured => structured.clone(),
     };
     assert_eq!(error["code"].as_str(), Some("launch_failure"));
@@ -829,7 +831,8 @@ async fn e2e_rotated_native_resume_reconstruction_failure_retains_launch_failure
     // The attached incarnation's sealed launch metadata and launch epoch
     // outlive settlement; they are checked here, after the stop, with the
     // same strictness the in-flight attachment proof once applied.
-    let launch_metadata = launch_metadata.expect("settled recovery row retains its launch metadata");
+    let launch_metadata =
+        launch_metadata.expect("settled recovery row retains its launch metadata");
     let metadata: ryeos_app::launch_metadata::RuntimeLaunchMetadata =
         serde_json::from_str(&launch_metadata).expect("decode native recovery launch metadata");
     metadata
@@ -1216,7 +1219,9 @@ model:
         .await
         .expect("threads/get")
         .expect("subject thread is visible to its requester");
-    let executor_ref = subject_detail["thread"]["executor_ref"].as_str().unwrap_or_default();
+    let executor_ref = subject_detail["thread"]["executor_ref"]
+        .as_str()
+        .unwrap_or_default();
     assert!(
         executor_ref.starts_with("native:"),
         "thread.executor_ref records the runtime executor binary; got: {:?}",
@@ -1337,7 +1342,9 @@ config:
         .await
         .expect("threads/get")
         .expect("subject thread is visible to its requester");
-    let executor_ref = subject_detail["thread"]["executor_ref"].as_str().unwrap_or_default();
+    let executor_ref = subject_detail["thread"]["executor_ref"]
+        .as_str()
+        .unwrap_or_default();
     assert!(
         executor_ref.starts_with("native:"),
         "thread.executor_ref records the runtime executor binary; got: {:?}",

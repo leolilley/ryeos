@@ -453,9 +453,7 @@ impl RuntimeDb {
         &self,
         operation_id: &str,
     ) -> Result<Option<SnapshotBootstrapRecord>> {
-        self.conn.with_sql(|conn| {
-            read(conn, operation_id)
-        })
+        self.conn.with_sql(|conn| read(conn, operation_id))
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -824,7 +822,8 @@ mod tests {
         db.claim_snapshot_bootstrap_attempt(&first.operation_id)
             .unwrap();
         assert!(
-            db.conn.with_sql(|connection| Ok(connection.execute(
+            db.conn
+                .with_sql(|connection| Ok(connection.execute(
                     "UPDATE runtime_snapshot_bootstrap SET phase='reserved' WHERE operation_id=?1",
                     [&first.operation_id],
                 )?))
@@ -968,7 +967,8 @@ mod tests {
                 [&intent.operation_id],
             )?)).is_err());
             assert!(
-                db.conn.with_sql(|connection| Ok(connection.execute(
+                db.conn
+                    .with_sql(|connection| Ok(connection.execute(
                         "DELETE FROM runtime_snapshot_bootstrap_authority WHERE operation_id=?1",
                         [&intent.operation_id],
                     )?))
@@ -1108,7 +1108,8 @@ mod tests {
             changed.provider_response_sha256 = "c".repeat(64);
             assert!(db.bind_snapshot_bootstrap_readiness(&changed).is_err());
             assert!(
-                db.conn.with_sql(|connection| Ok(connection.execute(
+                db.conn
+                    .with_sql(|connection| Ok(connection.execute(
                         "DELETE FROM runtime_snapshot_bootstrap_readiness WHERE operation_id=?1",
                         [&intent.operation_id],
                     )?))
