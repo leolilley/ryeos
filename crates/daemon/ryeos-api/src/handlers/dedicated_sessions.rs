@@ -3127,7 +3127,7 @@ async fn handoff_preflight(
     };
     let target_closure = target_node_client
         .objects_closure_get_with_total_timeout(
-            &[response.preflight_attestation_hash.clone()],
+            std::slice::from_ref(&response.preflight_attestation_hash),
             target_fetch_options,
             WORKER_SESSION_HANDOFF_PEER_CALL_TIMEOUT,
         )
@@ -11023,7 +11023,7 @@ mod tests {
             .with_in_process_lifecycle_authority(
                 ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_NON_RECOVERABLE,
             );
-        store
+        let _birth = store
             .create_in_process_child_with_events_and_launch_metadata(
                 &placement_thread(child_id, parent_id),
                 vec![ryeos_app::state_store::NewEventRecord {

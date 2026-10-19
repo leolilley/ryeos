@@ -477,7 +477,6 @@ fn run_gc_and_log(input: GcRunInput<'_>) -> Result<GcResult> {
             // marker makes the crash path safe; this in-process repair gives a
             // failed maintenance call the same convergence before returning.
             let repair = scheduler
-                .as_deref_mut()
                 .context("fire retention requires a scheduler guard")?
                 .repair_fire_retention();
             match repair {
