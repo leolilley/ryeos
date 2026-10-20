@@ -184,15 +184,13 @@ struct RetainedLeaf {
     source: Option<StateDestinationLeaf>,
     generated: Option<GeneratedLeafCustody>,
 }
-// Genuine generation/source observations remain with the actual root. Neither
-// a weak schema observation nor a path/name is a disposal or reopening grant.
+// Only the actual root and its registration carry custody here. The
+// generation's schema observation, name and expected identity are neither a
+// disposal nor a reopening grant, so they are discarded with the wrapper.
 struct GeneratedLeafCustody {
     root: Option<Arc<lillux::PinnedDirectory>>,
     registration: Option<lillux_sqlite::original_physical_custody::OriginalPhysicalRegistration>,
     registering: bool,
-    schema_reference: std::sync::Weak<crate::sqlite_schema::ClosedNativeSchemaSqlReference>,
-    name: std::ffi::OsString,
-    expected_identity: Option<(u64, u64)>,
 }
 pub(super) enum StateDestinationLeaf {
     State(Arc<OriginalProjectionStateOwner>),
@@ -503,18 +501,15 @@ impl OriginalStateDestinationJoin {
                         // actual descriptor, not a replacement opened by name.
                         let OriginalGeneratedProjectionAuthority {
                             preparation,
-                            schema_reference,
+                            schema_reference: _,
                             root,
-                            name,
-                            expected_identity,
+                            name: _,
+                            expected_identity: _,
                         } = owner;
                         state.get_mut().leaves[index].generated = Some(GeneratedLeafCustody {
                             root: Some(root),
                             registration: None,
                             registering: false,
-                            schema_reference,
-                            name,
-                            expected_identity,
                         });
                         // Canonical parent is still retained above; remove only
                         // this generation wrapper's redundant parent alias.

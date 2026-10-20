@@ -37,6 +37,10 @@ const MAX_CREDENTIAL_BYTES: usize = 64 * 1024;
 /// retained expectation (channel binding included) and any resume state, so
 /// it needs headroom above the admission bound.
 pub(crate) const MAX_LEASE_READY_REQUEST_BYTES: usize = 128 * 1024;
+
+// The Ready request embeds a whole admission request, so its bound must
+// leave the admission bound headroom.
+const _: () = assert!(MAX_LEASE_READY_REQUEST_BYTES >= 2 * MAX_LEASE_REQUEST_BYTES);
 const MAX_OPERATION_TIMEOUT_MS: u64 = 60 * 60 * 1000;
 
 /// Every credential, network, settings, activation, relay, lease-admission
@@ -302,7 +306,6 @@ mod tests {
         // own bound.
         assert_eq!(MAX_LEASE_REQUEST_BYTES, 64 * 1024);
         assert_eq!(MAX_LEASE_READY_REQUEST_BYTES, 128 * 1024);
-        assert!(MAX_LEASE_READY_REQUEST_BYTES >= 2 * MAX_LEASE_REQUEST_BYTES);
     }
 
     #[test]

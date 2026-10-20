@@ -85,7 +85,6 @@ pub(crate) struct ExternalQualificationLocalWorker {
     state_root: lillux::PinnedDirectory,
     _custody: Arc<QualificationWorkspaceCustody>,
     process_identity: ryeos_app::process::ExecutionProcessIdentity,
-    boot_identity: String,
     wire_max_bytes: u32,
     retired: bool,
 }
@@ -93,26 +92,6 @@ pub(crate) struct ExternalQualificationLocalWorker {
 impl ExternalQualificationLocalWorker {
     pub(crate) fn ready(&self) -> &ExternalQualificationReady {
         &self.ready
-    }
-
-    pub(crate) fn process_identity(&self) -> &ryeos_app::process::ExecutionProcessIdentity {
-        &self.process_identity
-    }
-
-    pub(crate) fn boot_identity(&self) -> &str {
-        &self.boot_identity
-    }
-
-    pub(crate) fn wire_max_bytes(&self) -> u32 {
-        self.wire_max_bytes
-    }
-
-    pub(crate) fn original_workspace(&self) -> &Arc<TempDirGuard> {
-        &self.workspace
-    }
-
-    pub(crate) fn state_root(&self) -> &lillux::PinnedDirectory {
-        &self.state_root
     }
 
     /// Send the finite signed setup and turn through this exact attached
@@ -269,15 +248,21 @@ impl ExternalQualificationLocalWorker {
             self.retired = true;
             Ok(())
         })();
-        if result.is_err() {
-            let _ =
-                ryeos_app::external_qualification_local::mark_qualification_local_cleanup_unproved(
-                    state,
-                    self.ready.placement(),
-                    "Q exclusive Worker retirement remained unproved",
-                );
-        }
-        result
+        let Err(error) = result else {
+            return Ok(());
+        };
+        let _ = ryeos_app::external_qualification_local::mark_qualification_local_cleanup_unproved(
+            state,
+            self.ready.placement(),
+            "Q exclusive Worker retirement remained unproved",
+        );
+        // The failed retirement keeps both private roots in custody; name
+        // them so the retained cleanup debt can be located.
+        Err(error.context(format!(
+            "Q retirement failed; workspace {:?} and state root {} remain retained",
+            self.workspace.path(),
+            self.state_root.path().display()
+        )))
     }
 
     /// Freeze the exact one-send transcript after the pool has reaped this
@@ -912,7 +897,6 @@ pub(crate) fn start_external_qualification_local_worker_for_signed_request(
             state_root,
             _custody: custody,
             process_identity,
-            boot_identity,
             wire_max_bytes,
             retired: false,
         },

@@ -681,7 +681,8 @@ impl LateNativeControl {
                     "outside descriptor cache slot names another registration"
                 );
                 ensure!(
-                    Arc::ptr_eq(&entry.registration.owner()?, &owner),
+                    Arc::ptr_eq(&entry.registration.owner()?, &owner)
+                        && Arc::ptr_eq(&entry.owner, &owner),
                     "cached outside descriptor membership changed"
                 );
                 match std::mem::replace(
@@ -1012,22 +1013,6 @@ impl LateNativeControl {
             .try_lock()
             .map_err(|_| anyhow::anyhow!("original late cleanup clock busy or poisoned"))?;
         Ok(matches!(*state, ClockState::Retired(_)))
-    }
-
-    pub(super) fn clock_input_alias_joined(&self) -> Result<bool> {
-        let state = self
-            .clock
-            .try_lock()
-            .map_err(|_| anyhow::anyhow!("original late cleanup clock busy or poisoned"))?;
-        Ok(match &*state {
-            ClockState::Open {
-                input_alias_joined, ..
-            } => *input_alias_joined,
-            ClockState::Ready(_)
-            | ClockState::Closing
-            | ClockState::Retired(_)
-            | ClockState::Refused(_) => true,
-        })
     }
 
     /// Irreversible use of the SAME paid counters. Successful transfer/close

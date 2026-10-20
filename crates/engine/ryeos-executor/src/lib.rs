@@ -7,7 +7,7 @@ pub mod dispatch_error;
 pub mod dispatch_role;
 pub mod execution;
 pub use execution::{
-    SelectedDedicatedInvocationLoan, SelectedInstallationRefusal, SelectedInvocationAttachment,
+    SelectedInstallationRefusal, SelectedInvocationAttachment,
     SelectedInvocationCompositionBarrier, SelectedRootAdmissionFence,
     abandoned_selected_compositions,
 };
@@ -26,7 +26,7 @@ impl SelectedApplicationPublication {
     }
 }
 
-/// Positive closure means no retained selected slot or ambiguous storage lock.
+/// Positive closure means no ambiguous (contended or poisoned) storage lock.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SelectedRootClose {
     Closed,

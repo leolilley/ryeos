@@ -2741,6 +2741,24 @@ pub(crate) fn create_launch_intent_record_for_test(
     create_launch_intent_record(owner_root, bytes)
 }
 
+fn canonical_record(intent: &GuestBaseInstallIntent) -> Result<Vec<u8>> {
+    let bytes = lillux::canonical_json(&serde_json::to_value(intent)?)?.into_bytes();
+    ensure!(
+        bytes.len() as u64 <= MAX_RECORD_BYTES,
+        "guest installation intent exceeds bound"
+    );
+    Ok(bytes)
+}
+
+fn canonical_marker(marker: &GuestBaseInstallMarker) -> Result<Vec<u8>> {
+    let bytes = lillux::canonical_json(&serde_json::to_value(marker)?)?.into_bytes();
+    ensure!(
+        bytes.len() as u64 <= MAX_RECORD_BYTES,
+        "guest installation owner marker exceeds bound"
+    );
+    Ok(bytes)
+}
+
 #[cfg(test)]
 mod recovery_binding_tests {
     use super::*;
@@ -2929,22 +2947,4 @@ mod recovery_binding_tests {
             .unwrap();
         assert!(ensure_child_binding(&occurrence, "retained", &child).is_err());
     }
-}
-
-fn canonical_record(intent: &GuestBaseInstallIntent) -> Result<Vec<u8>> {
-    let bytes = lillux::canonical_json(&serde_json::to_value(intent)?)?.into_bytes();
-    ensure!(
-        bytes.len() as u64 <= MAX_RECORD_BYTES,
-        "guest installation intent exceeds bound"
-    );
-    Ok(bytes)
-}
-
-fn canonical_marker(marker: &GuestBaseInstallMarker) -> Result<Vec<u8>> {
-    let bytes = lillux::canonical_json(&serde_json::to_value(marker)?)?.into_bytes();
-    ensure!(
-        bytes.len() as u64 <= MAX_RECORD_BYTES,
-        "guest installation owner marker exceeds bound"
-    );
-    Ok(bytes)
 }

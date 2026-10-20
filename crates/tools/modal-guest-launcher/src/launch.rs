@@ -7,7 +7,6 @@
 
 use std::ffi::{OsStr, OsString};
 use std::io::Cursor;
-use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, ensure};
@@ -318,6 +317,7 @@ pub fn launch(
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
+    use std::io::Read as _;
 
     use lillux::crypto::SigningKey;
     use ryeos_external_execution::guest_runtime_product::{

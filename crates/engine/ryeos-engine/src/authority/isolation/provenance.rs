@@ -277,31 +277,6 @@ pub struct AppliedIsolationLaunchAwaitingAttachment {
     pub(crate) original_command_binding: Option<super::CompiledOriginalCommandBinding>,
 }
 
-#[cfg(target_os = "linux")]
-impl AppliedIsolationLaunchAwaitingAttachment {
-    /// Lexical component preparation only. The upper must retain this SAME
-    /// outer owner and private lower storage. L1 supplies no production mint.
-    /// This bridge does not admit a callback/caller or prove final owner Drop.
-    pub fn prepare_selected_scoped_into(
-        &mut self,
-        destination: &mut lillux::exec::SelectedScopedBorrow<'_>,
-        original_service: lillux::time::MonotonicDeadline,
-        original_cleanup: lillux::time::MonotonicDeadline,
-    ) -> Result<(), EngineError> {
-        destination
-            .prepare_from_compiled_slots(
-                &mut self.request.request,
-                &mut self.request.scope,
-                &mut self.expected_applied_launch,
-                &mut self.expected_mount_preparation,
-                original_service,
-                original_cleanup,
-            )
-            .map_err(|reason| EngineError::IsolationPolicyRefused { reason })
-        // Provenance, actual original binding and backend capture remain HERE.
-    }
-}
-
 pub(super) fn redacted_plan_digest(plan: &IsolationPlan) -> Result<String, EngineError> {
     let mut value =
         serde_json::to_value(plan).map_err(|error| EngineError::IsolationPolicyRefused {

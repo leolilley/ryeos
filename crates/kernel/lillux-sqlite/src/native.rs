@@ -4275,7 +4275,7 @@ impl NativeConnectionBody {
         match self {
             Self::Transient(connection) => match connection.close() {
                 Ok(()) => Ok(ClosedNativeBody::Plain),
-                Err((c, e)) => Err(NativeCloseOwner::Transient(c, e)),
+                Err((c, _)) => Err(NativeCloseOwner::Transient(c)),
             },
             Self::Bound(connection) => match connection.close() {
                 Ok(()) => Ok(ClosedNativeBody::Plain),
@@ -4303,7 +4303,7 @@ enum NativeOpenOwner {
 }
 enum NativeCloseOwner {
     Live(NativeConnectionBody),
-    Transient(Connection, rusqlite::Error),
+    Transient(Connection),
     Bound(crate::BoundSqliteCloseFailure),
     Inspection(ReadonlySqliteCloseFailure),
     Closed(ClosedNativeBody),
@@ -6252,13 +6252,13 @@ impl OriginalNativeCloseFailure {
                         anyhow::bail!("original native close pending")
                     }
                 },
-                NativeCloseOwner::Transient(c, _) => match c.close() {
+                NativeCloseOwner::Transient(c) => match c.close() {
                     Ok(()) => Ok(ClosedNativeBody::Plain),
-                    Err((c, e)) => {
+                    Err((c, _)) => {
                         slot_put(
                             &mut parts.owner,
                             NATIVE_CLOSE_OWNER_KIND,
-                            NativeCloseOwner::Transient(c, e),
+                            NativeCloseOwner::Transient(c),
                         );
                         anyhow::bail!("original transient close pending")
                     }
@@ -6623,9 +6623,9 @@ impl OriginalNativeOpenFailure {
                         let result = match owner {
                             NativeCloseOwner::Live(body) => body.close(),
                             NativeCloseOwner::Closed(body) => Ok(body),
-                            NativeCloseOwner::Transient(c, _) => match c.close() {
+                            NativeCloseOwner::Transient(c) => match c.close() {
                                 Ok(()) => Ok(ClosedNativeBody::Plain),
-                                Err((c, e)) => Err(NativeCloseOwner::Transient(c, e)),
+                                Err((c, _)) => Err(NativeCloseOwner::Transient(c)),
                             },
                             NativeCloseOwner::Bound(f) => match f.retry() {
                                 Ok(()) => Ok(ClosedNativeBody::Plain),
@@ -7261,7 +7261,6 @@ enum OriginalMetadataPinState {
 /// Owns the actual original O_PATH descriptor, with no File/FD/dup escape.
 /// Unretired Drop retains the descriptor; it never fabricates a close receipt.
 pub struct RetainedOriginalMetadataPin {
-    process: u32,
     state: lillux::custody::Held<Mutex<OriginalMetadataPinState>>,
     identity: OnceLock<lillux::OpenFileIdentity>,
     /// Whether a host release already reported this pin's consumed refusal.
@@ -7319,7 +7318,6 @@ impl RetainedOriginalMetadataPin {
     /// duplicate, data descriptor or newly opened replacement.
     pub unsafe fn issued(file: std::fs::File) -> Arc<Self> {
         Arc::new(Self {
-            process: std::process::id(),
             state: lillux::custody::Held::new(
                 ORIGINAL_METADATA_PIN_KIND,
                 Mutex::new(OriginalMetadataPinState::Open(file)),

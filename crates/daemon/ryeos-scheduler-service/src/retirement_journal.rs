@@ -3212,85 +3212,6 @@ fn cleanup_name(record_name: &str) -> String {
     )
 }
 
-fn ensure_resolution_coordinate_matches(
-    runtime: &lillux::PinnedDirectory,
-    name: &str,
-    expected: &ryeos_scheduler_contract::SchedulerRetirementObservedCoordinate,
-    original: Option<&SchedulerRetirementRoleIdentity>,
-    directory_saw_entry: bool,
-) -> Result<()> {
-    use lillux::secure_fs::PinnedEntryType as EntryType;
-    use ryeos_scheduler_contract::SchedulerRetirementObservedCoordinate as Coordinate;
-
-    let observed = runtime.entry_no_follow(OsStr::new(name))?;
-    ensure!(
-        observed.is_some() == directory_saw_entry,
-        "scheduler resolution coordinate changed during bounded scan"
-    );
-    match (expected, observed) {
-        (Coordinate::Absent, None) => Ok(()),
-        (Coordinate::SameOriginal { device, inode }, Some(entry)) => {
-            ensure!(
-                entry.entry_type == EntryType::Regular
-                    && entry.containing_device == *device
-                    && entry.inode == *inode
-                    && original.is_some_and(|identity| {
-                        identity.device == *device && identity.inode == *inode
-                    }),
-                "scheduler resolution original coordinate changed after signed observation"
-            );
-            Ok(())
-        }
-        (Coordinate::ForeignRegular { device, inode }, Some(entry)) => {
-            ensure!(
-                entry.entry_type == EntryType::Regular
-                    && entry.containing_device == *device
-                    && entry.inode == *inode
-                    && !original.is_some_and(|identity| {
-                        identity.device == *device && identity.inode == *inode
-                    }),
-                "scheduler foreign resolution coordinate changed after signed observation"
-            );
-            Ok(())
-        }
-        (Coordinate::NonRegular { kind }, Some(entry)) => {
-            let actual = match entry.entry_type {
-                EntryType::Directory => {
-                    ryeos_scheduler_contract::SchedulerRetirementNonRegularKind::Directory
-                }
-                EntryType::Regular => anyhow::bail!("resolution coordinate became regular"),
-                EntryType::Symlink => {
-                    ryeos_scheduler_contract::SchedulerRetirementNonRegularKind::Symlink
-                }
-                EntryType::CharacterDevice => {
-                    ryeos_scheduler_contract::SchedulerRetirementNonRegularKind::CharacterDevice
-                }
-                EntryType::BlockDevice => {
-                    ryeos_scheduler_contract::SchedulerRetirementNonRegularKind::BlockDevice
-                }
-                EntryType::Fifo => {
-                    ryeos_scheduler_contract::SchedulerRetirementNonRegularKind::Fifo
-                }
-                EntryType::Socket => {
-                    ryeos_scheduler_contract::SchedulerRetirementNonRegularKind::Socket
-                }
-                EntryType::Other => {
-                    ryeos_scheduler_contract::SchedulerRetirementNonRegularKind::Other
-                }
-            };
-            ensure!(
-                &actual == kind,
-                "scheduler non-regular resolution coordinate changed"
-            );
-            Ok(())
-        }
-        (Coordinate::Unreadable { .. }, _) => {
-            anyhow::bail!("unreadable scheduler resolution coordinate requires held recovery")
-        }
-        _ => anyhow::bail!("scheduler resolution coordinate differs from its signed observation"),
-    }
-}
-
 /// Remove every surviving record of one retired operation's generations,
 /// then the retirement record itself, returning how many were removed.
 /// Every record is authenticated as this node's signed record of a listed
@@ -4809,38 +4730,6 @@ mod terminal_scanner_controls {
                 "completed child suppressed pre-effect parent {suffix}"
             );
         }
-        Ok(())
-    }
-
-    #[test]
-    fn latest_terminal_r_snapshot_rejects_reappearance_and_scan_race() -> Result<()> {
-        let directory = tempfile::tempdir()?;
-        let runtime = lillux::PinnedDirectory::open(directory.path())?
-            .context("test runtime directory is absent")?;
-        let name = format!(
-            "scheduler-retirement.resolve.{}.main.00.quarantine",
-            "22".repeat(16)
-        );
-        let absent = SchedulerRetirementObservedCoordinate::Absent;
-        ensure_resolution_coordinate_matches(&runtime, &name, &absent, None, false)?;
-        assert!(
-            runtime
-                .atomic_create_regular(
-                    OsStr::new(&name),
-                    b"foreign replacement",
-                    0o600,
-                    crate::SCHEDULER_TEMP_PURPOSE,
-                )?
-                .is_some()
-        );
-        // Both a stable occupied coordinate and a replacement after the directory
-        // snapshot must refuse the signed absence testimony.
-        assert!(
-            ensure_resolution_coordinate_matches(&runtime, &name, &absent, None, true).is_err()
-        );
-        assert!(
-            ensure_resolution_coordinate_matches(&runtime, &name, &absent, None, false).is_err()
-        );
         Ok(())
     }
 

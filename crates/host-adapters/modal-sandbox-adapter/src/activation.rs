@@ -201,7 +201,10 @@ pub(crate) enum Stopped {
     /// Nothing was sent to the facade.
     BeforeContact(anyhow::Error),
     /// A step may have reached the facade.
-    AfterContact(anyhow::Error),
+    /// The sequence may have reached the facade. The provider's reply is not
+    /// retained: nothing of it may leave the adapter, and the outcome is
+    /// pending either way.
+    AfterContact,
 }
 
 fn preflight(inputs: &ActivationInputs<'_>) -> Result<Vec<u8>> {
@@ -303,7 +306,7 @@ pub(crate) fn first_activation_contact<T: FacadeTransport>(
         )));
     }
     let launcher = preflight(inputs).map_err(Stopped::BeforeContact)?;
-    contact(client, sandbox_id, inputs, &launcher, chunk_bytes).map_err(Stopped::AfterContact)
+    contact(client, sandbox_id, inputs, &launcher, chunk_bytes).map_err(|_| Stopped::AfterContact)
 }
 
 fn contact<T: FacadeTransport>(
@@ -501,7 +504,7 @@ impl PreparedActivation {
 pub(crate) fn pending_unless_refused(outcome: std::result::Result<(), Stopped>) -> Result<()> {
     match outcome {
         Err(Stopped::BeforeContact(error)) => Err(error),
-        Ok(()) | Err(Stopped::AfterContact(_)) => Ok(()),
+        Ok(()) | Err(Stopped::AfterContact) => Ok(()),
     }
 }
 
@@ -882,10 +885,7 @@ mod tests {
             stage_ok(SLOT_RUNTIME, 0, RUNTIME),
             Step::Fail(crate::facade::TransportFailure::MayHaveBeenSent),
         ]);
-        assert!(matches!(
-            run(&set, &fake, 1024),
-            Err(Stopped::AfterContact(_))
-        ));
+        assert!(matches!(run(&set, &fake, 1024), Err(Stopped::AfterContact)));
         assert_eq!(fake.requests.borrow().len(), 2);
         assert!(fake.exhausted());
     }
@@ -903,10 +903,7 @@ mod tests {
             let count = steps.len();
             let set = set();
             let fake = Scripted::new(steps);
-            assert!(matches!(
-                run(&set, &fake, 1024),
-                Err(Stopped::AfterContact(_))
-            ));
+            assert!(matches!(run(&set, &fake, 1024), Err(Stopped::AfterContact)));
             assert_eq!(fake.requests.borrow().len(), count);
         }
     }
@@ -918,10 +915,7 @@ mod tests {
         steps.pop();
         steps.push(refusal("run_once", "slot_not_sealed"));
         let fake = Scripted::new(steps);
-        assert!(matches!(
-            run(&set, &fake, 1024),
-            Err(Stopped::AfterContact(_))
-        ));
+        assert!(matches!(run(&set, &fake, 1024), Err(Stopped::AfterContact)));
         assert_eq!(fake.requests.borrow().len(), 8);
     }
 

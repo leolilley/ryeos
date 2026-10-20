@@ -572,31 +572,6 @@ fn execution_authority_properties(
     )
 }
 
-// Keep structured evidence in the owning execution contract, using the same
-// canonical scalar encoding as the target requirement. Preserve list order:
-// admission and recovery must compare the exact selected resource generation.
-fn resource_selection_property(
-    selections: &[ryeos_engine::contracts::ExecutionResourceSelection],
-) -> Result<serde_json::Value> {
-    ryeos_app::execution_realization::resource_selection_property(selections)
-}
-
-fn authority_ceiling_properties(
-    filesystem: ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling,
-    network: ryeos_engine::isolation::IsolationNetworkAuthorityCeiling,
-) -> BTreeMap<String, serde_json::Value> {
-    ryeos_app::execution_realization::authority_ceiling_properties(filesystem, network)
-}
-
-/// Path-free identity of the complete backend observation that can affect a
-/// launch. A declaration/adapter-only identity is insufficient: replacing an
-/// inspected launcher payload must move the execution realization too.
-fn isolation_backend_inspection_digest(
-    inspection: &ryeos_engine::isolation::IsolationBackendInspection,
-) -> Result<String> {
-    ryeos_app::execution_realization::isolation_backend_inspection_digest(inspection)
-}
-
 fn verify_realization_components(
     state: &AppState,
     realization: &AdmittedExecutionRealization,
@@ -620,14 +595,6 @@ fn verify_realization_node_evidence(
     realization: &AdmittedExecutionRealization,
 ) -> Result<()> {
     ryeos_app::execution_realization::verify_realization_node_evidence(state, realization)
-}
-
-fn verify_attestation(
-    authority: &ryeos_state::PinnedStateAuthority,
-    attestation_hash: &str,
-    identity_hash: &str,
-) -> Result<()> {
-    ryeos_app::execution_realization::verify_attestation(authority, attestation_hash, identity_hash)
 }
 
 fn execution_components(
@@ -699,7 +666,7 @@ mod tests {
             serde_json::json!({
                 "isolation_enforced":false,
                 "isolation_policy_digest":isolation.inspection().digest,
-                "isolation_backend_inspection_digest":isolation_backend_inspection_digest(&isolation.inspection().backend).unwrap(),
+                "isolation_backend_inspection_digest":ryeos_app::execution_realization::isolation_backend_inspection_digest(&isolation.inspection().backend).unwrap(),
                 "isolation_filesystem_authority_ceiling":"captured_execution",
                 "isolation_network_authority_ceiling":"isolated",
                 "execution_resource_authority_ceiling":"node_policy",
@@ -932,18 +899,18 @@ mod tests {
         let first = backend_with_launcher(&"4".repeat(64));
         let second = backend_with_launcher(&"5".repeat(64));
         assert_ne!(
-            isolation_backend_inspection_digest(&first).unwrap(),
-            isolation_backend_inspection_digest(&second).unwrap()
+            ryeos_app::execution_realization::isolation_backend_inspection_digest(&first).unwrap(),
+            ryeos_app::execution_realization::isolation_backend_inspection_digest(&second).unwrap()
         );
     }
 
     #[test]
     fn captured_launch_ceilings_move_execution_realization_identity() {
-        let ordinary = authority_ceiling_properties(
+        let ordinary = ryeos_app::execution_realization::authority_ceiling_properties(
             ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
             ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
         );
-        let captured = authority_ceiling_properties(
+        let captured = ryeos_app::execution_realization::authority_ceiling_properties(
             ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::CapturedExecution,
             ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::Isolated,
         );

@@ -389,7 +389,7 @@ impl HostStorage {
                         generation,
                         bytes: self.length,
                     },
-                    None => HostStorageReleaseKind::BeforeRegion { bytes: self.length },
+                    None => HostStorageReleaseKind::BeforeRegion,
                 },
             })
         }
@@ -406,7 +406,7 @@ pub struct HostStorageReleased {
 #[derive(Clone, Copy)]
 enum HostStorageReleaseKind {
     Region { generation: u64, bytes: usize },
-    BeforeRegion { bytes: usize },
+    BeforeRegion,
     NeverMapped,
 }
 #[derive(Clone, Copy)]
@@ -456,9 +456,7 @@ impl HostStorageReleased {
                     bytes,
                 })
             }
-            HostStorageReleaseKind::BeforeRegion { .. } | HostStorageReleaseKind::NeverMapped => {
-                None
-            }
+            HostStorageReleaseKind::BeforeRegion | HostStorageReleaseKind::NeverMapped => None,
         })
     }
 }

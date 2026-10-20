@@ -330,55 +330,6 @@ impl OriginalManifestDocument {
     }
 }
 
-/// App-private data view tied to the SAME mutable original input owner.
-/// No transport/admission role or independently owning pair is constructed.
-pub(crate) struct OriginalManifestDocuments<'a> {
-    _owner: &'a VerifiedTrustedPooledSessionInputs,
-    gnu: OriginalManifestDocumentObservation<'a>,
-    driver: OriginalManifestDocumentObservation<'a>,
-}
-
-struct OriginalManifestDocumentObservation<'a> {
-    role: ryeos_engine::isolation::OriginalProductManifestRole,
-    descriptor: &'a lillux::InheritedDescriptorAuthority,
-    selected_raw_sha256: &'a str,
-    bytes: u64,
-}
-
-impl OriginalManifestDocuments<'_> {
-    fn gnu(&self) -> &OriginalManifestDocumentObservation<'_> {
-        &self.gnu
-    }
-
-    fn driver(&self) -> &OriginalManifestDocumentObservation<'_> {
-        &self.driver
-    }
-}
-
-impl OriginalManifestDocumentObservation<'_> {
-    fn role(&self) -> ryeos_engine::isolation::OriginalProductManifestRole {
-        self.role
-    }
-
-    fn descriptor(&self) -> &lillux::InheritedDescriptorAuthority {
-        self.descriptor
-    }
-
-    fn selected_raw_sha256(&self) -> &str {
-        self.selected_raw_sha256
-    }
-
-    fn bytes(&self) -> u64 {
-        self.bytes
-    }
-}
-
-/// Borrow of the actual original static owners. This can prepare a request,
-/// never accept a candidate or issue Init/Ready. No raw/serde constructor.
-pub(crate) struct OriginalStartupRequestInputs<'a> {
-    owner: &'a VerifiedTrustedPooledSessionInputs,
-}
-
 // Static source custody, not a startup factory/accepted observation. Retain raw
 // actual source/member owners before parsing and all later fallible checks.
 struct OriginalStartupContract {
@@ -646,11 +597,27 @@ struct StartupProducts {
 struct StartupPolicy {
     schema: String,
     primary_device_role: String,
+    /// The worker's L4 query policy, present and well-formed or explicitly
+    /// null. Nothing on this side applies the selection yet; it is named in
+    /// admission refusals so the operator sees which policy the worker ran.
     #[serde(deserialize_with = "required_startup_nullable_policy")]
     l4_query_policy: Option<StartupL4Policy>,
 }
 
-#[derive(Debug, Deserialize)]
+impl StartupPolicy {
+    /// The declared L4 query policy as the worker wrote it, for refusals.
+    fn l4_query_policy_name(&self) -> String {
+        match &self.l4_query_policy {
+            None => "null".to_string(),
+            Some(policy) => serde_json::to_value(policy)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_string))
+                .unwrap_or_else(|| "unrepresentable".to_string()),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 enum StartupL4Policy {
     #[serde(rename = "l4-is-mig-success-zero-mode-not-supported-v1")]
     SuccessZero,
@@ -715,7 +682,7 @@ impl VerifiedTrustedPooledSessionInputs {
     pub(crate) fn original_manifest_documents(
         &mut self,
         state: &crate::state::AppState,
-    ) -> Result<OriginalManifestDocuments<'_>> {
+    ) -> Result<()> {
         let validation: Result<()> = (|| {
             self.require_original_isolation_expectation(state)?;
             let original = self
@@ -793,38 +760,7 @@ impl VerifiedTrustedPooledSessionInputs {
             }
             return Err(error);
         }
-        let pair = self
-            .original_manifest_custody
-            .as_ref()
-            .expect("complete pair validated in same exclusive borrow");
-        let products = self
-            .original_product_inputs
-            .as_ref()
-            .expect("actual selected product owners validated");
-        Ok(OriginalManifestDocuments {
-            _owner: self,
-            gnu: OriginalManifestDocumentObservation {
-                role: ryeos_engine::isolation::OriginalProductManifestRole::Gnu,
-                descriptor: pair.gnu.sealed.as_ref().expect("actual GNU seal validated"),
-                selected_raw_sha256: &products.gnu.selection.manifest_hash,
-                bytes: pair.gnu.bytes.as_ref().expect("GNU bytes validated").len() as u64,
-            },
-            driver: OriginalManifestDocumentObservation {
-                role: ryeos_engine::isolation::OriginalProductManifestRole::Driver,
-                descriptor: pair
-                    .driver
-                    .sealed
-                    .as_ref()
-                    .expect("actual driver seal validated"),
-                selected_raw_sha256: &products.driver.selection.manifest_hash,
-                bytes: pair
-                    .driver
-                    .bytes
-                    .as_ref()
-                    .expect("driver bytes validated")
-                    .len() as u64,
-            },
-        })
+        Ok(())
     }
 
     /// Inert original data preparation: no FD export/env/Executor caller.
@@ -967,25 +903,6 @@ impl VerifiedTrustedPooledSessionInputs {
         Ok(realizations)
     }
 
-    pub(crate) fn original_startup_request_inputs(
-        &self,
-        state: &crate::state::AppState,
-    ) -> Result<OriginalStartupRequestInputs<'_>> {
-        self.require_original_isolation_expectation(state)?;
-        anyhow::ensure!(
-            self.startup_contract_selection.is_some()
-                && self
-                    .original_startup_contract
-                    .as_ref()
-                    .is_some_and(|v| v.verified),
-            "original startup request requires actual signed retained source contract"
-        );
-        anyhow::ensure!(
-            self.selected.selections().len() == 1,
-            "original startup request requires exactly one actual selected resource"
-        );
-        Ok(OriginalStartupRequestInputs { owner: self })
-    }
     /// Verify current retained bytes and independent node/product agreement.
     /// Existing executable prerequisite refusals remain authoritative.
     pub fn verify(state: &crate::state::AppState, capsule_hash: &str) -> Result<Self> {
@@ -1694,7 +1611,8 @@ impl VerifiedTrustedPooledSessionInputs {
                     .identities()
                     .iter()
                     .any(|device| device.role == contract.policy.primary_device_role),
-            "startup finite policy differs from actual selected device roles"
+            "startup finite policy differs from actual selected device roles; the worker declared l4 query policy {}",
+            contract.policy.l4_query_policy_name()
         );
         let wire = &contract.wire;
         anyhow::ensure!(

@@ -118,7 +118,7 @@ pub mod worker_handoff;
 pub mod write_barrier;
 
 // Original bearer custody only; opaque admission is issued separately.
-pub use callback_token::{DedicatedWorkerCredentialTransport, SelectedDedicatedWorkerAdmission};
+pub use callback_token::DedicatedWorkerCredentialTransport;
 
 #[cfg(any(test, feature = "test-support"))]
 mod test_support_native;

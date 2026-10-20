@@ -362,11 +362,25 @@ impl std::fmt::Debug for IssuancePreparationFailure {
             .finish_non_exhaustive()
     }
 }
+impl IssuancePreparationFailure {
+    /// The root the retained preparation holds, or a note when its owner is
+    /// busy; a failure report never waits on the owner.
+    fn retained_root(&self) -> String {
+        match self.owner.try_lock() {
+            Ok(preparation) => preparation.root.path().display().to_string(),
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => {
+                poisoned.into_inner().root.path().display().to_string()
+            }
+            Err(std::sync::TryLockError::WouldBlock) => "<owner busy>".to_owned(),
+        }
+    }
+}
 impl std::fmt::Display for IssuancePreparationFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "capacity issuance incomplete; original preparation retained: {}",
+            "capacity issuance incomplete; original preparation retained under {}: {}",
+            self.retained_root(),
             self.error
         )
     }

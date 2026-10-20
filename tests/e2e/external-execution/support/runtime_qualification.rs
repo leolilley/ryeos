@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 use super::candidate_authoring::{qualification_policy_source, qualification_verifier_tool_source};
 use super::qualification_node::{
     ManagedActivationGrant, RetainedTestRuntime, bind_manifests_to_tool,
-    bind_typed_manifests_to_tool, manifest_hash, operator_context,
+    bind_typed_manifests_to_tool, operator_context,
 };
 
 /// Mechanism claims a guest-runtime verifier may attest. A signed placement
@@ -83,26 +83,10 @@ pub fn guest_runtime_verifier_parameters() -> serde_json::Value {
 
 /// How a guest-runtime product is stored and bounded by its signed relationship.
 pub struct GuestProductStorage {
-    storage: &'static str,
-    maximum_file_bytes: u64,
-    maximum_total_bytes: u64,
+    pub storage: &'static str,
+    pub maximum_file_bytes: u64,
+    pub maximum_total_bytes: u64,
 }
-
-/// The large-content form: a joined runtime tree captured by large-object
-/// storage.
-pub const LARGE_GUEST_PRODUCT: GuestProductStorage = GuestProductStorage {
-    storage: "large_content",
-    maximum_file_bytes: 536_870_912,
-    maximum_total_bytes: 1_073_741_824,
-};
-
-/// The ordinary-content form a guest owner runtime product takes: the four
-/// owner members, observed as one ordinary tree manifest.
-pub const OWNER_GUEST_PRODUCT: GuestProductStorage = GuestProductStorage {
-    storage: "content",
-    maximum_file_bytes: 1_048_576,
-    maximum_total_bytes: 2_097_152,
-};
 
 fn guest_runtime_recipe_source(
     guest_runtime_manifest_hash: &str,
@@ -183,29 +167,11 @@ product_relationships:
 }
 
 /// Write the guest-runtime recipe, policy and verifier into a signed authoring
-/// bundle, before its node starts. `required_claims` is the relationship's
-/// selection and must be a sorted subset of [`GUEST_RUNTIME_CLAIMS`]; the policy
-/// allows, and the verifier probe attests, all of them. The verifier is a
-/// distinct tool from any other policy's, because its `config_schema` pins this
-/// policy's parameters.
-pub fn write_guest_runtime_sources(
-    bundle_root: &Path,
-    identity: &ryeos_node_runtime::identity::NodeIdentity,
-    guest_runtime_manifest_hash: &str,
-    verifier_runtime_manifest_hash: &str,
-    required_claims: &[&str],
-) {
-    write_guest_runtime_sources_for(
-        bundle_root,
-        identity,
-        guest_runtime_manifest_hash,
-        verifier_runtime_manifest_hash,
-        required_claims,
-        &LARGE_GUEST_PRODUCT,
-    );
-}
-
-/// As [`write_guest_runtime_sources`], for a guest runtime stored as `product`.
+/// bundle, before its node starts, for a guest runtime stored as `product`.
+/// `required_claims` is the relationship's selection and must be a sorted
+/// subset of [`GUEST_RUNTIME_CLAIMS`]; the policy allows, and the verifier probe
+/// attests, all of them. The verifier is a distinct tool from any other
+/// policy's, because its `config_schema` pins this policy's parameters.
 pub fn write_guest_runtime_sources_for(
     bundle_root: &Path,
     identity: &ryeos_node_runtime::identity::NodeIdentity,
@@ -265,7 +231,6 @@ pub struct GuestRuntimeQualification {
     pub policy_ref: String,
     pub required_claims: Vec<String>,
     pub guest_runtime_manifest_hash: String,
-    pub product_witness_hash: String,
 }
 
 /// The identity a guest-runtime product witness names, independent of whether
@@ -277,29 +242,9 @@ pub struct GuestProductSubject {
     pub total_bytes: u64,
 }
 
-impl GuestProductSubject {
-    pub fn large(manifest: &ryeos_state::objects::ExternalLargeContentManifestObject) -> Self {
-        Self {
-            manifest_hash: manifest_hash(manifest),
-            manifest_kind: ryeos_state::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND,
-            entry_count: manifest.entry_count,
-            total_bytes: manifest.total_bytes,
-        }
-    }
-
-    pub fn ordinary(manifest: &ryeos_state::objects::ExternalContentManifestObject) -> Self {
-        Self {
-            manifest_hash: ryeos_state::external_content_manifest_digest(manifest).unwrap(),
-            manifest_kind: ryeos_state::objects::EXTERNAL_CONTENT_MANIFEST_KIND,
-            entry_count: manifest.entry_count,
-            total_bytes: manifest.total_bytes,
-        }
-    }
-}
-
 /// Publish the product witness for one guest runtime tree already resident in
-/// the node, against the recipe [`write_guest_runtime_sources`] authored.
-fn publish_guest_runtime_witness(
+/// the node, against the recipe [`write_guest_runtime_sources_for`] authored.
+pub fn publish_guest_runtime_witness(
     state: &ryeos_app::state::AppState,
     subject: &GuestProductSubject,
 ) -> String {
@@ -470,35 +415,20 @@ async fn wait_for_sole_state_owner(state: &Arc<ryeos_app::state::AppState>) {
     }
 }
 
-/// Qualify one guest runtime tree that is already resident in the node (see
-/// `install_large_runtime_content`) and was named in
-/// [`write_guest_runtime_sources`]. Requires the node to be started with that
-/// bundle. On return the caller is the sole owner of `state` again.
-pub async fn qualify_guest_runtime(
-    state: &Arc<ryeos_app::state::AppState>,
-    guest_runtime: &ryeos_state::objects::ExternalLargeContentManifestObject,
-    verifier_runtime_manifest_hash: &str,
-    required_claims: &[&str],
-) -> GuestRuntimeQualification {
-    qualify_guest_runtime_subject(
-        state,
-        &GuestProductSubject::large(guest_runtime),
-        verifier_runtime_manifest_hash,
-        required_claims,
-    )
-    .await
-}
-
-/// As [`qualify_guest_runtime`], for a subject of either manifest kind.
-pub async fn qualify_guest_runtime_subject(
+/// Qualify one guest runtime product, already resident in the node and
+/// witnessed by `witness_hash` (see [`publish_guest_runtime_witness`]), against
+/// the sources a guest-runtime source writer authored. Requires the node to be
+/// started with that bundle. On return the caller is the sole owner of `state`
+/// again.
+pub async fn qualify_published_guest_runtime(
     state: &Arc<ryeos_app::state::AppState>,
     subject: &GuestProductSubject,
+    witness_hash: String,
     verifier_runtime_manifest_hash: &str,
     required_claims: &[&str],
 ) -> GuestRuntimeQualification {
     let guest_hash = subject.manifest_hash.clone();
     let context = operator_context(state);
-    let witness_hash = publish_guest_runtime_witness(state, subject);
     bind_typed_manifests_to_tool(
         state,
         GUEST_RUNTIME_VERIFIER_REF,
@@ -604,7 +534,6 @@ pub async fn qualify_guest_runtime_subject(
             .map(|claim| (*claim).to_owned())
             .collect(),
         guest_runtime_manifest_hash: guest_hash,
-        product_witness_hash: witness_hash,
     }
 }
 
@@ -619,7 +548,6 @@ pub struct RuntimeArchive {
     pub sha256: String,
     pub compressed_bytes: u64,
     pub expanded_bytes: u64,
-    pub logical_entries: usize,
     pub largest_file_bytes: u64,
     pub total_file_bytes: u64,
     bytes: Vec<u8>,
@@ -630,12 +558,10 @@ impl RuntimeArchive {
     /// is stored-only; the archive is byte-for-byte deterministic.
     pub fn from_tree(runtime: &Path) -> Self {
         let mut tar = Vec::new();
-        let mut entries = 0usize;
         let mut largest = 0u64;
         let mut total = 0u64;
         tar_directory_header(&mut tar, "runtime/");
         walk_tree(runtime, "runtime", &mut |relative, path, is_dir| {
-            entries += 1;
             if is_dir {
                 tar_directory_header(&mut tar, &format!("{relative}/"));
             } else {
@@ -653,7 +579,6 @@ impl RuntimeArchive {
             sha256: lillux::sha256_hex(&bytes),
             compressed_bytes: bytes.len() as u64,
             expanded_bytes,
-            logical_entries: entries + 1,
             largest_file_bytes: largest,
             total_file_bytes: total,
             bytes,
@@ -692,7 +617,7 @@ impl RuntimeArchive {
     }
 }
 
-fn walk_tree(root: &Path, prefix: &str, visit: &mut dyn FnMut(&str, &Path, bool)) {
+pub fn walk_tree(root: &Path, prefix: &str, visit: &mut dyn FnMut(&str, &Path, bool)) {
     let mut names = std::fs::read_dir(root)
         .unwrap()
         .map(|entry| entry.unwrap().file_name().into_string().unwrap())
@@ -933,25 +858,15 @@ pub struct ActivatedRuntimeQualification {
     pub coordinate_id: String,
     pub attestation_hash: String,
     pub owner_principal: String,
-    pub policy_ref: String,
     pub required_claims: Vec<String>,
-    pub runtime_manifest_hash: String,
-    pub declaration_id: String,
-    pub activation_receipt_hash: String,
 }
 
 /// Acquire the archived runtime by a real managed activation (offline, through
-/// the node-admitted archive root), run the content verifier as an accepted
-/// qualification launch and publish its testimony. The node must have been
-/// started with `RuntimeArchive::activation_grant` and the sources written by
-/// [`write_activated_runtime_sources`]; the archive must already be in the
-/// root. On return the caller is the sole owner of `state` again.
-pub async fn activate_and_qualify_runtime(
-    state: &Arc<ryeos_app::state::AppState>,
-    runtime_manifest_hash: &str,
-    verifier_runtime_manifest_hash: &str,
-    required_claims: &[&str],
-) -> ActivatedRuntimeQualification {
+/// the node-admitted archive root) and return the activation receipt hash. The
+/// node must have been started with `RuntimeArchive::activation_grant` and the
+/// sources written by [`write_activated_runtime_sources`]; the archive must
+/// already be in the root.
+pub async fn activate_runtime(state: &Arc<ryeos_app::state::AppState>) -> String {
     let context = operator_context(state);
     let activation = ryeos_api::handlers::external_content_activate::handle(
         ryeos_api::handlers::external_content_activate::Request {
@@ -966,7 +881,19 @@ pub async fn activate_and_qualify_runtime(
     .unwrap();
     let activation: ryeos_api::handlers::external_content_activate::Response =
         serde_json::from_value(activation).unwrap();
-    let receipt_hash = wait_for_activation(state, &activation.job_id).await;
+    wait_for_activation(state, &activation.job_id).await
+}
+
+/// Run the content verifier as an accepted qualification launch against the
+/// runtime [`activate_runtime`] acquired and publish its testimony. On return
+/// the caller is the sole owner of `state` again.
+pub async fn qualify_activated_runtime(
+    state: &Arc<ryeos_app::state::AppState>,
+    runtime_manifest_hash: &str,
+    verifier_runtime_manifest_hash: &str,
+    required_claims: &[&str],
+) -> ActivatedRuntimeQualification {
+    let context = operator_context(state);
     bind_manifests_to_tool(
         state,
         CONTENT_VERIFIER_REF,
@@ -1058,14 +985,10 @@ pub async fn activate_and_qualify_runtime(
         coordinate_id: qualification.coordinate_id,
         attestation_hash: qualification.qualification_hash,
         owner_principal: context.fingerprint.clone(),
-        policy_ref: CONTENT_POLICY_REF.to_owned(),
         required_claims: required_claims
             .iter()
             .map(|claim| (*claim).to_owned())
             .collect(),
-        runtime_manifest_hash: runtime_manifest_hash.to_owned(),
-        declaration_id: CONTENT_DECLARATION_ID.to_owned(),
-        activation_receipt_hash: receipt_hash,
     }
 }
 
@@ -1122,113 +1045,3 @@ pub fn archive_root(node_root: &Path) -> PathBuf {
 // ---------------------------------------------------------------------------
 // Guest owner runtime product and placement selection
 // ---------------------------------------------------------------------------
-
-/// Lay out the four-member guest owner runtime a placement binding names as its
-/// `guest_runtime_manifest_hash`: the owner executable, the controller's public
-/// root and the owner profile. `owner_bytes` stands in for the executable; the
-/// synthetic adapter never runs it.
-pub fn write_owner_runtime_tree(
-    root: &Path,
-    controller_root: &lillux::crypto::VerifyingKey,
-    owner_bytes: &[u8],
-) {
-    use std::os::unix::fs::PermissionsExt as _;
-
-    std::fs::create_dir_all(root.join("bin")).unwrap();
-    let write = |relative: &str, bytes: &[u8], mode: u32| {
-        let path = root.join(relative);
-        std::fs::write(&path, bytes).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
-    };
-    write(
-        "bin/ryeos-external-guest-occurrence-owner",
-        owner_bytes,
-        0o755,
-    );
-    write(
-        "controller-root.hex",
-        controller_root
-            .to_bytes()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>()
-            .as_bytes(),
-        0o644,
-    );
-    let profile = ryeos_external_execution::guest_import_authorization::GuestOwnerRuntimeProfile {
-        schema: 2,
-        account: lillux::GuestRuntimeAccount::Unix {
-            uid: 65534,
-            gid: 65534,
-        },
-        private_source_max_bytes: 32 * 1024 * 1024,
-        private_source_max_inodes: 1024,
-        owner_timeout_seconds: 600,
-    };
-    write(
-        "guest-owner-profile.json",
-        &ryeos_external_execution_contract::canonical_json(&profile).unwrap(),
-        0o644,
-    );
-}
-
-/// Observe one runtime tree as an ordinary content manifest and leave its
-/// bytes resident in the node's object store.
-pub fn install_ordinary_runtime_content(
-    state: &ryeos_app::state::AppState,
-    runtime_root: &Path,
-) -> ryeos_state::objects::ExternalContentManifestObject {
-    use ryeos_state::objects::ExternalContentManifestEntryKind;
-
-    let directory = lillux::PinnedDirectory::open(runtime_root)
-        .unwrap()
-        .unwrap();
-    let manifest = ryeos_state::observe_external_content_tree_exact(&directory).unwrap();
-    let authority = state.state_store.pinned_state_authority().unwrap();
-    let _guard = authority.acquire_shared_guard().unwrap();
-    let cas = authority.cas_store().unwrap();
-    for entry in &manifest.entries {
-        if entry.kind != ExternalContentManifestEntryKind::File {
-            continue;
-        }
-        let bytes = std::fs::read(runtime_root.join(&entry.path)).unwrap();
-        assert_eq!(entry.size, Some(bytes.len() as u64));
-        let blob_hash = cas.store_blob(&bytes).unwrap();
-        assert_eq!(entry.blob_hash.as_deref(), Some(blob_hash.as_str()));
-    }
-    let stored = cas
-        .store_object(&serde_json::to_value(&manifest).unwrap())
-        .unwrap();
-    assert_eq!(
-        stored,
-        ryeos_state::external_content_manifest_digest(&manifest).unwrap()
-    );
-    manifest
-}
-
-/// The signed placement selection a binding carries for these two proofs.
-pub fn placement_selection(
-    guest: &GuestRuntimeQualification,
-    content: &ActivatedRuntimeQualification,
-) -> ryeos_app::external_placement::test_support::PlacementQualificationSelection {
-    use ryeos_app::external_placement::test_support::{
-        ContentRuntimeQualificationSelection, GuestRuntimeQualificationSelection,
-        PlacementQualificationSelection,
-    };
-    PlacementQualificationSelection {
-        guest_runtime_manifest_hash: guest.guest_runtime_manifest_hash.clone(),
-        guest: Some(GuestRuntimeQualificationSelection {
-            attestation_hash: guest.attestation_hash.clone(),
-            owner_principal: guest.owner_principal.clone(),
-            policy_ref: guest.policy_ref.clone(),
-            required_claims: guest.required_claims.clone(),
-        }),
-        content: Some(ContentRuntimeQualificationSelection {
-            activation_ref: content.activation_ref.clone(),
-            coordinate_id: content.coordinate_id.clone(),
-            attestation_hash: content.attestation_hash.clone(),
-            owner_principal: content.owner_principal.clone(),
-            required_claims: content.required_claims.clone(),
-        }),
-    }
-}

@@ -590,7 +590,6 @@ mod tests {
 // Unused finite data leaf. These structural bounds grant no admission,
 // physical allocation, heap fit, funding or process-lifetime authority.
 const ORIGINAL_PHYSICAL_BOUNDS_SCHEMA: &str = "ryeos.original_physical_resource_bounds.v1";
-const MAX_ORIGINAL_PHYSICAL_BOUNDS_DOCUMENT_BYTES: usize = 1024;
 const MAX_ORIGINAL_PHYSICAL_MEMORY_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 const MAX_ORIGINAL_PHYSICAL_PROCESSES: u32 = 256;
 const MAX_ORIGINAL_PRIVATE_SOURCE_INODES: u64 = 2_000_000;
@@ -612,18 +611,6 @@ struct OriginalPhysicalResourceBoundsV1 {
 }
 
 impl OriginalPhysicalResourceBoundsV1 {
-    /// Decode directly into the closed type so duplicate known fields are
-    /// rejected before any generic JSON map could collapse them.
-    fn decode(bytes: &[u8]) -> anyhow::Result<Self> {
-        anyhow::ensure!(
-            !bytes.is_empty() && bytes.len() <= MAX_ORIGINAL_PHYSICAL_BOUNDS_DOCUMENT_BYTES,
-            "original physical bounds document exceeds decode bound"
-        );
-        let bounds: Self = serde_json::from_slice(bytes)?;
-        bounds.validate()?;
-        Ok(bounds)
-    }
-
     fn validate(&self) -> anyhow::Result<()> {
         anyhow::ensure!(
             self.schema == ORIGINAL_PHYSICAL_BOUNDS_SCHEMA,
@@ -688,68 +675,34 @@ impl OriginalPhysicalResourceBoundsV1 {
         // helper/kernel/allocator peaks fit it. That needs later admission.
         Ok(())
     }
-
-    /// Argument roles are data labels only; a future admitted caller must
-    /// supply their independently authenticated request/resource/node owners.
-    fn intersect(request: &Self, descriptor: &Self, node: &Self) -> anyhow::Result<Self> {
-        request.validate()?;
-        descriptor.validate()?;
-        node.validate()?;
-        let effective = Self {
-            schema: ORIGINAL_PHYSICAL_BOUNDS_SCHEMA.to_owned(),
-            maximum_memory_bytes: request
-                .maximum_memory_bytes
-                .min(descriptor.maximum_memory_bytes)
-                .min(node.maximum_memory_bytes),
-            maximum_processes: request
-                .maximum_processes
-                .min(descriptor.maximum_processes)
-                .min(node.maximum_processes),
-            maximum_private_source_bytes: request
-                .maximum_private_source_bytes
-                .min(descriptor.maximum_private_source_bytes)
-                .min(node.maximum_private_source_bytes),
-            maximum_private_source_inodes: request
-                .maximum_private_source_inodes
-                .min(descriptor.maximum_private_source_inodes)
-                .min(node.maximum_private_source_inodes),
-            maximum_retained_export_bytes: request
-                .maximum_retained_export_bytes
-                .min(descriptor.maximum_retained_export_bytes)
-                .min(node.maximum_retained_export_bytes),
-            maximum_single_document_bytes: request
-                .maximum_single_document_bytes
-                .min(descriptor.maximum_single_document_bytes)
-                .min(node.maximum_single_document_bytes),
-            maximum_constructor_buffer_bytes: request
-                .maximum_constructor_buffer_bytes
-                .min(descriptor.maximum_constructor_buffer_bytes)
-                .min(node.maximum_constructor_buffer_bytes),
-        };
-        effective.validate()?;
-        Ok(effective)
-    }
-
-    /// The sole RyeOS canonical JSON encoding, explicitly not JCS. Hash the
-    /// same returned bytes; no provenance fields or self-referential digest.
-    fn canonical_commitment(&self) -> anyhow::Result<(Vec<u8>, String)> {
-        self.validate()?;
-        let value = serde_json::to_value(self)?;
-        let bytes = lillux::canonical_json(&value)
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?
-            .into_bytes();
-        anyhow::ensure!(
-            bytes.len() <= MAX_ORIGINAL_PHYSICAL_BOUNDS_DOCUMENT_BYTES,
-            "original physical canonical document exceeds decode bound"
-        );
-        let digest = lillux::sha256_hex(&bytes);
-        Ok((bytes, digest))
-    }
 }
 
 #[cfg(test)]
 mod original_physical_bounds_tests {
     use super::*;
+
+    // Bounds are decoded through the live current-target request path, which
+    // validates the nested physical request exactly as production does.
+    fn decode_bounds(bytes: &[u8]) -> anyhow::Result<OriginalPhysicalResourceBoundsV1> {
+        let mut document = br#"{"schema":"ryeos.execution_target.v1","os":"linux","arch":"x86_64","resources":[],"original_physical_bounds":"#.to_vec();
+        document.extend_from_slice(bytes);
+        document.push(b'}');
+        match DecodedOriginalTargetRequest::decode(&document)? {
+            DecodedOriginalTargetRequest::CurrentV1(current) => current
+                .original_physical_bounds
+                .ok_or_else(|| anyhow::anyhow!("bounds decoded as null")),
+            DecodedOriginalTargetRequest::LegacyOrdinary(_) => {
+                anyhow::bail!("current request decoded as legacy")
+            }
+        }
+    }
+
+    fn canonical_wire(bounds: &OriginalPhysicalResourceBoundsV1) -> Vec<u8> {
+        bounds.validate().unwrap();
+        lillux::canonical_json(&serde_json::to_value(bounds).unwrap())
+            .unwrap()
+            .into_bytes()
+    }
 
     // Pure data controls only; never admitted or verified runtime owners.
     fn bounds() -> OriginalPhysicalResourceBoundsV1 {
@@ -766,84 +719,20 @@ mod original_physical_bounds_tests {
     }
 
     #[test]
-    fn exact_canonical_wire_and_same_byte_commitment() {
+    fn exact_canonical_wire_roundtrips_through_live_decoder() {
         let actual = bounds();
         let expected = br#"{"maximum_constructor_buffer_bytes":50,"maximum_memory_bytes":1000,"maximum_private_source_bytes":100,"maximum_private_source_inodes":10,"maximum_processes":2,"maximum_retained_export_bytes":80,"maximum_single_document_bytes":40,"schema":"ryeos.original_physical_resource_bounds.v1"}"#;
-        let (bytes, digest) = actual.canonical_commitment().unwrap();
+        let bytes = canonical_wire(&actual);
         assert_eq!(bytes.as_slice(), expected);
-        assert_eq!(digest, lillux::sha256_hex(expected));
-        assert_eq!(
-            OriginalPhysicalResourceBoundsV1::decode(expected).unwrap(),
-            actual
-        );
+        assert_eq!(decode_bounds(expected).unwrap(), actual);
         let mut changed = bounds();
         changed.maximum_private_source_inodes += 1;
-        let (changed_bytes, changed_digest) = changed.canonical_commitment().unwrap();
-        assert_ne!(changed_bytes, bytes);
-        assert_ne!(changed_digest, digest);
-    }
-
-    #[test]
-    fn conflicting_component_minima_and_permutations_preserve_constraints() {
-        let mut request = bounds();
-        request.maximum_memory_bytes = 500;
-        request.maximum_processes = 1;
-        request.maximum_constructor_buffer_bytes = 20;
-        let mut descriptor = bounds();
-        descriptor.maximum_private_source_bytes = 90;
-        descriptor.maximum_private_source_inodes = 5;
-        descriptor.maximum_single_document_bytes = 30;
-        let mut node = bounds();
-        node.maximum_retained_export_bytes = 60;
-        let mut expected = bounds();
-        expected.maximum_memory_bytes = 500;
-        expected.maximum_processes = 1;
-        expected.maximum_constructor_buffer_bytes = 20;
-        expected.maximum_private_source_bytes = 90;
-        expected.maximum_private_source_inodes = 5;
-        expected.maximum_single_document_bytes = 30;
-        expected.maximum_retained_export_bytes = 60;
-        let expected_commitment = expected.canonical_commitment().unwrap();
-        for (r, d, c) in [
-            (&request, &descriptor, &node),
-            (&request, &node, &descriptor),
-            (&descriptor, &request, &node),
-            (&descriptor, &node, &request),
-            (&node, &request, &descriptor),
-            (&node, &descriptor, &request),
-        ] {
-            let effective = OriginalPhysicalResourceBoundsV1::intersect(r, d, c).unwrap();
-            assert_eq!(effective, expected);
-            assert_eq!(
-                effective.canonical_commitment().unwrap(),
-                expected_commitment
-            );
-        }
-    }
-
-    #[test]
-    fn invalid_inputs_refuse_before_component_clipping_in_every_role() {
-        let valid = bounds();
-        let mut invalid = bounds();
-        invalid.maximum_processes = MAX_ORIGINAL_PHYSICAL_PROCESSES + 1;
-        for (r, d, c) in [
-            (&invalid, &valid, &valid),
-            (&valid, &invalid, &valid),
-            (&valid, &valid, &invalid),
-        ] {
-            let error = OriginalPhysicalResourceBoundsV1::intersect(r, d, c).unwrap_err();
-            assert!(
-                error
-                    .to_string()
-                    .contains("processes exceeds finite structural bounds")
-            );
-        }
-        assert!(invalid.canonical_commitment().is_err());
+        assert_ne!(canonical_wire(&changed), bytes);
     }
 
     #[test]
     fn closed_typed_wire_refuses_malformed_values_without_a_map_decoder() {
-        let wire = String::from_utf8(bounds().canonical_commitment().unwrap().0).unwrap();
+        let wire = String::from_utf8(canonical_wire(&bounds())).unwrap();
         let field = "\"maximum_processes\":2";
         for malformed in [
             wire.replace(field, "\"maximum_processes\":null"),
@@ -863,30 +752,15 @@ mod original_physical_bounds_tests {
                 "\"maximum_memory_bytes\":18446744073709551616",
             ),
         ] {
-            assert!(
-                OriginalPhysicalResourceBoundsV1::decode(malformed.as_bytes()).is_err(),
-                "{malformed}"
-            );
+            assert!(decode_bounds(malformed.as_bytes()).is_err(), "{malformed}");
         }
-        assert!(OriginalPhysicalResourceBoundsV1::decode(b"").is_err());
-        assert!(OriginalPhysicalResourceBoundsV1::decode(b"{}").is_err());
-        let mut padded = wire.clone();
-        padded.extend(std::iter::repeat_n(
-            ' ',
-            MAX_ORIGINAL_PHYSICAL_BOUNDS_DOCUMENT_BYTES - wire.len(),
-        ));
-        assert_eq!(
-            OriginalPhysicalResourceBoundsV1::decode(padded.as_bytes()).unwrap(),
-            bounds()
-        );
-        padded.push(' ');
-        let error = OriginalPhysicalResourceBoundsV1::decode(padded.as_bytes()).unwrap_err();
-        assert!(error.to_string().contains("exceeds decode bound"));
+        assert!(decode_bounds(b"").is_err());
+        assert!(decode_bounds(b"{}").is_err());
     }
 
     #[test]
     fn all_numeric_fields_refuse_zero_and_structural_maximum_plus_one() {
-        let wire = String::from_utf8(bounds().canonical_commitment().unwrap().0).unwrap();
+        let wire = String::from_utf8(canonical_wire(&bounds())).unwrap();
         for (key, old, maximum) in [
             (
                 "maximum_memory_bytes",
@@ -927,8 +801,7 @@ mod original_physical_bounds_tests {
             for invalid in [0, maximum + 1] {
                 let changed =
                     wire.replace(&format!("\"{key}\":{old}"), &format!("\"{key}\":{invalid}"));
-                let error =
-                    OriginalPhysicalResourceBoundsV1::decode(changed.as_bytes()).unwrap_err();
+                let error = decode_bounds(changed.as_bytes()).unwrap_err();
                 assert!(
                     error.to_string().contains("finite structural bounds"),
                     "{key}: {error}"
@@ -947,11 +820,8 @@ mod original_physical_bounds_tests {
         maximum.maximum_single_document_bytes = MAX_ORIGINAL_SINGLE_DOCUMENT_BYTES;
         maximum.maximum_constructor_buffer_bytes = MAX_ORIGINAL_CONSTRUCTOR_BUFFER_BYTES;
         maximum.validate().unwrap();
-        let wire = maximum.canonical_commitment().unwrap().0;
-        assert_eq!(
-            OriginalPhysicalResourceBoundsV1::decode(&wire).unwrap(),
-            maximum
-        );
+        let wire = canonical_wire(&maximum);
+        assert_eq!(decode_bounds(&wire).unwrap(), maximum);
         // Source's absolute ceiling cannot be reached with positive other
         // bounds and memory<=16GiB. Test its greatest feasible value instead.
         maximum.maximum_retained_export_bytes = 1;
@@ -1107,62 +977,6 @@ impl DecodedOriginalTargetRequest {
                 }))
             }
         }
-    }
-
-    fn require_original_physical_request(
-        &self,
-    ) -> anyhow::Result<&OriginalPhysicalResourceBoundsV1> {
-        match self {
-            Self::LegacyOrdinary(_) => {
-                anyhow::bail!("legacy ordinary target has no original physical request")
-            }
-            Self::CurrentV1(current) => {
-                anyhow::ensure!(
-                    current.schema == ORIGINAL_TARGET_REQUEST_SCHEMA,
-                    "unsupported original target request schema"
-                );
-                current.ordinary.validate()?;
-                let request = current.original_physical_bounds.as_ref().ok_or_else(|| {
-                    anyhow::anyhow!("current ordinary target has null original physical request")
-                })?;
-                request.validate()?;
-                Ok(request)
-            }
-        }
-    }
-
-    fn canonical_bytes(&self) -> anyhow::Result<Vec<u8>> {
-        let value = match self {
-            Self::LegacyOrdinary(ordinary) => {
-                ordinary.validate()?;
-                serde_json::to_value(ordinary)?
-            }
-            Self::CurrentV1(current) => {
-                anyhow::ensure!(
-                    current.schema == ORIGINAL_TARGET_REQUEST_SCHEMA,
-                    "unsupported original target request schema"
-                );
-                current.ordinary.validate()?;
-                if let Some(request) = current.original_physical_bounds.as_ref() {
-                    request.validate()?;
-                }
-                serde_json::to_value(CurrentOriginalTargetRequestSerialization {
-                    schema: &current.schema,
-                    os: &current.ordinary.os,
-                    arch: &current.ordinary.arch,
-                    resources: &current.ordinary.resources,
-                    original_physical_bounds: &current.original_physical_bounds,
-                })?
-            }
-        };
-        let bytes = lillux::canonical_json(&value)
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?
-            .into_bytes();
-        anyhow::ensure!(
-            bytes.len() <= MAX_ORIGINAL_TARGET_RAW_BYTES,
-            "original target canonical bytes exceed decode bound"
-        );
-        Ok(bytes)
     }
 }
 
@@ -1502,6 +1316,32 @@ impl<'de> Deserialize<'de> for RawOriginalTargetPresence {
 mod original_target_decoder_tests {
     use super::*;
 
+    fn canonical_of(decoded: &DecodedOriginalTargetRequest) -> Vec<u8> {
+        match decoded {
+            DecodedOriginalTargetRequest::LegacyOrdinary(ordinary) => {
+                lillux::canonical_json(&serde_json::to_value(ordinary).unwrap())
+                    .unwrap()
+                    .into_bytes()
+            }
+            DecodedOriginalTargetRequest::CurrentV1(current) => {
+                CurrentExecutionTargetRequest(current.clone())
+                    .canonical_bytes()
+                    .unwrap()
+            }
+        }
+    }
+
+    fn bounds_of(
+        decoded: &DecodedOriginalTargetRequest,
+    ) -> Option<&OriginalPhysicalResourceBoundsV1> {
+        match decoded {
+            DecodedOriginalTargetRequest::LegacyOrdinary(_) => None,
+            DecodedOriginalTargetRequest::CurrentV1(current) => {
+                current.original_physical_bounds.as_ref()
+            }
+        }
+    }
+
     const LEGACY: &[u8] = br#"{"arch":"x86_64","os":"linux","resources":[]}"#;
     // The existing ordinary serializer omits an empty resources vector.
     const LEGACY_CANONICAL: &[u8] = br#"{"arch":"x86_64","os":"linux"}"#;
@@ -1521,7 +1361,9 @@ mod original_target_decoder_tests {
     }
 
     fn current_request_wire() -> Vec<u8> {
-        let (bytes, _) = request().canonical_commitment().unwrap();
+        let bytes = lillux::canonical_json(&serde_json::to_value(request()).unwrap())
+            .unwrap()
+            .into_bytes();
         String::from_utf8(CURRENT_NULL.to_vec())
             .unwrap()
             .replace(
@@ -1559,74 +1401,42 @@ mod original_target_decoder_tests {
             &legacy,
             DecodedOriginalTargetRequest::LegacyOrdinary(_)
         ));
-        assert_eq!(legacy.canonical_bytes().unwrap(), LEGACY_CANONICAL);
+        assert_eq!(canonical_of(&legacy), LEGACY_CANONICAL);
         let canonical_legacy = DecodedOriginalTargetRequest::decode(LEGACY_CANONICAL).unwrap();
         assert!(matches!(
             &canonical_legacy,
             DecodedOriginalTargetRequest::LegacyOrdinary(_)
         ));
-        assert_eq!(
-            canonical_legacy.canonical_bytes().unwrap(),
-            LEGACY_CANONICAL
-        );
-        assert!(
-            legacy
-                .require_original_physical_request()
-                .unwrap_err()
-                .to_string()
-                .contains("legacy ordinary")
-        );
+        assert_eq!(canonical_of(&canonical_legacy), LEGACY_CANONICAL);
+        assert!(bounds_of(&legacy).is_none());
         let omitted =
             DecodedOriginalTargetRequest::decode(br#"{"os":"linux","arch":"x86_64"}"#).unwrap();
-        assert_eq!(omitted.canonical_bytes().unwrap(), LEGACY_CANONICAL);
+        assert_eq!(canonical_of(&omitted), LEGACY_CANONICAL);
         let current = DecodedOriginalTargetRequest::decode(CURRENT_NULL).unwrap();
         assert!(matches!(
             &current,
             DecodedOriginalTargetRequest::CurrentV1(_)
         ));
-        assert_eq!(current.canonical_bytes().unwrap(), CURRENT_NULL);
-        assert!(
-            current
-                .require_original_physical_request()
-                .unwrap_err()
-                .to_string()
-                .contains("null original physical")
-        );
+        assert_eq!(canonical_of(&current), CURRENT_NULL);
+        assert!(bounds_of(&current).is_none());
     }
 
     #[test]
-    fn current_request_retains_same_nested_bounds_and_canonical_commitment() {
+    fn current_request_retains_same_nested_bounds_and_canonical_bytes() {
         let wire = current_request_wire();
         let decoded = DecodedOriginalTargetRequest::decode(&wire).unwrap();
-        let borrowed = decoded.require_original_physical_request().unwrap();
-        let DecodedOriginalTargetRequest::CurrentV1(current) = &decoded else {
-            panic!("current branch required")
-        };
-        assert!(std::ptr::eq(
-            borrowed,
-            current.original_physical_bounds.as_ref().unwrap()
-        ));
+        let borrowed = bounds_of(&decoded).unwrap();
         assert_eq!(borrowed, &request());
-        assert_eq!(
-            borrowed.canonical_commitment().unwrap(),
-            request().canonical_commitment().unwrap()
-        );
-        let canonical = decoded.canonical_bytes().unwrap();
+        let canonical = canonical_of(&decoded);
         assert_eq!(canonical, wire);
         let roundtrip = DecodedOriginalTargetRequest::decode(&canonical).unwrap();
-        assert_eq!(
-            roundtrip.require_original_physical_request().unwrap(),
-            borrowed
-        );
+        assert_eq!(bounds_of(&roundtrip).unwrap(), borrowed);
         let changed = String::from_utf8(wire).unwrap().replace(
             "\"maximum_private_source_inodes\":10",
             "\"maximum_private_source_inodes\":11",
         );
         assert_ne!(
-            DecodedOriginalTargetRequest::decode(changed.as_bytes())
-                .unwrap()
-                .canonical_bytes()
-                .unwrap(),
+            canonical_of(&DecodedOriginalTargetRequest::decode(changed.as_bytes()).unwrap()),
             canonical
         );
     }
@@ -1742,10 +1552,7 @@ mod original_target_decoder_tests {
         let mut padded = LEGACY.to_vec();
         padded.resize(MAX_ORIGINAL_TARGET_RAW_BYTES, b' ');
         assert_eq!(
-            DecodedOriginalTargetRequest::decode(&padded)
-                .unwrap()
-                .canonical_bytes()
-                .unwrap(),
+            canonical_of(&DecodedOriginalTargetRequest::decode(&padded).unwrap()),
             LEGACY_CANONICAL
         );
         padded.push(b' ');
@@ -1792,7 +1599,7 @@ mod original_target_decoder_tests {
     fn portable_ordinary_resource_semantics_remain_separate_from_physical_request() {
         let target = br#"{"os":"windows","arch":"x86_64","resources":[{"class":"gpu","count":1,"allocation":"exclusive","access":"deployment_visible","exact_facts":{"model":"example"},"minimum_facts":{"memory":1}}]}"#;
         let decoded = DecodedOriginalTargetRequest::decode(target).unwrap();
-        assert!(decoded.require_original_physical_request().is_err());
+        assert!(bounds_of(&decoded).is_none());
         // Pure decoding deliberately does not match this host's platform.
         let target = String::from_utf8(target.to_vec()).unwrap();
         for invalid in [

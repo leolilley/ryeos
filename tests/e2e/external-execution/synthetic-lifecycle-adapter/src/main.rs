@@ -2104,8 +2104,7 @@ mod tests {
                 launcher_artifact_hash: self.activation.launcher_digest.clone(),
                 guest_runtime_artifact_hash: None,
                 guest_runtime_artifact_bytes: None,
-                attachment_deadline_ms: i64::try_from(lillux::time::timestamp_millis()).unwrap()
-                    + 60_000,
+                attachment_deadline_ms: lillux::time::timestamp_millis() + 60_000,
                 execution_timeout_seconds: 60,
                 post_execution_timeout_seconds: 1,
                 channel_max_bytes: 1024,

@@ -507,24 +507,25 @@ fn release(container_id: &str) -> Result<()> {
         }
         let container_index = read_record(&host_state, &container_name)?;
         let volume_index = read_record(&host_state, &transaction.record.lease_name)?;
-        for index in [container_index.as_ref(), volume_index.as_ref()] {
-            if let Some(index) = index {
-                // An older Released index belongs to the preceding lifetime;
-                // it may remain only while the new Intent/Prepared journal is
-                // still publishing its indexes. It cannot grant this release.
-                let preceding_released = index.phase == LifecyclePhase::Released
-                    && index.intent != transaction.record.intent
-                    && matches!(
-                        transaction.record.phase,
-                        LifecyclePhase::Intent | LifecyclePhase::Prepared
-                    );
-                let allowed = preceding_released || {
-                    let joined = reconcile_records(transaction.record.clone(), index.clone())?;
-                    joined == transaction.record
-                };
-                if !allowed {
-                    bail!("interrupted lifecycle index differs from its authoritative journal");
-                }
+        for index in [container_index.as_ref(), volume_index.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            // An older Released index belongs to the preceding lifetime;
+            // it may remain only while the new Intent/Prepared journal is
+            // still publishing its indexes. It cannot grant this release.
+            let preceding_released = index.phase == LifecyclePhase::Released
+                && index.intent != transaction.record.intent
+                && matches!(
+                    transaction.record.phase,
+                    LifecyclePhase::Intent | LifecyclePhase::Prepared
+                );
+            let allowed = preceding_released || {
+                let joined = reconcile_records(transaction.record.clone(), index.clone())?;
+                joined == transaction.record
+            };
+            if !allowed {
+                bail!("interrupted lifecycle index differs from its authoritative journal");
             }
         }
         if transaction.record.phase != LifecyclePhase::Released {

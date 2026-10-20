@@ -46,8 +46,6 @@ pub use oci_lifecycle::{
     OciHookState, OciLifecycleGeneration, OciLifecycleIntent, OciPreparationPhase,
     OciPreparationProgress,
 };
-#[cfg(target_os = "linux")]
-pub(crate) use scope::SelectedScopePreparation;
 pub use scope::{
     ControllerAccount, ProbeBarrier, ProcessHostLifetime, ProcessScope, ProcessScopeAllocation,
     ProcessScopeCapability, ProcessScopeConfiguration, ProcessScopeLaunchError,

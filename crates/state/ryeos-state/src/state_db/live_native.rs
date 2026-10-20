@@ -2599,11 +2599,15 @@ pub(crate) fn retain_abandoned_live_opening(opening: AbandonedLiveOpening) {
 
 /// Count of live openings this process retains because they were discarded
 /// without settlement. Any nonzero count means native custody and its
-/// namespace exclusion stay held until the process exits.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// namespace exclusion stay held until the process exits. The namespace
+/// identities and the retained operational owner count say which roots and
+/// how much custody stay held.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AbandonedLiveOpenings {
     pub state: usize,
     pub operational: usize,
+    pub state_namespaces: Vec<lillux::OpenFileIdentity>,
+    pub operational_retained_owners: usize,
 }
 
 /// Report the abandoned live openings this process retains.
@@ -2614,8 +2618,16 @@ pub fn abandoned_live_openings() -> AbandonedLiveOpenings {
     let mut report = AbandonedLiveOpenings::default();
     for opening in retained.iter() {
         match opening {
-            AbandonedLiveOpening::State(_) => report.state += 1,
-            AbandonedLiveOpening::Operational(_) => report.operational += 1,
+            AbandonedLiveOpening::State(opening) => {
+                report.state += 1;
+                if let Ok(identity) = opening._original.namespace().observe_retained_identity() {
+                    report.state_namespaces.push(identity);
+                }
+            }
+            AbandonedLiveOpening::Operational(opening) => {
+                report.operational += 1;
+                report.operational_retained_owners += opening.retained_owner_count();
+            }
         }
     }
     report

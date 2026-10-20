@@ -4247,16 +4247,8 @@ fn assert_stopped_handoff_completed(
     Ok(())
 }
 
-async fn assert_real_handoff_aborted(
-    handoff: &mut RealPortableHandoff,
-    successor_id: &str,
-) -> Result<()> {
-    handoff.source.kill_daemon().await?;
-    handoff.target.kill_daemon().await?;
-    assert_stopped_handoff_aborted(handoff, successor_id)
-}
-
-/// [`assert_real_handoff_aborted`] for daemons that have already exited.
+/// Assert, from the stopped daemons' on-disk state, that an aborted handoff left the
+/// source as the exact writer with no successor authority.
 fn assert_stopped_handoff_aborted(handoff: &RealPortableHandoff, successor_id: &str) -> Result<()> {
     let source_store = open_daemon_state(&handoff.source.state_path)?;
     anyhow::ensure!(

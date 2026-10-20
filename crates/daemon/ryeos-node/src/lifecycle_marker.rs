@@ -406,12 +406,6 @@ pub fn age(state_dir: &Path) -> Option<Duration> {
     marker.modification_age().ok()?
 }
 
-fn write(state_dir: &Path, marker: &LifecycleMarker) {
-    if let Err(e) = write_strict(state_dir, |_| Ok(marker.clone())) {
-        tracing::warn!(error = %e, "failed to write daemon lifecycle marker");
-    }
-}
-
 /// Replace the marker with the record `build` derives from the current one,
 /// by pinned compare-and-write. An unreadable current marker refuses, so a
 /// record carrying unapplied facts is never overwritten blind. The record
@@ -1039,7 +1033,7 @@ mod tests {
             pending_latched_drain: None,
             carrier_incarnation: None,
         };
-        write(tmp.path(), &marker);
+        write_strict(tmp.path(), |_| Ok(marker.clone())).unwrap();
         // The reporter must not panic and must classify it as not-alive.
         assert!(!process_alive(u32::MAX - 1));
         report_previous_exit(read(tmp.path()).as_ref()); // smoke: logs the inferred-crash path
