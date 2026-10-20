@@ -121,7 +121,7 @@ async fn execution_handler_rejects_cross_chain_and_hash_mismatched_braid_cuts() 
     )
     .await
     .expect_err("a foreign braid must not become the selected cut");
-    assert!(format!("{cross_chain:#}").contains("outside the selected execution closure"));
+    assert!(format!("{cross_chain:#}").contains("outside the authorized execution closure"));
 
     let hash_mismatch = (ryeos_ui::handlers::ui_field_execution::DESCRIPTOR.handler)(
         serde_json::json!({
@@ -141,6 +141,30 @@ async fn execution_handler_rejects_cross_chain_and_hash_mismatched_braid_cuts() 
     .await
     .expect_err("a cut hash must bind the durable event");
     assert!(format!("{hash_mismatch:#}").contains("does not match durable chain history"));
+}
+
+#[tokio::test]
+async fn admitted_operator_cannot_read_a_foreign_signed_thread() {
+    let (_tmp, _state_owner, state) = build_test_state();
+    let operator = local_operator_context(&state, Vec::new());
+    let foreign = format!("fp:{}", "f".repeat(64));
+    assert_ne!(foreign, operator.fingerprint);
+    create_running_thread(&state, "T-foreign-owner", &foreign);
+    let event = append_fixture_event(&state, "T-foreign-owner");
+    let error = (ryeos_ui::handlers::ui_field_execution::DESCRIPTOR.handler)(
+        serde_json::json!({
+            "thread_id":"T-foreign-owner",
+            "cursor":{"mode":"braid_cut","anchor":{
+                "chain_root_id":event.chain_root_id,"chain_seq":event.chain_seq,"event_hash":event.event_hash
+            }}
+        }),
+        operator,
+        Arc::new(state),
+    ).await.expect_err("operator authentication does not grant another principal's projectless thread");
+    assert!(matches!(
+        error.downcast_ref::<ryeos_app::handler_error::HandlerError>(),
+        Some(ryeos_app::handler_error::HandlerError::NotFound)
+    ));
 }
 
 #[tokio::test]

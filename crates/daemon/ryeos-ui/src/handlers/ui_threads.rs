@@ -1,10 +1,10 @@
 //! `ui.ryeos.threads.list` and `ui.ryeos.thread.inspect` — thread
 //! listing and read-only inspection for the ryeos-ui.
 //!
-//! Wraps the existing thread listing from the state store, providing
-//! a ryeos-ui-friendly view with status and item_ref data. Browser-session
-//! auth means the ryeos-ui always sees all threads (admin context).
+//! Locates bounded thread-list candidates in the projection, then checks each
+//! disclosed row against signed thread authority and the exact caller scope.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -19,6 +19,7 @@ use ryeos_api::registry::ServiceDescriptor;
 use ryeos_app::handler_context::HandlerContext;
 use ryeos_app::handler_error::HandlerError;
 use ryeos_app::state::AppState;
+use ryeos_app::state_store::AuthoritativeThreadSubject;
 use ryeos_engine::contracts::ProjectContext;
 use ryeos_executor::executor::ServiceAvailability;
 
@@ -27,8 +28,76 @@ fn default_limit() -> usize {
 }
 
 const MAX_THREAD_LIST_LIMIT: usize = 2_000;
+pub(crate) const MAX_THREAD_LIST_CANDIDATES_SCANNED: usize = 8_192;
 static THREAD_LIST_CALLS: AtomicU64 = AtomicU64::new(0);
 static THREAD_LIST_IN_FLIGHT: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn collect_authorized_thread_items(
+    limit: usize,
+    sort: ryeos_state::queries::ThreadSort,
+    mut page: impl FnMut(
+        usize,
+        Option<&ryeos_state::queries::ThreadListCursor>,
+    ) -> Result<Vec<ryeos_app::state_store::ThreadListItem>>,
+    mut authorize: impl FnMut(&ryeos_app::state_store::ThreadListItem) -> Result<bool>,
+) -> Result<(Vec<ryeos_app::state_store::ThreadListItem>, usize)> {
+    let mut cursor: Option<ryeos_state::queries::ThreadListCursor> = None;
+    let mut scanned = 0usize;
+    let mut authorized = Vec::with_capacity(limit);
+    while authorized.len() < limit && scanned < MAX_THREAD_LIST_CANDIDATES_SCANNED {
+        let page_limit = ryeos_state::queries::MAX_THREAD_CANDIDATE_PAGE
+            .min(MAX_THREAD_LIST_CANDIDATES_SCANNED - scanned);
+        let candidates = page(page_limit, cursor.as_ref())?;
+        let count = candidates.len();
+        if count > page_limit {
+            anyhow::bail!("thread candidate reader exceeded its bounded page");
+        }
+        if count == 0 {
+            break;
+        }
+        for item in candidates {
+            scanned += 1;
+            let next_cursor = ryeos_state::queries::ThreadListCursor::from_position(
+                &item.created_at,
+                &item.thread_id,
+                &item.status,
+            );
+            if cursor.as_ref().is_some_and(|previous| {
+                !thread_candidate_cursor_advances(previous, &next_cursor, sort)
+            }) {
+                anyhow::bail!("thread candidate page did not advance its ordered locator");
+            }
+            cursor = Some(next_cursor);
+            if authorize(&item)? {
+                authorized.push(item);
+                if authorized.len() == limit {
+                    break;
+                }
+            }
+        }
+        if count < page_limit {
+            break;
+        }
+    }
+    Ok((authorized, scanned))
+}
+
+fn thread_candidate_cursor_advances(
+    previous: &ryeos_state::queries::ThreadListCursor,
+    next: &ryeos_state::queries::ThreadListCursor,
+    sort: ryeos_state::queries::ThreadSort,
+) -> bool {
+    let previous_key = (&previous.created_at, &previous.thread_id);
+    let next_key = (&next.created_at, &next.thread_id);
+    match sort {
+        ryeos_state::queries::ThreadSort::Default => next_key > previous_key,
+        ryeos_state::queries::ThreadSort::Newest => next_key < previous_key,
+        ryeos_state::queries::ThreadSort::Watch => {
+            (next.watch_terminal & !previous.watch_terminal)
+                || (next.watch_terminal == previous.watch_terminal && next_key < previous_key)
+        }
+    }
+}
 
 struct ThreadListInFlightGuard;
 
@@ -97,13 +166,19 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
         _ => ryeos_app::thread_lifecycle::ThreadSort::Default,
     };
 
-    // Optional dashboard filters. An empty or absent value means "unfiltered"
-    // (the client sends "" for an unset filter facet), so an unset filter
-    // widens the list rather than emptying it. Seat auth is unchanged: a
-    // browser session is admin context, so there is no owner (`principal`)
-    // scope — these are operator-chosen facets, not an authorization boundary.
+    // Optional dashboard filters only narrow candidates. The compiled
+    // attachment's project or principal scope is independent of those params;
+    // an empty facet never upgrades a browser seat to node-wide authority.
+    let attachment_project = caller.project_query_identity()?;
+    let (principal, project_root) = match &caller {
+        crate::seat_auth::SeatCaller::Attachment(_) => match attachment_project {
+            Some(root) => (None, Some(root)),
+            None => (Some(caller.principal_id().to_string()), None),
+        },
+        crate::seat_auth::SeatCaller::Operator { .. } => (None, project_filter(&params, None)?),
+    };
     let filter = ryeos_app::thread_lifecycle::ThreadListFilter {
-        principal: None,
+        principal,
         status: string_filter(&params, "status"),
         kind: string_filter(&params, "kind"),
         requested_by: string_filter(&params, "requested_by"),
@@ -112,14 +187,52 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
         // bools for authored views and text for the TUI live-filter input.
         active_only: active_filter(&params),
         exclude_item_prefixes: string_list_filter(&params, "exclude_item_prefixes"),
-        project_root: project_filter(&params, caller.project_query_identity()?.as_deref())?,
+        project_root,
     };
 
-    // Route through the lifecycle layer so each row carries daemon-authored
-    // execution facts (`execution.supports_continuation`) the ryeos-ui gates on.
-    let threads = state
+    // The projection supplies bounded locators, not read authority. Fetch
+    // raw candidates without continuation/follow enrichment, then authorize
+    // each exact signed subject before any display decoration. A foreign or
+    // stale first page must not crowd later authorized candidates out of the
+    // requested page. The fixed scan budget prevents unbounded work; neither
+    // an exhausted budget nor an empty projection page proves absence.
+    let (authorized_items, scanned) = collect_authorized_thread_items(
+        limit,
+        sort,
+        |page_limit, cursor| {
+            state
+                .state_store
+                .list_threads_candidate_page(page_limit, &filter, sort, cursor)
+        },
+        |item| {
+            let signed = match crate::thread_authorization::authorize_exact_thread_subjects(
+                &ctx,
+                &state,
+                &caller,
+                &[&item.thread_id],
+            ) {
+                Ok(mut subjects) => subjects.pop().expect("one subject requested"),
+                Err(HandlerError::NotFound) => return Ok(false),
+                Err(error) => return Err(error.into()),
+            };
+            if !listed_thread_matches_signed_subject(item, &signed) {
+                return Err(HandlerError::NotFound.into());
+            }
+            Ok(true)
+        },
+    )?;
+    let mut threads = state
         .threads
-        .list_thread_views_query(limit, &filter, sort)?;
+        .display_verified_thread_list_items(authorized_items);
+    for row in &mut threads {
+        row.project = row.item.project_root.as_deref().and_then(|root| {
+            let path = Path::new(root);
+            Some(ryeos_app::thread_lifecycle::ProjectSummary {
+                path: root.to_string(),
+                name: path.file_name()?.to_str()?.to_string(),
+            })
+        });
+    }
 
     let elapsed_ms = started.elapsed().as_millis() as u64;
     if elapsed_ms >= 250 || in_flight >= 4 {
@@ -129,6 +242,7 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
             elapsed_ms,
             rows = threads.len(),
             limit,
+            scanned,
             "slow or overlapping ryeos-ui thread-list reconciliation"
         );
     } else {
@@ -138,32 +252,44 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
             elapsed_ms,
             rows = threads.len(),
             limit,
+            scanned,
             "ryeos-ui thread-list reconciliation"
         );
     }
 
     Ok(serde_json::json!({
         "threads": threads,
+        "coverage": {"state":"observed", "reason":"projection_locator_not_exhaustive"},
     }))
 }
 
+pub(crate) fn listed_thread_matches_signed_subject(
+    item: &ryeos_app::state_store::ThreadListItem,
+    signed: &AuthoritativeThreadSubject,
+) -> bool {
+    item.thread_id == signed.thread_id
+        && item.chain_root_id == signed.chain_root_id
+        && item.kind == signed.kind
+        && item.item_ref == signed.item_ref
+        && item.launch_mode == signed.launch_mode
+        && item.current_site_id == signed.current_site_id
+        && item.origin_site_id == signed.origin_site_id
+        && item.upstream_thread_id == signed.upstream_thread_id
+        && item.project_root.as_deref().map(Path::new) == signed.project_root.as_deref()
+        && item.created_at == signed.created_at
+        && item.updated_at == signed.updated_at
+        && item.status == signed.status.as_str()
+        && item.requested_by == signed.requested_by
+        && item.project_authority.as_ref() == Some(&signed.project_authority)
+        && item.admitted_launch_capsule_hash == signed.admitted_launch_capsule_hash
+}
+
 fn project_filter(params: &Value, caller_project_root: Option<&Path>) -> Result<Option<PathBuf>> {
-    let project_path = string_filter(params, "project_path");
     match string_filter(params, "project").as_deref() {
-        Some("current") => match caller_project_root {
-            Some(path) => Ok(Some(path.to_path_buf())),
-            None => project_path
-                .as_deref()
-                .map(canonicalize_project_filter)
-                .transpose(),
-        },
+        Some("current") => Ok(caller_project_root.map(Path::to_path_buf)),
         Some(path) => canonicalize_existing_dir(path).map(Some),
         None => Ok(None),
     }
-}
-
-fn canonicalize_project_filter(path: &str) -> Result<PathBuf> {
-    Ok(canonicalize_existing_dir(path).unwrap_or_else(|_| PathBuf::from(path)))
 }
 
 fn canonicalize_existing_dir(path: &str) -> Result<PathBuf> {
@@ -184,6 +310,75 @@ fn default_event_limit() -> usize {
 }
 
 const MAX_EVENT_LIMIT: usize = 500;
+const FACET_PAGE_EVENTS: u64 = 64;
+const FACET_PAGE_BYTES: u64 = 512 * 1024;
+const MAX_FACET_PAGES: usize = 8;
+
+fn completed_signed_facets(
+    facets: BTreeMap<String, String>,
+    exhausted: bool,
+) -> Option<BTreeMap<String, String>> {
+    exhausted.then_some(facets)
+}
+
+pub(crate) fn fold_inspection_facet_event(
+    facets: &mut BTreeMap<String, String>,
+    event_type: &str,
+    durability: ryeos_state::objects::EventDurability,
+    payload: &Value,
+) -> bool {
+    if event_type != ryeos_state::event_types::THREAD_FACET_SET
+        || !durability.is_projection_indexed()
+    {
+        return true;
+    }
+    super::ui_field_execution::fold_signed_facet(facets, payload).is_ok()
+}
+
+/// Only a fully exhausted fixed-anchor history proves the facet map, including
+/// an empty map. The signed reader returns newest-first events.
+pub(crate) fn read_signed_inspection_facets(
+    state: &AppState,
+    signed: &AuthoritativeThreadSubject,
+) -> Result<Option<BTreeMap<String, String>>> {
+    let Some(anchor) = state
+        .state_store
+        .capture_thread_event_read_anchor(&signed.chain_root_id, &signed.thread_id)?
+    else {
+        return Ok(None);
+    };
+    let mut progress = None;
+    let mut facets = BTreeMap::new();
+    for _ in 0..MAX_FACET_PAGES {
+        let page = state.state_store.read_thread_event_page(
+            &anchor,
+            progress.as_ref(),
+            FACET_PAGE_EVENTS,
+            FACET_PAGE_BYTES,
+        )?;
+        if page.events.is_empty() && page.progress.is_some() {
+            anyhow::bail!("signed thread facet history made no progress");
+        }
+        for (_, event) in page.events {
+            // The projection ignores malformed facet payloads. Preserve
+            // independently verified thread facts, but do not claim a
+            // complete facet map when signed testimony cannot be folded.
+            if !fold_inspection_facet_event(
+                &mut facets,
+                &event.event_type,
+                event.durability,
+                &event.payload,
+            ) {
+                return Ok(None);
+            }
+        }
+        match page.progress {
+            Some(next) => progress = Some(next),
+            None => return Ok(completed_signed_facets(facets, true)),
+        }
+    }
+    Ok(completed_signed_facets(facets, false))
+}
 
 pub async fn handle_inspect(
     params: Value,
@@ -195,71 +390,83 @@ pub async fn handle_inspect(
     let req: InspectRequest = serde_json::from_value(params)
         .map_err(|e| HandlerError::BadRequest(format!("invalid request: {e}")))?;
 
-    crate::thread_authorization::authorize_exact_thread_subjects(
+    let signed = crate::thread_authorization::authorize_exact_thread_subjects(
         &ctx,
         &state,
         &caller,
         &[&req.thread_id],
-    )?;
+    )?
+    .pop()
+    .expect("one exact thread authorization returns one signed subject");
 
-    let Some(thread) = state.threads.get_thread_view(&req.thread_id)? else {
+    let Some(mut thread) = state.threads.get_thread_view(&req.thread_id)? else {
         return Err(HandlerError::NotFound.into());
     };
+    let displayed = &thread.thread;
+    if displayed.thread_id != signed.thread_id
+        || displayed.chain_root_id != signed.chain_root_id
+        || displayed.kind != signed.kind
+        || displayed.item_ref != signed.item_ref
+        || displayed.executor_ref != signed.executor_ref
+        || displayed.launch_mode != signed.launch_mode
+        || displayed.current_site_id != signed.current_site_id
+        || displayed.origin_site_id != signed.origin_site_id
+        || displayed.upstream_thread_id != signed.upstream_thread_id
+        || displayed.project_root.as_deref().map(Path::new) != signed.project_root.as_deref()
+        || displayed.created_at != signed.created_at
+        || displayed.updated_at != signed.updated_at
+        || displayed.started_at != signed.started_at
+        || displayed.finished_at != signed.finished_at
+        || displayed.status != signed.status.as_str()
+        || displayed.admitted_launch_capsule_hash != signed.admitted_launch_capsule_hash
+        || displayed.result_project_snapshot_hash != signed.result_project_snapshot_hash
+        || displayed.result_workspace_output_capture_hash
+            != signed.result_workspace_output_capture_hash
+        || displayed.requested_by != signed.requested_by
+        || displayed.project_authority.as_ref() != Some(&signed.project_authority)
+    {
+        return Err(HandlerError::NotFound.into());
+    }
+    // The live waiter and projection fallback are not signed follow evidence.
+    // Do not let the serialized ThreadView bypass the explicit omission below.
+    thread.follow = None;
+    // The successor is projected from continuation history. Until this read
+    // authenticates that edge, do not expose it as verified inspection data.
+    thread.thread.successor_thread_id = None;
+    // Runtime, lifecycle metadata, project display and staged-input depth are
+    // operational projections. Do not launder them through the verified
+    // thread object; separately named operational fields retain their own
+    // coverage and must not be interpreted as signed execution testimony.
+    thread.thread.runtime = Default::default();
+    thread.thread.lifecycle_authority = None;
+    thread.project = None;
+    thread.pending = 0;
 
-    let result = state.threads.get_thread_result(&req.thread_id)?;
+    let result = state.state_store.get_thread_result_authoritative(
+        &signed.chain_root_id,
+        &req.thread_id,
+        signed.status.as_str(),
+    )?;
+    let outcome_coverage = outcome_coverage(signed.status, result.is_some());
     let artifacts = state.threads.list_thread_artifacts(&req.thread_id)?;
-    let children = state.threads.list_children(&req.thread_id)?;
-    let facets = state.state_store.get_facets(&req.thread_id)?;
-    let facets_map: std::collections::BTreeMap<String, String> = facets.into_iter().collect();
+    // These collections have only projection/operational readers in this
+    // service. An empty list is not proof of absence; publish explicit
+    // coverage until each has a signed positive/exhaustive read contract.
+    let children = Vec::<Value>::new();
+    let signed_facets = read_signed_inspection_facets(&state, &signed)?;
+    let facets_map = signed_facets.clone().unwrap_or_default();
+    let event_page = state.state_store.recent_thread_events(
+        &signed.chain_root_id,
+        &req.thread_id,
+        None,
+        req.event_limit.clamp(1, MAX_EVENT_LIMIT),
+        2 * 1024 * 1024,
+    )?;
     let events = state
         .state_store
-        .latest_thread_events(&req.thread_id, req.event_limit.clamp(1, MAX_EVENT_LIMIT))?;
+        .authenticate_execution_event_candidates(&signed.chain_root_id, &event_page.events)?;
 
-    // Deep-watch execution summary: chain-wide usage totals (this thread plus
-    // its continuations) as a list of labeled metrics the detail lens projects
-    // one row each. Kept as a projectable array (not the flat `cost.*` facets,
-    // whose dotted keys a view projection can't navigate).
-    let totals = state
-        .state_store
-        .chain_usage_totals(&thread.thread.chain_root_id)?;
-    let chain_has_usage = totals.input_tokens != 0
-        || totals.output_tokens != 0
-        || totals.spend_usd != 0.0
-        || totals.completed_turns != 0;
-    // A rollup-basis final cost (a graph aggregating its dispatched children)
-    // lives in the `cost.*` facets, never in `thread_usage` — dispatched
-    // children are fresh chain roots, so the chain totals read zero for such
-    // a thread. Project the rollup as explicitly-derived rows, and drop the
-    // bare-zero chain rows when the rollup is the only usage there is.
-    let is_rollup = facets_map.get("cost.basis").map(String::as_str) == Some("rollup");
-    let mut usage_rows: Vec<Value> = Vec::new();
-    if chain_has_usage || !is_rollup {
-        usage_rows.extend([
-            serde_json::json!({ "label": "input tokens", "value": totals.input_tokens.to_string() }),
-            serde_json::json!({ "label": "output tokens", "value": totals.output_tokens.to_string() }),
-            serde_json::json!({ "label": "cost", "value": format!("${:.4}", totals.spend_usd) }),
-            serde_json::json!({ "label": "turns", "value": totals.completed_turns.to_string() }),
-            serde_json::json!({ "label": "threads in chain", "value": totals.thread_count.to_string() }),
-        ]);
-    }
-    if is_rollup {
-        let facet = |key: &str| {
-            facets_map
-                .get(key)
-                .cloned()
-                .unwrap_or_else(|| "0".to_string())
-        };
-        let spend = facets_map
-            .get("cost.spend")
-            .and_then(|value| value.parse::<f64>().ok())
-            .unwrap_or(0.0);
-        usage_rows.extend([
-            serde_json::json!({ "label": "children input tokens", "value": facet("cost.input_tokens") }),
-            serde_json::json!({ "label": "children output tokens", "value": facet("cost.output_tokens") }),
-            serde_json::json!({ "label": "children cost (rollup)", "value": format!("${spend:.4}") }),
-        ]);
-    }
-    let usage = Value::Array(usage_rows);
+    let usage = Value::Array(Vec::new());
 
     // Staged operator-input depth (05c.1): lets the input area show an "N staged"
     // chip without a separate service call.
@@ -268,30 +475,57 @@ pub async fn handle_inspect(
     // Durable execution posture (05b.v2): preserve an explicit coverage result;
     // an absent, unreadable, or corrupt audit record is not a successful empty
     // projection.
-    let thread_meta = read_thread_meta(&state, &req.thread_id);
+    let thread_meta = read_thread_meta(&state, &signed.thread_id, &signed.item_ref);
     let execution = execution_meta_rows(thread_meta.value(), &thread.thread.executor_ref);
     let execution_coverage = thread_meta.coverage();
 
-    // Graph `follow:` lineage as labeled `{label, value}` rows (same projectable
-    // shape as `usage` / `execution_meta`), so the detail lens's Follow section
-    // renders `follow_node` / `child_terminal_status` as their own rows instead
-    // of dumping the `thread.follow` object. Empty array when the thread carries
-    // no follow fact — the section then reads empty.
-    let follow = follow_rows(thread.follow.as_ref());
+    // No signed follow-state fold exists here. The empty value is paired with
+    // explicit unavailable coverage, not a claim that no follow fact exists.
+    let follow = Value::Array(Vec::new());
+    let evidence_coverage = [
+        ("children", "signed_child_collection_not_proven"),
+        ("usage", "signed_chain_usage_not_available"),
+        ("follow", "signed_follow_state_not_available"),
+        ("successor", "signed_continuation_edge_not_available"),
+        ("runtime", "operational_projection_not_in_signed_inspection"),
+        (
+            "project_summary",
+            "display_projection_not_in_signed_inspection",
+        ),
+    ]
+    .map(|(subject, reason)| {
+        serde_json::json!({
+            "subject": subject,
+            "state": "unavailable",
+            "reason": reason,
+        })
+    });
+    let mut evidence_coverage = evidence_coverage.to_vec();
+    evidence_coverage.push(match signed_facets {
+        Some(_) => serde_json::json!({"subject": "facets", "state": "complete"}),
+        None => serde_json::json!({
+            "subject": "facets",
+            "state": "unavailable",
+            "reason": "signed_facet_map_not_proven",
+        }),
+    });
 
     let mut response = serde_json::json!({
         "schema_version": "ryeos-ui.thread.inspect.v1",
         "thread": thread,
         "result": result,
+        "outcome_coverage": outcome_coverage,
         "artifacts": artifacts,
         "children": children,
         "facets": facets_map,
         "events": events,
+        "events_truncated": event_page.has_more,
         "usage": usage,
         "pending": pending,
         "execution_meta": execution,
         "execution_coverage": [execution_coverage],
         "follow": follow,
+        "evidence_coverage": evidence_coverage,
     });
     if let Some(meta) = thread_meta.into_value() {
         response
@@ -300,6 +534,19 @@ pub async fn handle_inspect(
             .insert("thread_meta".to_string(), meta);
     }
     Ok(response)
+}
+
+/// The result owner returns None only when the authenticated snapshot contains
+/// no result, error, or outcome code. Never infer success from terminal status.
+fn outcome_coverage(status: ryeos_state::objects::ThreadStatus, has_result: bool) -> Value {
+    let (state, reason) = if has_result {
+        ("available", "signed_outcome_fields_retained")
+    } else if status.is_terminal() {
+        ("absent", "terminal_snapshot_declares_no_outcome_fields")
+    } else {
+        ("pending", "nonterminal_snapshot_has_no_outcome_fields_yet")
+    };
+    serde_json::json!({"state": state, "reason": reason, "thread_status": status.as_str()})
 }
 
 #[derive(Debug)]
@@ -337,7 +584,7 @@ impl ThreadMetaRead {
 
 /// Read the thread's signed `thread.json` audit record while retaining why its
 /// durable posture cannot be projected.
-fn read_thread_meta(state: &AppState, thread_id: &str) -> ThreadMetaRead {
+fn read_thread_meta(state: &AppState, thread_id: &str, item_ref: &str) -> ThreadMetaRead {
     let meta = match state.state_store.get_launch_metadata(thread_id) {
         Ok(Some(meta)) => meta,
         Ok(None) => return ThreadMetaRead::Unavailable("launch_metadata_absent"),
@@ -364,9 +611,17 @@ fn read_thread_meta(state: &AppState, thread_id: &str) -> ThreadMetaRead {
         Err(_) => return ThreadMetaRead::Unavailable("audit_record_unreadable"),
     };
     match verify_thread_meta_document(&signed, &state.identity) {
-        Ok(value) => ThreadMetaRead::Available(value),
+        Ok(value) if audit_record_matches_subject(&value, thread_id, item_ref) => {
+            ThreadMetaRead::Available(value)
+        }
+        Ok(_) => ThreadMetaRead::Unavailable("audit_record_subject_mismatch"),
         Err(reason) => ThreadMetaRead::Unavailable(reason),
     }
+}
+
+fn audit_record_matches_subject(value: &Value, thread_id: &str, item_ref: &str) -> bool {
+    value.get("thread_id").and_then(Value::as_str) == Some(thread_id)
+        && value.get("item_ref").and_then(Value::as_str) == Some(item_ref)
 }
 
 /// Verify the exact node-signed audit document before its body contributes
@@ -398,9 +653,10 @@ fn verify_thread_meta_document(
 
 /// Build the Execution section's labeled-metric rows (the same `{label, value}`
 /// shape the Usage section projects) from durable data: the `thread.json` audit
-/// record for caps/limits/trust/model, and the thread projection's `executor_ref`
-/// for the runtime identity. Rows with no value are dropped, so a thread with no
-/// audit record yields just the runtime row (or nothing).
+/// record for caps/limits/trust/model, and the executor reference already
+/// compared with the signed thread subject for runtime identity. Rows with no
+/// value are dropped, so a thread with no audit record yields just the runtime
+/// row (or nothing).
 fn execution_meta_rows(thread_meta: Option<&Value>, executor_ref: &str) -> Value {
     fn row(label: &str, value: String) -> Option<Value> {
         (!value.is_empty()).then(|| serde_json::json!({ "label": label, "value": value }))
@@ -421,8 +677,8 @@ fn execution_meta_rows(thread_meta: Option<&Value>, executor_ref: &str) -> Value
             rows.extend(row("model", model.to_string()));
         }
     }
-    // Runtime identity is durable on the thread projection regardless of the
-    // audit file, so it shows even when thread.json is absent.
+    // The caller compared this executor reference with the signed subject
+    // before invoking this formatter; it remains available without thread.json.
     rows.extend(row("runtime", executor_ref.to_string()));
 
     Value::Array(rows)
@@ -435,6 +691,7 @@ fn execution_meta_rows(thread_meta: Option<&Value>, executor_ref: &str) -> Value
 /// Absent optional fields (e.g. `child_terminal_status` while the child still
 /// runs, or the child identities on a durably-recognized successor) drop their
 /// row rather than showing a blank.
+#[cfg(test)]
 fn follow_rows(follow: Option<&ryeos_app::thread_lifecycle::FollowFact>) -> Value {
     fn row(label: &str, value: Option<String>) -> Option<Value> {
         value
@@ -508,6 +765,194 @@ mod tests {
     use super::*;
 
     #[test]
+    fn outcome_coverage_distinguishes_every_terminal_status_without_inventing_success() {
+        use ryeos_state::objects::ThreadStatus;
+        for status in [ThreadStatus::Created, ThreadStatus::Running] {
+            let coverage = outcome_coverage(status, false);
+            assert_eq!(coverage["state"], "pending");
+            assert_eq!(
+                coverage["reason"],
+                "nonterminal_snapshot_has_no_outcome_fields_yet"
+            );
+            assert_eq!(coverage["thread_status"], status.as_str());
+        }
+        for status in [
+            ThreadStatus::Completed,
+            ThreadStatus::Failed,
+            ThreadStatus::Cancelled,
+            ThreadStatus::Killed,
+            ThreadStatus::TimedOut,
+            ThreadStatus::Continued,
+        ] {
+            let coverage = outcome_coverage(status, false);
+            assert_eq!(coverage["state"], "absent");
+            assert_eq!(
+                coverage["reason"],
+                "terminal_snapshot_declares_no_outcome_fields"
+            );
+            assert_eq!(coverage["thread_status"], status.as_str());
+        }
+        // A signed record may carry only error or outcome_code, not a result
+        // payload. Availability describes fields, not successful completion.
+        for status in [
+            ThreadStatus::Created,
+            ThreadStatus::Running,
+            ThreadStatus::Completed,
+            ThreadStatus::Failed,
+            ThreadStatus::Cancelled,
+            ThreadStatus::Killed,
+            ThreadStatus::TimedOut,
+            ThreadStatus::Continued,
+        ] {
+            let coverage = outcome_coverage(status, true);
+            assert_eq!(coverage["state"], "available");
+            assert_eq!(coverage["reason"], "signed_outcome_fields_retained");
+            assert_eq!(coverage["thread_status"], status.as_str());
+            assert!(coverage.get("outcome_code").is_none());
+        }
+    }
+
+    #[test]
+    fn complete_signed_history_proves_an_empty_facet_map() {
+        assert_eq!(
+            completed_signed_facets(BTreeMap::new(), true),
+            Some(BTreeMap::new())
+        );
+    }
+
+    #[test]
+    fn incomplete_signed_history_does_not_publish_partial_facets() {
+        let mut partial = BTreeMap::new();
+        partial.insert("phase".to_string(), "new".to_string());
+        assert_eq!(completed_signed_facets(partial, false), None);
+    }
+
+    #[test]
+    fn malformed_signed_facet_cannot_be_folded() {
+        let mut facets = BTreeMap::new();
+        assert!(!fold_inspection_facet_event(
+            &mut facets,
+            ryeos_state::event_types::THREAD_FACET_SET,
+            ryeos_state::objects::EventDurability::Durable,
+            &serde_json::json!({"key": "phase", "value": 7}),
+        ));
+        assert!(facets.is_empty());
+    }
+
+    #[test]
+    fn inspection_facets_keep_latest_durable_value_and_ignore_journal() {
+        use ryeos_state::objects::EventDurability;
+        let mut facets = BTreeMap::new();
+        for (durability, value) in [
+            (EventDurability::Durable, "new"),
+            (EventDurability::Journal, "journal"),
+            (EventDurability::Durable, "old"),
+        ] {
+            assert!(fold_inspection_facet_event(
+                &mut facets,
+                ryeos_state::event_types::THREAD_FACET_SET,
+                durability,
+                &serde_json::json!({"key": "phase", "value": value}),
+            ));
+        }
+        assert_eq!(facets.get("phase").map(String::as_str), Some("new"));
+    }
+
+    fn candidate(index: usize) -> ryeos_app::state_store::ThreadListItem {
+        ryeos_app::state_store::ThreadListItem {
+            thread_id: format!("T-{index:05}"),
+            chain_root_id: format!("T-{index:05}"),
+            kind: "tool".into(),
+            status: "running".into(),
+            item_ref: "tool:example".into(),
+            launch_mode: "wait".into(),
+            current_site_id: "site:host".into(),
+            origin_site_id: "site:host".into(),
+            upstream_thread_id: None,
+            successor_thread_id: None,
+            requested_by: None,
+            project_root: None,
+            project_authority: None,
+            lifecycle_authority: None,
+            admitted_launch_capsule_hash: None,
+            created_at: "same-time".into(),
+            updated_at: "same-time".into(),
+        }
+    }
+
+    #[test]
+    fn signed_first_thread_list_refills_after_foreign_first_page() {
+        let (items, scanned) = collect_authorized_thread_items(
+            2,
+            ryeos_state::queries::ThreadSort::Default,
+            |page_limit, after| {
+                let start = after
+                    .map(|cursor| cursor.thread_id[2..].parse::<usize>().unwrap() + 1)
+                    .unwrap_or(0);
+                Ok((start..(start + page_limit).min(300))
+                    .map(candidate)
+                    .collect())
+            },
+            |item| Ok(item.thread_id == "T-00258" || item.thread_id == "T-00259"),
+        )
+        .unwrap();
+        assert_eq!(scanned, 260);
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.thread_id.as_str())
+                .collect::<Vec<_>>(),
+            ["T-00258", "T-00259"]
+        );
+    }
+
+    #[test]
+    fn signed_first_thread_list_has_a_fixed_foreign_candidate_scan_budget() {
+        let (items, scanned) = collect_authorized_thread_items(
+            1,
+            ryeos_state::queries::ThreadSort::Default,
+            |page_limit, after| {
+                let start = after
+                    .map(|cursor| cursor.thread_id[2..].parse::<usize>().unwrap() + 1)
+                    .unwrap_or(0);
+                Ok((start..start + page_limit).map(candidate).collect())
+            },
+            |_| Ok(false),
+        )
+        .unwrap();
+        assert!(items.is_empty());
+        assert_eq!(scanned, MAX_THREAD_LIST_CANDIDATES_SCANNED);
+    }
+
+    #[test]
+    fn candidate_cursor_must_advance_in_the_selected_sort_order() {
+        use ryeos_state::queries::{ThreadListCursor, ThreadSort};
+        let first = ThreadListCursor::from_position("time-a", "T-a", "running");
+        let later = ThreadListCursor::from_position("time-a", "T-b", "running");
+        assert!(thread_candidate_cursor_advances(
+            &first,
+            &later,
+            ThreadSort::Default
+        ));
+        assert!(!thread_candidate_cursor_advances(
+            &first,
+            &later,
+            ThreadSort::Newest
+        ));
+        let terminal = ThreadListCursor::from_position("time-z", "T-z", "completed");
+        assert!(thread_candidate_cursor_advances(
+            &first,
+            &terminal,
+            ThreadSort::Watch
+        ));
+        assert!(!thread_candidate_cursor_advances(
+            &terminal,
+            &first,
+            ThreadSort::Watch
+        ));
+    }
+
+    #[test]
     fn current_project_filter_uses_retained_canonical_identity() {
         let retained = Path::new("/canonical/project");
         let filter = project_filter(
@@ -524,10 +969,84 @@ mod tests {
     #[test]
     fn projectless_current_filter_does_not_infer_a_project() {
         assert_eq!(
-            project_filter(&serde_json::json!({"project": "current"}), None)
-                .expect("projectless filter"),
+            project_filter(
+                &serde_json::json!({
+                    "project": "current",
+                    "project_path": "/untrusted/browser/path"
+                }),
+                None,
+            )
+            .expect("projectless filter"),
             None
         );
+    }
+
+    #[test]
+    fn listed_status_and_item_must_match_signed_subject() {
+        use ryeos_app::state_store::ThreadListItem;
+        use ryeos_app::thread_lifecycle::{ExecutionFacts, ThreadListView};
+        use ryeos_state::objects::{ExecutionProjectAuthority, ThreadStatus};
+
+        let authority = ExecutionProjectAuthority::PROJECTLESS;
+        let signed = AuthoritativeThreadSubject {
+            thread_id: "T-listed".into(),
+            chain_root_id: "T-listed".into(),
+            kind: "tool".into(),
+            item_ref: "tool:example".into(),
+            executor_ref: "native:tool".into(),
+            launch_mode: "wait".into(),
+            current_site_id: "site:host".into(),
+            origin_site_id: "site:host".into(),
+            upstream_thread_id: None,
+            project_root: None,
+            created_at: "created".into(),
+            updated_at: "updated".into(),
+            started_at: None,
+            finished_at: None,
+            status: ThreadStatus::Running,
+            requested_by: Some("operator".into()),
+            project_authority: authority.clone(),
+            admitted_launch_capsule_hash: None,
+            result_project_snapshot_hash: None,
+            result_workspace_output_capture_hash: None,
+        };
+        let mut row = ThreadListView {
+            item: ThreadListItem {
+                thread_id: signed.thread_id.clone(),
+                chain_root_id: signed.chain_root_id.clone(),
+                kind: signed.kind.clone(),
+                status: signed.status.as_str().into(),
+                item_ref: signed.item_ref.clone(),
+                launch_mode: signed.launch_mode.clone(),
+                current_site_id: signed.current_site_id.clone(),
+                origin_site_id: signed.origin_site_id.clone(),
+                upstream_thread_id: None,
+                successor_thread_id: None,
+                requested_by: signed.requested_by.clone(),
+                project_root: None,
+                project_authority: Some(authority),
+                lifecycle_authority: None,
+                admitted_launch_capsule_hash: None,
+                created_at: signed.created_at.clone(),
+                updated_at: signed.updated_at.clone(),
+            },
+            execution: ExecutionFacts {
+                supports_continuation: false,
+                supports_operator_followup: false,
+            },
+            follow: None,
+            project: None,
+            pending: 0,
+            facets: Default::default(),
+            current_node: None,
+            error: None,
+        };
+        assert!(listed_thread_matches_signed_subject(&row.item, &signed));
+        row.item.status = "completed".into();
+        assert!(!listed_thread_matches_signed_subject(&row.item, &signed));
+        row.item.status = signed.status.as_str().into();
+        row.item.item_ref = "tool:other".into();
+        assert!(!listed_thread_matches_signed_subject(&row.item, &signed));
     }
 
     #[test]
@@ -601,6 +1120,37 @@ mod tests {
             verify_thread_meta_document(&body, &current),
             Err("audit_record_signature_missing")
         );
+    }
+
+    #[test]
+    fn valid_same_node_audit_record_cannot_be_reused_for_another_thread() {
+        let directory = tempfile::tempdir().unwrap();
+        let node =
+            ryeos_node_runtime::identity::NodeIdentity::create(&directory.path().join("node.pem"))
+                .unwrap();
+        let body = serde_json::json!({
+            "thread_id": "T-original",
+            "item_ref": "tool:original",
+            "capabilities": ["ryeos.execute.tool.original"]
+        })
+        .to_string();
+        let signed = lillux::signature::sign_content(&body, node.signing_key(), "#", None);
+        let verified = verify_thread_meta_document(&signed, &node).unwrap();
+        assert!(audit_record_matches_subject(
+            &verified,
+            "T-original",
+            "tool:original"
+        ));
+        assert!(!audit_record_matches_subject(
+            &verified,
+            "T-other",
+            "tool:original"
+        ));
+        assert!(!audit_record_matches_subject(
+            &verified,
+            "T-original",
+            "tool:other"
+        ));
     }
 
     #[test]

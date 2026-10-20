@@ -30,12 +30,23 @@ const MAX_DEPTH: usize = 64;
 const DEFAULT_MAX_NODES: usize = 500;
 const MAX_NODES: usize = 1_000;
 const MAX_CHAINS: usize = 64;
-const MAX_EVENTS_PER_CHAIN: usize = 2_000;
+const MAX_EVENTS_PER_THREAD: usize = 2_000;
 const MAX_EVENTS_TOTAL: usize = 5_000;
 const MAX_EVENT_REPLAY_BYTES: usize = 2 * 1024 * 1024;
+const MAX_EVENT_REPLAY_TOTAL_BYTES: usize = 8 * 1024 * 1024;
+const MAX_EVENT_THREADS: usize = 32;
 const MAX_DETAIL_THREADS: usize = 128;
+// The per-thread state reader permits a 6 MiB artifact collection. Cap the
+// artifact/result detail assembly before the generic 4 MiB output trim;
+// otherwise 128 individually bounded reads can accumulate unbounded detail.
+const MAX_DETAIL_ARTIFACT_ITEMS: usize = 1_024;
+const MAX_DETAIL_BYTES: usize = 8 * 1024 * 1024;
 const MAX_THREAD_FACETS: usize = 32;
 const MAX_THREAD_FACET_VALUE_BYTES: usize = 512;
+const FACET_PAGE_EVENTS: u64 = 64;
+const FACET_PAGE_BYTES: u64 = 512 * 1024;
+const MAX_FACET_PAGES_PER_THREAD: usize = 8;
+const MAX_FACET_PAGES_TOTAL: usize = 64;
 const MAX_INLINE_RESULT_BYTES: usize = 192 * 1024;
 const MAX_MANIFEST_VERIFICATIONS: usize = 64;
 
@@ -162,6 +173,36 @@ struct ExecutionAssembler {
     manifest_verifications: BTreeMap<String, (FieldManifestVerification, Option<String>)>,
 }
 
+#[derive(Default)]
+struct DetailBudget {
+    artifact_items: usize,
+    bytes: usize,
+}
+
+impl DetailBudget {
+    fn admit_artifact(&mut self, encoded_bytes: usize) -> bool {
+        let Some(items) = self.artifact_items.checked_add(1) else {
+            return false;
+        };
+        if items > MAX_DETAIL_ARTIFACT_ITEMS || !self.admit_bytes(encoded_bytes) {
+            return false;
+        }
+        self.artifact_items = items;
+        true
+    }
+
+    fn admit_bytes(&mut self, encoded_bytes: usize) -> bool {
+        let Some(bytes) = self.bytes.checked_add(encoded_bytes) else {
+            return false;
+        };
+        if bytes > MAX_DETAIL_BYTES {
+            return false;
+        }
+        self.bytes = bytes;
+        true
+    }
+}
+
 pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
     let caller = crate::seat_auth::require_seat_caller(&ctx, &state)?;
     let request: ExecutionRequest = serde_json::from_value(params).map_err(|error| {
@@ -220,11 +261,35 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
         .map(|request| usize::try_from(request.max_entities).unwrap_or(usize::MAX))
         .max()
         .unwrap_or_default();
-    let tree = state.threads.execution_tree(
-        thread_id,
-        request.max_depth.max(expansion_depth).clamp(1, MAX_DEPTH),
-        request.max_nodes.max(expansion_nodes).clamp(1, MAX_NODES),
+    let max_depth = request.max_depth.max(expansion_depth).clamp(1, MAX_DEPTH);
+    let max_nodes = request.max_nodes.max(expansion_nodes).clamp(1, MAX_NODES);
+    let mut tree = state
+        .threads
+        .execution_tree(thread_id, max_depth, max_nodes)?;
+    let authorized_threads = crate::thread_authorization::authorize_execution_tree_subjects(
+        &ctx, &state, &caller, &mut tree, thread_id, max_depth, max_nodes,
     )?;
+    // Authorization clears projection-derived facets. Reconstruct only from
+    // each member's signed, fixed-anchor event history for live views.
+    let facet_incomplete = if matches!(&request.cursor, FieldCursorRequest::Live) {
+        restore_signed_tree_facets(&state, &mut tree, thread_id)?
+    } else {
+        // A current signed head cannot prove the map as of a historical cut.
+        true
+    };
+    let _selected_chain_root_id = tree
+        .threads
+        .iter()
+        .find(|row| row.thread.item.thread_id == thread_id)
+        .map(|row| row.thread.item.chain_root_id.clone())
+        .ok_or(HandlerError::NotFound)?;
+    let mut event_thread_roots = BTreeMap::new();
+    for row in &tree.threads {
+        event_thread_roots.insert(
+            row.thread.item.thread_id.clone(),
+            row.thread.item.chain_root_id.clone(),
+        );
+    }
     let subject = FieldFactSubject {
         kind: "thread".to_string(),
         id: thread_id.to_string(),
@@ -232,6 +297,25 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
         effective_definition_digest: None,
     };
     let mut assembler = ExecutionAssembler::new(subject);
+    // Signed subject and positive-edge proofs do not prove that a rebuildable
+    // tree projection contains every signed branch. Keep coverage honest even
+    // when the bounded projection itself reports no truncation.
+    assembler.builder.warn(
+        "execution_closure_not_exhaustive",
+        "returned execution edges are signed, but absence of other branches is not proven",
+    );
+    assembler.builder.warn(
+        "bounded_execution_event_scope",
+        "event replay covers a bounded set of signed-authorized threads; events referencing subjects outside the authorized tree may be omitted",
+    );
+    assembler.builder.mark_truncated();
+    if facet_incomplete {
+        assembler.builder.mark_truncated();
+        assembler.builder.warn(
+            "thread_facets_incomplete",
+            "thread facets are omitted where signed history is bounded or the selected cut is historical; an empty map does not prove absence",
+        );
+    }
     let cas_read = match state.acquire_cas_read() {
         Ok(read) => Some(read),
         Err(error) => {
@@ -246,7 +330,7 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
         assembler.builder.mark_truncated();
         assembler.builder.warn(
             "tree_truncated",
-            "execution closure exceeded requested bounds",
+            "execution closure reached requested bounds; completeness is not asserted",
         );
     }
     let chain_roots = tree
@@ -264,32 +348,17 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
     match request.cursor {
         FieldCursorRequest::Live => {
             assembler.add_tree(&tree, None)?;
-            let mut event_count = 0usize;
-            for chain_root_id in chain_roots.into_iter().take(MAX_CHAINS) {
-                if event_count >= MAX_EVENTS_TOTAL {
-                    assembler.builder.mark_truncated();
-                    break;
-                }
-                let remaining = MAX_EVENTS_TOTAL - event_count;
-                let page = state.state_store.replay_events(
-                    &chain_root_id,
-                    None,
-                    None,
-                    remaining.min(MAX_EVENTS_PER_CHAIN),
-                    MAX_EVENT_REPLAY_BYTES,
-                )?;
-                if page.has_more {
-                    assembler.builder.mark_truncated();
-                    assembler.builder.warn(
-                        "event_limit",
-                        format!("chain `{chain_root_id}` has more durable events than returned"),
-                    );
-                }
-                event_count += page.events.len();
-                for event in page.events {
-                    assembler
-                        .add_event_verified(event, cas_read.as_ref().map(|read| read.cas()))?;
-                }
+            let event_order = prioritized_execution_threads(&event_thread_roots, thread_id, None)?;
+            let (events, event_limited) =
+                read_execution_scope_events(&state, &event_order, &authorized_threads, None)?;
+            if event_limited {
+                assembler.builder.warn(
+                    "event_limit",
+                    "execution event replay is bounded or omits out-of-closure references",
+                );
+            }
+            for event in events {
+                assembler.add_event_verified(event, cas_read.as_ref().map(|read| read.cas()))?;
             }
 
             let detail_thread_ids = tree
@@ -297,19 +366,47 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
                 .iter()
                 .map(|row| row.thread.item.thread_id.as_str())
                 .collect::<BTreeSet<_>>();
-            for &thread_id in detail_thread_ids.iter().take(MAX_DETAIL_THREADS) {
+            assembler.builder.warn(
+                "artifact_collection_not_exhaustive",
+                "returned artifact records are proved against signed source events, but the projection does not prove that no other artifact events exist",
+            );
+            let mut detail_budget = DetailBudget::default();
+            let mut detail_limited = false;
+            'detail: for &thread_id in detail_thread_ids.iter().take(MAX_DETAIL_THREADS) {
                 for artifact in state.threads.list_thread_artifacts(thread_id)? {
-                    assembler.add_artifact(thread_id, artifact)?;
+                    // One state-owned collection is already bounded. Admit
+                    // each record before expanding it into field facts; a
+                    // refused record and all later details remain undisclosed.
+                    if !assembler.add_bounded_artifact(&mut detail_budget, thread_id, artifact)? {
+                        detail_limited = true;
+                        break 'detail;
+                    }
                 }
-                if let Some(result) = state.threads.get_thread_result(thread_id)? {
-                    let status = tree
-                        .threads
-                        .iter()
-                        .find(|row| row.thread.item.thread_id == thread_id)
-                        .map(|row| row.thread.item.status.as_str())
-                        .expect("detail thread identity came from the execution closure");
-                    assembler.add_result(status, thread_id, result)?;
+                let chain_root_id = event_thread_roots
+                    .get(thread_id)
+                    .expect("detail thread identity came from the authorized execution closure");
+                let status = tree
+                    .threads
+                    .iter()
+                    .find(|row| row.thread.item.thread_id == thread_id)
+                    .map(|row| row.thread.item.status.as_str())
+                    .expect("detail thread identity came from the execution closure");
+                if let Some(result) = state.state_store.get_thread_result_authoritative(
+                    chain_root_id,
+                    thread_id,
+                    status,
+                )? && !assembler.add_bounded_result(
+                    &mut detail_budget,
+                    status,
+                    thread_id,
+                    result,
+                )? {
+                    detail_limited = true;
+                    break 'detail;
                 }
+            }
+            if detail_limited {
+                assembler.mark_detail_limited();
             }
             if detail_thread_ids.len() > MAX_DETAIL_THREADS {
                 assembler.builder.mark_truncated();
@@ -324,7 +421,8 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
         FieldCursorRequest::BraidCut { anchor } => {
             if !chain_roots.contains(&anchor.chain_root_id) {
                 return Err(HandlerError::BadRequest(
-                    "braid-cut anchor chain is outside the selected execution closure".to_string(),
+                    "braid-cut anchor chain is outside the authorized execution closure"
+                        .to_string(),
                 )
                 .into());
             }
@@ -334,35 +432,54 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
             let navigation = state
                 .state_store
                 .chain_event_navigation(&anchor.chain_root_id, through)?;
-            let Some(current) = navigation.current.as_ref() else {
+            let Some(current_candidate) = navigation.current.as_ref() else {
                 return Err(HandlerError::BadRequest(
                     "braid-cut anchor event does not exist".to_string(),
                 )
                 .into());
             };
+            let current = state
+                .state_store
+                .authenticate_execution_event_refs(
+                    &anchor.chain_root_id,
+                    std::slice::from_ref(current_candidate),
+                )?
+                .pop()
+                .expect("one navigation candidate has one signed proof");
+            if !authorized_threads.contains(&current.thread_id) {
+                return Err(HandlerError::NotFound.into());
+            }
             if current.event_hash != anchor.event_hash {
                 return Err(HandlerError::BadRequest(
                     "braid-cut anchor hash does not match durable chain history".to_string(),
                 )
                 .into());
             }
-            let page = state.state_store.replay_events_through(
-                &anchor.chain_root_id,
-                None,
-                None,
-                through,
-                MAX_EVENTS_TOTAL.min(MAX_EVENTS_PER_CHAIN),
-                MAX_EVENT_REPLAY_BYTES,
+            let event_order = prioritized_execution_threads(
+                &event_thread_roots,
+                &current.thread_id,
+                Some(&anchor.chain_root_id),
             )?;
-            if page.has_more {
-                assembler.builder.mark_truncated();
+            let (safe_events, event_limited) = read_execution_scope_events(
+                &state,
+                &event_order,
+                &authorized_threads,
+                Some(through),
+            )?;
+            if event_limited {
                 assembler.builder.warn(
                     "event_limit",
-                    "selected braid has more pre-cut durable events than returned",
+                    "selected braid replay is bounded or omits out-of-closure references",
                 );
             }
-            let included_threads = page
-                .events
+            if !contains_cut_anchor(&safe_events, through, &anchor.event_hash) {
+                return Err(HandlerError::BadRequest(
+                    "braid-cut anchor is not representable in the bounded authorized evidence"
+                        .to_string(),
+                )
+                .into());
+            }
+            let included_threads = safe_events
                 .iter()
                 .map(|event| event.thread_id.clone())
                 .collect::<BTreeSet<_>>();
@@ -379,10 +496,10 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
                     outside_cut,
                 },
                 Some(FieldReplay {
-                    capability: "adjacent_event_refs".to_string(),
-                    previous: navigation.previous.map(field_navigation_ref).transpose()?,
-                    next: navigation.next.map(field_navigation_ref).transpose()?,
-                    live_head: navigation.live_head.map(field_navigation_ref).transpose()?,
+                    capability: "bounded_authorized_anchor_only".to_string(),
+                    previous: None,
+                    next: None,
+                    live_head: None,
                 }),
             );
             assembler.add_tree(
@@ -393,7 +510,7 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
                     outside_chains,
                 }),
             )?;
-            for event in page.events {
+            for event in safe_events {
                 assembler.add_event_verified(event, cas_read.as_ref().map(|read| read.cas()))?;
             }
         }
@@ -406,6 +523,232 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
             .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
     }
     serde_json::to_value(document).map_err(Into::into)
+}
+
+fn contains_cut_anchor(events: &[PersistedEventRecord], chain_seq: i64, event_hash: &str) -> bool {
+    events.iter().any(|event| {
+        event.chain_seq == chain_seq && event.event_hash.as_deref() == Some(event_hash)
+    })
+}
+
+fn prioritized_execution_threads(
+    thread_roots: &BTreeMap<String, String>,
+    priority_thread_id: &str,
+    only_chain_root: Option<&str>,
+) -> Result<Vec<(String, String)>> {
+    let priority_root = thread_roots
+        .get(priority_thread_id)
+        .ok_or(HandlerError::NotFound)?;
+    if only_chain_root.is_some_and(|root| root != priority_root.as_str()) {
+        return Err(HandlerError::NotFound.into());
+    }
+    let mut ordered = vec![(priority_root.clone(), priority_thread_id.to_string())];
+    ordered.extend(
+        thread_roots
+            .iter()
+            .filter(|(id, root)| {
+                id.as_str() != priority_thread_id
+                    && only_chain_root.is_none_or(|chain| root.as_str() == chain)
+            })
+            .map(|(id, root)| (root.clone(), id.clone())),
+    );
+    Ok(ordered)
+}
+
+/// Restore complete facet maps from exact, signed-authorized tree members.
+/// The pager is newest-first, so the first set for a key wins. A bounded walk
+/// cannot prove absence; never publish its partial map.
+fn restore_signed_tree_facets(
+    state: &AppState,
+    tree: &mut ryeos_app::thread_lifecycle::ExecutionTreeResult,
+    selected_thread_id: &str,
+) -> Result<bool> {
+    let mut roots = BTreeMap::new();
+    for row in &tree.threads {
+        let thread_id = &row.thread.item.thread_id;
+        let chain_root_id = &row.thread.item.chain_root_id;
+        if roots
+            .insert(thread_id.clone(), chain_root_id.clone())
+            .is_some_and(|previous| previous.as_str() != chain_root_id.as_str())
+        {
+            bail!("authorized execution tree has divergent thread root identity");
+        }
+    }
+    // The selected subject must not be starved behind lexical siblings when
+    // the independent facet-history budget is exhausted.
+    let identities = prioritized_execution_threads(&roots, selected_thread_id, None)?;
+    let mut pages_left = MAX_FACET_PAGES_TOTAL;
+    let mut complete = BTreeMap::new();
+    let mut incomplete = false;
+    for (chain_root_id, thread_id) in identities {
+        if pages_left == 0 {
+            incomplete = true;
+            continue;
+        }
+        let anchor = state
+            .state_store
+            .capture_thread_event_read_anchor(&chain_root_id, &thread_id)?
+            .ok_or_else(|| anyhow::anyhow!("authorized thread has no signed event anchor"))?;
+        let mut progress = None;
+        let mut facets = BTreeMap::new();
+        let mut exhausted = false;
+        for _ in 0..MAX_FACET_PAGES_PER_THREAD {
+            if pages_left == 0 {
+                break;
+            }
+            pages_left -= 1;
+            let page = state.state_store.read_thread_event_page(
+                &anchor,
+                progress.as_ref(),
+                FACET_PAGE_EVENTS,
+                FACET_PAGE_BYTES,
+            )?;
+            if page.events.is_empty() && page.progress.is_some() {
+                bail!("signed thread facet history made no progress");
+            }
+            for (_, event) in page.events {
+                // The projection's facet state is derived only from indexed
+                // (Durable) events. A Journal event with the same type is
+                // retained testimony, not a facet-state mutation.
+                if event.event_type == ryeos_state::event_types::THREAD_FACET_SET
+                    && event.durability.is_projection_indexed()
+                {
+                    fold_signed_facet(&mut facets, &event.payload)?;
+                }
+            }
+            match page.progress {
+                Some(next) => progress = Some(next),
+                None => {
+                    exhausted = true;
+                    break;
+                }
+            }
+        }
+        if exhausted {
+            complete.insert(thread_id, facets);
+        } else {
+            incomplete = true;
+        }
+    }
+    for row in &mut tree.threads {
+        if let Some(facets) = complete.get(&row.thread.item.thread_id) {
+            row.thread.facets = facets.clone();
+        }
+    }
+    Ok(incomplete)
+}
+
+pub(super) fn fold_signed_facet(
+    facets: &mut BTreeMap<String, String>,
+    payload: &Value,
+) -> Result<()> {
+    let key = payload
+        .get("key")
+        .and_then(Value::as_str)
+        .filter(|key| !key.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("signed thread facet event has invalid key"))?;
+    let value = payload
+        .get("value")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("signed thread facet event has invalid value"))?;
+    facets
+        .entry(key.to_string())
+        .or_insert_with(|| value.to_string());
+    Ok(())
+}
+
+/// Projection rows locate one bounded page per signed-authorized thread; only
+/// fixed-anchor CAS-authenticated records can reach the Field assembler. The
+/// caller orders its priority thread first, so shared limits cannot starve a
+/// selected thread or cut anchor behind unrelated siblings. There is no
+/// cross-chain temporal order: the final sort is presentation-only.
+fn read_execution_scope_events(
+    state: &AppState,
+    ordered_threads: &[(String, String)],
+    authorized_threads: &BTreeSet<String>,
+    through_chain_seq: Option<i64>,
+) -> Result<(Vec<PersistedEventRecord>, bool)> {
+    let mut events = Vec::new();
+    let mut budget = ExecutionReplayBudget::default();
+    let mut limited = ordered_threads.len() > MAX_EVENT_THREADS;
+    for (chain_root_id, thread_id) in ordered_threads.iter().take(MAX_EVENT_THREADS) {
+        let remaining_events = budget.remaining_events();
+        // Reserve a complete per-thread page allowance. Passing a tiny
+        // positive remainder could turn honest truncation into a query error
+        // when that thread's first valid event cannot fit.
+        if remaining_events == 0 || budget.remaining_bytes() < MAX_EVENT_REPLAY_BYTES {
+            limited = true;
+            break;
+        }
+        let limit = remaining_events.min(MAX_EVENTS_PER_THREAD);
+        let max_bytes = MAX_EVENT_REPLAY_BYTES;
+        let page = state.state_store.recent_thread_events(
+            chain_root_id,
+            thread_id,
+            through_chain_seq,
+            limit,
+            max_bytes,
+        )?;
+        let page_bytes = serde_json::to_vec(&page.events)?.len();
+        budget.charge(page.events.len(), page_bytes)?;
+        limited |= page.has_more;
+        let authenticated = state
+            .state_store
+            .authenticate_execution_event_candidates(chain_root_id, &page.events)?;
+        for event in authenticated {
+            if event.chain_root_id != *chain_root_id || event.thread_id != *thread_id {
+                return Err(HandlerError::NotFound.into());
+            }
+            if require_execution_event_scope(&event, authorized_threads).is_err() {
+                limited = true;
+                continue;
+            }
+            events.push(event);
+        }
+    }
+    sort_execution_scope_events(&mut events);
+    Ok((events, limited))
+}
+
+#[derive(Default)]
+struct ExecutionReplayBudget {
+    examined_events: usize,
+    encoded_bytes: usize,
+}
+
+impl ExecutionReplayBudget {
+    fn remaining_events(&self) -> usize {
+        MAX_EVENTS_TOTAL.saturating_sub(self.examined_events)
+    }
+
+    fn remaining_bytes(&self) -> usize {
+        MAX_EVENT_REPLAY_TOTAL_BYTES.saturating_sub(self.encoded_bytes)
+    }
+
+    fn charge(&mut self, examined_events: usize, encoded_bytes: usize) -> Result<()> {
+        self.examined_events = self
+            .examined_events
+            .checked_add(examined_events)
+            .ok_or_else(|| anyhow::anyhow!("execution event replay item count overflow"))?;
+        self.encoded_bytes = self
+            .encoded_bytes
+            .checked_add(encoded_bytes)
+            .ok_or_else(|| anyhow::anyhow!("execution event replay byte count overflow"))?;
+        if self.examined_events > MAX_EVENTS_TOTAL
+            || self.encoded_bytes > MAX_EVENT_REPLAY_TOTAL_BYTES
+        {
+            bail!("execution event replay exceeded its aggregate bound");
+        }
+        Ok(())
+    }
+}
+
+fn sort_execution_scope_events(events: &mut [PersistedEventRecord]) {
+    events.sort_by(|left, right| {
+        left.chain_root_id
+            .cmp(&right.chain_root_id)
+            .then_with(|| left.chain_seq.cmp(&right.chain_seq))
+    });
 }
 
 /// Resolve one exact occurrence from the already-authorized execution field.
@@ -562,15 +905,6 @@ fn tree_position_cmp(
         .then_with(|| left.relation.cmp(&right.relation))
 }
 
-fn field_navigation_ref(event: ryeos_app::state_store::PersistedEventRef) -> Result<FieldEventRef> {
-    Ok(FieldEventRef {
-        chain_root_id: event.chain_root_id,
-        chain_seq: u64::try_from(event.chain_seq)
-            .context("navigation event chain sequence is negative")?,
-        event_hash: event.event_hash,
-    })
-}
-
 impl ExecutionAssembler {
     fn new(subject: FieldFactSubject) -> Self {
         Self {
@@ -585,6 +919,43 @@ impl ExecutionAssembler {
             current_graph: BTreeMap::new(),
             manifest_verifications: BTreeMap::new(),
         }
+    }
+
+    fn add_bounded_artifact(
+        &mut self,
+        budget: &mut DetailBudget,
+        thread_id: &str,
+        artifact: ThreadArtifactRecord,
+    ) -> Result<bool> {
+        if !budget.admit_artifact(serde_json::to_vec(&artifact)?.len()) {
+            return Ok(false);
+        }
+        self.add_artifact(thread_id, artifact)?;
+        Ok(true)
+    }
+
+    fn add_bounded_result(
+        &mut self,
+        budget: &mut DetailBudget,
+        status: &str,
+        thread_id: &str,
+        result: ThreadResultRecord,
+    ) -> Result<bool> {
+        if !budget.admit_bytes(serde_json::to_vec(&result)?.len()) {
+            return Ok(false);
+        }
+        self.add_result(status, thread_id, result)?;
+        Ok(true)
+    }
+
+    fn mark_detail_limited(&mut self) {
+        self.builder.mark_truncated();
+        self.builder.warn(
+            "execution_detail_limit",
+            format!(
+                "execution detail exceeded {MAX_DETAIL_ARTIFACT_ITEMS} artifact records or {MAX_DETAIL_BYTES} encoded bytes"
+            ),
+        );
     }
 
     fn add_tree(
@@ -2314,6 +2685,60 @@ fn bounded_inline_value(value: Value) -> Value {
     }
 }
 
+/// Chain replay is not scoped to the selected thread. Refuse an event owned
+/// outside the signed-authorized structural closure, including cross-thread
+/// references that its projected payload could otherwise disclose. This is
+/// deliberately a refusal, never silent event filtering or a partial braid.
+fn require_execution_event_scope(
+    event: &PersistedEventRecord,
+    authorized_threads: &BTreeSet<String>,
+) -> std::result::Result<(), HandlerError> {
+    if !authorized_threads.contains(&event.thread_id)
+        || !authorized_threads.contains(&event.chain_root_id)
+    {
+        return Err(HandlerError::NotFound);
+    }
+    let mut pending = vec![&event.payload];
+    let mut inspected = 0usize;
+    while let Some(value) = pending.pop() {
+        inspected += 1;
+        if inspected > 65_536 {
+            return Err(HandlerError::NotFound);
+        }
+        match value {
+            Value::Object(fields) => {
+                for (key, child) in fields {
+                    if key == "thread_id" || key.ends_with("_thread_id") {
+                        if !child.is_null()
+                            && !child
+                                .as_str()
+                                .is_some_and(|id| authorized_threads.contains(id))
+                        {
+                            return Err(HandlerError::NotFound);
+                        }
+                    } else if key == "thread_ids" || key.ends_with("_thread_ids") {
+                        let Some(ids) = child.as_array() else {
+                            return Err(HandlerError::NotFound);
+                        };
+                        if ids.iter().any(|value| {
+                            !value
+                                .as_str()
+                                .is_some_and(|id| authorized_threads.contains(id))
+                        }) {
+                            return Err(HandlerError::NotFound);
+                        }
+                    } else {
+                        pending.push(child);
+                    }
+                }
+            }
+            Value::Array(values) => pending.extend(values),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 fn bounded_event_attributes(event: &PersistedEventRecord) -> Result<Value> {
     let mut attributes = Map::new();
     attributes.insert("event_type".to_string(), json!(event.event_type));
@@ -2513,6 +2938,221 @@ pub const OCCURRENCE_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
 mod tests {
     use super::*;
 
+    #[test]
+    fn detail_artifact_budget_accepts_exact_boundary_and_refuses_overflow() {
+        let mut budget = DetailBudget::default();
+        assert!(budget.admit_artifact(MAX_DETAIL_BYTES));
+        assert!(!budget.admit_bytes(1));
+        assert_eq!(budget.artifact_items, 1);
+        assert_eq!(budget.bytes, MAX_DETAIL_BYTES);
+
+        let mut budget = DetailBudget::default();
+        for _ in 0..MAX_DETAIL_ARTIFACT_ITEMS {
+            assert!(budget.admit_artifact(1));
+        }
+        assert!(!budget.admit_artifact(1));
+        assert_eq!(budget.artifact_items, MAX_DETAIL_ARTIFACT_ITEMS);
+
+        let mut budget = DetailBudget::default();
+        assert!(budget.admit_bytes(MAX_DETAIL_BYTES - 1));
+        assert!(budget.admit_artifact(1));
+        assert!(!budget.admit_bytes(1));
+        assert_eq!(budget.bytes, MAX_DETAIL_BYTES);
+    }
+
+    #[test]
+    fn execution_detail_limit_retains_earlier_facts_and_withholds_later_details() {
+        let mut assembler = ExecutionAssembler::new(FieldFactSubject {
+            kind: "thread".to_string(),
+            id: "T-root".to_string(),
+            definition_ref: None,
+            effective_definition_digest: None,
+        });
+        let artifact = |artifact_id| ThreadArtifactRecord {
+            artifact_id,
+            artifact_type: "test_artifact".to_string(),
+            uri: format!("cas://artifact/{artifact_id}"),
+            content_hash: None,
+            metadata: None,
+        };
+        let mut budget = DetailBudget::default();
+        assert!(
+            assembler
+                .add_bounded_artifact(&mut budget, "T-root", artifact(1))
+                .unwrap()
+        );
+
+        // Model prior admitted details consuming the remaining byte allowance.
+        // The handler stops its detail walk at this first refusal.
+        let remaining = MAX_DETAIL_BYTES - budget.bytes;
+        assert!(budget.admit_bytes(remaining));
+        assert!(
+            !assembler
+                .add_bounded_artifact(&mut budget, "T-root", artifact(2))
+                .unwrap()
+        );
+        assembler.mark_detail_limited();
+        let document = assembler.finish().unwrap();
+        assert!(document.truncated);
+        assert!(
+            document
+                .warnings
+                .iter()
+                .any(|warning| warning["code"] == "execution_detail_limit")
+        );
+        assert!(
+            document
+                .entities
+                .iter()
+                .any(|entity| entity.id == "artifact:T-root:1")
+        );
+        assert!(
+            !document
+                .entities
+                .iter()
+                .any(|entity| entity.id == "artifact:T-root:2")
+        );
+        assert!(
+            !document
+                .entities
+                .iter()
+                .any(|entity| entity.id == "result:T-root")
+        );
+    }
+
+    #[test]
+    fn execution_result_overflow_retains_prior_thread_detail_and_marks_truncation() {
+        let mut assembler = ExecutionAssembler::new(FieldFactSubject {
+            kind: "thread".to_string(),
+            id: "T-root".to_string(),
+            definition_ref: None,
+            effective_definition_digest: None,
+        });
+        let mut budget = DetailBudget::default();
+        assert!(
+            assembler
+                .add_bounded_artifact(
+                    &mut budget,
+                    "T-earlier",
+                    ThreadArtifactRecord {
+                        artifact_id: 1,
+                        artifact_type: "test_artifact".to_string(),
+                        uri: "cas://artifact/1".to_string(),
+                        content_hash: None,
+                        metadata: None,
+                    },
+                )
+                .unwrap()
+        );
+        let remaining = MAX_DETAIL_BYTES - budget.bytes;
+        assert!(budget.admit_bytes(remaining));
+        assert!(
+            !assembler
+                .add_bounded_result(
+                    &mut budget,
+                    "completed",
+                    "T-later",
+                    ThreadResultRecord {
+                        outcome_code: Some("later".to_string()),
+                        result: None,
+                        error: None,
+                        metadata: None,
+                    },
+                )
+                .unwrap()
+        );
+        assembler.mark_detail_limited();
+        let document = assembler.finish().unwrap();
+        assert!(document.truncated);
+        assert!(
+            document
+                .warnings
+                .iter()
+                .any(|warning| warning["code"] == "execution_detail_limit")
+        );
+        assert!(
+            document
+                .entities
+                .iter()
+                .any(|entity| entity.id == "artifact:T-earlier:1")
+        );
+        assert!(
+            !document
+                .entities
+                .iter()
+                .any(|entity| entity.id == "result:T-later")
+        );
+    }
+
+    #[test]
+    fn execution_event_scope_refuses_foreign_owner_and_nested_thread_references() {
+        let allowed = BTreeSet::from(["T-root".to_string(), "T-child".to_string()]);
+        let valid = event(
+            1,
+            "graph_step_completed",
+            json!({"child_thread_id":"T-child","payload":{"occurrence_thread_id":"T-root"}}),
+        );
+        assert!(require_execution_event_scope(&valid, &allowed).is_ok());
+
+        let mut foreign_owner = valid.clone();
+        foreign_owner.thread_id = "T-foreign".to_string();
+        assert!(require_execution_event_scope(&foreign_owner, &allowed).is_err());
+        let mut foreign_child = valid.clone();
+        foreign_child.payload["child_thread_id"] = json!("T-foreign");
+        assert!(require_execution_event_scope(&foreign_child, &allowed).is_err());
+        let mut foreign_nested = valid;
+        foreign_nested.payload["payload"]["occurrence_thread_id"] = json!("T-foreign");
+        assert!(require_execution_event_scope(&foreign_nested, &allowed).is_err());
+    }
+
+    #[test]
+    fn bounded_tree_does_not_publish_unverified_child_existence() {
+        let mut tree = ryeos_app::thread_lifecycle::ExecutionTreeResult {
+            root_thread_id: Some("T-root".to_string()),
+            threads: vec![tree_view("T-root", None, "root", 0, true)],
+            truncated: true,
+        };
+        crate::thread_authorization::mask_unverified_tree_edges(&mut tree, 1, 1);
+        assert!(tree.truncated);
+        assert!(!tree.threads[0].tree.has_children);
+
+        tree.threads
+            .push(tree_view("T-child", Some("T-root"), "spawned", 1, true));
+        crate::thread_authorization::mask_unverified_tree_edges(&mut tree, 1, 8);
+        assert!(tree.truncated); // depth boundary, not a claim of unseen children
+        assert!(tree.threads[0].tree.has_children); // visible authorized edge
+        assert!(!tree.threads[1].tree.has_children); // hidden edge is not disclosed
+    }
+
+    #[test]
+    fn event_derived_facet_projection_is_not_snapshot_facet_authority() {
+        let mut row = tree_view("T-root", None, "root", 0, false);
+        row.thread
+            .facets
+            .insert("game".to_string(), "projected".to_string());
+        let mut tree = ryeos_app::thread_lifecycle::ExecutionTreeResult {
+            root_thread_id: Some("T-root".to_string()),
+            threads: vec![row],
+            truncated: false,
+        };
+        crate::thread_authorization::mask_unverified_tree_facets(&mut tree);
+        assert!(tree.threads[0].thread.facets.is_empty());
+    }
+
+    #[test]
+    fn signed_facet_fold_keeps_newest_value_and_rejects_malformed_history() {
+        let mut facets = BTreeMap::new();
+        fold_signed_facet(&mut facets, &json!({"key": "game", "value": "new"})).unwrap();
+        fold_signed_facet(&mut facets, &json!({"key": "game", "value": "old"})).unwrap();
+        fold_signed_facet(&mut facets, &json!({"key": "fleet", "value": "run-1"})).unwrap();
+        assert_eq!(facets.get("game").map(String::as_str), Some("new"));
+        assert_eq!(facets.get("fleet").map(String::as_str), Some("run-1"));
+        fold_signed_facet(&mut facets, &json!({"key": "  ", "value": "x"})).unwrap();
+        assert_eq!(facets.get("  ").map(String::as_str), Some("x"));
+        assert!(fold_signed_facet(&mut facets, &json!({"key": "", "value": "x"})).is_err());
+        assert!(fold_signed_facet(&mut facets, &json!({"key": "game", "value": 4})).is_err());
+    }
+
     fn tree_view(
         thread_id: &str,
         parent_thread_id: Option<&str>,
@@ -2576,6 +3216,83 @@ mod tests {
             prev_thread_event_hash: None,
             payload,
         }
+    }
+
+    #[test]
+    fn cut_anchor_must_survive_bounded_selected_thread_projection() {
+        let authorized = ["T-root".to_string()].into_iter().collect();
+        let safe = event(1, "thread_started", json!({}));
+        let anchor = event(
+            2,
+            "child_thread_spawned",
+            json!({"child_thread_id": "T-outside"}),
+        );
+        assert!(require_execution_event_scope(&anchor, &authorized).is_err());
+        let safe_events = vec![safe];
+        assert!(!contains_cut_anchor(
+            &safe_events,
+            anchor.chain_seq,
+            anchor.event_hash.as_deref().unwrap(),
+        ));
+        assert!(!contains_cut_anchor(&safe_events, 3, &"f".repeat(64)));
+    }
+
+    #[test]
+    fn execution_event_scope_prioritizes_anchor_owner_and_limits_cut_to_its_chain() {
+        let roots = BTreeMap::from([
+            ("T-a".to_string(), "T-root".to_string()),
+            ("T-b".to_string(), "T-root".to_string()),
+            ("T-c".to_string(), "T-other".to_string()),
+        ]);
+        let live = prioritized_execution_threads(&roots, "T-b", None).unwrap();
+        assert_eq!(live[0], ("T-root".to_string(), "T-b".to_string()));
+        assert_eq!(live.len(), 3);
+        let cut = prioritized_execution_threads(&roots, "T-b", Some("T-root")).unwrap();
+        assert_eq!(cut[0], ("T-root".to_string(), "T-b".to_string()));
+        assert_eq!(cut.len(), 2);
+        assert!(cut.iter().all(|(root, _)| root == "T-root"));
+        assert!(prioritized_execution_threads(&roots, "T-b", Some("T-other")).is_err());
+    }
+
+    #[test]
+    fn execution_event_scope_merges_interleaved_signed_thread_pages_by_chain_sequence() {
+        let mut sibling = event(2, "graph_step_completed", json!({}));
+        sibling.thread_id = "T-sibling".to_string();
+        let mut events = vec![
+            sibling,
+            event(3, "graph_completed", json!({})),
+            event(1, "graph_started", json!({})),
+        ];
+        sort_execution_scope_events(&mut events);
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.chain_seq)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+    }
+
+    #[test]
+    fn execution_replay_budget_charges_omitted_candidates_before_projection() {
+        let mut budget = ExecutionReplayBudget::default();
+        budget.charge(MAX_EVENTS_PER_THREAD, 1024).unwrap();
+        budget.charge(MAX_EVENTS_PER_THREAD, 1024).unwrap();
+        assert_eq!(
+            budget.remaining_events(),
+            MAX_EVENTS_TOTAL - 2 * MAX_EVENTS_PER_THREAD
+        );
+        budget
+            .charge(MAX_EVENTS_TOTAL - 2 * MAX_EVENTS_PER_THREAD, 1024)
+            .unwrap();
+        assert_eq!(budget.remaining_events(), 0);
+        assert!(budget.charge(1, 1).is_err());
+
+        let mut bytes = ExecutionReplayBudget::default();
+        bytes
+            .charge(0, MAX_EVENT_REPLAY_TOTAL_BYTES - MAX_EVENT_REPLAY_BYTES + 1)
+            .unwrap();
+        assert!(bytes.remaining_bytes() < MAX_EVENT_REPLAY_BYTES);
     }
 
     fn state_anchor_event(chain_seq: i64, payload: Value) -> PersistedEventRecord {

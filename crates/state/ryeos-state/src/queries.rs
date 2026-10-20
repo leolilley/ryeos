@@ -174,6 +174,7 @@ pub struct ChainEventRefRow {
     pub chain_root_id: String,
     pub chain_seq: i64,
     pub event_hash: String,
+    pub thread_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1441,6 +1442,7 @@ pub fn chain_event_navigation(
                     chain_root_id: row.get(0)?,
                     chain_seq: row.get(1)?,
                     event_hash: row.get(2)?,
+                    thread_id: row.get(3)?,
                 })
             };
             match chain_seq {
@@ -1459,28 +1461,28 @@ pub fn chain_event_navigation(
     Ok(ChainEventNavigationRows {
         previous: read(
             db,
-            "SELECT chain_root_id, chain_seq, event_hash FROM events \
+            "SELECT chain_root_id, chain_seq, event_hash, thread_id FROM events \
              WHERE chain_root_id = ? AND chain_seq < ? ORDER BY chain_seq DESC LIMIT 1",
             chain_root_id,
             Some(chain_seq),
         )?,
         current: read(
             db,
-            "SELECT chain_root_id, chain_seq, event_hash FROM events \
+            "SELECT chain_root_id, chain_seq, event_hash, thread_id FROM events \
              WHERE chain_root_id = ? AND chain_seq = ? LIMIT 1",
             chain_root_id,
             Some(chain_seq),
         )?,
         next: read(
             db,
-            "SELECT chain_root_id, chain_seq, event_hash FROM events \
+            "SELECT chain_root_id, chain_seq, event_hash, thread_id FROM events \
              WHERE chain_root_id = ? AND chain_seq > ? ORDER BY chain_seq LIMIT 1",
             chain_root_id,
             Some(chain_seq),
         )?,
         live_head: read(
             db,
-            "SELECT chain_root_id, chain_seq, event_hash FROM events \
+            "SELECT chain_root_id, chain_seq, event_hash, thread_id FROM events \
              WHERE chain_root_id = ? ORDER BY chain_seq DESC LIMIT 1",
             chain_root_id,
             None,
