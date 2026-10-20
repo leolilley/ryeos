@@ -6,7 +6,6 @@
 mod test_state;
 use test_state::{build_test_state, build_test_state_with_live_bundles, local_operator_context};
 
-use ryeos_app::handler_context::HandlerContext;
 use serde_json::json;
 use std::sync::Arc;
 
@@ -53,77 +52,110 @@ async fn opening_another_project_admits_an_independent_surface_without_replacing
     let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
     let state = Arc::new(state);
     let (session_id, ctx, producer, coordinate) =
-        test_state::live_presentation_with_surface(&state, "surface:ryeos/ui/base").await;
+        test_state::live_shipped_presentation(&state).await;
     let ui = ryeos_ui::state::get_ui_state(&state).unwrap();
     let session = ui.browser_sessions.get_session(&session_id).unwrap();
     let second = tempfile::TempDir::new().expect("second project");
-    let operator = HandlerContext::new(
-        session.principal_id.clone(),
-        session.granted_caps.clone(),
-        true,
-    );
-    let added = ryeos_ui::handlers::ui_projects::handle_projects_add(
-        json!({"root":second.path()}),
-        operator,
-        state.clone(),
+    // The session's principal is not the node operator: its registry is the
+    // principal-owned one, reached only through its retained root attachment.
+    let root_attachment = session.attachments[&session.root_attachment_id].clone();
+    let added = ryeos_ui::seat_auth::with_compiled_ui_attachment(
+        root_attachment,
+        ryeos_ui::handlers::ui_projects::handle_projects_add(
+            json!({"root":second.path()}),
+            ctx.clone(),
+            state.clone(),
+        ),
     )
     .await
     .expect("register project for the same retained principal");
     let local_id = added["project"]["local_id"].as_str().unwrap();
-    let request_id = uuid::Uuid::new_v4().to_string();
-    let request = json!({
-        "presentation_operation_id":request_id,
-        "producer":producer,
-        "binding":{
-            "binding_attachment_id":coordinate.binding_attachment_id,
-            "binding_generation":coordinate.binding_generation,
-            "binding_digest":coordinate.binding_digest,
-            "coordinate":{"kind":"affordance","view_ref":"view:ryeos/projects/list","affordance_id":"open-project"},
-            "payload":{"kind":"selection","record":{
-                "local_id":local_id, "surface_ref":"surface:ryeos/ui/project",
-                "creation_request_id":request_id
-            }}
-        }
-    });
     let membership = &session.presentations[&producer.presentation_id];
-    let origin = ryeos_client_base::ids::RyeOsViewInstanceKey::surface_tile(
+    let origin = ryeos_client_base::ids::RyeOsViewInstanceKey::shared_dialog(
         &ryeos_client_base::ids::PresentationId::try_new(producer.presentation_id.clone()).unwrap(),
-        &ryeos_client_base::ids::SurfaceInstanceId::try_new(
-            membership
-                .surfaces
-                .values()
-                .find(|surface| surface.coordinate == coordinate)
-                .unwrap()
-                .surface_instance_id
-                .clone(),
-        )
-        .unwrap(),
-        ryeos_client_base::ids::TileId::new(1),
-    );
-    let maximum = state
-        .node_config
-        .routes
-        .iter()
-        .find(|route| {
-            route.response.source.as_deref()
-                == Some(ryeos_ui::handlers::ui_invocations_dispatch::DESCRIPTOR.service_ref)
-        })
-        .unwrap()
-        .limits
-        .body_bytes_max;
-    let prepared = json!({"operation_id":request_id,"producer":producer,
-    "root_binding":membership.root_coordinate,"body":{"kind":"admission","purpose":"open_surface","surface_open_target":{"selection":{"kind":"authored","surface_ref":"surface:ryeos/ui/project"},"placement":{"kind":"new_surface"}},"particular_selection":null,"invocation_origin":origin,
-    "request":request["binding"],"success_notice":null}, "request_bounds":{
-        "max_request_bytes":maximum, "max_input_bytes":maximum,
-        "max_seat_append_bytes":state.node_config.routes.iter().find(|route| route.response.source.as_deref() == Some(ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR.service_ref)).unwrap().limits.body_bytes_max},
+        "projects",
+    )
+    .unwrap();
+    let body_limit = |service_ref: &str| {
+        state
+            .node_config
+            .routes
+            .iter()
+            .find(|route| route.response.source.as_deref() == Some(service_ref))
+            .unwrap()
+            .limits
+            .body_bytes_max
+    };
+    let maximum = body_limit(ryeos_ui::handlers::ui_invocations_dispatch::DESCRIPTOR.service_ref);
+    let mut prepared: ryeos_client_base::ui::admission_operation::UiPreparedPresentationOperation =
+        serde_json::from_value(json!({
+            "schema": 2, "prepared_engine_seq": 0,
+            "operation_id": "00000000-0000-4000-8000-000000000000",
+            "producer": producer,
+            "root_binding": membership.root_coordinate,
+            "request_bounds": {
+                "max_request_bytes": maximum, "max_input_bytes": maximum,
+                "max_seat_append_bytes": body_limit(
+                    ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR.service_ref),
+            },
+            "body": {
+                "kind": "admission", "purpose": "open_surface",
+                "surface_open_target": {
+                    "selection": {"kind": "authored", "surface_ref": "surface:ryeos/ui/project"},
+                    "placement": {"kind": "new_surface"},
+                },
+                "particular_selection": null,
+                "invocation_origin": origin,
+                "request": {
+                    "binding_attachment_id": coordinate.binding_attachment_id,
+                    "binding_generation": coordinate.binding_generation,
+                    "binding_digest": coordinate.binding_digest,
+                    "coordinate": {"kind": "affordance",
+                        "view_ref": "view:ryeos/projects/list", "affordance_id": "open-project"},
+                    "payload": {"kind": "selection", "record": {
+                        "local_id": local_id, "surface_ref": "surface:ryeos/ui/project",
+                    }},
+                },
+                "success_notice": null,
+            },
+        }))
+        .unwrap();
+    prepared.assign_identity().unwrap();
+    let request_id = prepared.operation_id.clone();
+    let request = json!({
+        "presentation_operation_id": request_id,
+        "producer": producer,
+        "binding": prepared.admission().unwrap().request,
     });
-    let events = json!([{"engine_seq":0,"event_type":"seat.presentation_operation.prepared","payload":prepared}]);
-    (ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR.handler)(json!({
-        "presentation_id":producer.presentation_id,"thread_id":producer.thread_id,
-        "producer_incarnation":producer.producer_incarnation,"operation_id":uuid::Uuid::new_v4().to_string(),
-        "first_engine_seq":0,"last_engine_seq":0,"event_count":1,
-        "payload_digest":ryeos_client_base::ui::seat_payload_digest(&events).unwrap(),"events":events,
-    }),ctx.clone(),state.clone()).await.expect("acknowledge real prepared operation before admission");
+    let events = json!([{
+        "engine_seq": 0, "event_type": "seat.presentation_operation.prepared",
+        "payload": prepared,
+    }]);
+    let payload_digest = ryeos_client_base::ui::seat_payload_digest(&events).unwrap();
+    let operation_id = ryeos_client_base::ui::admission_operation::UiSeatAppendIdentity {
+        presentation_id: producer.presentation_id.clone(),
+        chain_root_id: producer.thread_id.clone(),
+        thread_id: producer.thread_id.clone(),
+        producer_incarnation: producer.producer_incarnation.clone(),
+        first_engine_seq: 0,
+        last_engine_seq: 0,
+        event_count: 1,
+        payload_digest: payload_digest.clone(),
+    }
+    .derive_identity()
+    .unwrap();
+    (ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR.handler)(
+        json!({
+            "presentation_id": producer.presentation_id, "thread_id": producer.thread_id,
+            "producer_incarnation": producer.producer_incarnation, "operation_id": operation_id,
+            "first_engine_seq": 0, "last_engine_seq": 0, "event_count": 1,
+            "payload_digest": payload_digest, "events": events,
+        }),
+        ctx.clone(),
+        state.clone(),
+    )
+    .await
+    .expect("acknowledge real prepared operation before admission");
     let opened = (ryeos_ui::handlers::ui_invocations_dispatch::DESCRIPTOR.handler)(
         request.clone(),
         ctx.clone(),

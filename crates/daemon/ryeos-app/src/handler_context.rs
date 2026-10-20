@@ -112,6 +112,45 @@ impl OriginalExecutionBudget {
     }
 }
 
+/// The future of one service handler call.
+pub type HandlerFuture = std::pin::Pin<
+    Box<dyn std::future::Future<Output = anyhow::Result<serde_json::Value>> + Send + 'static>,
+>;
+
+/// Task-scoped authority that a service handler's own task must re-enter.
+///
+/// A recorded service runs its handler on a task the daemon owns, which does
+/// not inherit the dispatching task's task-locals. A dispatcher that keeps
+/// authority in a task-local installs the scope here, and the executor runs
+/// the handler future inside it. It carries no authority of its own: it only
+/// restores what the dispatcher already admitted for this one call.
+#[derive(Clone)]
+pub struct HandlerTaskScope(Arc<dyn Fn(HandlerFuture) -> HandlerFuture + Send + Sync>);
+
+impl HandlerTaskScope {
+    pub fn new(scope: impl Fn(HandlerFuture) -> HandlerFuture + Send + Sync + 'static) -> Self {
+        Self(Arc::new(scope))
+    }
+
+    pub fn enter(&self, handler: HandlerFuture) -> HandlerFuture {
+        (self.0)(handler)
+    }
+}
+
+impl std::fmt::Debug for HandlerTaskScope {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("HandlerTaskScope")
+    }
+}
+
+impl PartialEq for HandlerTaskScope {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for HandlerTaskScope {}
+
 /// Typed caller context, passed to every service handler.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -149,6 +188,9 @@ pub struct HandlerContext {
     /// deserialization cannot create, locate or renew this authority.
     #[serde(skip)]
     original_execution_budget: Option<OriginalExecutionBudget>,
+    /// Task-scoped dispatcher authority the handler's task re-enters.
+    #[serde(skip)]
+    task_scope: Option<HandlerTaskScope>,
 }
 
 impl HandlerContext {
@@ -163,6 +205,7 @@ impl HandlerContext {
             authenticated_grant_authority: None,
             recorded_service_root_id: None,
             original_execution_budget: None,
+            task_scope: None,
         }
     }
 
@@ -181,6 +224,7 @@ impl HandlerContext {
             authenticated_grant_authority: None,
             recorded_service_root_id: None,
             original_execution_budget: None,
+            task_scope: None,
         }
     }
 
@@ -200,6 +244,7 @@ impl HandlerContext {
             authenticated_grant_authority: None,
             recorded_service_root_id: None,
             original_execution_budget: None,
+            task_scope: None,
         }
     }
 
@@ -220,6 +265,7 @@ impl HandlerContext {
             authenticated_grant_authority: Some(authenticated_grant_authority),
             recorded_service_root_id: None,
             original_execution_budget: None,
+            task_scope: None,
         }
     }
 
@@ -243,6 +289,16 @@ impl HandlerContext {
             anyhow::bail!("recorded service handler context already has an invocation root");
         }
         Ok(self)
+    }
+
+    /// Install the scope the handler's own task must run inside.
+    pub fn with_task_scope(mut self, scope: HandlerTaskScope) -> Self {
+        self.task_scope = Some(scope);
+        self
+    }
+
+    pub fn task_scope(&self) -> Option<&HandlerTaskScope> {
+        self.task_scope.as_ref()
     }
 
     pub fn recorded_service_root_id(&self) -> Option<&str> {
