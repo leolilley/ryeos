@@ -1950,6 +1950,34 @@ pub struct TwoAnchorThreadAppend<'a> {
     pub required_target_kind: &'a str,
 }
 
+/// Single-target append under a mixed cut: the target's exact frontier plus
+/// whatever live and retired dependencies the caller's read named. No second
+/// live chain is required.
+pub struct SingleAnchorThreadAppend<'a> {
+    pub chain_root_id: &'a str,
+    pub thread_id: &'a str,
+    pub events: Vec<ThreadEvent>,
+    pub signer: &'a dyn Signer,
+    pub runtime_liveness: &'a dyn RuntimeLivenessInspector,
+    pub expected: &'a AuthoritativeThreadEventReadAnchor,
+    /// Kind the target thread's signed snapshot must carry.
+    pub required_target_kind: &'a str,
+}
+
+/// Borrowed signed data captured while the target and every dependency chain
+/// lock remain held. Not a lock handle, writer grant or reusable token.
+pub struct SingleAnchorAdmissionView<'a> {
+    pub target: &'a ThreadSnapshot,
+    pub target_thread_ids: &'a [String],
+}
+
+struct MixedCutAdmission<'a> {
+    target: &'a ThreadSnapshot,
+    counterpart: Option<&'a ThreadSnapshot>,
+    target_thread_ids: &'a [String],
+    counterpart_thread_ids: Option<&'a [String]>,
+}
+
 /// A retired chain identity an append depends on: the fence store must still
 /// record it as retired with this exact retained closure.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -7096,6 +7124,83 @@ impl StateDb {
             counterpart,
             required_target_kind,
         } = request;
+        self.append_running_events_under_mixed_cut(
+            SingleAnchorThreadAppend {
+                chain_root_id,
+                thread_id,
+                events,
+                signer,
+                runtime_liveness,
+                expected,
+                required_target_kind,
+            },
+            Some(counterpart),
+            dependencies,
+            cas_mutation_guard,
+            |view| {
+                let (Some(other), Some(other_ids)) =
+                    (view.counterpart, view.counterpart_thread_ids)
+                else {
+                    anyhow::bail!("two-anchor admission lost its counterpart");
+                };
+                admit(TwoAnchorAdmissionView {
+                    target: view.target,
+                    counterpart: other,
+                    target_thread_ids: view.target_thread_ids,
+                    counterpart_thread_ids: other_ids,
+                })
+            },
+        )
+    }
+
+    /// Append to a running target whose read cut is the target's exact
+    /// frontier plus zero or more further live frontiers and retired chains.
+    /// Every dependency lock is taken in root order and held through
+    /// publication. Live dependencies must still match their exact frontier;
+    /// a retired dependency whose chain regained a head or pending transition,
+    /// or whose fence is absent or released, is a conflict; a fence naming a
+    /// different closure, a chain named both live and retired, or conflicting
+    /// duplicate cuts refuse with an error. `admit` runs under the locks just
+    /// before publication, must not reenter StateDb, and `false` is a clean
+    /// conflict.
+    pub fn append_running_events_admitted_if_single_anchor_mixed_cut_with_admission(
+        &self,
+        request: SingleAnchorThreadAppend<'_>,
+        dependencies: MixedCutDependencies<'_>,
+        cas_mutation_guard: &crate::recovery::CasMutationGuard,
+        admit: impl FnOnce(SingleAnchorAdmissionView<'_>) -> anyhow::Result<bool>,
+    ) -> anyhow::Result<ConditionalThreadEventAppendResult> {
+        self.append_running_events_under_mixed_cut(
+            request,
+            None,
+            dependencies,
+            cas_mutation_guard,
+            |view| {
+                admit(SingleAnchorAdmissionView {
+                    target: view.target,
+                    target_thread_ids: view.target_thread_ids,
+                })
+            },
+        )
+    }
+
+    fn append_running_events_under_mixed_cut(
+        &self,
+        request: SingleAnchorThreadAppend<'_>,
+        counterpart: Option<&AuthoritativeThreadEventReadAnchor>,
+        dependencies: MixedCutDependencies<'_>,
+        cas_mutation_guard: &crate::recovery::CasMutationGuard,
+        admit: impl FnOnce(MixedCutAdmission<'_>) -> anyhow::Result<bool>,
+    ) -> anyhow::Result<ConditionalThreadEventAppendResult> {
+        let SingleAnchorThreadAppend {
+            chain_root_id,
+            thread_id,
+            events,
+            signer,
+            runtime_liveness,
+            expected,
+            required_target_kind,
+        } = request;
         let MixedCutDependencies {
             current_anchors,
             retired,
@@ -7104,13 +7209,13 @@ impl StateDb {
         anyhow::ensure!(
             expected.chain_root_id == chain_root_id
                 && expected.thread_id == thread_id
-                && counterpart.chain_root_id != chain_root_id
+                && counterpart.is_none_or(|other| other.chain_root_id != chain_root_id)
                 && !events.is_empty()
                 && events.iter().all(|event| event.durability.is_cas_stored()),
-            "two-anchor append requires distinct exact chains and durable events"
+            "mixed-cut append requires distinct exact chains and durable events"
         );
         let mut live = BTreeMap::new();
-        for anchor in current_anchors.iter().chain([expected, counterpart]) {
+        for anchor in current_anchors.iter().chain([expected]).chain(counterpart) {
             anyhow::ensure!(
                 !anchor.chain_root_id.is_empty(),
                 "append dependency has empty chain identity"
@@ -7218,40 +7323,50 @@ impl StateDb {
             {
                 return Ok(ConditionalThreadEventAppendResult::Conflict);
             }
-            let Some(other) = chain::read_thread_snapshot_with_trust(
-                &self.cas_root,
-                &self.refs_root,
-                lock_for(&counterpart.chain_root_id)?,
-                &counterpart.chain_root_id,
-                &counterpart.thread_id,
-                self.trust_store.as_ref(),
-                &mut cache,
-            )?
-            else {
-                return Ok(ConditionalThreadEventAppendResult::Conflict);
+            let other = match counterpart {
+                None => None,
+                Some(counterpart) => {
+                    let Some(other) = chain::read_thread_snapshot_with_trust(
+                        &self.cas_root,
+                        &self.refs_root,
+                        lock_for(&counterpart.chain_root_id)?,
+                        &counterpart.chain_root_id,
+                        &counterpart.thread_id,
+                        self.trust_store.as_ref(),
+                        &mut cache,
+                    )?
+                    else {
+                        return Ok(ConditionalThreadEventAppendResult::Conflict);
+                    };
+                    if other.chain_root_id != counterpart.chain_root_id
+                        || other.thread_id != counterpart.thread_id
+                    {
+                        return Ok(ConditionalThreadEventAppendResult::Conflict);
+                    }
+                    Some(other)
+                }
             };
-            if other.chain_root_id != counterpart.chain_root_id
-                || other.thread_id != counterpart.thread_id
-            {
-                return Ok(ConditionalThreadEventAppendResult::Conflict);
-            }
             (target, other)
         };
         let target_lock = lock_for(chain_root_id)?;
         let target_thread_ids = self
             .authoritative_chain_thread_ids_under_lock(chain_root_id, target_lock)?
-            .ok_or_else(|| anyhow::anyhow!("two-anchor target lost signed membership"))?;
-        let counterpart_thread_ids = self
-            .authoritative_chain_thread_ids_under_lock(
-                &counterpart.chain_root_id,
-                lock_for(&counterpart.chain_root_id)?,
-            )?
-            .ok_or_else(|| anyhow::anyhow!("two-anchor counterpart lost signed membership"))?;
-        if !admit(TwoAnchorAdmissionView {
+            .ok_or_else(|| anyhow::anyhow!("mixed-cut target lost signed membership"))?;
+        let counterpart_thread_ids = match counterpart {
+            None => None,
+            Some(counterpart) => Some(
+                self.authoritative_chain_thread_ids_under_lock(
+                    &counterpart.chain_root_id,
+                    lock_for(&counterpart.chain_root_id)?,
+                )?
+                .ok_or_else(|| anyhow::anyhow!("mixed-cut counterpart lost signed membership"))?,
+            ),
+        };
+        if !admit(MixedCutAdmission {
             target: &target_snapshot,
-            counterpart: &counterpart_snapshot,
+            counterpart: counterpart_snapshot.as_ref(),
             target_thread_ids: &target_thread_ids,
-            counterpart_thread_ids: &counterpart_thread_ids,
+            counterpart_thread_ids: counterpart_thread_ids.as_deref(),
         })? {
             return Ok(ConditionalThreadEventAppendResult::Conflict);
         }

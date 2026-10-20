@@ -869,3 +869,101 @@ fn retained_thread_event_is_read_by_exact_canonical_hash() {
             .is_err()
     );
 }
+
+#[test]
+fn single_anchor_mixed_cut_commits_once_under_the_fence() {
+    let (_dir, db) = open();
+    let signer = TestSigner::default();
+    create(&db, "T-a", KIND);
+    create(&db, "T-c", KIND);
+    let manifest = "ab".repeat(32);
+    fence(&db, "T-retired", &manifest);
+    let retired = [RetiredChainDependency {
+        chain_root_id: "T-retired".into(),
+        manifest_hash: manifest.clone(),
+    }];
+    let target = capture(&db, "T-a");
+    let run = |expected: &AuthoritativeThreadEventReadAnchor,
+               current: &[AuthoritativeThreadEventReadAnchor],
+               retired: &[RetiredChainDependency]| {
+        db.append_running_events_admitted_if_single_anchor_mixed_cut_with_admission(
+            SingleAnchorThreadAppend {
+                chain_root_id: "T-a",
+                thread_id: "T-a",
+                events: vec![event("T-a", "single")],
+                signer: &signer,
+                runtime_liveness: &NoRecovery,
+                expected,
+                required_target_kind: KIND,
+            },
+            MixedCutDependencies {
+                current_anchors: current,
+                retired,
+            },
+            &guard(&db),
+            |view| {
+                assert_eq!(view.target.thread_id, "T-a");
+                Ok(true)
+            },
+        )
+    };
+
+    // A fence naming another closure refuses; nothing is written.
+    let wrong = [RetiredChainDependency {
+        chain_root_id: "T-retired".into(),
+        manifest_hash: "cd".repeat(32),
+    }];
+    assert!(run(&target, &[], &wrong).is_err());
+    // A chain that still has a head is not retired; an unfenced one neither.
+    let headed = [RetiredChainDependency {
+        chain_root_id: "T-c".into(),
+        manifest_hash: manifest.clone(),
+    }];
+    assert!(matches!(
+        run(&target, &[], &headed).unwrap(),
+        ConditionalThreadEventAppendResult::Conflict
+    ));
+    drop(db.acquire_chain_lock("T-ghost").unwrap());
+    let ghost = [RetiredChainDependency {
+        chain_root_id: "T-ghost".into(),
+        manifest_hash: manifest.clone(),
+    }];
+    assert!(matches!(
+        run(&target, &[], &ghost).unwrap(),
+        ConditionalThreadEventAppendResult::Conflict
+    ));
+    // A released fence can no longer prove the cut.
+    fence(&db, "T-released", &manifest);
+    let released_lock = db.acquire_existing_chain_lock("T-released").unwrap();
+    db.recovery
+        .publish_retired_chain_release(&guard(&db), &released_lock, "T-released", &BTreeSet::new())
+        .unwrap();
+    drop(released_lock);
+    let released = [RetiredChainDependency {
+        chain_root_id: "T-released".into(),
+        manifest_hash: manifest.clone(),
+    }];
+    assert!(matches!(
+        run(&target, &[], &released).unwrap(),
+        ConditionalThreadEventAppendResult::Conflict
+    ));
+    assert_eq!(event_rows(&db, "T-a"), START_ROWS);
+
+    // The same chain named live and retired is refused outright.
+    let extra = capture(&db, "T-c");
+    assert!(run(&target, std::slice::from_ref(&extra), &headed).is_err());
+
+    // Under the fence the append commits exactly once.
+    assert!(committed(run(&target, &[], &retired).unwrap()));
+    assert_eq!(event_rows(&db, "T-a"), START_ROWS + 1);
+    // The target moved, so the same cut is stale.
+    assert!(matches!(
+        run(&target, &[], &retired).unwrap(),
+        ConditionalThreadEventAppendResult::Conflict
+    ));
+    assert_eq!(event_rows(&db, "T-a"), START_ROWS + 1);
+    // Zero retired dependencies is a plain exact-frontier append.
+    let target = capture(&db, "T-a");
+    assert!(committed(run(&target, &[], &[]).unwrap()));
+    assert_eq!(event_rows(&db, "T-a"), START_ROWS + 2);
+}
