@@ -3415,7 +3415,16 @@ async fn qualify_target_abort_boundary(
         )
         .await
     });
-    gate.wait_reached().await?;
+    if let Err(gate_error) = gate.wait_reached().await {
+        // The boundary is reached from inside the abort request, so a request
+        // the target refused is the usual reason it never arrives.
+        let response = tokio::time::timeout(Duration::from_secs(5), request_task).await;
+        let stderr = target.drain_stderr_nonblocking().await;
+        target.kill_daemon().await?;
+        return Err(gate_error.context(format!(
+            "target abort request outcome: {response:?}\ntarget daemon stderr:\n{stderr}"
+        )));
+    }
     target.kill_daemon().await?;
     let _ = tokio::time::timeout(Duration::from_secs(5), request_task).await;
     assert_target_abort_state(&target.state_path, source, expected_cut)?;
