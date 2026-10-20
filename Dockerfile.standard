@@ -84,8 +84,13 @@ RUN groupadd --gid 10000 ryeos && \
 # running user, which is root here because tini and the entrypoint start as
 # root, and they require that user's ~/.ssh to exist with mode 0700. Without
 # it the session is closed right after the platform authenticates the
-# operator. The directory stays empty in the image.
-RUN install -d -m 0700 /root/.ssh
+# operator, and they refuse a root account whose password field is locked,
+# which is how the base image ships it. The password set below is random
+# and discarded: it only moves the account from locked to set; nothing
+# authenticates with it, and the node account runs with no_new_privs. The
+# ssh directory stays empty in the image.
+RUN install -d -m 0700 /root/.ssh && \
+    usermod -p "$(openssl rand -base64 48 | openssl passwd -6 -stdin)" root
 
 COPY --from=builder /build/target/release/ryeosd           /usr/local/bin/ryeosd
 COPY --from=builder /build/target/release/ryeos            /usr/local/bin/ryeos
@@ -102,7 +107,6 @@ COPY --from=builder /build/bundles/ryeos-docs /opt/ryeos/ryeos-docs
 COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
-ENV HOME=/data/app
 ENV RYEOS_APP_ROOT=/data/app
 ENV RYEOS_INIT_NODE_PROFILE=standard
 EXPOSE 8000
