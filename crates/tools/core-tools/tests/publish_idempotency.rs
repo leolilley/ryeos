@@ -140,6 +140,14 @@ fn ensure_handler_bins_built() -> PathBuf {
         return release_dir;
     }
 
+    // A gate that has already built and staged the bundle binaries names
+    // their directory, so each test process need not repeat the release build.
+    if let Some(staged) = std::env::var_os("RYEOS_TEST_HANDLER_BIN_DIR").map(PathBuf::from)
+        && required.iter().all(|name| staged.join(name).is_file())
+    {
+        return staged;
+    }
+
     HANDLER_BINS_BUILD.get_or_init(|| {
         let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
         let status = std::process::Command::new(cargo)

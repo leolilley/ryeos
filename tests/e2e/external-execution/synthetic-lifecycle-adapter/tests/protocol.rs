@@ -506,31 +506,21 @@ fn shipped_external_codex_profile_is_explicit_and_closed() {
 }
 
 fn install_joined_runtime_files(runtime: &Path) {
-    for directory in ["bin", "lib64", "usr/lib"] {
-        std::fs::create_dir_all(runtime.join(directory)).unwrap();
-    }
+    std::fs::create_dir_all(runtime.join("bin")).unwrap();
+    let candidate = Path::new(env!(
+        "CARGO_BIN_EXE_ryeos-synthetic-external-candidate-runtime"
+    ));
+    let provider = Path::new(env!(
+        "CARGO_BIN_EXE_ryeos-synthetic-external-provider-runtime"
+    ));
     for (source, destination) in [
-        (
-            env!("CARGO_BIN_EXE_ryeos-synthetic-external-candidate-runtime"),
-            runtime.join("bin/candidate"),
-        ),
-        (
-            env!("CARGO_BIN_EXE_ryeos-synthetic-external-provider-runtime"),
-            runtime.join("bin/provider"),
-        ),
-        (
-            "/usr/lib/ld-linux-x86-64.so.2",
-            runtime.join("lib64/ld-linux-x86-64.so.2"),
-        ),
-        ("/usr/lib/libc.so.6", runtime.join("usr/lib/libc.so.6")),
-        (
-            "/usr/lib/libgcc_s.so.1",
-            runtime.join("usr/lib/libgcc_s.so.1"),
-        ),
+        (candidate, runtime.join("bin/candidate")),
+        (provider, runtime.join("bin/provider")),
     ] {
         std::fs::copy(source, &destination).unwrap();
         std::fs::set_permissions(&destination, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
+    lillux::platform::install_native_runtime_libraries(runtime, &[candidate, provider]).unwrap();
 }
 
 fn store_project_file(

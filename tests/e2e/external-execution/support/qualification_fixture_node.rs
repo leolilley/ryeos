@@ -18,28 +18,19 @@ pub struct RuntimeBinaries<'a> {
 /// Populate one synthetic runtime tree. `marker` adds one extra regular file so
 /// two trees built from the same binaries have distinct manifest identities.
 pub fn install_runtime_files(runtime: &Path, binaries: &RuntimeBinaries<'_>, marker: Option<&str>) {
-    for directory in ["bin", "lib64", "usr/lib"] {
-        std::fs::create_dir_all(runtime.join(directory)).unwrap();
-    }
+    std::fs::create_dir_all(runtime.join("bin")).unwrap();
     for (source, destination) in [
         (binaries.candidate, runtime.join("bin/candidate")),
         (binaries.provider, runtime.join("bin/provider")),
-        (
-            Path::new("/usr/lib/ld-linux-x86-64.so.2"),
-            runtime.join("lib64/ld-linux-x86-64.so.2"),
-        ),
-        (
-            Path::new("/usr/lib/libc.so.6"),
-            runtime.join("usr/lib/libc.so.6"),
-        ),
-        (
-            Path::new("/usr/lib/libgcc_s.so.1"),
-            runtime.join("usr/lib/libgcc_s.so.1"),
-        ),
     ] {
         std::fs::copy(source, &destination).unwrap();
         std::fs::set_permissions(&destination, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
+    lillux::platform::install_native_runtime_libraries(
+        runtime,
+        &[binaries.candidate, binaries.provider],
+    )
+    .unwrap();
     if let Some(marker) = marker {
         let destination = runtime.join("bin/marker");
         std::fs::write(&destination, marker.as_bytes()).unwrap();

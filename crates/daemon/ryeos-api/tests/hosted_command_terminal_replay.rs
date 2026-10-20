@@ -670,7 +670,7 @@ fn seed_workload_child(
             call_id: call_id.to_owned(),
         },
         child_thread_id,
-        child_thread_id,
+        root,
         child_owner,
     );
 }
@@ -1067,6 +1067,8 @@ fn command_observation_refuses_a_child_with_contradictory_root() {
     let root = "T-contradictory-child-root";
     let pending = seed_pending_turn_fixture(&state, root, false);
     settle_pending_turn(&state, root, &pending);
+    // The intent is inline, so its child belongs in the placement's chain;
+    // this one is its own chain root instead.
     seed_workspace_child(
         &state,
         root,
@@ -1077,7 +1079,7 @@ fn command_observation_refuses_a_child_with_contradictory_root() {
             call_id: "call-wrong-root".to_owned(),
         },
         "T-child-wrong-root",
-        root,
+        "T-child-wrong-root",
         "fp:test-operator",
     );
     complete_turn(&state, root, &pending.turn_id);

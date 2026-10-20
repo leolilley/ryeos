@@ -9104,9 +9104,14 @@ mod tests {
                 thread_id: "T-captured-plan",
                 verbatim_env_names: &[],
             };
-            // These host fixture paths are below /tmp, which is refused by
-            // configuration admission before the planner can consider overlap.
-            for forbidden in [project.path(), private_state.as_path()] {
+            // /tmp is a protected namespace, refused by configuration
+            // admission before the planner can consider overlap. The paths are
+            // spelled explicitly because the fixture roots live wherever the
+            // host's temporary directory is.
+            for forbidden in [
+                Path::new("/tmp/captured-plan"),
+                Path::new("/tmp/a-captured-state"),
+            ] {
                 assert!(
                     IsolationReadOnlyMountAuthority::new_runtime_configuration(
                         baseline.path().to_path_buf(),

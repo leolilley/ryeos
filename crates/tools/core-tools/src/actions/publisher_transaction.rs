@@ -708,7 +708,7 @@ mod tests {
 
         let temp = tempfile::tempdir().unwrap();
         let bundle = temp.path().join("bundle");
-        fs::create_dir_all(bundle.join(".venv/bin")).unwrap();
+        fs::create_dir_all(bundle.join(".ai/state/local/bin")).unwrap();
         fs::create_dir_all(bundle.join(".ai/node/routes")).unwrap();
         fs::create_dir_all(bundle.join(".ai/node/schedules")).unwrap();
         fs::create_dir_all(bundle.join(".ai/node/bundles")).unwrap();
@@ -717,10 +717,10 @@ mod tests {
         fs::write(bundle.join(".ai/node/routes/execute.yaml"), b"route").unwrap();
         fs::write(bundle.join(".ai/node/schedules/nightly.yaml"), b"schedule").unwrap();
         fs::write(bundle.join(".ai/node/bundles/runtime.yaml"), b"runtime").unwrap();
-        symlink("/usr/bin/python", bundle.join(".venv/bin/python")).unwrap();
+        symlink("/usr/bin/python", bundle.join(".ai/state/local/bin/python")).unwrap();
 
         with_staged_bundle_generation(&bundle, |staging| {
-            assert!(!staging.join(".venv").exists());
+            assert!(!staging.join(".ai/state/local").exists());
             assert_eq!(
                 fs::read(staging.join(".ai/node/routes/execute.yaml"))?,
                 b"route"
@@ -738,7 +738,7 @@ mod tests {
         })
         .expect("bundle declarations must enter publisher staging without local content");
 
-        assert!(bundle.join(".venv/bin/python").is_symlink());
+        assert!(bundle.join(".ai/state/local/bin/python").is_symlink());
         assert_eq!(
             fs::read(bundle.join(".ai/node/routes/execute.yaml")).unwrap(),
             b"route"
@@ -785,9 +785,9 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let bundle = temp.path().join("bundle");
         let staging = temp.path().join(".bundle.publish-staging");
-        fs::create_dir_all(bundle.join(".venv/bin")).unwrap();
+        fs::create_dir_all(bundle.join(".ai/state/local/bin")).unwrap();
         fs::write(bundle.join("generation"), b"old").unwrap();
-        symlink("/usr/bin/python", bundle.join(".venv/bin/python")).unwrap();
+        symlink("/usr/bin/python", bundle.join(".ai/state/local/bin/python")).unwrap();
         fs::create_dir(&staging).unwrap();
         fs::write(staging.join("generation"), b"committed").unwrap();
 
@@ -797,14 +797,14 @@ mod tests {
 
         with_staged_bundle_generation(&bundle, |next| {
             assert_eq!(fs::read(next.join("generation"))?, b"committed");
-            assert!(!next.join(".venv").exists());
+            assert!(!next.join(".ai/state/local").exists());
             fs::write(next.join("generation"), b"next")?;
             Ok(())
         })
         .expect("next publish should recover the committed exchange first");
 
         assert_eq!(fs::read(bundle.join("generation")).unwrap(), b"next");
-        assert!(bundle.join(".venv/bin/python").is_symlink());
+        assert!(bundle.join(".ai/state/local/bin/python").is_symlink());
         assert!(!publisher_recovery_marker(temp.path(), "bundle").exists());
     }
 
@@ -817,12 +817,11 @@ mod tests {
         let staging = temp.path().join(".bundle.publish-staging");
         fs::create_dir_all(bundle.join(".ai/objects/old/fanout")).unwrap();
         fs::write(bundle.join(".ai/objects/old/fanout/object"), b"old").unwrap();
-        fs::create_dir_all(bundle.join("tools/.venv/bin")).unwrap();
-        symlink("/usr/bin/python", bundle.join("tools/.venv/bin/python")).unwrap();
+        fs::create_dir_all(bundle.join(".ai/state/local/bin")).unwrap();
+        symlink("/usr/bin/python", bundle.join(".ai/state/local/bin/python")).unwrap();
 
         fs::create_dir_all(staging.join(".ai/objects/new/fanout")).unwrap();
         fs::write(staging.join(".ai/objects/new/fanout/object"), b"new").unwrap();
-        fs::create_dir(staging.join("tools")).unwrap();
 
         let recovery = PublisherExchangeRecovery::capture(&bundle, &staging).unwrap();
         write_recovery_marker(temp.path(), "bundle", recovery);
@@ -832,7 +831,7 @@ mod tests {
             assert!(next.join(".ai/objects/new/fanout/object").exists());
             assert!(!next.join(".ai/objects/old").exists());
             assert!(
-                !next.join("tools/.venv").exists(),
+                !next.join(".ai/state/local").exists(),
                 "excluded local content must stay outside publisher authoring"
             );
             Ok(())
@@ -841,7 +840,7 @@ mod tests {
 
         assert!(bundle.join(".ai/objects/new/fanout/object").exists());
         assert!(!bundle.join(".ai/objects/old").exists());
-        assert!(bundle.join("tools/.venv/bin/python").is_symlink());
+        assert!(bundle.join(".ai/state/local/bin/python").is_symlink());
         assert!(!publisher_recovery_marker(temp.path(), "bundle").exists());
     }
 
@@ -854,23 +853,27 @@ mod tests {
         let staging = temp.path().join(".bundle.publish-staging");
         fs::create_dir(&bundle).unwrap();
         fs::write(bundle.join("generation"), b"live").unwrap();
-        fs::create_dir_all(staging.join(".venv/bin")).unwrap();
+        fs::create_dir_all(staging.join(".ai/state/local/bin")).unwrap();
         fs::write(staging.join("generation"), b"never-committed").unwrap();
-        symlink("/usr/bin/python", staging.join(".venv/bin/python")).unwrap();
+        symlink(
+            "/usr/bin/python",
+            staging.join(".ai/state/local/bin/python"),
+        )
+        .unwrap();
 
         let recovery = PublisherExchangeRecovery::capture(&bundle, &staging).unwrap();
         write_recovery_marker(temp.path(), "bundle", recovery);
 
         with_staged_bundle_generation(&bundle, |next| {
             assert_eq!(fs::read(next.join("generation"))?, b"live");
-            assert!(!next.join(".venv").exists());
+            assert!(!next.join(".ai/state/local").exists());
             fs::write(next.join("generation"), b"next")?;
             Ok(())
         })
         .expect("uncommitted staging should be discarded before the next publish");
 
         assert_eq!(fs::read(bundle.join("generation")).unwrap(), b"next");
-        assert!(!bundle.join(".venv").exists());
+        assert!(!bundle.join(".ai/state/local").exists());
         assert!(!publisher_recovery_marker(temp.path(), "bundle").exists());
     }
 }

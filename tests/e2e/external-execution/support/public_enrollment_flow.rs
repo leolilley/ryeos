@@ -49,12 +49,26 @@ fn trusted_enrollment_policy(raw: &str, node: &lillux::crypto::SigningKey) -> Re
         "preboot isolation policy is not signed by this fixture node"
     );
     let mut document: Value = serde_yaml::from_str(&body)?;
+    // The node's selected policy declares exactly one host class; the flag
+    // and the mode both live inside it.
+    let classes = document
+        .pointer_mut("/policy/host_classes")
+        .and_then(Value::as_object_mut)
+        .context("preboot isolation policy declares no host classes")?;
     ensure!(
-        document.pointer("/policy/mode") == Some(&json!("disabled")),
+        classes.len() == 1,
+        "trusted enrollment fixture expects exactly one selected host class"
+    );
+    let class = classes
+        .values_mut()
+        .next()
+        .context("selected host class is absent")?;
+    ensure!(
+        class.get("mode") == Some(&json!("disabled")),
         "trusted enrollment fixture expects existing disabled isolation topology"
     );
-    let flag = document
-        .pointer_mut("/policy/trusted_process_group_sessions")
+    let flag = class
+        .get_mut("trusted_process_group_sessions")
         .context("preboot isolation policy omits explicit trusted session policy")?;
     ensure!(flag.is_boolean(), "trusted session policy is not boolean");
     *flag = json!(true);
@@ -437,7 +451,11 @@ mod tests {
         ))
         .unwrap();
         let original = profile["policies"]["isolation"].clone();
-        assert_eq!(original["policy"]["trusted_process_group_sessions"], false);
+        fn flag(document: &mut Value) -> &mut Value {
+            &mut document["policy"]["host_classes"]["local"]["trusted_process_group_sessions"]
+        }
+        let mut original = original;
+        assert_eq!(*flag(&mut original), false);
         let node = fast_fixture::node_signing_key();
         let raw = lillux::signature::sign_content_at(
             &serde_yaml::to_string(&original).unwrap(),
@@ -449,8 +467,8 @@ mod tests {
         let signed = trusted_enrollment_policy(&raw, &node).unwrap();
         let body = lillux::signature::strip_signature_lines(&signed);
         let mut observed: Value = serde_yaml::from_str(&body).unwrap();
-        assert_eq!(observed["policy"]["trusted_process_group_sessions"], true);
-        observed["policy"]["trusted_process_group_sessions"] = json!(false);
+        assert_eq!(*flag(&mut observed), true);
+        *flag(&mut observed) = json!(false);
         assert_eq!(observed, original, "fixture widened another policy field");
         let header =
             lillux::signature::parse_signature_line(signed.lines().next().unwrap(), "#", None)
