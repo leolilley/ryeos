@@ -1021,7 +1021,7 @@ mod tests {
     #[test]
     fn only_a_stop_before_contact_is_a_refusal() {
         let before = Err(Stopped::BeforeContact(anyhow::anyhow!("no contact")));
-        let after = Err(Stopped::AfterContact(anyhow::anyhow!("maybe contact")));
+        let after = Err(Stopped::AfterContact);
         assert!(pending_unless_refused(before).is_err());
         assert!(pending_unless_refused(after).is_ok());
         assert!(pending_unless_refused(Ok(())).is_ok());
