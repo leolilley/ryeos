@@ -2047,7 +2047,7 @@ mod compact_observation_controls {
             operation: SchedulerRetirementEffect::Purge,
             disposition: SchedulerRetirementFailureDisposition::BeforeCommit,
             stage: SchedulerRetirementFailureStage::Unchanged,
-            substep_observed: false,
+            substep_observed: true,
             error_sha256: "cd".repeat(32),
         };
         observation.original_failure = Some(failure.clone());
@@ -2246,13 +2246,21 @@ mod compact_observation_controls {
         }
         generation.recovery = None;
         generation.operation_id = generation.generation.clone();
+        assert!(
+            intent.validate_for_generation(&generation).is_err(),
+            "a generation without its authenticated plan was accepted"
+        );
+        generation.intake_mode = "stopped-original".to_owned();
+        generation.stopped_plan = intent.expected.stopped_plan.clone();
         assert!(intent.validate_for_generation(&generation).is_err());
-        let mut live = intent;
-        live.operation_id = generation.operation_id.clone();
+        let mut matching = intent.clone();
+        matching.operation_id = generation.operation_id.clone();
+        matching.validate_for_generation(&generation)?;
+        let mut live = matching;
         live.expected.stopped_plan = None;
         live.expected.selected_source = None;
         live.expected.stopped_coordinates.clear();
-        live.validate_for_generation(&generation)?;
+        assert!(live.validate_for_generation(&generation).is_err());
         Ok(())
     }
 
