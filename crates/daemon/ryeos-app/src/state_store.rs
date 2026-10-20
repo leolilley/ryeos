@@ -1576,6 +1576,47 @@ pub struct MixedCutAppend<'a> {
     pub retired: &'a [ryeos_state::RetiredChainDependency],
 }
 
+/// Two exact seats published in order under one cut: the first seat takes
+/// `first_events`, then the second takes the batch built from the first
+/// commit. Both seats are chain roots whose signed snapshots must carry their
+/// seat identity; the cut's `expected` anchor is the first seat's, and the
+/// second seat's anchor must also appear in `cut.anchors`.
+#[derive(Debug, Clone, Copy)]
+pub struct SeatPairAppend<'a> {
+    pub first: &'a ExactSeat<'a>,
+    pub second: &'a ExactSeat<'a>,
+    pub second_anchor: &'a ryeos_state::AuthoritativeThreadEventReadAnchor,
+    pub first_events: &'a [NewEventRecord],
+    pub cut: &'a SeatCut<'a>,
+}
+
+/// Signed data visible to the admission callback of a seat pair append, taken
+/// while every chain lock of the cut is held.
+#[derive(Debug, Clone, Copy)]
+pub struct SeatPairAdmission<'a> {
+    pub first: &'a ryeos_state::objects::ThreadSnapshot,
+    pub second: &'a ryeos_state::objects::ThreadSnapshot,
+}
+
+/// Outcome of an ordered two-seat append. Two signed heads cannot move
+/// atomically: after the first publication every outcome other than
+/// `Committed` is partial or uncertain and must be reconciled from signed
+/// history before either seat is retried.
+#[derive(Debug)]
+pub enum CutPairAppendResult {
+    Committed {
+        first: Vec<PersistedEventRecord>,
+        second: Vec<PersistedEventRecord>,
+    },
+    Conflict,
+    NotRunning,
+    FirstUncertain(anyhow::Error),
+    FirstCommittedSecondUncertain {
+        first: Vec<PersistedEventRecord>,
+        error: anyhow::Error,
+    },
+}
+
 /// CAS-authoritative terminal fields used to reconcile a runtime's process
 /// result with an earlier callback finalization. This deliberately reads the
 /// signed thread snapshot rather than treating subprocess stdout as a second
@@ -15324,6 +15365,22 @@ impl StateStore {
         events: &[NewEventRecord],
         cut: &SeatCut<'_>,
     ) -> Result<CutAppendResult> {
+        self.append_seat_events_and_renew_if_mixed_cut_admitted(seat, events, cut, |_| Ok(true))
+    }
+
+    /// The seat append of `append_seat_events_and_renew_if_mixed_cut` with a
+    /// domain admission. `admit` runs under every chain lock of the cut,
+    /// after the seat identity, status and unclaimed lease are re-proved and
+    /// immediately before publication; it must not reenter StateStore. `false`
+    /// is a `Conflict` with nothing written and the lease untouched. The
+    /// lease is renewed only after the batch is published.
+    pub fn append_seat_events_and_renew_if_mixed_cut_admitted(
+        &self,
+        seat: &ExactSeat<'_>,
+        events: &[NewEventRecord],
+        cut: &SeatCut<'_>,
+        admit: impl FnOnce(MixedCutAdmission<'_>) -> Result<bool>,
+    ) -> Result<CutAppendResult> {
         Self::validate_seat_cut(seat, cut)?;
         let converted = Self::durable_cut_events(events, seat.root_id, seat.root_id)?;
         let fenced = self
@@ -15346,14 +15403,14 @@ impl StateStore {
         // Runs under the publishing chain locks. It only reads: the lease is
         // renewed after the batch is published, so a refusal or an error
         // before publication leaves the lease untouched.
-        let admit_seat = |target: &ThreadSnapshot| -> Result<bool> {
-            if !Self::seat_snapshot_matches(target, seat, fenced)
+        let admit_seat = |view: MixedCutAdmission<'_>| -> Result<bool> {
+            if !Self::seat_snapshot_matches(view.target, seat, fenced)
                 || g.runtime_db.seat_lease_is_reaping(seat.root_id)?
             {
                 refused.set(true);
                 return Ok(false);
             }
-            Ok(true)
+            admit(view)
         };
         let dependencies = ryeos_state::MixedCutDependencies {
             current_anchors: cut.anchors,
@@ -15379,7 +15436,13 @@ impl StateStore {
                     },
                     dependencies,
                     permit.cas_guard(),
-                    |view| admit_seat(view.target),
+                    |view| {
+                        admit_seat(MixedCutAdmission {
+                            target: view.target,
+                            target_thread_ids: view.target_thread_ids,
+                            counterpart: Some(view.counterpart),
+                        })
+                    },
                 ),
             None => g
                 .state_db
@@ -15395,7 +15458,13 @@ impl StateStore {
                     },
                     dependencies,
                     permit.cas_guard(),
-                    |view| admit_seat(view.target),
+                    |view| {
+                        admit_seat(MixedCutAdmission {
+                            target: view.target,
+                            target_thread_ids: view.target_thread_ids,
+                            counterpart: None,
+                        })
+                    },
                 ),
         };
         let result = Self::cut_append_result(
@@ -15432,6 +15501,179 @@ impl StateStore {
             }
             None if refused.get() => CutAppendResult::NotRunning,
             None => CutAppendResult::Conflict,
+        })
+    }
+
+    /// Publish an ordered pair of events to two exact seats under one cut.
+    /// Both seats are checked as the admitted running seat (signed identity,
+    /// runtime row without a stop intent, lease unclaimed) before the locks
+    /// and again under every chain lock of the cut, together with the
+    /// caller's `admit`. The first seat takes `first_events`; `build_second`
+    /// then receives that commit and returns the second seat's batch, which
+    /// is published under the same locks. Both leases are renewed only after
+    /// both batches are published. A seat that is not admitted returns
+    /// `NotRunning` and a moved cut or refused admission returns `Conflict`,
+    /// neither writing. Any failure after the first publication is reported
+    /// as partial, never as a refusal. Neither callback may reenter StateStore.
+    pub fn append_seat_pair_if_mixed_cut(
+        &self,
+        request: &SeatPairAppend<'_>,
+        admit: impl FnOnce(SeatPairAdmission<'_>) -> Result<bool>,
+        build_second: impl FnOnce(&[PersistedEventRecord]) -> Result<Vec<NewEventRecord>>,
+    ) -> Result<CutPairAppendResult> {
+        let SeatPairAppend {
+            first,
+            second,
+            second_anchor,
+            first_events,
+            cut,
+        } = *request;
+        Self::validate_seat_cut(first, cut)?;
+        if first.root_id == second.root_id
+            || second_anchor.chain_root_id() != second.root_id
+            || second_anchor.thread_id() != second.root_id
+            || !cut.anchors.iter().any(|anchor| anchor == second_anchor)
+        {
+            bail!("seat pair append requires two distinct exact seat roots in the cut");
+        }
+        let first_converted = Self::durable_cut_events(first_events, first.root_id, first.root_id)?;
+        let fenced = self
+            .fenced_chain_kinds
+            .get()
+            .ok_or_else(|| anyhow!("fenced chain kinds are not installed"))?;
+        let permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        let (Some(first_snapshot), Some(second_snapshot)) = (
+            self.running_append_snapshot(&g, first.root_id, first.root_id)?,
+            self.running_append_snapshot(&g, second.root_id, second.root_id)?,
+        ) else {
+            return Ok(CutPairAppendResult::NotRunning);
+        };
+        if !Self::seat_snapshot_matches(&first_snapshot, first, fenced)
+            || !Self::seat_snapshot_matches(&second_snapshot, second, fenced)
+        {
+            return Ok(CutPairAppendResult::NotRunning);
+        }
+        let predecessor = g
+            .state_db
+            .read_authoritative_thread_append_anchor(first.root_id, first.root_id)?
+            .ok_or_else(|| anyhow!("seat pair append has no signed predecessor"))?;
+        let refused = std::cell::Cell::new(false);
+        let second_new = std::cell::RefCell::new(Vec::new());
+        let admitted = |view: ryeos_state::TwoAnchorAdmissionView<'_>| -> Result<bool> {
+            for (snapshot, seat) in [(view.target, first), (view.counterpart, second)] {
+                if !Self::seat_snapshot_matches(snapshot, seat, fenced)
+                    || g.runtime_db.seat_lease_is_reaping(seat.root_id)?
+                    || !Self::stop_intent_clear(&g, seat.root_id)?
+                {
+                    refused.set(true);
+                    return Ok(false);
+                }
+            }
+            admit(SeatPairAdmission {
+                first: view.target,
+                second: view.counterpart,
+            })
+        };
+        let committed = g.state_db.append_running_event_pair_admitted_if_mixed_cut(
+            ryeos_state::OrderedPairThreadAppend {
+                first: cut.expected,
+                second: second_anchor,
+                first_events: first_converted.clone(),
+                signer: g.signer.as_ref(),
+                runtime_liveness: &g.runtime_db,
+                required_first_kind: &first_snapshot.kind_name,
+                required_second_kind: &second_snapshot.kind_name,
+            },
+            ryeos_state::MixedCutDependencies {
+                current_anchors: cut.anchors,
+                retired: cut.retired,
+            },
+            permit.cas_guard(),
+            admitted,
+            |committed, _frontier| {
+                let persisted = persisted_from_append(&committed.value, first_events)?;
+                let events = build_second(&persisted)?;
+                let converted = Self::durable_cut_events(&events, second.root_id, second.root_id)?;
+                *second_new.borrow_mut() = events;
+                Ok(converted)
+            },
+        );
+        Ok(match committed {
+            Ok(ryeos_state::ConditionalThreadEventPairAppendResult::Committed {
+                first: first_committed,
+                second: second_committed,
+            }) => {
+                let first_records = persisted_from_append(
+                    &committed_value(first_committed),
+                    first_events,
+                )?;
+                let second_records = persisted_from_append(
+                    &committed_value(second_committed),
+                    &second_new.borrow(),
+                )?;
+                for seat in [first, second] {
+                    match g.runtime_db.touch_seat_lease(
+                        seat.root_id,
+                        seat.owner,
+                        seat.item_ref,
+                        seat.executor_ref,
+                    ) {
+                        Ok(true) => {}
+                        Ok(false) => tracing::error!(
+                            seat = seat.root_id,
+                            "seat lease was claimed after its pair append was admitted"
+                        ),
+                        Err(error) => tracing::error!(
+                            seat = seat.root_id,
+                            error = %error,
+                            "seat lease renewal failed after its pair append was published"
+                        ),
+                    }
+                }
+                CutPairAppendResult::Committed {
+                    first: first_records,
+                    second: second_records,
+                }
+            }
+            Ok(ryeos_state::ConditionalThreadEventPairAppendResult::Conflict) => {
+                if refused.get() {
+                    CutPairAppendResult::NotRunning
+                } else {
+                    CutPairAppendResult::Conflict
+                }
+            }
+            Ok(ryeos_state::ConditionalThreadEventPairAppendResult::FirstUncertain { error }) => {
+                // The first publication may or may not have happened: report
+                // the observed signed outcome, not the raw write error.
+                match committed_append_after_error(
+                    &g,
+                    first.root_id,
+                    first.root_id,
+                    &predecessor,
+                    &first_converted,
+                    first_events,
+                    error,
+                ) {
+                    Ok(first_records) => CutPairAppendResult::FirstCommittedSecondUncertain {
+                        first: first_records,
+                        error: anyhow!(
+                            "the first write reported an error after publishing; the second seat was not attempted"
+                        ),
+                    },
+                    Err(error) => CutPairAppendResult::FirstUncertain(error),
+                }
+            }
+            Ok(
+                ryeos_state::ConditionalThreadEventPairAppendResult::FirstCommittedSecondUncertain {
+                    first: first_committed,
+                    error,
+                },
+            ) => CutPairAppendResult::FirstCommittedSecondUncertain {
+                first: persisted_from_append(&committed_value(first_committed), first_events)?,
+                error,
+            },
+            Err(error) => return Err(error),
         })
     }
 

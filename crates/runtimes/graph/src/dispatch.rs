@@ -436,6 +436,7 @@ fn callback_child_thread_identity(thread: &Value) -> (Option<String>, Option<Str
         {
             return (None, None);
         }
+        Some(Value::Bool(true)) => {}
         Some(_) => {
             return (
                 None,

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-19T22:29:39Z:184f67f67c7f4f9c91de59581d671de64f22a9289ec84f962b8f74ad8d50f1ee:QjuBbGEg5q5V6dLNyZyp9FezCuNcDPAf5KmEURrh5ARxMSf/P7qIlwBhD2haaIF4pngLgEyNgiodAiLGaaBFDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-20T09:54:48Z:7f9977da8f99eb5b688ec4274ca2a1fb3f87ad20d246c12ad9c9e28d15e8c865:kSqhjGPePRfEkVASYF8wvny43qv2eNTYzeWMbSSeXbbbpT7oLif1xn3nJ7pbIKJP43/fmCw0FLkQcn23rEyYCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - codex
@@ -395,7 +395,7 @@ policies:
           capabilities:
             - ryeos.receive.provider_env.openai_api_key
   ui_browser_sessions:
-    schema: 3
+    schema: 4
     max_session_bootstrap_bytes: 4194304
     max_live_binding_attachments_per_session: 16
     max_presentations_per_session: 16
@@ -406,3 +406,7 @@ policies:
       max_initial_surfaces: 16
       max_label_bytes: 128
       max_mount_id_bytes: 64
+    seat:
+      kind: seat_session
+      max_replay_frame_events: 64
+      max_replay_frame_bytes: 4194304

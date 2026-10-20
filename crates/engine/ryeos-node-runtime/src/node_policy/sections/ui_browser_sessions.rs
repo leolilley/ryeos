@@ -1,8 +1,10 @@
 //! Node-owned resource limits for authenticated UI browser sessions.
 //!
 //! The UI session store enforces this compiled policy when it admits retained
-//! binding attachments. The policy has no daemon fallback: registration makes
-//! the section a required member of every complete node-policy generation.
+//! binding attachments, and the seat history stream takes its frame bounds and
+//! the seat thread kind from it. The policy has no daemon fallback:
+//! registration makes the section a required member of every complete
+//! node-policy generation.
 
 use std::sync::Arc;
 
@@ -14,7 +16,7 @@ use crate::node_policy::{ErasedNodePolicy, NodePolicyContext, NodePolicySection,
 
 pub const SECTION_NAME: &str = "ui_browser_sessions";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UiBrowserSessionPolicy {
     pub schema: u32,
@@ -23,6 +25,18 @@ pub struct UiBrowserSessionPolicy {
     pub max_presentations_per_session: u32,
     pub max_surface_instances_per_presentation: u32,
     pub shared_presentation: SharedPresentationPolicyLimits,
+    pub seat: SeatPolicy,
+}
+
+/// The seat thread kind a browser session binds, and the bounds of one
+/// provisional replay frame of seat history. The kind names a fenced chain
+/// kind; the frame bounds must sit below the smallest client decoder limit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SeatPolicy {
+    pub kind: String,
+    pub max_replay_frame_events: u32,
+    pub max_replay_frame_bytes: u64,
 }
 
 /// Admission bounds for the signed shared declaration; not renderer defaults.
@@ -38,7 +52,7 @@ pub struct SharedPresentationPolicyLimits {
 
 impl UiBrowserSessionPolicy {
     pub fn validate(&self) -> anyhow::Result<()> {
-        if self.schema != 3 {
+        if self.schema != 4 {
             bail!("UI browser-session node policy schema is not current");
         }
         if self.max_live_binding_attachments_per_session == 0 {
@@ -72,6 +86,23 @@ impl UiBrowserSessionPolicy {
             (
                 "shared_presentation.max_mount_id_bytes",
                 u64::from(self.shared_presentation.max_mount_id_bytes),
+            ),
+        ] {
+            if value == 0 {
+                bail!("UI browser-session {name} must be non-zero");
+            }
+        }
+        if self.seat.kind.trim().is_empty() || self.seat.kind.trim() != self.seat.kind {
+            bail!("UI browser-session seat.kind must be a non-empty trimmed kind name");
+        }
+        for (name, value) in [
+            (
+                "seat.max_replay_frame_events",
+                u64::from(self.seat.max_replay_frame_events),
+            ),
+            (
+                "seat.max_replay_frame_bytes",
+                self.seat.max_replay_frame_bytes,
             ),
         ] {
             if value == 0 {
@@ -134,11 +165,14 @@ mod tests {
         assert_eq!(policy.max_live_binding_attachments_per_session, 16);
         assert_eq!(policy.max_session_bootstrap_bytes, 4194304);
         assert_eq!(policy.shared_presentation.max_declaration_bytes, 65536);
+        assert_eq!(policy.seat.kind, "seat_session");
+        assert_eq!(policy.seat.max_replay_frame_events, 64);
+        assert_eq!(policy.seat.max_replay_frame_bytes, 4194304);
     }
 
     fn current_body() -> Value {
         serde_json::json!({
-            "schema": 3,
+            "schema": 4,
             "max_session_bootstrap_bytes": 4194304,
             "max_live_binding_attachments_per_session": 16,
             "max_presentations_per_session": 16,
@@ -149,6 +183,11 @@ mod tests {
                 "max_initial_surfaces": 16,
                 "max_label_bytes": 128,
                 "max_mount_id_bytes": 64
+            },
+            "seat": {
+                "kind": "seat_session",
+                "max_replay_frame_events": 64,
+                "max_replay_frame_bytes": 4194304
             }
         })
     }
@@ -164,6 +203,7 @@ mod tests {
             "max_presentations_per_session",
             "max_surface_instances_per_presentation",
             "shared_presentation",
+            "seat",
         ] {
             let mut missing = original.clone();
             missing.as_object_mut().unwrap().remove(name);
@@ -198,7 +238,25 @@ mod tests {
                 bad.push(zero);
             }
         }
-        for predecessor in [1, 2] {
+        for name in ["max_replay_frame_events", "max_replay_frame_bytes"] {
+            let mut zero = original.clone();
+            zero["seat"][name] = serde_json::json!(0);
+            bad.push(zero);
+        }
+        for name in ["kind", "max_replay_frame_events", "max_replay_frame_bytes"] {
+            let mut missing = original.clone();
+            missing["seat"].as_object_mut().unwrap().remove(name);
+            bad.push(missing);
+        }
+        for kind in ["", " seat_session", "seat_session "] {
+            let mut blank = original.clone();
+            blank["seat"]["kind"] = serde_json::json!(kind);
+            bad.push(blank);
+        }
+        let mut seat_unknown = original.clone();
+        seat_unknown["seat"]["fallback"] = serde_json::json!(1);
+        bad.push(seat_unknown);
+        for predecessor in [1, 2, 3] {
             let mut stale = original.clone();
             stale["schema"] = serde_json::json!(predecessor);
             bad.push(stale);

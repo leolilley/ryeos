@@ -129,6 +129,16 @@ pub struct CompiledUiBinding {
     pub attenuated: Vec<AttenuatedUiBinding>,
 }
 
+impl CompiledUiBinding {
+    /// Whether the admitted composition root is an item of exactly this kind.
+    /// The kind is read from the root's canonical identity, never from a
+    /// separately stored discriminant.
+    pub fn root_is_kind(&self, kind: &str) -> bool {
+        ryeos_engine::canonical_ref::CanonicalRef::parse(&self.surface.canonical_ref)
+            .is_ok_and(|parsed| parsed.kind == kind)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionCompiledUiBinding {

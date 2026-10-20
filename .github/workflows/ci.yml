@@ -234,10 +234,10 @@ jobs:
   test:
     name: Workspace tests
     runs-on: ubuntu-latest
-    # The full two-thread gate now reaches more than 5,250 tests and has
-    # repeatedly been canceled by the previous 90-minute ceiling while still
-    # making progress near the end of the suite.
-    timeout-minutes: 120
+    # The full two-thread gate now runs more than 11,500 tests and was still
+    # making progress near the end of the suite when the 120-minute ceiling
+    # cancelled it.
+    timeout-minutes: 150
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_tests }}
     steps:
       - name: Check out repository
@@ -291,6 +291,17 @@ jobs:
           sudo chown "$(id -u):$(id -g)" /mnt/ryeos-tmp
           findmnt --target /mnt/ryeos-tmp
           echo "TMPDIR=/mnt/ryeos-tmp" >> "$GITHUB_ENV"
+
+      - name: Allow unprivileged user namespaces on the runner
+
+        # The sandbox probes map a user namespace; this selects the
+
+        # namespace-enabled test-host baseline on the disposable VM, not an
+
+        # application fallback or node policy.
+
+        run: sudo -n sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
 
       - name: Run workspace gate
         # --refresh-bundles populates + dev-key-signs the bundle bin trees the

@@ -1252,3 +1252,274 @@ fn cut_over<'a>(
         retired: std::slice::from_ref(dep),
     }
 }
+
+#[test]
+fn admitted_seat_append_runs_its_hook_under_the_cut_and_renews_only_on_commit() {
+    let store = new_store();
+    running_seat(&store, "S-hook");
+    let fresh = anchor(&store, "S-hook");
+    let base = tip_seq(&store, "S-hook");
+    let cut = SeatCut {
+        expected: &fresh,
+        anchors: std::slice::from_ref(&fresh),
+        retired: &[],
+    };
+    // A refusing hook is a conflict: nothing written, lease not renewed.
+    let entered = std::cell::Cell::new(false);
+    assert!(matches!(
+        store
+            .append_seat_events_and_renew_if_mixed_cut_admitted(
+                &seat("S-hook"),
+                &[event("refused")],
+                &cut,
+                |view| {
+                    entered.set(true);
+                    assert_eq!(view.target.thread_id, "S-hook");
+                    assert!(view.counterpart.is_none());
+                    Ok(false)
+                },
+            )
+            .unwrap(),
+        CutAppendResult::Conflict
+    ));
+    assert!(entered.get());
+    assert_eq!(tip_seq(&store, "S-hook"), base);
+    assert!(!lease_active(&store, "S-hook"));
+    // A hook error publishes nothing either.
+    assert!(
+        store
+            .append_seat_events_and_renew_if_mixed_cut_admitted(
+                &seat("S-hook"),
+                &[event("error")],
+                &cut,
+                |_| bail!("domain admission failed"),
+            )
+            .is_err()
+    );
+    assert_eq!(tip_seq(&store, "S-hook"), base);
+    assert!(!lease_active(&store, "S-hook"));
+    // An admitting hook commits and renews in the same step.
+    assert!(matches!(
+        store
+            .append_seat_events_and_renew_if_mixed_cut_admitted(
+                &seat("S-hook"),
+                &[event("admitted")],
+                &cut,
+                |_| Ok(true),
+            )
+            .unwrap(),
+        CutAppendResult::Committed(_)
+    ));
+    assert_eq!(tip_seq(&store, "S-hook"), base + 1);
+    assert!(lease_active(&store, "S-hook"));
+    // A claimed lease is refused before the hook is consulted.
+    assert!(store.claim_expired_seat_lease("S-hook", i64::MAX).unwrap());
+    let current = anchor(&store, "S-hook");
+    let claimed_cut = SeatCut {
+        expected: &current,
+        anchors: std::slice::from_ref(&current),
+        retired: &[],
+    };
+    let entered = std::cell::Cell::new(false);
+    assert!(matches!(
+        store
+            .append_seat_events_and_renew_if_mixed_cut_admitted(
+                &seat("S-hook"),
+                &[event("claimed")],
+                &claimed_cut,
+                |_| {
+                    entered.set(true);
+                    Ok(true)
+                },
+            )
+            .unwrap(),
+        CutAppendResult::NotRunning
+    ));
+    assert!(!entered.get());
+    assert_eq!(tip_seq(&store, "S-hook"), base + 1);
+}
+
+#[test]
+fn seat_pair_publishes_the_second_batch_from_the_first_commit_and_renews_both() {
+    let store = new_store();
+    running_seat(&store, "S-dst");
+    running_seat(&store, "S-src");
+    let dst = anchor(&store, "S-dst");
+    let src = anchor(&store, "S-src");
+    let both = [dst.clone(), src.clone()];
+    let cut = SeatCut {
+        expected: &dst,
+        anchors: &both,
+        retired: &[],
+    };
+    let (dst_base, src_base) = (tip_seq(&store, "S-dst"), tip_seq(&store, "S-src"));
+    let first_events = [event("inbound")];
+    let request = SeatPairAppend {
+        first: &seat("S-dst"),
+        second: &seat("S-src"),
+        second_anchor: &src,
+        first_events: &first_events,
+        cut: &cut,
+    };
+    let built_from = std::cell::RefCell::new(None);
+    let CutPairAppendResult::Committed { first, second } = store
+        .append_seat_pair_if_mixed_cut(
+            &request,
+            |view| {
+                assert_eq!(view.first.thread_id, "S-dst");
+                assert_eq!(view.second.thread_id, "S-src");
+                Ok(true)
+            },
+            |first| {
+                *built_from.borrow_mut() = first.first().cloned();
+                Ok(vec![event("prepared")])
+            },
+        )
+        .unwrap()
+    else {
+        panic!("pair at exact frontiers commits");
+    };
+    let built_from = built_from.into_inner().expect("builder ran");
+    assert_eq!(first.len(), 1);
+    assert_eq!(second.len(), 1);
+    assert_eq!(built_from.event_hash, first[0].event_hash);
+    assert_eq!(first[0].chain_root_id, "S-dst");
+    assert_eq!(second[0].chain_root_id, "S-src");
+    assert_eq!(tip_seq(&store, "S-dst"), dst_base + 1);
+    assert_eq!(tip_seq(&store, "S-src"), src_base + 1);
+    assert!(lease_active(&store, "S-dst"));
+    assert!(lease_active(&store, "S-src"));
+}
+
+#[test]
+fn seat_pair_refuses_without_writing_on_every_unadmitted_shape() {
+    let store = new_store();
+    running_seat(&store, "S-dst");
+    running_seat(&store, "S-src");
+    let dst = anchor(&store, "S-dst");
+    let src = anchor(&store, "S-src");
+    let both = [dst.clone(), src.clone()];
+    let cut = SeatCut {
+        expected: &dst,
+        anchors: &both,
+        retired: &[],
+    };
+    let (dst_base, src_base) = (tip_seq(&store, "S-dst"), tip_seq(&store, "S-src"));
+    let first_events = [event("inbound")];
+    let run = |first: ExactSeat<'_>,
+               second: ExactSeat<'_>,
+               admitted: bool,
+               entered: &std::cell::Cell<bool>| {
+        store
+            .append_seat_pair_if_mixed_cut(
+                &SeatPairAppend {
+                    first: &first,
+                    second: &second,
+                    second_anchor: &src,
+                    first_events: &first_events,
+                    cut: &cut,
+                },
+                |_| {
+                    entered.set(true);
+                    Ok(admitted)
+                },
+                |_| unreachable!("the second batch is never built without a first commit"),
+            )
+            .unwrap()
+    };
+    let entered = std::cell::Cell::new(false);
+    // A foreign owner on either seat is not the running seat.
+    let foreign = |id| ExactSeat {
+        owner: "fp:other",
+        ..seat(id)
+    };
+    assert!(matches!(
+        run(foreign("S-dst"), seat("S-src"), true, &entered),
+        CutPairAppendResult::NotRunning
+    ));
+    assert!(matches!(
+        run(seat("S-dst"), foreign("S-src"), true, &entered),
+        CutPairAppendResult::NotRunning
+    ));
+    assert!(!entered.get());
+    // A refusing hook is a conflict.
+    assert!(matches!(
+        run(seat("S-dst"), seat("S-src"), false, &entered),
+        CutPairAppendResult::Conflict
+    ));
+    assert!(entered.get());
+    // A claimed lease on either seat is refused under the locks.
+    assert!(
+        store
+            .touch_seat_lease_if_anchors(&seat("S-src"), &src, std::slice::from_ref(&src))
+            .unwrap()
+    );
+    assert!(store.claim_expired_seat_lease("S-src", i64::MAX).unwrap());
+    entered.set(false);
+    assert!(matches!(
+        run(seat("S-dst"), seat("S-src"), true, &entered),
+        CutPairAppendResult::NotRunning
+    ));
+    assert!(!entered.get());
+    // A moved counterpart is a stale cut.
+    push(&store, "S-src", "moved");
+    assert!(matches!(
+        run(seat("S-dst"), seat("S-src"), true, &entered),
+        CutPairAppendResult::Conflict
+    ));
+    assert_eq!(tip_seq(&store, "S-dst"), dst_base);
+    assert_eq!(tip_seq(&store, "S-src"), src_base + 1);
+    // Malformed requests are refused outright.
+    assert!(
+        store
+            .append_seat_pair_if_mixed_cut(
+                &SeatPairAppend {
+                    first: &seat("S-dst"),
+                    second: &seat("S-dst"),
+                    second_anchor: &dst,
+                    first_events: &first_events,
+                    cut: &cut,
+                },
+                |_| Ok(true),
+                |_| unreachable!(),
+            )
+            .is_err()
+    );
+}
+
+#[test]
+fn seat_pair_reports_a_failed_second_batch_as_first_committed() {
+    let store = new_store();
+    running_seat(&store, "S-dst");
+    running_seat(&store, "S-src");
+    let dst = anchor(&store, "S-dst");
+    let src = anchor(&store, "S-src");
+    let both = [dst.clone(), src.clone()];
+    let cut = SeatCut {
+        expected: &dst,
+        anchors: &both,
+        retired: &[],
+    };
+    let (dst_base, src_base) = (tip_seq(&store, "S-dst"), tip_seq(&store, "S-src"));
+    let first_events = [event("inbound")];
+    let result = store
+        .append_seat_pair_if_mixed_cut(
+            &SeatPairAppend {
+                first: &seat("S-dst"),
+                second: &seat("S-src"),
+                second_anchor: &src,
+                first_events: &first_events,
+                cut: &cut,
+            },
+            |_| Ok(true),
+            |_| bail!("second batch could not be built"),
+        )
+        .unwrap();
+    let CutPairAppendResult::FirstCommittedSecondUncertain { first, .. } = result else {
+        panic!("a failed second batch is partial, not refused");
+    };
+    assert_eq!(first.len(), 1);
+    assert_eq!(tip_seq(&store, "S-dst"), dst_base + 1);
+    assert_eq!(tip_seq(&store, "S-src"), src_base);
+    assert!(!lease_active(&store, "S-src"));
+}

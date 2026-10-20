@@ -298,7 +298,7 @@ fn build_dimension_projection(
         generated_at: lillux::time::iso8601_now(),
         session: SessionInfo {
             session_id: session.session_id.clone(),
-            surface_ref: attachment.surface_ref.clone(),
+            surface_ref: attachment.root_ref.clone(),
             user_principal_id: session.user_principal_id.clone(),
             binding_digest: attachment.compiled_binding.binding_digest.clone(),
             posture: attachment.compiled_binding.posture,

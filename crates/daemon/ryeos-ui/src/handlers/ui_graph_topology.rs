@@ -323,7 +323,7 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
         });
     let root_surface = match &caller {
         crate::seat_auth::SeatCaller::Attachment(attachment) => {
-            Some(attachment.surface_ref.clone())
+            Some(attachment.root_ref.clone())
         }
         crate::seat_auth::SeatCaller::Operator { .. } => params
             .get("surface_ref")

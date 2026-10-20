@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-19T22:29:39Z:9a83a610f7379e23fa010a921d54af75eafea447ce09f0b38ef9cd03b5285296:Mre/AcSkuppyM7yHNGTurU57PFADFPpvf9PpbwBRI9XPNR4nLmkvq2jXhpkKDkqwVshvaRbhdm2N6913+joqCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-20T09:54:47Z:4d60efda7200f0e056d360ceff415977fd8600b3b78dfb93d3f3701c199576af:fBsnUIIQdccjyMrZYvwkyb19Sxr7fAwziMbw0r+ofP/2MedkOytfQDSBT1mrY3zmxtihmGFFOhIMuWhY91cmCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Core profile: the substrate alone.
 schema: 1
 exact_bundles:
@@ -361,7 +361,7 @@ policies:
     schema: 2
     names: []
   ui_browser_sessions:
-    schema: 3
+    schema: 4
     max_session_bootstrap_bytes: 4194304
     max_live_binding_attachments_per_session: 16
     max_presentations_per_session: 16
@@ -372,3 +372,7 @@ policies:
       max_initial_surfaces: 16
       max_label_bytes: 128
       max_mount_id_bytes: 64
+    seat:
+      kind: seat_session
+      max_replay_frame_events: 64
+      max_replay_frame_bytes: 4194304
