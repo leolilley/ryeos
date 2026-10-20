@@ -125,6 +125,19 @@ jobs:
       - name: Check workspace dependency direction
         run: python3 .ai/tools/ryeos/development/repository-validation/dependency-layers.py --project-path "$PWD" --config-file .ai/config/development/ryeos/repository-validation.yaml
 
+      - name: Use the browser adapter's pinned Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: crates/clients/web/package.json
+          cache: npm
+          cache-dependency-path: crates/clients/web/package-lock.json
+
+      - name: Install browser adapter test dependencies
+        working-directory: crates/clients/web
+        run: |
+          npm install --global "npm@$(node -p "require('./package.json').engines.npm")"
+          npm ci
+
       - name: Check browser key adapter
         working-directory: crates/clients/web
         run: npm test
