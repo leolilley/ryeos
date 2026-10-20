@@ -310,8 +310,12 @@ mod tests {
                     attenuated: Vec::new(),
                 },
             }),
-            effective_surface: serde_json::json!({}),
-            surface_ref: "surface:ryeos/ui/base-observe".into(),
+            presentation:
+                ryeos_client_base::presentation::UiCompositionPresentation::from_effective_surface(
+                    serde_json::json!({"name": "test-surface"}),
+                )
+                .expect("fixture presentation"),
+            root_ref: "surface:ryeos/ui/base-observe".into(),
             project_query_identity: None,
             project_authority: None,
         })

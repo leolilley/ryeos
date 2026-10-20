@@ -361,7 +361,7 @@ pub async fn handle_open(
         .into());
     }
     let owner = seat_owner(&session);
-    let surface_ref = attachment.surface_ref.clone();
+    let surface_ref = attachment.root_ref.clone();
     let client_ref = format!(
         "client:ryeos/ui-session/{}/{}:{}",
         attachment.binding_attachment_id,

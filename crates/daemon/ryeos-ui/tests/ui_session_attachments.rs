@@ -60,7 +60,7 @@ fn secondary_attachment(
             BindingAttachmentCandidate {
                 registered_project_id: None,
                 compiled_binding: candidate.compiled_binding,
-                effective_surface: candidate.effective_surface,
+                presentation: candidate.presentation,
                 project_authority: None,
             },
             16,

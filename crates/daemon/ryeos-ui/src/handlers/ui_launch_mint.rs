@@ -132,7 +132,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         }
     };
 
-    let (compiled_binding, effective_surface) =
+    let (compiled_binding, presentation) =
         compile_session_binding(&req, &ctx, &state, project_authority.as_deref())?;
     let _project_registry_gate = match (
         registered_project_id.as_deref(),
@@ -157,7 +157,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     };
     let launch_ctx = LaunchContext {
         compiled_binding: std::sync::Arc::new(compiled_binding),
-        effective_surface,
+        presentation,
         granted_caps: ctx.scopes.clone(),
         user_principal_id,
         project_authority,
@@ -185,7 +185,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         token,
         launch_url,
         session_id,
-        attachment: attachment.public_descriptor(binding_request_bounds(&state)?)?,
+        attachment: attachment.public_descriptor(binding_request_bounds(&state)?),
     };
 
     serde_json::to_value(response).map_err(Into::into)
@@ -196,7 +196,10 @@ pub(crate) fn compile_session_binding(
     ctx: &HandlerContext,
     state: &AppState,
     project_authority: Option<&lillux::PinnedDirectory>,
-) -> Result<(SessionCompiledUiBinding, Value)> {
+) -> Result<(
+    SessionCompiledUiBinding,
+    ryeos_client_base::presentation::UiCompositionPresentation,
+)> {
     use ryeos_engine::canonical_ref::CanonicalRef;
     use ryeos_engine::contracts::SubjectResolutionAuthority;
     use ryeos_engine::engine::EffectiveItemRequest;
@@ -265,7 +268,10 @@ pub(crate) fn compile_session_binding(
                 &surface.composed_value,
                 |target_ref| compile_target(generation, &prepared, target_ref),
             )?;
-            let presentation = binding.sanitize_effective_surface(&surface.composed_value)?;
+            let presentation =
+                ryeos_client_base::presentation::UiCompositionPresentation::from_effective_surface(
+                    binding.sanitize_effective_surface(&surface.composed_value)?,
+                )?;
             Ok((binding, presentation))
         })
 }

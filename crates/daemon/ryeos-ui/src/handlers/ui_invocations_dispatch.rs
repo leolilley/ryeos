@@ -1091,7 +1091,10 @@ mod tests {
             user_principal_id,
             root_attachment_id: "attachment-1".to_string(),
             attachments: Default::default(),
+            pending_transfer_attachments: Default::default(),
+            presentations: Default::default(),
             next_attachment_generation: 1,
+            next_surface_ordinal: 1,
         }
     }
 

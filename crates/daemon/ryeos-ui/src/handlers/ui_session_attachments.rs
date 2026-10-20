@@ -66,7 +66,7 @@ pub async fn handle_detach(
         .attachment_for_detach(&session_id, &coordinate)
     {
         Ok(attachment) => attachment,
-        Err(AttachmentStoreError::SurfaceAttachmentImmutable) => {
+        Err(AttachmentStoreError::RootAttachmentImmutable) => {
             return Err(HandlerError::Structured {
                 code: "surface_attachment_immutable".into(),
                 status: 409,

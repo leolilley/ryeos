@@ -368,11 +368,11 @@ pub async fn handle_projects_open(
     );
     let compile_request = super::ui_launch_mint::Request {
         ui_binding_contract_revision: crate::UI_BINDING_CONTRACT_REVISION.to_owned(),
-        surface_ref: origin.surface_ref.clone(),
+        surface_ref: origin.root_ref.clone(),
         project_path: Some(root.clone()),
         user_principal_id: None,
     };
-    let (compiled_binding, effective_surface) = super::ui_launch_mint::compile_session_binding(
+    let (compiled_binding, presentation) = super::ui_launch_mint::compile_session_binding(
         &compile_request,
         &compile_context,
         &state,
@@ -404,13 +404,13 @@ pub async fn handle_projects_open(
         crate::browser_session::BindingAttachmentCandidate {
             registered_project_id: Some(project.local_id.clone()),
             compiled_binding: Arc::new(compiled_binding),
-            effective_surface,
+            presentation,
             project_authority: Some(project_authority),
         },
         usize::try_from(policy.max_live_binding_attachments_per_session)?,
         state.node_policy.generation_digest(),
     )?;
-    let descriptor = attachment.public_descriptor(request_bounds)?;
+    let descriptor = attachment.public_descriptor(request_bounds);
     // Recent history is presentation metadata, not attachment authority. Once
     // publication succeeds, a recent-file failure must not turn the admitted
     // attachment into an unreturned/stranded capability.
@@ -530,11 +530,11 @@ pub async fn handle_particular_view_set_resume(
         );
         let compile_request = super::ui_launch_mint::Request {
             ui_binding_contract_revision: crate::UI_BINDING_CONTRACT_REVISION.to_owned(),
-            surface_ref: origin.surface_ref.clone(),
+            surface_ref: origin.root_ref.clone(),
             project_path: Some(root),
             user_principal_id: None,
         };
-        let (compiled_binding, effective_surface) = super::ui_launch_mint::compile_session_binding(
+        let (compiled_binding, presentation) = super::ui_launch_mint::compile_session_binding(
             &compile_request,
             &compile_context,
             &state,
@@ -573,13 +573,13 @@ pub async fn handle_particular_view_set_resume(
             crate::browser_session::BindingAttachmentCandidate {
                 registered_project_id: Some(project.local_id.clone()),
                 compiled_binding: Arc::new(compiled_binding),
-                effective_surface,
+                presentation,
                 project_authority: Some(project_authority),
             },
             usize::try_from(policy.max_live_binding_attachments_per_session)?,
             state.node_policy.generation_digest(),
         )?;
-        let descriptor = retained.public_descriptor(request_bounds)?;
+        let descriptor = retained.public_descriptor(request_bounds);
         let insertion = descriptor.binding_attachment_id.clone();
         (Some(descriptor), insertion)
     } else {

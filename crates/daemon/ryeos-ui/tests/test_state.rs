@@ -53,7 +53,11 @@ pub fn launch_context(
                 attenuated: Vec::new(),
             },
         }),
-        effective_surface: serde_json::json!({"name": "test-surface"}),
+        presentation:
+            ryeos_client_base::presentation::UiCompositionPresentation::from_effective_surface(
+                serde_json::json!({"name": "test-surface"}),
+            )
+            .expect("fixture presentation"),
         granted_caps: vec!["ui.read".into()],
         user_principal_id,
         project_authority: project_root.map(|project_root| {
@@ -353,7 +357,7 @@ fn build_app_state(
                 ),
                 Arc::new(
                     ryeos_node_runtime::node_policy::sections::ui_browser_sessions::UiBrowserSessionPolicy {
-                        schema: 3,
+                        schema: 4,
                         max_session_bootstrap_bytes: 4194304,
                         max_live_binding_attachments_per_session: 16,
                         max_presentations_per_session: 16,
@@ -364,6 +368,11 @@ fn build_app_state(
                             max_initial_surfaces: 16,
                             max_label_bytes: 128,
                             max_mount_id_bytes: 64,
+                        },
+                        seat: ryeos_node_runtime::node_policy::sections::ui_browser_sessions::SeatPolicy {
+                            kind: "seat_session".to_owned(),
+                            max_replay_frame_events: 64,
+                            max_replay_frame_bytes: 4194304,
                         },
                     },
                 ),
