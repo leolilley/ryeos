@@ -2596,7 +2596,6 @@ fn invoke_operation(
     .unwrap()
 }
 
-#[allow(clippy::too_many_arguments)]
 fn try_invoke_operation(
     adapter: &lillux::InheritedDescriptorAuthority,
     supervisor: &lillux::InheritedDescriptorAuthority,
