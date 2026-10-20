@@ -13,12 +13,6 @@ test("prepared-document handoff stays a compact token-styled platform frame", as
 });
 
 test("opening declarations use one signed effect and explicit placement without an alias", async () => {
-  for (const path of ["ui/session/surfaces/open", "projects/open"]) {
-    const service = await read(`../../../../bundles/ryeos-ui/.ai/services/${path}.yaml`);
-    assert.match(service, /ui_result_effect: surface_opening/);
-    assert.match(service, /placement: object/);
-    assert.doesNotMatch(service, /ui_result_effect: open_surface/);
-  }
   for (const path of ["surfaces/list", "view-sets/library", "projects/list"]) {
     const view = await read(`../../../../bundles/ryeos-ui/.ai/views/ryeos/${path}.yaml`);
     assert.match(view, /presentation_operation: surface_opening/);

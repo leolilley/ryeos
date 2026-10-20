@@ -26192,12 +26192,7 @@ mod tests {
     #[test]
     fn selected_fences_all_phases_and_refusal_before_claim_release_rotation_and_sweep() {
         use crate::selected_invocation_bookkeeping::SelectedFixturePhase::*;
-        for phase in [
-            Pending,
-            Occupied,
-            Borrowed,
-            RestoredAwaitingBorrowAck,
-        ] {
+        for phase in [Pending, Occupied, Borrowed, RestoredAwaitingBorrowAck] {
             for refused in [false, true] {
                 let (store, claim) = selected_fence_fixture(phase, refused);
                 assert!(

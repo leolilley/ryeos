@@ -3849,20 +3849,13 @@ pub async fn dispatch_verified(
     if request.lifecycle_authority.ownership
         == ryeos_state::objects::ExecutionOwnershipAuthority::DaemonOwned
     {
-        return dispatch_daemon_owned_inner(
-            item_ref,
-            Some(verified),
-            None,
-            request,
-            ctx,
-            state,
-        )
-        .await
-        .map_err(|error| {
-            DispatchError::Internal(anyhow::anyhow!(
-                "daemon-owned verified dispatch task ended before settlement: {error}"
-            ))
-        })?;
+        return dispatch_daemon_owned_inner(item_ref, Some(verified), None, request, ctx, state)
+            .await
+            .map_err(|error| {
+                DispatchError::Internal(anyhow::anyhow!(
+                    "daemon-owned verified dispatch task ended before settlement: {error}"
+                ))
+            })?;
     }
     Box::pin(dispatch_inner(
         item_ref,
@@ -3935,20 +3928,13 @@ pub async fn dispatch_with_application_publication(
         && request.lifecycle_authority.ownership
             == ryeos_state::objects::ExecutionOwnershipAuthority::DaemonOwned
     {
-        return dispatch_daemon_owned_inner(
-            item_ref,
-            None,
-            handler_context,
-            request,
-            ctx,
-            state,
-        )
-        .await
-        .map_err(|error| {
-            DispatchError::Internal(anyhow::anyhow!(
-                "daemon-owned publication dispatch ended before settlement: {error}"
-            ))
-        })?;
+        return dispatch_daemon_owned_inner(item_ref, None, handler_context, request, ctx, state)
+            .await
+            .map_err(|error| {
+                DispatchError::Internal(anyhow::anyhow!(
+                    "daemon-owned publication dispatch ended before settlement: {error}"
+                ))
+            })?;
     }
     let result = Box::pin(dispatch_inner(
         item_ref,
