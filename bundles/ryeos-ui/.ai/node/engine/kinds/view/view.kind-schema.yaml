@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-19T22:29:40Z:67dd0b0b4810b727a4bad6c870d96a1e930e0c563feb82b20ef1a257b454f409:URCLWANfavXrItn8hnnJFU9e1NbuoRVx0Vj/UATS0ll1pxalEIK3rOKC5crZ/O+a83CEYCWc4EZbU3SIg79SCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-20T19:22:30Z:532c9373fa0168f7623bd7f1cb15a10572308e344c545b98f43f78b0f7963b3c:iT4cUl94E9uK8MwClV37vNcP6Vdu8aAoJ2U0K3lY1mSIWstBcVRQzG2D60lQ/mOnst5VsydHXJVD4Z2KHrirDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/view"
 version: "1.0.0"
 location:
@@ -41,7 +41,7 @@ composer_config:
     # atomic instead of inheriting partial sections by position or title.
     - name: sections
       strategy: replace_root_last
-      expect_value_type: array
+      expect_value_type: sequence
     - name: body
       strategy: replace_root_last
     - name: presentation
@@ -53,7 +53,7 @@ composer_config:
     - name: affordances
       strategy: keyed_seq_merge_root_last
       key: id
-      expect_value_type: array
+      expect_value_type: sequence
     - name: refresh
       strategy: dict_merge_root_last
       expect_value_type: mapping

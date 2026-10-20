@@ -231,9 +231,7 @@ impl RyeOsCore {
     }
 
     /// The surface's declared library groups, filtered to lensable refs.
-    /// Grouped entries — `{ group, views: [ref…] }` — are the canonical
-    /// shape; a bare `view:` ref string (the legacy flat form) is shelved
-    /// under its path-derived group in declared order. One key serving
+    /// Every entry is a `{ group, views: [ref…] }` mapping. One key serving
     /// two consumers: `lens_library` cycles the flattened declared
     /// order, `library_groups` hands the launcher the tree.
     fn library_groups_declared(&self) -> Vec<LibraryGroup> {
@@ -256,16 +254,6 @@ impl RyeOsCore {
             None => groups.push(LibraryGroup { title, refs }),
         };
         for entry in &entries {
-            if let Some(view_ref) = entry.as_str() {
-                if self.lensable(view_ref) {
-                    add(
-                        &mut groups,
-                        derived_group_title(view_ref),
-                        vec![view_ref.to_string()],
-                    );
-                }
-                continue;
-            }
             let Some(title) = entry
                 .get("group")
                 .and_then(|value| value.as_str())
