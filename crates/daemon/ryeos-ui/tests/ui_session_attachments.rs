@@ -143,3 +143,55 @@ async fn detach_is_session_exact_fences_dispatch_and_replays() {
     .expect("lost-response replay");
     assert_eq!(replay["detached"], false);
 }
+
+#[tokio::test]
+async fn surface_open_requires_existing_presentation_producer_and_rejects_browser_project_authority()
+ {
+    let (_tmp, _state_owner, state) = build_test_state();
+    let (id, ctx) = activate(&state, context("surface:ryeos/ui/base"));
+    let session = get_ui_state(&state)
+        .unwrap()
+        .browser_sessions
+        .get_session(&id)
+        .unwrap();
+    let params = serde_json::json!({
+        "creation_request_id": "00000000-0000-4000-8000-000000000002",
+        "selection": {"kind":"authored", "surface_ref": "surface:ryeos/ui/base"},
+    });
+    let descriptor = &ryeos_ui::handlers::ui_session_attachments::OPEN_SURFACE_DESCRIPTOR;
+    (descriptor.handler)(params.clone(), ctx.clone(), Arc::new(state.clone()))
+        .await
+        .expect_err("a cookie and root attachment do not create presentation producer authority");
+    let mut predecessor = params.clone();
+    predecessor["root_binding"] =
+        serde_json::to_value(session.attachments[&session.root_attachment_id].coordinate())
+            .unwrap();
+    predecessor["producer"] = serde_json::json!({
+        "presentation_id":"00000000-0000-4000-8000-000000000001",
+        "thread_id":"T-not-a-seat", "producer_incarnation":"11".repeat(32)
+    });
+    let error = (descriptor.handler)(predecessor, ctx.clone(), Arc::new(state.clone()))
+        .await
+        .expect_err("predecessor browser-selected root/producer grammar is rejected");
+    assert!(format!("{error:#}").contains("unknown field"));
+    let mut project_params = params.clone();
+    project_params["project_path"] = serde_json::json!("/another-project");
+    let error = (descriptor.handler)(project_params, ctx, Arc::new(state.clone()))
+        .await
+        .expect_err("Surface open never accepts a browser-selected project path");
+    assert!(format!("{error:#}").contains("unknown field"));
+    (descriptor.handler)(
+        params,
+        HandlerContext::new("fp:operator".into(), vec!["*".into()], true),
+        Arc::new(state.clone()),
+    )
+    .await
+    .expect_err("operator scope is not a browser presentation association");
+    let after = get_ui_state(&state)
+        .unwrap()
+        .browser_sessions
+        .get_session(&id)
+        .unwrap();
+    assert_eq!(after.attachments.len(), 1);
+    assert!(after.presentations.is_empty());
+}

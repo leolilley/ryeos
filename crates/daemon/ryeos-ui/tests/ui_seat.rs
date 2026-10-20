@@ -2353,3 +2353,271 @@ async fn a_prepared_pair_is_read_through_its_cut_by_every_seat_service() {
     );
     assert_eq!(kinds.last(), Some(&"ui_seat.replay.complete.v1"));
 }
+
+#[tokio::test]
+async fn retained_surface_close_repairs_a_lost_projection_without_revoking_root_or_seat() {
+    use ryeos_ui::handlers::ui_seat::{APPEND_DESCRIPTOR, OPEN_DESCRIPTOR, TOUCH_DESCRIPTOR};
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+    let (session_id, context, original, coordinate) =
+        test_state::live_presentation_with_surface(&state, "surface:ryeos/ui/assistant-observe")
+            .await;
+    let state = Arc::new(state);
+    let ui = get_ui_state(&state).unwrap();
+    let before = ui.browser_sessions.get_session(&session_id).unwrap();
+    let membership = &before.presentations[&original.presentation_id];
+    let surface = membership.public_descriptor().surfaces[0].clone();
+    let original_claim = json!({"presentation_id":original.presentation_id,"chain_root_id":membership.chain_root_id.clone().unwrap(),"thread_id":original.thread_id,
+        "producer_incarnation":original.producer_incarnation});
+    let rotated = claim(
+        &state,
+        &session_id,
+        &original_claim,
+        &uuid::Uuid::new_v4().to_string(),
+        json!({"kind":"takeover","expected_producer_incarnation":original.producer_incarnation}),
+    )
+    .await
+    .unwrap();
+    let closure = json!({"presentation_id":original.presentation_id,
+        "surface_instance_id":surface.surface_instance_id,"binding":surface.binding});
+    let mut stale = append_request(
+        &original_claim,
+        &uuid::Uuid::new_v4().to_string(),
+        0,
+        std::slice::from_ref(&closure),
+    );
+    stale["events"][0]["event_type"] = json!(ryeos_client_base::ui::seat::SURFACE_CLOSED_EVENT);
+    identify_append(&original_claim, &mut stale);
+    route(&state, &session_id, &APPEND_DESCRIPTOR, stale)
+        .await
+        .expect_err("replaced writer cannot close a Surface");
+    assert_eq!(
+        ui.browser_sessions
+            .get_session(&session_id)
+            .unwrap()
+            .presentations[&original.presentation_id]
+            .public_descriptor()
+            .surfaces
+            .len(),
+        1
+    );
+
+    // Model the precise crash gap: the complete atomic producer batch committed,
+    // but the transient membership projection and response were not updated.
+    let detail = state
+        .state_store
+        .get_thread(&original.thread_id)
+        .unwrap()
+        .unwrap();
+    let event_type = ryeos_client_base::ui::seat::SURFACE_CLOSED_EVENT;
+    let semantic = json!([{"engine_seq":0,"event_type":event_type,"payload":closure.clone()}]);
+    let payload_digest = ryeos_client_base::ui::seat_payload_digest(&semantic).unwrap();
+    let operation_id = ryeos_client_base::ui::admission_operation::UiSeatAppendIdentity {
+        presentation_id: original.presentation_id.clone(),
+        chain_root_id: detail.chain_root_id.clone(),
+        thread_id: detail.thread_id.clone(),
+        producer_incarnation: rotated["producer_incarnation"].as_str().unwrap().into(),
+        first_engine_seq: 0,
+        last_engine_seq: 0,
+        event_count: 1,
+        payload_digest: payload_digest.clone(),
+    }
+    .derive_identity()
+    .unwrap();
+    state.threads.append_thread_events(&detail.chain_root_id,&detail.thread_id,&[
+        ryeos_app::state_store::NewEventRecord {
+            event_type:event_type.into(),
+            storage_class:"indexed".into(),payload:json!({"seq":0,"operation_id":surface.surface_instance_id,"payload":closure}),
+        },
+        ryeos_app::state_store::NewEventRecord {
+            event_type:"ui_seat.append_receipt.v2".into(),
+            storage_class:"indexed".into(),
+            payload:json!({"schema_version":"ryeos.ui.seat.append-receipt.v2",
+                "producer_incarnation":rotated["producer_incarnation"],
+                "operation_id":operation_id,"first_engine_seq":0,"last_engine_seq":0,
+                "event_count":1,"payload_digest":payload_digest}),
+        },
+    ]).unwrap().expect("running seat persists close evidence");
+    assert_eq!(
+        ui.browser_sessions
+            .get_session(&session_id)
+            .unwrap()
+            .presentations[&original.presentation_id]
+            .public_descriptor()
+            .surfaces
+            .len(),
+        1
+    );
+    let current =
+        ryeos_ui::handlers::ui_session_current::handle(json!({}), context.clone(), state.clone())
+            .await
+            .unwrap();
+    let after = ui.browser_sessions.get_session(&session_id).unwrap();
+    assert!(
+        after.presentations[&original.presentation_id]
+            .public_descriptor()
+            .surfaces
+            .is_empty()
+    );
+    assert_eq!(
+        after.attachments.len(),
+        before.attachments.len(),
+        "history remains retained"
+    );
+    assert!(
+        ui.browser_sessions
+            .require_presentation_attachment(
+                &session_id,
+                &original.presentation_id,
+                &coordinate,
+                state.node_policy.generation_digest()
+            )
+            .is_err()
+    );
+    assert!(
+        ui.browser_sessions
+            .require_presentation_attachment(
+                &session_id,
+                &original.presentation_id,
+                &membership.root_coordinate,
+                state.node_policy.generation_digest()
+            )
+            .is_ok()
+    );
+    assert_eq!(
+        state
+            .state_store
+            .get_thread(&original.thread_id)
+            .unwrap()
+            .unwrap()
+            .status,
+        "running"
+    );
+    let attachments = current["binding_attachments"].as_array().unwrap();
+    assert!(
+        !attachments
+            .iter()
+            .any(|item| item["binding_attachment_id"] == coordinate.binding_attachment_id)
+    );
+    assert!(
+        attachments.iter().any(|item| item["binding_attachment_id"]
+            == membership.root_coordinate.binding_attachment_id)
+    );
+    // Repair is read-only with respect to producer control: the current writer
+    // can still touch its presentation, and a repeated bootstrap is stable.
+    route(
+        &state,
+        &session_id,
+        &TOUCH_DESCRIPTOR,
+        json!({"presentation_id":rotated["presentation_id"],
+        "thread_id":rotated["thread_id"],"producer_incarnation":rotated["producer_incarnation"]}),
+    )
+    .await
+    .unwrap();
+    let observe = route(&state,&session_id,&OPEN_DESCRIPTOR,json!({"action":"observe",
+        "presentation_id":rotated["presentation_id"],"thread_id":rotated["thread_id"],"chain_root_id":rotated["chain_root_id"]})).await.unwrap();
+    assert_eq!(
+        observe["producer"]["producer_incarnation"],
+        rotated["producer_incarnation"]
+    );
+    assert_eq!(
+        ryeos_ui::handlers::ui_session_current::handle(json!({}), context, state)
+            .await
+            .unwrap()["binding_attachments"],
+        current["binding_attachments"]
+    );
+}
+
+#[tokio::test]
+async fn an_executable_admission_the_signed_binding_does_not_declare_is_refused_by_the_validator() {
+    use ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR;
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+    let session = activate(&state);
+    let state = Arc::new(state);
+    let opened = fresh(&state, &session).await;
+    let thread = opened["thread_id"].as_str().unwrap();
+    let root = opened["chain_root_id"].as_str().unwrap();
+    let held = get_ui_state(&state)
+        .unwrap()
+        .browser_sessions
+        .get_session(&session)
+        .unwrap();
+    let coordinate = held.attachments[&held.root_attachment_id].coordinate();
+    let body_limit = |service_ref: &str| {
+        state
+            .node_config
+            .routes
+            .iter()
+            .find(|route| route.response.source.as_deref() == Some(service_ref))
+            .map(|route| route.limits.body_bytes_max)
+            .unwrap()
+    };
+    let operation_id = "00000000-0000-4000-8000-000000000071";
+    let presentation = opened["presentation_id"].as_str().unwrap();
+    let mut prepared: ryeos_client_base::ui::admission_operation::UiPreparedPresentationOperation =
+        serde_json::from_value(json!({
+            "schema": 2, "prepared_engine_seq": 0, "operation_id": operation_id,
+            "producer": {
+                "presentation_id": presentation, "thread_id": thread,
+                "producer_incarnation": opened["producer_incarnation"],
+            },
+            "root_binding": coordinate,
+            "request_bounds": {
+                "max_request_bytes": body_limit(
+                    ryeos_ui::handlers::ui_invocations_dispatch::DESCRIPTOR.service_ref),
+                "max_input_bytes": body_limit(
+                    ryeos_ui::handlers::ui_invocations_dispatch::DESCRIPTOR.service_ref),
+                "max_seat_append_bytes": body_limit(APPEND_DESCRIPTOR.service_ref),
+            },
+            "body": {
+                "kind": "admission", "purpose": "resume_particular_view_set",
+                "surface_open_target": null,
+                "particular_selection": {
+                    "kind": "view_set", "id": "current", "expected_revision": 0,
+                    "surface_ref": "surface:ryeos/ui/base",
+                },
+                "invocation_origin": format!("seat:{presentation}:dock:left"),
+                "request": {
+                    "binding_attachment_id": coordinate.binding_attachment_id,
+                    "binding_generation": coordinate.binding_generation,
+                    "binding_digest": coordinate.binding_digest,
+                    "coordinate": {
+                        "kind": "affordance", "view_ref": "view:test/undeclared",
+                        "affordance_id": "open",
+                    },
+                    "payload": {"kind": "selection",
+                        "record": {"creation_request_id": operation_id}},
+                },
+                "success_notice": null,
+            },
+        }))
+        .unwrap();
+    prepared.assign_identity().unwrap();
+    let before = state
+        .state_store
+        .capture_thread_event_read_anchor(root, thread)
+        .unwrap()
+        .unwrap();
+    let mut request = append_request(&opened, "", 0, &[serde_json::to_value(&prepared).unwrap()]);
+    request["events"][0]["event_type"] = json!("seat.presentation_operation.prepared");
+    identify_append(&opened, &mut request);
+    let error = route(&state, &session, &APPEND_DESCRIPTOR, request)
+        .await
+        .expect_err("a preparation the signed binding does not declare must be refused");
+    let message = format!("{error:#}");
+    // The validator refuses with Forbidden, which the service dispatch maps
+    // to a capability denial; the retired stopgap refused with a bad request.
+    assert!(
+        message.contains("service_cap_denied"),
+        "the signed-binding validator must refuse: {message}"
+    );
+    assert_eq!(
+        state
+            .state_store
+            .capture_thread_event_read_anchor(root, thread)
+            .unwrap()
+            .unwrap()
+            .tip(),
+        before.tip(),
+        "the refused preparation must not advance the signed seat: {message}"
+    );
+}

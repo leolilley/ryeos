@@ -17,7 +17,9 @@ use ryeos_app::handler_context::HandlerContext;
 use ryeos_app::handler_error::HandlerError;
 use ryeos_app::service_registry::UiDispatchMode;
 use ryeos_app::state::AppState;
-use ryeos_client_base::ui::{UiBindingCoordinate, UiBindingPayload, UiBindingRequest};
+use ryeos_client_base::ui::{
+    UiBindingCoordinate, UiBindingPayload, UiBindingRequest, UiInvocationRequest,
+};
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_executor::executor::ServiceAvailability;
 
@@ -34,6 +36,108 @@ use crate::{seat_auth::SeatCaller, thread_authorization::authorize_exact_thread_
 struct BoundInvocation {
     target: CompiledUiTarget,
     params: Value,
+}
+
+pub(crate) fn validate_prepared_operation_binding(
+    attachment: &AdmittedBindingAttachment,
+    operation: &ryeos_client_base::ui::admission_operation::UiPreparedPresentationOperation,
+) -> Result<()> {
+    let admission = operation.admission().ok_or_else(|| {
+        HandlerError::BadRequest("composition operations are not executable invocations".into())
+    })?;
+    let marker = crate::seat_auth::attachment_project_query_identity(attachment)
+        .map_err(|error| HandlerError::Forbidden(error.to_string()))?
+        .map(|path| path.to_string_lossy().into_owned());
+    let bound = resolve_binding_request(attachment, &admission.request, marker.as_deref())?;
+    use ryeos_client_base::ui::admission_operation::UiPresentationOperationKind;
+    let purpose = match bound.target.result_effect {
+        Some(CompiledUiResultEffect::SurfaceOpening) => {
+            resolved_surface_open_request(&bound.params)?
+                .placement
+                .purpose()
+        }
+        Some(CompiledUiResultEffect::ResumeParticularViewSet) => {
+            UiPresentationOperationKind::ResumeParticularViewSet
+        }
+        Some(CompiledUiResultEffect::ResumeParticularSurface) => {
+            UiPresentationOperationKind::ResumeParticularSurface
+        }
+        None => {
+            return Err(HandlerError::BadRequest(
+                "ordinary binding cannot prepare a presentation admission".into(),
+            )
+            .into());
+        }
+    };
+    if purpose != admission.purpose
+        || bound
+            .params
+            .get("creation_request_id")
+            .and_then(Value::as_str)
+            != Some(operation.operation_id.as_str())
+    {
+        return Err(HandlerError::BadRequest(
+            "prepared presentation purpose or creation coordinate differs from signed binding"
+                .into(),
+        )
+        .into());
+    }
+    validate_surface_open_request(
+        purpose,
+        &bound.params,
+        admission.surface_open_target.as_ref(),
+    )?;
+    let resolved_particular = ryeos_client_base::ui::admission_operation::UiParticularAdmissionSelection::from_resolved_params(
+        purpose,
+        &bound.params,
+    )
+    .map_err(HandlerError::BadRequest)?;
+    if admission.particular_selection != resolved_particular {
+        return Err(HandlerError::BadRequest(
+            "retained particular selection differs from signed resolved input".into(),
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// Compare the retained selection with the signed template's resolved input,
+/// never with the caller's unresolved selection record.
+fn resolved_surface_open_request(
+    resolved_params: &Value,
+) -> Result<ryeos_client_base::surface::opening::SurfaceOpenRequest> {
+    ryeos_client_base::surface::opening::SurfaceOpenRequest::from_resolved_params(resolved_params)
+        .map_err(|error| HandlerError::BadRequest(error).into())
+}
+
+fn validate_surface_open_request(
+    purpose: ryeos_client_base::ui::admission_operation::UiPresentationOperationKind,
+    resolved_params: &Value,
+    request: Option<&ryeos_client_base::surface::opening::SurfaceOpenTarget>,
+) -> Result<()> {
+    use ryeos_client_base::ui::admission_operation::UiPresentationOperationKind;
+    if !matches!(
+        purpose,
+        UiPresentationOperationKind::OpenSurface
+            | UiPresentationOperationKind::ImportSurfaceTabs
+            | UiPresentationOperationKind::OpenPresentationDocument
+    ) {
+        if request.is_some() {
+            return Err(HandlerError::BadRequest(
+                "non-opening admission carries a Surface selection".into(),
+            )
+            .into());
+        }
+        return Ok(());
+    }
+    let resolved = resolved_surface_open_request(resolved_params)?;
+    if resolved.placement.purpose() != purpose || request != Some(&resolved.target()) {
+        return Err(HandlerError::BadRequest(
+            "retained Surface request differs from signed resolved input".into(),
+        )
+        .into());
+    }
+    Ok(())
 }
 
 /// Extract session_id from the handler context's fingerprint.
@@ -56,9 +160,13 @@ pub(crate) struct PreparedInvocation {
 }
 
 pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
-    let req: UiBindingRequest = serde_json::from_value(input.clone()).map_err(|e| {
+    let invocation: UiInvocationRequest = serde_json::from_value(input.clone()).map_err(|e| {
         HandlerError::BadRequest(format!("invalid ui.invocations.dispatch request: {e}"))
     })?;
+    enforce_request_bounds(&state, &invocation, &input)?;
+    let presentation_operation_id = invocation.presentation_operation_id;
+    let req = invocation.binding;
+    let producer = invocation.producer;
 
     // Require browser session.
     let session_id = session_id_from_context(&ctx).ok_or_else(|| {
@@ -78,7 +186,12 @@ pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> 
     };
     let attachment = ui
         .browser_sessions
-        .resolve_attachment(&session_id, &attachment_coordinate)
+        .require_presentation_attachment(
+            &session_id,
+            &producer.presentation_id,
+            &attachment_coordinate,
+            state.node_policy.generation_digest(),
+        )
         .map_err(|error| binding_stale(&error.to_string()))?;
     if attachment
         .compiled_binding
@@ -90,7 +203,6 @@ pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> 
             "the node policy generation changed after session mint",
         ));
     }
-    enforce_request_bounds(&state, &req, &input)?;
     authorize_route_context(&ctx, &state, &attachment, &req)?;
     let project_access =
         crate::seat_auth::attachment_project_access(&attachment).map_err(|_| {
@@ -176,70 +288,212 @@ pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> 
     );
 
     let source_safe = bound.target.source_safe;
-    let mut result = crate::seat_auth::with_compiled_ui_attachment(attachment.clone(), async {
-        if bound.target.source_safe {
-            execute_read_only_service(
-                &item_ref,
-                bound.params,
-                &state,
-                prepared,
-                verified,
-                trusted_handler_context,
-            )
-            .await
-        } else {
-            let _dispatch_admission = ui
-                .browser_sessions
-                .admit_attachment_dispatch(&session_id, &attachment_coordinate)
-                .map_err(|error| binding_stale(&error.to_string()))?;
-            execute_prepared_item_ref(
-                &item_ref,
-                bound.params,
-                &state,
-                prepared,
-                verified,
-                &invocation_ctx.scopes,
-                trusted_handler_context,
-            )
-            .await
+    let ingress =
+        super::ui_seat::read_completed_seat_ingress(state.clone(), &session, &producer).await?;
+    // The synchronous token issue is the admission boundary. Do not hold the
+    // process-local transition mutex across execution/await: admitted work
+    // keeps its ordinary execution owner if a later takeover replaces the UI.
+    let _dispatch_admission = {
+        let _transition = ui
+            .lock_seat_transition()
+            .map_err(|_| HandlerError::Internal("seat transition lock poisoned".into()))?;
+        let admitted = ingress.authorize(&state, &session, &producer)?;
+        match (
+            bound.target.result_effect,
+            presentation_operation_id.as_deref(),
+        ) {
+            (Some(_), Some(operation_id)) => {
+                let operation =
+                    ingress.require_prepared(&state, &session, &producer, operation_id, &req)?;
+                validate_prepared_operation_binding(&attachment, &operation)?;
+                if bound
+                    .params
+                    .get("creation_request_id")
+                    .and_then(Value::as_str)
+                    != Some(operation_id)
+                {
+                    return Err(HandlerError::Conflict(
+                        "resolved creation UUID differs from retained operation".into(),
+                    )
+                    .into());
+                }
+            }
+            (Some(_), None) => {
+                return Err(HandlerError::Forbidden(
+                    "presentation admission requires acknowledged retained preparation".into(),
+                )
+                .into());
+            }
+            (None, Some(_)) => {
+                return Err(HandlerError::BadRequest(
+                    "ordinary invocation cannot carry a presentation operation".into(),
+                )
+                .into());
+            }
+            (None, None) => {}
         }
-    })
+        state
+            .engine
+            .with_checked_bundle_generation(|generation| -> Result<_> {
+                if generation.request_engine_generation_identity()
+                    != attachment
+                        .compiled_binding
+                        .binding
+                        .request_engine_generation_identity
+                {
+                    return Err(binding_stale(
+                        "UI generation changed before dispatch admission",
+                    ));
+                }
+                state
+                    .state_store
+                    .with_exact_seat_action_if_mixed_cut(&admitted.seat(), &admitted.cut(), || {
+                        ui.browser_sessions
+                            .admit_presentation_dispatch(
+                                &session_id,
+                                &producer.presentation_id,
+                                &attachment_coordinate,
+                                state.node_policy.generation_digest(),
+                            )
+                            .map_err(|error| binding_stale(&error.to_string()))
+                    })?
+                    .ok_or_else(|| {
+                        HandlerError::Conflict(
+                            "seat action anchor changed before dispatch admission".into(),
+                        )
+                        .into()
+                    })
+            })?
+    };
+    let expected_opening =
+        if bound.target.result_effect == Some(CompiledUiResultEffect::SurfaceOpening) {
+            Some(resolved_surface_open_request(&bound.params)?)
+        } else {
+            None
+        };
+    let mut result = crate::seat_auth::with_compiled_ui_session(
+        &session,
+        attachment.clone(),
+        Some(producer.clone()),
+        async {
+            if bound.target.source_safe {
+                execute_read_only_service(
+                    &item_ref,
+                    bound.params,
+                    &state,
+                    prepared,
+                    verified,
+                    trusted_handler_context,
+                )
+                .await
+            } else {
+                execute_prepared_item_ref(
+                    &item_ref,
+                    bound.params,
+                    &state,
+                    prepared,
+                    verified,
+                    &invocation_ctx.scopes,
+                    trusted_handler_context,
+                )
+                .await
+            }
+        },
+    )
     .await?;
-    if source_safe {
-        ui.browser_sessions
-            .recheck_attachment_after_read(&session_id, &attachment_coordinate)
-            .map_err(|error| binding_stale(&error.to_string()))?;
-    }
-    retain_declared_result_effect(
-        &bound.target,
-        &attachment_coordinate.binding_attachment_id,
-        &mut result,
-    )?;
+    let mut publish = || -> Result<Value> {
+        if let Some(expected) = &expected_opening {
+            let actual = result
+                .get("ui_transition")
+                .and_then(|transition| transition.get("opening"))
+                .cloned()
+                .ok_or_else(|| {
+                    HandlerError::Internal(
+                        "Surface opening returned no exact request commitment".into(),
+                    )
+                })?;
+            let actual: ryeos_client_base::surface::opening::SurfaceOpenRequest =
+                serde_json::from_value(actual).map_err(|error| {
+                    HandlerError::Internal(format!(
+                        "Surface opening returned invalid request commitment: {error}"
+                    ))
+                })?;
+            if &actual != expected {
+                return Err(HandlerError::Internal(
+                    "Surface opening result differs from the signed resolved request".into(),
+                )
+                .into());
+            }
+        }
+        retain_declared_result_effect(&bound.target, &producer.presentation_id, &mut result)?;
 
-    ui.session_bus.publish(
-        &session_id,
-        "invocation.dispatched",
-        json!({
+        ui.session_bus.publish(
+            &session_id,
+            "invocation.dispatched",
+            json!({
+                "target": { "kind": "ref", "ref": item_ref },
+                "invocation_id": invocation_id,
+                "status": "executed",
+            }),
+        );
+
+        Ok(json!({
+            "status": "executed",
             "target": { "kind": "ref", "ref": item_ref },
             "invocation_id": invocation_id,
-            "status": "executed",
-        }),
-    );
-
-    Ok(json!({
-        "status": "executed",
-        "target": { "kind": "ref", "ref": item_ref },
-        "invocation_id": invocation_id,
-        "binding_attachment_id": attachment_coordinate.binding_attachment_id,
-        "binding_generation": attachment_coordinate.binding_generation,
-        "binding_digest": attachment_coordinate.binding_digest,
-        "result": result,
-    }))
+            "binding_attachment_id": attachment_coordinate.binding_attachment_id,
+            "binding_generation": attachment_coordinate.binding_generation,
+            "binding_digest": attachment_coordinate.binding_digest,
+            "result": result,
+        }))
+    };
+    if source_safe {
+        // Execution has its original admitted owner. A fresh completed cut
+        // qualifies disclosure; a stale UI cannot undo or reissue that work.
+        let fresh =
+            super::ui_seat::read_completed_seat_ingress(state.clone(), &session, &producer).await?;
+        let _transition = ui
+            .lock_seat_transition()
+            .map_err(|_| HandlerError::Internal("seat transition lock poisoned".into()))?;
+        let admitted = fresh.authorize(&state, &session, &producer)?;
+        return state
+            .engine
+            .with_checked_bundle_generation(|generation| -> Result<Value> {
+                if generation.request_engine_generation_identity()
+                    != attachment
+                        .compiled_binding
+                        .binding
+                        .request_engine_generation_identity
+                {
+                    return Err(binding_stale(
+                        "UI generation changed before result disclosure",
+                    ));
+                }
+                state
+                    .state_store
+                    .with_exact_seat_action_if_mixed_cut(&admitted.seat(), &admitted.cut(), || {
+                        ui.browser_sessions
+                            .require_presentation_attachment(
+                                &session_id,
+                                &producer.presentation_id,
+                                &attachment_coordinate,
+                                state.node_policy.generation_digest(),
+                            )
+                            .map_err(|error| binding_stale(&error.to_string()))?;
+                        publish()
+                    })?
+                    .ok_or_else(|| {
+                        HandlerError::Conflict("source result cut changed before disclosure".into())
+                            .into()
+                    })
+            });
+    }
+    publish()
 }
 
 fn retain_declared_result_effect(
     target: &CompiledUiTarget,
-    invoking_attachment_id: &str,
+    presentation_id: &str,
     result: &mut Value,
 ) -> Result<()> {
     let Some(fields) = result.as_object_mut() else {
@@ -252,37 +506,390 @@ fn retain_declared_result_effect(
         return Ok(());
     };
     let authored = fields.remove("ui_transition");
+    let authored_particular_selection = target
+        .result_effect
+        .and_then(|_| fields.remove("particular_selection"));
+    if target.result_effect == Some(CompiledUiResultEffect::SurfaceOpening)
+        && authored
+            .as_ref()
+            .and_then(|value| value.get("kind"))
+            .and_then(Value::as_str)
+            == Some("open_presentation_document")
+    {
+        let transition: ryeos_client_base::ui::binding::UiPreparedPresentationDocumentTransition =
+            serde_json::from_value(authored.ok_or_else(|| {
+                HandlerError::Internal("presentation preparation returned no transition".into())
+            })?)
+            .map_err(|error| {
+                HandlerError::Internal(format!(
+                    "presentation preparation returned invalid transition: {error}",
+                ))
+            })?;
+        transition.validate().map_err(HandlerError::Internal)?;
+        if transition.presentation_id != presentation_id
+            || transition.creation_request_id != transition.opening.creation_request_id
+            || transition.opening.placement.purpose()
+                != ryeos_client_base::ui::admission_operation::UiPresentationOperationKind::OpenPresentationDocument
+            || authored_particular_selection.is_some()
+        {
+            return Err(HandlerError::Internal(
+                "presentation preparation returned contradictory admission".into(),
+            ).into());
+        }
+        fields.insert("ui_transition".into(), serde_json::to_value(transition)?);
+        return Ok(());
+    }
+    if target.result_effect == Some(CompiledUiResultEffect::SurfaceOpening)
+        && authored
+            .as_ref()
+            .and_then(|value| value.get("kind"))
+            .and_then(Value::as_str)
+            == Some("import_surface_tabs")
+    {
+        let transition: ryeos_client_base::ui::binding::UiSurfaceTabsAdmissionTransition =
+            serde_json::from_value(authored.ok_or_else(|| {
+                HandlerError::Internal("Surface import returned no transition".into())
+            })?)
+            .map_err(|error| {
+                HandlerError::Internal(format!(
+                    "Surface import returned invalid transition: {error}",
+                ))
+            })?;
+        transition.validate().map_err(HandlerError::Internal)?;
+        if transition.presentation_id != presentation_id
+            || transition.creation_request_id != transition.opening.creation_request_id
+            || transition.opening.placement.purpose()
+                != ryeos_client_base::ui::admission_operation::UiPresentationOperationKind::ImportSurfaceTabs
+            || authored_particular_selection.is_some()
+            || transition.origin_attachment.validate().is_err()
+            || transition.origin_attachment.presentation.definition.surface().is_none()
+            || transition.tab_attachments.iter().any(|attachment| attachment.validate().is_err())
+        {
+            return Err(HandlerError::Internal("Surface import returned contradictory admission".into()).into());
+        }
+        fields.insert("ui_transition".into(), serde_json::to_value(transition)?);
+        return Ok(());
+    }
     match target.result_effect {
         None => Ok(()),
-        Some(CompiledUiResultEffect::AdmitBindingAttachment) => {
-            #[derive(Deserialize)]
+        Some(CompiledUiResultEffect::SurfaceOpening)
+        | Some(CompiledUiResultEffect::ResumeParticularSurface) => {
+            #[derive(Deserialize, serde::Serialize)]
             #[serde(deny_unknown_fields)]
-            struct AttachmentTransition {
+            struct SurfaceAdmissionTransition {
                 kind: String,
+                presentation_id: String,
+                surface: ryeos_client_base::ui::binding::UiSurfaceMembership,
                 attachment: ryeos_client_base::ui::UiBindingAttachment,
+                tab_attachments: Vec<ryeos_client_base::ui::UiBindingAttachment>,
+                creation_request_id: String,
+                #[serde(default, skip_serializing_if = "Option::is_none")]
+                opening: Option<ryeos_client_base::surface::opening::SurfaceOpenRequest>,
             }
-            let transition: AttachmentTransition =
+            let transition: SurfaceAdmissionTransition =
                 serde_json::from_value(authored.ok_or_else(|| {
-                    HandlerError::Internal(
-                        "attachment-admission service returned no typed UI transition".into(),
-                    )
+                    HandlerError::Internal("Surface admission returned no typed transition".into())
                 })?)
+                .map_err(|error| {
+                    HandlerError::Internal(format!(
+                        "Surface admission returned invalid transition: {error}"
+                    ))
+                })?;
+            let expected_kind =
+                if target.result_effect == Some(CompiledUiResultEffect::SurfaceOpening) {
+                    "open_surface"
+                } else {
+                    "resume_particular_surface"
+                };
+            let valid_opening = match (&transition.opening, expected_kind) {
+                (Some(opening), "open_surface") => {
+                    opening.validate().is_ok()
+                        && opening.creation_request_id == transition.creation_request_id
+                        && matches!(
+                            &opening.placement,
+                            ryeos_client_base::surface::opening::SurfaceOpenPlacement::NewSurface
+                        )
+                }
+                (None, "resume_particular_surface") => true,
+                _ => false,
+            };
+            let valid_opening_selection = match transition.opening.as_ref() {
+                None => expected_kind == "resume_particular_surface",
+                Some(opening) => {
+                    use ryeos_client_base::surface::opening::SurfaceOpenSelection;
+                    use ryeos_client_base::ui::binding::UiSurfaceCompositionProvenance;
+                    match (
+                        &opening.selection,
+                        transition.surface.saved_surface.as_ref(),
+                    ) {
+                        (SurfaceOpenSelection::Authored { surface_ref }, None) => {
+                            surface_ref.as_str() == transition.attachment.root_ref.as_str()
+                        }
+                        (
+                            SurfaceOpenSelection::Reusable {
+                                id,
+                                expected_revision,
+                                fresh_subjects,
+                            },
+                            Some(composition),
+                        ) => {
+                            composition.validate().is_ok()
+                                && composition.library_identity().is_some_and(
+                                    |(saved_id, revision, _)| {
+                                        id == saved_id && expected_revision.eq(&revision)
+                                    },
+                                )
+                                && composition.portable_tabs().is_some_and(|tabs| {
+                                    fresh_subjects
+                                        .keys()
+                                        .all(|id| tabs.iter().any(|tab| &tab.saved_set_id == id))
+                                        && tabs.iter().all(|tab| {
+                                            fresh_subjects
+                                                .get(&tab.saved_set_id)
+                                                .map_or(tab.fresh_subjects.is_empty(), |subjects| {
+                                                    subjects == &tab.fresh_subjects
+                                                })
+                                        })
+                                })
+                        }
+                        (SurfaceOpenSelection::Composed(request), Some(composition)) => {
+                            composition.validate().is_ok()
+                                && matches!(&composition.provenance, UiSurfaceCompositionProvenance::Composed { composition: retained } if retained == request)
+                                && ryeos_client_base::ui::binding::origin_matches_descriptor(
+                                    &request.origin,
+                                    &transition.attachment,
+                                )
+                        }
+                        _ => false,
+                    }
+                }
+            };
+            let particular_selection = authored_particular_selection
+                .map(serde_json::from_value)
+                .transpose()
                 .map_err(|_| {
                     HandlerError::Internal(
-                        "attachment-admission service returned an invalid typed UI transition"
-                            .into(),
+                        "Surface admission returned an invalid particular selection".into(),
                     )
                 })?;
-            if transition.kind != "admit_binding_attachment" {
+            let valid_particular_selection = if expected_kind == "open_surface" {
+                particular_selection.is_none()
+            } else {
+                matches!(
+                    &particular_selection,
+                    Some(ryeos_client_base::ui::admission_operation::UiParticularAdmissionSelection::Surface { .. })
+                )
+            };
+            let is_uuid = |value: &str| {
+                uuid::Uuid::parse_str(value)
+                    .ok()
+                    .is_some_and(|parsed| parsed.to_string() == value)
+            };
+            let attachment_coordinate =
+                |attachment: &ryeos_client_base::ui::UiBindingAttachment| {
+                    ryeos_client_base::ui::UiBindingAttachmentCoordinate {
+                        binding_attachment_id: attachment.binding_attachment_id.clone(),
+                        binding_generation: attachment.binding_generation,
+                        binding_digest: attachment.binding_digest.clone(),
+                    }
+                };
+            let mut descriptors = std::collections::BTreeMap::new();
+            for descriptor in &transition.tab_attachments {
+                if descriptor.validate().is_err()
+                    || descriptor.presentation.definition.surface().is_none()
+                    || descriptors
+                        .insert(descriptor.binding_attachment_id.as_str(), descriptor)
+                        .is_some()
+                {
+                    return Err(HandlerError::Internal(
+                        "Surface admission returned invalid tab attachments".into(),
+                    )
+                    .into());
+                }
+            }
+            let mut tabs = std::collections::BTreeSet::new();
+            let valid_composition = match transition.surface.saved_surface.as_ref() {
+                None => {
+                    expected_kind == "open_surface"
+                        && descriptors.is_empty()
+                        && transition
+                            .attachment
+                            .presentation
+                            .definition
+                            .surface()
+                            .is_some_and(|surface| {
+                                surface.display_title() == transition.surface.title
+                            })
+                }
+                Some(composition) => {
+                    composition.validate().map_err(HandlerError::Internal)?;
+                    if composition.portable_tabs().is_some_and(|tabs| {
+                        tabs.iter().any(|tab| {
+                            descriptors
+                                .get(tab.binding.binding_attachment_id.as_str())
+                                .is_none_or(|descriptor| {
+                                    !ryeos_client_base::ui::binding::origin_matches_descriptor(
+                                        &tab.origin,
+                                        descriptor,
+                                    )
+                                })
+                        })
+                    }) {
+                        return Err(HandlerError::Internal(
+                            "Surface tab origin differs from admitted descriptor".into(),
+                        )
+                        .into());
+                    }
+                    let tab_pairs = match &composition.body {
+                        ryeos_client_base::ui::binding::UiSavedSurfaceCompositionBody::Particular { tabs }
+                            if expected_kind == "resume_particular_surface"
+                                && matches!(
+                                    &particular_selection,
+                                    Some(ryeos_client_base::ui::admission_operation::UiParticularAdmissionSelection::Surface { id, expected_revision })
+                                        if composition.library_identity().is_some_and(|(saved_id, revision, _)| id == saved_id && *expected_revision == revision)
+                                ) => tabs.iter()
+                                .map(|tab| (tab.saved_set_id.as_str(), &tab.binding)).collect::<Vec<_>>(),
+                        ryeos_client_base::ui::binding::UiSavedSurfaceCompositionBody::Reusable { tabs }
+                            if expected_kind == "open_surface" => tabs.iter()
+                                .map(|tab| (tab.saved_set_id.as_str(), &tab.binding)).collect::<Vec<_>>(),
+                        ryeos_client_base::ui::binding::UiSavedSurfaceCompositionBody::Composed { tabs }
+                            if expected_kind == "open_surface" => tabs.iter()
+                                .map(|tab| (tab.saved_set_id.as_str(), &tab.binding)).collect::<Vec<_>>(),
+                        _ => return Err(HandlerError::Internal("Surface receipt body contradicts its declared effect".into()).into()),
+                    };
+                    !tab_pairs.is_empty()
+                        && tab_pairs.len() <= ryeos_client_base::surface::view_sets::MAX_VIEW_SETS
+                        && tab_pairs.len() == descriptors.len()
+                        && tab_pairs.iter().all(|(id, binding)| {
+                            tabs.insert(*id)
+                                && descriptors
+                                    .get(binding.binding_attachment_id.as_str())
+                                    .is_some_and(|descriptor| {
+                                        **binding == attachment_coordinate(descriptor)
+                                    })
+                        })
+                        && tabs.contains(composition.active_view_set_id.as_str())
+                        && if expected_kind == "resume_particular_surface" {
+                            fields.get("particular_surface")
+                                == Some(&serde_json::to_value(composition)?)
+                        } else {
+                            !fields.contains_key("particular_surface")
+                        }
+                }
+            };
+            if transition.kind != expected_kind
+                || !valid_opening
+                || !valid_opening_selection
+                || transition.presentation_id != presentation_id
+                || ![
+                    transition.presentation_id.as_str(),
+                    transition.surface.surface_instance_id.as_str(),
+                    transition.creation_request_id.as_str(),
+                ]
+                .into_iter()
+                .all(is_uuid)
+                || transition.surface.ordinal == 0
+                || transition.surface.title.trim().is_empty()
+                || transition.attachment.validate().is_err()
+                || transition
+                    .attachment
+                    .presentation
+                    .definition
+                    .surface()
+                    .is_none()
+                || transition.surface.binding != attachment_coordinate(&transition.attachment)
+                || !valid_particular_selection
+                || !valid_composition
+            {
                 return Err(HandlerError::Internal(
-                    "attachment-admission service returned an invalid typed UI transition".into(),
+                    "Surface admission returned contradictory admission".into(),
                 )
                 .into());
             }
-            fields.insert(
-                "ui_transition".to_string(),
-                json!({"kind":"admit_binding_attachment","attachment":transition.attachment}),
-            );
+            let manifest = &transition.surface.mount_manifest;
+            manifest.validate().map_err(|error| {
+                HandlerError::Internal(format!(
+                    "Surface admission returned invalid mount manifest: {error}"
+                ))
+            })?;
+            let expected_seeds = if let Some(saved) = &transition.surface.saved_surface {
+                saved.mount_seeds()
+            } else {
+                transition
+                    .attachment
+                    .presentation
+                    .definition
+                    .surface()
+                    .ok_or_else(|| {
+                        HandlerError::Internal("Surface origin definition is absent".into())
+                    })?
+                    .to_mount_seeds()
+                    .map_err(HandlerError::Internal)?
+                    .into_iter()
+                    .map(|seed| (seed, transition.surface.binding.clone()))
+                    .collect()
+            };
+            if manifest.presentation_id.as_str() != transition.presentation_id
+                || manifest.surface_instance_id.as_str() != transition.surface.surface_instance_id
+                || manifest
+                    .tabs
+                    .iter()
+                    .map(|tab| (tab.seed.clone(), tab.binding.clone()))
+                    .collect::<Vec<_>>()
+                    != expected_seeds
+            {
+                return Err(HandlerError::Internal(
+                    "Surface mount manifest contradicts its admitted owner or seeds".into(),
+                )
+                .into());
+            }
+            let origin_surface = transition
+                .attachment
+                .presentation
+                .definition
+                .surface()
+                .ok_or_else(|| {
+                    HandlerError::Internal("Surface origin definition is absent".into())
+                })?;
+            for set in manifest
+                .instantiate_with_exact_ids(&origin_surface.tiling)
+                .map_err(HandlerError::Internal)?
+            {
+                let tab = manifest
+                    .tabs
+                    .iter()
+                    .find(|tab| tab.view_set_id == set.id)
+                    .ok_or_else(|| {
+                        HandlerError::Internal("Surface manifest tab is absent".into())
+                    })?;
+                let descriptor = if transition.surface.saved_surface.is_some() {
+                    *descriptors
+                        .get(tab.binding.binding_attachment_id.as_str())
+                        .ok_or_else(|| {
+                            HandlerError::Internal("Surface tab descriptor is absent".into())
+                        })?
+                } else {
+                    &transition.attachment
+                };
+                if set.tiles.values().any(|tile| {
+                    !descriptor
+                        .presentation
+                        .views
+                        .contains_key(&tile.view.view_ref)
+                }) {
+                    return Err(HandlerError::Internal(
+                        "Surface manifest View is outside its admitted closure".into(),
+                    )
+                    .into());
+                }
+            }
+            fields.insert("ui_transition".into(), serde_json::to_value(transition)?);
+            if let Some(selection) = particular_selection {
+                fields.insert(
+                    "particular_selection".into(),
+                    serde_json::to_value(selection)?,
+                );
+            }
             Ok(())
         }
         Some(CompiledUiResultEffect::ResumeParticularViewSet) => {
@@ -290,9 +897,10 @@ fn retain_declared_result_effect(
             #[serde(deny_unknown_fields)]
             struct ResumeTransition {
                 kind: String,
-                #[serde(default)]
-                attachment: Option<ryeos_client_base::ui::UiBindingAttachment>,
-                insertion_attachment_id: String,
+                presentation_id: String,
+                surface: ryeos_client_base::ui::binding::UiSurfaceMembership,
+                attachment: ryeos_client_base::ui::UiBindingAttachment,
+                creation_request_id: String,
             }
             let transition: ResumeTransition =
                 serde_json::from_value(authored.ok_or_else(|| {
@@ -314,13 +922,49 @@ fn retain_declared_result_effect(
                         "particular-set resume returned an invalid resolved set".into(),
                     )
                 })?;
+            let particular_selection: ryeos_client_base::ui::admission_operation::UiParticularAdmissionSelection =
+                serde_json::from_value(authored_particular_selection.ok_or_else(|| {
+                    HandlerError::Internal(
+                        "particular-set resume returned no typed particular selection".into(),
+                    )
+                })?)
+                .map_err(|_| {
+                    HandlerError::Internal(
+                        "particular-set resume returned an invalid particular selection".into(),
+                    )
+                })?;
             if transition.kind != "resume_particular_view_set"
-                || transition.insertion_attachment_id.is_empty()
-                || transition.attachment.as_ref().is_some_and(|attachment| {
-                    attachment.binding_attachment_id != transition.insertion_attachment_id
+                || transition.presentation_id != presentation_id
+                || [
+                    &transition.presentation_id,
+                    &transition.surface.surface_instance_id,
+                    &transition.creation_request_id,
+                ]
+                .iter()
+                .any(|value| {
+                    uuid::Uuid::parse_str(value)
+                        .ok()
+                        .is_none_or(|parsed| parsed.to_string().as_str() != value.as_str())
                 })
-                || (transition.attachment.is_none()
-                    && transition.insertion_attachment_id != invoking_attachment_id)
+                || transition.surface.ordinal == 0
+                || transition.attachment.validate().is_err()
+                || transition
+                    .attachment
+                    .presentation
+                    .definition
+                    .surface()
+                    .is_none_or(|surface| surface.display_title() != transition.surface.title)
+                || transition.surface.binding.binding_attachment_id
+                    != transition.attachment.binding_attachment_id
+                || transition.surface.binding.binding_generation
+                    != transition.attachment.binding_generation
+                || transition.surface.binding.binding_digest != transition.attachment.binding_digest
+                || !matches!(
+                    &particular_selection,
+                    ryeos_client_base::ui::admission_operation::UiParticularAdmissionSelection::ViewSet { id, surface_ref, .. }
+                        if id == &resolved.id
+                            && surface_ref == &transition.attachment.root_ref
+                )
             {
                 return Err(HandlerError::Internal(
                     "particular-set resume returned an invalid typed UI transition".into(),
@@ -332,11 +976,17 @@ fn retain_declared_result_effect(
                 serde_json::to_value(resolved)?,
             );
             fields.insert(
+                "particular_selection".to_string(),
+                serde_json::to_value(particular_selection)?,
+            );
+            fields.insert(
                 "ui_transition".to_string(),
                 json!({
                     "kind": "resume_particular_view_set",
+                    "presentation_id": transition.presentation_id,
+                    "surface": transition.surface,
                     "attachment": transition.attachment,
-                    "insertion_attachment_id": transition.insertion_attachment_id,
+                    "creation_request_id": transition.creation_request_id,
                 }),
             );
             Ok(())
@@ -391,7 +1041,11 @@ fn binding_stale(message: &str) -> anyhow::Error {
     }.into()
 }
 
-fn enforce_request_bounds(state: &AppState, req: &UiBindingRequest, input: &Value) -> Result<()> {
+fn enforce_request_bounds(
+    state: &AppState,
+    req: &UiInvocationRequest,
+    input: &Value,
+) -> Result<()> {
     let maximum = state
         .node_config
         .routes
@@ -406,8 +1060,13 @@ fn enforce_request_bounds(state: &AppState, req: &UiBindingRequest, input: &Valu
         ))
         .into());
     }
-    req.validate_bounds(super::ui_launch_mint::binding_request_bounds(state)?)
-        .map_err(|error| HandlerError::BadRequest(error.to_string()).into())
+    req.validate_bounds(ryeos_client_base::ui::UiBindingRequestBounds {
+        max_request_bytes: maximum,
+        max_input_bytes: maximum,
+        max_seat_append_bytes: super::ui_launch_mint::binding_request_bounds(state)?
+            .max_seat_append_bytes,
+    })
+    .map_err(|error| HandlerError::BadRequest(error.to_string()).into())
 }
 
 fn resolve_binding_request(
@@ -1061,6 +1720,217 @@ mod tests {
     use std::collections::BTreeMap;
     use std::time::{Duration, Instant};
 
+    fn attach_fixture_manifest(transition: &mut Value) {
+        if transition["kind"] == "open_surface" {
+            let selection = if transition["surface"]["saved_surface"].is_object() {
+                let provenance = &transition["surface"]["saved_surface"]["provenance"];
+                json!({"kind":"reusable","id":provenance["saved_id"],
+                    "expected_revision":provenance["library_revision"],"fresh_subjects":{}})
+            } else {
+                json!({"kind":"authored","surface_ref":transition["attachment"]["root_ref"]})
+            };
+            transition["opening"] = json!({"selection":selection,
+                "placement":{"kind":"new_surface"},"creation_request_id":transition["creation_request_id"]});
+        }
+        use ryeos_client_base::ids::{PresentationId, SurfaceInstanceId};
+        use ryeos_client_base::ui::{
+            UiBindingAttachmentCoordinate, composition_identity::UiSurfaceMountManifest,
+        };
+        let binding: UiBindingAttachmentCoordinate =
+            serde_json::from_value(transition["surface"]["binding"].clone()).unwrap();
+        let seeds = if transition["surface"]["saved_surface"].is_object() {
+            let saved: ryeos_client_base::ui::binding::UiSavedSurfaceComposition =
+                serde_json::from_value(transition["surface"]["saved_surface"].clone()).unwrap();
+            saved.mount_seeds()
+        } else {
+            let attachment: ryeos_client_base::ui::UiBindingAttachment =
+                serde_json::from_value(transition["attachment"].clone()).unwrap();
+            attachment
+                .presentation
+                .definition
+                .surface()
+                .unwrap()
+                .to_mount_seeds()
+                .unwrap()
+                .into_iter()
+                .map(|seed| (seed, binding.clone()))
+                .collect()
+        };
+        let active = seeds.first().map(|(seed, _)| seed.id.clone());
+        let manifest = UiSurfaceMountManifest::allocate(
+            PresentationId::try_new(transition["presentation_id"].as_str().unwrap()).unwrap(),
+            SurfaceInstanceId::try_new(
+                transition["surface"]["surface_instance_id"]
+                    .as_str()
+                    .unwrap(),
+            )
+            .unwrap(),
+            1,
+            seeds,
+            active.as_deref(),
+        )
+        .unwrap();
+        transition["surface"]["mount_manifest"] = serde_json::to_value(manifest).unwrap();
+    }
+
+    #[test]
+    fn surface_selection_proof_matches_resolved_input_not_unresolved_record() {
+        use ryeos_client_base::surface::opening::SurfaceOpenSelection;
+        use ryeos_client_base::ui::admission_operation::UiPresentationOperationKind as Purpose;
+        let selection = SurfaceOpenSelection::Reusable {
+            id: "saved-a".into(),
+            expected_revision: 7,
+            fresh_subjects: BTreeMap::from([(
+                "tab-a".into(),
+                BTreeMap::from([(
+                    "subject".into(),
+                    BTreeMap::from([("thread_id".into(), serde_json::json!("T-a"))]),
+                )]),
+            )]),
+        };
+        let params = serde_json::json!({"selection": selection,
+            "placement":{"kind":"new_surface"},
+            "creation_request_id":"00000000-0000-4000-8000-000000000001"});
+        let retained = resolved_surface_open_request(&params).unwrap().target();
+        assert!(
+            validate_surface_open_request(Purpose::OpenSurface, &params, Some(&retained)).is_ok()
+        );
+        for field in ["id", "expected_revision", "fresh_subjects"] {
+            let mut changed = params.clone();
+            changed["selection"][field] = match field {
+                "id" => serde_json::json!("saved-b"),
+                "expected_revision" => serde_json::json!(8),
+                _ => serde_json::json!({}),
+            };
+            assert!(
+                validate_surface_open_request(Purpose::OpenSurface, &changed, Some(&retained))
+                    .is_err()
+            );
+        }
+        assert!(
+            validate_surface_open_request(
+                Purpose::OpenSurface,
+                &serde_json::json!({"surface_ref":"surface:test/a"}),
+                Some(&retained)
+            )
+            .is_err()
+        );
+        assert!(validate_surface_open_request(Purpose::OpenSurface, &params, None).is_err());
+        let mut changed_placement = params.clone();
+        changed_placement["placement"] = serde_json::json!({"kind":"append_tabs"});
+        assert!(
+            validate_surface_open_request(
+                Purpose::OpenSurface,
+                &changed_placement,
+                Some(&retained)
+            )
+            .is_err()
+        );
+        assert!(
+            validate_surface_open_request(
+                Purpose::ResumeParticularSurface,
+                &params,
+                Some(&retained)
+            )
+            .is_err()
+        );
+        assert!(
+            validate_surface_open_request(Purpose::ResumeParticularSurface, &params, None).is_ok()
+        );
+    }
+
+    #[test]
+    fn prepared_document_commits_exact_shared_root_and_distinct_purpose() {
+        use ryeos_client_base::ui::admission_operation::UiPresentationOperationKind as Purpose;
+        let params = json!({
+            "creation_request_id":"00000000-0000-4000-8000-000000000001",
+            "selection":{"kind":"authored","surface_ref":"surface:test/selected"},
+            "placement":{"kind":"new_presentation","root_binding":{
+                "binding_attachment_id":"shared-root","binding_generation":1,"binding_digest":"a".repeat(64)
+            }}
+        });
+        let retained = resolved_surface_open_request(&params).unwrap().target();
+        assert!(
+            validate_surface_open_request(
+                Purpose::OpenPresentationDocument,
+                &params,
+                Some(&retained)
+            )
+            .is_ok()
+        );
+        for purpose in [Purpose::OpenSurface, Purpose::ImportSurfaceTabs] {
+            assert!(validate_surface_open_request(purpose, &params, Some(&retained)).is_err());
+        }
+        for (field, value) in [
+            ("binding_attachment_id", json!("another-root")),
+            ("binding_generation", json!(2)),
+            ("binding_digest", json!("b".repeat(64))),
+        ] {
+            let mut changed = params.clone();
+            changed["placement"]["root_binding"][field] = value;
+            assert!(
+                validate_surface_open_request(
+                    Purpose::OpenPresentationDocument,
+                    &changed,
+                    Some(&retained)
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            validate_surface_open_request(Purpose::OpenPresentationDocument, &params, None)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn import_preparation_commits_every_destination_coordinate() {
+        use ryeos_client_base::ui::admission_operation::UiPresentationOperationKind as Purpose;
+        let params = json!({
+            "creation_request_id":"00000000-0000-4000-8000-000000000001",
+            "selection":{"kind":"authored","surface_ref":"surface:test/source"},
+            "placement":{"kind":"append_tabs",
+                "destination_surface_instance_id":"11111111-1111-4111-8111-111111111111",
+                "destination_binding":{"binding_attachment_id":"destination","binding_generation":2,"binding_digest":"ab".repeat(32)},
+                "expected_composition_revision":3,"expected_next_mount_id":4,
+                "insertion_index":1,"activate_imported_tab":false}
+        });
+        let retained = resolved_surface_open_request(&params).unwrap().target();
+        assert!(
+            validate_surface_open_request(Purpose::ImportSurfaceTabs, &params, Some(&retained))
+                .is_ok()
+        );
+        assert!(
+            validate_surface_open_request(Purpose::OpenSurface, &params, Some(&retained)).is_err()
+        );
+        for (field, replacement) in [
+            (
+                "destination_surface_instance_id",
+                json!("22222222-2222-4222-8222-222222222222"),
+            ),
+            (
+                "destination_binding",
+                json!({"binding_attachment_id":"other","binding_generation":2,"binding_digest":"ab".repeat(32)}),
+            ),
+            ("expected_composition_revision", json!(4)),
+            ("expected_next_mount_id", json!(5)),
+            ("insertion_index", json!(0)),
+            ("activate_imported_tab", json!(true)),
+        ] {
+            let mut changed = params.clone();
+            changed["placement"][field] = replacement;
+            assert!(
+                validate_surface_open_request(
+                    Purpose::ImportSurfaceTabs,
+                    &changed,
+                    Some(&retained)
+                )
+                .is_err(),
+                "{field}"
+            );
+        }
+    }
+
     fn target(result_effect: Option<CompiledUiResultEffect>) -> CompiledUiTarget {
         use ryeos_api::surface_views::EffectiveUiItemIdentity;
         use ryeos_engine::resolution::{EffectiveDefinitionDigest, TrustClass};
@@ -1099,6 +1969,105 @@ mod tests {
     }
 
     #[test]
+    fn prepared_document_result_checks_exact_child_initialization() {
+        use ryeos_client_base::ui::binding::UiBindingAttachment;
+        use ryeos_client_base::ui::composition_identity::UiSurfaceMountManifest;
+        let parent = "11111111-1111-4111-8111-111111111111";
+        let child = "22222222-2222-4222-8222-222222222222";
+        let creation = "33333333-3333-4333-8333-333333333333";
+        let surface = "44444444-4444-4444-8444-444444444444";
+        let coordinate = |id: &str| json!({"binding_attachment_id":id,"binding_generation":1,"binding_digest":"a".repeat(64)});
+        let descriptor = |id: &str, root_ref: &str, definition: Value| {
+            json!({
+                "binding_attachment_id":id,"binding_generation":1,"binding_digest":"a".repeat(64),
+                "root_ref":root_ref,"root_generation":"generation","project_path":null,"subject":{"kind":"projectless"},"posture":"observation_only",
+                "binding_request_bounds":{"max_request_bytes":65536,"max_input_bytes":1024,"max_seat_append_bytes":65536},
+                "presentation":{"definition":definition,"views":{"view:test/work":{"widget":"rows"}}}
+            })
+        };
+        let root = descriptor(
+            "root",
+            "config:test/shared",
+            json!({"kind":"shared_presentation","config":{
+                "category":"ui","shared_presentation":{"schema":1,"title":"RyeOS","launcher":"launch",
+                    "dialogs":[{"id":"launch","title":"Launch","view":"view:test/work"}],"capabilities":{"sources":[],"affordances":[]}}
+            }}),
+        );
+        let origin = descriptor(
+            "surface",
+            "surface:test/work",
+            json!({"kind":"surface","surface":{"name":"Work","tiles":["view:test/work"]}}),
+        );
+        let origin_typed: UiBindingAttachment = serde_json::from_value(origin.clone()).unwrap();
+        let seeds = origin_typed
+            .presentation
+            .definition
+            .surface()
+            .unwrap()
+            .to_mount_seeds()
+            .unwrap();
+        let active = seeds[0].id.clone();
+        let manifest = UiSurfaceMountManifest::allocate(
+            ryeos_client_base::ids::PresentationId::try_new(child).unwrap(),
+            ryeos_client_base::ids::SurfaceInstanceId::try_new(surface).unwrap(),
+            1,
+            seeds
+                .into_iter()
+                .map(|seed| (seed, serde_json::from_value(coordinate("surface")).unwrap()))
+                .collect(),
+            Some(&active),
+        )
+        .unwrap();
+        let opening = json!({"creation_request_id":creation,"selection":{"kind":"authored","surface_ref":"surface:test/work"},"placement":{"kind":"new_presentation","root_binding":coordinate("root")}});
+        let result = json!({"ui_transition":{"kind":"open_presentation_document","presentation_id":parent,"creation_request_id":creation,"opening":opening,
+            "prepared":{"presentation_id":child,"thread_id":"T-55555555-5555-4555-8555-555555555555","chain_root_id":"T-55555555-5555-4555-8555-555555555555","root_binding":coordinate("root"),
+                "initialization":{"schema":2,"selection":{"kind":"selected_surface","opening":opening},"presentation_id":child,"creation_request_id":creation,
+                    "root_binding":coordinate("root"),"next_mount_id":manifest.next_mount_id,
+                    "surfaces":[{"surface_instance_id":surface,"ordinal":1,"title":"Work","binding":coordinate("surface"),"mount_manifest":manifest,"saved_surface":null}],
+                    "binding_attachments":[root,origin]}}}});
+        retain_declared_result_effect(
+            &target(Some(CompiledUiResultEffect::SurfaceOpening)),
+            parent,
+            &mut result.clone(),
+        )
+        .unwrap();
+        for pointer in [
+            "/ui_transition/prepared/root_binding/binding_digest",
+            "/ui_transition/prepared/initialization/root_binding/binding_digest",
+        ] {
+            let mut changed = result.clone();
+            *changed.pointer_mut(pointer).unwrap() = json!("b".repeat(64));
+            assert!(
+                retain_declared_result_effect(
+                    &target(Some(CompiledUiResultEffect::SurfaceOpening)),
+                    parent,
+                    &mut changed
+                )
+                .is_err()
+            );
+        }
+        let mut changed = result.clone();
+        changed["ui_transition"]["prepared"]["initialization"]["selection"] =
+            json!({"kind":"configured_defaults"});
+        assert!(
+            retain_declared_result_effect(
+                &target(Some(CompiledUiResultEffect::SurfaceOpening)),
+                parent,
+                &mut changed
+            )
+            .is_err()
+        );
+        assert!(
+            retain_declared_result_effect(
+                &target(Some(CompiledUiResultEffect::SurfaceOpening)),
+                child,
+                &mut result.clone()
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn invocation_context_uses_compiled_binding_principal() {
         let invocation_ctx = invocation_context_for_session(&session(Some(
             "fp:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
@@ -1119,6 +2088,79 @@ mod tests {
     }
 
     #[test]
+    fn saved_surface_transition_rejects_extra_descriptors_and_coordinate_drift() {
+        let presentation = "11111111-1111-4111-8111-111111111111";
+        let binding = json!({"binding_attachment_id":"attachment-tab", "binding_generation":2,"binding_digest":"11"});
+        let attachment = json!({"binding_attachment_id":"attachment-tab", "binding_generation":2,"binding_digest":"11",
+            "root_ref":"surface:test/base","root_generation":"22","project_path":null,"subject":{"kind":"projectless"},"posture":"observation_only",
+            "presentation":{"definition":{"kind":"surface","surface":{"name":"Fixture"}},"views":{}},
+            "binding_request_bounds":{"max_request_bytes":65536,"max_input_bytes":65536,"max_seat_append_bytes":65536}});
+        let composition = json!({"provenance":{"kind":"library","saved_id":"saved-surface","library_revision":1,"record_digest":"ab".repeat(32)},
+            "active_view_set_id":"set-one","body":{"kind":"particular","tabs":[{"saved_set_id":"set-one","binding":binding,
+                "resolved":{"id":"set-one","name":"First","composition":{"schema":2,"id":"set-one","title":"First","root":null},
+                    "relationships":[]}}]}});
+        let mut result = json!({"particular_surface":composition,
+            "particular_selection":{"kind":"surface","id":"saved-surface","expected_revision":1},"ui_transition":{
+            "kind":"resume_particular_surface","presentation_id":presentation,
+            "creation_request_id":"33333333-3333-4333-8333-333333333333",
+            "surface":{"surface_instance_id":"22222222-2222-4222-8222-222222222222","ordinal":1,"title":"Fixture",
+                "binding":binding,"saved_surface":composition},"attachment":attachment,"tab_attachments":[attachment]}});
+        attach_fixture_manifest(&mut result["ui_transition"]);
+        retain_declared_result_effect(
+            &target(Some(CompiledUiResultEffect::ResumeParticularSurface)),
+            presentation,
+            &mut result.clone(),
+        )
+        .unwrap();
+        for mutation in [
+            "extra",
+            "binding",
+            "composition",
+            "unknown",
+            "manifest_owner",
+            "manifest_seed",
+            "selection",
+        ] {
+            let mut invalid = result.clone();
+            match mutation {
+                "extra" => invalid["ui_transition"]["tab_attachments"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(attachment.clone()),
+                "binding" => {
+                    invalid["ui_transition"]["surface"]["saved_surface"]["body"]["tabs"][0]["binding"]
+                        ["binding_generation"] = json!(3)
+                }
+                "composition" => {
+                    invalid["particular_surface"]["active_view_set_id"] = json!("other")
+                }
+                "unknown" => {
+                    invalid["ui_transition"]["compatibility_attachment"] = attachment.clone()
+                }
+                "manifest_owner" => {
+                    invalid["ui_transition"]["surface"]["mount_manifest"]["surface_instance_id"] =
+                        json!("44444444-4444-4444-8444-444444444444")
+                }
+                "manifest_seed" => {
+                    invalid["ui_transition"]["surface"]["mount_manifest"]["tabs"][0]["seed"]["title"] =
+                        json!("Different retained seed")
+                }
+                "selection" => invalid["particular_selection"]["expected_revision"] = json!(2),
+                _ => unreachable!(),
+            }
+            assert!(
+                retain_declared_result_effect(
+                    &target(Some(CompiledUiResultEffect::ResumeParticularSurface)),
+                    presentation,
+                    &mut invalid
+                )
+                .is_err(),
+                "{mutation}"
+            );
+        }
+    }
+
+    #[test]
     fn undeclared_service_result_cannot_forge_a_ui_transition() {
         let mut result = json!({
             "value": 7,
@@ -1129,72 +2171,260 @@ mod tests {
             }
         });
 
-        retain_declared_result_effect(&target(None), "attachment-1", &mut result)
-            .expect("sanitize result");
+        retain_declared_result_effect(
+            &target(None),
+            "11111111-1111-4111-8111-111111111111",
+            &mut result,
+        )
+        .expect("sanitize result");
 
         assert_eq!(result, json!({"value": 7}));
     }
 
     #[test]
+    fn reusable_surface_effect_requires_reusable_body_and_exact_descriptor_closure() {
+        let presentation = "11111111-1111-4111-8111-111111111111";
+        let binding = json!({"binding_attachment_id":"reusable-tab","binding_generation":2,"binding_digest":"11".repeat(32)});
+        let attachment = json!({"binding_attachment_id":"reusable-tab","binding_generation":2,"binding_digest":"11".repeat(32),
+            "root_ref":"surface:test/base","root_generation":"22".repeat(32),"project_path":null,"subject":{"kind":"projectless"},"posture":"observation_only",
+            "presentation":{"definition":{"kind":"surface","surface":{"name":"Fixture"}},"views":{}},
+            "binding_request_bounds":{"max_request_bytes":65536,"max_input_bytes":65536,"max_seat_append_bytes":65536}});
+        let composition = json!({"provenance":{"kind":"library","saved_id":"reusable","library_revision":2,"record_digest":"ab".repeat(32)},"active_view_set_id":"set-one",
+            "body":{"kind":"reusable","tabs":[{"saved_set_id":"set-one","binding":binding,"origin":{"surface_ref":"surface:test/base"},
+                "template":{"id":"set-one","name":"First","composition":{"schema":2,"id":"set-one","title":"First","root":null},"relationships":[]},"fresh_subjects":{}}]}});
+        let mut result = json!({"ui_transition":{"kind":"open_surface","presentation_id":presentation,
+            "creation_request_id":"33333333-3333-4333-8333-333333333333",
+            "surface":{"surface_instance_id":"22222222-2222-4222-8222-222222222222","ordinal":1,"title":"Fixture","binding":binding,"saved_surface":composition},
+            "attachment":attachment,"tab_attachments":[attachment]}});
+        attach_fixture_manifest(&mut result["ui_transition"]);
+        retain_declared_result_effect(
+            &target(Some(CompiledUiResultEffect::SurfaceOpening)),
+            presentation,
+            &mut result.clone(),
+        )
+        .unwrap();
+        let mut duplicate = result.clone();
+        duplicate["ui_transition"]["tab_attachments"]
+            .as_array_mut()
+            .unwrap()
+            .push(attachment);
+        assert!(
+            retain_declared_result_effect(
+                &target(Some(CompiledUiResultEffect::SurfaceOpening)),
+                presentation,
+                &mut duplicate
+            )
+            .is_err()
+        );
+        let mut wrong_origin = result.clone();
+        wrong_origin["ui_transition"]["surface"]["saved_surface"]["body"]["tabs"][0]["origin"]["surface_ref"] =
+            json!("surface:test/other");
+        assert!(
+            retain_declared_result_effect(
+                &target(Some(CompiledUiResultEffect::SurfaceOpening)),
+                presentation,
+                &mut wrong_origin,
+            )
+            .is_err()
+        );
+        let mut missing_commitment = result.clone();
+        missing_commitment["ui_transition"]
+            .as_object_mut()
+            .unwrap()
+            .remove("opening");
+        assert!(
+            retain_declared_result_effect(
+                &target(Some(CompiledUiResultEffect::SurfaceOpening)),
+                presentation,
+                &mut missing_commitment,
+            )
+            .is_err()
+        );
+        let mut wrong_kind = result;
+        wrong_kind["ui_transition"]["kind"] = json!("resume_particular_surface");
+        assert!(
+            retain_declared_result_effect(
+                &target(Some(CompiledUiResultEffect::ResumeParticularSurface)),
+                presentation,
+                &mut wrong_kind
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn import_effect_requires_exact_destination_manifest_and_origin() {
+        use ryeos_client_base::ids::{PresentationId, SurfaceInstanceId};
+        use ryeos_client_base::ui::{
+            UiBindingAttachment, UiBindingAttachmentCoordinate,
+            composition_identity::UiSurfaceMountManifest,
+        };
+        let presentation = "11111111-1111-4111-8111-111111111111";
+        let destination = "22222222-2222-4222-8222-222222222222";
+        let creation = "33333333-3333-4333-8333-333333333333";
+        let attachment: UiBindingAttachment = serde_json::from_value(json!({
+            "binding_attachment_id":"origin","binding_generation":2,"binding_digest":"ab".repeat(32),
+            "root_ref":"surface:test/base","root_generation":"cd".repeat(32),
+            "presentation":{"definition":{"kind":"surface","surface":{"name":"Fixture"}},"views":{}},
+            "project_path":null,"subject":{"kind":"projectless"},"posture":"observation_only",
+            "binding_request_bounds":{"max_request_bytes":65536,"max_input_bytes":4096,"max_seat_append_bytes":65536}
+        })).unwrap();
+        let coordinate = UiBindingAttachmentCoordinate {
+            binding_attachment_id: attachment.binding_attachment_id.clone(),
+            binding_generation: attachment.binding_generation,
+            binding_digest: attachment.binding_digest.clone(),
+        };
+        let seeds = attachment
+            .presentation
+            .definition
+            .surface()
+            .unwrap()
+            .to_mount_seeds()
+            .unwrap();
+        let active = seeds.first().map(|seed| seed.id.clone());
+        let manifest = UiSurfaceMountManifest::allocate(
+            PresentationId::try_new(presentation).unwrap(),
+            SurfaceInstanceId::try_new(destination).unwrap(),
+            5,
+            seeds
+                .into_iter()
+                .map(|seed| (seed, coordinate.clone()))
+                .collect(),
+            active.as_deref(),
+        )
+        .unwrap();
+        let opening = json!({"creation_request_id":creation,"selection":{"kind":"authored","surface_ref":"surface:test/base"},
+            "placement":{"kind":"append_tabs","destination_surface_instance_id":destination,
+                "destination_binding":{"binding_attachment_id":"destination","binding_generation":1,"binding_digest":"ef".repeat(32)},
+                "expected_composition_revision":3,"expected_next_mount_id":5,"insertion_index":0,"activate_imported_tab":false}});
+        let result = json!({"ui_transition":{"kind":"import_surface_tabs","presentation_id":presentation,"creation_request_id":creation,
+            "opening":opening,"composition":null,"origin_attachment":attachment,"tab_attachments":[],"manifest":manifest}});
+        retain_declared_result_effect(
+            &target(Some(CompiledUiResultEffect::SurfaceOpening)),
+            presentation,
+            &mut result.clone(),
+        )
+        .unwrap();
+        for (field, value) in [
+            (
+                "surface_instance_id",
+                json!("44444444-4444-4444-8444-444444444444"),
+            ),
+            ("allocation_start", json!(6)),
+        ] {
+            let mut changed = result.clone();
+            changed["ui_transition"]["manifest"][field] = value;
+            assert!(
+                retain_declared_result_effect(
+                    &target(Some(CompiledUiResultEffect::SurfaceOpening)),
+                    presentation,
+                    &mut changed
+                )
+                .is_err(),
+                "{field}"
+            );
+        }
+        let mut changed = result;
+        changed["ui_transition"]["origin_attachment"]["root_ref"] = json!("surface:test/other");
+        assert!(
+            retain_declared_result_effect(
+                &target(Some(CompiledUiResultEffect::SurfaceOpening)),
+                presentation,
+                &mut changed
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn declared_attachment_effect_is_typed_and_retained() {
-        let transition = json!({
-            "kind": "admit_binding_attachment",
+        let mut transition = json!({
+            "kind": "open_surface",
+            "creation_request_id":"33333333-3333-4333-8333-333333333333",
+            "tab_attachments":[],
+            "presentation_id":"11111111-1111-4111-8111-111111111111",
+            "surface":{"surface_instance_id":"22222222-2222-4222-8222-222222222222","ordinal":1,"title":"Fixture",
+                "binding":{"binding_attachment_id":"attachment-2","binding_generation":2,"binding_digest":"11"}},
             "attachment": {
                 "binding_attachment_id": "attachment-2",
                 "binding_generation": 2,
                 "binding_digest": "11",
                 "root_ref": "surface:test/base",
                 "root_generation": "22",
-                "presentation": {"definition": {"kind": "surface", "surface": {"name": "base"}}, "views": {}},
+                "presentation": {"definition": {"kind": "surface", "surface": {"name": "Fixture"}}, "views": {}},
                 "project_path": null,
-                "subject": {"kind": "projectless"},
+                "subject": {"kind":"projectless"},
                 "posture": "observation_only",
-                "binding_request_bounds": {"max_request_bytes": 1024, "max_input_bytes": 512, "max_seat_append_bytes": 256}
+                "binding_request_bounds": {"max_request_bytes": 1024, "max_input_bytes": 512,"max_seat_append_bytes":65536}
             }
         });
+        let attachment: ryeos_client_base::ui::UiBindingAttachment =
+            serde_json::from_value(transition["attachment"].clone()).unwrap();
+        transition["attachment"] = serde_json::to_value(attachment).unwrap();
+        attach_fixture_manifest(&mut transition);
         let mut result = json!({"ui_transition": transition.clone()});
 
         retain_declared_result_effect(
-            &target(Some(CompiledUiResultEffect::AdmitBindingAttachment)),
-            "attachment-1",
+            &target(Some(CompiledUiResultEffect::SurfaceOpening)),
+            "11111111-1111-4111-8111-111111111111",
             &mut result,
         )
         .expect("retain signed result effect");
 
-        let canonical = serde_json::to_value(
-            serde_json::from_value::<ryeos_client_base::ui::UiBindingAttachment>(
-                transition["attachment"].clone(),
-            )
-            .expect("typed attachment fixture"),
-        )
-        .unwrap();
-        assert_eq!(result["ui_transition"]["kind"], transition["kind"]);
-        assert_eq!(result["ui_transition"]["attachment"], canonical);
+        assert_eq!(result["ui_transition"], transition);
+        for (field, value) in [
+            (
+                "presentation",
+                json!("33333333-3333-4333-8333-333333333333"),
+            ),
+            ("binding", json!("changed")),
+            ("title", json!("Changed title")),
+        ] {
+            let mut mismatched = transition.clone();
+            match field {
+                "presentation" => mismatched["presentation_id"] = value,
+                "binding" => mismatched["surface"]["binding"]["binding_digest"] = value,
+                "title" => mismatched["surface"]["title"] = value,
+                _ => unreachable!(),
+            }
+            assert!(
+                retain_declared_result_effect(
+                    &target(Some(CompiledUiResultEffect::SurfaceOpening)),
+                    "11111111-1111-4111-8111-111111111111",
+                    &mut json!({"ui_transition":mismatched}),
+                )
+                .is_err()
+            );
+        }
     }
 
     #[test]
     fn declared_attachment_effect_rejects_missing_descriptor() {
         let mut result = json!({
             "ui_transition": {
-                "kind": "admit_binding_attachment"
+                "kind": "open_surface"
             }
         });
 
         let error = retain_declared_result_effect(
-            &target(Some(CompiledUiResultEffect::AdmitBindingAttachment)),
-            "attachment-1",
+            &target(Some(CompiledUiResultEffect::SurfaceOpening)),
+            "11111111-1111-4111-8111-111111111111",
             &mut result,
         )
         .expect_err("missing descriptor must fail closed");
 
-        assert!(error.to_string().contains("invalid typed UI transition"));
+        assert!(
+            error
+                .to_string()
+                .contains("Surface admission returned invalid transition")
+        );
     }
 
     #[test]
     fn declared_attachment_effect_rejects_unknown_fields() {
         let mut result = json!({
             "ui_transition": {
-                "kind": "admit_binding_attachment",
+                "kind": "open_surface",
                 "attachment": {},
                 "session_id": "forged"
             }
@@ -1202,8 +2432,8 @@ mod tests {
 
         assert!(
             retain_declared_result_effect(
-                &target(Some(CompiledUiResultEffect::AdmitBindingAttachment)),
-                "attachment-1",
+                &target(Some(CompiledUiResultEffect::SurfaceOpening)),
+                "11111111-1111-4111-8111-111111111111",
                 &mut result,
             )
             .is_err()
@@ -1213,6 +2443,12 @@ mod tests {
     #[test]
     fn particular_resume_effect_requires_typed_resolution_and_exact_insertion() {
         let mut result = json!({
+            "particular_selection": {
+                "kind": "view_set",
+                "id": "current",
+                "expected_revision": 1,
+                "surface_ref": "surface:test/base"
+            },
             "particular_view_set": {
                 "id": "current",
                 "name": "Current",
@@ -1220,7 +2456,7 @@ mod tests {
                     "schema": 2,
                     "id": "current",
                     "title": "Current",
-                    "root": null
+                    "root": {"type":"group","views":["view:test/retained"],"active":0}
                 },
                 "relationships": [],
                 "resolved_selection_work": {
@@ -1230,52 +2466,97 @@ mod tests {
             },
             "ui_transition": {
                 "kind": "resume_particular_view_set",
-                "attachment": null,
-                "insertion_attachment_id": "attachment-1"
+                "presentation_id": "11111111-1111-4111-8111-111111111111",
+                "creation_request_id": "33333333-3333-4333-8333-333333333333",
+                "surface": {"surface_instance_id":"22222222-2222-4222-8222-222222222222", "ordinal":1, "title":"Fixture", "binding":{"binding_attachment_id":"attachment-2", "binding_generation":2,"binding_digest":"11"}},
+                "attachment": {"binding_attachment_id":"attachment-2", "binding_generation":2,"binding_digest":"11", "root_ref":"surface:test/base", "root_generation":"22", "presentation":{"definition":{"kind":"surface","surface":{"name":"Fixture"}},"views":{}}, "project_path":null,"subject":{"kind":"projectless"},"posture":"observation_only","binding_request_bounds":{"max_request_bytes":1024,"max_input_bytes":512,"max_seat_append_bytes":65536}}
             }
         });
+        result["ui_transition"]["attachment"]["presentation"]["views"] =
+            json!({"view:test/retained":{"widget":"rows"}});
+        let resolved: ryeos_client_base::surface::view_sets::ResolvedParticularViewSet =
+            serde_json::from_value(result["particular_view_set"].clone()).unwrap();
+        let coordinate =
+            serde_json::from_value(result["ui_transition"]["surface"]["binding"].clone()).unwrap();
+        // A particular resume allocates the retained composition, not the
+        // authored Surface's empty default tab. This mirrors its publication owner.
+        let manifest =
+            ryeos_client_base::ui::composition_identity::UiSurfaceMountManifest::allocate(
+                ryeos_client_base::ids::PresentationId::try_new(
+                    "11111111-1111-4111-8111-111111111111",
+                )
+                .unwrap(),
+                ryeos_client_base::ids::SurfaceInstanceId::try_new(
+                    "22222222-2222-4222-8222-222222222222",
+                )
+                .unwrap(),
+                1,
+                vec![(resolved.composition.clone(), coordinate)],
+                Some(&resolved.composition.id),
+            )
+            .unwrap();
+        result["ui_transition"]["surface"]["mount_manifest"] =
+            serde_json::to_value(&manifest).unwrap();
         retain_declared_result_effect(
             &target(Some(CompiledUiResultEffect::ResumeParticularViewSet)),
-            "attachment-1",
+            "11111111-1111-4111-8111-111111111111",
             &mut result,
         )
         .expect("retain typed particular-set resolution");
         assert_eq!(
-            result["ui_transition"]["insertion_attachment_id"],
-            "attachment-1"
+            result["ui_transition"]["surface"]["mount_manifest"],
+            serde_json::to_value(&manifest).unwrap()
+        );
+        assert_eq!(manifest.tabs[0].seed.id, "current");
+        assert_eq!(manifest.tabs[0].tile_ids.len(), 1);
+        assert_eq!(
+            result["ui_transition"]["surface"]["binding"]["binding_attachment_id"],
+            "attachment-2"
         );
         assert_eq!(
             result["particular_view_set"]["resolved_selection_work"]["thread"],
             "T-head"
         );
 
-        let mut wrong_origin = result.clone();
-        wrong_origin["ui_transition"]["insertion_attachment_id"] = json!("attachment-9");
+        let mut wrong_selection = result.clone();
+        wrong_selection["particular_selection"]["id"] = json!("different");
         assert!(
             retain_declared_result_effect(
                 &target(Some(CompiledUiResultEffect::ResumeParticularViewSet)),
-                "attachment-1",
+                "11111111-1111-4111-8111-111111111111",
+                &mut wrong_selection,
+            )
+            .is_err()
+        );
+
+        let mut wrong_origin = result.clone();
+        wrong_origin["ui_transition"]["surface"]["binding"]["binding_attachment_id"] =
+            json!("attachment-9");
+        assert!(
+            retain_declared_result_effect(
+                &target(Some(CompiledUiResultEffect::ResumeParticularViewSet)),
+                "11111111-1111-4111-8111-111111111111",
                 &mut wrong_origin,
             )
             .is_err()
         );
 
         result["ui_transition"]["attachment"] = json!({
-            "binding_attachment_id": "attachment-2",
+            "binding_attachment_id": "attachment-9",
             "binding_generation": 2,
             "binding_digest": "11",
             "root_ref": "surface:test/base",
             "root_generation": "22",
-            "presentation": {"definition": {"kind": "surface", "surface": {"name": "base"}}, "views": {}},
+            "presentation": {"definition": {"kind": "surface", "surface": {"name": "Fixture"}}, "views": {}},
             "project_path": null,
-            "subject": {"kind": "projectless"},
+            "subject": {"kind":"projectless"},
             "posture": "observation_only",
-            "binding_request_bounds": {"max_request_bytes": 1024, "max_input_bytes": 512, "max_seat_append_bytes": 256}
+            "binding_request_bounds": {"max_request_bytes": 1024, "max_input_bytes": 512,"max_seat_append_bytes":65536}
         });
         assert!(
             retain_declared_result_effect(
                 &target(Some(CompiledUiResultEffect::ResumeParticularViewSet)),
-                "attachment-1",
+                "11111111-1111-4111-8111-111111111111",
                 &mut result,
             )
             .is_err()

@@ -539,11 +539,14 @@ pub(crate) fn compile_target(
         UiDispatchMode::SessionLocal => CompiledUiDispatchClass::SessionLocal,
     };
     let result_effect = extract_ui_result_effect(metadata)?.map(|effect| match effect {
-        ryeos_app::service_registry::UiResultEffect::AdmitBindingAttachment => {
-            crate::compiled_binding::CompiledUiResultEffect::AdmitBindingAttachment
+        ryeos_app::service_registry::UiResultEffect::SurfaceOpening => {
+            crate::compiled_binding::CompiledUiResultEffect::SurfaceOpening
         }
         ryeos_app::service_registry::UiResultEffect::ResumeParticularViewSet => {
             crate::compiled_binding::CompiledUiResultEffect::ResumeParticularViewSet
+        }
+        ryeos_app::service_registry::UiResultEffect::ResumeParticularSurface => {
+            crate::compiled_binding::CompiledUiResultEffect::ResumeParticularSurface
         }
     });
     let declared_source_safe = extract_ui_read_only(metadata)?;

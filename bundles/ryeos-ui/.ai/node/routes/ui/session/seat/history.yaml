@@ -1,0 +1,8 @@
+# ryeos:signed:2026-10-20T14:59:00Z:af97b9e2b2bdacde755634baecc770e37a4e4b5f3391d77295f57d8c33390dc2:FTXuB7QT1rmtDRwIzhwQ3ldjzr/w3i58HltSYtLDZdxW9HP/qT3aZKNOKQ2mU/WmQNC2zYxt1P6WLEcxYHqZCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+id: ui/api/session/seat/history
+path: /ui/api/session/seat/history
+methods: [POST]
+auth: browser_session
+limits: { body_bytes_max: 16384, timeout_ms: 0, concurrent_max: 8 }
+request: { body: json }
+response: { mode: event_stream, source: ui_seat_history }

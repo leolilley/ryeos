@@ -34,8 +34,9 @@ pub enum CompiledUiDispatchClass {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CompiledUiResultEffect {
-    AdmitBindingAttachment,
+    SurfaceOpening,
     ResumeParticularViewSet,
+    ResumeParticularSurface,
 }
 
 /// Exact execution target resolved from a signed source or affordance.
@@ -950,6 +951,27 @@ fn is_trusted(identity: &EffectiveUiItemIdentity) -> bool {
 mod tests {
     use super::*;
     use ryeos_engine::resolution::{EffectiveDefinitionDigest, TrustClass};
+
+    #[test]
+    fn result_effect_vocabulary_is_the_three_declared_effects() {
+        for effect in [
+            CompiledUiResultEffect::SurfaceOpening,
+            CompiledUiResultEffect::ResumeParticularViewSet,
+            CompiledUiResultEffect::ResumeParticularSurface,
+        ] {
+            let wire = serde_json::to_value(effect).unwrap();
+            assert_eq!(
+                serde_json::from_value::<CompiledUiResultEffect>(wire).unwrap(),
+                effect
+            );
+        }
+        for retired in ["admit_binding_attachment", "open_surface"] {
+            assert!(
+                serde_json::from_value::<CompiledUiResultEffect>(serde_json::json!(retired))
+                    .is_err()
+            );
+        }
+    }
 
     fn identity(item_ref: &str, byte: char) -> EffectiveUiItemIdentity {
         EffectiveUiItemIdentity {
