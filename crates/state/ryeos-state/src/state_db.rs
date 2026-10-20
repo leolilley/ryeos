@@ -6787,6 +6787,215 @@ impl StateDb {
         Ok(AuthoritativeThreadEventReadPage { events, progress })
     }
 
+    /// Run a short callback only while every supplied thread is still at its
+    /// exact trust-verified signed head. `None` means a supplied cut is stale
+    /// (changed head, snapshot or tip) or its chain has a pending transition.
+    /// A chain that does not exist, and contradictory cuts for one thread,
+    /// refuse with an error. Every chain lock stays held through the callback,
+    /// which must not acquire locks, reenter state/CAS, perform I/O or write.
+    pub fn with_thread_event_read_anchors<T>(
+        &self,
+        guard: &crate::recovery::CasMutationGuard,
+        anchors: &[AuthoritativeThreadEventReadAnchor],
+        action: impl FnOnce() -> anyhow::Result<T>,
+    ) -> anyhow::Result<Option<T>> {
+        self.ensure_cas_mutation_guard(guard)?;
+        anyhow::ensure!(
+            !anchors.is_empty(),
+            "thread read action requires at least one exact anchor"
+        );
+        let live = Self::distinct_read_anchors(anchors)?;
+        let locks = self.acquire_read_cut_locks(live.keys().copied())?;
+        if !self.live_read_cuts_are_current(&locks, &live)? {
+            return Ok(None);
+        }
+        self.ensure_cas_mutation_guard(guard)?;
+        action().map(Some)
+    }
+
+    /// Read exclusion for a historical cut that mixes live chains with retired
+    /// ones. Live anchors must still match their exact frontier. Each retired
+    /// dependency must still be headless, without a pending transition, and
+    /// fenced (not released) with the same retained closure; a fence naming a
+    /// different closure refuses with an error, as does a chain named both
+    /// live and retired, a conflicting duplicate retired cut, or an empty
+    /// retired list. `None` means a cut is stale. Locks are taken in chain
+    /// order and held through the callback, which must not acquire locks,
+    /// reenter state/CAS, perform I/O or write.
+    pub fn with_thread_event_read_mixed_cut<T>(
+        &self,
+        guard: &crate::recovery::CasMutationGuard,
+        current_anchors: &[AuthoritativeThreadEventReadAnchor],
+        retired: &[RetiredChainDependency],
+        action: impl FnOnce() -> anyhow::Result<T>,
+    ) -> anyhow::Result<Option<T>> {
+        self.ensure_cas_mutation_guard(guard)?;
+        anyhow::ensure!(
+            !retired.is_empty(),
+            "mixed read exclusion requires a nonempty retired cut"
+        );
+        let live = Self::distinct_read_anchors(current_anchors)?;
+        let mut retired_cuts = BTreeMap::new();
+        for dependency in retired {
+            anyhow::ensure!(
+                !dependency.chain_root_id.is_empty()
+                    && !live.contains_key(dependency.chain_root_id.as_str()),
+                "mixed read exclusion mixes live and retired cuts"
+            );
+            if let Some(prior) = retired_cuts.insert(dependency.chain_root_id.as_str(), dependency)
+            {
+                anyhow::ensure!(
+                    prior == dependency,
+                    "mixed read exclusion has conflicting retired cuts"
+                );
+            }
+        }
+        let locks =
+            self.acquire_read_cut_locks(live.keys().copied().chain(retired_cuts.keys().copied()))?;
+        for (root, dependency) in &retired_cuts {
+            let lock = locks
+                .get(root)
+                .ok_or_else(|| anyhow::anyhow!("retired read cut lock was not acquired"))?;
+            if self.recovery.read_pending(root)?.is_some()
+                || lock
+                    .read_verified_head(self.trust_store.as_ref())?
+                    .is_some()
+            {
+                return Ok(None);
+            }
+            match self.recovery.retired_chain_fence(root)? {
+                crate::recovery::RetiredChainFence::Retired { manifest_hash } => {
+                    anyhow::ensure!(
+                        manifest_hash == dependency.manifest_hash,
+                        "retired read dependency differs from its recorded fence"
+                    );
+                }
+                crate::recovery::RetiredChainFence::Absent
+                | crate::recovery::RetiredChainFence::Released { .. } => return Ok(None),
+            }
+        }
+        if !self.live_read_cuts_are_current(&locks, &live)? {
+            return Ok(None);
+        }
+        self.ensure_cas_mutation_guard(guard)?;
+        action().map(Some)
+    }
+
+    /// Load one immutable thread event by its exact CAS hash without trusting
+    /// the rebuildable projection. The shared authority guard keeps a
+    /// concurrent retention sweep from removing the object mid-read; the
+    /// typed envelope and canonical content hash are verified. `None` means
+    /// the object is not retained; a non-canonical hash refuses.
+    pub fn retained_thread_event_by_hash(
+        &self,
+        event_hash: &str,
+        guard: &crate::recovery::CasMutationGuard,
+    ) -> anyhow::Result<Option<ThreadEvent>> {
+        self.ensure_cas_mutation_guard(guard)?;
+        anyhow::ensure!(
+            lillux::valid_hash(event_hash)
+                && !event_hash.bytes().any(|byte| byte.is_ascii_uppercase()),
+            "retained thread event hash is not canonical"
+        );
+        let value = self.pinned_cas()?.get_object_bounded(
+            event_hash,
+            crate::objects::MAX_THREAD_EVENT_SERIALIZED_BYTES as u64,
+        )?;
+        self.ensure_cas_mutation_guard(guard)?;
+        let Some(value) = value else {
+            return Ok(None);
+        };
+        let event: ThreadEvent =
+            serde_json::from_value(value).context("decode retained thread event")?;
+        event.validate().context("validate retained thread event")?;
+        let actual = crate::objects::thread_event::hash_event(&event)
+            .context("hash retained thread event")?;
+        anyhow::ensure!(
+            actual == event_hash,
+            "retained thread event content hash changed"
+        );
+        Ok(Some(event))
+    }
+
+    /// Group read anchors by chain, folding identical repeats and refusing
+    /// empty scopes or two different cuts for one thread.
+    fn distinct_read_anchors(
+        anchors: &[AuthoritativeThreadEventReadAnchor],
+    ) -> anyhow::Result<BTreeMap<&str, Vec<&AuthoritativeThreadEventReadAnchor>>> {
+        let mut by_root = BTreeMap::<&str, Vec<&AuthoritativeThreadEventReadAnchor>>::new();
+        for anchor in anchors {
+            anyhow::ensure!(
+                !anchor.chain_root_id.is_empty() && !anchor.thread_id.is_empty(),
+                "thread read action has an empty chain or thread scope"
+            );
+            let scoped = by_root.entry(anchor.chain_root_id.as_str()).or_default();
+            if let Some(prior) = scoped
+                .iter()
+                .find(|prior| prior.thread_id == anchor.thread_id)
+            {
+                anyhow::ensure!(
+                    *prior == anchor,
+                    "thread read action has contradictory exact anchors"
+                );
+            } else {
+                scoped.push(anchor);
+            }
+        }
+        Ok(by_root)
+    }
+
+    /// Existing-chain locks for every root, in root order. A root with no
+    /// established chain authority refuses rather than being created.
+    fn acquire_read_cut_locks<'a>(
+        &self,
+        roots: impl Iterator<Item = &'a str>,
+    ) -> anyhow::Result<BTreeMap<&'a str, crate::chain::ChainLock>> {
+        let ordered = roots.collect::<std::collections::BTreeSet<_>>();
+        let mut locks = BTreeMap::new();
+        for root in ordered {
+            locks.insert(root, self.acquire_existing_chain_lock(root)?);
+        }
+        Ok(locks)
+    }
+
+    /// Whether every live anchor still equals the trust-verified signed
+    /// frontier under its held chain lock. A pending transition is stale.
+    fn live_read_cuts_are_current(
+        &self,
+        locks: &BTreeMap<&str, crate::chain::ChainLock>,
+        live: &BTreeMap<&str, Vec<&AuthoritativeThreadEventReadAnchor>>,
+    ) -> anyhow::Result<bool> {
+        let mut cache = self.head_cache.lock().expect("head_cache lock");
+        for (root, scoped) in live {
+            let lock = locks
+                .get(root)
+                .ok_or_else(|| anyhow::anyhow!("live read cut lock was not acquired"))?;
+            if self.recovery.read_pending(root)?.is_some() {
+                return Ok(false);
+            }
+            for anchor in scoped {
+                let current = chain::capture_authoritative_thread_event_read_anchor_with_trust(
+                    &self.cas_root,
+                    &self.refs_root,
+                    lock,
+                    root,
+                    &anchor.thread_id,
+                    self.trust_store.as_ref(),
+                    &mut cache,
+                )?;
+                if current.is_none_or(|current| {
+                    current.chain_head_hash != anchor.chain_head_hash
+                        || current.snapshot_hash != anchor.snapshot_hash
+                        || current.thread_last_event_hash != anchor.thread_last_event_hash
+                        || current.thread_last_seq != anchor.thread_last_seq
+                }) {
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(true)
+    }
+
     /// Exact signed membership for nonterminal as well as terminal chains.
     /// The caller retains the chain lock through any structural owner check.
     pub fn authoritative_chain_thread_ids_under_lock(

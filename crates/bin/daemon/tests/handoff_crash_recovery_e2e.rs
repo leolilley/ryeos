@@ -7160,13 +7160,14 @@ async fn settled_portable_command_lost_ack_replays_after_real_daemon_restart_on_
             }),
         )
         .await?;
-    anyhow::ensure!(
-        matches!(
-            status,
-            reqwest::StatusCode::OK | reqwest::StatusCode::ACCEPTED
-        ),
-        "portable lost-ACK launch returned {status}: {launch}"
-    );
+    if !matches!(
+        status,
+        reqwest::StatusCode::OK | reqwest::StatusCode::ACCEPTED
+    ) {
+        let stderr = daemon.drain_stderr_nonblocking().await;
+        let detail = format!("portable lost-ACK launch returned {status}: {launch}\n{stderr}");
+        return Err(refuse_launch_or_host_unqualified(detail, &launch, &stderr));
+    }
     let chain_root_id = launch
         .get("thread_id")
         .or_else(|| launch.get("chain_root_id"))
