@@ -3,6 +3,12 @@
 //! Browser sessions, `/ui` service handlers, and UI-specific route invokers
 //! live here so `ryeos-api` can remain generic HTTP/route substrate.
 
+#[cfg(test)]
+extern crate self as ryeos_ui;
+#[cfg(test)]
+#[path = "../tests/test_state.rs"]
+mod test_state;
+
 pub mod assets;
 pub mod browser_session;
 pub mod compiled_binding;
