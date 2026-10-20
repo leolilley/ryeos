@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-19T22:29:40Z:f9aaca9c4b90100ccf46a5715c1b7d7fa75216a2065a352c057dbb2c89903443:pqti5W6C0WZpWUcCt5rVt/RvYL996LenTJQbmDp/kMlRwAyL9upEcoBWFPgfdmPD0hTAA4Ojvvf9Zn6YWrnzAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-20T19:22:30Z:4c5d16287cbd796f47edfe38fac5232997ceb565f2298c8ad895ce15677f0e82:2TZ8j/ACp+t/wHyRYud20V+uevjBmKzAFwr91iiTlvkeWjGfM8khrVWnCA6FTV3HyoftqpkMTWzW0obrT3p/Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/surface"
 version: "2.0.0"
 location:
@@ -50,23 +50,23 @@ composer_config:
     - name: affordances
       strategy: keyed_seq_merge_root_last
       key: id
-      expect_value_type: array
+      expect_value_type: sequence
     - name: instruments
       strategy: keyed_seq_merge_root_last
       key: id
-      expect_value_type: array
+      expect_value_type: sequence
     - name: capabilities
       strategy: narrow_against_parent_effective
       expect_value_type: mapping
-    # replace_root_last, not keyed merge: entries may be bare view refs and
-    # the keyed merge would silently drop keyless items.
+    # replace_root_last, not keyed merge: group entries carry no `id` key,
+    # so the keyed merge would silently drop them.
     - name: library
       strategy: replace_root_last
-      expect_value_type: array
+      expect_value_type: sequence
     - name: navigation
       strategy: keyed_seq_merge_root_last
       key: id
-      expect_value_type: array
+      expect_value_type: sequence
     - name: backdrop
       strategy: replace_root_last
       expect_value_type: string
@@ -227,15 +227,19 @@ composed_value_contract:
           sources: { type: single, prim: sequence, elements: { type: single, prim: string } }
           affordances: { type: single, prim: sequence, elements: { type: single, prim: string } }
         optional: {}
-    # Grouped `{ group, views }` entries are canonical; bare `view:` ref
-    # strings remain accepted (the launcher shelves them under their
-    # path-derived group).
+    # Every entry is a `{ group, views }` mapping.
     library:
       type: single
       prim: sequence
       elements:
-        type: union
-        prims: [string, mapping]
+        type: single
+        prim: mapping
+        contract:
+          root_type: mapping
+          required:
+            group: { type: single, prim: string }
+            views: { type: single, prim: sequence, elements: { type: single, prim: string } }
+          optional: {}
     navigation:
       type: single
       prim: sequence
