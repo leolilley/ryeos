@@ -6111,6 +6111,29 @@ impl ThreadLifecycleService {
         Ok(self.decorate_list_items_with_enrichment(items, enrichment))
     }
 
+    /// Minimal display decoration for a caller that has already verified each
+    /// candidate against its exact signed subject. This deliberately avoids
+    /// follow-parent expansion and projection/runtime enrichment: those lanes
+    /// must be authorized independently before they are disclosed.
+    pub fn display_verified_thread_list_items(
+        &self,
+        items: Vec<ThreadListItem>,
+    ) -> Vec<ThreadListView> {
+        items
+            .into_iter()
+            .map(|item| ThreadListView {
+                execution: self.execution_facts(&item.kind),
+                item,
+                follow: None,
+                project: None,
+                pending: 0,
+                facets: Default::default(),
+                current_node: None,
+                error: None,
+            })
+            .collect()
+    }
+
     fn decorate_list_items_with_enrichment(
         &self,
         items: Vec<ThreadListItem>,
@@ -9203,6 +9226,60 @@ mod tests {
         // Present-but-null (the field is always emitted when the fact exists).
         assert_eq!(v["child_terminal_status"], json!(null));
         assert_eq!(v["parent_successor_thread_id"], json!("succ-9"));
+    }
+
+    #[test]
+    fn verified_list_display_carries_no_unauthorized_enrichment() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let (_store_owner, state) =
+            crate::state::test_support::build(root.path()).expect("application state");
+        let item = |thread_id: &str, status: &str| ThreadListItem {
+            thread_id: thread_id.to_string(),
+            chain_root_id: thread_id.to_string(),
+            kind: "unprofiled_kind".to_string(),
+            status: status.to_string(),
+            item_ref: "directive:demo".to_string(),
+            launch_mode: "managed_async".to_string(),
+            current_site_id: "site:test".to_string(),
+            origin_site_id: "site:test".to_string(),
+            upstream_thread_id: None,
+            successor_thread_id: None,
+            requested_by: Some("fp:test".to_string()),
+            project_root: Some("/srv/project".to_string()),
+            project_authority: None,
+            lifecycle_authority: None,
+            admitted_launch_capsule_hash: None,
+            created_at: "t".to_string(),
+            updated_at: "t".to_string(),
+        };
+        let views = state.threads.display_verified_thread_list_items(vec![
+            item("T-b", "continued"),
+            item("T-a", "running"),
+        ]);
+        assert_eq!(
+            views
+                .iter()
+                .map(|view| view.item.thread_id.as_str())
+                .collect::<Vec<_>>(),
+            ["T-b", "T-a"],
+            "the caller's verified order is preserved"
+        );
+        for view in &views {
+            assert!(view.follow.is_none());
+            assert!(view.project.is_none(), "no project path is disclosed");
+            assert_eq!(view.pending, 0);
+            assert!(view.facets.is_empty());
+            assert!(view.current_node.is_none());
+            assert!(view.error.is_none());
+            assert!(!view.execution.supports_continuation);
+            assert!(!view.execution.supports_operator_followup);
+        }
+        assert!(
+            state
+                .threads
+                .display_verified_thread_list_items(Vec::new())
+                .is_empty()
+        );
     }
 
     #[test]

@@ -7341,10 +7341,21 @@ async fn settled_portable_command_lost_ack_replays_after_real_daemon_restart_on_
     );
     daemon.kill_daemon().await?;
     let store = open_daemon_state(&daemon.state_path)?;
-    anyhow::ensure!(
-        store.dedicated_session_commands(&cut.placement_thread_id)? == vec![settled],
-        "exact replay created another worker command or altered the settled record"
-    );
+    let replayed = store.dedicated_session_commands(&cut.placement_thread_id)?;
+    if replayed != vec![settled] {
+        // The refusal of the worker's exclusive session arrives after the
+        // launch answered, so a host that cannot qualify process scopes shows
+        // up here, as a settled record that never became a real session.
+        let stderr = daemon.drain_stderr_nonblocking().await;
+        let detail = format!(
+            "exact replay created another worker command or altered the settled record: {replayed:?}\n{stderr}"
+        );
+        return Err(refuse_launch_or_host_unqualified(
+            detail,
+            &serde_json::Value::Null,
+            &stderr,
+        ));
+    }
     anyhow::ensure!(
         std::fs::read(&contact_marker)? == contacts_at_cut,
         "exact replay contacted the worker a second time"
