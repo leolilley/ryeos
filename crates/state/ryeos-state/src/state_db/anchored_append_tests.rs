@@ -967,3 +967,268 @@ fn single_anchor_mixed_cut_commits_once_under_the_fence() {
     assert!(committed(run(&target, &[], &[]).unwrap()));
     assert_eq!(event_rows(&db, "T-a"), START_ROWS + 2);
 }
+
+fn pair<'a>(
+    first: &'a AuthoritativeThreadEventReadAnchor,
+    second: &'a AuthoritativeThreadEventReadAnchor,
+    signer: &'a TestSigner,
+    first_kind: &'a str,
+    second_kind: &'a str,
+) -> OrderedPairThreadAppend<'a> {
+    OrderedPairThreadAppend {
+        first,
+        second,
+        first_events: vec![event(&first.chain_root_id, "first")],
+        signer,
+        runtime_liveness: &NoRecovery,
+        required_first_kind: first_kind,
+        required_second_kind: second_kind,
+    }
+}
+
+#[test]
+fn ordered_pair_publishes_the_second_event_from_the_first_commit() {
+    let (_dir, db) = open();
+    let signer = TestSigner::default();
+    create(&db, "T-first", KIND);
+    create(&db, "T-second", KIND);
+    let first = capture(&db, "T-first");
+    let second = capture(&db, "T-second");
+    let built_from = std::cell::RefCell::new(None);
+    let result = db
+        .append_running_event_pair_admitted_if_mixed_cut(
+            pair(&first, &second, &signer, KIND, KIND),
+            MixedCutDependencies {
+                current_anchors: &[],
+                retired: &[],
+            },
+            &guard(&db),
+            |view| {
+                assert_eq!(view.target.thread_id, "T-first");
+                assert_eq!(view.counterpart.thread_id, "T-second");
+                Ok(true)
+            },
+            |committed, after| {
+                *built_from.borrow_mut() = Some((
+                    committed.value.chain_state_hash.clone(),
+                    after.tip().map(|(hash, seq)| (hash.to_owned(), seq)),
+                ));
+                Ok(vec![event("T-second", "second")])
+            },
+        )
+        .unwrap();
+    let ConditionalThreadEventPairAppendResult::Committed {
+        first: a,
+        second: b,
+    } = result
+    else {
+        panic!("pair did not commit");
+    };
+    assert_eq!(a.value.event_count, 1);
+    assert_eq!(b.value.event_count, 1);
+    let (head, tip) = built_from.into_inner().expect("builder ran");
+    assert_eq!(head, a.value.chain_state_hash);
+    assert_eq!(tip.expect("first tip").1, first.tip().expect("tip").1 + 1);
+    assert_eq!(event_rows(&db, "T-first"), START_ROWS + 1);
+    assert_eq!(event_rows(&db, "T-second"), START_ROWS + 1);
+}
+
+#[test]
+fn ordered_pair_conflicts_before_any_write_on_a_stale_kind_or_refused_cut() {
+    let (_dir, db) = open();
+    let signer = TestSigner::default();
+    create(&db, "T-first", KIND);
+    create(&db, "T-second", KIND);
+    create(&db, "T-extra", KIND);
+    let first = capture(&db, "T-first");
+    let second = capture(&db, "T-second");
+    let extra = capture(&db, "T-extra");
+    let none = || MixedCutDependencies {
+        current_anchors: &[],
+        retired: &[],
+    };
+    let run = |second_kind: &str,
+               deps: MixedCutDependencies<'_>,
+               admitted: bool,
+               entered: &std::cell::Cell<bool>| {
+        db.append_running_event_pair_admitted_if_mixed_cut(
+            pair(&first, &second, &signer, KIND, second_kind),
+            deps,
+            &guard(&db),
+            |_| {
+                entered.set(true);
+                Ok(admitted)
+            },
+            |_, _| unreachable!("the second event is never built without a first commit"),
+        )
+        .unwrap()
+    };
+    let entered = std::cell::Cell::new(false);
+    // The second chain must be the required kind.
+    assert!(matches!(
+        run("tool", none(), true, &entered),
+        ConditionalThreadEventPairAppendResult::Conflict
+    ));
+    assert!(!entered.get());
+    // A moved extra live dependency refuses before admission.
+    append(&db, "T-extra", 1);
+    assert!(matches!(
+        run(
+            KIND,
+            MixedCutDependencies {
+                current_anchors: std::slice::from_ref(&extra),
+                retired: &[]
+            },
+            true,
+            &entered
+        ),
+        ConditionalThreadEventPairAppendResult::Conflict
+    ));
+    assert!(!entered.get());
+    // A refused admission is a clean conflict.
+    assert!(matches!(
+        run(KIND, none(), false, &entered),
+        ConditionalThreadEventPairAppendResult::Conflict
+    ));
+    assert!(entered.get());
+    assert_eq!(event_rows(&db, "T-first"), START_ROWS);
+    assert_eq!(event_rows(&db, "T-second"), START_ROWS);
+    // The same chain twice is refused outright.
+    assert!(
+        db.append_running_event_pair_admitted_if_mixed_cut(
+            pair(&first, &first, &signer, KIND, KIND),
+            none(),
+            &guard(&db),
+            |_| Ok(true),
+            |_, _| unreachable!(),
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn ordered_pair_reports_a_failed_second_event_as_first_committed() {
+    let (_dir, db) = open();
+    let signer = TestSigner::default();
+    create(&db, "T-first", KIND);
+    create(&db, "T-second", KIND);
+    let first = capture(&db, "T-first");
+    let second = capture(&db, "T-second");
+    let result = db
+        .append_running_event_pair_admitted_if_mixed_cut(
+            pair(&first, &second, &signer, KIND, KIND),
+            MixedCutDependencies {
+                current_anchors: &[],
+                retired: &[],
+            },
+            &guard(&db),
+            |_| Ok(true),
+            |_, _| anyhow::bail!("second event could not be built"),
+        )
+        .unwrap();
+    assert!(matches!(
+        result,
+        ConditionalThreadEventPairAppendResult::FirstCommittedSecondUncertain { .. }
+    ));
+    assert_eq!(event_rows(&db, "T-first"), START_ROWS + 1);
+    assert_eq!(event_rows(&db, "T-second"), START_ROWS);
+}
+
+#[test]
+fn a_retired_dependency_records_an_obligation_for_every_chain_that_publishes() {
+    let (_dir, db) = open();
+    let signer = TestSigner::default();
+    create(&db, "T-first", KIND);
+    create(&db, "T-second", KIND);
+    create(&db, "T-single", KIND);
+    let manifest = "ab".repeat(32);
+    fence(&db, "T-owner", &manifest);
+    let retired = [RetiredChainDependency {
+        chain_root_id: "T-owner".into(),
+        manifest_hash: manifest.clone(),
+    }];
+    let owner_holders = || {
+        let lock = db.acquire_existing_chain_lock("T-owner").unwrap();
+        holders(&db, &lock)
+    };
+    assert!(owner_holders().is_empty());
+
+    let single = capture(&db, "T-single");
+    assert!(committed(
+        db.append_running_events_admitted_if_single_anchor_mixed_cut_with_admission(
+            SingleAnchorThreadAppend {
+                chain_root_id: "T-single",
+                thread_id: "T-single",
+                events: vec![event("T-single", "evidence")],
+                signer: &signer,
+                runtime_liveness: &NoRecovery,
+                expected: &single,
+                required_target_kind: KIND,
+            },
+            MixedCutDependencies {
+                current_anchors: &[],
+                retired: &retired,
+            },
+            &guard(&db),
+            |_| Ok(true),
+        )
+        .unwrap()
+    ));
+    assert_eq!(owner_holders(), BTreeSet::from(["T-single".to_owned()]));
+
+    let first = capture(&db, "T-first");
+    let second = capture(&db, "T-second");
+    let result = db
+        .append_running_event_pair_admitted_if_mixed_cut(
+            pair(&first, &second, &signer, KIND, KIND),
+            MixedCutDependencies {
+                current_anchors: &[],
+                retired: &retired,
+            },
+            &guard(&db),
+            |_| Ok(true),
+            |_, _| Ok(vec![event("T-second", "second")]),
+        )
+        .unwrap();
+    assert!(matches!(
+        result,
+        ConditionalThreadEventPairAppendResult::Committed { .. }
+    ));
+    assert_eq!(
+        owner_holders(),
+        BTreeSet::from([
+            "T-first".to_owned(),
+            "T-second".to_owned(),
+            "T-single".to_owned()
+        ])
+    );
+}
+
+#[test]
+fn a_cut_with_no_retired_dependency_records_no_obligation() {
+    let (_dir, db) = open();
+    let signer = TestSigner::default();
+    create(&db, "T-a", KIND);
+    create(&db, "T-b", KIND);
+    let target = capture(&db, "T-a");
+    let counterpart = capture(&db, "T-b");
+    assert!(committed(
+        db.append_running_events_admitted_if_mixed_cut_with_admission(
+            two_anchor("T-a", &signer, &target, &counterpart, KIND),
+            MixedCutDependencies {
+                current_anchors: &[],
+                retired: &[],
+            },
+            &guard(&db),
+            |_| Ok(true),
+        )
+        .unwrap()
+    ));
+    let lock = db.acquire_existing_chain_lock("T-b").unwrap();
+    assert!(
+        db.recovery
+            .evidence_obligation_holders(&lock, "T-b")
+            .unwrap()
+            .is_empty()
+    );
+}

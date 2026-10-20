@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-19T22:29:39Z:de0342c7b1876809a99e4374a011f16c6b96065ff4d09e33c10f33c65fd1f4b8:lUwEnBq7CIsCBTKKbO/eYRd9AYuHx9HYMeG6KQGG4b+4/PW+f0aI5OB/xOzo+eWFZrHOqR+VC7qGXpZ6QapJCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-20T09:54:48Z:eb90fb868dd1a2d1dab20351154751a01620540e16f315ed8a4c27107333c6b2:5UnrT35djiYawwqMbrXjSfEJgcdUM7RiiM0CBQEz9K3hMfMbZ41DgzOjsZKgeunEFoeEGHFL8tDEAtPOXGJWBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - core
@@ -327,7 +327,7 @@ policies:
     schema: 2
     names: []
   ui_browser_sessions:
-    schema: 3
+    schema: 4
     max_session_bootstrap_bytes: 4194304
     max_live_binding_attachments_per_session: 16
     max_presentations_per_session: 16
@@ -338,3 +338,7 @@ policies:
       max_initial_surfaces: 16
       max_label_bytes: 128
       max_mount_id_bytes: 64
+    seat:
+      kind: seat_session
+      max_replay_frame_events: 64
+      max_replay_frame_bytes: 4194304
