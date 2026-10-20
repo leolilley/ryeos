@@ -413,6 +413,22 @@ impl UiHistoricalTransferCutProof {
         self.lifecycles.get(operation_id)
     }
 
+    /// Every transfer phase the cut authenticated on the seat `root`, oldest
+    /// first. A seat the cut does not name has none.
+    pub fn seat_phases(&self, root: &str) -> Vec<(&TransferEvidence, &TransferRecord)> {
+        let Some(read) = self.cut.endpoints.get(root) else {
+            return Vec::new();
+        };
+        let mut phases: Vec<_> = read
+            .operations
+            .values()
+            .flat_map(|operation| operation.phases.iter())
+            .map(|phase| (&phase.evidence, &phase.record))
+            .collect();
+        phases.sort_by_key(|(evidence, _)| evidence.chain_seq);
+        phases
+    }
+
     pub fn cancellation(
         &self,
         operation_id: &str,

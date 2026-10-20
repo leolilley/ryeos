@@ -5,8 +5,10 @@
 //! binding descriptors, and the events URL. Descriptor order carries no
 //! authority.
 //!
-//! Requires `browser_session` auth (cookie). No cap intersection, no
-//! extra round trips.
+//! Requires `browser_session` auth (cookie). Memberships whose seats carry
+//! transfers, and memberships of retired seats, are repaired only from a
+//! completed bounded paired cut before projection; this is retained-history
+//! work, not another grant or cap intersection.
 
 use std::sync::Arc;
 
@@ -19,6 +21,7 @@ use ryeos_app::handler_error::HandlerError;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 
+use crate::browser_session::transfer_reservation::{CompletedPairedCut, CompletedRetiredRoot};
 use crate::state::get_ui_state;
 
 /// Extract session_id from the handler context's fingerprint.
@@ -41,23 +44,327 @@ pub async fn handle(_params: Value, ctx: HandlerContext, state: Arc<AppState>) -
         .ok_or_else(|| HandlerError::Forbidden("no browser session".into()))?;
 
     let ui = get_ui_state(&state).expect("UiState not set");
-    let expected = ui
-        .browser_sessions
-        .presentation_memberships(&session_id)
-        .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
-    // The projection is taken while the store holds exactly the membership
-    // inventory read above; a membership that changed in between refuses and
-    // the browser retries, so a descriptor is never mixed from two states.
-    let projected = ui
-        .browser_sessions
-        .with_exact_presentation_read_snapshot(
-            &session_id,
-            &expected,
-            state.node_policy.generation_digest(),
-            |locked| project_current_session(&state, locked),
+    let (session, paired, retired_initial, initial_heads) = {
+        let _transition = ui
+            .lock_seat_transition()
+            .map_err(|_| HandlerError::Internal("seat transition lock poisoned".into()))?;
+        let session = ui
+            .browser_sessions
+            .get_session(&session_id)
+            .ok_or(HandlerError::Forbidden("session expired or invalid".into()))?;
+        let reconciliation = super::ui_seat::reconcile_session_surface_closures(&state, &session)?;
+        // Ordinary closure reconciliation may have changed the session above.
+        // Freeze the actual post-repair inventory, not the stale pre-repair
+        // clone used to discover transfer-bearing roots.
+        let session = ui
+            .browser_sessions
+            .get_session(&session_id)
+            .ok_or(HandlerError::Forbidden("session expired or invalid".into()))?;
+        let current = |presentation_id: &str| {
+            session
+                .presentations
+                .get(presentation_id)
+                .cloned()
+                .ok_or_else(|| {
+                    HandlerError::Conflict("session presentation inventory changed".into())
+                })
+        };
+        let paired = reconciliation
+            .paired
+            .iter()
+            .map(|membership| -> Result<_> {
+                let membership = current(&membership.presentation_id)?;
+                let (chain_root_id, thread_id) = seat_coordinates(&membership)?;
+                let anchor = state
+                    .state_store
+                    .capture_thread_event_read_anchor(chain_root_id, thread_id)?
+                    .ok_or_else(|| {
+                        HandlerError::Conflict("paired bootstrap lost signed head".into())
+                    })?;
+                Ok((membership, anchor))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let retired = reconciliation
+            .retired
+            .into_iter()
+            .map(|(membership, evidence)| -> Result<_> {
+                Ok((current(&membership.presentation_id)?, evidence))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let heads = session
+            .presentations
+            .values()
+            .filter(|membership| membership.thread_id.is_some())
+            .map(|membership| -> Result<_> {
+                let (chain_root_id, thread_id) = seat_coordinates(membership)?;
+                let anchor = state
+                    .state_store
+                    .capture_thread_event_read_anchor(chain_root_id, thread_id)?;
+                Ok((chain_root_id.to_owned(), thread_id.to_owned(), anchor))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        (session, paired, retired, heads)
+    };
+
+    let mut completed_roots = Vec::new();
+    for (membership, anchor) in paired {
+        let cut = super::ui_seat::paired_read::read_live_root_cut(
+            state.clone(),
+            &session,
+            &membership,
+            anchor.clone(),
         )
-        .map_err(|error| HandlerError::Forbidden(error.to_string()))??;
+        .await?;
+        let mut replay = super::ui_seat::FixedAnchorReplay::begin_at_anchor(
+            &state,
+            &membership.presentation_id,
+            anchor.clone(),
+            Some(cut.clone()),
+        )?;
+        loop {
+            let read_state = state.clone();
+            let (next, step) = tokio::task::spawn_blocking(move || {
+                let step = replay.next_step(&read_state);
+                (replay, step)
+            })
+            .await?;
+            replay = next;
+            match step? {
+                super::ui_seat::FixedAnchorReplayStep::Pending => {}
+                super::ui_seat::FixedAnchorReplayStep::Complete {
+                    tip_hash,
+                    thread_seq,
+                } => {
+                    replay.completed_paired_projection(&membership.initialization)?;
+                    if anchor.tip() != Some((tip_hash.as_str(), thread_seq)) {
+                        return Err(HandlerError::Conflict(
+                            "paired bootstrap replay tip differs".into(),
+                        )
+                        .into());
+                    }
+                    completed_roots.push((membership, anchor, cut, replay));
+                    break;
+                }
+            }
+        }
+    }
+    let mut completed_retired = Vec::new();
+    for (membership, evidence) in retired_initial {
+        let root = super::ui_seat::paired_read::read_retired_root(
+            state.clone(),
+            &session,
+            &membership,
+            evidence,
+        )
+        .await?;
+        completed_retired.push((membership, root));
+    }
+
+    let _transition = ui
+        .lock_seat_transition()
+        .map_err(|_| HandlerError::Internal("seat transition lock poisoned".into()))?;
+    let current = ui
+        .browser_sessions
+        .get_session(&session_id)
+        .ok_or(HandlerError::Forbidden("session expired or invalid".into()))?;
+    if current.presentations != session.presentations {
+        return Err(HandlerError::Conflict(
+            "session presentation inventory changed during paired bootstrap".into(),
+        )
+        .into());
+    }
+    for membership in session.presentations.values() {
+        let settled = completed_roots
+            .iter()
+            .any(|(root, _, _, _)| root.presentation_id == membership.presentation_id)
+            || completed_retired
+                .iter()
+                .any(|(retired, _)| retired.presentation_id == membership.presentation_id);
+        if !settled && membership.thread_id.is_some() {
+            super::ui_seat::initialization::require(&state, &session, &membership.presentation_id)?;
+        }
+    }
+    let mut anchors = std::collections::BTreeMap::new();
+    let mut fences =
+        std::collections::BTreeMap::<String, ryeos_state::RetiredChainDependency>::new();
+    for (_, root_anchor, cut, _) in &completed_roots {
+        if !cut.current_anchors().contains(root_anchor) {
+            return Err(
+                HandlerError::Conflict("paired bootstrap root cut disappeared".into()).into(),
+            );
+        }
+        include_cut(&mut anchors, &mut fences, cut)?;
+    }
+    for (_, root) in &completed_retired {
+        match root.cut() {
+            Some(cut) => {
+                if !cut.retired_dependencies().contains(root.dependency()) {
+                    return Err(HandlerError::Conflict(
+                        "retired bootstrap cut omitted its original fence".into(),
+                    )
+                    .into());
+                }
+                include_cut(&mut anchors, &mut fences, cut)?;
+            }
+            None => include_fence(&mut fences, root.dependency())?,
+        }
+    }
+    for (chain_root_id, thread_id, initial) in &initial_heads {
+        if let Some(anchor) = initial {
+            include_anchor(&mut anchors, anchor)?;
+        } else if state
+            .state_store
+            .capture_thread_event_read_anchor(chain_root_id, thread_id)?
+            .is_some()
+        {
+            // There is no signed chain lock to hold for an absent initial
+            // head. Under the seat transition, a newly initialized seat must
+            // restart rather than slip into the projected session.
+            return Err(HandlerError::Conflict(
+                "session seat acquired its first signed head during bootstrap".into(),
+            )
+            .into());
+        }
+    }
+    if fences
+        .keys()
+        .any(|root| anchors.keys().any(|(anchor_root, _)| anchor_root == root))
+    {
+        return Err(
+            HandlerError::Conflict("paired bootstrap mixes live and retired root".into()).into(),
+        );
+    }
+    let anchors = anchors.into_values().collect::<Vec<_>>();
+    let fences = fences.into_values().collect::<Vec<_>>();
+    let expected = session.presentations.values().cloned().collect::<Vec<_>>();
+    let policy_digest = state.node_policy.generation_digest();
+    let projected = if anchors.is_empty() && fences.is_empty() {
+        ui.browser_sessions
+            .with_exact_presentation_read_snapshot(
+                &session_id,
+                &expected,
+                policy_digest,
+                |locked| project_current_session(&state, locked),
+            )
+            .map_err(|error| HandlerError::Forbidden(error.to_string()))??
+    } else if completed_roots.is_empty() && completed_retired.is_empty() {
+        ui.browser_sessions
+            .with_exact_presentation_read_snapshot(
+                &session_id,
+                &expected,
+                policy_digest,
+                |locked| {
+                    state
+                        .state_store
+                        .with_thread_event_read_anchors(&anchors, || {
+                            project_current_session(&state, locked)
+                        })
+                },
+            )
+            .map_err(|error| HandlerError::Forbidden(error.to_string()))??
+            .ok_or_else(|| HandlerError::Conflict("session signed cut advanced".into()))?
+    } else {
+        let roots = completed_roots
+            .iter()
+            .map(|(membership, _, cut, replay)| -> Result<_> {
+                Ok((
+                    membership,
+                    replay.completed_paired_projection(&membership.initialization)?,
+                    cut.as_ref() as &dyn CompletedPairedCut,
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let retired_roots = completed_retired
+            .iter()
+            .map(|(membership, root)| {
+                (
+                    membership,
+                    root as &dyn CompletedRetiredRoot,
+                    root.dependency(),
+                )
+            })
+            .collect::<Vec<_>>();
+        ui.browser_sessions
+            .with_reconciled_completed_roots_at_cut(
+                &state.state_store,
+                &anchors,
+                &fences,
+                &session_id,
+                &expected,
+                policy_digest,
+                &roots,
+                &retired_roots,
+                |candidate| Ok(Some(project_current_session(&state, candidate)?)),
+            )?
+            .ok_or_else(|| HandlerError::Conflict("paired bootstrap signed cut advanced".into()))?
+    };
     serde_json::to_value(projected).map_err(Into::into)
+}
+
+type AnchorKey = (String, String);
+
+fn seat_coordinates(
+    membership: &crate::browser_session::PresentationMembership,
+) -> Result<(&str, &str), HandlerError> {
+    let thread_id = membership
+        .thread_id
+        .as_deref()
+        .ok_or_else(|| HandlerError::Conflict("session seat has no thread".into()))?;
+    let chain_root_id = membership
+        .chain_root_id
+        .as_deref()
+        .ok_or_else(|| HandlerError::Conflict("session seat has no chain root".into()))?;
+    Ok((chain_root_id, thread_id))
+}
+
+fn include_anchor(
+    anchors: &mut std::collections::BTreeMap<
+        AnchorKey,
+        ryeos_state::AuthoritativeThreadEventReadAnchor,
+    >,
+    anchor: &ryeos_state::AuthoritativeThreadEventReadAnchor,
+) -> Result<()> {
+    let key = (
+        anchor.chain_root_id().to_owned(),
+        anchor.thread_id().to_owned(),
+    );
+    if anchors
+        .insert(key, anchor.clone())
+        .is_some_and(|previous| previous != *anchor)
+    {
+        return Err(HandlerError::Conflict("bootstrap has conflicting signed cuts".into()).into());
+    }
+    Ok(())
+}
+
+fn include_fence(
+    fences: &mut std::collections::BTreeMap<String, ryeos_state::RetiredChainDependency>,
+    fence: &ryeos_state::RetiredChainDependency,
+) -> Result<()> {
+    if fences
+        .insert(fence.chain_root_id.clone(), fence.clone())
+        .is_some_and(|previous| previous != *fence)
+    {
+        return Err(HandlerError::Conflict("bootstrap has conflicting retired cuts".into()).into());
+    }
+    Ok(())
+}
+
+fn include_cut(
+    anchors: &mut std::collections::BTreeMap<
+        AnchorKey,
+        ryeos_state::AuthoritativeThreadEventReadAnchor,
+    >,
+    fences: &mut std::collections::BTreeMap<String, ryeos_state::RetiredChainDependency>,
+    cut: &super::ui_seat::paired_read::FixedTransferCut,
+) -> Result<()> {
+    for anchor in cut.current_anchors() {
+        include_anchor(anchors, &anchor)?;
+    }
+    for fence in cut.retired_dependencies() {
+        include_fence(fences, &fence)?;
+    }
+    Ok(())
 }
 
 /// Pure projection: no store lookup, seat mutation or lock acquisition.

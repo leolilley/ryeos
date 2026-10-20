@@ -10,6 +10,9 @@ use ryeos_client_base::ui::presentation_initialization::{
 };
 use ryeos_state::objects::thread_event::ThreadEvent;
 
+mod fixed_anchor_replay;
+pub(crate) use fixed_anchor_replay::{FixedAnchorReplay, FixedAnchorReplayStep};
+
 use super::{
     MAX_SEAT_APPEND_EVENTS, SEAT_APPEND_RECEIPT_EVENT, SEAT_PRODUCER_EVENT, SeatAppendReceipt,
     SeatProducer, canonical_digest, canonical_operation_id,
@@ -42,6 +45,25 @@ pub(super) fn persisted(
         prev_thread_event_hash: event.prev_thread_event_hash,
         payload: event.payload,
     })
+}
+
+fn validate_replay_initialization(
+    record: &PersistedEventRecord,
+    presentation_id: &str,
+) -> Result<(), HandlerError> {
+    let initialization: UiPresentationInitializationRecord =
+        serde_json::from_value(record.payload.clone()).map_err(|error| {
+            invalid(format!(
+                "invalid authenticated replay initialization: {error}"
+            ))
+        })?;
+    initialization.validate().map_err(invalid)?;
+    if initialization.initialization.presentation_id != presentation_id {
+        return Err(invalid(
+            "authenticated replay initialization belongs to another presentation",
+        ));
+    }
+    Ok(())
 }
 
 /// Reverse-CAS initialization fold. Owned activity must not be interpreted as
@@ -514,6 +536,37 @@ mod replay_initialization_tests {
             prev_thread_event_hash: None,
             payload: serde_json::to_value(record).unwrap(),
         }
+    }
+
+    #[test]
+    fn initialization_cursor_requires_the_exact_presentation() {
+        let record = valid_initialization_event();
+        assert!(
+            validate_replay_initialization(&record, "11111111-1111-4111-8111-111111111111").is_ok()
+        );
+        assert!(
+            validate_replay_initialization(&record, "33333333-3333-4333-8333-333333333333")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn signed_event_type_alone_cannot_be_an_initialization_cursor() {
+        let record = PersistedEventRecord {
+            event_id: 0,
+            event_hash: Some("a".repeat(64)),
+            chain_root_id: "T-seat".into(),
+            chain_seq: 2,
+            thread_id: "T-seat".into(),
+            thread_seq: 2,
+            event_type: PRESENTATION_INITIALIZED_EVENT.into(),
+            storage_class: "indexed".into(),
+            ts: "2026-10-06T00:00:00Z".into(),
+            prev_chain_event_hash: None,
+            prev_thread_event_hash: None,
+            payload: serde_json::json!({"not_an_initialization": true}),
+        };
+        assert!(validate_replay_initialization(&record, "presentation").is_err());
     }
 
     fn owned_activity_kinds() -> [&'static str; 7] {

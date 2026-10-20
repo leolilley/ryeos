@@ -3,7 +3,7 @@
 //! the refusal of every predecessor lifecycle version.
 
 mod test_state;
-use test_state::build_test_state;
+use test_state::{build_test_state, launch_context, mint_launch};
 
 use std::sync::Arc;
 
@@ -605,4 +605,221 @@ async fn an_orphan_inbound_waits_for_its_source_to_be_claimed_then_cancels() {
     )
     .unwrap();
     assert_eq!(cut.closure(&transfer).unwrap(), TransferClosure::Closed);
+}
+
+/// A launch whose root is a shared-presentation Config: the only root kind a
+/// presentation can be admitted under.
+fn shared_launch_context() -> ryeos_ui::browser_session::LaunchContext {
+    let mut context = launch_context(
+        "surface:ryeos/ui/base",
+        None,
+        ryeos_ui::compiled_binding::EffectiveUiPosture::ObservationOnly,
+        None,
+    );
+    Arc::make_mut(&mut context.compiled_binding)
+        .binding
+        .surface
+        .canonical_ref = "config:ryeos/test/presentation".to_owned();
+    let config = serde_json::from_value(json!({
+        "category": "ryeos/test",
+        "shared_presentation": {
+            "schema": 1, "title": "Test presentation", "launcher": "launch",
+            "dialogs": [{"id": "launch", "title": "Launch", "view": "view:ryeos/test/launcher"}],
+            "capabilities": {"sources": [], "affordances": []}
+        }
+    }))
+    .expect("typed shared Config fixture");
+    context.presentation = ryeos_client_base::presentation::UiCompositionPresentation {
+        definition: ryeos_client_base::presentation::UiCompositionDefinition::SharedPresentation {
+            config,
+        },
+        views: std::collections::BTreeMap::from([(
+            "view:ryeos/test/launcher".into(),
+            json!({"widget": "rows"}),
+        )]),
+    };
+    context
+}
+
+/// A session holding one unbound presentation per requested seat.
+struct SessionFixture {
+    session_id: String,
+    root: ryeos_ui::browser_session::BindingAttachmentCoordinate,
+    digest: String,
+    presentations: Vec<String>,
+}
+
+fn session_with_presentations(state: &AppState, count: usize) -> SessionFixture {
+    let (session_id, token) = mint_launch(state, shared_launch_context());
+    let ui = ryeos_ui::state::get_ui_state(state).unwrap();
+    ui.browser_sessions.consume_launch_token(&token).unwrap();
+    let session = ui.browser_sessions.get_session(&session_id).unwrap();
+    let root = session.attachments[&session.root_attachment_id].coordinate();
+    let policy = state
+        .node_policy
+        .require::<ryeos_node_runtime::node_policy::sections::ui_browser_sessions::UiBrowserSessionPolicy>()
+        .expect("signed UI browser-session policy");
+    let limits =
+        ryeos_ui::browser_session::PresentationLimits::from_policy(policy).expect("policy limits");
+    let digest = state.node_policy.generation_digest().to_owned();
+    let presentations = (0..count)
+        .map(|_| {
+            ui.browser_sessions
+                .prepare_presentation(
+                    &session_id,
+                    &uuid::Uuid::new_v4().to_string(),
+                    &root,
+                    &limits,
+                    &digest,
+                    ryeos_client_base::ui::UiBindingRequestBounds {
+                        max_request_bytes: 65536,
+                        max_input_bytes: 65536,
+                        max_seat_append_bytes: 65536,
+                    },
+                )
+                .unwrap()
+                .presentation_id
+        })
+        .collect();
+    SessionFixture {
+        session_id,
+        root,
+        digest,
+        presentations,
+    }
+}
+
+fn bind(state: &AppState, fixture: &SessionFixture, presentation: &str, seat: &Seat) {
+    ryeos_ui::state::get_ui_state(state)
+        .unwrap()
+        .browser_sessions
+        .bind_presentation_seat(
+            &fixture.session_id,
+            presentation,
+            &fixture.root,
+            &seat.id,
+            &seat.id,
+            &fixture.digest,
+        )
+        .unwrap();
+}
+
+async fn current(
+    state: &Arc<AppState>,
+    fixture: &SessionFixture,
+) -> anyhow::Result<serde_json::Value> {
+    ryeos_ui::handlers::ui_session_current::handle(
+        json!(null),
+        ryeos_app::handler_context::HandlerContext::new(
+            format!("session:{}", fixture.session_id),
+            vec![],
+            false,
+        ),
+        state.clone(),
+    )
+    .await
+}
+
+/// Close the seats, let their leases expire and settle them; then retire the
+/// `retired` ones one after another in the given order. A seat retired while
+/// its counterpart is still on the chain keeps its transfer testimony as
+/// retained evidence.
+async fn settle_and_retire(state: &Arc<AppState>, settled: &[&Seat], retired: &[&Seat]) {
+    let store = &state.state_store;
+    for seat in settled {
+        close_seat(store, seat);
+        claim_for_reaping(store, seat);
+    }
+    let held = exclusion(state).await;
+    let claimed = settled
+        .iter()
+        .map(|seat| seat.id.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        settle_claimed_seats(state, &held, &claimed).unwrap(),
+        settled.len()
+    );
+    for seat in settled {
+        release_launch_claim(store, seat);
+    }
+    for seat in retired {
+        let plan = qualify_seat_retirement(store, &seat.id).unwrap().unwrap();
+        store
+            .retire_fenced_chain(&seat.id, FAR_FUTURE, &plan, |_| Ok(0))
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn session_current_reads_a_retired_seat_with_no_transfers_through_its_fence() {
+    let (_dir, _owner, state) = build_test_state();
+    install_composition();
+    let fixture = session_with_presentations(&state, 1);
+    let seat = new_seat(
+        &state.state_store,
+        "S-plain",
+        &fixture.presentations[0],
+        'b',
+    );
+    bind(&state, &fixture, &fixture.presentations[0], &seat);
+    let state = Arc::new(state);
+    settle_and_retire(&state, &[&seat], &[&seat]).await;
+    let retired = capture_retired_seat(&state.state_store, &seat.id)
+        .unwrap()
+        .unwrap();
+    assert!(retired.owner_events().is_empty());
+
+    let reported = current(&state, &fixture).await.unwrap();
+    let presentations = reported["presentations"].as_array().unwrap();
+    assert_eq!(presentations.len(), 1);
+    assert_eq!(presentations[0]["thread_id"], "S-plain");
+    assert_eq!(presentations[0]["chain_root_id"], "S-plain");
+}
+
+#[tokio::test]
+async fn session_current_reads_a_settled_transfer_between_two_retired_seats() {
+    let (_dir, _owner, state) = build_test_state();
+    install_composition();
+    let fixture = session_with_presentations(&state, 2);
+    let store = Arc::clone(&state.state_store);
+    let source = new_seat(&store, "S-source", &fixture.presentations[0], 'b');
+    let destination = new_seat(&store, "S-dest", &fixture.presentations[1], 'c');
+    prepared_pair(&store, &source, &destination);
+    bind(&state, &fixture, &fixture.presentations[0], &source);
+    bind(&state, &fixture, &fixture.presentations[1], &destination);
+    let state = Arc::new(state);
+    settle_and_retire(&state, &[&source, &destination], &[&source, &destination]).await;
+    let retired = capture_retired_seat(&store, &source.id).unwrap().unwrap();
+    assert_eq!(
+        retired.owner_events().len(),
+        2,
+        "the retired source keeps its Prepared and Aborted testimony"
+    );
+
+    let reported = current(&state, &fixture).await.unwrap();
+    assert_eq!(reported["presentations"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn session_current_refuses_retired_transfer_evidence_naming_a_presentation_the_session_lacks()
+{
+    let (_dir, _owner, state) = build_test_state();
+    install_composition();
+    let fixture = session_with_presentations(&state, 1);
+    let store = Arc::clone(&state.state_store);
+    let source = new_seat(&store, "S-source", &fixture.presentations[0], 'b');
+    let stranger = new_seat(
+        &store,
+        "S-stranger",
+        "22222222-2222-4222-8222-222222222222",
+        'c',
+    );
+    prepared_pair(&store, &source, &stranger);
+    bind(&state, &fixture, &fixture.presentations[0], &source);
+    let state = Arc::new(state);
+    settle_and_retire(&state, &[&source, &stranger], &[&source]).await;
+    let error = current(&state, &fixture)
+        .await
+        .expect_err("the cut names a seat this session does not hold");
+    assert!(error.to_string().contains("does not hold"), "{error}");
 }

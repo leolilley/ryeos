@@ -217,7 +217,9 @@ impl UiCompositionReplay {
         &self.initialization == initial
     }
 
-    fn initialized(initial: &UiPresentationInitialization) -> Result<Self, String> {
+    /// The replay of an initialization alone: no seat event has been folded
+    /// into it and no chain position is recorded.
+    pub fn initialized(initial: &UiPresentationInitialization) -> Result<Self, String> {
         initial.validate()?;
         let root = initial
             .binding_attachments
