@@ -3550,6 +3550,22 @@ impl std::fmt::Display for HostCannotQualifyProcessScopes {
 
 impl std::error::Error for HostCannotQualifyProcessScopes {}
 
+fn refuse_launch_or_host_unqualified(
+    detail: String,
+    launch: &serde_json::Value,
+    stderr: &str,
+) -> anyhow::Error {
+    if stderr.contains("qualified node process-scope support")
+        || launch
+            .to_string()
+            .contains("persistent-session dependency `session_worker`")
+    {
+        HostCannotQualifyProcessScopes { detail }.into()
+    } else {
+        anyhow::anyhow!("{detail}")
+    }
+}
+
 fn settled_or_host_unqualified(result: Result<()>) -> Result<()> {
     match result {
         Err(error)
@@ -3589,14 +3605,7 @@ async fn launch_and_checkpoint_portable_worker(
         let detail = format!(
             "portable worker launch returned {status}: {launch}\n--- daemon stderr ---\n{stderr}"
         );
-        if stderr.contains("qualified node process-scope support")
-            || launch
-                .to_string()
-                .contains("persistent-session dependency `session_worker`")
-        {
-            return Err(HostCannotQualifyProcessScopes { detail }.into());
-        }
-        anyhow::bail!("{detail}");
+        return Err(refuse_launch_or_host_unqualified(detail, &launch, &stderr));
     }
     let chain_root_id = launch
         .get("thread_id")
@@ -6962,7 +6971,8 @@ async fn portable_worker_fixture_launches_and_binds_a_real_hosted_session_on_qua
         reqwest::StatusCode::OK | reqwest::StatusCode::ACCEPTED
     ) {
         let stderr = daemon.drain_stderr_nonblocking().await;
-        anyhow::bail!("portable worker launch returned {status}: {launch}\n{stderr}");
+        let detail = format!("portable worker launch returned {status}: {launch}\n{stderr}");
+        return Err(refuse_launch_or_host_unqualified(detail, &launch, &stderr));
     }
     let chain_root_id = launch
         .get("thread_id")
