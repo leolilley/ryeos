@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-14T10:03:09Z:86671c46763baf1e473cbfa79f3cda418037ff7617a8a39737709a9f989266bb:bzRa/J8JisMLgiIYsL0G+EnOKWFKNadgKx4/xIW8Og5QQTGwAEPbCzW61tkx8UguAN71LR06grUxSDAg8eg9CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-19T22:29:40Z:4c3cfc55ce7777355969490767e9b8e47d110891e33341e218c08b5fb016e6f6:7N/UohbW8NXsWGvSV+Q1EOneJSZrBapCz+1XNQw1k2GITYI2vzNnFizBPTbfnYwQWOTpPBE4Yz93ubTcxIsPDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: project-items
 title: Items
 version: "1.0.0"
@@ -12,6 +12,7 @@ sources:
       limit: 500
       project_path: "@session:project_root"
     collection: items
+    coverage: coverage
     requires_project: true
 projections:
   columns:
@@ -41,6 +42,8 @@ affordances:
       facet: selection
       value:
         item: "{record.canonical_ref}"
+      open_view: view:ryeos/item/inspector
+      drill: true
   - id: explain
     label: Explain
     invoke:

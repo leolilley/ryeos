@@ -1,5 +1,6 @@
-# ryeos:signed:2026-09-14T10:03:09Z:5e4c5fdf8ca696aca935ff2563de6dadc939fa8d23f05bc8233f1b015e6d15ca:mFGyc5R9r9Ct2Z2e5ZR1E3+HtwdU8e0+cJ+1zNttxgXv6YxCf/xo9DWPluQMXV7aDSA6Y5wP8hKsF84/kVn7DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-19T22:29:40Z:bb0ec143e878661f427cf39de94da42c0253ff764ebf50ad6afe495db3f0dae4:vXHIY4jkrCRlaOYGReqicewXkbN6HE9IxNa3HkPK2IK/j80AmEHbEEsVdpYBWjO+b8nAFZrFhfZqA1M3EjRGCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-thread
+title: Thread
 version: "1.0.0"
 description: Directive thread — watch and drive a single execution stream
 
@@ -7,11 +8,7 @@ capabilities:
   sources: ["ryeos.execute.service.*"]
   affordances: ["ryeos.execute.service.*"]
 
-# One center tile: the directive thread event stream. It starts empty
-# (its source is the route head thread `@facet:input.route.thread`, which
-# is None until the first submit), then fills as the execution streams.
-# The bottom input targets the same directive route, so submitting here
-# launches a thread and the timeline above shows it live.
+# Transcript inspection; conversation input is owned by an explicitly mounted View.
 tiling:
   mode: master_stack
   master: { side: left, arrange: vertical, ratio: 1.0, count: 1 }
@@ -21,14 +18,13 @@ tiling:
 tiles:
   - "view:ryeos/thread/transcript"
 
-slots:
-  bottom: { content: "view:ryeos/input", open: true, size: 7 }
-  right: { content: "view:ryeos/item/inspector", open: false, size: 40 }
-
 style:
   border: thin
 
 library:
+  - group: Inspection
+    views:
+      - view:ryeos/item/inspector
   - group: Threads
     views:
       - view:ryeos/threads/history

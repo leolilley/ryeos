@@ -1,7 +1,8 @@
-# ryeos:signed:2026-09-19T05:20:53Z:4f528f0fca598fbb0f22a41927e9e67b674195b7e39914f1c58a7e022c43bf8b:v6EvhagfZWTgt6UIU25cGXM5e1Yi2JDAR6imC8aeGu8nxC9Rbt6TCn/5a8HUsUlxezSRYQh8neLhkdEbioAfDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-19T22:29:40Z:ee6de7fec471edb3042c96f4756d88223725ddbcdde83bb16011987eef412fbb:TP6TpqmQJeuOnolgT9ogKxc+VierDW4Yol4iZDpDTv7fxiZh2tXRr3w4W3gfsyAl2PchZTprYMY+CBcT+v9FDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-assistant
+title: Assistant
 version: "3.1.0"
-description: Named tiled RyeOS view sets with contextual views and optional supporting slots
+description: Named tiled RyeOS view sets with contextual views
 
 extends: surface:ryeos/ui/lens
 
@@ -9,10 +10,6 @@ tiling:
   mode: master_stack
 
 tiles: []
-# Explicitly remove the inherited single-lens slots. View-set seeds below
-# own their placements; the overview has no global command/input strip.
-slots: { top: null, bottom: null, left: null, right: null }
-
 navigation: []
 style:
   border: thin
@@ -24,7 +21,8 @@ view_sets:
   # changes and execution groups through the view-set-scoped selection owner;
   # the conversation keeps its independently explicit input route. No
   # renderer-owned sample project or thread is used.
-  - id: development
+  - schema: 2
+    id: development
     title: Development
     root:
       type: split
@@ -58,13 +56,15 @@ view_sets:
             label: Execution
             views: ["view:ryeos/development/execution", "view:ryeos/development/occurrence", "view:ryeos/work/children", "view:ryeos/thread/tree"]
             active: 0
-  - id: overview
+  - schema: 2
+    id: overview
     title: Overview
     root:
       type: group
       views: ["view:ryeos/home/overview", "view:ryeos/sites/list", "view:ryeos/programs/list"]
       active: 0
-  - id: work
+  - schema: 2
+    id: work
     title: Work
     root:
       type: split
@@ -80,7 +80,8 @@ view_sets:
         label: Detail
         views: ["view:ryeos/work/overview", "view:ryeos/work/children", "view:ryeos/work/evidence", "view:ryeos/work/candidate", "view:ryeos/work/approvals"]
         active: 0
-  - id: review
+  - schema: 2
+    id: review
     title: Review
     root:
       type: group

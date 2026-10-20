@@ -11,44 +11,12 @@ impl RyeOsCore {
         action: super::event::RyeOsInputAction,
     ) -> Vec<RyeOsEffect> {
         use super::event::{RyeOsInputAction, RyeOsUiEvent};
-        use super::model::{RyeOsFocusTarget, dock_view_instance_key};
-        if address.view_set_id != self.view_sets[self.active_view_set].id
-            || !self.input_address_is_live(&address)
+        use super::model::RyeOsFocusTarget;
+        if !self.input_address_is_live(&address)
+            || self.move_freeze_restricts_instance(&address.buffer.view_instance_key)
         {
             return Vec::new();
         }
-        let view_set = &self.view_sets[self.active_view_set];
-        let target = if let Some(tile_id) = address.buffer.view_instance_key.view_set_tile_id() {
-            let Some(tile) = view_set.tiles.get(&tile_id) else {
-                return Vec::new();
-            };
-            if tile.view.view_ref != address.buffer.view_ref
-                || !view_set
-                    .root
-                    .as_ref()
-                    .is_some_and(|tree| tree.active_tile_ids().contains(&tile_id))
-            {
-                return Vec::new();
-            }
-            RyeOsFocusTarget::ViewSetTile {
-                tile_id: tile_id.0.to_string(),
-            }
-        } else {
-            let Some((edge, _)) =
-                view_set
-                    .docks
-                    .visible_slot_views()
-                    .into_iter()
-                    .find(|(edge, view_ref)| {
-                        dock_view_instance_key(view_set.id, *edge)
-                            == address.buffer.view_instance_key
-                            && view_ref == &address.buffer.view_ref
-                    })
-            else {
-                return Vec::new();
-            };
-            RyeOsFocusTarget::Dock { edge }
-        };
         let Some(input) = self
             .binding_for_instance(&address.buffer.view_instance_key, &address.buffer.view_ref)
             .and_then(|view| view.input.as_ref())
@@ -60,16 +28,40 @@ impl RyeOsCore {
             &address.buffer.view_ref,
             input,
         );
-        if expected != address.buffer {
+        if expected.as_ref() != Some(&address.buffer) {
+            return Vec::new();
+        }
+        if matches!(
+            &action,
+            RyeOsInputAction::NavigateSelection { .. } | RyeOsInputAction::ActivateSelection
+        ) && !input.is_live_filter()
+        {
+            return Vec::new();
+        }
+        if matches!(&action, RyeOsInputAction::NavigateSelection { delta } if !matches!(*delta, -1 | 1))
+        {
             return Vec::new();
         }
         // Resolve and compare before changing any focus or buffer state. A stale
         // callback must not retarget a replacement view or a changed seat route.
-        if let RyeOsFocusTarget::ViewSetTile { tile_id } = &target {
-            self.view_sets[self.active_view_set]
-                .focus_tile(parse_tile_id(tile_id).expect("validated tile"));
+        let instance = address.buffer.view_instance_key.clone();
+        let tile_id = self.view_set_for_instance(&instance).and_then(|set| {
+            set.tiles
+                .iter()
+                .find_map(|(id, tile)| (tile.instance_key == instance).then_some(*id))
+        });
+        if let Some(tile_id) = tile_id {
+            let Some(set) = self.active_view_set_mut() else {
+                return Vec::new();
+            };
+            set.focus_tile(tile_id);
+            set.focus_target = Some(RyeOsFocusTarget::ViewSetTile {
+                tile_id: tile_id.0.to_string(),
+            });
         }
-        self.view_sets[self.active_view_set].focus_target = Some(target);
+        // A shared input has no tab. Interaction focus names its exact mount,
+        // and never rewrites another View's execution route.
+        self.focused_input = Some(instance);
         let event = match action {
             RyeOsInputAction::Focus => {
                 self.bump_generation();
@@ -81,6 +73,10 @@ impl RyeOsCore {
             RyeOsInputAction::Complete => RyeOsUiEvent::CompleteInput,
             RyeOsInputAction::Submit { interrupt: false } => RyeOsUiEvent::SubmitInput,
             RyeOsInputAction::Submit { interrupt: true } => RyeOsUiEvent::SubmitInputInterrupt,
+            RyeOsInputAction::NavigateSelection { delta } => {
+                return self.move_focused_row(delta).1;
+            }
+            RyeOsInputAction::ActivateSelection => RyeOsUiEvent::ActivateFocused,
         };
         self.dispatch_ui(event)
     }
@@ -135,6 +131,9 @@ impl RyeOsCore {
         let Some((key, view_ref)) = self.focused_input_instance() else {
             return Vec::new();
         };
+        if self.move_freeze_restricts_instance(&key.view_instance_key) {
+            return Vec::new();
+        }
         if self.instance_has_unresolved_required_subject(&key.view_instance_key) {
             self.notice(
                 "This view requires a subject before input can be submitted.",
@@ -152,7 +151,7 @@ impl RyeOsCore {
         if input.submit.is_none() {
             return Vec::new();
         }
-        let text = self.view_sets[self.active_view_set]
+        let text = self
             .input_buffers
             .get(&key.storage_key())
             .map(|buffer| buffer.text.trim().to_string())
@@ -326,6 +325,9 @@ impl RyeOsCore {
         let Some((key, view_ref)) = self.focused_input_instance() else {
             return Vec::new();
         };
+        if self.move_freeze_restricts_instance(&key.view_instance_key) {
+            return Vec::new();
+        }
         let count = self
             .binding_for_instance(&key.view_instance_key, &view_ref)
             .and_then(|binding| binding.input.as_ref())
@@ -335,10 +337,7 @@ impl RyeOsCore {
         if count < 2 {
             return Vec::new();
         }
-        let buffer = self.view_sets[self.active_view_set]
-            .input_buffers
-            .entry(key.storage_key())
-            .or_default();
+        let buffer = self.input_buffers.entry(key.storage_key()).or_default();
         buffer.filter_field = if forward {
             (buffer.filter_field + 1) % count
         } else {
@@ -368,6 +367,9 @@ impl RyeOsCore {
         let Some((input_key, _)) = self.focused_input_instance() else {
             return Vec::new();
         };
+        if self.move_freeze_restricts_instance(&input_key.view_instance_key) {
+            return Vec::new();
+        }
         let mut route = self.input_route_for(&input_key);
         // The input declared route-chain targeting (the author's assertion
         // that this route continues conversations). The only thing the engine
@@ -411,7 +413,9 @@ impl RyeOsCore {
             }
         }
         // A non-serializable InputRoute is a bug, not a runtime branch.
-        self.set_input_route(&input_key, &route);
+        if self.set_input_route(&input_key, &route).is_none() {
+            return Vec::new();
+        }
         self.bump_generation();
         let mut effects = self.effects_for_view_instance(&input_key.view_instance_key);
         effects.extend(self.effects_for_hint("thread"));
@@ -452,6 +456,9 @@ impl RyeOsCore {
         let Some((origin_key, _)) = self.focused_input_instance() else {
             return Vec::new();
         };
+        if self.move_freeze_restricts_instance(&origin_key.view_instance_key) {
+            return Vec::new();
+        }
         if self.instance_has_unresolved_required_subject(&origin_key.view_instance_key) {
             self.notice(
                 "This view requires a subject before input can be submitted.",
@@ -462,7 +469,9 @@ impl RyeOsCore {
         if self.refuse_blocked_mutation_for_instance(&origin_key.view_instance_key) {
             return Vec::new();
         }
-        let input_origin = self.input_address_for(origin_key.clone());
+        let Some(input_origin) = self.input_address_for(origin_key.clone()) else {
+            return Vec::new();
+        };
         let line = match super::tokenize::classify_line(text) {
             Ok(line) => line,
             Err(error) => {
@@ -580,6 +589,9 @@ impl RyeOsCore {
         affordance_id: &str,
         value: &str,
     ) -> Vec<RyeOsEffect> {
+        if self.move_freeze_restricts_instance(invocation_origin) {
+            return Vec::new();
+        }
         if self.instance_has_unresolved_required_subject(invocation_origin) {
             self.notice(
                 "This view requires a subject before input can be submitted.",
@@ -606,7 +618,9 @@ impl RyeOsCore {
         ) {
             Some(super::content::AffordanceInvoke::OpenSavedViewSet { .. })
             | Some(super::content::AffordanceInvoke::SaveActiveViewSet { .. })
-            | Some(super::content::AffordanceInvoke::SaveParticularViewSet { .. }) => {
+            | Some(super::content::AffordanceInvoke::SaveParticularViewSet { .. })
+            | Some(super::content::AffordanceInvoke::SaveActiveSurface { .. })
+            | Some(super::content::AffordanceInvoke::SaveParticularSurface { .. }) => {
                 self.notice(
                     "View-set library actions require a selected library record.",
                     RyeOsTone::Warn,
@@ -673,20 +687,12 @@ impl RyeOsCore {
         &mut self,
         address: &super::model::RyeOsInputAddress,
     ) -> bool {
-        if !self.input_address_is_live(address) {
+        if !self.input_address_is_live(address)
+            || self.move_freeze_restricts_instance(&address.buffer.view_instance_key)
+        {
             return false;
         }
-        let Some(view_set) = self
-            .view_sets
-            .iter_mut()
-            .find(|view_set| view_set.id == address.view_set_id)
-        else {
-            return false;
-        };
-        let Some(buffer) = view_set
-            .input_buffers
-            .get_mut(&address.buffer.storage_key())
-        else {
+        let Some(buffer) = self.input_buffers.get_mut(&address.buffer.storage_key()) else {
             return false;
         };
         buffer.clear();
@@ -702,7 +708,10 @@ impl RyeOsCore {
         let Some(tile_id) = parse_tile_id(&tile_id) else {
             return Vec::new();
         };
-        let Some(tile) = self.view_sets[self.active_view_set].tiles.get_mut(&tile_id) else {
+        let Some(tile) = self
+            .active_view_set_mut()
+            .and_then(|set| set.tiles.get_mut(&tile_id))
+        else {
             return Vec::new();
         };
         // Item/file tiles are content-bound now; only the services
@@ -738,14 +747,402 @@ pub(crate) enum TargetSlot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::reducer::test_support::core as test_support_core;
     use crate::ui::reducer::test_support::*;
+
+    fn seed_input_view(core: &mut RyeOsCore) {
+        crate::ui::reducer::test_support::seed_input_view(core);
+        if core.focused_input_instance().is_none() {
+            core.focused_input =
+                core.shared_dock_instance_key(crate::ui::model::RyeOsDockEdge::Bottom);
+        }
+        assert!(core.focused_input_instance().is_some());
+    }
+
+    fn seed_service_route(core: &mut RyeOsCore) {
+        seed_input_view(core);
+        crate::ui::reducer::test_support::seed_service_route(core);
+    }
+
+    fn mount_fixture_view(core: &mut RyeOsCore, view_ref: &str) -> crate::ids::TileId {
+        let producer = core
+            .presentation_operations
+            .producer
+            .clone()
+            .unwrap_or_else(|| claim_fixture_producer(core));
+        settle_pending_prefix(core, &producer);
+        let before = core.active_view_set().unwrap().tile_ids();
+        core.add_center_tile(ViewSpec::bound(view_ref));
+        settle_pending_prefix(core, &producer);
+        let tile = core
+            .active_view_set()
+            .unwrap()
+            .tile_ids()
+            .into_iter()
+            .find(|tile| !before.contains(tile))
+            .expect("admitted fixture mount");
+        focus_tile(core, tile);
+        tile
+    }
+
+    fn filter_core() -> RyeOsCore {
+        let session = session_with_surface(serde_json::json!({
+            "name":"Filter fixture","tiles":["view:test/filter"],
+            "views":{"view:test/filter":{
+            "widget":"rows",
+            "sources":{"default":{"ref":"service:test/items","params":{"limit":50},"collection":"items"}},
+            "input":{"id":"q","placeholder":"filter…","feeds":{"param":"query","debounce_ms":120}}
+        }}}));
+        let mut core = test_support_core(session);
+        let tile = core.active_view_set().unwrap().focused_tile;
+        focus_tile(&mut core, tile);
+        core
+    }
+
+    fn surface_route_core() -> RyeOsCore {
+        let mut core = test_support_core(session_with_surface(serde_json::json!({
+            "name":"Surface route fixture","tiles":["view:ryeos/input"],
+            "input":{"invoke":{"type":"service","ref":"service:threads/input"}},
+            "views":{"view:ryeos/input":{"widget":"text","input":{
+                "id":"line","submit":"route","target":{"cycle":"route_chains"}
+            }}}
+        })));
+        let tile = core.active_view_set().unwrap().focused_tile;
+        focus_tile(&mut core, tile);
+        core
+    }
+
+    #[test]
+    fn shared_draft_edits_reject_whole_over_budget_unicode_inputs() {
+        let mut session = shared_session();
+        session.binding_attachments[0]
+            .binding_request_bounds
+            .max_input_bytes = 4;
+        let mut core = test_support_core(session);
+        let address = build_view_model(&core)
+            .docks
+            .bottom
+            .unwrap()
+            .input
+            .unwrap()
+            .address;
+        core.dispatch_addressed_input(
+            address.clone(),
+            crate::ui::event::RyeOsInputAction::SetText {
+                text: "é".into(),
+                cursor: 2,
+            },
+        );
+        core.dispatch_ui(RyeOsUiEvent::InsertInputChar { ch: 'λ' });
+        let before = core.focused_input_buffer().unwrap().clone();
+        assert_eq!(before.text, "éλ");
+        assert_eq!(before.cursor, 4);
+        core.dispatch_ui(RyeOsUiEvent::InsertInputChar { ch: 'x' });
+        assert_eq!(core.focused_input_buffer(), Some(&before));
+        core.insert_focused_input_text("\nλ");
+        assert_eq!(core.focused_input_buffer(), Some(&before));
+        core.dispatch_addressed_input(
+            address.clone(),
+            crate::ui::event::RyeOsInputAction::SetText {
+                text: "abcé".into(),
+                cursor: 5,
+            },
+        );
+        assert_eq!(core.focused_input_buffer(), Some(&before));
+        core.dispatch_addressed_input(
+            address,
+            crate::ui::event::RyeOsInputAction::SetText {
+                text: "aé".into(),
+                cursor: 2,
+            },
+        );
+        assert_eq!(core.focused_input_buffer().unwrap().cursor, 1);
+        assert!(core.active_surface().is_none());
+    }
+
+    #[test]
+    fn local_filter_draft_uses_its_mounted_binding_budget() {
+        let mut core = filter_core();
+        let (key, _) = core.focused_input_instance().unwrap();
+        let id = core
+            .binding_attachment_for_instance(&key.view_instance_key)
+            .unwrap()
+            .binding_attachment_id
+            .clone();
+        core.binding_attachments
+            .get_mut(&id)
+            .unwrap()
+            .descriptor
+            .binding_request_bounds
+            .max_input_bytes = 3;
+        core.insert_focused_input_text("aé");
+        let before = core.focused_input_buffer().unwrap().clone();
+        core.insert_focused_input_text("x");
+        assert_eq!(core.focused_input_buffer(), Some(&before));
+        core.binding_attachments
+            .get_mut(&id)
+            .unwrap()
+            .descriptor
+            .binding_request_bounds
+            .max_input_bytes = 0;
+        core.dispatch_ui(RyeOsUiEvent::SetInputText {
+            text: "x".into(),
+            cursor: 1,
+        });
+        assert_eq!(core.focused_input_buffer(), Some(&before));
+    }
+
+    #[test]
+    fn paste_inserts_unicode_and_newlines_into_exact_shared_input() {
+        let mut core = test_support_core(shared_session());
+        let address = build_view_model(&core)
+            .docks
+            .bottom
+            .unwrap()
+            .input
+            .unwrap()
+            .address;
+        let storage = address.buffer.storage_key();
+        core.dispatch_addressed_input(
+            address,
+            crate::ui::event::RyeOsInputAction::SetText {
+                text: "aéz".into(),
+                cursor: 3,
+            },
+        );
+        core.input_buffers.insert(
+            "unrelated".into(),
+            crate::ui::model::RyeOsInputState::default(),
+        );
+        core.insert_focused_input_text("\nλ");
+        let buffer = &core.input_buffers[&storage];
+        assert_eq!(buffer.text, "aé\nλz");
+        assert_eq!(buffer.cursor, 6);
+        assert!(core.input_buffers["unrelated"].text.is_empty());
+        assert!(core.active_surface().is_none());
+    }
+
+    #[test]
+    fn paste_live_filter_defers_fetch_and_blocked_replay_rejects_edit() {
+        let mut core = filter_core();
+        assert!(core.insert_focused_input_text("query\ntext").is_empty());
+        assert_eq!(focused_input_text(&core), "query\ntext");
+        core.presentation_operations.replay_blocked = true;
+        assert!(core.insert_focused_input_text("ignored").is_empty());
+        assert_eq!(focused_input_text(&core), "query\ntext");
+    }
+
+    #[test]
+    fn paste_without_live_input_or_with_invalid_cursor_is_inert() {
+        let mut core = test_support_core(session_with_surface_and_docks(
+            serde_json::json!({"name":"No input","tiles":["view:test/text"],"views":{"view:test/text":{"widget":"text","body":"Text"}}}),
+            serde_json::json!({}),
+        ));
+        assert!(!core.has_focused_input());
+        let generation = core.generation;
+        assert!(core.insert_focused_input_text("ignored").is_empty());
+        assert_eq!(core.generation, generation);
+        let mut core = test_support_core(shared_session());
+        let address = build_view_model(&core)
+            .docks
+            .bottom
+            .unwrap()
+            .input
+            .unwrap()
+            .address;
+        core.dispatch_addressed_input(address, crate::ui::event::RyeOsInputAction::Focus);
+        let buffer = core.focused_input_buffer_mut().unwrap();
+        buffer.text = "é".into();
+        buffer.cursor = 1;
+        assert!(core.insert_focused_input_text("ignored").is_empty());
+        assert_eq!(focused_input_text(&core), "é");
+    }
+
+    #[test]
+    fn shared_input_remains_addressable_without_any_surface() {
+        let mut core = test_support_core(shared_session());
+        assert!(core.active_view_set().is_none());
+        let address = build_view_model(&core)
+            .docks
+            .bottom
+            .unwrap()
+            .input
+            .unwrap()
+            .address;
+        assert!(matches!(
+            &address.owner,
+            crate::ui::model::RyeOsInputOwner::Shared { .. }
+        ));
+        core.dispatch_addressed_input(
+            address,
+            crate::ui::event::RyeOsInputAction::SetText {
+                text: "shared draft".into(),
+                cursor: 12,
+            },
+        );
+        assert_eq!(focused_input_text(&core), "shared draft");
+        assert!(core.active_surface().is_none());
+    }
+
+    #[test]
+    fn addressed_live_filter_navigates_its_mount_and_rejects_stale_addresses() {
+        use crate::ui::event::RyeOsInputAction;
+        let session = session_with_surface_and_docks(
+            serde_json::json!({
+                "name":"Filter fixture", "views": {
+                    "view:test/filter": {
+                        "title":"Filter", "widget":"rows",
+                        "sources":{"default":{"ref":"service:test/read","collection":"rows"}},
+                        "projections":{"primary":"title"},
+                        "input":{"id":"filter","feeds":{"fields":[{"param":"query","label":"query"}]}}
+                    }
+                }
+            }),
+            serde_json::json!({"left":{"content":"view:test/filter","open":true,"size":32}}),
+        );
+        let mut core = test_support_core(session);
+        let address = build_view_model(&core)
+            .docks
+            .left
+            .unwrap()
+            .input
+            .unwrap()
+            .address;
+        let key = address.buffer.view_instance_key.clone();
+        core.data.sources.insert(
+            crate::ui::source_key::RyeOsSourceInstanceKey::named(key.clone(), "default").encode(),
+            serde_json::json!({"rows":[{"title":"One"},{"title":"Two"}]}),
+        );
+        assert!(
+            core.dispatch_addressed_input(
+                address.clone(),
+                RyeOsInputAction::NavigateSelection { delta: 1 }
+            )
+            .is_empty()
+        );
+        assert!(matches!(
+            core.mounted_local_state(&key),
+            Some(crate::view_set::ViewLocalState::GenericList { cursor: 1, .. })
+        ));
+        let mut stale = address.clone();
+        stale.binding_generation += 1;
+        core.dispatch_addressed_input(stale, RyeOsInputAction::NavigateSelection { delta: -1 });
+        core.dispatch_addressed_input(
+            address,
+            RyeOsInputAction::NavigateSelection { delta: i32::MIN },
+        );
+        assert!(matches!(
+            core.mounted_local_state(&key),
+            Some(crate::view_set::ViewLocalState::GenericList { cursor: 1, .. })
+        ));
+    }
+
+    #[test]
+    fn live_filter_dialog_activation_never_uses_the_underlying_surface_row() {
+        use crate::ui::event::{RyeOsInputAction, RyeOsUiIntent};
+        for widget in ["rows", "table"] {
+            let view = serde_json::json!({
+                "title":"Exact list", "widget":widget,
+                "sources":{"default":{"ref":"service:test/read","collection":"rows"}},
+                "projections":{"primary":"title","columns":[{"label":"Title","field":"title"}]},
+                "input":{"id":"filter","feeds":{"fields":[{"param":"query","label":"query"}]}},
+                "selection":{"activate":"choose"},
+                "affordances":[{"id":"choose","invoke":{"plane":"ui","facet":"fixture.choice","value":"{record.title}"}}]
+            });
+            let mut session = session_with_surface(serde_json::json!({
+                "name":"Underlying", "tiles":["view:test/underlying"],
+                "views":{"view:test/underlying":view.clone()}
+            }));
+            session
+                .binding_attachments
+                .last_mut()
+                .unwrap()
+                .presentation
+                .views
+                .insert("view:ryeos/launcher".into(), view);
+            let mut core = test_support_core(session);
+            let set = core.active_view_set().unwrap();
+            let underlying = set.tiles[&set.focused_tile].instance_key.clone();
+            let key = |instance| {
+                crate::ui::source_key::RyeOsSourceInstanceKey::named(instance, "default").encode()
+            };
+            core.data.sources.insert(
+                key(underlying.clone()),
+                serde_json::json!({"rows":[{"title":"Wrong Surface row"}]}),
+            );
+            core.focused_input = None;
+            assert!(matches!(
+                crate::ui::view_model::intent_for_focused_row(&core),
+                Some(RyeOsUiIntent::InvokeAffordance { instance_key, .. }) if instance_key == underlying
+            ));
+            core.open_dialog("launcher");
+            let address = build_view_model(&core).dialogs[0]
+                .input
+                .as_ref()
+                .unwrap()
+                .address
+                .clone();
+            let dialog = address.buffer.view_instance_key.clone();
+            core.data.sources.insert(
+                key(dialog.clone()),
+                serde_json::json!({"rows":[{"title":"Exact dialog row"}]}),
+            );
+            assert!(matches!(
+                crate::ui::view_model::intent_for_focused_row(&core),
+                Some(RyeOsUiIntent::InvokeAffordance { instance_key, record, .. })
+                    if instance_key == dialog && record["title"] == "Exact dialog row"
+            ));
+            core.dispatch_addressed_input(address.clone(), RyeOsInputAction::ActivateSelection);
+            assert_eq!(
+                core.seat.fold().get("fixture.choice"),
+                Some(&serde_json::json!("Exact dialog row"))
+            );
+            // An empty dialog must not fall through to the still-actionable tile.
+            core.data
+                .sources
+                .insert(key(dialog.clone()), serde_json::json!({"rows":[]}));
+            assert!(crate::ui::view_model::intent_for_focused_row(&core).is_none());
+            core.close_dialog(&dialog);
+            core.dispatch_addressed_input(address, RyeOsInputAction::ActivateSelection);
+            assert_ne!(core.focused_input.as_ref(), Some(&dialog));
+            assert_eq!(
+                core.seat.fold().get("fixture.choice"),
+                Some(&serde_json::json!("Exact dialog row"))
+            );
+        }
+    }
+
+    #[test]
+    fn list_actions_do_not_reinterpret_an_ordinary_composer_or_change_focus() {
+        use crate::ui::event::RyeOsInputAction;
+        let mut core = test_support_core(session());
+        let address = build_view_model(&core)
+            .docks
+            .bottom
+            .unwrap()
+            .input
+            .unwrap()
+            .address;
+        core.focused_input = None;
+        assert!(
+            core.dispatch_addressed_input(address.clone(), RyeOsInputAction::ActivateSelection)
+                .is_empty()
+        );
+        assert!(
+            core.dispatch_addressed_input(
+                address,
+                RyeOsInputAction::NavigateSelection { delta: 1 }
+            )
+            .is_empty()
+        );
+        assert!(core.focused_input.is_none());
+    }
 
     #[test]
     fn addressed_input_rejects_stale_scope_and_edits_the_named_instance() {
         use crate::ui::event::RyeOsInputAction;
-        let mut core = RyeOsCore::new(session(), BrowserViewport::default(), 0);
+        let mut core = test_support_core(session());
         let address = build_view_model(&core)
-            .view_set
             .docks
             .bottom
             .unwrap()
@@ -754,7 +1151,7 @@ mod tests {
             .address;
         // Browser focus may still be on a different region; address, not that
         // focus, decides which admitted input receives the edit.
-        core.view_sets[0].focus_target = None;
+        core.active_view_set_mut().unwrap().focus_target = None;
         let edit = RyeOsInputAction::SetText {
             text: "exact draft".into(),
             cursor: 11,
@@ -788,15 +1185,10 @@ mod tests {
         );
         assert_eq!(core.focused_input_buffer().unwrap().text, "exact draft");
         core.new_view_set();
-        core.dispatch_addressed_input(address, edit);
-        assert!(core.view_sets[1].input_buffers.is_empty());
+        core.dispatch_addressed_input(address.clone(), edit);
+        assert_eq!(core.input_buffers.len(), 1);
         assert_eq!(
-            core.view_sets[0]
-                .input_buffers
-                .values()
-                .next()
-                .unwrap()
-                .text,
+            core.input_buffers[&address.buffer.storage_key()].text,
             "exact draft"
         );
     }
@@ -839,7 +1231,9 @@ mod tests {
                 ] } }
             }}
         }));
-        let mut core = RyeOsCore::new(session, BrowserViewport::default(), 0);
+        let mut core = test_support_core(session);
+        let tile = core.active_view_set().unwrap().focused_tile;
+        focus_tile(&mut core, tile);
         // Type into the first field (status).
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::InsertInputChar { ch: 'r' },
@@ -890,11 +1284,12 @@ mod tests {
                 }
             }
         }));
-        let mut core = RyeOsCore::new(session, BrowserViewport::default(), 0);
-        let tile = core.view_sets[core.active_view_set].focused_tile;
+        let mut core = test_support_core(session);
+        let tile = core.active_view_set().unwrap().focused_tile;
+        focus_tile(&mut core, tile);
         let tile_key = tile.0.to_string();
         let source_key = crate::ui::source_key::RyeOsSourceInstanceKey::named(
-            core.view_sets[core.active_view_set].tiles[&tile]
+            core.active_view_set().unwrap().tiles[&tile]
                 .instance_key
                 .clone(),
             "default",
@@ -915,7 +1310,9 @@ mod tests {
                 index: 50,
             },
         });
-        let cursor = |core: &RyeOsCore| match &core.view_sets[core.active_view_set]
+        let cursor = |core: &RyeOsCore| match &core
+            .active_view_set()
+            .unwrap()
             .tiles
             .get(&tile)
             .unwrap()
@@ -951,7 +1348,7 @@ mod tests {
 
     #[test]
     fn tab_cycles_input_target_through_new_then_chains() {
-        let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
+        let mut core = test_support_core(writable_session());
         seed_service_route(&mut core);
         // Two conversations in list order (most-recent first): chain B is a
         // single thread; chain A has a follow-up (head T-a2 braids on T-a1).
@@ -1006,7 +1403,7 @@ mod tests {
 
     #[test]
     fn thread_execution_facts_accessors() {
-        let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
+        let mut core = test_support_core(writable_session());
         core.data.threads = Some(RyeOsThreadsDto {
             threads: vec![
                 // directive: continuation + operator follow-up.
@@ -1043,7 +1440,7 @@ mod tests {
         // graph continues by machine) yet must report NOT continuation-eligible
         // and NOT operator-followup-eligible while suspended — the instance
         // follow fact vetoes the kind facts.
-        let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
+        let mut core = test_support_core(writable_session());
         core.data.threads = Some(RyeOsThreadsDto {
             threads: vec![serde_json::json!({
                 "thread_id": "T-parent",
@@ -1068,7 +1465,7 @@ mod tests {
 
     #[test]
     fn suspended_follow_parent_is_never_an_input_target() {
-        let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
+        let mut core = test_support_core(writable_session());
         seed_service_route(&mut core);
         // Two single-thread chains: one is a normal operator-followup directive,
         // the other is a suspended follow-parent (its successor is not yet in the
@@ -1112,7 +1509,7 @@ mod tests {
 
     #[test]
     fn cycle_input_target_excludes_machine_only_chain() {
-        let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
+        let mut core = test_support_core(writable_session());
         seed_service_route(&mut core);
         // Two single-thread chains: one accepts operator follow-up, one is
         // machine-only (a graph — continuation-capable but no operator input).
@@ -1142,7 +1539,7 @@ mod tests {
 
     #[test]
     fn cycle_input_target_is_noop_with_no_chains() {
-        let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
+        let mut core = test_support_core(writable_session());
         seed_service_route(&mut core);
         // No threads fetched yet → only "new conversation" exists.
         core.dispatch(RyeOsEvent::Ui {
@@ -1155,7 +1552,7 @@ mod tests {
 
     #[test]
     fn cycle_input_target_noop_without_declaration() {
-        let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
+        let mut core = test_support_core(writable_session());
         seed_service_route(&mut core);
         // Replace the input with one that does NOT declare targeting.
         seed_view_value(
@@ -1183,7 +1580,7 @@ mod tests {
 
     #[test]
     fn cycle_input_target_notices_when_route_has_no_invoke() {
-        let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
+        let mut core = test_support_core(writable_session());
         seed_input_view(&mut core);
         // Route facet with no invoke template at all.
         set_focused_route_value(&mut core, serde_json::json!({ "thread": "T-x" }));
@@ -1204,7 +1601,7 @@ mod tests {
 
     #[test]
     fn cycle_input_target_dedupes_current_chain_and_prefers_fetched_head() {
-        let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
+        let mut core = test_support_core(writable_session());
         seed_service_route(&mut core);
         // Route already on chain A with a stale head (T-a1).
         set_focused_route_value(
@@ -1241,7 +1638,7 @@ mod tests {
 
     #[test]
     fn cycle_input_target_keeps_synthetic_current_before_refresh() {
-        let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
+        let mut core = test_support_core(writable_session());
         seed_service_route(&mut core);
         // Route aimed at a freshly-launched chain not yet in the thread list.
         set_focused_route_value(
@@ -1272,8 +1669,24 @@ mod tests {
     }
 
     #[test]
+    fn shared_input_cannot_borrow_the_active_surface_route() {
+        let mut core = surface_route_core();
+        core.focused_input = core.shared_dock_instance_key(crate::ui::model::RyeOsDockEdge::Bottom);
+        seed_service_route(&mut core);
+        set_focused_input(&mut core, "private shared draft");
+        let buffers = core.input_buffers.clone();
+        assert!(
+            core.dispatch(RyeOsEvent::Ui {
+                event: RyeOsUiEvent::SubmitInput
+            })
+            .is_empty()
+        );
+        assert_eq!(core.input_buffers, buffers);
+    }
+
+    #[test]
     fn writable_input_submit_emits_surface_route_coordinate() {
-        let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
+        let mut core = surface_route_core();
         seed_service_route(&mut core);
         set_focused_input(&mut core, "  run this  ");
 
@@ -1301,7 +1714,7 @@ mod tests {
     #[test]
     fn plain_submit_carries_no_interrupt_intent() {
         // Steer is the daemon default, so the wire omits `intent` entirely.
-        let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
+        let mut core = surface_route_core();
         seed_service_route(&mut core);
         set_focused_input(&mut core, "steer me");
 
@@ -1323,7 +1736,7 @@ mod tests {
     fn interrupt_submit_sets_interrupt_intent() {
         // Alt+Enter → SubmitInputInterrupt injects intent=interrupt so a running
         // thread cuts its current cognition.
-        let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
+        let mut core = surface_route_core();
         seed_service_route(&mut core);
         set_focused_input(&mut core, "stop, do X");
 
@@ -1343,7 +1756,7 @@ mod tests {
 
     #[test]
     fn submit_without_route_warns_and_emits_nothing() {
-        let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
+        let mut core = test_support_core(writable_session());
         seed_input_view(&mut core);
         set_focused_input(&mut core, "hello");
         let effects = core.dispatch(RyeOsEvent::Ui {
@@ -1363,7 +1776,7 @@ mod tests {
         // The ratchet keys off the input's `target` declaration, not the
         // invoke ref: an input that does NOT declare conversation targeting is
         // never retargeted onto the produced thread (no false "continuing").
-        let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
+        let mut core = surface_route_core();
         seed_service_route(&mut core);
         seed_view_value(
             &mut core,
@@ -1400,7 +1813,7 @@ mod tests {
         // Focus then moves to a non-targeting input before the async result
         // lands. The launch must STILL ratchet (issue-time decision), proving
         // the result handler doesn't recompute from current focus.
-        let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
+        let mut core = surface_route_core();
         seed_service_route(&mut core); // targeting input focused
         set_focused_input(&mut core, "hi");
         let effect = core
@@ -1443,8 +1856,8 @@ mod tests {
     }
 
     #[test]
-    fn delayed_submit_result_mutates_only_its_originating_view_set() {
-        let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
+    fn delayed_submit_result_cannot_mutate_an_inactive_view_set_or_current_input() {
+        let mut core = surface_route_core();
         seed_service_route(&mut core);
         set_focused_input(&mut core, "first draft");
         let effect = core
@@ -1461,16 +1874,15 @@ mod tests {
             other => panic!("route submit must retain its origin, got {other:?}"),
         };
 
-        // A second view set mounts the same authored bottom view. Its dock has
-        // a distinct instance key because the set id is part of the address.
-        let mut second =
-            crate::view_set::ViewSet::from_tiling(core.view_sets[0].tiling.clone(), Vec::new());
-        second.docks = core.view_sets[0].docks.clone();
-        second.focus_target = Some(super::super::model::RyeOsFocusTarget::Dock {
-            edge: super::super::model::RyeOsDockEdge::Bottom,
-        });
-        core.view_sets.push(second);
-        core.active_view_set = 1;
+        // A separate Surface tab mounts an ordinary input View. The shared
+        // bottom dock remains one mount across tab switches, not a copied dock.
+        let producer = claim_fixture_producer(&mut core);
+        settle_pending_prefix(&mut core, &producer);
+        core.new_view_set();
+        settle_pending_prefix(&mut core, &producer);
+        assert_eq!(core.active_surface().unwrap().view_sets().len(), 2);
+        let second_tile = mount_fixture_view(&mut core, "view:ryeos/input");
+        focus_tile(&mut core, second_tile);
         seed_service_route(&mut core);
         set_focused_route_value(
             &mut core,
@@ -1505,24 +1917,21 @@ mod tests {
             core.route_for_instance(&origin.buffer.view_instance_key)
                 .thread
                 .as_deref(),
-            Some("T-first-result")
+            None,
+            "an inactive mount is not a live input address for late retargeting"
         );
         assert!(
-            core.view_sets
-                .iter()
-                .find(|view_set| view_set.id == origin.view_set_id)
-                .unwrap()
-                .input_buffers
+            core.input_buffers
                 .get(&origin.buffer.storage_key())
-                .is_some_and(|buffer| buffer.text.is_empty()),
-            "success clears the originating draft even after focus changes"
+                .is_some_and(|buffer| buffer.text == "first draft"),
+            "inactive source drafts remain intact when a late result is rejected"
         );
     }
 
     #[test]
     fn feeds_input_drives_its_source_param() {
-        let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
-        let tile_id = seed_filter_tile(&mut core);
+        let mut core = filter_core();
+        let tile_id = core.active_view_set().unwrap().focused_tile.0.to_string();
         // The focused tile declares `input.feeds`, so it owns input.
         assert!(core.has_focused_input());
 
@@ -1540,9 +1949,11 @@ mod tests {
         assert_eq!(
             fetched,
             crate::ui::source_key::RyeOsSourceInstanceKey::named(
-                crate::ids::RyeOsViewInstanceKey::view_set_tile(crate::ids::TileId::new(
-                    tile_id.parse().unwrap()
-                )),
+                crate::ids::RyeOsViewInstanceKey::surface_tile(
+                    core.presentation.as_ref().unwrap().id(),
+                    core.active_surface().unwrap().id(),
+                    crate::ids::TileId::new(tile_id.parse().unwrap())
+                ),
                 "default",
             )
             .encode()
@@ -1560,8 +1971,10 @@ mod tests {
     fn feeds_input_has_no_submit_and_allows_read_only() {
         // `feeds` works in an observation-only binding (no durable write); Enter
         // does nothing.
-        let mut core = RyeOsCore::new(session(), BrowserViewport::default(), 0);
-        seed_filter_tile(&mut core);
+        let mut core = filter_core();
+        for binding in core.binding_attachments.values_mut() {
+            binding.descriptor.posture = crate::ui::binding::UiEffectivePosture::ObservationOnly;
+        }
         let edit = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::InsertInputChar { ch: 'x' },
         });
@@ -1584,24 +1997,17 @@ mod tests {
 
     #[test]
     fn submit_affordance_fires_with_value_payload() {
-        let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
-        seed_view_value(
-            &mut core,
-            "view:test/palette",
-            serde_json::json!({
+        let mut core = test_support_core(session_with_surface(serde_json::json!({
+            "name":"Palette","tiles":["view:test/palette"],"views":{"view:test/palette":{
                 "widget": "text",
                 "input": { "id": "line", "submit": "run" },
                 "affordances": [{
                     "id": "run",
                     "invoke": { "plane": "rye", "tokens": ["thread", "input"], "args": { "line": "{value}" } }
                 }]
-            }),
-        );
-        let tile_id = core.view_sets[core.active_view_set]
-            .add_tile(ViewSpec {
-                view_ref: "view:test/palette".to_string(),
-            })
-            .expect("fixture layout accepts view");
+            }}
+        })));
+        let tile_id = core.active_view_set().unwrap().focused_tile;
         focus_tile(&mut core, tile_id);
         set_focused_input(&mut core, "do the thing");
 
@@ -1625,62 +2031,55 @@ mod tests {
 
     #[test]
     fn submit_affordance_blocked_without_compiled_binding() {
-        let mut unbound = session();
-        unbound.binding_attachments[0].binding_digest.clear();
-        let mut core = RyeOsCore::new(unbound, BrowserViewport::default(), 0);
-        seed_view_value(
-            &mut core,
-            "view:test/palette",
-            serde_json::json!({
+        let mut core = test_support_core(session_with_surface(serde_json::json!({
+            "name":"Palette","tiles":["view:test/palette"],"views":{"view:test/palette":{
                 "widget": "text",
                 "input": { "id": "line", "submit": "run" },
                 "affordances": [{
                     "id": "run",
                     "invoke": { "plane": "rye", "tokens": ["x"], "args": { "line": "{value}" } }
                 }]
-            }),
-        );
-        let tile_id = core.view_sets[core.active_view_set]
-            .add_tile(ViewSpec {
-                view_ref: "view:test/palette".to_string(),
-            })
-            .expect("fixture layout accepts view");
-        core.view_sets[core.active_view_set].focused_tile = tile_id;
+            }}
+        })));
+        let tile_id = core.active_view_set().unwrap().focused_tile;
+        focus_tile(&mut core, tile_id);
         set_focused_input(&mut core, "blocked");
+        let buffers = core.input_buffers.clone();
+        let history = core.seat.events().to_vec();
+        core.binding_attachments
+            .get_mut("fixture-attachment")
+            .unwrap()
+            .descriptor
+            .binding_digest
+            .clear();
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::SubmitInput,
         });
         assert!(effects.is_empty());
         assert!(
-            core.ui
-                .notices
-                .last()
-                .is_some_and(|notice| notice.message.contains("compiled operation binding"))
+            core.focused_input_instance().is_none(),
+            "a stale descriptor cannot resolve the input address"
         );
+        assert_eq!(core.input_buffers, buffers);
+        assert_eq!(core.seat.events(), history);
     }
 
     #[test]
     fn duplicate_view_instances_have_independent_buffers() {
-        let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
-        seed_view_value(
-            &mut core,
-            "view:test/filter",
-            serde_json::json!({
+        let mut core = test_support_core(session_with_surface(serde_json::json!({
+            "name":"Independent inputs","view_sets":[{"schema":2,"id":"work","title":"Work","root":{
+                "type":"split","axis":"horizontal","ratio":0.5,
+                "first":{"type":"group","views":["view:test/filter"],"active":0},
+                "second":{"type":"group","views":["view:test/filter"],"active":0}
+            }}],"views":{"view:test/filter":{
                 "widget": "rows",
                 "sources": { "default": { "ref": "service:test/items", "params": {}, "collection": "items" } },
                 "input": { "id": "q", "feeds": { "param": "query" } }
-            }),
-        );
-        let first = core.view_sets[core.active_view_set]
-            .add_tile(ViewSpec {
-                view_ref: "view:test/filter".to_string(),
-            })
-            .expect("fixture layout accepts view");
-        let second = core.view_sets[core.active_view_set]
-            .add_tile(ViewSpec {
-                view_ref: "view:test/filter".to_string(),
-            })
-            .expect("fixture layout accepts view");
+            }}
+        })));
+        let tiles = core.active_view_set().unwrap().tile_ids();
+        let first = tiles[0];
+        let second = tiles[1];
         assert_ne!(first, second);
 
         focus_tile(&mut core, first);

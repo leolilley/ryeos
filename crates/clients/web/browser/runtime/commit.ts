@@ -31,7 +31,9 @@ export interface CommitRuntime<Event, Envelope> {
    * event turn, allowing the caller to observe platform handling metadata.
    */
   commitMutation(mutation: () => Envelope): void;
-  /** Test/teardown fence for all work accepted before this call. */
+  /** Detach this document adapter; does not cancel an admitted execution. */
+  close(): void;
+  /** Live-adapter fence; after close this does not assert execution settlement. */
   idle(): Promise<void>;
 }
 
@@ -54,6 +56,7 @@ export function createCommitRuntime<
   const startedEffects = new Set<EffectIdentity>();
   const scheduleRender = options.scheduleRender ?? ((render) => queueMicrotask(render));
   let draining = false;
+  let closed = false;
   let renderScheduled = false;
   let renderRunning = false;
   let pendingEffects = 0;
@@ -63,6 +66,7 @@ export function createCommitRuntime<
   const idleWaiters: Array<{ sequence: number; resolve: () => void }> = [];
 
   function enqueueMutation(mutation: Mutation<Envelope>): void {
+    if (closed) return;
     mutationQueue.push(mutation);
     acceptedSequence += 1;
     void drainMutations();
@@ -92,15 +96,17 @@ export function createCommitRuntime<
       pendingEffects += 1;
       let delivered = false;
       options.startEffect(effect).then(
-        (result) => deliverEffectResult(result),
-        (error: unknown) => deliverEffectResult(options.failedEffectResult(effect, error)),
+        (result) => deliverEffectResult(() => result),
+        (error: unknown) => deliverEffectResult(() => options.failedEffectResult(effect, error)),
       );
 
-      function deliverEffectResult(result: Result): void {
+      function deliverEffectResult(result: () => Result): void {
         if (delivered) return;
         delivered = true;
         pendingEffects -= 1;
-        enqueueMutation(() => options.applyEffectResult(result));
+        if (closed) return;
+        const resolved = result();
+        enqueueMutation(() => options.applyEffectResult(resolved));
       }
     }
     latestRenderable = envelope;
@@ -116,6 +122,7 @@ export function createCommitRuntime<
   async function flushRender(): Promise<void> {
     if (renderRunning) return;
     renderScheduled = false;
+    if (closed) return;
     renderRunning = true;
     try {
       // Capture once. A newer envelope arriving during the renderer flush is
@@ -152,7 +159,17 @@ export function createCommitRuntime<
     commitMutation(mutation) {
       enqueueMutation(mutation);
     },
+    close() {
+      if (closed) return;
+      closed = true;
+      mutationQueue.length = 0;
+      latestRenderable = null;
+      // An in-flight request remains with its daemon/execution owner. Its
+      // eventual reply must not mutate a disposed or replacement WASM core.
+      for (const waiter of idleWaiters.splice(0)) waiter.resolve();
+    },
     idle() {
+      if (closed) return Promise.resolve();
       const sequence = acceptedSequence;
       if (!draining && mutationQueue.length === 0 && pendingEffects === 0
         && !renderScheduled && !renderRunning && !latestRenderable

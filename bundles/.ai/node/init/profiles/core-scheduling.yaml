@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-18T10:11:10Z:df8a8e04167878529f5d07365878386ba5710074919c6406a9915f33425f3a84:2WB+xk1m3rGT0XQ1y0PjIKBq1Ff9ja4KByMVfAJ1yJQ9GBCnFuly8BYwtaEJP2aRxsuli+OqumRFYOGrT4y4Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-19T22:29:39Z:d40a6659564b48ba2d68063e5af85e67aa039aa190ac2fe412d5f0c63c21cfda:Se6PHsuLyH3tzV8FeQCm3TPIeaOuQJYVzGB37YER8p7uoFrGhi14n1IxI/CLmtsZ8nnj/IGfQvEnB0kLGWy7Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Core plus scheduling.
 schema: 1
 exact_bundles:
@@ -364,5 +364,14 @@ policies:
     schema: 2
     names: []
   ui_browser_sessions:
-    schema: 1
+    schema: 3
+    max_session_bootstrap_bytes: 4194304
     max_live_binding_attachments_per_session: 16
+    max_presentations_per_session: 16
+    max_surface_instances_per_presentation: 16
+    shared_presentation:
+      max_declaration_bytes: 65536
+      max_dialogs: 16
+      max_initial_surfaces: 16
+      max_label_bytes: 128
+      max_mount_id_bytes: 64

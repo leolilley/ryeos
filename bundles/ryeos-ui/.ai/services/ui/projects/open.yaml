@@ -1,5 +1,6 @@
-# ryeos:signed:2026-07-06T08:36:51Z:52a2c1b08e2bc9093afe2481cd95bba89a5f078ef6ef294aa6c30df0c2781f9b:5oj34VLAcNI6D1uxfIKr7FDpCqgmgIeB+Ra/KVjHnkiz1iSqaDe5NUyz32gIBwdISD1KdQCdcjTSMMdorHDFBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-19T22:29:40Z:d8a59cedf4fedba4d63a249714af6bdf2fcd9743518d1280f5a11a538fdc76c7:z74/URU8onFo5eM/GVcxm/Zf3SOXjan0D99FXQE1z6VS/u75TWbWIfaPHU2qYUW5L3NV28eLngKIgcoSlhDcAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
+required_caps: ["ryeos.execute.service.projects/open"]
 name: projects/open
 version: "1.0.0"
 description: Open a registered project root and bind it to the current UI session.

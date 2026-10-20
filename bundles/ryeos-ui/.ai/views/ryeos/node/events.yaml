@@ -1,8 +1,8 @@
-# ryeos:signed:2026-08-04T10:21:25Z:6c32c2a0d67893ed3ba3f9854da66a03d3ed1d28296fd76b08b5f1025be061f3:J7QtEq5uwZ3GxDUWOoSEC4+NX0BJUmfWd4i7NucrcBaq03AaTu8L8yfXTY7zQR3sPxpOODY8WnRT5ONgsSV9Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-19T22:29:40Z:464e98f8922d898ce8aa56df4a1a8f2e6d0301bf46557b0879311ee35dc223f5:otH6QbUAV4Ah7DZS2U9NaWI/tgKM8t2wjpnU81+i915Tp2RVWtkMe5HIgj6+ASG1J44bzhbDT61uFG2JeU55DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: node-events
 title: Events
 version: "1.0.0"
-description: Recent durable events across every thread on the node
+description: Bounded authenticated activity visible to the current caller, with explicit observation coverage
 
 widget: sections
 sources:
@@ -17,14 +17,13 @@ sources:
       exclude_types: ["seat.facet", "thread_usage", "cognition_out"]
 affordances:
   - id: watch-thread
-    label: Watch thread
+    label: Inspect execution
     invoke:
       plane: ui
-      facet: input.route
-      merge:
-        thread: "{record.thread_id}"
-        chain_root: "{record.chain_root_id}"
-      open_view: view:ryeos/thread/transcript
+      facet: selection
+      value:
+        thread_id: "{record.thread_id}"
+      open_view: view:ryeos/threads/detail
       drill: true
 sections:
   - title: Pulse
@@ -33,10 +32,23 @@ sections:
     projection:
       primary: value
       meta: label
+  - title: Pulse coverage
+    source_channel: pulse
+    collection: pulse_coverage
+    projection:
+      primary: state
+      meta: reason
+  - title: Usage coverage
+    source_channel: pulse
+    collection: usage_coverage
+    projection:
+      primary: state
+      meta: reason
   - title: Recent
     source_channel: recent
     collection: events
     projection:
+      identity: event_hash
       primary: event_type
       meta: thread_id
       tone:
@@ -54,5 +66,17 @@ sections:
           child_thread_spawned: accent
         default: neutral
     activate: watch-thread
+  - title: Recent event coverage
+    source_channel: recent
+    collection: events_coverage
+    projection:
+      primary: state
+      meta: reason
+      tone:
+        field: state
+        map:
+          failed: danger
+          partial: warn
+        default: neutral
 refresh:
   on_hint: [thread, activity]

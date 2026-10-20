@@ -43,9 +43,9 @@ export type RyeOsUiEvent =
   | { type: "focus_changed"; target: string | null }
   | { type: "focus_dock"; edge: RyeOsDockEdge }
   | { type: "focus_direction"; direction: FocusDirection }
-  | { type: "open_overlay"; overlay_id: string }
-  | { type: "close_overlay" }
-  | { type: "set_overlay_query"; query: string }
+  | { type: "open_launcher" }
+  | { type: "open_dialog"; dialog_id: string }
+  | { type: "close_dialog"; instance_key: RyeOsViewInstanceKey }
   | { type: "focus_input" }
   | { type: "blur_input" }
   | { type: "insert_input_char"; ch: string }
@@ -86,24 +86,6 @@ export type RyeOsUiEvent =
    * on non-running targets. Bound to Alt+Enter.
    */
   | { type: "submit_input_interrupt" }
-  | { type: "move_overlay_selection"; delta: number }
-  /**
-   * Pointer selection names the exact projected overlay row; it must not
-   * derive a delta or trust a mutable index from a stale renderer frame.
-   */
-  | { type: "set_overlay_selection"; item_id: string }
-  | { type: "choose_overlay"; secondary: boolean }
-  /**
-   * Atomically select and choose one exact projected overlay row.
-   */
-  | { type: "choose_overlay_at"; item_id: string; secondary: boolean }
-  /**
-   * Fold (`expand: false`) or unfold the launcher group under the
-   * overlay selection. Folding from a leaf lands the selection on the
-   * group's header. Inert while a search query is live — matches
-   * present under force-expanded headers.
-   */
-  | { type: "fold_overlay_group"; expand: boolean }
   | { type: "set_tile_cursor"; tile_id: string; index: bigint }
   /**
    * Select a projected list point by its exact mounted view identity. This
@@ -124,6 +106,11 @@ export type RyeOsUiEvent =
    * semantic item id, so a stale renderer cannot affect a replacement row.
    */
   | { type: "toggle_view_item_expansion"; instance_key: RyeOsViewInstanceKey; item_id: string; expand: boolean }
+  /**
+   * Fold descendants of the exact visible hierarchy item. Unlike the
+   * keyboard-focused form, this also addresses shared docks and dialogs.
+   */
+  | { type: "set_view_tree_item_collapsed"; instance_key: RyeOsViewInstanceKey; item_id: string; collapsed: boolean }
   /**
    * Dismiss one exact transient notice. Unknown/already-dismissed ids are
    * idempotent no-ops so stale renderer frames cannot remove another one.

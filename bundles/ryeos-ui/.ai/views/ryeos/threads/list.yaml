@@ -1,7 +1,8 @@
-# ryeos:signed:2026-08-04T10:21:26Z:cd098f7556ab5789e214c8d6cef7712cd2962096d1137f669a0618d090277d58:S9e4VU2lTlVfJqz85SMJhoVS0miPXxm2Ktnfnz7bF+p0cKo84EKS+q8JKHdERbEPEOvtvSrpChaQKDamEqnIDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-19T22:29:41Z:90bac0b0fc78d10b87e55c8076ccd47d48a88e3ef3638bf8821b463844feb47b:RP05zxU47P5d8XS10gt223ZquImBp/Xg3K9T7ecBd66I+P6h0GGbnox3g3OVJk5J85knazCYihGYrGIUkta4DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: threads-list
+title: Observed Threads
 version: "1.0.0"
-description: Thread list over the ryeos-ui threads source
+description: Bounded observed thread candidates; an empty page does not prove no retained work exists
 
 widget: table
 # Operator watch dashboard: the UI-ryeos-ui (operator-scoped) thread list, ordered
@@ -14,6 +15,7 @@ sources:
       limit: 200
       sort: watch
     collection: threads
+    coverage: coverage
 projections:
   columns:
     - label: thread
@@ -32,24 +34,11 @@ projections:
     - label: status
       field: status
       present: words
-    # Sparse by design: ordinary threads stay blank. Graph-follow rows show the
-    # readable lineage state (`suspended`, `resume queued`, or `resumed`); role,
-    # child-chain status, and cohort progress remain in expanded detail. The
-    # cell tone calls out waiting work while the row keeps its status tone.
-    - label: lineage
-      field: follow.display_state
-      present: words
-      tone:
-        field: follow.display_state
-        map:
-          suspended: warn
-          resume_queued: neutral
-          resumed: good
     - label: created
       field: created_at
       present: time_date
   expand:
-    fields: [thread_id, chain_root_id, project.name, project.path, item_ref, requested_by, created_at, current_node.node, follow.role, follow.display_state, follow.phase, follow.follow_node, follow.child_thread_id, follow.child_chain_root_id, follow.child_terminal_status, follow.parent_successor_thread_id, follow.cohort.done, follow.cohort.expected, error]
+    fields: [thread_id, chain_root_id, project.name, project.path, item_ref, requested_by, created_at]
   tone:
     field: status
     map:
@@ -60,50 +49,27 @@ projections:
       cancelled: warn
       completed: good
     default: neutral
-# Enter watches the row: aim the route at the thread (both thread + chain_root so
-# the braid resolves) and swap the single center lens to its braid.
+# Enter inspects the exact execution subject; generic thread kinds need not
+# expose a conversation or an input route.
 selection:
   activate: watch
 affordances:
   - id: watch
-    label: Watch
+    label: Inspect execution
     invoke:
       plane: ui
-      facet: input.route
-      merge:
-        thread: "{record.thread_id}"
-        chain_root: "{record.chain_root_id}"
-      open_view: view:ryeos/thread/transcript
-      # Step INTO the braid (returnable via Backspace) rather than a flat swap:
-      # the list + its context are pushed onto the drill stack so the operator
-      # can walk back up the execution tree.
-      drill: true
-  # Watch the followed CHILD chain of a suspended parent — same shape as `watch`
-  # but aims the route at the child chain root the daemon recorded on the follow
-  # fact (`follow.child_chain_root_id`, head thread `follow.child_thread_id`), so
-  # activating it on a suspended parent opens the child's braid. Meaningful only
-  # on a suspended-parent row; on a non-follow row both merge fields resolve to
-  # null (per-row affordance gating does not exist yet — see follow-up).
-  - id: watch-child
-    label: Watch child
-    invoke:
-      plane: ui
-      facet: input.route
-      merge:
-        thread: "{record.follow.child_thread_id}"
-        chain_root: "{record.follow.child_chain_root_id}"
-      open_view: view:ryeos/thread/transcript
-      # Step into the child chain — a return frame lets Backspace walk back to
-      # the parent.
+      facet: selection
+      value:
+        thread_id: "{record.thread_id}"
+      open_view: view:ryeos/threads/detail
       drill: true
   - id: tree
     label: Tree
     invoke:
       plane: ui
-      facet: input.route
-      merge:
-        thread: "{record.thread_id}"
-        chain_root: "{record.chain_root_id}"
+      facet: selection
+      value:
+        thread_id: "{record.thread_id}"
       open_view: view:ryeos/thread/tree
       drill: true
   # Inspect swaps the center lens to the thread's detail sections. Write the

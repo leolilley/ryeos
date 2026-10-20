@@ -1,0 +1,7 @@
+# ryeos:signed:2026-10-19T22:29:41Z:45580a0a86f534b35a469710fc221569516359dfe32bf34edaff1e50d9e4ddb9:PMqa2b3h5QVM7R9d9cjzpnK/vg55oI+hk2CWbL5j64LPnf9fbkGHwh5l7VgnItoM3FXMkvQnhxzynHBIEwGQDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: presentation-session-details
+title: Session details
+version: "1.0.0"
+description: Retained acting principal and presentation membership; no credentials, grants or inferred remote identity.
+widget: rows
+local_projection: session_details

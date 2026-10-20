@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-19T07:22:30Z:2a0d772a22a08463ac92804a1e457cacfcf22e2d60f98464934a8c5aec31c60d:BIVNccUbwjBaoeNkEEQYQmUKVlunKRxxzH5nf3i6KX6UALSw97Krsdh0osdknhzBxxtNI2RvSQ6sy5JLndA1Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-19T22:29:41Z:d0bf5ff1e3b5c2cf2a01b13f8ef2d607aedda88179afa73cc7935487fab69015:MhBiLeR+OhNYwzRfj+N4UTIHCgC5wHiSsWMLU3dzj5gCxStkR93pbcclZIWRWZdJtwD4IDCFgJSY8kKem16eCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: assistant-work-evidence
 title: Evidence
 version: "1.0.0"
@@ -12,6 +12,16 @@ sources:
       thread_id: "@facet:selection.work.thread"
 
 sections:
+  - title: Evidence coverage
+    source_channel: detail
+    collection: evidence_coverage
+    projection:
+      primary: subject
+      meta: reason
+      tone:
+        field: state
+        map: { unavailable: warn, available: good }
+        default: neutral
   - title: Execution posture coverage
     source_channel: detail
     collection: execution_coverage
@@ -28,6 +38,14 @@ sections:
     projection:
       primary: value
       meta: label
+  - title: Outcome coverage
+    source_channel: detail
+    collection: outcome_coverage
+    projection:
+      primary: state
+      meta: reason
+      expand:
+        fields: [state, reason, thread_status]
   - title: Outcome
     source_channel: detail
     collection: result
@@ -42,31 +60,11 @@ sections:
     source_channel: detail
     collection: artifacts
     projection:
+      identity: artifact_id
       primary: artifact_type
-      meta: uri
-  - title: Follow
-    source_channel: detail
-    collection: follow
-    projection:
-      primary: value
-      meta: label
-  - title: Children
-    source_channel: detail
-    collection: children
-    projection:
-      primary: item_ref
-      meta: status
-      tone:
-        field: status
-        map:
-          running: accent
-          created: accent
-          failed: danger
-          killed: danger
-          timed_out: danger
-          cancelled: warn
-          completed: good
-        default: neutral
+      meta: artifact_id
+      expand:
+        fields: [artifact_id, artifact_type, metadata]
 
 refresh:
   on_facet: selection

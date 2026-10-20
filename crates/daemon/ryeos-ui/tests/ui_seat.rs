@@ -95,7 +95,7 @@ fn open_request(state: &ryeos_app::state::AppState, session_id: &str) -> Value {
         .expect("active session");
     let coordinate = session
         .attachments
-        .get(&session.surface_attachment_id)
+        .get(&session.root_attachment_id)
         .expect("surface attachment")
         .coordinate();
     serde_json::json!({

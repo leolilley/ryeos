@@ -1,0 +1,99 @@
+# ryeos:signed:2026-10-19T22:29:41Z:9027c17945c3b70d4616a234acaa89430ee73b4cdab6b61f5899c303ee21d89e:PrLPWwoU4J0cceV0EevRd0z4ANbzQ9LXoIU4UO024372XHNHULJCHN7xtK0ZXJGckBu31pEEKNad8TLZEQgzCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: surfaces-list
+title: Surfaces
+version: "1.0.0"
+description: >-
+  Bounded authored Surface discovery in this shared presentation's admitted
+  resolution context. Listing is not an opening grant: explicit selection
+  re-resolves the Surface under current admission, without changing other tabs.
+
+widget: table
+sources:
+  default:
+    ref: service:ui/ryeos-ui/items/list
+    params:
+      kind: surface
+      limit: 200
+    collection: items
+    coverage: coverage
+projections:
+  columns:
+    - label: Surface
+      field: label
+    - label: Reference
+      field: canonical_ref
+    - label: Space
+      field: space
+    - label: Trust
+      field: trust.class
+  tone:
+    field: trust.class
+    map:
+      trusted: good
+      untrusted: danger
+      unsigned: warn
+      unknown: neutral
+    default: neutral
+selection:
+  activate: open
+input:
+  id: filter
+  placeholder: Find an authored Surface
+  feeds:
+    param: query
+    debounce_ms: 120
+affordances:
+  - id: open
+    label: Open Surface
+    enabled_when: { field: trust.class, equals: trusted }
+    disabled_reason: Surface must pass current trust and admission before opening.
+    presentation_operation: surface_opening
+    invoke:
+      plane: rye
+      ref: service:ui/session/surfaces/open
+      args:
+        placement: { kind: new_surface }
+        selection:
+          kind: authored
+          surface_ref: "{record.canonical_ref}"
+        creation_request_id: "{record.creation_request_id}"
+      notice: Surface opened.
+  - id: open-composed-document
+    label: Open selected Surface in an independent presentation
+    presentation_operation: surface_opening
+    invoke:
+      plane: rye
+      ref: service:ui/session/surfaces/open
+      args:
+        placement: "{record.document_placement}"
+        selection: "{record.opening_selection}"
+        creation_request_id: "{record.creation_request_id}"
+      notice: Presentation prepared. Open its link when ready.
+  - id: import-tabs
+    label: Open tabs here
+    enabled_when: { field: trust.class, equals: trusted }
+    disabled_reason: Surface must pass current trust and destination admission before import.
+    presentation_operation: surface_opening
+    invoke:
+      plane: rye
+      ref: service:ui/session/surfaces/open
+      args:
+        placement: "{record.opening_placement}"
+        selection:
+          kind: authored
+          surface_ref: "{record.canonical_ref}"
+        creation_request_id: "{record.creation_request_id}"
+      notice: Tabs opened.
+  - id: open-composed-surface
+    label: Open selected composition in a new Surface
+    presentation_operation: surface_opening
+    invoke:
+      plane: rye
+      ref: service:ui/session/surfaces/open
+      args:
+        placement: { kind: new_surface }
+        selection: "{record.opening_selection}"
+        creation_request_id: "{record.creation_request_id}"
+      notice: Surface opened.
+refresh:
+  on_hint: [bundle]

@@ -1,9 +1,10 @@
-# ryeos:signed:2026-08-04T10:21:25Z:9be880dd2e156334f6d6d8b0fed109344c19103d9f9edb7ed26a1e41769a9afb:iYfOQikCB+06NYtUSRMcJ/6WBMaUZ3o7pg02K0NpiY6MlffVJfMzHlUiU1hgOlfvXmWOuet/fYpSnBfccdWADw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-19T22:29:40Z:91c1782536778b0f7d87a6f8d6df6a1564f778c91b9920edec6dacc750e2b1d0:AM3GDR/5iKnE6HOLiJbJoIJCMZG1S+BKpAG8Gm6uaMuzTkS8EuvtaYbSmqybjJuqnuCxwU6PYebGB4aUpmNYBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: node-threads-history
-title: Node Threads
+title: Observed Operator Threads
 version: "1.0.0"
 description: >-
-  Node-wide thread history across project contexts. The input acts as the
+  Bounded threads visible to this admitted operator, not every owner on the
+  node. An empty page is not proof of no retained work. The input acts as the
   active/status/kind/source filter instead of a separate active-only view.
 
 widget: table
@@ -14,6 +15,7 @@ sources:
       limit: 200
       sort: watch
     collection: threads
+    coverage: coverage
 projections:
   columns:
     - label: thread
@@ -32,22 +34,11 @@ projections:
     - label: status
       field: status
       present: words
-    # Sparse by design: ordinary threads stay blank, while graph-follow rows
-    # expose their operator-facing lineage state instead of an internal role.
-    - label: lineage
-      field: follow.display_state
-      present: words
-      tone:
-        field: follow.display_state
-        map:
-          suspended: warn
-          resume_queued: neutral
-          resumed: good
     - label: created
       field: created_at
       present: time_date
   expand:
-    fields: [thread_id, chain_root_id, project.name, project.path, item_ref, requested_by, created_at, current_node.node, follow.role, follow.display_state, follow.phase, follow.follow_node, follow.child_thread_id, follow.child_chain_root_id, follow.child_terminal_status, follow.parent_successor_thread_id, follow.cohort.done, follow.cohort.expected, error]
+    fields: [thread_id, chain_root_id, project.name, project.path, item_ref, requested_by, created_at]
   tone:
     field: status
     map:
@@ -67,33 +58,21 @@ selection:
   activate: watch
 affordances:
   - id: watch
-    label: Watch
+    label: Inspect execution
     invoke:
       plane: ui
-      facet: input.route
-      merge:
-        thread: "{record.thread_id}"
-        chain_root: "{record.chain_root_id}"
-      open_view: view:ryeos/thread/transcript
-      drill: true
-  - id: watch-child
-    label: Watch child
-    invoke:
-      plane: ui
-      facet: input.route
-      merge:
-        thread: "{record.follow.child_thread_id}"
-        chain_root: "{record.follow.child_chain_root_id}"
-      open_view: view:ryeos/thread/transcript
+      facet: selection
+      value:
+        thread_id: "{record.thread_id}"
+      open_view: view:ryeos/threads/detail
       drill: true
   - id: tree
     label: Tree
     invoke:
       plane: ui
-      facet: input.route
-      merge:
-        thread: "{record.thread_id}"
-        chain_root: "{record.chain_root_id}"
+      facet: selection
+      value:
+        thread_id: "{record.thread_id}"
       open_view: view:ryeos/thread/tree
       drill: true
   - id: inspect

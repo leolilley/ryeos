@@ -1,7 +1,8 @@
-# ryeos:signed:2026-09-14T10:03:09Z:d198e4e0fb3e4f43f4e5078ee188a538db639dc3eca2ec9c3a9231d1d4becf68:Bu0dueyGH0xH825NezrrkVq8gWibzI1eM7SLXv58uU1nJXQutnxAcjpkeqY/FxxDN0TbqIGuxhyf1A7kLF5pDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-19T22:29:40Z:e55ea3c6f3379a50adc5404f1c32da4464dd1156ab8c01d2181b9f707b743f1a:gr4WX8nQP+DSsUxzO/SJ33Pv81ln0iZ+vVaQg3jZO91KYnIGAXAwOq1Mwt4KPYs0SIBMNBTGK4+u8oUy9PPsAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-atlas-observe
+title: Atlas · observe
 version: "1.0.0"
-description: Observation-only Atlas surface for the default browser launch
+description: Observation-only Atlas composition for explicitly selected atlas presentations
 extends: surface:ryeos/ui/atlas
 
 # The parent supplies the complete source and affordance ceilings. This child

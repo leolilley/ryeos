@@ -84,7 +84,7 @@ fn attachment_coordinate(
 ) -> ryeos_ui::browser_session::BindingAttachmentCoordinate {
     session
         .attachments
-        .get(&session.surface_attachment_id)
+        .get(&session.root_attachment_id)
         .expect("surface attachment")
         .coordinate()
 }

@@ -1,10 +1,11 @@
-# ryeos:signed:2026-09-14T10:03:09Z:d90bc76f5664b94f4e2b975bbc14063c3900fffb585ad75e82880659891e5fd8:xsAf2RwDbHgSKAAUfXUQ4ZLc2mrOXYq1cQj37RK/nrfjmu8uZtnfyTwMKnORNi9QZtP5PfyJgbF69sVz6UWjCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-19T22:29:41Z:92f1b55aefc7f059b9829ab5cf0eb409a1bb172835a6e276ec2e53872139af1b:ZQ8kB+mFk17alQwQsz0aplH0DjZXtPf6yW4FqZGdiOj0Y1gti/Yk66oJOeqE/ZdGCAZLUcbzHCM0HDboI2dTCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: project-threads
-title: Project Threads
+title: Observed Project Threads
 version: "1.0.0"
 description: >-
-  Active-project thread history. This is the broad project execution table:
-  running, failed, cancelled, and completed threads are all present, with the
+  Bounded observed active-project thread history. The page does not prove
+  exhaustive membership. Running, failed, cancelled, and completed threads may
+  appear, with the
   input acting as the active/status/kind/source filter instead of separate
   active-only views.
 
@@ -19,6 +20,7 @@ sources:
       sort: watch
     requires_project: true
     collection: threads
+    coverage: coverage
 projections:
   columns:
     - label: thread
@@ -37,20 +39,11 @@ projections:
     - label: status
       field: status
       present: words
-    - label: lineage
-      field: follow.display_state
-      present: words
-      tone:
-        field: follow.display_state
-        map:
-          suspended: warn
-          resume_queued: neutral
-          resumed: good
     - label: created
       field: created_at
       present: time_date
   expand:
-    fields: [thread_id, chain_root_id, project.name, project.path, item_ref, requested_by, created_at, current_node.node, follow.role, follow.display_state, follow.phase, follow.follow_node, follow.child_thread_id, follow.child_chain_root_id, follow.child_terminal_status, follow.parent_successor_thread_id, follow.cohort.done, follow.cohort.expected, error]
+    fields: [thread_id, chain_root_id, project.name, project.path, item_ref, requested_by, created_at]
   tone:
     field: status
     map:
@@ -70,33 +63,21 @@ selection:
   activate: watch
 affordances:
   - id: watch
-    label: Watch
+    label: Inspect execution
     invoke:
       plane: ui
-      facet: input.route
-      merge:
-        thread: "{record.thread_id}"
-        chain_root: "{record.chain_root_id}"
-      open_view: view:ryeos/thread/transcript
-      drill: true
-  - id: watch-child
-    label: Watch child
-    invoke:
-      plane: ui
-      facet: input.route
-      merge:
-        thread: "{record.follow.child_thread_id}"
-        chain_root: "{record.follow.child_chain_root_id}"
-      open_view: view:ryeos/thread/transcript
+      facet: selection
+      value:
+        thread_id: "{record.thread_id}"
+      open_view: view:ryeos/threads/detail
       drill: true
   - id: tree
     label: Tree
     invoke:
       plane: ui
-      facet: input.route
-      merge:
-        thread: "{record.thread_id}"
-        chain_root: "{record.chain_root_id}"
+      facet: selection
+      value:
+        thread_id: "{record.thread_id}"
       open_view: view:ryeos/thread/tree
       drill: true
   - id: inspect

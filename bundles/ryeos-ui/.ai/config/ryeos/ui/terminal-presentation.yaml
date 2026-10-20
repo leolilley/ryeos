@@ -1,0 +1,32 @@
+# ryeos:signed:2026-10-19T22:29:41Z:6969672f46311605eb650ba743143bd99c520b6303f2fb8ec33578716bcb1373:NsLzRj9xWg1Hi7kgykgmEuW4D+3naVFLMYe+iOuSJG2bvv1NfAOtoitcPT+e6/yPAkNLBGy8k56FauxJLe0GAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: ui
+version: "1.0.0"
+description: Shared terminal presentation with explicit admitted terminal Surface seeds and no ambient project selection.
+shared_presentation:
+  schema: 1
+  title: RyeOS
+  launcher: launcher
+  dialogs:
+    - { id: launcher, title: Launch, view: "view:ryeos/ui/launcher" }
+    - { id: shortcuts, title: Shortcuts, view: "view:ryeos/ui/shortcuts" }
+    - { id: node, title: Node details, view: "view:ryeos/node/status" }
+    - { id: session, title: Session details, view: "view:ryeos/ui/session-details" }
+    - { id: surfaces, title: Surfaces, view: "view:ryeos/surfaces/list" }
+    - { id: projects, title: Projects and Surfaces, view: "view:ryeos/projects/list" }
+    - { id: view-sets, title: Saved view sets, view: "view:ryeos/view-sets/library" }
+  docks: {}
+  initial_surfaces:
+    - { id: home, title: Home, surface: "surface:ryeos/ui/lens-observe" }
+  capabilities:
+    sources:
+      - ryeos.execute.service.node/status
+      - ryeos.execute.service.projects/list
+      - ryeos.execute.service.ui/ryeos-ui/config/get
+      - ryeos.execute.service.ui/ryeos-ui/items/list
+    affordances:
+      - ryeos.execute.service.projects/open
+      - ryeos.execute.service.projects/add
+      - ryeos.execute.service.ui/ryeos-ui/config/update
+      - ryeos.execute.service.ui/ryeos-ui/view-sets/resume
+      - ryeos.execute.service.ui/session/surfaces/open
+      - ryeos.execute.service.ui/ryeos-ui/surfaces/resume

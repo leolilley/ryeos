@@ -36,3 +36,16 @@ pub fn stdout_line(text: &str) {
     let mut out = io::stdout().lock();
     let _ = writeln!(out, "{text}");
 }
+
+/// Write a prompt to stderr without a line ending and flush it.
+pub fn stderr_prompt(text: &str) {
+    let mut err = io::stderr().lock();
+    let _ = write!(err, "{text}");
+    let _ = err.flush();
+}
+
+/// End a prompt line on stderr.
+pub fn stderr_newline() {
+    let mut err = io::stderr().lock();
+    let _ = writeln!(err);
+}

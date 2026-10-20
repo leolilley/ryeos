@@ -101,7 +101,7 @@ async fn opening_another_project_admits_an_independent_attachment() {
         .expect("first session retained");
     let first_coordinate = first_session
         .attachments
-        .get(&first_session.surface_attachment_id)
+        .get(&first_session.root_attachment_id)
         .expect("first attachment")
         .coordinate();
     let predecessor_context = HandlerContext::new(

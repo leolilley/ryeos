@@ -65,17 +65,34 @@ fn daemon_error_message(body: &[u8]) -> String {
         .unwrap_or_else(|| String::from_utf8_lossy(body).trim().to_string())
 }
 
+fn seat_history_stream_response(
+    status: reqwest::StatusCode,
+    content_type: Option<&reqwest::header::HeaderValue>,
+    content_length: Option<u64>,
+) -> bool {
+    status == reqwest::StatusCode::OK
+        && content_length != Some(0)
+        && content_type
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(';').next())
+            .is_some_and(|media_type| media_type.trim().eq_ignore_ascii_case("text/event-stream"))
+}
+
 // ---------------------------------------------------------------------------
 // Daemon client
 // ---------------------------------------------------------------------------
 
 pub struct DaemonClient {
-    #[allow(dead_code)]
-    app_root: PathBuf,
     base_url: String,
     audience: String,
     signer: Option<Signer>,
     ui_session_id: RwLock<Option<String>>,
+    /// Ephemeral admitted producer coordinate, never a grant or seat registry.
+    pub(crate) ui_producer: RwLock<Option<ryeos_client_base::ui::binding::UiPresentationProducer>>,
+    pub(crate) seat_delivery: tokio::sync::Mutex<crate::app::seat::SeatDelivery>,
+    /// Single-use authenticated stream handoff from replacement admission to
+    /// the terminal loop; never serialized into a reducer effect result.
+    pub(crate) seat_live_handoff: tokio::sync::Mutex<Option<crate::app::seat::LiveSeatHandoff>>,
     /// One pooled connection for the client's lifetime. Every signed call
     /// rides this handle so requests reuse the kept-alive TCP/TLS session
     /// instead of paying a fresh connect per round trip.
@@ -104,23 +121,15 @@ impl DaemonClient {
         };
 
         Ok(Self {
-            app_root,
             base_url,
             audience,
             signer,
             ui_session_id: RwLock::new(None),
+            ui_producer: RwLock::new(None),
+            seat_delivery: tokio::sync::Mutex::new(crate::app::seat::SeatDelivery::default()),
+            seat_live_handoff: tokio::sync::Mutex::new(None),
             http: signed_client()?,
         })
-    }
-
-    #[allow(dead_code)]
-    pub fn base_url(&self) -> &str {
-        &self.base_url
-    }
-
-    #[allow(dead_code)]
-    pub fn has_identity(&self) -> bool {
-        self.signer.is_some()
     }
 
     fn sign(&self, method: &str, path: &str, body: &[u8]) -> Result<SignHeaders, ClientError> {
@@ -132,7 +141,7 @@ impl DaemonClient {
 
     pub async fn mint_ui_session(
         &self,
-        surface_ref: &str,
+        config_ref: &str,
         project_path: Option<&str>,
     ) -> Result<(), ClientError> {
         if self
@@ -147,7 +156,7 @@ impl DaemonClient {
             .signer
             .as_ref()
             .map(|signer| format!("fp:{}", signer.fingerprint));
-        let body = ui_session_mint_body(surface_ref, project_path, user_principal_id.as_deref());
+        let body = ui_session_mint_body(config_ref, project_path, user_principal_id.as_deref());
         let response = self.signed_post("/ui/api/launch/mint", &body).await?;
         if response
             .get("ui_binding_contract_revision")
@@ -361,24 +370,73 @@ impl DaemonClient {
         path: &str,
         body: &serde_json::Value,
     ) -> Result<serde_json::Value, ClientError> {
-        let url = format!("{}{}", self.base_url.trim_end_matches('/'), path);
-        let body_bytes = serde_json::to_vec(body)?;
-        let headers = self.sign("POST", path, &body_bytes)?;
+        let wrapped;
+        let body = if matches!(
+            path,
+            "/ui/api/invocations/dispatch" | "/ui/api/session/attachments/detach"
+        ) {
+            let producer = self
+                .ui_producer
+                .read()
+                .expect("producer lock poisoned")
+                .clone()
+                .ok_or_else(|| {
+                    ClientError::UiBindingRequest("presentation producer is not ready".into())
+                })?;
+            wrapped = if path == "/ui/api/invocations/dispatch" {
+                let binding = serde_json::from_value::<
+                    ryeos_client_base::ui::binding::UiBindingRequest,
+                >(body.clone())?;
+                serde_json::to_value(ryeos_client_base::ui::binding::UiInvocationRequest {
+                    producer,
+                    binding,
+                    presentation_operation_id: None,
+                })?
+            } else {
+                let mut request = body.clone();
+                if !request.is_object() {
+                    return Err(ClientError::UiBindingRequest(
+                        "attachment detach request must be a record".into(),
+                    ));
+                }
+                request["producer"] = serde_json::to_value(producer)?;
+                request
+            };
+            &wrapped
+        } else {
+            body
+        };
+        self.signed_post_exact(path, body).await
+    }
 
-        let mut req = self
-            .http
-            .post(&url)
-            .header("content-type", "application/json")
-            .header("accept", "application/json")
-            .header("x-ryeos-key-id", &headers.key_id)
-            .header("x-ryeos-timestamp", &headers.timestamp)
-            .header("x-ryeos-nonce", &headers.nonce)
-            .header("x-ryeos-signature", &headers.signature)
-            .body(body_bytes);
-        if let Some(cookie) = self.ui_cookie(path) {
-            req = req.header("cookie", cookie);
-        }
+    pub(crate) async fn invoke_presentation_operation(
+        &self,
+        binding: &ryeos_client_base::ui::binding::UiBindingRequest,
+        operation_id: &str,
+    ) -> Result<serde_json::Value, ClientError> {
+        let producer = self
+            .ui_producer
+            .read()
+            .expect("producer lock poisoned")
+            .clone()
+            .ok_or_else(|| {
+                ClientError::UiBindingRequest("presentation producer is not ready".into())
+            })?;
+        let body = serde_json::to_value(ryeos_client_base::ui::binding::UiInvocationRequest {
+            producer,
+            binding: binding.clone(),
+            presentation_operation_id: Some(operation_id.to_owned()),
+        })?;
+        self.signed_post_exact("/ui/api/invocations/dispatch", &body)
+            .await
+    }
 
+    async fn signed_post_exact(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<serde_json::Value, ClientError> {
+        let (url, req) = self.signed_post_request(path, body, "application/json")?;
         let resp = req.send().await.map_err(|e| TransportError::Unreachable {
             bind: url.clone(),
             detail: format!("request send: {e}"),
@@ -396,6 +454,73 @@ impl DaemonClient {
             });
         }
         Ok(serde_json::from_slice(&body_bytes)?)
+    }
+
+    fn signed_post_request(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+        accept: &str,
+    ) -> Result<(String, reqwest::RequestBuilder), ClientError> {
+        let url = format!("{}{}", self.base_url.trim_end_matches('/'), path);
+        let body_bytes = serde_json::to_vec(body)?;
+        let headers = self.sign("POST", path, &body_bytes)?;
+
+        let mut req = self
+            .http
+            .post(&url)
+            .header("content-type", "application/json")
+            .header("accept", accept)
+            .header("x-ryeos-key-id", &headers.key_id)
+            .header("x-ryeos-timestamp", &headers.timestamp)
+            .header("x-ryeos-nonce", &headers.nonce)
+            .header("x-ryeos-signature", &headers.signature)
+            .body(body_bytes);
+        if let Some(cookie) = self.ui_cookie(path) {
+            req = req.header("cookie", cookie);
+        }
+        Ok((url, req))
+    }
+
+    /// Authenticated, request-body-bound POST stream for one signed UI seat
+    /// history cut. This is not the ephemeral session hint or generic thread
+    /// tail stream.
+    pub async fn open_seat_history(
+        &self,
+        presentation_id: &str,
+        chain_root_id: &str,
+    ) -> Result<SseStream, ClientError> {
+        let path = "/ui/api/session/seat/history";
+        let body = serde_json::json!({
+            "presentation_id": presentation_id,
+            "chain_root_id": chain_root_id,
+        });
+        let (url, req) = self.signed_post_request(path, &body, "text/event-stream")?;
+        let resp = req.send().await.map_err(|e| TransportError::Unreachable {
+            bind: url.clone(),
+            detail: format!("request send: {e}"),
+        })?;
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body_bytes = resp.bytes().await.map_err(|e| TransportError::BodyDecode {
+                detail: format!("read body: {e}"),
+            })?;
+            return Err(ClientError::DaemonError {
+                path: path.to_string(),
+                status,
+                message: daemon_error_message(&body_bytes),
+            });
+        }
+        if !seat_history_stream_response(
+            resp.status(),
+            resp.headers().get(reqwest::header::CONTENT_TYPE),
+            resp.content_length(),
+        ) {
+            return Err(ClientError::UiBindingRequest(
+                "seat history did not return a nonempty event stream response".into(),
+            ));
+        }
+        Ok(SseStream::new(resp))
     }
 
     /// Tail a turn's chain braid live over SSE
@@ -447,13 +572,13 @@ impl DaemonClient {
 }
 
 fn ui_session_mint_body(
-    surface_ref: &str,
+    config_ref: &str,
     project_path: Option<&str>,
     user_principal_id: Option<&str>,
 ) -> serde_json::Value {
     serde_json::json!({
         "ui_binding_contract_revision": ryeos_client_base::UI_BINDING_CONTRACT_REVISION,
-        "surface_ref": surface_ref,
+        "composition": { "kind": "shared_presentation", "config_ref": config_ref },
         "project_path": project_path,
         "user_principal_id": user_principal_id,
     })
@@ -463,19 +588,19 @@ fn ui_session_mint_body(
 // SSE Stream wrapper
 // ---------------------------------------------------------------------------
 
-#[allow(dead_code)]
 pub struct SseStream {
     body: reqwest::Response,
-    buffer: String,
+    buffer: Vec<u8>,
+    scan_from: usize,
     done: bool,
 }
 
-#[allow(dead_code)]
 impl SseStream {
     pub fn new(body: reqwest::Response) -> Self {
         Self {
             body,
-            buffer: String::new(),
+            buffer: Vec::new(),
+            scan_from: 0,
             done: false,
         }
     }
@@ -485,34 +610,61 @@ impl SseStream {
         if self.done {
             return None;
         }
-
-        // Try to parse a complete event from the buffer
-        if let Some(frame) = self.try_parse_event() {
-            return Some(frame);
-        }
-
-        // Read the next chunk of body bytes.
-        match self.body.chunk().await {
-            Ok(Some(bytes)) => {
-                self.buffer.push_str(&String::from_utf8_lossy(&bytes));
-                self.try_parse_event()
+        loop {
+            match self.try_parse_event() {
+                Ok(Some(frame)) => return Some(frame),
+                Ok(None) => {}
+                Err(()) => {
+                    self.done = true;
+                    return None;
+                }
             }
-            Ok(None) | Err(_) => {
-                self.done = true;
-                None
+            match self.body.chunk().await {
+                Ok(Some(bytes)) => {
+                    self.buffer.extend_from_slice(&bytes);
+                    if self.buffer.len() > 32 * 1024 * 1024 {
+                        self.done = true;
+                        return None;
+                    }
+                }
+                Ok(None) | Err(_) => {
+                    self.done = true;
+                    return None;
+                }
             }
         }
     }
 
-    fn try_parse_event(&mut self) -> Option<crate::transport::sse::SseFrame> {
-        // Look for double newline (event boundary)
-        let event_end = self.buffer.find("\n\n")?;
-        let event_text = self.buffer[..event_end].to_string();
-        self.buffer = self.buffer[event_end + 2..].to_string();
+    fn try_parse_event(&mut self) -> Result<Option<crate::transport::sse::SseFrame>, ()> {
+        parse_sse_frame(&mut self.buffer, &mut self.scan_from)
+    }
+}
 
+/// Parse only a complete UTF-8 frame. Transport chunks can split both SSE
+/// delimiters and multi-byte code points; neither is an end-of-stream marker.
+fn parse_sse_frame(
+    buffer: &mut Vec<u8>,
+    scan_from: &mut usize,
+) -> Result<Option<crate::transport::sse::SseFrame>, ()> {
+    while let Some((end, delimiter_len)) = {
+        let suffix = &buffer[*scan_from..];
+        let lf = suffix.windows(2).position(|part| part == b"\n\n");
+        let crlf = suffix.windows(4).position(|part| part == b"\r\n\r\n");
+        match (lf, crlf) {
+            (Some(a), Some(b)) if a < b => Some((*scan_from + a, 2)),
+            (Some(_), Some(b)) => Some((*scan_from + b, 4)),
+            (Some(a), None) => Some((*scan_from + a, 2)),
+            (None, Some(b)) => Some((*scan_from + b, 4)),
+            (None, None) => None,
+        }
+    } {
+        let event_text = std::str::from_utf8(&buffer[..end])
+            .map_err(|_| ())?
+            .to_owned();
+        buffer.drain(..end + delimiter_len);
+        *scan_from = 0;
         let mut event_type = "message";
         let mut data = String::new();
-
         for line in event_text.lines() {
             if let Some(t) = line.strip_prefix("event: ") {
                 event_type = t.trim();
@@ -523,31 +675,107 @@ impl SseStream {
                 data.push_str(d.trim());
             }
         }
-
-        if data.is_empty() {
-            return None;
+        if !data.is_empty() {
+            return Ok(Some(crate::transport::sse::SseFrame {
+                event_type: event_type.to_string(),
+                data,
+            }));
         }
-
-        Some(crate::transport::sse::SseFrame {
-            event_type: event_type.to_string(),
-            data,
-        })
     }
+    *scan_from = buffer.len().saturating_sub(3);
+    Ok(None)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::ui_session_mint_body;
+    use super::{parse_sse_frame, seat_history_stream_response, ui_session_mint_body};
+
+    #[test]
+    fn seat_history_requires_an_actual_sse_response() {
+        use reqwest::StatusCode;
+        use reqwest::header::HeaderValue;
+
+        let sse = HeaderValue::from_static("text/event-stream; charset=utf-8");
+        let json = HeaderValue::from_static("application/json");
+        let lookalike = HeaderValue::from_static("text/event-streaming");
+        assert!(seat_history_stream_response(
+            StatusCode::OK,
+            Some(&sse),
+            None
+        ));
+        assert!(seat_history_stream_response(
+            StatusCode::OK,
+            Some(&sse),
+            Some(42)
+        ));
+        assert!(!seat_history_stream_response(
+            StatusCode::NO_CONTENT,
+            Some(&sse),
+            None
+        ));
+        assert!(!seat_history_stream_response(
+            StatusCode::OK,
+            Some(&sse),
+            Some(0)
+        ));
+        assert!(!seat_history_stream_response(
+            StatusCode::OK,
+            Some(&json),
+            None
+        ));
+        assert!(!seat_history_stream_response(
+            StatusCode::OK,
+            Some(&lookalike),
+            None
+        ));
+        assert!(!seat_history_stream_response(StatusCode::OK, None, None));
+    }
+
+    #[test]
+    fn sse_parser_waits_for_split_utf8_and_accepts_lf_or_crlf_frames() {
+        let mut buffer = b"event: history\ndata: caf".to_vec();
+        buffer.push(0xc3);
+        let mut scan_from = 0;
+        assert!(
+            parse_sse_frame(&mut buffer, &mut scan_from)
+                .unwrap()
+                .is_none()
+        );
+        buffer.extend_from_slice(&[0xa9, b'\n', b'\n']);
+        let first = parse_sse_frame(&mut buffer, &mut scan_from)
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.event_type, "history");
+        assert_eq!(first.data, "café");
+        buffer.extend_from_slice(b"event: next\r\ndata: {\"ok\":true}\r\n\r");
+        assert!(
+            parse_sse_frame(&mut buffer, &mut scan_from)
+                .unwrap()
+                .is_none()
+        );
+        buffer.push(b'\n');
+        let second = parse_sse_frame(&mut buffer, &mut scan_from)
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.event_type, "next");
+        assert_eq!(second.data, "{\"ok\":true}");
+    }
 
     #[test]
     fn ui_session_is_bound_to_the_verified_operator_principal() {
         let body = ui_session_mint_body(
-            "surface:ryeos/ui/lens",
+            "config:ryeos/ui/terminal-presentation",
             Some("/work/project"),
             Some("fp:operator"),
         );
         assert_eq!(body["user_principal_id"], "fp:operator");
         assert_eq!(body["project_path"], "/work/project");
+        assert_eq!(body["composition"]["kind"], "shared_presentation");
+        assert_eq!(
+            body["composition"]["config_ref"],
+            "config:ryeos/ui/terminal-presentation"
+        );
+        assert!(body["composition"].get("surface_ref").is_none());
         assert_eq!(
             body["ui_binding_contract_revision"],
             ryeos_client_base::UI_BINDING_CONTRACT_REVISION

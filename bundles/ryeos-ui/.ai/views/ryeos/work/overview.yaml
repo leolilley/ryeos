@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-15T01:11:43Z:d53e5445a96048c06f1f75231951cc0bfe8bca6ce6acc96bf91896e285839ea4:NPdc/BFR6dYOtsvnzFWwZT8wWkvqo97coN/ql4KdcaMslIzp0ufHh0mJLYsW1zdTYRISURUw9Bm31rYm64UnDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-19T22:29:41Z:519e274569fe2e390299ce834144f2d63915aea22a8df9bb44698cafa7d6f25e:0G7VrhxmRobFsg878LK5YNhnLlIVInTC7UZMnvL89PfE/Tk1Y/uubfmfosFMBUZWBQs3yf8hot5IA/Omo8C2Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: assistant-work-overview
 title: Overview
 version: "1.0.0"
@@ -33,20 +33,24 @@ sections:
     source_channel: detail
     collection: thread
     projection:
-      primary: project.name
-      meta: project.path
+      primary: project_root
+      meta: current_site_id
   - title: Placement
     source_channel: detail
     collection: thread
     projection:
       primary: current_site_id
       meta: origin_site_id
-  - title: Usage
+  - title: Evidence coverage
     source_channel: detail
-    collection: usage
+    collection: evidence_coverage
     projection:
-      primary: value
-      meta: label
+      primary: subject
+      meta: reason
+      tone:
+        field: state
+        map: { unavailable: warn, available: good }
+        default: neutral
   - title: Outcome
     source_channel: detail
     collection: result

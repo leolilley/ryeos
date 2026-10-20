@@ -1,11 +1,9 @@
-# ryeos:signed:2026-08-04T10:21:25Z:e6baac4417c5af7fbab33459b496c192721274d1034f876e64e48659d978d653:lOzSl4lJwRDTDC1tqJkH6UFBXbganvNd7611fB2pHL5tVL4l5wnq1yduorSohF7OrjP8Z8X6AHAbC2VTkDhUDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-19T22:29:40Z:3db96b921b07244c6643b81ba02ee8c1fb1d3f68681fc5f56868abeef73b32d8:nR8FBRS/UWSiw5YkCOWDffklDn4jlWATMqzaQjIYKiNkxnxJuQNREkyO3FuL8ElUIiCHC/tXatBH0TRBsi4aAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: thread-detail
 version: "1.0.0"
 description: >-
-  Thread detail lens: the triage read for one execution. Sections project the
-  inspect service (summary, usage, outcome, artifacts, children) — each reads a
-  sub-value of the one inspect response, so the whole thing degrades to empty
-  sections rather than a raw-JSON dump when a thread has no result/artifacts yet.
+  Thread detail lens for one signed execution subject. Coverage rows distinguish
+  unavailable collections from verified empty evidence.
 
 widget: sections
 title: Thread
@@ -34,45 +32,35 @@ sections:
           completed: good
         default: neutral
 
-  # Project: the launch project context, when the thread carries one. This is
-  # display/scoping metadata for local RyeOS UI sessions, not an authorization
-  # boundary; old/system rows may be empty.
+  # The retained launch project root is signed. The project display summary is
+  # an operational projection and is not part of this inspection response.
   - title: Project
     source_channel: detail
     collection: thread
     projection:
-      primary: project.path
-      meta: project.name
+      primary: project_root
+      meta: current_site_id
 
-  # Follow: the graph `follow:` lineage, present only when this thread issued or
-  # resumed a follow. Sourced from the daemon-emitted labeled-rows `follow`
-  # collection (`{label, value}` — the same shape as Usage / Execution), so each
-  # lineage fact renders as its own row: `state` (suspended / resumed), phase,
-  # follow node, child chain, child thread, child status, resume successor.
-  # Absent rows (a still-running child, or a durably-recognized successor that no
-  # longer carries the child identity) are dropped by the daemon, and a non-follow
-  # thread yields an empty collection — so the section degrades to empty rather
-  # than dumping the thread record.
-  - title: Follow
+  - title: Evidence coverage
     source_channel: detail
-    collection: follow
+    collection: evidence_coverage
     projection:
-      primary: value
-      meta: label
+      primary: subject
+      meta: reason
+      tone:
+        field: state
+        map: { unavailable: warn, available: good }
+        default: neutral
 
-  # Usage: chain-wide execution totals (tokens, cost, turns, thread count), one
-  # metric per row — the deep-watch summary of what this execution consumed.
-  - title: Usage
+  # Audit posture reads an exact-subject node-signed audit record when
+  # available. Coverage applies to that record; the verified executor identity
+  # may still appear in Execution when the audit record is unavailable.
+  - title: Execution posture coverage
     source_channel: detail
-    collection: usage
+    collection: execution_coverage
     projection:
-      primary: value
-      meta: label
-
-  # Execution: the thread's durable execution posture — capabilities minted,
-  # hard limits, effective trust class, model, runtime — one labeled metric per
-  # row, read from the signed thread.json audit record (plus the projection's
-  # executor identity). Empty when the thread carries no audit record.
+      primary: state
+      meta: reason
   - title: Execution
     source_channel: detail
     collection: execution_meta
@@ -80,8 +68,16 @@ sections:
       primary: value
       meta: label
 
-  # Outcome: the `result` sub-object (outcome code + error). Null until the
-  # thread finishes → this section is simply empty.
+  # Null outcome fields are explained by the signed snapshot coverage below;
+  # a terminal status alone is not an outcome or a successful result.
+  - title: Outcome coverage
+    source_channel: detail
+    collection: outcome_coverage
+    projection:
+      primary: state
+      meta: reason
+      expand:
+        fields: [state, reason, thread_status]
   - title: Outcome
     source_channel: detail
     collection: result
@@ -95,30 +91,16 @@ sections:
           error: danger
         default: neutral
 
-  # Artifacts the execution produced (one row each; empty when none).
+  # Positive signed artifact evidence; an empty list is not an exhaustive claim.
   - title: Artifacts
     source_channel: detail
     collection: artifacts
     projection:
+      identity: artifact_id
       primary: artifact_type
-      meta: uri
-
-  # Child threads spawned by this one (the chain fanning out).
-  - title: Children
-    source_channel: detail
-    collection: children
-    projection:
-      primary: item_ref
-      meta: status
-      tone:
-        field: status
-        map:
-          running: accent
-          created: accent
-          failed: danger
-          cancelled: warn
-          completed: good
-        default: neutral
+      meta: artifact_id
+      expand:
+        fields: [artifact_id, artifact_type, metadata]
 
 # Re-fetch whenever the selected thread changes (the inspect affordance writes
 # selection.thread_id before opening this lens).

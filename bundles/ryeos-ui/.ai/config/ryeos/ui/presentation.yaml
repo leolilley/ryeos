@@ -1,0 +1,32 @@
+# ryeos:signed:2026-10-19T22:29:41Z:867ed1da5e3c1ba634c2fb0e7decb386cb169406ee363fae580b79b0f57439d2:26c7E7fqi+96+WYdLdfMO7qOVNL/N34cKCDjf/cgPbJlhktGCtpavv3auAjI515K/siwTuGIS+9Hoi09enzgCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: ui
+version: "1.0.0"
+description: Shared RyeOS browser presentation; Surface contents retain their own independent admission.
+shared_presentation:
+  schema: 1
+  title: RyeOS
+  launcher: launcher
+  dialogs:
+    - { id: launcher, title: Launch, view: "view:ryeos/ui/launcher" }
+    - { id: shortcuts, title: Shortcuts, view: "view:ryeos/ui/shortcuts" }
+    - { id: node, title: Node details, view: "view:ryeos/node/status" }
+    - { id: session, title: Session details, view: "view:ryeos/ui/session-details" }
+    - { id: surfaces, title: Surfaces, view: "view:ryeos/surfaces/list" }
+    - { id: projects, title: Projects and Surfaces, view: "view:ryeos/projects/list" }
+    - { id: view-sets, title: Saved view sets, view: "view:ryeos/view-sets/library" }
+  docks: {}
+  initial_surfaces:
+    - { id: home, title: Home, surface: "surface:ryeos/ui/base-observe" }
+  capabilities:
+    sources:
+      - ryeos.execute.service.node/status
+      - ryeos.execute.service.projects/list
+      - ryeos.execute.service.ui/ryeos-ui/config/get
+      - ryeos.execute.service.ui/ryeos-ui/items/list
+    affordances:
+      - ryeos.execute.service.projects/open
+      - ryeos.execute.service.projects/add
+      - ryeos.execute.service.ui/ryeos-ui/config/update
+      - ryeos.execute.service.ui/ryeos-ui/view-sets/resume
+      - ryeos.execute.service.ui/session/surfaces/open
+      - ryeos.execute.service.ui/ryeos-ui/surfaces/resume

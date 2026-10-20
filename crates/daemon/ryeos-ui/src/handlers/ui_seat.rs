@@ -326,40 +326,6 @@ fn require_owned_seat(
     Ok(detail)
 }
 
-/// Settle every running seat owned by an exact predecessor UI session. This
-/// runs at daemon-side session activation because the successor renderer must
-/// never receive authority to close a predecessor-owned thread. Replays are
-/// harmless and finish any cleanup whose first response was lost.
-pub(crate) fn retire_session_seats(state: &AppState, session_id: &str) -> Result<()> {
-    let owner = format!("session:{session_id}");
-    loop {
-        let running = state
-            .state_store
-            .list_threads_sorted(100, Some(&owner), ryeos_state::queries::ThreadSort::Watch)?
-            .into_iter()
-            .filter(|thread| thread.kind == SEAT_KIND && thread.status == "running")
-            .collect::<Vec<_>>();
-        if running.is_empty() {
-            break;
-        }
-        for detail in running {
-            state.threads.finalize_thread(&ThreadFinalizeParams {
-                thread_id: detail.thread_id.clone(),
-                status: "completed".to_string(),
-                outcome_code: None,
-                result: None,
-                error: None,
-                metadata: None,
-                artifacts: Vec::new(),
-                final_cost: None,
-                summary_json: None,
-            })?;
-            state.state_store.remove_seat_lease(&detail.thread_id)?;
-        }
-    }
-    Ok(())
-}
-
 pub async fn handle_open(
     params: Value,
     ctx: HandlerContext,

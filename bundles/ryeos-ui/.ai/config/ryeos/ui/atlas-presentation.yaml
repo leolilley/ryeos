@@ -1,0 +1,32 @@
+# ryeos:signed:2026-10-19T22:29:41Z:8584a4410139f208cdd77fb61107d18534fe1759e370f3fb1702e492a0d0c83e:gW/km/tH394SX6YkriI3dCX/XY14QK6AtVx4OQAiBuvriEESqLZcOb2mfArId+CtO94wMjJva3GkK1Lsd4dSCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: ui
+version: "1.0.0"
+description: Shared browser presentation whose initial admitted Surface is the namespace atlas.
+shared_presentation:
+  schema: 1
+  title: RyeOS
+  launcher: launcher
+  dialogs:
+    - { id: launcher, title: Launch, view: "view:ryeos/ui/launcher" }
+    - { id: shortcuts, title: Shortcuts, view: "view:ryeos/ui/shortcuts" }
+    - { id: node, title: Node details, view: "view:ryeos/node/status" }
+    - { id: session, title: Session details, view: "view:ryeos/ui/session-details" }
+    - { id: surfaces, title: Surfaces, view: "view:ryeos/surfaces/list" }
+    - { id: projects, title: Projects and Surfaces, view: "view:ryeos/projects/list" }
+    - { id: view-sets, title: Saved view sets, view: "view:ryeos/view-sets/library" }
+  docks: {}
+  initial_surfaces:
+    - { id: atlas, title: Atlas, surface: "surface:ryeos/ui/atlas-observe" }
+  capabilities:
+    sources:
+      - ryeos.execute.service.node/status
+      - ryeos.execute.service.projects/list
+      - ryeos.execute.service.ui/ryeos-ui/config/get
+      - ryeos.execute.service.ui/ryeos-ui/items/list
+    affordances:
+      - ryeos.execute.service.projects/open
+      - ryeos.execute.service.projects/add
+      - ryeos.execute.service.ui/ryeos-ui/config/update
+      - ryeos.execute.service.ui/ryeos-ui/view-sets/resume
+      - ryeos.execute.service.ui/session/surfaces/open
+      - ryeos.execute.service.ui/ryeos-ui/surfaces/resume
