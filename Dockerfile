@@ -78,18 +78,17 @@ WORKDIR /app
 # before any ryeos command.
 RUN groupadd --gid 10000 ryeos && \
     useradd --uid 10000 --gid 10000 --home-dir /data/app --no-create-home \
-      --shell /usr/sbin/nologin ryeos && \
+      --shell /bin/bash ryeos && \
     install -d -o ryeos -g ryeos -m 0750 /data /data/app
 
-# Platform shells (Render's SSH and dashboard shell) attach as the image's
-# running user, which is root here because tini and the entrypoint start as
-# root, and they require that user's ~/.ssh to exist with mode 0700. Without
-# it the session is closed right after the platform authenticates the
-# operator, and they refuse a root account whose password field is locked,
-# which is how the base image ships it. The password set below is random
-# and discarded: it only moves the account from locked to set; nothing
-# authenticates with it, and the node account runs with no_new_privs. The
-# ssh directory stays empty in the image.
+# Platform shells (Render's SSH and dashboard shell) attach as root, after
+# checking that the service's running user has a login shell: the entrypoint
+# drops root to the node account before the daemon starts, so that account
+# carries bash above (a nologin shell makes the gateway close every session
+# right after it authenticates the operator). The shell grants the account
+# nothing: no password, no_new_privs, and ownership of the app root only.
+# Root keeps a ~/.ssh directory with mode 0700 and a set, random, discarded
+# password; the base image ships root locked, which the gateway refuses.
 RUN install -d -m 0700 /root/.ssh && \
     usermod -p "$(openssl rand -base64 48 | openssl passwd -6 -stdin)" root
 
