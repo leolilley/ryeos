@@ -86,15 +86,18 @@ fn stage_core_handler_binaries(registry: &Path) {
 request="$(cat)"
 case "$request" in
   *'"command":"validate_parser_config"'*)
-    response='{"schema_version":4,"response":{"result":"validate_ok"}}'
+    response='{"schema_version":@SCHEMA@,"response":{"result":"validate_ok"}}'
     ;;
   *)
-    response='{"schema_version":4,"response":{"result":"parse_ok","value":{"version":"1"}}}'
+    response='{"schema_version":@SCHEMA@,"response":{"result":"parse_ok","value":{"version":"1"}}}'
     ;;
 esac
 printf '%s\n' "$response"
 "###
-            .to_string()
+            .replace(
+                "@SCHEMA@",
+                &ryeos_handler_protocol::HANDLER_PROTOCOL_SCHEMA_VERSION.to_string(),
+            )
         } else {
             format!("#!/bin/sh\necho test {name}\n")
         };
@@ -157,7 +160,7 @@ fn trust_store_for_key(key: &SigningKey, label: &str) -> TrustStore {
 }
 
 #[test]
-fn declarative_publish_skips_binary_rebuild_and_signs_manifest() {
+fn declarative_publish_rebuilds_an_empty_closed_manifest_and_signs_manifest() {
     if !core_bundle().join(ryeos_engine::AI_DIR).is_dir() {
         eprintln!("skipping: bundles/core not found");
         return;
@@ -169,9 +172,14 @@ fn declarative_publish_skips_binary_rebuild_and_signs_manifest() {
 
     let report = run_publish_once(&bundle, &registry, &key);
 
-    assert!(report.binary_rebuild_skipped);
-    assert!(report.rebuild_report.is_none());
-    assert!(report.binary_rebuild_skip_reason.is_some());
+    let rebuild = report
+        .rebuild_report
+        .as_ref()
+        .expect("a declarative bundle publishes the same closed manifest as any bundle");
+    assert!(
+        rebuild.entries.is_empty(),
+        "a declarative bundle's source manifest has no binary entries"
+    );
     assert!(report.sign_report.failed.is_empty());
 
     let manifest = bundle.join(ryeos_engine::AI_DIR).join("manifest.yaml");
@@ -184,12 +192,8 @@ fn declarative_publish_skips_binary_rebuild_and_signs_manifest() {
     );
 
     assert!(
-        !bundle.join(ryeos_engine::AI_DIR).join("objects").exists(),
-        "publish should not create binary CAS objects for a declarative bundle"
-    );
-    assert!(
-        !bundle.join(ryeos_engine::AI_DIR).join("refs").exists(),
-        "publish should not create binary CAS refs for a declarative bundle"
+        !bundle.join(ryeos_engine::AI_DIR).join("bin").exists(),
+        "publish must not invent a binary root for a declarative bundle"
     );
 }
 
@@ -376,17 +380,18 @@ fn publish_hard_fails_on_uncovered_item_dir() {
 }
 
 #[test]
-fn direct_binary_rebuild_remains_strict_without_bin_directory() {
+fn direct_rebuild_without_bin_directory_is_an_empty_closed_manifest() {
     let key = load_dev_signing_key();
     let tmp = tempfile::tempdir().unwrap();
     let bundle = create_declarative_bundle(tmp.path());
 
-    let err = ryeos_core_tools::actions::build_bundle::rebuild_bundle_manifest(&bundle, &key)
-        .expect_err("direct binary CAS rebuild should require .ai/bin");
+    let report = ryeos_core_tools::actions::build_bundle::rebuild_bundle_manifest(&bundle, &key)
+        .expect("a bundle without .ai/bin rebuilds to an empty source manifest");
 
+    assert!(report.entries.is_empty());
     assert!(
-        format!("{err:#}").contains("no .ai/bin directory"),
-        "unexpected error: {err:#}"
+        !bundle.join(ryeos_engine::AI_DIR).join("bin").exists(),
+        "rebuild must not invent a binary root"
     );
 }
 
@@ -401,7 +406,7 @@ fn declarative_publish_is_idempotent_without_bin_directory() {
     let bundle = create_declarative_bundle(tmp.path());
     let registry = prepare_core_registry(tmp.path(), &key);
 
-    let _report1 = run_publish_once(&bundle, &registry, &key);
+    let report1 = run_publish_once(&bundle, &registry, &key);
     let manifest = bundle.join(ryeos_engine::AI_DIR).join("manifest.yaml");
     let manifest1 = std::fs::read_to_string(&manifest).unwrap();
 
@@ -412,8 +417,11 @@ fn declarative_publish_is_idempotent_without_bin_directory() {
         manifest1, manifest2,
         "second publish should leave manifest unchanged"
     );
-    assert!(report2.binary_rebuild_skipped);
-    assert!(report2.rebuild_report.is_none());
+    assert_eq!(
+        report1.rebuild_report.as_ref().unwrap().manifest_hash,
+        report2.rebuild_report.as_ref().unwrap().manifest_hash,
+        "the empty source manifest is content-addressed and stable"
+    );
     assert!(!report2.manifest_changed);
     assert!(report2.sign_report.failed.is_empty());
 }

@@ -323,10 +323,13 @@ fn run_installs_max_open_files_before_exec() {
 
 #[test]
 fn run_installs_memory_cpu_and_process_limits_before_exec() {
-    // Inspect installed limits using shell builtins, without command-substitution
-    // forks. RLIMIT_NPROC counts this UID's other host tasks too; observing the
+    // Read the installed soft limits from the kernel's own report of the
+    // exec'd process, which needs no shell-specific `ulimit` option.
+    // RLIMIT_NPROC counts this UID's other host tasks too; observing the
     // installed value must not depend on the developer's current process count.
-    let mut request = sh(&["-c", "ulimit -v; ulimit -t; ulimit -u"]);
+    let mut request = sh(&[]);
+    request.cmd = "/bin/cat".to_string();
+    request.args = vec!["/proc/self/limits".to_string()];
     request.limits = Some(SubprocessLimits {
         max_address_space_bytes: Some(256 * 1024 * 1024),
         max_cpu_seconds: Some(3),
@@ -337,9 +340,22 @@ fn run_installs_memory_cpu_and_process_limits_before_exec() {
     let result = run(request);
 
     assert!(result.success, "stderr: {}", result.stderr);
+    let soft_limit = |label: &str| -> String {
+        result
+            .stdout
+            .lines()
+            .find_map(|line| line.strip_prefix(label))
+            .and_then(|rest| rest.split_whitespace().next())
+            .unwrap_or_else(|| panic!("no `{label}` row in {:?}", result.stdout))
+            .to_owned()
+    };
     assert_eq!(
-        result.stdout.lines().collect::<Vec<_>>(),
-        ["262144", "3", "512"]
+        [
+            soft_limit("Max address space"),
+            soft_limit("Max cpu time"),
+            soft_limit("Max processes"),
+        ],
+        ["268435456", "3", "512"]
     );
 }
 

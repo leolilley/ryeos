@@ -159,6 +159,17 @@ if [[ "$skip_tests" == "1" ]]; then
     exit 0
 fi
 
+# A refresh has just built and staged the core bundle's release binaries. The
+# publish idempotency tests need exactly those, and each nextest test is its
+# own process, so name the staged directory rather than letting every such
+# test run its own cold release build.
+if [[ "$refresh_bundles" == "1" ]]; then
+    staged_core_bins="$ROOT/bundles/core/.ai/bin/x86_64-unknown-linux-gnu"
+    if [[ -d "$staged_core_bins" ]]; then
+        export RYEOS_TEST_HANDLER_BIN_DIR="$staged_core_bins"
+    fi
+fi
+
 # Resource caps. The workspace has heavy integration tests (some spawn daemons),
 # so running them at full parallelism can exhaust memory and lock up the machine.
 # Default to half the available cores for both compilation and test execution.

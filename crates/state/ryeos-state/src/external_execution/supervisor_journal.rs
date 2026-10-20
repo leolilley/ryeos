@@ -1890,15 +1890,20 @@ mod tests {
                 }
                 Err(error) => error,
             };
-            for rendered in [
-                format!("{error}"),
-                format!("{error:#}"),
-                format!("{error:?}"),
-                format!("{error:#?}"),
+            // The bound is on the rendered user-facing text: the Debug forms
+            // also carry a captured backtrace when the environment asks for
+            // one, which has no bearing on what the error says.
+            for (rendered, user_facing) in [
+                (format!("{error}"), true),
+                (format!("{error:#}"), true),
+                (format!("{error:?}"), false),
+                (format!("{error:#?}"), false),
             ] {
                 assert!(!rendered.contains(SENTINEL));
                 assert!(rendered.contains("network capture JSON"));
-                assert!(rendered.len() < 2048);
+                if user_facing {
+                    assert!(rendered.len() < 2048);
+                }
                 if oversized {
                     assert!(rendered.contains("exceeds bounds"));
                 }
