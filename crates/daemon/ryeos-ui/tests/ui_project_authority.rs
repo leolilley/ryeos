@@ -100,35 +100,27 @@ fn compiled_project_session(
         .expect("active session")
 }
 
+/// A live shared-presentation session whose seat holds one authored project
+/// Surface. The launch names the project by `spelling`; the session retains
+/// the canonical project identity.
 async fn mint_compiled_project_session(
     state: &AppState,
     project_root: &std::path::Path,
-) -> (ryeos_ui::browser_session::BrowserSession, HandlerContext) {
-    let operator = test_state::local_operator_context(state, vec!["*".into()]);
-    let minted = ryeos_ui::handlers::ui_launch_mint::handle(
-        ryeos_ui::handlers::ui_launch_mint::Request {
-            ui_binding_contract_revision: ryeos_ui::UI_BINDING_CONTRACT_REVISION.to_string(),
-            surface_ref: "surface:ryeos/ui/base".to_string(),
-            project_path: Some(project_root.to_string_lossy().into_owned()),
-            user_principal_id: None,
-        },
-        operator,
-        Arc::new(state.clone()),
-    )
-    .await
-    .expect("compile project browser session");
-    let session_id = minted["session_id"]
-        .as_str()
-        .expect("minted session id")
-        .to_string();
-    let activated = ryeos_ui::handlers::ui_launch::handle(
-        serde_json::json!({"token": minted["token"]}),
-        HandlerContext::anonymous(),
-        Arc::new(state.clone()),
-    )
-    .await
-    .expect("activate project browser session");
-    assert_eq!(activated["session_id"], session_id);
+    spelling: &std::path::Path,
+) -> (
+    ryeos_ui::browser_session::BrowserSession,
+    HandlerContext,
+    ryeos_client_base::ui::UiPresentationProducer,
+    ryeos_ui::browser_session::BindingAttachmentCoordinate,
+) {
+    let (session_id, context, producer, coordinate) =
+        test_state::live_presentation_with_surface_in_project(
+            state,
+            project_root,
+            spelling,
+            "surface:ryeos/ui/project",
+        )
+        .await;
     let session = get_ui_state(state)
         .expect("UI state")
         .browser_sessions
@@ -136,48 +128,49 @@ async fn mint_compiled_project_session(
         .expect("active compiled project session");
     let attachment = session
         .attachments
-        .get(&session.root_attachment_id)
+        .get(&coordinate.binding_attachment_id)
         .expect("surface attachment");
+    let binding = &attachment.compiled_binding.binding;
     assert!(
-        attachment
-            .compiled_binding
-            .binding
+        binding
             .sources
             .get("view:ryeos/threads/history")
             .is_some_and(|sources| sources.contains_key("default")),
-        "the acceptance test must cross a source coordinate compiled from the live surface"
+        "the acceptance test must cross a source coordinate compiled from the live surface: {} {:?} {:?} {:?}",
+        attachment.root_ref,
+        binding.views.keys().collect::<Vec<_>>(),
+        binding.sources.keys().collect::<Vec<_>>(),
+        binding.attenuated
     );
-    let context = HandlerContext::new(format!("session:{session_id}"), vec!["*".into()], false);
-    (session, context)
+    (session, context, producer, coordinate)
 }
 
 async fn dispatch_project_threads(
     state: Arc<AppState>,
-    session: &ryeos_ui::browser_session::BrowserSession,
     context: HandlerContext,
+    producer: &ryeos_client_base::ui::UiPresentationProducer,
+    coordinate: &ryeos_ui::browser_session::BindingAttachmentCoordinate,
     attempted_project_override: &std::path::Path,
 ) -> serde_json::Value {
-    let coordinate = session
-        .attachments
-        .get(&session.root_attachment_id)
-        .expect("surface attachment")
-        .coordinate();
     (ryeos_ui::handlers::ui_invocations_dispatch::DESCRIPTOR.handler)(
         serde_json::json!({
-            "binding_attachment_id": coordinate.binding_attachment_id,
-            "binding_generation": coordinate.binding_generation,
-            "binding_digest": coordinate.binding_digest,
-            "coordinate": {
-                "kind": "source",
-                "view_ref": "view:ryeos/threads/history",
-                "channel": "default"
-            },
-            "payload": {
-                "kind": "source_parameters",
-                // This key is part of the signed source template, but the
-                // browser-supplied value must never replace its retained
-                // @session:project_root authority.
-                "params": {"project_path": attempted_project_override}
+            "producer": producer,
+            "binding": {
+                "binding_attachment_id": coordinate.binding_attachment_id,
+                "binding_generation": coordinate.binding_generation,
+                "binding_digest": coordinate.binding_digest,
+                "coordinate": {
+                    "kind": "source",
+                    "view_ref": "view:ryeos/threads/history",
+                    "channel": "default"
+                },
+                "payload": {
+                    "kind": "source_parameters",
+                    // This key is part of the signed source template, but the
+                    // browser-supplied value must never replace its retained
+                    // @session:project_root authority.
+                    "params": {"project_path": attempted_project_override}
+                }
             }
         }),
         context,
@@ -280,21 +273,23 @@ async fn compiled_browser_dispatch_keeps_equivalent_paths_and_live_projects_isol
     // Compile and activate real browser sessions. The first enters through an
     // equivalent symlink path, proving the session retains the canonical
     // project identity rather than trusting the request spelling.
-    let (first_session, first_context) = mint_compiled_project_session(&state, &first_alias).await;
-    let (second_session, second_context) = mint_compiled_project_session(&state, &second).await;
+    let (first_session, first_context, first_producer, first_coordinate) =
+        mint_compiled_project_session(&state, &first, &first_alias).await;
+    let (second_session, second_context, second_producer, second_coordinate) =
+        mint_compiled_project_session(&state, &second, &second).await;
     let canonical_first = first.canonicalize().expect("canonical first project");
     let canonical_second = second.canonicalize().expect("canonical second project");
     assert_eq!(
         first_session
             .attachments
-            .get(&first_session.root_attachment_id)
+            .get(&first_coordinate.binding_attachment_id)
             .and_then(|attachment| attachment.project_query_identity.as_deref()),
         Some(canonical_first.to_string_lossy().as_ref())
     );
     assert_eq!(
         second_session
             .attachments
-            .get(&second_session.root_attachment_id)
+            .get(&second_coordinate.binding_attachment_id)
             .and_then(|attachment| attachment.project_query_identity.as_deref()),
         Some(canonical_second.to_string_lossy().as_ref())
     );
@@ -302,13 +297,20 @@ async fn compiled_browser_dispatch_keeps_equivalent_paths_and_live_projects_isol
     let state = Arc::new(state);
     let first_result = dispatch_project_threads(
         state.clone(),
-        &first_session,
         first_context,
+        &first_producer,
+        &first_coordinate,
         &canonical_second,
     )
     .await;
-    let second_result =
-        dispatch_project_threads(state, &second_session, second_context, &canonical_first).await;
+    let second_result = dispatch_project_threads(
+        state,
+        second_context,
+        &second_producer,
+        &second_coordinate,
+        &canonical_first,
+    )
+    .await;
 
     for (result, expected, excluded) in [
         (&first_result, "T-first", "T-second"),

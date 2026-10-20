@@ -71,15 +71,23 @@ async fn browser_boot_sequence_endpoints_accept_same_session() {
     )
     .await
     .expect("session/current should succeed");
-    assert_eq!(session["surface_ref"], "surface:ryeos/ui/base");
+    assert!(session.get("surface_ref").is_none());
+    let root_attachment_id = session["root_attachment_id"].as_str().unwrap();
+    let root = session["binding_attachments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|attachment| attachment["binding_attachment_id"] == root_attachment_id)
+        .expect("the session reports its root attachment");
+    assert_eq!(root["root_ref"], "surface:ryeos/ui/base");
 
     let items = ryeos_ui::seat_auth::with_compiled_ui_attachment(
         attachment.clone(),
         (ryeos_ui::handlers::ui_items::ITEMS_LIST_DESCRIPTOR.handler)(
             json!({
                 "kind": "surface",
-                "query": "ryeos/ryeos-ui/base",
-                "limit": 1
+                "query": "ryeos/ui/base",
+                "limit": 16
             }),
             ctx.clone(),
             state.clone(),
@@ -87,13 +95,20 @@ async fn browser_boot_sequence_endpoints_accept_same_session() {
     )
     .await
     .expect("items list should succeed");
-    assert_eq!(items["items"][0]["canonical_ref"], "surface:ryeos/ui/base");
+    assert!(
+        items["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["canonical_ref"] == "surface:ryeos/ui/base"),
+        "the surface inventory lists the root surface"
+    );
 
     let effective = ryeos_ui::seat_auth::with_compiled_ui_attachment(
         attachment.clone(),
         (ryeos_api::handlers::items_effective::DESCRIPTOR.handler)(
             json!({
-                "canonical_ref": session["surface_ref"],
+                "canonical_ref": root["root_ref"],
                 "expected_kind": "surface"
             }),
             ctx.clone(),
@@ -130,7 +145,7 @@ async fn browser_boot_sequence_endpoints_accept_same_session() {
     )
     .await
     .expect("item inspect should succeed");
-    assert_eq!(inspection["schema_version"], "ryeos.ui.item.inspect.v1");
+    assert_eq!(inspection["schema_version"], "ryeos-ui.item.inspect.v1");
     assert_eq!(inspection["item"]["canonical_ref"], "surface:ryeos/ui/base");
     assert!(
         inspection["raw"]["content"]

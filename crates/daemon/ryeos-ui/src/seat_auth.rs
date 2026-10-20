@@ -249,6 +249,21 @@ where
         .await
 }
 
+/// The scope that re-enters the current compiled dispatch authority on
+/// another task. A recorded service handler runs on a daemon-owned task, which
+/// does not inherit this task's authority; the executor enters the scope
+/// around that handler call. `None` outside a compiled dispatch.
+pub(crate) fn current_compiled_ui_task_scope()
+-> Option<ryeos_app::handler_context::HandlerTaskScope> {
+    let dispatch = COMPILED_UI_DISPATCH.try_with(Clone::clone).ok()?;
+    Some(ryeos_app::handler_context::HandlerTaskScope::new(
+        move |handler| {
+            let dispatch = dispatch.clone();
+            Box::pin(COMPILED_UI_DISPATCH.scope(dispatch, handler))
+        },
+    ))
+}
+
 pub(crate) fn require_compiled_ui_producer()
 -> Result<ryeos_client_base::ui::UiPresentationProducer, HandlerError> {
     COMPILED_UI_DISPATCH
@@ -574,6 +589,34 @@ mod tests {
             assert!(resolve_compiled_ui_session(&ctx, &store).is_err());
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn the_dispatch_task_scope_reenters_authority_on_another_task() {
+        assert!(current_compiled_ui_task_scope().is_none());
+        let scope = with_compiled_ui_attachment(attachment(), async {
+            current_compiled_ui_task_scope().expect("a compiled dispatch has a task scope")
+        })
+        .await;
+        let probe = |scope: Option<ryeos_app::handler_context::HandlerTaskScope>| {
+            let work: ryeos_app::handler_context::HandlerFuture =
+                Box::pin(async { Ok(serde_json::json!(compiled_ui_attachment().is_some())) });
+            let work = match scope {
+                Some(scope) => scope.enter(work),
+                None => work,
+            };
+            tokio::spawn(work)
+        };
+        assert_eq!(
+            probe(None).await.expect("join").expect("probe"),
+            serde_json::json!(false),
+            "a spawned task does not inherit the dispatch authority"
+        );
+        assert_eq!(
+            probe(Some(scope)).await.expect("join").expect("probe"),
+            serde_json::json!(true),
+            "the scope restores exactly the admitted dispatch authority"
+        );
     }
 
     #[tokio::test]

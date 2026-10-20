@@ -1081,7 +1081,12 @@ pub async fn execute_service_verified(
                         anyhow::anyhow!("service handler '{}' not registered", task_endpoint)
                     })?
                     .clone();
-                let result = handler(task_params.clone(), hctx, Arc::new(task_state.clone())).await;
+                let scope = hctx.task_scope().cloned();
+                let call = handler(task_params.clone(), hctx, Arc::new(task_state.clone()));
+                let result = match scope {
+                    Some(scope) => scope.enter(call).await,
+                    None => call.await,
+                };
                 drop(handler);
                 result
             }

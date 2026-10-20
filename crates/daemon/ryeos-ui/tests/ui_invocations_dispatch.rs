@@ -19,7 +19,56 @@ async fn mint_live_session(
     ryeos_client_base::ui::UiPresentationProducer,
     ryeos_ui::browser_session::BindingAttachmentCoordinate,
 ) {
-    test_state::live_presentation_with_surface(state, "surface:ryeos/ui/base").await
+    test_state::live_presentation_with_surface(state, "surface:ryeos/ui/assistant").await
+}
+
+/// A durable chain owned by the browser session's principal, the only kind of
+/// chain a verified service may replay for it. A seat is owned by its browser
+/// session itself, so its history is read through the seat stream instead.
+fn create_principal_owned_chain(state: &ryeos_app::state::AppState, thread_id: &str, owner: &str) {
+    use ryeos_state::objects::{
+        CapturedItemTrustClass, CapturedNodeHistoryPolicyProvenance, CapturedPolicyProvenance,
+        CapturedThreadHistoryPolicy, ExecutionProjectAuthority, ThreadHistoryRetention,
+    };
+    let hash = "a".repeat(64);
+    state
+        .state_store
+        .create_thread_for_test(&ryeos_app::state_store::NewThreadRecord {
+            thread_id: thread_id.to_string(),
+            chain_root_id: thread_id.to_string(),
+            kind: "directive".to_string(),
+            item_ref: "directive:test/owned-chain".to_string(),
+            executor_ref: "test/executor".to_string(),
+            launch_mode: "wait".to_string(),
+            current_site_id: "site:test".to_string(),
+            origin_site_id: "site:test".to_string(),
+            upstream_thread_id: None,
+            requested_by: Some(owner.to_string()),
+            project_root: None,
+            project_authority: ExecutionProjectAuthority::projectless(
+                ryeos_state::objects::EnvironmentAuthority::None,
+            )
+            .expect("projectless authority"),
+            base_project_snapshot_hash: None,
+            usage_subject: None,
+            usage_subject_asserted_by: None,
+            captured_history_policy: Some(CapturedThreadHistoryPolicy {
+                retention: ThreadHistoryRetention::Durable,
+                canonical_item_ref: "directive:test/owned-chain".to_string(),
+                item_content_hash: hash.clone(),
+                item_signer_fingerprint: Some(hash.clone()),
+                item_trust_class: CapturedItemTrustClass::Trusted,
+                kind_schema_content_hash: hash,
+                resolved_from: CapturedPolicyProvenance::NodeDefault {
+                    node_policy: CapturedNodeHistoryPolicyProvenance::test_policy(),
+                },
+            }),
+        })
+        .expect("create principal-owned chain");
+    state
+        .state_store
+        .mark_thread_running(thread_id, None)
+        .expect("mark chain running");
 }
 
 fn test_context() -> ryeos_ui::browser_session::LaunchContext {
@@ -216,7 +265,8 @@ async fn session_cookie_required() {
 #[ignore = "requires populated handler binaries via scripts/populate-bundles.sh"]
 async fn session_local_invocation_publishes_to_session_bus() {
     let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
-    let (session_id, ctx, producer, coordinate) = mint_live_session(&state).await;
+    let (session_id, ctx, producer, coordinate) =
+        test_state::live_shipped_presentation(&state).await;
 
     // Subscribe to the session bus before invoking.
     let mut rx = get_ui_state(&state)
@@ -246,7 +296,12 @@ async fn session_local_invocation_publishes_to_session_bus() {
         Arc::new(state),
     )
     .await
-    .expect("should succeed");
+    .unwrap_or_else(|error| {
+        panic!(
+            "dispatch the registration affordance: {:?}",
+            ryeos_app::handler_error::extract_handler_error(&error)
+        )
+    });
 
     let invocation_id = result["invocation_id"].as_str().unwrap();
 
@@ -266,7 +321,7 @@ async fn session_local_invocation_publishes_to_session_bus() {
 #[ignore = "requires populated handler binaries via scripts/populate-bundles.sh"]
 async fn read_only_thread_sources_replay_without_recording_service_threads() {
     let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
-    let (_session_id, ctx, producer, coordinate) = mint_live_session(&state).await;
+    let (session_id, ctx, producer, coordinate) = mint_live_session(&state).await;
     let state = Arc::new(state);
 
     let chain_root_id = producer.thread_id.as_str();
@@ -276,12 +331,24 @@ async fn read_only_thread_sources_replay_without_recording_service_threads() {
     }]);
     let payload_digest =
         ryeos_ui_presentation_contract::payload_digest::seat_payload_digest(&events).unwrap();
+    let operation_id = ryeos_client_base::ui::admission_operation::UiSeatAppendIdentity {
+        presentation_id: producer.presentation_id.clone(),
+        chain_root_id: chain_root_id.into(),
+        thread_id: producer.thread_id.clone(),
+        producer_incarnation: producer.producer_incarnation.clone(),
+        first_engine_seq: 0,
+        last_engine_seq: 0,
+        event_count: 1,
+        payload_digest: payload_digest.clone(),
+    }
+    .derive_identity()
+    .unwrap();
     (ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR.handler)(
         serde_json::json!({
             "presentation_id": producer.presentation_id,
             "thread_id": producer.thread_id,
             "producer_incarnation": producer.producer_incarnation,
-            "operation_id": uuid::Uuid::new_v4().to_string(),
+            "operation_id": operation_id,
             "first_engine_seq": 0, "last_engine_seq": 0, "event_count": 1,
             "payload_digest": payload_digest, "events": events
         }),
@@ -291,11 +358,24 @@ async fn read_only_thread_sources_replay_without_recording_service_threads() {
     .await
     .expect("append replay fixture event");
 
+    let session_owner = get_ui_state(&state)
+        .unwrap()
+        .browser_sessions
+        .get_session(&session_id)
+        .unwrap()
+        .principal_id
+        .clone();
+    let owned_chain = "T-owned-chain";
+    create_principal_owned_chain(&state, owned_chain, &session_owner);
     let rows_before = state
         .state_store
         .list_threads_filtered(100, None)
         .expect("list fixture threads");
-    assert_eq!(rows_before.len(), 1, "only the seat is recorded");
+    assert_eq!(
+        rows_before.len(),
+        2,
+        "only the seat and the owned chain are recorded"
+    );
 
     let node_rows = (ryeos_ui::handlers::ui_threads::DESCRIPTOR.handler)(
         serde_json::json!({ "limit": 100, "sort": "watch" }),
@@ -329,8 +409,8 @@ async fn read_only_thread_sources_replay_without_recording_service_threads() {
             "binding_digest": coordinate.binding_digest,
             "coordinate": {
                 "kind": "source",
-                "view_ref": "view:ryeos/input",
-                "channel": "input.line.mentions"
+                "view_ref": "view:ryeos/threads/history",
+                "channel": "default"
             },
             "payload": { "kind": "source_parameters", "params": {} }
             }
@@ -368,7 +448,7 @@ async fn read_only_thread_sources_replay_without_recording_service_threads() {
             },
             "payload": {
                 "kind": "source_parameters",
-                "params": { "chain_root_id": chain_root_id }
+                "params": { "chain_root_id": owned_chain }
             }
             }
         }),
@@ -383,13 +463,24 @@ async fn read_only_thread_sources_replay_without_recording_service_threads() {
         )
     });
     assert_eq!(replayed["result"]["thread"]["recorded"], false);
+    let retained = state
+        .events
+        .replay(&ryeos_app::event_store_service::EventReplayParams {
+            thread_id: None,
+            chain_root_id: Some(owned_chain.to_string()),
+            after_chain_seq: None,
+            limit: 100,
+        })
+        .expect("replay the owned chain directly")
+        .events;
+    assert!(!retained.is_empty(), "the owned chain retains its creation");
     assert_eq!(
         replayed["result"]["result"]["events"]
             .as_array()
             .expect("events collection")
             .len(),
-        5,
-        "root creation/start, producer claim, facet and its exact append receipt are retained"
+        retained.len(),
+        "the compiled source replays exactly the chain's retained events"
     );
 
     let rows_after = state

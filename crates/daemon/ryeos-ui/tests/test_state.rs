@@ -41,6 +41,24 @@ async fn live_presentation_seeded(
     ryeos_client_base::ui::UiPresentationProducer,
     ryeos_ui::browser_session::BindingAttachmentCoordinate,
 ) {
+    let root = state.config.app_root.clone();
+    live_presentation_in_project(state, &root, &root, initial_surface).await
+}
+
+/// The presentation fixture rooted in `project_root`, which holds the signed
+/// shared Config. `spelling` is the path the launch names that project by; it
+/// may be any equivalent path of the canonical root.
+async fn live_presentation_in_project(
+    state: &AppState,
+    project_root: &std::path::Path,
+    spelling: &std::path::Path,
+    initial_surface: Option<&str>,
+) -> (
+    String,
+    ryeos_app::handler_context::HandlerContext,
+    ryeos_client_base::ui::UiPresentationProducer,
+    ryeos_ui::browser_session::BindingAttachmentCoordinate,
+) {
     let mut body = String::from(
         "category: test\nversion: '1'\nshared_presentation:\n  schema: 1\n  title: Test presentation\n  launcher: launch\n  dialogs:\n    - id: launch\n      title: Launch\n      view: 'view:ryeos/ui/launcher'\n  capabilities:\n    sources: []\n    affordances: []\n",
     );
@@ -53,7 +71,7 @@ async fn live_presentation_seeded(
         &ryeos_engine::test_support::workspace_root().join(".dev-keys/PUBLISHER_DEV.pem"),
     )
     .expect("established development publisher key");
-    let config_dir = state.config.app_root.join(".ai/config/test");
+    let config_dir = project_root.join(".ai/config/test");
     std::fs::create_dir_all(&config_dir).unwrap();
     std::fs::write(
         config_dir.join("presentation.yaml"),
@@ -61,7 +79,7 @@ async fn live_presentation_seeded(
     )
     .unwrap();
     let principal = format!("fp:{}", "ab".repeat(32));
-    let project_root = state.config.app_root.canonicalize().unwrap();
+    let project_root = project_root.canonicalize().unwrap();
     // This verified non-operator principal selects only its private, explicitly
     // registered temporary project; no test touches the user's local registry.
     let resolver =
@@ -90,7 +108,7 @@ async fn live_presentation_seeded(
         ryeos_ui::handlers::ui_launch_mint::Request {
             ui_binding_contract_revision: ryeos_ui::UI_BINDING_CONTRACT_REVISION.into(),
             surface_ref: "config:test/presentation".into(),
-            project_path: Some(project_root.display().to_string()),
+            project_path: Some(spelling.display().to_string()),
             user_principal_id: Some(principal.clone()),
         },
         ryeos_app::handler_context::HandlerContext::new(principal, vec!["*".into()], true),
@@ -98,6 +116,47 @@ async fn live_presentation_seeded(
     )
     .await
     .expect("compile real signed shared Config fixture");
+    claim_minted_presentation(state, &minted).await
+}
+
+/// A projectless presentation under the shipped shared Config, for a verified
+/// non-operator principal. Its dialogs carry the real project registry
+/// affordances, and nothing in it names a project.
+#[allow(dead_code)]
+pub async fn live_shipped_presentation(
+    state: &AppState,
+) -> (
+    String,
+    ryeos_app::handler_context::HandlerContext,
+    ryeos_client_base::ui::UiPresentationProducer,
+    ryeos_ui::browser_session::BindingAttachmentCoordinate,
+) {
+    let principal = format!("fp:{}", "ab".repeat(32));
+    let minted = ryeos_ui::handlers::ui_launch_mint::handle(
+        ryeos_ui::handlers::ui_launch_mint::Request {
+            ui_binding_contract_revision: ryeos_ui::UI_BINDING_CONTRACT_REVISION.into(),
+            surface_ref: "config:ryeos/ui/presentation".into(),
+            project_path: None,
+            user_principal_id: Some(principal.clone()),
+        },
+        ryeos_app::handler_context::HandlerContext::new(principal, vec!["*".into()], true),
+        Arc::new(state.clone()),
+    )
+    .await
+    .expect("compile the shipped shared Config");
+    claim_minted_presentation(state, &minted).await
+}
+
+/// Activate a minted session and claim its first presentation's producer.
+async fn claim_minted_presentation(
+    state: &AppState,
+    minted: &serde_json::Value,
+) -> (
+    String,
+    ryeos_app::handler_context::HandlerContext,
+    ryeos_client_base::ui::UiPresentationProducer,
+    ryeos_ui::browser_session::BindingAttachmentCoordinate,
+) {
     let id = minted["session_id"].as_str().unwrap().to_owned();
     let ui = ryeos_ui::state::get_ui_state(state).unwrap();
     assert_eq!(
@@ -105,14 +164,49 @@ async fn live_presentation_seeded(
             .consume_launch_token(minted["token"].as_str().unwrap()),
         Some(id.clone())
     );
-    let session = ui.browser_sessions.get_session(&id).unwrap();
+    let (ctx, root) = session_context_and_root(state, &id);
+    let producer = claim_presentation_in_session(state, &ctx, &root).await;
+    (id, ctx, producer, root)
+}
+
+fn session_context_and_root(
+    state: &AppState,
+    id: &str,
+) -> (
+    ryeos_app::handler_context::HandlerContext,
+    ryeos_ui::browser_session::BindingAttachmentCoordinate,
+) {
+    let session = ryeos_ui::state::get_ui_state(state)
+        .unwrap()
+        .browser_sessions
+        .get_session(id)
+        .unwrap();
     let root = session.attachments[&session.root_attachment_id].coordinate();
     let ctx = ryeos_app::handler_context::HandlerContext::new(
         format!("session:{id}"),
         session.granted_caps.clone(),
         false,
     );
-    let mut request = serde_json::to_value(&root).unwrap();
+    (ctx, root)
+}
+
+/// A further independently owned presentation in an existing session, with
+/// its producer claimed.
+#[allow(dead_code)]
+pub async fn additional_presentation(
+    state: &AppState,
+    session_id: &str,
+) -> ryeos_client_base::ui::UiPresentationProducer {
+    let (ctx, root) = session_context_and_root(state, session_id);
+    claim_presentation_in_session(state, &ctx, &root).await
+}
+
+async fn claim_presentation_in_session(
+    state: &AppState,
+    ctx: &ryeos_app::handler_context::HandlerContext,
+    root: &ryeos_ui::browser_session::BindingAttachmentCoordinate,
+) -> ryeos_client_base::ui::UiPresentationProducer {
+    let mut request = serde_json::to_value(root).unwrap();
     request["action"] = serde_json::json!("prepare");
     request["creation_request_id"] = serde_json::json!(uuid::Uuid::new_v4().to_string());
     let prepared = (ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR.handler)(
@@ -154,12 +248,11 @@ async fn live_presentation_seeded(
     )
     .await
     .expect("claim exact presentation producer");
-    let producer = ryeos_client_base::ui::UiPresentationProducer {
+    ryeos_client_base::ui::UiPresentationProducer {
         presentation_id: claimed["presentation_id"].as_str().unwrap().into(),
         thread_id: claimed["thread_id"].as_str().unwrap().into(),
         producer_incarnation: claimed["producer_incarnation"].as_str().unwrap().into(),
-    };
-    (id, ctx, producer, root)
+    }
 }
 
 #[allow(dead_code)]
@@ -172,7 +265,26 @@ pub async fn live_presentation_with_surface(
     ryeos_client_base::ui::UiPresentationProducer,
     ryeos_ui::browser_session::BindingAttachmentCoordinate,
 ) {
-    let (id, ctx, producer, _) = live_presentation_seeded(state, Some(surface_ref)).await;
+    let root = state.config.app_root.clone();
+    live_presentation_with_surface_in_project(state, &root, &root, surface_ref).await
+}
+
+/// The presentation fixture rooted in `project_root`, returning the
+/// coordinate of its one authored initial Surface rather than the root.
+#[allow(dead_code)]
+pub async fn live_presentation_with_surface_in_project(
+    state: &AppState,
+    project_root: &std::path::Path,
+    spelling: &std::path::Path,
+    surface_ref: &str,
+) -> (
+    String,
+    ryeos_app::handler_context::HandlerContext,
+    ryeos_client_base::ui::UiPresentationProducer,
+    ryeos_ui::browser_session::BindingAttachmentCoordinate,
+) {
+    let (id, ctx, producer, _) =
+        live_presentation_in_project(state, project_root, spelling, Some(surface_ref)).await;
     let session = ryeos_ui::state::get_ui_state(state)
         .unwrap()
         .browser_sessions

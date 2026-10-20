@@ -401,6 +401,13 @@ pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> 
         },
     )
     .await?;
+    // A presentation result effect is validated and retained as the service's
+    // own value, so the execution envelope around it is not part of the result.
+    if bound.target.result_effect.is_some() {
+        result = result.get_mut("result").map(Value::take).ok_or_else(|| {
+            HandlerError::Internal("service execution returned no result envelope".into())
+        })?;
+    }
     let mut publish = || -> Result<Value> {
         if let Some(expected) = &expected_opening {
             let actual = result
@@ -1653,6 +1660,12 @@ async fn execute_prepared_item_ref(
     )
     .map_err(|error| HandlerError::Internal(error.to_string()))?;
 
+    // The handler of a recorded service runs on a task the daemon owns, so
+    // the compiled dispatch authority this task holds is carried to it.
+    let local_handler_context = match crate::seat_auth::current_compiled_ui_task_scope() {
+        Some(scope) => local_handler_context.with_task_scope(scope),
+        None => local_handler_context,
+    };
     let dispatch_req = ryeos_executor::dispatch::DispatchRequest {
         launch_mode: "wait",
         target_site_id: None,
