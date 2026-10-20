@@ -59,7 +59,6 @@ use common::DaemonHarness;
 const DAEMON_SOURCE_SITE_ID: &str = "site:testhost";
 const REMOTE_TARGET_SITE_ID: &str = "site:handoff-target";
 const REMOTE_SOURCE_SITE_ID: &str = "site:handoff-source";
-const DAEMON_TARGET_SITE_ID: &str = "site:testhost";
 const TARGET_REMOTE_NAME: &str = "handoff-source";
 const TARGET_CREDENTIAL_PROFILE_ID: &str = "credential:handoff-fixture";
 const TARGET_CREDENTIAL_RESERVATION_ID: &str = "reservation:handoff-fixture";
@@ -69,6 +68,15 @@ fn target_node_signing_key() -> SigningKey {
     // qualification must never accidentally authenticate both daemons as the
     // same deterministic node.
     SigningKey::from_bytes(&[61_u8; 32])
+}
+
+/// The target daemon names its site after its own node fingerprint, so the
+/// seeded operation must carry exactly that site to pass the abort admission.
+fn daemon_target_site_id() -> String {
+    format!(
+        "site:{}",
+        lillux::signature::compute_fingerprint(&target_node_signing_key().verifying_key())
+    )
 }
 
 fn target_operator_signing_key() -> SigningKey {
@@ -2936,7 +2944,7 @@ fn create_source_abort_authority() -> Result<SourceAbortAuthority> {
     let seeded = seed_source_exported_handoff(
         state_root.path(),
         REMOTE_SOURCE_SITE_ID,
-        DAEMON_TARGET_SITE_ID,
+        &daemon_target_site_id(),
     )?;
     let store = open_daemon_state(state_root.path())?;
     let source_head_payload = export_exact_chain_head(
@@ -4806,7 +4814,7 @@ fn build_abort_payload_measurement_record(
         case_id: case_id.to_owned(),
         workload_profile_id: "worker:handoff-fixture/target-abort".to_owned(),
         source_site_id: REMOTE_SOURCE_SITE_ID.to_owned(),
-        target_site_id: DAEMON_TARGET_SITE_ID.to_owned(),
+        target_site_id: daemon_target_site_id(),
         object_schema_versions,
         failure_cut: Some(boundary),
         cache_state: "measured_pre_abort_import".to_owned(),
