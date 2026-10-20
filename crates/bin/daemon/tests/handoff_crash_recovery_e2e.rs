@@ -7345,7 +7345,21 @@ async fn settled_portable_command_lost_ack_replays_after_real_daemon_restart_on_
     daemon.kill_daemon().await?;
     let store = open_daemon_state(&daemon.state_path)?;
     let replayed = store.dedicated_session_commands(&cut.placement_thread_id)?;
-    if replayed != vec![settled] {
+    // The restarted worker reattaches to its upstream session with a
+    // recovery command at its new boot epoch; that record is the restart's
+    // own, not the replay's. Everything else must be the settled record,
+    // byte for byte.
+    let replay_left_the_settlement_alone = replayed.first() == Some(&settled)
+        && replayed.iter().skip(1).all(|record| {
+            record.command_kind == "reattach"
+                && record.worker_boot_epoch > settled.worker_boot_epoch
+                && record.idempotency_key
+                    == format!(
+                        "recovery:{}:handoff-fixture-session",
+                        record.worker_boot_epoch
+                    )
+        });
+    if !replay_left_the_settlement_alone {
         // The refusal of the worker's exclusive session arrives after the
         // launch answered, so a host that cannot qualify process scopes shows
         // up here, as a settled record that never became a real session.

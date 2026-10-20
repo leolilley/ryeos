@@ -92,17 +92,55 @@ fn session_context(
         lillux::signature::sign_content(body, &key, "#", None),
     )
     .unwrap();
+    // The Config lives in the project space of the fixture application root,
+    // so its binding is the one the daemon would mint: the engine's own
+    // effective identity of the Config and of its View closure.
+    let project_root = state.config.app_root.canonicalize().unwrap();
     let mut context = launch_context(
         "config:test/presentation",
-        None,
+        project_root.to_str(),
         ryeos_ui::compiled_binding::EffectiveUiPosture::ObservationOnly,
         principal,
     );
+    let authority = context
+        .project_authority
+        .clone()
+        .expect("fixture project authority");
+    let embedded = state
+        .engine
+        .with_checked_bundle_generation(|generation| -> anyhow::Result<_> {
+            let root = generation.effective_item_under_project_authority(
+                ryeos_engine::engine::EffectiveItemRequest {
+                    item_ref: ryeos_engine::canonical_ref::CanonicalRef::parse(
+                        "config:test/presentation",
+                    )?,
+                    expected_kind: Some("config".into()),
+                    project_root: Some(project_root.clone()),
+                    subject_resolution_authority:
+                        ryeos_engine::contracts::SubjectResolutionAuthority::for_live_project_root(
+                            Some(&project_root),
+                        ),
+                },
+                authority.as_ref(),
+            )?;
+            ryeos_api::surface_views::resolve_effective_ui_view_closure_in_generation(
+                generation,
+                Some(&project_root),
+                Some(authority.as_ref()),
+                &root,
+                vec!["view:ryeos/home".into()],
+            )
+            .map_err(anyhow::Error::msg)
+        })
+        .expect("resolve fixture composition");
+    let binding = &mut Arc::make_mut(&mut context.compiled_binding).binding;
+    binding.surface = embedded.identity.surface;
+    binding.views = embedded.identity.views;
     context.presentation = ryeos_client_base::presentation::UiCompositionPresentation {
         definition: ryeos_client_base::presentation::UiCompositionDefinition::SharedPresentation {
             config: serde_yaml::from_str(body).unwrap(),
         },
-        views: Default::default(),
+        views: embedded.values,
     };
     context
 }
@@ -320,7 +358,6 @@ async fn transition_request(
 }
 
 #[tokio::test]
-#[ignore = "needs the config-root view-closure revalidation of ryeos-api surface_views"]
 async fn producer_observation_is_exact_read_only_and_does_not_infer_liveness() {
     use ryeos_ui::handlers::ui_seat::{CLOSE_DESCRIPTOR, OPEN_DESCRIPTOR};
     let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
@@ -483,7 +520,6 @@ async fn producer_observation_is_exact_read_only_and_does_not_infer_liveness() {
 }
 
 #[tokio::test]
-#[ignore = "needs the config-root view-closure revalidation of ryeos-api surface_views"]
 async fn prepare_is_idempotent_without_claiming_or_stealing_a_producer() {
     use ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR;
     let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
@@ -572,7 +608,6 @@ async fn prepare_is_idempotent_without_claiming_or_stealing_a_producer() {
 }
 
 #[tokio::test]
-#[ignore = "needs the config-root view-closure revalidation of ryeos-api surface_views"]
 async fn legacy_and_forged_control_intents_do_not_claim_a_producer() {
     use ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR;
     let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
@@ -653,7 +688,6 @@ async fn legacy_and_forged_control_intents_do_not_claim_a_producer() {
 }
 
 #[tokio::test]
-#[ignore = "needs the config-root view-closure revalidation of ryeos-api surface_views"]
 async fn append_receipts_survive_takeover_and_close_without_granting_old_producer() {
     use ryeos_ui::handlers::ui_seat::*;
     let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
@@ -662,11 +696,11 @@ async fn append_receipts_survive_takeover_and_close_without_granting_old_produce
     let state = Arc::new(state);
     let (opened, original_claim) = fresh_with_request(&state, &session).await;
     let op = "00000000-0000-4000-8000-000000000002";
-    let request = append_request(&opened, op, 0, &[json!({"é":"😀","a":"𐀀"})]);
+    let request = append_request(&opened, op, 0, &[json!({"key":"é😀","value":{"a":"𐀀"}})]);
     let op = request["operation_id"].as_str().unwrap().to_owned();
     assert_eq!(
         request["payload_digest"],
-        "40442791210ae66e4e67d762a8102f444250935db90a1976d743cb9952eed572"
+        "a7b97b79ab2c07cfaf889d314a1dcf70276b5f8b59a37c2b75f81f8148b6307b"
     );
     let ack = route(&state, &session, &APPEND_DESCRIPTOR, request.clone())
         .await
@@ -685,7 +719,12 @@ async fn append_receipts_survive_takeover_and_close_without_granting_old_produce
     );
     assert_eq!(acknowledged[0]["event_hash"].as_str().unwrap().len(), 64);
     assert_eq!(
-        acknowledged[0]["chain_seq"].as_i64().unwrap() + 1,
+        acknowledged[0]["chain_seq"]
+            .as_str()
+            .unwrap()
+            .parse::<i64>()
+            .unwrap()
+            + 1,
         ack["chain_seq"].as_str().unwrap().parse::<i64>().unwrap()
     );
     assert_eq!(
@@ -718,7 +757,7 @@ async fn append_receipts_survive_takeover_and_close_without_granting_old_produce
             &state,
             &session,
             &APPEND_DESCRIPTOR,
-            append_request(&opened, op, seq, &[json!({"different":true})]),
+            append_request(&opened, op, seq, &[json!({"key":"different","value":true})]),
         )
         .await
         .expect_err("gap/overlap");
@@ -727,11 +766,16 @@ async fn append_receipts_survive_takeover_and_close_without_granting_old_produce
         &state,
         &session,
         &APPEND_DESCRIPTOR,
-        append_request(&opened, &op, 0, &[json!({"different":true})]),
+        append_request(&opened, &op, 0, &[json!({"key":"different","value":true})]),
     )
     .await
     .expect_err("operation contradiction");
-    let mut reused_id = append_request(&opened, "ignored", 1, &[json!({"new_interval":true})]);
+    let mut reused_id = append_request(
+        &opened,
+        "ignored",
+        1,
+        &[json!({"key":"new_interval","value":true})],
+    );
     reused_id["operation_id"] = json!(op);
     route(&state, &session, &APPEND_DESCRIPTOR, reused_id)
         .await
@@ -740,7 +784,7 @@ async fn append_receipts_survive_takeover_and_close_without_granting_old_produce
         &opened,
         "00000000-0000-4000-8000-000000000005",
         1,
-        &[json!({})],
+        &[json!({"key":"empty","value":null})],
     );
     malformed["payload_digest"] = json!("bad");
     route(&state, &session, &APPEND_DESCRIPTOR, malformed)
@@ -754,15 +798,27 @@ async fn append_receipts_survive_takeover_and_close_without_granting_old_produce
             &opened,
             "00000000-0000-4000-8000-000000000006",
             1,
-            &[json!({"fraction":0.000001}), json!({"second":true})],
+            &[
+                json!({"key":"fraction","value":0.000001}),
+                json!({"key":"second","value":true}),
+            ],
         ),
     )
     .await
     .unwrap();
     assert_eq!(second_ack["events"].as_array().unwrap().len(), 2);
     assert_eq!(
-        second_ack["events"][0]["chain_seq"].as_i64().unwrap() + 1,
-        second_ack["events"][1]["chain_seq"].as_i64().unwrap()
+        second_ack["events"][0]["chain_seq"]
+            .as_str()
+            .unwrap()
+            .parse::<i64>()
+            .unwrap()
+            + 1,
+        second_ack["events"][1]["chain_seq"]
+            .as_str()
+            .unwrap()
+            .parse::<i64>()
+            .unwrap()
     );
     assert_ne!(
         second_ack["events"][0]["event_hash"],
@@ -795,7 +851,7 @@ async fn append_receipts_survive_takeover_and_close_without_granting_old_produce
             &opened,
             "00000000-0000-4000-8000-000000000015",
             2,
-            &[json!({})],
+            &[json!({"key":"empty","value":null})],
         ),
     )
     .await
@@ -866,7 +922,6 @@ async fn append_receipts_survive_takeover_and_close_without_granting_old_produce
 }
 
 #[tokio::test]
-#[ignore = "needs the config-root view-closure revalidation of ryeos-api surface_views"]
 async fn relinquish_resume_and_touch_are_exact_producer_fenced() {
     use ryeos_ui::handlers::ui_seat::*;
     let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
@@ -965,7 +1020,6 @@ async fn relinquish_resume_and_touch_are_exact_producer_fenced() {
 }
 
 #[tokio::test]
-#[ignore = "needs the config-root view-closure revalidation of ryeos-api surface_views"]
 async fn exact_append_retry_survives_a_later_unreceipted_signed_tip() {
     use ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR;
 
@@ -977,7 +1031,7 @@ async fn exact_append_retry_survives_a_later_unreceipted_signed_tip() {
         &opened,
         "00000000-0000-4000-8000-000000000071",
         0,
-        &[json!({"selection":"retained"})],
+        &[json!({"key":"selection","value":"retained"})],
     );
     let acknowledged = route(&state, &session, &APPEND_DESCRIPTOR, request.clone())
         .await
@@ -1015,7 +1069,6 @@ async fn exact_append_retry_survives_a_later_unreceipted_signed_tip() {
 }
 
 #[tokio::test]
-#[ignore = "needs the config-root view-closure revalidation of ryeos-api surface_views"]
 async fn prepare_rejects_stale_attachment_policy() {
     let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
     let mut context = session_context(&state, None);
@@ -1038,7 +1091,6 @@ async fn prepare_rejects_stale_attachment_policy() {
 }
 
 #[tokio::test]
-#[ignore = "needs the config-root view-closure revalidation of ryeos-api surface_views"]
 async fn forged_presentation_operation_records_do_not_change_the_seat() {
     use ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR;
     let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
