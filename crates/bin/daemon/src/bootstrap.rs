@@ -588,7 +588,7 @@ pub fn repair_daemon_local(config: &Config) -> Result<()> {
 /// general policy is disabled.
 /// Every optional Cargo feature of this daemon, with whether it is compiled
 /// in. The capability report lists the compiled ones.
-const COMPILED_FEATURES: [(&str, bool); 5] = [
+const COMPILED_FEATURES: [(&str, bool); 6] = [
     (
         "crash-qualification-test-support",
         cfg!(feature = "crash-qualification-test-support"),
@@ -598,6 +598,7 @@ const COMPILED_FEATURES: [(&str, bool); 5] = [
         cfg!(feature = "handoff-test-support"),
     ),
     ("latency-profiling", cfg!(feature = "latency-profiling")),
+    ("test-support", cfg!(feature = "test-support")),
     (
         "model-provider-setup",
         cfg!(feature = "model-provider-setup"),
