@@ -1,0 +1,9 @@
+# ryeos:signed:2026-10-20T14:59:00Z:9e45a130847e4881c596cd5620cd561ea3f301a9673ee3c41def98073f286f90:SRGv3fi5u99cYFsATxR6qD3EdOZij/Sg85EMwo2x9FNe5MYHm1hIVChx2nSAgmK4VW940uCIaAc6Up/x1hD7Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: seat-transfer
+version: "1.0.0"
+description: Publish exact paired presentation transfer phases under the authenticated seat owner
+endpoint: ui.seat.transfer
+ui_dispatch: verified
+record_thread: false
+availability: daemon_only

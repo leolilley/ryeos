@@ -1,9 +1,15 @@
-# ryeos:signed:2026-09-19T05:56:15Z:c1c9f8101fc94738eab313532dbbccb4efa73227364c91698542316d4fe1fe50:ZRPjUxOuJBO5eTzGCrJCFPVt4kiYCS8C4IGwVYqEljwyZ4VGkCPvaSmpHlI2S6Y+pSHA4Kmv23e0FUxMEup6BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-20T14:59:00Z:0e20c1b1a15d34675bfde2010c1bd5e81186a91a335ac697e2652ed51c092858:DFYuLAAJYP9jyJtY9yg4ZWCDL0cmTYx/Mz2h3r65OY7yrJq7Ne9HWs0pzO+jnoO6OVSy0Kr/jMfDM8kiNlajCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
+required_caps: ["ryeos.execute.service.projects/open"]
 name: projects/open
 version: "1.0.0"
-description: Open a registered project root and bind it to the current session.
+description: Open an explicitly selected Surface for a registered project in the current presentation.
 endpoint: projects.open
 availability: daemon_only
 ui_dispatch: session_local
-ui_result_effect: admit_binding_attachment
+ui_result_effect: surface_opening
+schema:
+  local_id: string
+  selection: object
+  placement: object
+  creation_request_id: string
