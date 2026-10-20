@@ -76,6 +76,9 @@ impl PrefixTip {
 
 /// One retained event of the owner or a counterpart, with both chains' prefix
 /// tips at retirement. The event hash is the evidence; the tips bound it.
+/// Evidence whose counterpart root is the owner itself is owner-only: it names
+/// no other chain, its counterpart tip is the owner's tip, and it creates no
+/// counterpart obligation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EvidenceCoordinate {
@@ -168,8 +171,9 @@ impl RetiredChainClosurePage {
         for coordinate in &self.retained_evidence {
             coordinate.validate()?;
             anyhow::ensure!(
-                coordinate.counterpart_root != self.chain_root_id,
-                "retained evidence names the owner as its own counterpart"
+                coordinate.counterpart_root != self.chain_root_id
+                    || coordinate.counterpart_tip == coordinate.owner_tip,
+                "owner-only retained evidence carries a counterpart tip other than the owner's"
             );
             let key = coordinate.order_key();
             anyhow::ensure!(

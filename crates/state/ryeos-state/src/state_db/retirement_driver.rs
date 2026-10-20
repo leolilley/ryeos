@@ -27,7 +27,9 @@ use crate::recovery::{
 };
 
 /// One retained event the caller wants kept as evidence. State derives the
-/// sequence position and both chains' prefix tips from the live chains.
+/// sequence position and both chains' prefix tips from the live chains. A
+/// counterpart root equal to the retired chain itself keeps an event of that
+/// chain alone, with no other chain involved.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RetirementEvidenceRef {
     pub counterpart_root: String,
@@ -279,10 +281,24 @@ impl StateDb {
         let mut retained_evidence = Vec::with_capacity(request.evidence.len());
         for reference in &request.evidence {
             let counterpart = reference.counterpart_root.as_str();
-            anyhow::ensure!(
-                counterpart != chain_root_id,
-                "a retired chain cannot be its own counterpart"
-            );
+            let owner_tip = owner_tip
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("chain {chain_root_id} has no events"))?;
+            let event = load_event(cas, &reference.event_hash)?;
+            if counterpart == chain_root_id {
+                anyhow::ensure!(
+                    event.chain_root_id == chain_root_id,
+                    "owner-only evidence is not an event of the retired chain"
+                );
+                retained_evidence.push(EvidenceCoordinate {
+                    counterpart_root: counterpart.to_string(),
+                    event_hash: reference.event_hash.clone(),
+                    chain_seq: event.chain_seq,
+                    counterpart_tip: owner_tip.clone(),
+                    owner_tip,
+                });
+                continue;
+            }
             if !counterpart_tips.contains_key(counterpart) {
                 let lock = request
                     .counterpart_locks
@@ -303,10 +319,6 @@ impl StateDb {
                 counterpart_tips.insert(counterpart, tip);
             }
             let counterpart_tip = counterpart_tips[counterpart].clone();
-            let owner_tip = owner_tip
-                .clone()
-                .ok_or_else(|| anyhow::anyhow!("chain {chain_root_id} has no events"))?;
-            let event = load_event(cas, &reference.event_hash)?;
             counterpart_roots.insert(counterpart.to_string());
             retained_evidence.push(EvidenceCoordinate {
                 counterpart_root: counterpart.to_string(),

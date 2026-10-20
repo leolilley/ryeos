@@ -43,10 +43,6 @@ const MAX_DETAIL_ARTIFACT_ITEMS: usize = 1_024;
 const MAX_DETAIL_BYTES: usize = 8 * 1024 * 1024;
 const MAX_THREAD_FACETS: usize = 32;
 const MAX_THREAD_FACET_VALUE_BYTES: usize = 512;
-const FACET_PAGE_EVENTS: u64 = 64;
-const FACET_PAGE_BYTES: u64 = 512 * 1024;
-const MAX_FACET_PAGES_PER_THREAD: usize = 8;
-const MAX_FACET_PAGES_TOTAL: usize = 64;
 const MAX_INLINE_RESULT_BYTES: usize = 192 * 1024;
 const MAX_MANIFEST_VERIFICATIONS: usize = 64;
 
@@ -577,7 +573,8 @@ fn restore_signed_tree_facets(
     // The selected subject must not be starved behind lexical siblings when
     // the independent facet-history budget is exhausted.
     let identities = prioritized_execution_threads(&roots, selected_thread_id, None)?;
-    let mut pages_left = MAX_FACET_PAGES_TOTAL;
+    let budgets = super::ui_threads::inspection_policy(state)?;
+    let mut pages_left = budgets.max_facet_pages_total;
     let mut complete = BTreeMap::new();
     let mut incomplete = false;
     for (chain_root_id, thread_id) in identities {
@@ -592,7 +589,7 @@ fn restore_signed_tree_facets(
         let mut progress = None;
         let mut facets = BTreeMap::new();
         let mut exhausted = false;
-        for _ in 0..MAX_FACET_PAGES_PER_THREAD {
+        for _ in 0..budgets.max_facet_pages_per_thread {
             if pages_left == 0 {
                 break;
             }
@@ -600,8 +597,8 @@ fn restore_signed_tree_facets(
             let page = state.state_store.read_thread_event_page(
                 &anchor,
                 progress.as_ref(),
-                FACET_PAGE_EVENTS,
-                FACET_PAGE_BYTES,
+                u64::from(budgets.max_facet_page_events),
+                budgets.max_facet_page_bytes,
             )?;
             if page.events.is_empty() && page.progress.is_some() {
                 bail!("signed thread facet history made no progress");

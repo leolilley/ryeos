@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-20T09:54:48Z:0df645c7664b76540f629d69734101d81c781074eafaceb80de4920bac2f7ba3:VqATKf6xbuJELNDZqS0A/asjAg01ELl3nBADLaC4o2upAOn1yU7XJEvdhbyY/i3FGMhfSjV8jBR0kLV2j86JCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-20T18:29:03Z:d10a19780624d338feffd06142c645c8f93c11f89e384f842887aa751fa60e4c:DUlibjHVPTm1AaVuXzkeKOh9BX8uZJ5X6xcytTcCX9pRi1hVrZ99+rOHMBlOF7ybmLqg50017EMfNQfR3+bfAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Optional application authentication above the standard set.
 schema: 1
 exact_bundles:
@@ -363,3 +363,10 @@ policies:
       kind: seat_session
       max_replay_frame_events: 64
       max_replay_frame_bytes: 4194304
+  ui_inspection:
+    schema: 1
+    max_event_limit: 500
+    max_facet_page_events: 64
+    max_facet_page_bytes: 524288
+    max_facet_pages_per_thread: 8
+    max_facet_pages_total: 64

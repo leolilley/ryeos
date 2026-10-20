@@ -13,3 +13,4 @@ pub mod persistent_sessions;
 pub mod provider_environment;
 pub mod thread_history;
 pub mod ui_browser_sessions;
+pub mod ui_inspection;

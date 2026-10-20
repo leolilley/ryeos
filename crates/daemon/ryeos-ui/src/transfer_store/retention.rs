@@ -24,6 +24,9 @@ use ryeos_api::maintenance::RetentionComposition;
 use ryeos_app::retention_exclusion::RetentionExclusion;
 use ryeos_app::state::AppState;
 use ryeos_app::state_store::{FencedChainRetirementPlan, StateStore};
+use ryeos_client_base::ui::presentation_initialization::{
+    PRESENTATION_INITIALIZED_EVENT, UiPresentationInitializationRecord,
+};
 use ryeos_state::object_closure::{
     EventPayloadContractRegistration, RegisteredObjectEdge, RegisteredObjectExpectation,
     RegisteredObjectLinks,
@@ -41,7 +44,7 @@ use super::appends::{
     MoveFreezeCancellationAppendResult, StoreReapingClaims, TransferAppendResult,
     append_reaping_freeze_cancellation, append_transfer_settlement,
 };
-use super::discovery::discover_seat_transfer_identities;
+use super::discovery::{discover_seat_transfer_identities, seat_initialization_event_hash};
 use super::historical::{
     HistoryEndpoint, TransferClosure, prepare_settlement_from_cut, read_transfer_cut,
     seat_transfer_evidence,
@@ -126,12 +129,22 @@ pub fn event_contracts() -> Vec<EventPayloadContractRegistration> {
     ]
 }
 
-/// Judge one retained evidence event. Retained evidence is transfer
-/// testimony of a seat root, decoded exactly: anything else in a seat's
-/// closure would be a retained event nothing can interpret.
+fn validate_initialization(event: &ThreadEvent) -> anyhow::Result<()> {
+    let record: UiPresentationInitializationRecord =
+        serde_json::from_value(event.payload.clone()).context("decode seat initialization")?;
+    record.validate().map_err(anyhow::Error::msg)
+}
+
+/// Judge one retained evidence event. Retained evidence is the signed
+/// initialization of a seat root or transfer testimony of one, decoded
+/// exactly: anything else in a seat's closure would be a retained event
+/// nothing can interpret.
 pub fn validate_retained_evidence(event: &ThreadEvent) -> anyhow::Result<()> {
     if event.chain_root_id != event.thread_id {
         bail!("retained seat evidence is not on a seat root");
+    }
+    if event.event_type == PRESENTATION_INITIALIZED_EVENT {
+        return validate_initialization(event);
     }
     if event.event_type == MOVE_FREEZE_CANCELLED_EVENT {
         return validate_freeze_cancellation(&event.to_value());
@@ -149,8 +162,9 @@ pub fn validate_retained_evidence(event: &ThreadEvent) -> anyhow::Result<()> {
 /// Decide whether the terminal seat `root` may retire, and what it keeps.
 /// `None` leaves the seat for a later pass: some transfer it took part in is
 /// not completely settled, or its history is not exhaustively readable. A
-/// plan lists, for every transfer whose counterpart seat is still live, each
-/// transfer event the seat holds, with that counterpart.
+/// plan always keeps the seat's signed initialization, and lists, for every
+/// transfer whose counterpart seat is still live, each transfer event the seat
+/// holds, with that counterpart.
 pub fn qualify_seat_retirement(
     store: &Arc<StateStore>,
     root: &str,
@@ -158,9 +172,16 @@ pub fn qualify_seat_retirement(
     let Some(anchor) = store.capture_thread_event_read_anchor(root, root)? else {
         return Ok(None);
     };
+    let mut plan = FencedChainRetirementPlan::default();
+    if let Some(event_hash) = seat_initialization_event_hash(store, root, &anchor)? {
+        plan.evidence.push(RetirementEvidenceRef {
+            counterpart_root: root.to_string(),
+            event_hash,
+        });
+    }
     let identities = discover_seat_transfer_identities(store, root, &anchor)?;
     if identities.is_empty() {
-        return Ok(Some(FencedChainRetirementPlan::default()));
+        return Ok(Some(plan));
     }
     let requested: Vec<TransferIdentity> = identities.values().cloned().collect();
     let cut = read_transfer_cut(store, &HistoryEndpoint::Current(anchor), &requested)?;
@@ -173,7 +194,6 @@ pub fn qualify_seat_retirement(
             }
         }
     }
-    let mut plan = FencedChainRetirementPlan::default();
     let mut retained = BTreeSet::new();
     for transfer in &requested {
         let counterpart_root = if transfer.source.chain_root_id == root {

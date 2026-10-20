@@ -1122,6 +1122,63 @@ mod tests {
         );
     }
 
+    /// Finalize a real running seat with `params` and replay its signed
+    /// history to the terminal tip.
+    fn replay_after_finalize(
+        params: impl FnOnce(&str) -> ryeos_app::thread_lifecycle::ThreadFinalizeParams,
+    ) -> Result<FixedAnchorReplayStep, HandlerError> {
+        let (_directory, _owner, state) = crate::test_state::build_test_state();
+        let store = &state.state_store;
+        store.create_thread_for_test(&seat_thread()).unwrap();
+        store
+            .claim_thread_launch("T-seat", "claim-T-seat", "daemon:test")
+            .unwrap();
+        store.mark_thread_running("T-seat", None).unwrap();
+        store
+            .append_events(
+                "T-seat",
+                "T-seat",
+                &[ryeos_app::state_store::NewEventRecord {
+                    event_type: PRESENTATION_INITIALIZED_EVENT.into(),
+                    storage_class: "indexed".into(),
+                    payload: initialization_payload(&initialization()),
+                }],
+            )
+            .unwrap();
+        state.threads.finalize_thread(&params("T-seat")).unwrap();
+        let anchor = store
+            .capture_thread_event_read_anchor("T-seat", "T-seat")
+            .unwrap()
+            .unwrap();
+        let mut replay =
+            FixedAnchorReplay::begin_at_anchor(&state, PRESENTATION, anchor, None).unwrap();
+        loop {
+            match replay.next_step(&state)? {
+                FixedAnchorReplayStep::Batch { .. } => {}
+                done => return Ok(done),
+            }
+        }
+    }
+
+    #[test]
+    fn a_seat_finalized_by_detach_cleanup_still_replays() {
+        assert!(matches!(
+            replay_after_finalize(crate::handlers::ui_session_attachments::detach_finalize_params)
+                .unwrap(),
+            FixedAnchorReplayStep::Complete { .. }
+        ));
+        let untyped = replay_after_finalize(|thread_id| {
+            let mut params =
+                crate::handlers::ui_session_attachments::detach_finalize_params(thread_id);
+            params.outcome_code = None;
+            params
+        });
+        assert!(
+            untyped.is_err(),
+            "a terminal tip without the lease-expiry outcome is refused"
+        );
+    }
+
     #[test]
     fn exact_unpaired_transfer_is_refused() {
         let (_directory, _owner, _state, mut replay) = initialized_replay();

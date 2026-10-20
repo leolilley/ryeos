@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-20T09:54:47Z:1a3fa6980a805d0d48aa8022a805a0bda2f0ecf763e42c0585875110e4d69241:TUXSrFnu1pQ1rpCCDwKdaKiRlV2dbx72/ksY33nbFyMS63ZHFuvjdhDCFVkiDLTHE0OO/A4SeMBBFXhpBfYiDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-20T18:29:03Z:f90976941ffb59375a1ffccffe51c5607a2d54cdb27d40a8d5076f4ac57a8009:pMGP0LBHwn2g7/kPgShvZgcMWUoCKYGTB1ewpDdQwU4MMDIPUzGoGpY/OJMj01YnsGxkDDEuNWUqKcujJFiODQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Core plus the graph workflow bundles.
 schema: 1
 exact_bundles:
@@ -379,3 +379,10 @@ policies:
       kind: seat_session
       max_replay_frame_events: 64
       max_replay_frame_bytes: 4194304
+  ui_inspection:
+    schema: 1
+    max_event_limit: 500
+    max_facet_page_events: 64
+    max_facet_page_bytes: 524288
+    max_facet_pages_per_thread: 8
+    max_facet_pages_total: 64

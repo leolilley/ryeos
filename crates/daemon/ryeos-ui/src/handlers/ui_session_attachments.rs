@@ -15,6 +15,7 @@ use ryeos_client_base::surface::opening::{SurfaceOpenRequest, SurfaceOpenSelecti
 use ryeos_executor::executor::ServiceAvailability;
 
 use crate::browser_session::{AttachmentStoreError, BindingAttachmentCoordinate};
+use crate::handlers::ui_seat::seat_kind;
 use crate::state::get_ui_state;
 
 /// Admit one real Surface into an existing authenticated presentation. This
@@ -561,6 +562,24 @@ fn client_ref(coordinate: &BindingAttachmentCoordinate) -> String {
     )
 }
 
+/// How a seat whose attachment is detached ends. Its lease is released with
+/// the attachment, so the seat finishes as an expired one does: the typed
+/// lease-expiry outcome and nothing else, which is the only terminal tip the
+/// seat's history replay accepts.
+pub(crate) fn detach_finalize_params(thread_id: &str) -> ThreadFinalizeParams {
+    ThreadFinalizeParams {
+        thread_id: thread_id.to_owned(),
+        status: "completed".into(),
+        outcome_code: Some("seat_lease_expired".into()),
+        result: None,
+        error: None,
+        metadata: None,
+        artifacts: Vec::new(),
+        final_cost: None,
+        summary_json: None,
+    }
+}
+
 pub async fn handle_detach(
     params: Value,
     ctx: HandlerContext,
@@ -605,7 +624,7 @@ pub async fn handle_detach(
             .state_store
             .get_thread(&thread_id)?
             .ok_or_else(|| HandlerError::Internal("leased seat thread disappeared".into()))?;
-        if detail.kind != "seat_session"
+        if detail.kind != seat_kind(&state)?
             || detail.requested_by.as_deref() != Some(owner.as_str())
             || detail.executor_ref != exact_client_ref
         {
@@ -615,17 +634,9 @@ pub async fn handle_detach(
             .into());
         }
         if detail.status == "running" {
-            state.threads.finalize_thread(&ThreadFinalizeParams {
-                thread_id: detail.thread_id.clone(),
-                status: "completed".into(),
-                outcome_code: None,
-                result: None,
-                error: None,
-                metadata: None,
-                artifacts: Vec::new(),
-                final_cost: None,
-                summary_json: None,
-            })?;
+            state
+                .threads
+                .finalize_thread(&detach_finalize_params(&detail.thread_id))?;
         }
         state.state_store.remove_seat_lease(&detail.thread_id)?;
     }

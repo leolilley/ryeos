@@ -10,7 +10,7 @@ use ryeos_client_base::ui::presentation_initialization::{
 
 use crate::browser_session::{AttachmentStoreError, BrowserSession, PresentationMembership};
 
-fn record(membership: &PresentationMembership) -> UiPresentationInitializationRecord {
+pub(super) fn record(membership: &PresentationMembership) -> UiPresentationInitializationRecord {
     UiPresentationInitializationRecord {
         operation_id: membership.creation_request_id.clone(),
         initialization: membership.initialization.clone(),

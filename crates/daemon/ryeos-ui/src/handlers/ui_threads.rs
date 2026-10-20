@@ -309,10 +309,14 @@ fn default_event_limit() -> usize {
     100
 }
 
-const MAX_EVENT_LIMIT: usize = 500;
-const FACET_PAGE_EVENTS: u64 = 64;
-const FACET_PAGE_BYTES: u64 = 512 * 1024;
-const MAX_FACET_PAGES: usize = 8;
+/// The signed read budgets of thread inspection.
+pub(crate) fn inspection_policy(
+    state: &AppState,
+) -> Result<&ryeos_node_runtime::node_policy::sections::ui_inspection::UiInspectionPolicy> {
+    state
+        .node_policy
+        .require::<ryeos_node_runtime::node_policy::sections::ui_inspection::UiInspectionPolicy>()
+}
 
 fn completed_signed_facets(
     facets: BTreeMap<String, String>,
@@ -347,14 +351,15 @@ pub(crate) fn read_signed_inspection_facets(
     else {
         return Ok(None);
     };
+    let budgets = inspection_policy(state)?;
     let mut progress = None;
     let mut facets = BTreeMap::new();
-    for _ in 0..MAX_FACET_PAGES {
+    for _ in 0..budgets.max_facet_pages_per_thread {
         let page = state.state_store.read_thread_event_page(
             &anchor,
             progress.as_ref(),
-            FACET_PAGE_EVENTS,
-            FACET_PAGE_BYTES,
+            u64::from(budgets.max_facet_page_events),
+            budgets.max_facet_page_bytes,
         )?;
         if page.events.is_empty() && page.progress.is_some() {
             anyhow::bail!("signed thread facet history made no progress");
@@ -459,7 +464,8 @@ pub async fn handle_inspect(
         &signed.chain_root_id,
         &req.thread_id,
         None,
-        req.event_limit.clamp(1, MAX_EVENT_LIMIT),
+        req.event_limit
+            .clamp(1, inspection_policy(&state)?.max_event_limit as usize),
         2 * 1024 * 1024,
     )?;
     let events = state

@@ -318,11 +318,19 @@ fn append_control(
 }
 
 /// The thread kind of a presentation seat, as the signed node policy declares
-/// it.
-fn seat_kind(state: &AppState) -> Result<String, HandlerError> {
+/// it. The kind must be one an installed kind profile fences.
+pub(crate) fn seat_kind(state: &AppState) -> Result<String, HandlerError> {
     let policy = state
         .node_policy
         .require::<ryeos_node_runtime::node_policy::sections::ui_browser_sessions::UiBrowserSessionPolicy>()
+        .map_err(|error| HandlerError::Internal(error.to_string()))?;
+    policy
+        .require_fenced_seat_kind(
+            state
+                .state_store
+                .fenced_chain_kinds()
+                .map_err(|error| HandlerError::Internal(error.to_string()))?,
+        )
         .map_err(|error| HandlerError::Internal(error.to_string()))?;
     Ok(policy.seat.kind.clone())
 }
@@ -766,6 +774,26 @@ fn reconcile_surface_closures(
     Ok(false)
 }
 
+/// Whether the seat's exhaustively scanned signed history names a transfer.
+fn seat_history_names_transfer(
+    state: &AppState,
+    chain_root_id: &str,
+    thread_id: &str,
+) -> Result<bool, HandlerError> {
+    let anchor = state
+        .state_store
+        .capture_thread_event_read_anchor(chain_root_id, thread_id)
+        .map_err(|error| HandlerError::Internal(error.to_string()))?
+        .ok_or_else(|| HandlerError::Conflict("seat history has no signed anchor".into()))?;
+    crate::transfer_store::discovery::discover_seat_transfer_identities(
+        state.state_store.as_ref(),
+        chain_root_id,
+        &anchor,
+    )
+    .map(|identities| !identities.is_empty())
+    .map_err(|error| HandlerError::Internal(error.to_string()))
+}
+
 /// What session bootstrap found while repairing the closure projection of
 /// every seat the session holds.
 pub(crate) struct SessionReconciliation {
@@ -831,9 +859,16 @@ pub(crate) fn reconcile_session_surface_closures(
         ) {
             Ok((_, transfer_bearing)) => transfer_bearing,
             // The singleton fold can fail once transfer phases follow later
-            // edits. That is only a request for the full fixed-cut reader: an
-            // empty discovery or a failed proof still refuses bootstrap.
-            Err(_) => true,
+            // edits. That is a request for the full fixed-cut reader only
+            // when the seat's signed history itself names a transfer; every
+            // other failure, and every other error class, is the failure it
+            // is.
+            Err(HandlerError::Conflict(_))
+                if seat_history_names_transfer(state, root, thread_id)? =>
+            {
+                true
+            }
+            Err(error) => return Err(error),
         };
         if transfer_bearing {
             reconciliation.paired.push(membership.clone());

@@ -16,6 +16,15 @@ use crate::node_policy::{ErasedNodePolicy, NodePolicyContext, NodePolicySection,
 
 pub const SECTION_NAME: &str = "ui_browser_sessions";
 
+/// Most events one replay frame may carry: the cold-replay decoders of the web
+/// and terminal clients refuse a longer frame.
+pub const MAX_REPLAY_FRAME_EVENTS_CEILING: u32 = 64;
+
+/// Most record bytes one replay frame may carry: half of the smallest client
+/// frame buffer (the browser's 16 MiB), which leaves room for the JSON and SSE
+/// envelope and string escaping around the records.
+pub const MAX_REPLAY_FRAME_BYTES_CEILING: u64 = 8 * 1024 * 1024;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UiBrowserSessionPolicy {
@@ -109,10 +118,36 @@ impl UiBrowserSessionPolicy {
                 bail!("UI browser-session {name} must be non-zero");
             }
         }
+        if self.seat.max_replay_frame_events > MAX_REPLAY_FRAME_EVENTS_CEILING {
+            bail!(
+                "UI browser-session seat.max_replay_frame_events exceeds the client decoder limit of {MAX_REPLAY_FRAME_EVENTS_CEILING}"
+            );
+        }
+        if self.seat.max_replay_frame_bytes > MAX_REPLAY_FRAME_BYTES_CEILING {
+            bail!(
+                "UI browser-session seat.max_replay_frame_bytes exceeds the client frame budget of {MAX_REPLAY_FRAME_BYTES_CEILING}"
+            );
+        }
         if self.shared_presentation.max_initial_surfaces
             > self.max_surface_instances_per_presentation
         {
             bail!("UI browser-session initial Surfaces exceed the presentation Surface limit");
+        }
+        Ok(())
+    }
+
+    /// Refuse a seat kind that no installed kind profile declares fenced. The
+    /// policy alone cannot know the installed profiles, so the composition
+    /// that holds both checks them together before minting a seat.
+    pub fn require_fenced_seat_kind(
+        &self,
+        fenced: &ryeos_state::FencedChainKinds,
+    ) -> anyhow::Result<()> {
+        if !fenced.contains(&self.seat.kind) {
+            bail!(
+                "UI browser-session seat.kind `{}` names no kind profile with a retirement fence",
+                self.seat.kind
+            );
         }
         Ok(())
     }
@@ -275,6 +310,61 @@ mod tests {
                 UiBrowserSessionPolicySection
                     .parse(&context(), &body)
                     .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn replay_frame_bounds_above_the_client_ceilings_are_refused() {
+        for (name, over) in [
+            (
+                "max_replay_frame_events",
+                serde_json::json!(MAX_REPLAY_FRAME_EVENTS_CEILING + 1),
+            ),
+            (
+                "max_replay_frame_bytes",
+                serde_json::json!(MAX_REPLAY_FRAME_BYTES_CEILING + 1),
+            ),
+        ] {
+            let mut body = current_body();
+            body["seat"][name] = over;
+            let error = UiBrowserSessionPolicySection
+                .parse(&context(), &body)
+                .err()
+                .unwrap();
+            assert!(format!("{error:#}").contains(name), "{error:#}");
+            let mut at_ceiling = current_body();
+            at_ceiling["seat"][name] = match name {
+                "max_replay_frame_events" => serde_json::json!(MAX_REPLAY_FRAME_EVENTS_CEILING),
+                _ => serde_json::json!(MAX_REPLAY_FRAME_BYTES_CEILING),
+            };
+            assert!(
+                UiBrowserSessionPolicySection
+                    .parse(&context(), &at_ceiling)
+                    .is_ok()
+            );
+        }
+    }
+
+    #[test]
+    fn the_seat_kind_must_name_a_fenced_kind_profile() {
+        let parsed = UiBrowserSessionPolicySection
+            .parse(&context(), &current_body())
+            .unwrap();
+        let policy = parsed
+            .as_any()
+            .downcast_ref::<UiBrowserSessionPolicy>()
+            .unwrap();
+        let fenced = ryeos_state::FencedChainKinds::new(["seat_session".to_owned()]).unwrap();
+        policy.require_fenced_seat_kind(&fenced).unwrap();
+        for other in [
+            ryeos_state::FencedChainKinds::default(),
+            ryeos_state::FencedChainKinds::new(["directive".to_owned()]).unwrap(),
+        ] {
+            let error = policy.require_fenced_seat_kind(&other).unwrap_err();
+            assert!(
+                format!("{error:#}").contains("retirement fence"),
+                "{error:#}"
             );
         }
     }

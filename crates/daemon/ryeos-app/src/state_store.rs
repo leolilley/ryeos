@@ -14789,52 +14789,6 @@ impl StateStore {
         }))
     }
 
-    pub fn touch_seat_lease(
-        &self,
-        thread_id: &str,
-        owner: &str,
-        surface: &str,
-        client_ref: &str,
-    ) -> Result<()> {
-        // A seat lease belongs to a thread of a kind whose profile declares a
-        // retirement fence; the kind comes from installed profile data. The
-        // fenced kinds stand for the seat kinds in this tranche because the
-        // only fenced kind is the seat profile; the seat writers will make
-        // the seat-lease kind its own declared datum.
-        let fenced = self
-            .fenced_chain_kinds
-            .get()
-            .ok_or_else(|| anyhow!("fenced chain kinds are not installed"))?;
-        let _permit = self.acquire_write_permit()?;
-        let g = self.lock()?;
-        let thread = g
-            .state_db
-            .get_thread(thread_id)?
-            .ok_or_else(|| anyhow!("seat thread {thread_id} does not exist"))?;
-        if !fenced.contains(&thread.kind)
-            || thread.status != ThreadStatus::Running.as_str()
-            || thread.requested_by.as_deref() != Some(owner)
-            || thread.item_ref != surface
-        {
-            bail!("seat thread {thread_id} is not a matching running owned seat");
-        }
-        let _admission = g.state_db.authorize_runtime_pin(&thread.chain_root_id)?;
-        if !g
-            .runtime_db
-            .touch_seat_lease(thread_id, owner, surface, client_ref)?
-        {
-            bail!("seat thread {thread_id} is being reaped");
-        }
-        Ok(())
-    }
-
-    pub fn touch_existing_seat_lease(&self, thread_id: &str) -> Result<bool> {
-        let _permit = self.acquire_write_permit()?;
-        let g = self.lock()?;
-        let _admission = Self::authorize_runtime_pin_for_thread(&g, thread_id)?;
-        g.runtime_db.touch_existing_seat_lease(thread_id)
-    }
-
     pub fn remove_seat_lease(&self, thread_id: &str) -> Result<()> {
         let g = self.lock()?;
         g.runtime_db.remove_seat_lease(thread_id)
@@ -16158,6 +16112,13 @@ impl StateStore {
         Ok(())
     }
 
+    /// The installed fenced chain kinds.
+    pub fn fenced_chain_kinds(&self) -> Result<&ryeos_state::FencedChainKinds> {
+        self.fenced_chain_kinds
+            .get()
+            .ok_or_else(|| anyhow!("fenced chain kinds are not installed"))
+    }
+
     /// One bounded keyset slice of fenced-kind chains whose retention has
     /// elapsed. A scheduling hint only: `retire_fenced_chain` requalifies.
     pub fn due_fenced_chain_retirement_slice(
@@ -16227,9 +16188,10 @@ impl StateStore {
             .evidence
             .iter()
             .map(|reference| reference.counterpart_root.as_str())
+            .filter(|counterpart| *counterpart != chain_root_id)
             .collect();
         anyhow::ensure!(
-            !lock_ids.contains(chain_root_id),
+            !plan.counterpart_roots.contains(chain_root_id),
             "a retired chain cannot be its own counterpart"
         );
         lock_ids.insert(chain_root_id);

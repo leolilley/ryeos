@@ -9,7 +9,9 @@ use std::sync::Arc;
 
 use ryeos_app::retention_exclusion::ExclusionMode;
 use ryeos_app::state::AppState;
-use ryeos_app::state_store::{NewEventRecord, NewThreadRecord, PersistedEventRecord, StateStore};
+use ryeos_app::state_store::{
+    ExactSeat, NewEventRecord, NewThreadRecord, PersistedEventRecord, StateStore,
+};
 use ryeos_state::objects::thread_event::ThreadEvent;
 use ryeos_ui::transfer_store::historical::{
     HistoryEndpoint, TransferClosure, read_historical_transfer_cut, read_transfer_cut,
@@ -45,11 +47,11 @@ fn install_composition() {
         .unwrap();
 }
 
-fn history_policy() -> ryeos_state::objects::CapturedThreadHistoryPolicy {
+fn history_policy(item_ref: &str) -> ryeos_state::objects::CapturedThreadHistoryPolicy {
     let hash = "a".repeat(64);
     ryeos_state::objects::CapturedThreadHistoryPolicy {
         retention: ryeos_state::objects::ThreadHistoryRetention::TerminalFor { seconds: 60 },
-        canonical_item_ref: SURFACE.to_string(),
+        canonical_item_ref: item_ref.to_string(),
         item_content_hash: hash.clone(),
         item_signer_fingerprint: Some(hash.clone()),
         item_trust_class: ryeos_state::objects::CapturedItemTrustClass::Trusted,
@@ -60,24 +62,63 @@ fn history_policy() -> ryeos_state::objects::CapturedThreadHistoryPolicy {
     }
 }
 
-fn thread_record(id: &str) -> NewThreadRecord {
+/// Who a fixture seat belongs to: the owner, root item and executor its
+/// thread record carries and its lease is keyed by.
+struct Ownership {
+    owner: String,
+    item_ref: String,
+    executor_ref: String,
+}
+
+impl Ownership {
+    /// A seat no browser session owns.
+    fn detached() -> Self {
+        Self {
+            owner: OWNER.to_string(),
+            item_ref: SURFACE.to_string(),
+            executor_ref: CLIENT.to_string(),
+        }
+    }
+
+    /// The seat a session would mint for its presentation.
+    fn of_session(state: &AppState, fixture: &SessionFixture, presentation_id: &str) -> Self {
+        let session = ryeos_ui::state::get_ui_state(state)
+            .unwrap()
+            .browser_sessions
+            .get_session(&fixture.session_id)
+            .unwrap();
+        let root = &fixture.root;
+        Self {
+            owner: format!("session:{}", fixture.session_id),
+            item_ref: session.attachments[&session.root_attachment_id]
+                .root_ref
+                .clone(),
+            executor_ref: format!(
+                "client:ryeos/ui-presentation/{presentation_id}/{}:{}:{}",
+                root.binding_attachment_id, root.binding_generation, root.binding_digest
+            ),
+        }
+    }
+}
+
+fn thread_record(id: &str, ownership: &Ownership) -> NewThreadRecord {
     NewThreadRecord {
         thread_id: id.to_string(),
         chain_root_id: id.to_string(),
         kind: KIND.to_string(),
-        item_ref: SURFACE.to_string(),
-        executor_ref: CLIENT.to_string(),
+        item_ref: ownership.item_ref.clone(),
+        executor_ref: ownership.executor_ref.clone(),
         launch_mode: "wait".to_string(),
         current_site_id: "site:test".to_string(),
         origin_site_id: "site:test".to_string(),
         upstream_thread_id: None,
-        requested_by: Some(OWNER.to_string()),
+        requested_by: Some(ownership.owner.clone()),
         project_root: None,
         project_authority: ryeos_state::objects::ExecutionProjectAuthority::PROJECTLESS,
         base_project_snapshot_hash: None,
         usage_subject: None,
         usage_subject_asserted_by: None,
-        captured_history_policy: Some(history_policy()),
+        captured_history_policy: Some(history_policy(&ownership.item_ref)),
     }
 }
 
@@ -135,6 +176,7 @@ fn new_seat(store: &StateStore, id: &str, presentation_id: &str, incarnation: ch
         id,
         presentation_id,
         incarnation,
+        &Ownership::detached(),
         json!({
             "schema": 2,
             "selection": {"kind": "configured_defaults"},
@@ -145,14 +187,32 @@ fn new_seat(store: &StateStore, id: &str, presentation_id: &str, incarnation: ch
                 "binding_generation": 1,
                 "binding_digest": "a".repeat(64),
             },
+            "next_mount_id": 1,
+            "surfaces": [],
             "binding_attachments": [{
                 "binding_attachment_id": "root",
                 "binding_generation": 1,
                 "binding_digest": "a".repeat(64),
+                "root_ref": "config:ryeos/test/presentation",
+                "root_generation": "c".repeat(64),
+                "project_path": null,
+                "subject": {"kind": "projectless"},
+                "posture": "observation_only",
                 "binding_request_bounds": {
                     "max_request_bytes": 4096,
                     "max_input_bytes": 1024,
                     "max_seat_append_bytes": 65536,
+                },
+                "presentation": {
+                    "definition": {"kind": "shared_presentation", "config": {
+                        "category": "ui",
+                        "shared_presentation": {
+                            "schema": 1, "title": "Fixture", "launcher": "launcher",
+                            "dialogs": [{"id": "launcher", "title": "Launcher", "view": "view:test/launcher"}],
+                            "docks": {}, "capabilities": {"sources": [], "affordances": []}
+                        }
+                    }},
+                    "views": {"view:test/launcher": {"widget": "rows"}}
                 },
             }],
         }),
@@ -181,6 +241,7 @@ fn live_seat(
         id,
         presentation_id,
         incarnation,
+        &Ownership::of_session(state, fixture, presentation_id),
         serde_json::to_value(membership.initialization()).unwrap(),
     )
 }
@@ -190,9 +251,12 @@ fn seat_with_initialization(
     id: &str,
     presentation_id: &str,
     incarnation: char,
+    ownership: &Ownership,
     initialization: serde_json::Value,
 ) -> Seat {
-    store.create_thread_for_test(&thread_record(id)).unwrap();
+    store
+        .create_thread_for_test(&thread_record(id, ownership))
+        .unwrap();
     store
         .claim_thread_launch(id, &format!("claim-{id}"), "daemon:test")
         .unwrap();
@@ -237,7 +301,24 @@ fn seat_with_initialization(
         SEAT_PRODUCER_EVENT,
         serde_json::to_value(producer).unwrap(),
     );
-    store.touch_seat_lease(id, OWNER, SURFACE, CLIENT).unwrap();
+    let anchor = store
+        .capture_thread_event_read_anchor(id, id)
+        .unwrap()
+        .unwrap();
+    assert!(
+        store
+            .touch_seat_lease_if_anchors(
+                &ExactSeat {
+                    root_id: id,
+                    owner: &ownership.owner,
+                    item_ref: &ownership.item_ref,
+                    executor_ref: &ownership.executor_ref,
+                },
+                &anchor,
+                std::slice::from_ref(&anchor),
+            )
+            .unwrap()
+    );
     Seat {
         id: id.to_string(),
         presentation_id: presentation_id.to_string(),
@@ -439,10 +520,27 @@ fn earlier_lifecycle_versions_have_no_decoder_and_are_not_retainable() {
             .payload(json!({}))
             .build();
     assert!(validate_retained_evidence(&ordinary).is_err());
+
+    let initialization = |payload: serde_json::Value| -> ThreadEvent {
+        ryeos_state::objects::thread_event::NewEvent::new(
+            &seat.id,
+            &seat.id,
+            "ui_seat.presentation_initialized.v1",
+        )
+        .thread_seq(1)
+        .chain_seq(1)
+        .payload(payload)
+        .build()
+    };
+    assert!(
+        validate_retained_evidence(&initialization(json!({"initialization": {}}))).is_err(),
+        "a malformed initialization is not retainable evidence"
+    );
 }
 
 #[tokio::test]
-async fn a_closed_seat_without_transfers_settles_finalizes_and_retires_with_no_evidence() {
+async fn a_closed_seat_without_transfers_settles_finalizes_and_retires_keeping_only_its_initialization()
+ {
     let (_dir, _owner, state) = build_test_state();
     install_composition();
     let store = &state.state_store;
@@ -465,7 +563,9 @@ async fn a_closed_seat_without_transfers_settles_finalizes_and_retires_with_no_e
             .is_empty()
     );
     let plan = qualify_seat_retirement(store, &seat.id).unwrap().unwrap();
-    assert!(plan.evidence.is_empty() && plan.counterpart_roots.is_empty());
+    assert!(plan.counterpart_roots.is_empty());
+    assert_eq!(plan.evidence.len(), 1);
+    assert_eq!(plan.evidence[0].counterpart_root, seat.id);
     release_launch_claim(store, &seat);
     assert_eq!(retire_due(&state, &held), 1);
     let retired = capture_retired_seat(store, &seat.id).unwrap().unwrap();
@@ -535,8 +635,8 @@ async fn an_unaccepted_transfer_settles_by_source_abort_and_both_seats_retire_th
     );
     assert_eq!(
         source_plan.evidence.len(),
-        2,
-        "Prepared and the lifecycle Aborted"
+        3,
+        "the initialization, Prepared and the lifecycle Aborted"
     );
     store
         .retire_fenced_chain(&source.id, FAR_FUTURE, &source_plan, |_| Ok(0))
@@ -587,7 +687,15 @@ async fn an_unaccepted_transfer_settles_by_source_abort_and_both_seats_retire_th
     let destination_plan = qualify_seat_retirement(store, &destination.id)
         .unwrap()
         .unwrap();
-    assert!(destination_plan.evidence.is_empty());
+    assert_eq!(
+        destination_plan
+            .evidence
+            .iter()
+            .map(|evidence| evidence.counterpart_root.as_str())
+            .collect::<Vec<_>>(),
+        [destination.id.as_str()],
+        "only the initialization is kept, filed under the seat itself"
+    );
     store
         .retire_fenced_chain(&destination.id, FAR_FUTURE, &destination_plan, |_| Ok(0))
         .unwrap();
@@ -811,12 +919,7 @@ async fn session_current_reads_a_retired_seat_with_no_transfers_through_its_fenc
     let (_dir, _owner, state) = build_test_state();
     install_composition();
     let fixture = session_with_presentations(&state, 1);
-    let seat = new_seat(
-        &state.state_store,
-        "S-plain",
-        &fixture.presentations[0],
-        'b',
-    );
+    let seat = live_seat(&state, &fixture, 0, "S-plain", 'b');
     bind(&state, &fixture, &fixture.presentations[0], &seat);
     let state = Arc::new(state);
     settle_and_retire(&state, &[&seat], &[&seat]).await;
@@ -824,6 +927,22 @@ async fn session_current_reads_a_retired_seat_with_no_transfers_through_its_fenc
         .unwrap()
         .unwrap();
     assert!(retired.owner_events().is_empty());
+    assert_eq!(
+        retired
+            .initialization()
+            .map(|record| record.operation_id.as_str()),
+        Some(
+            ryeos_ui::state::get_ui_state(&state)
+                .unwrap()
+                .browser_sessions
+                .get_session(&fixture.session_id)
+                .unwrap()
+                .presentations[&fixture.presentations[0]]
+                .creation_request_id
+                .as_str()
+        ),
+        "a retired seat keeps its signed initialization even with no transfer"
+    );
 
     let reported = current(&state, &fixture).await.unwrap();
     let presentations = reported["presentations"].as_array().unwrap();
@@ -838,8 +957,8 @@ async fn session_current_reads_a_settled_transfer_between_two_retired_seats() {
     install_composition();
     let fixture = session_with_presentations(&state, 2);
     let store = Arc::clone(&state.state_store);
-    let source = new_seat(&store, "S-source", &fixture.presentations[0], 'b');
-    let destination = new_seat(&store, "S-dest", &fixture.presentations[1], 'c');
+    let source = live_seat(&state, &fixture, 0, "S-source", 'b');
+    let destination = live_seat(&state, &fixture, 1, "S-dest", 'c');
     prepared_pair(&store, &source, &destination);
     bind(&state, &fixture, &fixture.presentations[0], &source);
     bind(&state, &fixture, &fixture.presentations[1], &destination);
@@ -863,7 +982,7 @@ async fn session_current_refuses_retired_transfer_evidence_naming_a_presentation
     install_composition();
     let fixture = session_with_presentations(&state, 1);
     let store = Arc::clone(&state.state_store);
-    let source = new_seat(&store, "S-source", &fixture.presentations[0], 'b');
+    let source = live_seat(&state, &fixture, 0, "S-source", 'b');
     let stranger = new_seat(
         &store,
         "S-stranger",
@@ -964,4 +1083,53 @@ async fn session_current_reads_a_retired_seat_beside_its_live_counterpart() {
             seat.id
         );
     }
+}
+
+#[tokio::test]
+async fn session_current_refuses_a_retired_seat_whose_retained_initialization_differs_from_the_membership()
+ {
+    let (_dir, _owner, state) = build_test_state();
+    install_composition();
+    let fixture = session_with_presentations(&state, 1);
+    // The seat signs an initialization that is not the admission the session
+    // holds for this presentation.
+    let seat = new_seat(
+        &state.state_store,
+        "S-diverged",
+        &fixture.presentations[0],
+        'b',
+    );
+    bind(&state, &fixture, &fixture.presentations[0], &seat);
+    let state = Arc::new(state);
+    settle_and_retire(&state, &[&seat], &[&seat]).await;
+    let error = current(&state, &fixture)
+        .await
+        .expect_err("a retired seat is authenticated against its retained initialization");
+    assert!(
+        error
+            .to_string()
+            .contains("initialization differs from original retained admission"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn session_current_does_not_report_an_ownership_failure_as_a_transfer_bearing_seat() {
+    let (_dir, _owner, state) = build_test_state();
+    install_composition();
+    let fixture = session_with_presentations(&state, 1);
+    // A live seat owned by someone else: the session cannot read it, and the
+    // failure is the failure, not a request for the paired reader.
+    let seat = new_seat(
+        &state.state_store,
+        "S-foreign",
+        &fixture.presentations[0],
+        'b',
+    );
+    bind(&state, &fixture, &fixture.presentations[0], &seat);
+    let state = Arc::new(state);
+    let error = current(&state, &fixture)
+        .await
+        .expect_err("a foreign seat is not a paired read");
+    assert!(error.to_string().contains("not found"), "{error}");
 }
