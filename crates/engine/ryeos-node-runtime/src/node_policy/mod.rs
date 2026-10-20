@@ -79,6 +79,7 @@ impl NodePolicyTable {
             Box::new(sections::provider_environment::ProviderEnvironmentPolicySection),
             Box::new(sections::thread_history::ThreadHistoryPolicySection),
             Box::new(sections::ui_browser_sessions::UiBrowserSessionPolicySection),
+            Box::new(sections::ui_inspection::UiInspectionPolicySection),
         ])
         .expect("built-in node-policy table is valid")
     }

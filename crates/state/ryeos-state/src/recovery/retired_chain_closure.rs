@@ -175,10 +175,15 @@ impl RecoveryStore {
         // from the live chains under the owner lock. Here they are only
         // checked against the retained events they name.
         for coordinate in &evidence {
+            let owner_only = coordinate.counterpart_root == owner;
             anyhow::ensure!(
-                counterparts.contains(&coordinate.counterpart_root),
+                owner_only || counterparts.contains(&coordinate.counterpart_root),
                 "retained evidence counterpart {:?} is not a retained counterpart",
                 coordinate.counterpart_root
+            );
+            anyhow::ensure!(
+                !owner_only || coordinate.counterpart_tip == coordinate.owner_tip,
+                "owner-only retained evidence carries a counterpart tip other than the owner's"
             );
             check_tip(cas, owner, &coordinate.owner_tip)?;
             check_tip(
@@ -334,7 +339,8 @@ pub fn read_retired_chain_closure(
     anyhow::ensure!(
         evidence
             .iter()
-            .all(|coordinate| counterparts.contains(&coordinate.counterpart_root)),
+            .all(|coordinate| coordinate.counterpart_root == owner
+                || counterparts.contains(&coordinate.counterpart_root)),
         "retained evidence counterpart is not a retained counterpart"
     );
     Ok(RetiredChainClosure {

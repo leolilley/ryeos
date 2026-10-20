@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-20T09:54:48Z:7f9977da8f99eb5b688ec4274ca2a1fb3f87ad20d246c12ad9c9e28d15e8c865:kSqhjGPePRfEkVASYF8wvny43qv2eNTYzeWMbSSeXbbbpT7oLif1xn3nJ7pbIKJP43/fmCw0FLkQcn23rEyYCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-20T18:29:03Z:e6afeb55a0a0a14daaf9278b6b5f59658cedf2e4ad8ac72012758c19f19e27d1:Rze93SPcKsIPjAm+WSnQOhqDpaQeXp2y/PW9BzY6wi+4rvl+BmA0ff2c5TmtQgn2HNXoDaC5YoOgXxoETcMHDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - codex
@@ -410,3 +410,10 @@ policies:
       kind: seat_session
       max_replay_frame_events: 64
       max_replay_frame_bytes: 4194304
+  ui_inspection:
+    schema: 1
+    max_event_limit: 500
+    max_facet_page_events: 64
+    max_facet_page_bytes: 524288
+    max_facet_pages_per_thread: 8
+    max_facet_pages_total: 64

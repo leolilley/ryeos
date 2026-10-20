@@ -233,6 +233,80 @@ fn drives_a_chain_to_a_fenced_unlinked_closure() {
 }
 
 #[test]
+fn owner_only_evidence_retires_a_chain_with_no_counterpart() {
+    let (_dir, db) = seeded();
+    let kept = live_event_hashes(&db, OWNER).0;
+    let guard = guard(&db);
+    let owner = db.acquire_chain_lock(OWNER).unwrap();
+    let judged = Cell::new(0);
+    let report = db
+        .retire_chain(
+            OWNER,
+            &owner,
+            &guard,
+            ChainRetirement {
+                counterpart_roots: BTreeSet::new(),
+                evidence: vec![RetirementEvidenceRef {
+                    counterpart_root: OWNER.to_string(),
+                    event_hash: kept.clone(),
+                }],
+                counterpart_locks: &[],
+                validator: &|event| {
+                    judged.set(judged.get() + 1);
+                    assert_eq!(event.chain_root_id, OWNER);
+                    Ok(())
+                },
+                runtime_cleanup: &|| Ok(()),
+            },
+        )
+        .unwrap();
+    assert_eq!(judged.get(), 1);
+    let cas = db.pinned_cas().unwrap();
+    let closure =
+        crate::recovery::read_retired_chain_closure(&cas, OWNER, &report.manifest_hash).unwrap();
+    assert!(closure.counterpart_roots.is_empty());
+    assert_eq!(closure.retained_evidence.len(), 1);
+    let coordinate = &closure.retained_evidence[0];
+    assert_eq!(coordinate.event_hash, kept);
+    assert_eq!(coordinate.counterpart_tip, coordinate.owner_tip);
+    assert!(
+        db.recovery
+            .evidence_obligation_holders(&owner, OWNER)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn owner_only_evidence_must_be_an_event_of_the_owner() {
+    let (_dir, db) = seeded();
+    let foreign = live_event_hashes(&db, PEER).0;
+    let guard = guard(&db);
+    let owner = db.acquire_chain_lock(OWNER).unwrap();
+    let error = db
+        .retire_chain(
+            OWNER,
+            &owner,
+            &guard,
+            ChainRetirement {
+                counterpart_roots: BTreeSet::new(),
+                evidence: vec![RetirementEvidenceRef {
+                    counterpart_root: OWNER.to_string(),
+                    event_hash: foreign,
+                }],
+                counterpart_locks: &[],
+                validator: &accept,
+                runtime_cleanup: &|| Ok(()),
+            },
+        )
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("not an event of the retired chain"));
+    drop(owner);
+    assert_eq!(fence(&db, OWNER), RetiredChainFence::Absent);
+    assert!(head_present(&db, OWNER));
+}
+
+#[test]
 fn a_refused_validator_leaves_the_chain_live_and_unfenced() {
     let (_dir, db) = seeded();
     let cleaned = Cell::new(false);

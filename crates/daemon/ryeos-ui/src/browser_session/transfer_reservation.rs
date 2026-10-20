@@ -80,6 +80,11 @@ pub trait CompletedRetiredRoot {
     /// The replay was read through exactly this fence.
     fn matches_completed_retired_dependency(&self, dependency: &RetiredChainDependency) -> bool;
 
+    /// Transfers the root's retained evidence names whose every other seat is
+    /// retired too. Retirement qualified each as completely settled, so no
+    /// seat is left to activate a hidden reservation one of them still holds.
+    fn settled_retired_transfers(&self) -> &[TransferIdentity];
+
     fn completed_composition_frontier(
         &self,
         initialization: &ryeos_client_base::ui::binding::UiPresentationInitialization,
@@ -1146,6 +1151,9 @@ impl BrowserSessionStore {
             if let Some(cut) = root.completed_paired_cut() {
                 release_completed_negative_batches(&mut candidate, cut)?;
             }
+            for transfer in root.settled_retired_transfers() {
+                release_settled_hidden_batch(&mut candidate, transfer)?;
+            }
         }
         let publish = || {
             let result = action(&candidate)?;
@@ -1185,6 +1193,30 @@ fn release_completed_negative_batches(
         let reservation: UiTransferReservation = serde_json::from_value(reservation.clone())?;
         release_exact_hidden_batch(candidate, &record.transfer, &export, &reservation)
     })
+}
+
+/// Drop the hidden reservation of a transfer whose seats are all retired. The
+/// reservation must be the one this exact transfer made: another identity under
+/// the same operation is a conflict. Activated mounts and frontiers stay.
+fn release_settled_hidden_batch(
+    candidate: &mut BrowserSession,
+    transfer: &TransferIdentity,
+) -> anyhow::Result<()> {
+    match candidate
+        .pending_transfer_attachments
+        .get(&transfer.operation_id)
+    {
+        None => Ok(()),
+        Some(pending) if pending.transfer != *transfer => {
+            Err(AttachmentStoreError::PresentationConflict.into())
+        }
+        Some(_) => {
+            candidate
+                .pending_transfer_attachments
+                .remove(&transfer.operation_id);
+            Ok(())
+        }
+    }
 }
 
 // Mechanical candidate mutation only. The sole production caller above supplies
@@ -1683,8 +1715,7 @@ mod tests {
     };
     use ryeos_ui_presentation_contract::transfer::TransferSeat;
 
-    #[test]
-    fn exact_hidden_retry_does_not_accept_changed_retained_authority() {
+    fn staged_batch() -> StagedTransferAttachmentBatch {
         let context = super::super::tests::test_context();
         let attachment = Arc::new(
             build_attachment(
@@ -1708,7 +1739,7 @@ mod tests {
             producer_incarnation: "a".repeat(64),
             revision: 0,
         };
-        let original = StagedTransferAttachmentBatch {
+        StagedTransferAttachmentBatch {
             transfer: TransferIdentity {
                 operation_id: "11111111-1111-4111-8111-111111111111".into(),
                 source: seat("22222222-2222-4222-8222-222222222222"),
@@ -1725,7 +1756,12 @@ mod tests {
                 },
                 destination: attachment,
             }],
-        };
+        }
+    }
+
+    #[test]
+    fn exact_hidden_retry_does_not_accept_changed_retained_authority() {
+        let original = staged_batch();
         assert!(same_batch(&original, &original.clone()));
         // A committed source can already be retired while the independently
         // admitted destination remains retained privately. This test isolates
@@ -1757,6 +1793,36 @@ mod tests {
         Arc::make_mut(binding).posture =
             crate::compiled_binding::EffectiveUiPosture::ObservationOnly;
         assert!(!same_batch(&original, &changed));
+    }
+
+    #[test]
+    fn a_settled_retired_transfer_releases_the_hidden_reservation_it_made() {
+        let batch = staged_batch();
+        let store = BrowserSessionStore::new();
+        let (id, token, _) = store
+            .mint_token(super::super::tests::test_context(), 4, &"22".repeat(32))
+            .unwrap();
+        store.consume_launch_token(&token).unwrap();
+        let mut candidate = store.get_session(&id).unwrap();
+        let transfer = batch.transfer.clone();
+        candidate
+            .pending_transfer_attachments
+            .insert(transfer.operation_id.clone(), batch);
+
+        // Another identity under the same operation is not this reservation.
+        let mut other = transfer.clone();
+        other.export_digest = "d".repeat(64);
+        assert!(release_settled_hidden_batch(&mut candidate, &other).is_err());
+        assert!(
+            candidate
+                .pending_transfer_attachments
+                .contains_key(&transfer.operation_id)
+        );
+
+        release_settled_hidden_batch(&mut candidate, &transfer).unwrap();
+        assert!(candidate.pending_transfer_attachments.is_empty());
+        // A transfer with no reservation left is already settled.
+        release_settled_hidden_batch(&mut candidate, &transfer).unwrap();
     }
 
     #[test]

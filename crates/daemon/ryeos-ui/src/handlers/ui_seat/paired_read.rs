@@ -28,6 +28,7 @@ use ryeos_ui_presentation_contract::{
     transfer_state::TransferLifecycleState,
 };
 
+use super::initialization;
 use crate::browser_session::transfer_reservation::{
     CompletedPairedCut, CompletedRetiredFrontier, CompletedRetiredRoot,
 };
@@ -719,6 +720,7 @@ pub(crate) async fn read_live_root_cut(
 pub(crate) struct RetiredRoot {
     evidence: RetiredSeatEvidence,
     cut: Option<FixedTransferCut>,
+    settled: Vec<TransferIdentity>,
 }
 
 impl RetiredRoot {
@@ -731,10 +733,14 @@ impl RetiredRoot {
     }
 }
 
-/// Read a retired root's cut from its retained evidence. A retired seat with
-/// no retained transfer testimony has no cut, and neither has one whose every
+/// Read a retired root's cut from its retained evidence. The seat's retained
+/// signed initialization must be exactly the admission the session holds for
+/// it: the session's own record is never the proof. A retired seat with no
+/// retained transfer testimony has no cut, and neither has one whose every
 /// transfer is between retired seats: nothing of such a transfer is left to
-/// reconcile, and its counterpart kept no testimony to read it from.
+/// reconcile, and its counterpart kept no testimony to read it from. Those
+/// transfers are reported as settled, so the session can release the hidden
+/// reservation they may still hold.
 pub(crate) async fn read_retired_root(
     state: Arc<AppState>,
     session: &BrowserSession,
@@ -748,30 +754,49 @@ pub(crate) async fn read_retired_root(
             HandlerError::Conflict("retired evidence belongs to another seat".into()).into(),
         );
     }
+    let retained = evidence.initialization().ok_or_else(|| {
+        HandlerError::Conflict("retired seat retained no signed initialization".into())
+    })?;
+    if *retained != initialization::record(membership)
+        || retained
+            .initialization
+            .digest()
+            .map_err(HandlerError::Internal)?
+            != membership.initialization_digest
+    {
+        return Err(HandlerError::Conflict(
+            "retired seat initialization differs from original retained admission".into(),
+        )
+        .into());
+    }
     if evidence.owner_events().is_empty() {
         return Ok(RetiredRoot {
             evidence,
             cut: None,
+            settled: Vec::new(),
         });
     }
     let task_state = state.clone();
-    let (evidence, proof) = tokio::task::spawn_blocking(move || -> Result<_> {
+    let (evidence, proof, settled) = tokio::task::spawn_blocking(move || -> Result<_> {
         let store = &task_state.state_store;
         let mut requested = Vec::new();
+        let mut settled = Vec::new();
         for identity in discover_retired_seat_transfer_identities(&evidence)?.into_values() {
-            if !counterparts_all_retired(store, evidence.chain_root_id(), &identity)? {
+            if counterparts_all_retired(store, evidence.chain_root_id(), &identity)? {
+                settled.push(identity);
+            } else {
                 requested.push(identity);
             }
         }
         if requested.is_empty() {
-            return Ok((evidence, None));
+            return Ok((evidence, None, settled));
         }
         let proof = read_historical_transfer_cut(
             store,
             &HistoryEndpoint::Retired(evidence.dependency().clone()),
             &requested,
         )?;
-        Ok((evidence, Some(proof)))
+        Ok((evidence, Some(proof), settled))
     })
     .await
     .map_err(|error| HandlerError::Internal(format!("retired cut reader failed: {error}")))?
@@ -780,6 +805,7 @@ pub(crate) async fn read_retired_root(
         return Ok(RetiredRoot {
             evidence,
             cut: None,
+            settled,
         });
     };
     let cut = FixedTransferCut::new(&state, session, proof)
@@ -790,6 +816,7 @@ pub(crate) async fn read_retired_root(
     Ok(RetiredRoot {
         evidence,
         cut: Some(cut),
+        settled,
     })
 }
 
@@ -824,15 +851,27 @@ impl CompletedRetiredRoot for RetiredRoot {
         self.evidence.dependency() == dependency
     }
 
+    fn settled_retired_transfers(&self) -> &[TransferIdentity] {
+        &self.settled
+    }
+
     /// A retired seat keeps no composition, only its transfer evidence, so
-    /// its frontier is the original initialization and nothing folded onto it.
-    /// Transfer testimony is seen exactly when a paired cut was read for it.
+    /// its frontier is the original initialization, authenticated against the
+    /// retained one, and nothing folded onto it. Transfer testimony is seen
+    /// exactly when a paired cut was read for it.
     fn completed_composition_frontier(
         &self,
         initialization: &UiPresentationInitialization,
     ) -> Result<CompletedRetiredFrontier> {
+        let retained = self
+            .evidence
+            .initialization()
+            .ok_or_else(|| anyhow!("retired seat retained no signed initialization"))?;
+        if retained.initialization != *initialization {
+            bail!("retired seat initialization differs from the session admission");
+        }
         Ok(CompletedRetiredFrontier {
-            replay: UiCompositionReplay::initialized(initialization)
+            replay: UiCompositionReplay::initialized(&retained.initialization)
                 .map_err(|error| anyhow!(error))?,
             transfer_testimony_seen: self.cut.is_some(),
         })

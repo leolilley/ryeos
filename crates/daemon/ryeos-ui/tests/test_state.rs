@@ -669,6 +669,16 @@ fn build_app_state(
                         },
                     },
                 ),
+                Arc::new(
+                    ryeos_node_runtime::node_policy::sections::ui_inspection::UiInspectionPolicy {
+                        schema: 1,
+                        max_event_limit: 500,
+                        max_facet_page_events: 64,
+                        max_facet_page_bytes: 524288,
+                        max_facet_pages_per_thread: 8,
+                        max_facet_pages_total: 64,
+                    },
+                ),
             ]),
         ),
         vault: Arc::new(ryeos_app::vault::EmptyVault),

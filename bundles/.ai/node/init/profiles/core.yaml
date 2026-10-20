@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-20T09:54:47Z:4d60efda7200f0e056d360ceff415977fd8600b3b78dfb93d3f3701c199576af:fBsnUIIQdccjyMrZYvwkyb19Sxr7fAwziMbw0r+ofP/2MedkOytfQDSBT1mrY3zmxtihmGFFOhIMuWhY91cmCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-20T18:29:03Z:ea94f7c86709c7ee57b9ef0516007de1cfc9e5c4f5e951730433fd53ff1706d2:cuc7/zjYtf/f7+UdGQ4W65Bx7ZLRRs7okuu7lD+B1iWPMBXJF0JiiWsExr1mn4Np1FAi+tSnZUiiWe9T/ShQBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Core profile: the substrate alone.
 schema: 1
 exact_bundles:
@@ -376,3 +376,10 @@ policies:
       kind: seat_session
       max_replay_frame_events: 64
       max_replay_frame_bytes: 4194304
+  ui_inspection:
+    schema: 1
+    max_event_limit: 500
+    max_facet_page_events: 64
+    max_facet_page_bytes: 524288
+    max_facet_pages_per_thread: 8
+    max_facet_pages_total: 64

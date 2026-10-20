@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 
 use anyhow::{anyhow, bail};
 use ryeos_app::state_store::StateStore;
+use ryeos_client_base::ui::presentation_initialization::PRESENTATION_INITIALIZED_EVENT;
 use ryeos_state::objects::thread_event::ThreadEvent;
 use ryeos_ui_presentation_contract::transfer::TransferIdentity;
 
@@ -157,6 +158,44 @@ pub fn discover_seat_transfer_identities(
                 None => {
                     found.insert(identity.operation_id.clone(), identity);
                 }
+            }
+        }
+        progress = page.progress;
+        if progress.is_none() {
+            return Ok(found);
+        }
+    }
+}
+
+/// The CAS hash of the seat's signed initialization, read at the supplied
+/// exact anchor until genesis. `None` means the exhaustive scan found none; a
+/// second initialization is refused.
+pub fn seat_initialization_event_hash(
+    store: &StateStore,
+    seat_root_id: &str,
+    anchor: &ryeos_state::AuthoritativeThreadEventReadAnchor,
+) -> anyhow::Result<Option<String>> {
+    if anchor.chain_root_id() != seat_root_id || anchor.thread_id() != seat_root_id {
+        bail!("initialization lookup requires an exact seat-root anchor");
+    }
+    let mut found: Option<String> = None;
+    let mut progress = None;
+    loop {
+        let page = store.read_thread_event_page(
+            anchor,
+            progress.as_ref(),
+            DISCOVERY_PAGE_EVENTS,
+            DISCOVERY_PAGE_BYTES,
+        )?;
+        if page.events.is_empty() && page.progress.is_some() {
+            bail!("signed initialization lookup page made no progress");
+        }
+        for (hash, event) in page.events {
+            if event.chain_root_id != seat_root_id || event.thread_id != seat_root_id {
+                bail!("signed initialization lookup changed exact seat");
+            }
+            if event.event_type == PRESENTATION_INITIALIZED_EVENT && found.replace(hash).is_some() {
+                bail!("seat history carries two signed initializations");
             }
         }
         progress = page.progress;

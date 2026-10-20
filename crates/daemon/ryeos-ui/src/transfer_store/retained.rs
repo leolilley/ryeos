@@ -6,7 +6,9 @@
 //! stored. Reading it back therefore trusts retirement-time qualification for
 //! the control and receipt ancestry a live read re-derives, and checks only
 //! what the retained events themselves state: exact owner, exact decoding and
-//! the transfer phase order. The retired seat is covered by the fence this
+//! the transfer phase order. The seat's signed initialization is always
+//! retained, so a reader can compare it with the admission the session holds
+//! instead of trusting the session. The retired seat is covered by the fence this
 //! module captures: a publication that depends on it names that fence, and
 //! the state layer re-proves it under the chain locks.
 
@@ -14,6 +16,9 @@ use std::collections::BTreeMap;
 
 use anyhow::{Context, anyhow, bail};
 use ryeos_app::state_store::StateStore;
+use ryeos_client_base::ui::presentation_initialization::{
+    PRESENTATION_INITIALIZED_EVENT, UiPresentationInitializationRecord,
+};
 use ryeos_state::RetiredChainDependency;
 use ryeos_state::RetiredChainFence;
 use ryeos_state::objects::thread_event::ThreadEvent;
@@ -30,6 +35,7 @@ use super::reader::{
 /// A retired seat's retained evidence, read through its fence.
 pub struct RetiredSeatEvidence {
     dependency: RetiredChainDependency,
+    initialization: Option<UiPresentationInitializationRecord>,
     owner_events: Vec<(TransferEvidence, ThreadEvent)>,
 }
 
@@ -44,7 +50,14 @@ impl RetiredSeatEvidence {
         &self.dependency.chain_root_id
     }
 
-    /// Retained events of the retired seat's own chain, oldest first.
+    /// The seat's signed initialization as its retirement retained it. A seat
+    /// that retired without ever being initialized retained none.
+    pub fn initialization(&self) -> Option<&UiPresentationInitializationRecord> {
+        self.initialization.as_ref()
+    }
+
+    /// Retained transfer testimony of the retired seat's own chain, oldest
+    /// first.
     pub fn owner_events(&self) -> &[(TransferEvidence, ThreadEvent)] {
         &self.owner_events
     }
@@ -76,6 +89,7 @@ pub fn capture_retired_seat(
     )
     .with_context(|| format!("read the retained closure of retired seat {chain_root_id}"))?;
     let mut owner_events = Vec::new();
+    let mut initialization = None;
     for coordinate in &closure.retained_evidence {
         let event = store
             .retained_thread_event_by_hash(&coordinate.event_hash)?
@@ -83,7 +97,17 @@ pub fn capture_retired_seat(
         if event.chain_seq != coordinate.chain_seq {
             bail!("retained evidence event differs from its recorded coordinate");
         }
-        if event.chain_root_id == chain_root_id {
+        if event.chain_root_id == chain_root_id
+            && event.event_type == PRESENTATION_INITIALIZED_EVENT
+        {
+            let record: UiPresentationInitializationRecord =
+                serde_json::from_value(event.payload.clone())
+                    .context("decode the retained seat initialization")?;
+            record.validate().map_err(anyhow::Error::msg)?;
+            if initialization.replace(record).is_some() {
+                bail!("retired seat {chain_root_id} retained two initializations");
+            }
+        } else if event.chain_root_id == chain_root_id {
             owner_events.push((
                 TransferEvidence {
                     event_hash: coordinate.event_hash.clone(),
@@ -105,6 +129,7 @@ pub fn capture_retired_seat(
             chain_root_id: chain_root_id.to_string(),
             manifest_hash,
         },
+        initialization,
         owner_events,
     }))
 }
