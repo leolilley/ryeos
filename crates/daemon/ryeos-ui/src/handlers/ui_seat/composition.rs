@@ -96,15 +96,6 @@ fn validate_receipted_preparation(
 }
 
 impl VerifiedHistory {
-    pub(super) fn require_ordinary_mutation(&self) -> Result<()> {
-        if self.transfer_testimony_seen {
-            return Err(conflict(
-                "transfer testimony requires phase-aware two-seat mutation admission",
-            ));
-        }
-        Ok(())
-    }
-
     fn checkpoint(&self) -> CompositionCheckpoint {
         CompositionCheckpoint {
             tip_hash: self.tip_hash.clone(),
@@ -496,7 +487,9 @@ pub(super) fn read_history(
 
 /// Recheck the freshly folded lifetime frontier against the exact signed
 /// anchor that the mutation owner will condition. A changed head is a retry,
-/// never permission to mix one fold with a different append predecessor.
+/// never permission to mix one fold with a different append predecessor. A
+/// history with transfer testimony is folded here without its phases: the
+/// caller must take its composition from the completed paired cut.
 pub(super) fn verified_frontier(
     state: &AppState,
     detail: &ThreadDetail,
@@ -506,7 +499,6 @@ pub(super) fn verified_frontier(
     ryeos_state::AuthoritativeThreadEventReadAnchor,
 )> {
     let verified = read_history(state, detail, initial)?;
-    verified.require_ordinary_mutation()?;
     let anchor = state
         .state_store
         .capture_thread_event_read_anchor(&detail.chain_root_id, &detail.thread_id)?

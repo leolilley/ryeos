@@ -397,6 +397,11 @@ impl UiHistoricalTransferCutProof {
         self.cut.local_endpoint()
     }
 
+    /// How the seat `root` was read in this cut, if the cut names it.
+    pub fn endpoint(&self, root: &str) -> Option<&HistoryEndpoint> {
+        self.cut.endpoints.get(root).map(|read| &read.endpoint)
+    }
+
     pub fn identities(&self) -> &BTreeMap<String, TransferIdentity> {
         self.cut.identities()
     }

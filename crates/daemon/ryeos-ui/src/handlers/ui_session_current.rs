@@ -130,7 +130,13 @@ pub async fn handle(_params: Value, ctx: HandlerContext, state: Arc<AppState>) -
             .await?;
             replay = next;
             match step? {
-                super::ui_seat::FixedAnchorReplayStep::Pending => {}
+                super::ui_seat::FixedAnchorReplayStep::Batch { .. } => {}
+                super::ui_seat::FixedAnchorReplayStep::ReproofRequired => {
+                    return Err(HandlerError::Conflict(
+                        "paired bootstrap replay asked for a reproof".into(),
+                    )
+                    .into());
+                }
                 super::ui_seat::FixedAnchorReplayStep::Complete {
                     tip_hash,
                     thread_seq,
