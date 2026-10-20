@@ -39,7 +39,6 @@ ryeos-effect-contract = { workspace = true }
 ryeos-gpu-loader-owner-contract = { workspace = true }
 ryeos-isolation-protocol = { workspace = true }
 ryeos-runtime = { workspace = true }
-ryeos-scheduler = { workspace = true }
 ryeos-scheduler-contract = { workspace = true }
 ryeos-state = { workspace = true }
 ryeos-tracing = { workspace = true }

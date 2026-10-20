@@ -918,10 +918,10 @@ impl ClosedLiveStateStore {
 
     pub(super) fn scheduler_native_store_handoff_receipt<'store>(
         &'store self,
-        handoff_id: &ryeos_scheduler::db::SchedulerNativeStoreHandoffId,
+        handoff_id: &ryeos_scheduler_contract::SchedulerNativeStoreHandoffId,
         factory: &Arc<OriginalNativeFactory>,
         aggregate: &lillux_sqlite::OriginalNativeTerminal,
-    ) -> Result<ryeos_scheduler::db::SchedulerNativeStoreHandoffReceipt<'store>> {
+    ) -> Result<ryeos_scheduler_contract::SchedulerNativeStoreHandoffReceipt<'store>> {
         let p = &self.inner.progress;
         super::live_outside::issue_scheduler_store_handoff_receipt(
             self,
@@ -1084,8 +1084,8 @@ impl ClosedLiveStateStore {
         aggregate: &lillux_sqlite::OriginalNativeTerminal,
         prepay: &dyn Fn(u64, u64) -> Result<()>,
         handoff: Option<(
-            ryeos_scheduler::db::SchedulerNativeStoreHandoffId,
-            ryeos_scheduler::db::SchedulerNativeStoreSourceRole,
+            ryeos_scheduler_contract::SchedulerNativeStoreHandoffId,
+            ryeos_scheduler_contract::SchedulerNativeStoreSourceRole,
         )>,
     ) -> Result<()> {
         let p = self.progress_mut();
@@ -1117,7 +1117,7 @@ impl ClosedLiveStateStore {
         factory: &Arc<OriginalNativeFactory>,
         aggregate: &lillux_sqlite::OriginalNativeTerminal,
         prepay: &dyn Fn(u64, u64) -> Result<()>,
-        handoff_id: Option<ryeos_scheduler::db::SchedulerNativeStoreHandoffId>,
+        handoff_id: Option<ryeos_scheduler_contract::SchedulerNativeStoreHandoffId>,
     ) -> Result<()> {
         let p = self.progress_mut();
         let expected = p.metadata.original.as_ref();

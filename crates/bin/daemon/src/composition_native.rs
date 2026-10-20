@@ -25,7 +25,8 @@ struct CompositionNativeParts {
     scheduler_native_finalization_owner:
         Option<ryeosd::scheduler::db::SchedulerNativeFinalizationOwner>,
     #[cfg(feature = "scheduling")]
-    scheduler_native_outside_sources: Option<ryeosd::scheduler::db::SchedulerNativeOutsideSources>,
+    scheduler_native_outside_sources:
+        Option<ryeos_scheduler_contract::SchedulerNativeOutsideSources>,
     #[cfg(feature = "scheduling")]
     scheduler_native_connection_parts: Option<lillux_sqlite::OriginalNativeOutsideConnectionParts>,
     #[cfg(feature = "scheduling")]
@@ -89,7 +90,7 @@ slots! {
         ryeosd::scheduler::db::SchedulerNativeFinalizationOwner;
     #[cfg(feature = "scheduling")]
     scheduler_native_outside_sources / scheduler_native_outside_sources_mut:
-        ryeosd::scheduler::db::SchedulerNativeOutsideSources;
+        ryeos_scheduler_contract::SchedulerNativeOutsideSources;
     #[cfg(feature = "scheduling")]
     scheduler_native_connection_parts / scheduler_native_connection_parts_mut:
         lillux_sqlite::OriginalNativeOutsideConnectionParts;

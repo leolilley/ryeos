@@ -1,10 +1,13 @@
-//! Canonical pure schedule contracts for App and selected scheduler composition.
-//! No DB, timer, daemon, App or executor implementation belongs here.
+//! Canonical schedule contracts for App and selected scheduler composition,
+//! plus the scheduler's native-store custody types and schema text, which
+//! both sides share. No timer, daemon, App or executor implementation
+//! belongs here.
 
 mod accounting;
 mod execution;
 mod expression;
 mod maintenance;
+mod native_handoff;
 mod project;
 mod retirement;
 mod vocabulary;
@@ -18,6 +21,12 @@ pub use expression::{parse_iso_ts, validate_expression, validate_schedule_id, va
 pub use maintenance::{
     NodeMaintenancePolicy, NodeMaintenanceSchedulePolicy, OFFLINE_RESET_SOURCE_ROLES,
     OfflineNativeQuota, OfflineResetQuota, SECTION_NAME, validate_offline_native_class,
+};
+pub use native_handoff::{
+    SCHEDULER_SCHEMA_SQL, SchedulerNativeDatabaseSource, SchedulerNativeOutsideSources,
+    SchedulerNativeStoreHandoffId, SchedulerNativeStoreHandoffReceipt,
+    SchedulerNativeStoreSourceRole, TakenSchedulerNativeDatabaseSource,
+    prepare_scheduler_schema_reference,
 };
 pub use vocabulary::{MisfirePolicy, OverlapPolicy, parse_misfire_policy, parse_overlap_policy};
 

@@ -68,7 +68,7 @@ impl StoppedNodeScheduler {
             )
         }
         .context("issue the stopped-node scheduler schema reference inputs")?;
-        let reference = match SchedulerDb::prepare_scheduler_schema_reference(
+        let reference = match ryeos_scheduler_contract::prepare_scheduler_schema_reference(
             Arc::clone(&factory),
             reference_inputs,
         ) {
