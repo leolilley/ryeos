@@ -1,0 +1,6 @@
+schema: ryeos.shared_static_payloads.v1
+description: Static payloads that one bundle owns and builds once and other bundles carry as byte-identical copies of that single build.
+shared_payloads:
+  - binary: ryeos-external-candidate-supervisor
+    owner_bundle: render-sandbox
+    consumer_bundles: [modal-sandbox]

@@ -39,6 +39,7 @@ class NativeBundleWp0Tests(unittest.TestCase):
     def test_payload_ownership_is_unique_and_references_known_bundles(self):
         fixture = json.loads((FIXTURES / "bundle-sets.json").read_text())
         known = set().union(*map(set, fixture["sets"].values()))
+        known |= set(shell_lines("ryeos_bundle_set_names release-artifacts"))
         seen = set()
         result = subprocess.run([str(OWNERSHIP), "--repository-root", str(ROOT)],
                                 text=True, capture_output=True, check=True)
