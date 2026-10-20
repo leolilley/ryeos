@@ -12,7 +12,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use hickory_resolver::config::{ResolveHosts, ResolverConfig, ResolverOpts};
-use hickory_resolver::name_server::TokioConnectionProvider;
+use hickory_resolver::net::runtime::TokioRuntimeProvider;
 use hickory_resolver::{Hosts, Resolver};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::runtime::{Builder, Runtime};
@@ -62,7 +62,7 @@ impl NetworkContext {
                 "network configuration exceeds its bound",
             ));
         }
-        // Hickory 0.25's resolv-conf parser otherwise derives an absent domain
+        // Hickory's resolv-conf parser otherwise derives an absent domain
         // from gethostname (or /proc/sys/kernel/hostname in static builds).
         // Seed only the parse buffer with the DNS root; later authored domain
         // and search directives retain their normal precedence. Connections
@@ -148,10 +148,11 @@ impl NetworkContext {
             } else {
                 let mut resolver = Resolver::builder_with_config(
                     self.config.clone(),
-                    TokioConnectionProvider::default(),
+                    TokioRuntimeProvider::default(),
                 )
                 .with_options(self.options.clone())
-                .build();
+                .build()
+                .map_err(|_| io::Error::other("network name resolution failed"))?;
                 resolver.set_hosts(self.hosts.clone());
                 let absolute_host = format!("{}.", host.trim_end_matches('.'));
                 let lookup = resolver
@@ -346,16 +347,17 @@ impl Drop for NetworkStream {
 mod tests {
     use super::*;
     use crate::time::Duration;
-    use hickory_resolver::config::NameServerConfig;
-    use hickory_resolver::proto::xfer::Protocol;
+    use hickory_resolver::config::{ConnectionConfig, NameServerConfig};
     use std::net::{TcpListener, UdpSocket};
     use std::time::Instant;
 
     fn context(dns: SocketAddr) -> NetworkContext {
+        let mut udp = ConnectionConfig::udp();
+        udp.port = dns.port();
         let config = ResolverConfig::from_parts(
             None,
             vec![],
-            vec![NameServerConfig::new(dns, Protocol::Udp)],
+            vec![NameServerConfig::new(dns.ip(), true, vec![udp])],
         );
         let mut options = ResolverOpts::default();
         options.use_hosts_file = ResolveHosts::Never;
@@ -385,7 +387,7 @@ mod tests {
                 .config
                 .name_servers()
                 .iter()
-                .all(|server| server.socket_addr.ip() == "192.0.2.53".parse::<IpAddr>().unwrap())
+                .all(|server| server.ip == "192.0.2.53".parse::<IpAddr>().unwrap())
         );
         assert!(!context.config.name_servers().is_empty());
         assert_eq!(context.options.use_hosts_file, ResolveHosts::Never);
@@ -396,8 +398,9 @@ mod tests {
         let lookup = context.hosts.lookup_static_host(&query).unwrap();
         assert_eq!(
             lookup
+                .answers()
                 .iter()
-                .filter_map(|record| record.ip_addr())
+                .filter_map(|record| record.data.ip_addr())
                 .collect::<Vec<_>>(),
             vec!["192.0.2.42".parse::<IpAddr>().unwrap()]
         );
