@@ -3,6 +3,13 @@ all-features = true
 
 [advisories]
 yanked = "deny"
+ignore = [
+    # unsafe-libyaml is unmaintained and serde_yaml, which 29 workspace crates
+    # read signed YAML through, has no safe successor to upgrade to; the
+    # advisory reports no vulnerability. The migration off serde_yaml is a
+    # tracked item; until it lands this advisory is acknowledged, not fixed.
+    "RUSTSEC-2024-0449",
+]
 
 [licenses]
 confidence-threshold = 0.8
