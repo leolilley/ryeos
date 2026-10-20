@@ -74,6 +74,15 @@ pub struct EmbeddedSurfaceViews {
     pub failures: Vec<(String, String)>,
 }
 
+/// Explicit View closure resolved for a composition root, without rewriting
+/// the root body. Values are keyed by the declared view ref.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmbeddedUiCompositionViews {
+    pub identity: EmbeddedSurfaceIdentity,
+    pub values: BTreeMap<String, Value>,
+    pub failures: Vec<(String, String)>,
+}
+
 /// Collect every `view:`-prefixed ref anywhere in the composed surface
 /// value — center `tiles`, edge `slots`, `backdrop`, `library` — skipping
 /// the ROOT `views` map only (it holds resolved bindings keyed by ref,
@@ -243,39 +252,15 @@ pub fn embed_surface_views_in_generation(
     if !composed_value.is_object() {
         return Vec::new();
     }
-    let mut resolved = Vec::new();
-    let mut requests = Vec::new();
-    let mut valid_refs = Vec::new();
-    for view_ref in unique_view_refs(composed_value) {
-        match CanonicalRef::parse(&view_ref) {
-            Ok(item_ref) => {
-                valid_refs.push(view_ref);
-                requests.push(EffectiveItemRequest {
-                    item_ref,
-                    expected_kind: Some("view".to_string()),
-                    project_root: project_root.map(Path::to_path_buf),
-                    subject_resolution_authority: SubjectResolutionAuthority::for_live_project_root(
-                        project_root,
-                    ),
-                });
-            }
-            Err(error) => resolved.push((view_ref, Err(format!("invalid view ref: {error}")))),
-        }
-    }
-    resolved.extend(
-        valid_refs
-            .into_iter()
-            .zip(generation.effective_items(&requests))
-            .map(|(view_ref, result)| {
-                (
-                    view_ref,
-                    result
-                        .map(|effective| effective.composed_value)
-                        .map_err(|error| error.to_string()),
-                )
-            }),
-    );
-    resolved.sort_by(|(left, _), (right, _)| left.cmp(right));
+    let resolved = resolve_identity_views_in_generation(
+        generation,
+        project_root,
+        None,
+        unique_view_refs(composed_value),
+    )
+    .into_iter()
+    .map(|(view_ref, result)| (view_ref, result.map(|(value, _identity)| value)))
+    .collect();
     embed_view_results(composed_value, resolved)
 }
 
@@ -293,62 +278,7 @@ pub fn embed_effective_surface_views_in_generation(
     project_root: Option<&Path>,
     effective_surface: &mut EffectiveItem,
 ) -> EmbeddedSurfaceViews {
-    let surface = EffectiveUiItemIdentity::from_effective_item(effective_surface);
-    if !effective_surface.composed_value.is_object() {
-        return EmbeddedSurfaceViews {
-            identity: EmbeddedSurfaceIdentity {
-                request_engine_generation_identity: generation
-                    .request_engine_generation_identity()
-                    .to_string(),
-                surface,
-                views: BTreeMap::new(),
-            },
-            failures: Vec::new(),
-        };
-    }
-
-    let mut resolved = Vec::new();
-    let mut requests = Vec::new();
-    let mut valid_refs = Vec::new();
-    for view_ref in unique_view_refs(&effective_surface.composed_value) {
-        match CanonicalRef::parse(&view_ref) {
-            Ok(item_ref) => {
-                valid_refs.push(view_ref);
-                requests.push(EffectiveItemRequest {
-                    item_ref,
-                    expected_kind: Some("view".to_string()),
-                    project_root: project_root.map(Path::to_path_buf),
-                    subject_resolution_authority: SubjectResolutionAuthority::for_live_project_root(
-                        project_root,
-                    ),
-                });
-            }
-            Err(error) => resolved.push((view_ref, Err(format!("invalid view ref: {error}")))),
-        }
-    }
-    resolved.extend(
-        valid_refs
-            .into_iter()
-            .zip(generation.effective_items(&requests))
-            .map(|(view_ref, result)| {
-                (
-                    view_ref,
-                    result
-                        .map(|effective| {
-                            let identity = EffectiveUiItemIdentity::from_effective_item(&effective);
-                            (effective.composed_value, identity)
-                        })
-                        .map_err(|error| error.to_string()),
-                )
-            }),
-    );
-    resolved.sort_by(|(left, _), (right, _)| left.cmp(right));
-    embed_identity_view_results(
-        &mut effective_surface.composed_value,
-        generation.request_engine_generation_identity().to_string(),
-        surface,
-        resolved,
-    )
+    embed_effective_surface_views(generation, project_root, None, effective_surface)
 }
 
 /// Descriptor-authority variant of
@@ -358,6 +288,20 @@ pub fn embed_effective_surface_views_in_generation_under_project_authority(
     generation: &CheckedEngineGeneration<'_>,
     project_root: &Path,
     project_content: &dyn ryeos_engine::project_content::AuthoritativeProjectContent,
+    effective_surface: &mut EffectiveItem,
+) -> EmbeddedSurfaceViews {
+    embed_effective_surface_views(
+        generation,
+        Some(project_root),
+        Some(project_content),
+        effective_surface,
+    )
+}
+
+fn embed_effective_surface_views(
+    generation: &CheckedEngineGeneration<'_>,
+    project_root: Option<&Path>,
+    project_content: Option<&dyn ryeos_engine::project_content::AuthoritativeProjectContent>,
     effective_surface: &mut EffectiveItem,
 ) -> EmbeddedSurfaceViews {
     let surface = EffectiveUiItemIdentity::from_effective_item(effective_surface);
@@ -373,28 +317,102 @@ pub fn embed_effective_surface_views_in_generation_under_project_authority(
             failures: Vec::new(),
         };
     }
+    let resolved = resolve_identity_views_in_generation(
+        generation,
+        project_root,
+        project_content,
+        unique_view_refs(&effective_surface.composed_value),
+    );
+    embed_identity_view_results(
+        &mut effective_surface.composed_value,
+        generation.request_engine_generation_identity().to_string(),
+        surface,
+        resolved,
+    )
+}
 
+/// Explicit View closure of a composition root whose own body is not rewritten
+/// (a shared-presentation Config). The root's identity is read from its
+/// effective canonical ref, which must name a Config or a Surface; the view
+/// values come back keyed by ref beside the identity closure.
+pub fn resolve_effective_ui_view_closure_in_generation(
+    generation: &CheckedEngineGeneration<'_>,
+    project_root: Option<&Path>,
+    project_content: Option<&dyn ryeos_engine::project_content::AuthoritativeProjectContent>,
+    effective_root: &EffectiveItem,
+    view_refs: Vec<String>,
+) -> Result<EmbeddedUiCompositionViews, String> {
+    if project_content.is_some() && project_root.is_none() {
+        return Err("UI composition content authority requires its project root".into());
+    }
+    let root = CanonicalRef::parse(&effective_root.canonical_ref)
+        .map_err(|error| format!("invalid composition root ref: {error}"))?;
+    if root.kind != "config" && root.kind != "surface" {
+        return Err("UI composition root must be config or surface".into());
+    }
+    let mut view_refs = view_refs;
+    view_refs.sort();
+    view_refs.dedup();
+    let resolved =
+        resolve_identity_views_in_generation(generation, project_root, project_content, view_refs);
+    let mut body = serde_json::json!({});
+    let embedded = embed_identity_view_results(
+        &mut body,
+        generation.request_engine_generation_identity().to_string(),
+        EffectiveUiItemIdentity::from_effective_item(effective_root),
+        resolved,
+    );
+    let values = match body.get("views").and_then(Value::as_object) {
+        Some(views) => views
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect(),
+        None => BTreeMap::new(),
+    };
+    Ok(EmbeddedUiCompositionViews {
+        identity: embedded.identity,
+        values,
+        failures: embedded.failures,
+    })
+}
+
+/// The single engine-owned resolution mechanism for a set of `view:` refs.
+/// Collection and schema validation belong to the composition consumer; this
+/// operation grants no access. Retained project authority is borrowed across
+/// the complete batch.
+fn resolve_identity_views_in_generation(
+    generation: &CheckedEngineGeneration<'_>,
+    project_root: Option<&Path>,
+    project_content: Option<&dyn ryeos_engine::project_content::AuthoritativeProjectContent>,
+    view_refs: Vec<String>,
+) -> Vec<(String, Result<(Value, EffectiveUiItemIdentity), String>)> {
     let mut resolved = Vec::new();
     let mut requests = Vec::new();
     let mut valid_refs = Vec::new();
-    for view_ref in unique_view_refs(&effective_surface.composed_value) {
+    for view_ref in view_refs {
         match CanonicalRef::parse(&view_ref) {
             Ok(item_ref) => {
                 valid_refs.push(view_ref);
                 requests.push(EffectiveItemRequest {
                     item_ref,
                     expected_kind: Some("view".to_string()),
-                    project_root: Some(project_root.to_path_buf()),
-                    subject_resolution_authority: SubjectResolutionAuthority::LiveFs,
+                    project_root: project_root.map(Path::to_path_buf),
+                    subject_resolution_authority: SubjectResolutionAuthority::for_live_project_root(
+                        project_root,
+                    ),
                 });
             }
             Err(error) => resolved.push((view_ref, Err(format!("invalid view ref: {error}")))),
         }
     }
+    let effective_items = match project_content {
+        Some(authority) => generation.effective_items_under_project_authority(&requests, authority),
+        None => generation.effective_items(&requests),
+    };
     resolved.extend(
         valid_refs
             .into_iter()
-            .zip(generation.effective_items_under_project_authority(&requests, project_content))
+            .zip(effective_items)
             .map(|(view_ref, result)| {
                 (
                     view_ref,
@@ -408,12 +426,7 @@ pub fn embed_effective_surface_views_in_generation_under_project_authority(
             }),
     );
     resolved.sort_by(|(left, _), (right, _)| left.cmp(right));
-    embed_identity_view_results(
-        &mut effective_surface.composed_value,
-        generation.request_engine_generation_identity().to_string(),
-        surface,
-        resolved,
-    )
+    resolved
 }
 
 #[cfg(test)]
