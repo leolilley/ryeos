@@ -688,3 +688,184 @@ fn pending_transition_on_a_live_dependency_is_a_conflict_at_its_exact_frontier()
     ));
     assert_eq!(event_rows(&db, "T-a"), START_ROWS);
 }
+
+#[test]
+fn read_anchors_run_the_callback_only_at_the_exact_frontier() {
+    let (_dir, db) = open();
+    create(&db, "T-a", KIND);
+    create(&db, "T-b", KIND);
+    let a = capture(&db, "T-a");
+    let b = capture(&db, "T-b");
+    let both = [a.clone(), b.clone(), a.clone()];
+
+    let mut ran = false;
+    let result = db
+        .with_thread_event_read_anchors(&guard(&db), &both, || {
+            ran = true;
+            Ok(7)
+        })
+        .unwrap();
+    assert_eq!(result, Some(7));
+    assert!(ran);
+
+    append(&db, "T-b", 1);
+    let mut ran = false;
+    let stale = db
+        .with_thread_event_read_anchors(&guard(&db), &both, || {
+            ran = true;
+            Ok(())
+        })
+        .unwrap();
+    assert!(stale.is_none() && !ran);
+
+    assert!(
+        db.with_thread_event_read_anchors(&guard(&db), &[], || Ok(()))
+            .is_err()
+    );
+}
+
+#[test]
+fn read_anchors_refuse_contradictory_cuts_and_unknown_chains() {
+    let (_dir, db) = open();
+    create(&db, "T-a", KIND);
+    let before = capture(&db, "T-a");
+    append(&db, "T-a", 1);
+    let after = capture(&db, "T-a");
+    assert!(
+        db.with_thread_event_read_anchors(&guard(&db), &[before, after.clone()], || Ok(()))
+            .is_err()
+    );
+
+    let mut foreign = after;
+    foreign.chain_root_id = "T-nowhere".into();
+    foreign.thread_id = "T-nowhere".into();
+    assert!(
+        db.with_thread_event_read_anchors(&guard(&db), &[foreign], || Ok(()))
+            .is_err()
+    );
+    assert!(!db.refs_root().join("T-nowhere").exists());
+}
+
+#[test]
+fn mixed_read_cut_requires_live_frontiers_and_the_exact_retired_fence() {
+    let (_dir, db) = open();
+    create(&db, "T-live", KIND);
+    create(&db, "T-other", KIND);
+    let manifest = "ab".repeat(32);
+    fence(&db, "T-retired", &manifest);
+    let retired = [RetiredChainDependency {
+        chain_root_id: "T-retired".into(),
+        manifest_hash: manifest.clone(),
+    }];
+    let live = capture(&db, "T-live");
+    let other = capture(&db, "T-other");
+    let run = |current: &[AuthoritativeThreadEventReadAnchor],
+               retired: &[RetiredChainDependency]| {
+        db.with_thread_event_read_mixed_cut(&guard(&db), current, retired, || Ok("ran"))
+    };
+
+    assert_eq!(
+        run(std::slice::from_ref(&live), &retired).unwrap(),
+        Some("ran")
+    );
+    assert_eq!(run(&[], &retired).unwrap(), Some("ran"));
+
+    // A fence naming another closure is an error, not a stale cut.
+    let wrong = [RetiredChainDependency {
+        chain_root_id: "T-retired".into(),
+        manifest_hash: "cd".repeat(32),
+    }];
+    assert!(run(&[], &wrong).is_err());
+    // An empty retired cut belongs to the live-only guard.
+    assert!(run(std::slice::from_ref(&live), &[]).is_err());
+    // A chain cannot be both live and retired.
+    let live_as_retired = [RetiredChainDependency {
+        chain_root_id: "T-other".into(),
+        manifest_hash: manifest.clone(),
+    }];
+    assert!(run(std::slice::from_ref(&other), &live_as_retired).is_err());
+    // Conflicting duplicate retired cuts refuse.
+    let conflicting = [
+        retired[0].clone(),
+        RetiredChainDependency {
+            chain_root_id: "T-retired".into(),
+            manifest_hash: "cd".repeat(32),
+        },
+    ];
+    assert!(run(&[], &conflicting).is_err());
+
+    // A chain that still has a head, and an unfenced identity, are stale.
+    assert!(run(&[], &live_as_retired).unwrap().is_none());
+    drop(db.acquire_chain_lock("T-ghost").unwrap());
+    let ghost = [RetiredChainDependency {
+        chain_root_id: "T-ghost".into(),
+        manifest_hash: manifest.clone(),
+    }];
+    assert!(run(&[], &ghost).unwrap().is_none());
+    // A chain never established at all is refused, not created.
+    let nowhere = [RetiredChainDependency {
+        chain_root_id: "T-nowhere".into(),
+        manifest_hash: manifest.clone(),
+    }];
+    assert!(run(&[], &nowhere).is_err());
+    assert!(!db.refs_root().join("T-nowhere").exists());
+
+    // A released closure no longer proves the retired cut.
+    fence(&db, "T-released", &manifest);
+    let released_lock = db.acquire_existing_chain_lock("T-released").unwrap();
+    db.recovery
+        .publish_retired_chain_release(&guard(&db), &released_lock, "T-released", &BTreeSet::new())
+        .unwrap();
+    drop(released_lock);
+    let released = [RetiredChainDependency {
+        chain_root_id: "T-released".into(),
+        manifest_hash: manifest,
+    }];
+    assert!(run(&[], &released).unwrap().is_none());
+
+    // A moved live frontier is stale even when the retired cut holds.
+    append(&db, "T-live", 1);
+    assert!(
+        run(std::slice::from_ref(&live), &retired)
+            .unwrap()
+            .is_none()
+    );
+    let live = capture(&db, "T-live");
+    assert_eq!(run(&[live], &retired).unwrap(), Some("ran"));
+}
+
+#[test]
+fn retained_thread_event_is_read_by_exact_canonical_hash() {
+    let (_dir, db) = open();
+    create(&db, "T-a", KIND);
+    append(&db, "T-a", 2);
+    let anchor = capture(&db, "T-a");
+    let page = db
+        .read_thread_event_page(&anchor, None, 1, 1 << 20, &guard(&db))
+        .unwrap();
+    let (hash, event) = page.events.into_iter().next().unwrap();
+
+    let read = db
+        .retained_thread_event_by_hash(&hash, &guard(&db))
+        .unwrap()
+        .expect("retained event");
+    assert_eq!(read.payload, event.payload);
+    assert_eq!(read.thread_seq, event.thread_seq);
+
+    assert!(
+        db.retained_thread_event_by_hash(&"f".repeat(64), &guard(&db))
+            .unwrap()
+            .is_none()
+    );
+    for malformed in [hash.to_uppercase(), "short".to_owned(), String::new()] {
+        assert!(
+            db.retained_thread_event_by_hash(&malformed, &guard(&db))
+                .is_err()
+        );
+    }
+    // A retained object that is not a thread event never decodes as one.
+    assert!(
+        db.retained_thread_event_by_hash(&anchor.snapshot_hash, &guard(&db))
+            .is_err()
+    );
+}
