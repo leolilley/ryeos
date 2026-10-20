@@ -40,32 +40,32 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
             HandlerError::BadRequest("invalid field definition thread_id".to_string()).into(),
         );
     }
-    crate::thread_authorization::authorize_exact_thread_subjects(
+    let signed = crate::thread_authorization::authorize_exact_thread_subjects(
         &ctx,
         &state,
         &caller,
         &[&request.thread_id],
-    )?;
-    let Some(thread) = state.threads.get_thread_view(&request.thread_id)? else {
-        return Err(HandlerError::NotFound.into());
-    };
-    let run_identity = state
+    )?
+    .pop()
+    .expect("one exact signed subject requested");
+    let admitted = state
         .state_store
-        .graph_run_list_identities(std::slice::from_ref(&request.thread_id))?
-        .remove(&request.thread_id);
+        .admitted_program_evidence(&request.thread_id);
+    let verified_admitted = admitted
+        .as_ref()
+        .ok()
+        .and_then(Option::as_ref)
+        .filter(|evidence| {
+            signed.admitted_launch_capsule_hash.as_deref()
+                == Some(evidence.admitted_launch_capsule_hash.as_str())
+        });
     let expected_ref = request
         .definition_ref
         .clone()
-        .or_else(|| {
-            run_identity
-                .as_ref()
-                .map(|identity| identity.definition_ref.clone())
-        })
-        .unwrap_or_else(|| thread.thread.item_ref.clone());
+        .or_else(|| verified_admitted.map(|evidence| evidence.subject.canonical_ref.clone()))
+        .unwrap_or_else(|| signed.item_ref.clone());
     let expected_digest = request.effective_definition_digest.clone().or_else(|| {
-        run_identity
-            .as_ref()
-            .map(|identity| identity.effective_definition_digest.clone())
+        verified_admitted.map(|evidence| evidence.effective_definition_digest.as_str().to_string())
     });
     let subject = FieldFactSubject {
         kind: "thread".to_string(),
@@ -75,11 +75,24 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
     };
     let mut builder = FieldFactsBuilder::new("definition", SERVICE_REF, subject);
 
-    let evidence = match state
-        .state_store
-        .admitted_program_evidence(&request.thread_id)
-    {
-        Ok(Some(evidence)) => evidence,
+    let evidence = match admitted {
+        Ok(Some(evidence))
+            if signed.admitted_launch_capsule_hash.as_deref()
+                == Some(evidence.admitted_launch_capsule_hash.as_str()) =>
+        {
+            evidence
+        }
+        Ok(Some(_)) => {
+            add_definition_shell(
+                &mut builder,
+                &request.thread_id,
+                &expected_ref,
+                expected_digest.as_deref(),
+                "admitted_program_invalid",
+                "authorized thread and admitted capsule identity disagree",
+            )?;
+            return serde_json::to_value(builder.finish()?).map_err(Into::into);
+        }
         Ok(None) => {
             add_definition_shell(
                 &mut builder,

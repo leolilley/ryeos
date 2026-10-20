@@ -2621,3 +2621,140 @@ async fn an_executable_admission_the_signed_binding_does_not_declare_is_refused_
         "the refused preparation must not advance the signed seat: {message}"
     );
 }
+
+#[tokio::test]
+async fn thread_inspection_facets_cross_a_fixed_anchor_page_boundary() {
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+    let (session_id, ctx, producer, _) =
+        test_state::live_presentation_with_surface(&state, "surface:ryeos/ui/assistant-observe")
+            .await;
+    let detail = state
+        .state_store
+        .get_thread(&producer.thread_id)
+        .unwrap()
+        .unwrap();
+    let mut events = vec![ryeos_app::state_store::NewEventRecord {
+        event_type: ryeos_state::event_types::THREAD_FACET_SET.into(),
+        storage_class: "indexed".into(),
+        payload: json!({"key": "phase", "value": "old"}),
+    }];
+    for index in 0..64 {
+        events.push(ryeos_app::state_store::NewEventRecord {
+            event_type: ryeos_state::event_types::THREAD_FACET_SET.into(),
+            storage_class: "indexed".into(),
+            payload: json!({"key": format!("filler.{index}"), "value": "present"}),
+        });
+    }
+    events.push(ryeos_app::state_store::NewEventRecord {
+        event_type: ryeos_state::event_types::THREAD_FACET_SET.into(),
+        storage_class: "indexed".into(),
+        payload: json!({"key": "phase", "value": "new"}),
+    });
+    events.push(ryeos_app::state_store::NewEventRecord {
+        event_type: ryeos_state::event_types::THREAD_FACET_SET.into(),
+        storage_class: "journal".into(),
+        payload: json!({"key": "phase", "value": "journal"}),
+    });
+    state
+        .threads
+        .append_thread_events(&detail.chain_root_id, &detail.thread_id, &events)
+        .unwrap()
+        .expect("signed facet fixture commits");
+    let session = get_ui_state(&state)
+        .unwrap()
+        .browser_sessions
+        .get_session(&session_id)
+        .unwrap();
+    let attachment = session.attachments[&session.root_attachment_id].clone();
+    let inspected = ryeos_ui::seat_auth::with_compiled_ui_attachment(
+        attachment,
+        (ryeos_ui::handlers::ui_threads::INSPECT_DESCRIPTOR.handler)(
+            json!({"thread_id": producer.thread_id, "event_limit": 1}),
+            ctx,
+            Arc::new(state),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(inspected["facets"]["phase"], "new");
+    assert_eq!(inspected["facets"]["filler.0"], "present");
+    assert_eq!(inspected["facets"]["filler.63"], "present");
+    assert!(
+        inspected["evidence_coverage"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| { entry["subject"] == "facets" && entry["state"] == "complete" })
+    );
+}
+
+#[tokio::test]
+async fn thread_inspection_does_not_publish_a_partial_facet_map_at_page_budget() {
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+    let (session_id, ctx, producer, _) =
+        test_state::live_presentation_with_surface(&state, "surface:ryeos/ui/assistant-observe")
+            .await;
+    let detail = state
+        .state_store
+        .get_thread(&producer.thread_id)
+        .unwrap()
+        .unwrap();
+    state
+        .threads
+        .append_thread_events(
+            &detail.chain_root_id,
+            &detail.thread_id,
+            &[ryeos_app::state_store::NewEventRecord {
+                event_type: ryeos_state::event_types::THREAD_FACET_SET.into(),
+                storage_class: "indexed".into(),
+                payload: json!({"key": "phase", "value": "old"}),
+            }],
+        )
+        .unwrap()
+        .expect("signed facet fixture commits");
+    // More than the inspection reader's eight 64-event pages. Journal
+    // testimony is signed but not a facet; it must not turn an unfinished
+    // walk into an authoritative empty or partial facet collection.
+    for batch in 0..9 {
+        let events = (0..64)
+            .map(|index| ryeos_app::state_store::NewEventRecord {
+                event_type: "ui.test.facet-history-padding".into(),
+                storage_class: "journal".into(),
+                payload: json!({"batch": batch, "index": index}),
+            })
+            .collect::<Vec<_>>();
+        state
+            .threads
+            .append_thread_events(&detail.chain_root_id, &detail.thread_id, &events)
+            .unwrap()
+            .expect("signed journal fixture commits");
+    }
+    let session = get_ui_state(&state)
+        .unwrap()
+        .browser_sessions
+        .get_session(&session_id)
+        .unwrap();
+    let attachment = session.attachments[&session.root_attachment_id].clone();
+    let inspected = ryeos_ui::seat_auth::with_compiled_ui_attachment(
+        attachment,
+        (ryeos_ui::handlers::ui_threads::INSPECT_DESCRIPTOR.handler)(
+            json!({"thread_id": producer.thread_id, "event_limit": 1}),
+            ctx,
+            Arc::new(state),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(inspected["facets"], json!({}));
+    assert!(
+        inspected["evidence_coverage"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| {
+                entry["subject"] == "facets"
+                    && entry["state"] == "unavailable"
+                    && entry["reason"] == "signed_facet_map_not_proven"
+            })
+    );
+}

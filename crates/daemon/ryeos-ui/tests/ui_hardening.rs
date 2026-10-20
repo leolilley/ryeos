@@ -377,3 +377,190 @@ async fn items_list_applies_filters_and_accepts_include_shadowed() {
     assert_eq!(items[0]["item_kind"], "tool");
     assert_eq!(items[0]["space"], "bundle");
 }
+
+#[tokio::test]
+async fn activity_returns_only_signed_subjects_owned_by_projectless_caller() {
+    use ryeos_state::objects::{
+        CapturedItemTrustClass, CapturedNodeHistoryPolicyProvenance, CapturedPolicyProvenance,
+        CapturedThreadHistoryPolicy, EnvironmentAuthority, ExecutionProjectAuthority,
+        ThreadHistoryRetention,
+    };
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
+    for (thread_id, principal) in [("T-visible", "fp:test"), ("T-private", "fp:foreign")] {
+        state
+            .state_store
+            .create_thread_for_test(&ryeos_app::state_store::NewThreadRecord {
+                thread_id: thread_id.into(),
+                chain_root_id: thread_id.into(),
+                kind: "tool".into(),
+                item_ref: "tool:test/activity".into(),
+                executor_ref: "test/executor".into(),
+                launch_mode: "wait".into(),
+                current_site_id: "site:testhost".into(),
+                origin_site_id: "site:testhost".into(),
+                upstream_thread_id: None,
+                requested_by: Some(principal.into()),
+                project_root: None,
+                project_authority: ExecutionProjectAuthority::Projectless {
+                    environment: EnvironmentAuthority::None,
+                },
+                base_project_snapshot_hash: None,
+                usage_subject: None,
+                usage_subject_asserted_by: None,
+                captured_history_policy: Some(CapturedThreadHistoryPolicy {
+                    retention: ThreadHistoryRetention::Durable,
+                    canonical_item_ref: "tool:test/activity".into(),
+                    item_content_hash: "a".repeat(64),
+                    item_signer_fingerprint: Some("a".repeat(64)),
+                    item_trust_class: CapturedItemTrustClass::Trusted,
+                    kind_schema_content_hash: "a".repeat(64),
+                    resolved_from: CapturedPolicyProvenance::NodeDefault {
+                        node_policy: CapturedNodeHistoryPolicyProvenance::test_policy(),
+                    },
+                }),
+            })
+            .unwrap();
+    }
+    let page = state
+        .state_store
+        .recent_thread_events("T-visible", "T-visible", None, 64, 128 * 1024)
+        .expect("owned fixture has readable event projection");
+    assert!(
+        !page.events.is_empty(),
+        "thread admission must publish signed creation evidence"
+    );
+    state
+        .state_store
+        .authenticate_execution_event_candidates("T-visible", &page.events)
+        .expect("owned fixture event projection must match signed admission evidence");
+    let (context, attachment) = mint_session(&state, None);
+    let result = ryeos_ui::seat_auth::with_compiled_ui_attachment(
+        attachment,
+        (ryeos_ui::handlers::ui_node::ACTIVITY_DESCRIPTOR.handler)(
+            json!({}),
+            context,
+            Arc::new(state),
+        ),
+    )
+    .await
+    .expect("authorized activity observation");
+    assert_eq!(result["pulse_coverage"]["observed_threads"], 1);
+    assert_eq!(result["pulse"][0]["label"], "observed running");
+    assert_eq!(result["pulse"][0]["value"], "1");
+    let events = result["events"].as_array().unwrap();
+    assert!(
+        !events.is_empty(),
+        "owned signed events must remain inspectable: {result}"
+    );
+    assert!(events.iter().all(|event| event["thread_id"] == "T-visible"));
+    let encoded = serde_json::to_string(&result).unwrap();
+    assert!(!encoded.contains("T-private"));
+    assert!(!encoded.contains("fp:foreign"));
+    assert_eq!(result["usage_coverage"]["state"], "unavailable");
+    assert_eq!(
+        result["pulse"].as_array().unwrap().len(),
+        4,
+        "no invented usage or spend totals"
+    );
+}
+
+#[tokio::test]
+async fn activity_bound_project_excludes_foreign_project_and_projectless_subjects() {
+    use ryeos_state::objects::{
+        CapturedItemTrustClass, CapturedNodeHistoryPolicyProvenance, CapturedPolicyProvenance,
+        CapturedThreadHistoryPolicy, EnvironmentAuthority, ExecutionProjectAuthority,
+        LiveFilesystemConfinement, LiveProjectAccess, ThreadHistoryRetention,
+    };
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
+    let admitted = tempfile::tempdir().unwrap();
+    let foreign = tempfile::tempdir().unwrap();
+    let admitted_root = admitted.path().canonicalize().unwrap();
+    let foreign_root = foreign.path().canonicalize().unwrap();
+    // Live-project visibility follows the admitted project, not only creator
+    // identity. Own work elsewhere must not leak into this project's activity.
+    for (thread_id, principal, root) in [
+        ("T-visible", "fp:collaborator", Some(admitted_root.clone())),
+        ("T-private", "fp:test", Some(foreign_root)),
+        ("T-projectless", "fp:test", None),
+    ] {
+        let authority = match &root {
+            // These are signed live execution subjects on an unconfined test
+            // host, not read-only filesystem realizations. The UI call below
+            // remains a read-only observation and gains no execution authority.
+            Some(root) => ExecutionProjectAuthority::live(
+                root.clone(),
+                root.to_string_lossy().into_owned(),
+                LiveProjectAccess::ReadWrite,
+                LiveFilesystemConfinement::UnconfinedHost,
+                EnvironmentAuthority::None,
+                vec!["project".to_owned()],
+            )
+            .unwrap(),
+            None => ExecutionProjectAuthority::Projectless {
+                environment: EnvironmentAuthority::None,
+            },
+        };
+        state
+            .state_store
+            .create_thread_for_test(&ryeos_app::state_store::NewThreadRecord {
+                thread_id: thread_id.into(),
+                chain_root_id: thread_id.into(),
+                kind: "tool".into(),
+                item_ref: "tool:test/activity".into(),
+                executor_ref: "test/executor".into(),
+                launch_mode: "wait".into(),
+                current_site_id: "site:testhost".into(),
+                origin_site_id: "site:testhost".into(),
+                upstream_thread_id: None,
+                requested_by: Some(principal.into()),
+                project_root: root,
+                project_authority: authority,
+                base_project_snapshot_hash: None,
+                usage_subject: None,
+                usage_subject_asserted_by: None,
+                captured_history_policy: Some(CapturedThreadHistoryPolicy {
+                    retention: ThreadHistoryRetention::Durable,
+                    canonical_item_ref: "tool:test/activity".into(),
+                    item_content_hash: "a".repeat(64),
+                    item_signer_fingerprint: Some("a".repeat(64)),
+                    item_trust_class: CapturedItemTrustClass::Trusted,
+                    kind_schema_content_hash: "a".repeat(64),
+                    resolved_from: CapturedPolicyProvenance::NodeDefault {
+                        node_policy: CapturedNodeHistoryPolicyProvenance::test_policy(),
+                    },
+                }),
+            })
+            .unwrap();
+    }
+    let (context, attachment) =
+        mint_session(&state, Some(admitted_root.to_string_lossy().into_owned()));
+    let result = ryeos_ui::seat_auth::with_compiled_ui_attachment(
+        attachment,
+        (ryeos_ui::handlers::ui_node::ACTIVITY_DESCRIPTOR.handler)(
+            json!({}),
+            context,
+            Arc::new(state),
+        ),
+    )
+    .await
+    .expect("authorized activity observation");
+    assert_eq!(result["pulse_coverage"]["observed_threads"], 1);
+    assert_eq!(result["pulse"][0]["label"], "observed running");
+    assert_eq!(result["pulse"][0]["value"], "1");
+    let events = result["events"].as_array().unwrap();
+    assert!(
+        !events.is_empty(),
+        "owned signed events must remain inspectable: {result}"
+    );
+    assert!(events.iter().all(|event| event["thread_id"] == "T-visible"));
+    let encoded = serde_json::to_string(&result).unwrap();
+    assert!(!encoded.contains("T-private"));
+    assert!(!encoded.contains("T-projectless"));
+    assert!(!encoded.contains("fp:test"));
+    assert_eq!(result["usage_coverage"]["state"], "unavailable");
+    assert_eq!(
+        result["pulse"].as_array().unwrap().len(),
+        4,
+        "no invented usage or spend totals"
+    );
+}

@@ -657,6 +657,7 @@ pub struct PersistedEventRef {
     pub chain_root_id: String,
     pub chain_seq: i64,
     pub event_hash: String,
+    pub thread_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1420,6 +1421,17 @@ pub struct ThreadListItem {
 /// One durable row in an execution-tree closure. The embedded list item keeps
 /// the same bounded enrichment path as the thread dashboard; the extra fields
 /// are structural facts consumed by a hierarchy-aware view.
+/// Projection-located structural edge offered for signed execution-tree proof.
+/// No field in this candidate grants visibility or establishes lineage.
+#[derive(Debug, Clone)]
+pub struct ExecutionTreeEdgeCandidate {
+    pub parent_thread_id: String,
+    pub parent_chain_root_id: String,
+    pub child_thread_id: String,
+    pub child_chain_root_id: String,
+    pub relation: String,
+}
+
 #[derive(Debug)]
 pub struct ExecutionTreeItem {
     pub item: ThreadListItem,
@@ -1444,20 +1456,6 @@ pub struct ThreadListEnrichment {
     pub facets: HashMap<String, Vec<(String, String)>>,
     pub current_graph_nodes: HashMap<String, (String, u32)>,
     pub terminal_error_previews: HashMap<String, String>,
-}
-
-/// One graph run's identity lifted from the latest bounded
-/// `graph_step_started` payload for a thread-list page. This preserves the
-/// existing node-keyed list summary while allowing generic run sources to
-/// link a row to the exact definition and graph-run occurrence without N+1
-/// event replay.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct GraphRunListIdentity {
-    pub definition_ref: String,
-    pub effective_definition_digest: String,
-    pub graph_run_id: String,
-    pub node: String,
-    pub step: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -1490,11 +1488,24 @@ pub struct AdmittedExecutionComparisonEvidence {
 pub struct AuthoritativeThreadSubject {
     pub thread_id: String,
     pub chain_root_id: String,
+    pub kind: String,
     pub item_ref: String,
+    pub executor_ref: String,
+    pub launch_mode: String,
+    pub current_site_id: String,
+    pub origin_site_id: String,
+    pub upstream_thread_id: Option<String>,
+    pub project_root: Option<PathBuf>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
     pub status: ryeos_state::objects::ThreadStatus,
     pub requested_by: Option<String>,
     pub project_authority: ryeos_state::objects::ExecutionProjectAuthority,
     pub admitted_launch_capsule_hash: Option<String>,
+    pub result_project_snapshot_hash: Option<String>,
+    pub result_workspace_output_capture_hash: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -14610,11 +14621,25 @@ impl StateStore {
                 Ok(Some(AuthoritativeThreadSubject {
                     thread_id: snapshot.thread_id,
                     chain_root_id: snapshot.chain_root_id,
+                    kind: snapshot.kind_name,
                     item_ref: snapshot.item_ref,
+                    executor_ref: snapshot.executor_ref,
+                    launch_mode: snapshot.launch_mode,
+                    current_site_id: snapshot.current_site_id,
+                    origin_site_id: snapshot.origin_site_id,
+                    upstream_thread_id: snapshot.upstream_thread_id,
+                    project_root: snapshot.project_root,
+                    created_at: snapshot.created_at,
+                    updated_at: snapshot.updated_at,
+                    started_at: snapshot.started_at,
+                    finished_at: snapshot.finished_at,
                     status: snapshot.status,
                     requested_by: snapshot.requested_by,
                     project_authority: snapshot.project_authority,
                     admitted_launch_capsule_hash: snapshot.admitted_launch_capsule_hash,
+                    result_project_snapshot_hash: snapshot.result_project_snapshot_hash,
+                    result_workspace_output_capture_hash: snapshot
+                        .result_workspace_output_capture_hash,
                 }))
             })
             .collect()
@@ -17095,6 +17120,51 @@ impl StateStore {
         Self::rows_to_list_items(thread_rows, successor_payloads)
     }
 
+    /// Bounded projection candidates for a signed-first listing. Unlike the
+    /// general dashboard list this does not enrich rows with projected
+    /// continuation facts; the caller must check every candidate against its
+    /// signed subject before displaying it or advancing to a new page.
+    pub fn list_threads_candidate_page(
+        &self,
+        limit: usize,
+        filter: &queries::ThreadListFilter,
+        sort: queries::ThreadSort,
+        after: Option<&queries::ThreadListCursor>,
+    ) -> Result<Vec<ThreadListItem>> {
+        let rows = {
+            let g = self.lock()?;
+            queries::list_threads_candidate_page(
+                g.state_db.projection(),
+                limit,
+                filter,
+                sort,
+                after,
+            )?
+        };
+        Ok(rows
+            .into_iter()
+            .map(|row| ThreadListItem {
+                thread_id: row.thread_id,
+                chain_root_id: row.chain_root_id,
+                kind: row.kind,
+                status: row.status,
+                item_ref: row.item_ref,
+                launch_mode: row.launch_mode,
+                current_site_id: row.current_site_id,
+                origin_site_id: row.origin_site_id,
+                upstream_thread_id: row.upstream_thread_id,
+                successor_thread_id: None,
+                requested_by: row.requested_by,
+                project_root: row.project_root,
+                project_authority: Some(row.project_authority),
+                lifecycle_authority: None,
+                admitted_launch_capsule_hash: row.admitted_launch_capsule_hash,
+                created_at: row.created_at,
+                updated_at: row.updated_at,
+            })
+            .collect())
+    }
+
     /// Bounded execution closure containing continuation and cross-chain spawn
     /// edges. The query resolves an arbitrary selected thread to its oldest
     /// reachable ancestor, so opening the tree from a child still shows its
@@ -17248,69 +17318,6 @@ impl StateStore {
             follow_waiters,
             terminal_error_previews,
         )
-    }
-
-    /// Load graph-run identity for a bounded thread page in one projection
-    /// query. Missing or malformed payloads produce no identity rather than a
-    /// guessed link to mutable definition content.
-    pub fn graph_run_list_identities(
-        &self,
-        thread_ids: &[String],
-    ) -> Result<HashMap<String, GraphRunListIdentity>> {
-        let payloads = {
-            let g = self.lock()?;
-            queries::current_graph_node_payloads(
-                g.state_db.projection(),
-                thread_ids,
-                MAX_THREAD_LIST_ENRICHMENT_THREADS,
-                MAX_THREAD_LIST_EVENT_PAYLOAD_BYTES,
-                MAX_THREAD_LIST_EVENT_PAYLOAD_TOTAL_BYTES,
-            )?
-        };
-        let mut identities = HashMap::new();
-        for (thread_id, payload) in payloads {
-            let payload: Value = match serde_json::from_slice(&payload) {
-                Ok(payload) => payload,
-                Err(error) => {
-                    tracing::warn!(
-                        %thread_id,
-                        %error,
-                        "ignoring malformed graph identity payload in field run enrichment"
-                    );
-                    continue;
-                }
-            };
-            let Some(definition_ref) = payload.get("definition_ref").and_then(Value::as_str) else {
-                continue;
-            };
-            let Some(effective_definition_digest) = payload
-                .get("effective_definition_digest")
-                .and_then(Value::as_str)
-            else {
-                continue;
-            };
-            let Some(graph_run_id) = payload.get("graph_run_id").and_then(Value::as_str) else {
-                continue;
-            };
-            let Some(node) = payload.get("node").and_then(Value::as_str) else {
-                continue;
-            };
-            let step = payload.get("step").and_then(Value::as_u64).unwrap_or(0);
-            let Ok(step) = u32::try_from(step) else {
-                continue;
-            };
-            identities.insert(
-                thread_id,
-                GraphRunListIdentity {
-                    definition_ref: definition_ref.to_string(),
-                    effective_definition_digest: effective_definition_digest.to_string(),
-                    graph_run_id: graph_run_id.to_string(),
-                    node: node.to_string(),
-                    step,
-                },
-            );
-        }
-        Ok(identities)
     }
 
     pub fn thread_list_enrichment_with_waiters(
@@ -25403,6 +25410,224 @@ impl StateStore {
             .collect()
     }
 
+    /// Authenticate the small current/previous/next/live-head navigation set
+    /// against each exact thread's fixed signed endpoint. The projected refs
+    /// are locators only; returned refs are rebuilt from CAS events.
+    pub fn authenticate_execution_event_refs(
+        &self,
+        chain_root_id: &str,
+        candidates: &[PersistedEventRef],
+    ) -> Result<Vec<PersistedEventRef>> {
+        const MAX_REFS: usize = 4;
+        const PAGE_EVENTS: u64 = 64;
+        const PAGE_BYTES: u64 = 2 * 1024 * 1024;
+        if candidates.len() > MAX_REFS {
+            bail!("execution event navigation exceeds its reference bound");
+        }
+        let mut by_thread = BTreeMap::<&str, BTreeMap<&str, Vec<usize>>>::new();
+        for (index, candidate) in candidates.iter().enumerate() {
+            if candidate.chain_root_id != chain_root_id
+                || candidate.chain_seq < 1
+                || candidate.thread_id.is_empty()
+                || !lillux::valid_hash(&candidate.event_hash)
+                || candidate
+                    .event_hash
+                    .bytes()
+                    .any(|byte| byte.is_ascii_uppercase())
+            {
+                bail!("execution event navigation has contradictory coordinates");
+            }
+            let positions = by_thread
+                .entry(&candidate.thread_id)
+                .or_default()
+                .entry(&candidate.event_hash)
+                .or_default();
+            if positions
+                .first()
+                .is_some_and(|first| &candidates[*first] != candidate)
+            {
+                bail!("execution event navigation repeats a hash with different coordinates");
+            }
+            positions.push(index);
+        }
+        let mut authenticated = vec![None; candidates.len()];
+        for (thread_id, pending) in &mut by_thread {
+            let anchor = self
+                .capture_thread_event_read_anchor(chain_root_id, thread_id)?
+                .ok_or_else(|| anyhow!("execution event navigation thread is absent"))?;
+            let mut progress = None;
+            loop {
+                let page = self.read_thread_event_page(
+                    &anchor,
+                    progress.as_ref(),
+                    PAGE_EVENTS,
+                    PAGE_BYTES,
+                )?;
+                for (hash, event) in page.events {
+                    if let Some(positions) = pending.remove(hash.as_str()) {
+                        let candidate = &candidates[positions[0]];
+                        let chain_seq = i64::try_from(event.chain_seq)
+                            .context("signed navigation chain sequence exceeds storage range")?;
+                        if event.chain_root_id != candidate.chain_root_id
+                            || event.thread_id != candidate.thread_id
+                            || chain_seq != candidate.chain_seq
+                        {
+                            bail!("execution event navigation contradicts signed content");
+                        }
+                        let signed = PersistedEventRef {
+                            chain_root_id: event.chain_root_id,
+                            chain_seq,
+                            event_hash: hash,
+                            thread_id: event.thread_id,
+                        };
+                        for index in positions {
+                            authenticated[index] = Some(signed.clone());
+                        }
+                    }
+                }
+                progress = page.progress;
+                if progress.is_none() || pending.is_empty() {
+                    break;
+                }
+            }
+            if !pending.is_empty() {
+                bail!("execution event navigation is absent from signed thread history");
+            }
+        }
+        authenticated
+            .into_iter()
+            .map(|record| {
+                record.ok_or_else(|| anyhow!("execution event navigation proof is incomplete"))
+            })
+            .collect()
+    }
+
+    /// Prove every projection-located execution-tree edge from signed child
+    /// identity and a signed parent event. A child snapshot's upstream link
+    /// alone does not prove the source decision; a projected edge/reason alone
+    /// is never authority. Walk parent histories through bounded CAS pages and
+    /// release each page guard before continuing. No total-history ceiling is
+    /// inferred from the UI node limit.
+    pub fn verify_execution_tree_edges(&self, edges: &[ExecutionTreeEdgeCandidate]) -> Result<()> {
+        const MAX_EDGES: usize = 1_000;
+        const PAGE_EVENTS: u64 = 64;
+        const PAGE_BYTES: u64 = 2 * 1024 * 1024;
+        if edges.len() > MAX_EDGES {
+            bail!("execution tree edge proof exceeds its node bound");
+        }
+        let mut by_parent =
+            BTreeMap::<(&str, &str), BTreeMap<&str, Vec<&ExecutionTreeEdgeCandidate>>>::new();
+        for edge in edges {
+            if edge.parent_thread_id.is_empty()
+                || edge.child_thread_id.is_empty()
+                || edge.parent_thread_id == edge.child_thread_id
+                || edge.parent_chain_root_id.is_empty()
+                || edge.child_chain_root_id.is_empty()
+                || !matches!(edge.relation.as_str(), "continued" | "spawned" | "follow")
+            {
+                bail!("execution tree edge candidate is malformed");
+            }
+            let (parent, child) = {
+                let g = self.lock()?;
+                let parent = g
+                    .state_db
+                    .read_authoritative_thread_snapshot(
+                        &edge.parent_chain_root_id,
+                        &edge.parent_thread_id,
+                    )?
+                    .ok_or_else(|| anyhow!("execution tree parent is absent from signed state"))?;
+                let child = g
+                    .state_db
+                    .read_authoritative_thread_snapshot(
+                        &edge.child_chain_root_id,
+                        &edge.child_thread_id,
+                    )?
+                    .ok_or_else(|| anyhow!("execution tree child is absent from signed state"))?;
+                (parent, child)
+            };
+            if parent.thread_id != edge.parent_thread_id
+                || parent.chain_root_id != edge.parent_chain_root_id
+                || child.thread_id != edge.child_thread_id
+                || child.chain_root_id != edge.child_chain_root_id
+            {
+                bail!("execution tree edge identity contradicts signed snapshots");
+            }
+            let continued = child.upstream_thread_id.as_deref()
+                == Some(edge.parent_thread_id.as_str())
+                && edge.parent_chain_root_id == edge.child_chain_root_id;
+            if (edge.relation == "continued") != continued {
+                bail!("execution tree edge relation contradicts signed child lineage");
+            }
+            let matching = by_parent
+                .entry((
+                    edge.parent_chain_root_id.as_str(),
+                    edge.parent_thread_id.as_str(),
+                ))
+                .or_default()
+                .entry(edge.child_thread_id.as_str())
+                .or_default();
+            if matching.first().is_some_and(|first| {
+                first.relation != edge.relation
+                    || first.child_chain_root_id != edge.child_chain_root_id
+            }) {
+                bail!("execution tree repeats an edge with contradictory identity");
+            }
+            matching.push(edge);
+        }
+        // One authenticated traversal serves every candidate child of this
+        // parent. A wide fan-out must not rescan the parent's whole history
+        // once per child or retain unbounded event pages in memory.
+        for ((parent_chain_root_id, parent_thread_id), mut pending) in by_parent {
+            let anchor = self
+                .capture_thread_event_read_anchor(parent_chain_root_id, parent_thread_id)?
+                .ok_or_else(|| anyhow!("execution tree parent has no signed event anchor"))?;
+            let mut progress = None;
+            loop {
+                let page = self.read_thread_event_page(
+                    &anchor,
+                    progress.as_ref(),
+                    PAGE_EVENTS,
+                    PAGE_BYTES,
+                )?;
+                for (_, event) in page.events {
+                    let key = match event.event_type.as_str() {
+                        ryeos_state::event_types::THREAD_CONTINUED => "successor_thread_id",
+                        ryeos_state::event_types::CHILD_THREAD_SPAWNED => "child_thread_id",
+                        _ => continue,
+                    };
+                    let Some(child_id) = event.payload.get(key).and_then(Value::as_str) else {
+                        continue;
+                    };
+                    let Some(matching) = pending.get(child_id) else {
+                        continue;
+                    };
+                    let signed_relation =
+                        if event.event_type == ryeos_state::event_types::THREAD_CONTINUED {
+                            "continued"
+                        } else if event.payload.get("spawn_reason").and_then(Value::as_str)
+                            == Some("follow")
+                        {
+                            "follow"
+                        } else {
+                            "spawned"
+                        };
+                    if matching.iter().any(|edge| edge.relation != signed_relation) {
+                        bail!("execution tree relation contradicts signed parent event");
+                    }
+                    pending.remove(child_id);
+                }
+                progress = page.progress;
+                if pending.is_empty() || progress.is_none() {
+                    break;
+                }
+            }
+            if !pending.is_empty() {
+                bail!("execution tree edge has no signed parent decision");
+            }
+        }
+        Ok(())
+    }
+
     pub fn chain_event_navigation(
         &self,
         chain_root_id: &str,
@@ -25413,6 +25638,7 @@ impl StateStore {
                 chain_root_id: row.chain_root_id,
                 chain_seq: row.chain_seq,
                 event_hash: row.event_hash,
+                thread_id: row.thread_id,
             }
         }
 
