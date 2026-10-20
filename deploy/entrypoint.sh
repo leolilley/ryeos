@@ -188,6 +188,7 @@ run_as_node_account() {
   else
     echo "[entrypoint] host refuses capability bounding-set changes; dropping root without clearing the bounding set" >&2
   fi
+  export HOME=/data/app
   exec setpriv --reuid="$NODE_UID" --regid="$NODE_GID" --clear-groups \
     --no-new-privs "${cap_args[@]}" \
     -- "${BASH_SOURCE[0]}" "$@"

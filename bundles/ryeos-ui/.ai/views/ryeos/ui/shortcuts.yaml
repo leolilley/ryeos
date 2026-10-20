@@ -1,0 +1,7 @@
+# ryeos:signed:2026-10-19T22:29:41Z:4eefc529e436b62552e7c727d2c8cd2d0572ce6c78e99c6c9e33bc99590b9b26:9Zir7FPzL/8Kg4+0gFxV+2iP75EsYfDIbZY30oocS9TVdMauC+zQBX8GBaFmw2T+Ybvf8uM5tEsMOTbDIIzkBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: presentation-shortcuts
+title: Shortcuts
+version: "1.0.0"
+description: Current shared Rust keymap; labels are presentation data, not execution authority.
+widget: rows
+local_projection: shortcuts

@@ -1255,7 +1255,10 @@ fn run(lifecycle: &mut BridgeLifecycle) -> Result<()> {
                 bail!("{reason}");
             }
         }
-        if pending_workload_termination.is_some() {
+        if let Some(cancelled_request_id) = pending_workload_termination
+            .as_ref()
+            .map(|pending| pending.0.clone())
+        {
             match session_incoming.recv_timeout(Duration::from_millis(50)) {
                 Ok(Ok(frame)) => {
                     if validate_incoming_frame(&frame).is_ok()
@@ -1267,10 +1270,6 @@ fn run(lifecycle: &mut BridgeLifecycle) -> Result<()> {
                             );
                             continue;
                         };
-                        let cancelled_request_id = &pending_workload_termination
-                            .as_ref()
-                            .expect("checked pending workload termination")
-                            .0;
                         if request_id == cancelled_request_id
                             || pending_cancelled_responses.contains(request_id)
                         {
@@ -4887,13 +4886,15 @@ mod tests {
                 &json!({"message":{"params":params}})
             ));
         }
-        let mut queue = EventQueue::default();
-        queue.command_progress = Some(CommandProgressBarrier {
-            request_id: "command-one".to_owned(),
-            digest: "a".repeat(64),
-            acknowledged: false,
-            deadline: MonotonicDeadline::after(OBSERVATION_ACK_TIMEOUT),
-        });
+        let mut queue = EventQueue {
+            command_progress: Some(CommandProgressBarrier {
+                request_id: "command-one".to_owned(),
+                digest: "a".repeat(64),
+                acknowledged: false,
+                deadline: MonotonicDeadline::after(OBSERVATION_ACK_TIMEOUT),
+            }),
+            ..Default::default()
+        };
         assert!(
             queue
                 .acknowledge_command_progress("command-two", Some(&"a".repeat(64)))

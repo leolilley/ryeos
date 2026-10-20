@@ -399,7 +399,7 @@ impl SchedulerResetPreview<'_> {
                 self.quota_claim
                     .retain_failure(error, QuotaFailurePhase::Admission)
             })?;
-        let reference = match ryeos_scheduler::db::SchedulerDb::prepare_scheduler_schema_reference(
+        let reference = match ryeos_scheduler_contract::prepare_scheduler_schema_reference(
             Arc::clone(&factory),
             inputs,
         ) {

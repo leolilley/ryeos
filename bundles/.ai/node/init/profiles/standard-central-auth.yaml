@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-18T10:11:10Z:37a2f3299a1424ac92dbd4093ba75d26f886e68b18c2883ee4af5c391b6a0cd2:mEzxl/TRTNYdPnOwosSCqcUAOt1t5fUzNoqwiuxko5oABUZm5UU1stfbT9OMp4qJiVhY/dFEFMQowYH/bJ40Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-19T22:29:39Z:ba476440267c8b28968330582f81fdc295583ae1012ba506880af8144e836508:njU/8o1vHMDlkD6mcgS4zjFWGco6H0WmWV+73+uOJnSbUedMGpv1qhgJvf8Gb+rtgMfBgIB49B9RAjm1j+zhDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Optional application authentication above the standard set.
 schema: 1
 exact_bundles:
@@ -348,5 +348,14 @@ policies:
     schema: 2
     names: []
   ui_browser_sessions:
-    schema: 1
+    schema: 3
+    max_session_bootstrap_bytes: 4194304
     max_live_binding_attachments_per_session: 16
+    max_presentations_per_session: 16
+    max_surface_instances_per_presentation: 16
+    shared_presentation:
+      max_declaration_bytes: 65536
+      max_dialogs: 16
+      max_initial_surfaces: 16
+      max_label_bytes: 128
+      max_mount_id_bytes: 64

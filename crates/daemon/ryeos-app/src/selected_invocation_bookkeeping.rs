@@ -94,7 +94,6 @@ enum Phase {
     Occupied,
     Borrowed(u64),
     RestoredAwaitingBorrowAck(u64),
-    Retiring,
 }
 
 #[derive(Debug)]
@@ -107,7 +106,6 @@ struct Record {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SelectedBookkeepingError {
-    Closed,
     Capacity,
     WrongIdentity,
     WrongState,
@@ -128,7 +126,6 @@ pub(crate) enum SelectedFixturePhase {
     Occupied,
     Borrowed,
     RestoredAwaitingBorrowAck,
-    Retiring,
 }
 
 pub(crate) struct SelectedInvocationBookkeeping {
@@ -137,7 +134,6 @@ pub(crate) struct SelectedInvocationBookkeeping {
     slots: [Option<Record>; CAPACITY],
     next_nonce: u64,
     next_borrower: u64,
-    closed: bool,
 }
 
 impl SelectedInvocationBookkeeping {
@@ -148,7 +144,6 @@ impl SelectedInvocationBookkeeping {
             slots: std::array::from_fn(|_| None),
             next_nonce: 1,
             next_borrower: 1,
-            closed: false,
         }
     }
 
@@ -179,9 +174,6 @@ impl SelectedInvocationBookkeeping {
         &mut self,
         generation: &str,
     ) -> Result<SelectedGeneration, SelectedBookkeepingError> {
-        if self.closed {
-            return Err(SelectedBookkeepingError::Closed);
-        }
         if generation.is_empty() || self.generation.as_deref().is_some_and(|g| g != generation) {
             return Err(SelectedBookkeepingError::WrongIdentity);
         }
@@ -214,9 +206,6 @@ impl SelectedInvocationBookkeeping {
         owner: &str,
     ) -> Result<SelectedTicket, SelectedBookkeepingError> {
         self.validate_generation(generation)?;
-        if self.closed {
-            return Err(SelectedBookkeepingError::Closed);
-        }
         if thread.is_empty() || claim.is_empty() || owner.is_empty() {
             return Err(SelectedBookkeepingError::WrongIdentity);
         }
@@ -276,9 +265,6 @@ impl SelectedInvocationBookkeeping {
         &mut self,
         ticket: &SelectedTicket,
     ) -> Result<(), SelectedBookkeepingError> {
-        if self.closed {
-            return Err(SelectedBookkeepingError::Closed);
-        }
         let r = self.record(ticket)?;
         if r.refused {
             return Err(SelectedBookkeepingError::Refused);
@@ -294,9 +280,6 @@ impl SelectedInvocationBookkeeping {
         &mut self,
         ticket: &SelectedTicket,
     ) -> Result<SelectedBorrowTicket, SelectedBookkeepingError> {
-        if self.closed {
-            return Err(SelectedBookkeepingError::Closed);
-        }
         let borrower = self.next_borrower;
         let next = borrower
             .checked_add(1)
@@ -351,25 +334,6 @@ impl SelectedInvocationBookkeeping {
         Ok(SelectedBorrowReturn::Returned)
     }
 
-    fn refuse(&mut self, ticket: &SelectedTicket) -> Result<(), SelectedBookkeepingError> {
-        self.record(ticket)?.refused = true;
-        Ok(())
-    }
-
-    fn retire(&mut self, ticket: &SelectedTicket) -> Result<(), SelectedBookkeepingError> {
-        let r = self.record(ticket)?;
-        if r.phase != Phase::Occupied {
-            return Err(SelectedBookkeepingError::WrongState);
-        }
-        r.phase = Phase::Retiring;
-        // No final removal: real native/finance/durable release adapters are absent.
-        Ok(())
-    }
-
-    fn close_admission(&mut self) {
-        self.closed = true;
-    }
-
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn fixture_restored_borrow(
         &mut self,
@@ -398,7 +362,6 @@ impl SelectedInvocationBookkeeping {
             SelectedFixturePhase::Occupied => Phase::Occupied,
             SelectedFixturePhase::Borrowed => Phase::Borrowed(1),
             SelectedFixturePhase::RestoredAwaitingBorrowAck => Phase::RestoredAwaitingBorrowAck(1),
-            SelectedFixturePhase::Retiring => Phase::Retiring,
         };
         record.refused = refused;
     }
@@ -474,7 +437,6 @@ mod tests {
         assert!(b.borrow(&wrong).is_err());
         wrong = t.clone();
         wrong.claim.push('x');
-        assert!(b.retire(&wrong).is_err());
         wrong = t.clone();
         wrong.slot = CAPACITY;
         assert!(b.borrow(&wrong).is_err());
@@ -483,23 +445,17 @@ mod tests {
         assert!(b.install(&wrong).is_err());
         wrong = t.clone();
         wrong.registration.generation.push('x');
-        assert!(b.refuse(&wrong).is_err());
         let mut other = SelectedInvocationBookkeeping::new();
         other.register_generation("fixture-generation").unwrap();
         assert!(other.borrow(&t).is_err());
         assert_eq!(b.record(&t).unwrap().phase, Phase::Occupied);
         let loan = b.borrow(&t).unwrap();
-        b.refuse(&t).unwrap();
         b.restored(&loan).unwrap();
         b.ack_selected_borrow_return(&loan).unwrap();
-        assert_eq!(b.borrow(&t).err(), Some(SelectedBookkeepingError::Refused));
-        b.retire(&t).unwrap();
-        assert_eq!(b.record(&t).unwrap().phase, Phase::Retiring);
-        assert!(b.record(&t).unwrap().refused);
     }
 
     #[test]
-    fn bounded_capacity_and_closed_registration_leave_records_intact() {
+    fn bounded_capacity_leaves_records_intact() {
         let mut b = SelectedInvocationBookkeeping::new();
         let g = b.register_generation("g").unwrap();
         for n in 0..CAPACITY {
@@ -511,28 +467,5 @@ mod tests {
             Some(SelectedBookkeepingError::Capacity)
         );
         assert_eq!(b.slots.iter().flatten().count(), CAPACITY);
-        b.close_admission();
-        assert_eq!(
-            b.register_generation("g").err(),
-            Some(SelectedBookkeepingError::Closed)
-        );
-        assert_eq!(b.slots.iter().flatten().count(), CAPACITY);
-    }
-
-    #[test]
-    fn closure_and_refusal_allow_only_exact_restoration_and_ack() {
-        let (mut b, t) = occupied();
-        let loan = b.borrow(&t).unwrap();
-        assert!(b.retire(&t).is_err());
-        b.close_admission();
-        b.refuse(&t).unwrap();
-        assert_eq!(b.borrow(&t).err(), Some(SelectedBookkeepingError::Closed));
-        b.restored(&loan).unwrap();
-        assert_eq!(
-            b.ack_selected_borrow_return(&loan),
-            Ok(SelectedBorrowReturn::Returned)
-        );
-        assert!(b.record(&t).unwrap().refused);
-        assert_eq!(b.borrow(&t).err(), Some(SelectedBookkeepingError::Closed));
     }
 }

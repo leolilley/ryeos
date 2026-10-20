@@ -477,7 +477,6 @@ fn genuine_signed_startup_selection_remains_static_without_original_binder() {
     // current GPU/device/provider result; the genuine fixture uses /dev/null.
     assert!(inputs.original_isolation.is_none());
     assert!(inputs.original_startup_contract.is_none());
-    assert!(inputs.original_startup_request_inputs(&state).is_err());
     let mut engine = (*state.engine).clone();
     engine.node_trust_store = ryeos_engine::trust::TrustStore::from_signers(vec![]);
     state.engine = Arc::new(engine);
@@ -622,7 +621,6 @@ fn temporary_c2_actual_admission_publication_recovery_reads_signed_selected_raw_
     )
     .unwrap();
     assert_eq!(retained.bytes, C2_RAW_MEMBER);
-    assert!(inputs.original_startup_request_inputs(&state).is_err());
 }
 
 #[test]
@@ -952,7 +950,6 @@ fn current_v2_fixed_selector_reads_actual_nested_recovered_member_under_same_gua
         )
         .is_err()
     );
-    assert!(inputs.original_startup_request_inputs(&state).is_err());
     drop(guard);
     drop(source);
     // Close the Store before its directory is removed.

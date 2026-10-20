@@ -21,13 +21,6 @@ pub const PROFILE_ID: &str = "credential:public-offline-enrollment";
 const LOGIN_LAUNCH_ID: &str = "L-2b3e89703b173ebaf7195f4d672a1010";
 const PRODUCER_LAUNCH_ID: &str = "L-2b3e89703b173ebaf7195f4d672a1009";
 
-pub struct EnrolledPublicFixture {
-    pub harness: DaemonHarness,
-    pub keys: fast_fixture::FastFixture,
-    pub producer_project: tempfile::TempDir,
-    pub evidence: Value,
-}
-
 fn expected_runtime_manifest() -> Result<String> {
     crate::offline_runtime_input::bytes()?;
     Ok(crate::offline_runtime_input::MANIFEST_HASH.to_owned())
@@ -101,10 +94,10 @@ pub fn install_before_start(
     fast_fixture::register_presigned_fixture_bundle(state, "public-enrollment-fixture", &root, keys)
 }
 
-/// One isolated acceptance. Returns the still-running disposable harness so a
-/// subsequent candidate test can reuse the SAME active profile and owner.
-/// All runtime mutations occur once through authenticated public services.
-pub async fn start_enrolled_fixture() -> Result<EnrolledPublicFixture> {
+/// One isolated acceptance. Returns the enrollment evidence; the disposable
+/// harness retains its node evidence when it drops. All runtime mutations
+/// occur once through authenticated public services.
+pub async fn start_enrolled_fixture() -> Result<Value> {
     ensure!(
         std::env::consts::OS == "linux" && std::env::consts::ARCH == "x86_64",
         "offline fixture ELF has an exact Linux x86_64 target"
@@ -130,12 +123,7 @@ pub async fn start_enrolled_fixture() -> Result<EnrolledPublicFixture> {
         .await.with_context(|| format!(
             "public enrollment stopped; retain node={}, producer={}, login_launch={LOGIN_LAUNCH_ID}; never relaunch uncertain work",
             harness.state_path.display(), producer_project.path().display()))?;
-    Ok(EnrolledPublicFixture {
-        harness,
-        keys,
-        producer_project,
-        evidence,
-    })
+    Ok(evidence)
 }
 
 async fn enroll(
@@ -482,13 +470,13 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     #[ignore = "requires current signed core/standard daemon artifacts and native Linux x86_64 execution"]
     async fn public_offline_enrollment_observes_then_confirms_exact_profile() -> Result<()> {
-        let fixture = start_enrolled_fixture().await?;
+        let evidence = start_enrolled_fixture().await?;
         ensure!(
-            fixture.evidence["profile"]["state"] == "active"
-                && fixture.evidence["profile"]["profile_id"] == PROFILE_ID,
+            evidence["profile"]["state"] == "active"
+                && evidence["profile"]["profile_id"] == PROFILE_ID,
             "public enrollment did not retain its exact active profile"
         );
-        eprintln!("public-offline-enrollment-evidence: {}", fixture.evidence);
+        eprintln!("public-offline-enrollment-evidence: {}", evidence);
         Ok(())
     }
 

@@ -1,5 +1,20 @@
 /* @ts-self-types="./ryeos_web.d.ts" */
 
+export function ryeos_abort_seat_replay() {
+    wasm.ryeos_abort_seat_replay();
+}
+
+/**
+ * @returns {bigint}
+ */
+export function ryeos_acknowledged_seat_prefix_len() {
+    const ret = wasm.ryeos_acknowledged_seat_prefix_len();
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return BigInt.asUintN(64, ret[0]);
+}
+
 /**
  * Apply a browser/daemon effect result to RyeOS.
  * @param {any} result_json
@@ -7,6 +22,62 @@
  */
 export function ryeos_apply_effect_result(result_json) {
     const ret = wasm.ryeos_apply_effect_result(result_json);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return takeFromExternrefTable0(ret[0]);
+}
+
+/**
+ * @param {any} session_json
+ * @param {string} presentation_id
+ * @param {any} viewport_json
+ * @param {bigint} now_ms
+ */
+export function ryeos_begin_seat_replay(session_json, presentation_id, viewport_json, now_ms) {
+    const ptr0 = passStringToWasm0(presentation_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.ryeos_begin_seat_replay(session_json, ptr0, len0, viewport_json, now_ms);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
+}
+
+/**
+ * Same-producer refresh stages into the existing private replay lane. The
+ * live Core is neither replaced nor reset before authenticated completion.
+ * @param {any} session_json
+ * @param {string} presentation_id
+ * @param {any} viewport_json
+ * @param {bigint} now_ms
+ */
+export function ryeos_begin_seat_reproof(session_json, presentation_id, viewport_json, now_ms) {
+    const ptr0 = passStringToWasm0(presentation_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.ryeos_begin_seat_reproof(session_json, ptr0, len0, viewport_json, now_ms);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
+}
+
+/**
+ * @param {any} completion_json
+ * @returns {any}
+ */
+export function ryeos_commit_seat_replay(completion_json) {
+    const ret = wasm.ryeos_commit_seat_replay(completion_json);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return takeFromExternrefTable0(ret[0]);
+}
+
+/**
+ * @param {any} completion_json
+ * @returns {any}
+ */
+export function ryeos_commit_seat_reproof(completion_json) {
+    const ret = wasm.ryeos_commit_seat_reproof(completion_json);
     if (ret[2]) {
         throw takeFromExternrefTable0(ret[1]);
     }
@@ -98,25 +169,19 @@ export function ryeos_key(event_json) {
 }
 
 /**
- * @returns {string}
+ * @returns {string | undefined}
  */
 export function ryeos_layout_preference_key() {
-    let deferred2_0;
-    let deferred2_1;
-    try {
-        const ret = wasm.ryeos_layout_preference_key();
-        var ptr1 = ret[0];
-        var len1 = ret[1];
-        if (ret[3]) {
-            ptr1 = 0; len1 = 0;
-            throw takeFromExternrefTable0(ret[2]);
-        }
-        deferred2_0 = ptr1;
-        deferred2_1 = len1;
-        return getStringFromWasm0(ptr1, len1);
-    } finally {
-        wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+    const ret = wasm.ryeos_layout_preference_key();
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
     }
+    let v1;
+    if (ret[0] !== 0) {
+        v1 = getStringFromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    }
+    return v1;
 }
 
 /**
@@ -135,15 +200,30 @@ export function ryeos_open_saved_view_set_template(encoded) {
 
 /**
  * Replay durable seat braid events into the in-memory RyeOs engine.
+ * @param {any} producer_json
+ * @param {any} captured_json
  * @param {any} events_json
  * @returns {any}
  */
-export function ryeos_replay_seat_events(events_json) {
-    const ret = wasm.ryeos_replay_seat_events(events_json);
+export function ryeos_replay_acknowledged_seat_events(producer_json, captured_json, events_json) {
+    const ret = wasm.ryeos_replay_acknowledged_seat_events(producer_json, captured_json, events_json);
     if (ret[2]) {
         throw takeFromExternrefTable0(ret[1]);
     }
     return takeFromExternrefTable0(ret[0]);
+}
+
+/**
+ * Browser readiness is a positive reducer fact, not the absence of an error
+ * from an event whose mismatch path intentionally emits no effects.
+ * @param {any} producer_json
+ * @param {bigint} next_engine_seq
+ */
+export function ryeos_require_presentation_producer_ready(producer_json, next_engine_seq) {
+    const ret = wasm.ryeos_require_presentation_producer_ready(producer_json, next_engine_seq);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
 }
 
 /**
@@ -173,6 +253,54 @@ export function ryeos_scene_model() {
 }
 
 /**
+ * Derive the identity of one frozen transport batch in the shared Rust owner.
+ * @param {any} identity
+ * @returns {string}
+ */
+export function ryeos_seat_append_identity(identity) {
+    let deferred2_0;
+    let deferred2_1;
+    try {
+        const ret = wasm.ryeos_seat_append_identity(identity);
+        var ptr1 = ret[0];
+        var len1 = ret[1];
+        if (ret[3]) {
+            ptr1 = 0; len1 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred2_0 = ptr1;
+        deferred2_1 = len1;
+        return getStringFromWasm0(ptr1, len1);
+    } finally {
+        wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+    }
+}
+
+/**
+ * Derive an exact control intent in the same Rust owner used by its verifier.
+ * @param {any} request
+ * @returns {string}
+ */
+export function ryeos_seat_control_identity(request) {
+    let deferred2_0;
+    let deferred2_1;
+    try {
+        const ret = wasm.ryeos_seat_control_identity(request);
+        var ptr1 = ret[0];
+        var len1 = ret[1];
+        if (ret[3]) {
+            ptr1 = 0; len1 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred2_0 = ptr1;
+        deferred2_1 = len1;
+        return getStringFromWasm0(ptr1, len1);
+    } finally {
+        wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+    }
+}
+
+/**
  * Return the local seat event log so JS can mirror it into the seat braid.
  * @returns {any}
  */
@@ -185,14 +313,47 @@ export function ryeos_seat_events() {
 }
 
 /**
+ * @param {any} proof_json
+ */
+export function ryeos_stage_seat_move_freeze_cancellation_proof(proof_json) {
+    const ret = wasm.ryeos_stage_seat_move_freeze_cancellation_proof(proof_json);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
+}
+
+/**
+ * @param {any} events_json
+ */
+export function ryeos_stage_seat_replay_events(events_json) {
+    const ret = wasm.ryeos_stage_seat_replay_events(events_json);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
+}
+
+/**
+ * @param {any} proof_json
+ */
+export function ryeos_stage_seat_transfer_proof(proof_json) {
+    const ret = wasm.ryeos_stage_seat_transfer_proof(proof_json);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
+}
+
+/**
  * Start RyeOS, returning the semantic view/scene models and initial effects.
  * @param {any} session_json
+ * @param {string} presentation_id
  * @param {any} viewport_json
  * @param {bigint} now_ms
  * @returns {any}
  */
-export function ryeos_start(session_json, viewport_json, now_ms) {
-    const ret = wasm.ryeos_start(session_json, viewport_json, now_ms);
+export function ryeos_start(session_json, presentation_id, viewport_json, now_ms) {
+    const ptr0 = passStringToWasm0(presentation_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.ryeos_start(session_json, ptr0, len0, viewport_json, now_ms);
     if (ret[2]) {
         throw takeFromExternrefTable0(ret[1]);
     }

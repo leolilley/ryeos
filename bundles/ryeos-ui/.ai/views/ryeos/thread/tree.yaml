@@ -1,18 +1,18 @@
-# ryeos:signed:2026-08-04T10:21:25Z:5e9acd00e108c6f2d0ed6ed772a2ef834aafd500f88a2c2e1b28167999bde8d7:LnQv18Yl6kDplszQNyAXUzeyEldQ494k2X37z5xQpbuNQopgl8T1oQRgZtSULUGT8Tn3TqLdqm/Vqnvh8XYvCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-19T22:29:40Z:a2b9bd491b9b235bdea2c4250028b89b0f4a9648452dbc5ff8e779287399de5c:J7hE1AU+f6bUE9Qjzxt6GRc5R6frGSICCASJ5NjN0tikrHXBJAQHMXlbPpKFErkN7bj9Wl2uMlOZYmMBTkytBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: thread-execution-tree
 title: Execution Tree
 version: "1.0.0"
 description: >-
   Focused execution ancestry across continuations and spawned child chains.
   Open it from a thread row; fold branches with left/right and enter any row to
-  inspect that thread's live transcript.
+  inspect that thread's retained execution detail without changing a conversation.
 
 widget: table
 sources:
   default:
     ref: service:ui/ryeos-ui/thread/tree
     params:
-      thread_id: "@facet:input.route.thread"
+      thread_id: "@facet:selection.thread_id"
       max_depth: 32
       max_nodes: 500
     collection: threads
@@ -68,14 +68,13 @@ selection:
   activate: watch
 affordances:
   - id: watch
-    label: Watch
+    label: Inspect execution
     invoke:
       plane: ui
-      facet: input.route
-      merge:
-        thread: "{record.thread_id}"
-        chain_root: "{record.chain_root_id}"
-      open_view: view:ryeos/thread/transcript
+      facet: selection
+      value:
+        thread_id: "{record.thread_id}"
+      open_view: view:ryeos/threads/detail
       drill: true
   - id: inspect
     label: Inspect
@@ -87,4 +86,5 @@ affordances:
       open_view: view:ryeos/threads/detail
 
 refresh:
+  on_facet: selection
   on_hint: [thread, activity]

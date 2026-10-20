@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-18T05:27:26Z:d76fe909e63a0e25a25470d887c433a4a0d88f05024fc9b9122fec51da2caa1f:j/rLZbGAjhG3gO9v4EX98GrGRNmJJEUv0LFynvwa9oEvKOFL+sY4eIH5RhCRx+ARErnpUwM7HTF7JSBTMmojBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-19T22:29:40Z:9246c8c03b3e2f03463e69697dd750d05c4b788140059c4ba9f54211419c8dc6:e5ipDEuKzdfcuW3n5kBtkuoo1c0mdXqmbFpu5KBLLgWqwrViuVtev4vqWAqkTojO/lH17w+QARnod7QJscJsBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: assistant-home
 title: Home
 version: "1.0.0"
@@ -25,14 +25,13 @@ sources:
     collection: projects
 affordances:
   - id: watch-thread
-    label: Talk to work
+    label: Inspect execution
     invoke:
       plane: ui
-      facet: input.route
-      merge:
-        thread: "{record.thread_id}"
-        chain_root: "{record.chain_root_id}"
-      open_view: view:ryeos/thread/transcript
+      facet: selection
+      value:
+        thread_id: "{record.thread_id}"
+      open_view: view:ryeos/threads/detail
       drill: true
   - id: review-attention
     label: Review request
@@ -75,6 +74,12 @@ sections:
       primary: item_ref
       meta: status
     activate: watch-thread
+  - title: Activity coverage
+    source_channel: active
+    collection: coverage
+    projection:
+      primary: state
+      meta: reason
   - title: Candidates to review
     source_channel: attention
     collection: candidates
@@ -99,5 +104,17 @@ sections:
     projection:
       primary: name
       meta: root
+  - title: Recent movement coverage
+    source_channel: movement
+    collection: events_coverage
+    projection:
+      primary: state
+      meta: reason
+      tone:
+        field: state
+        map:
+          failed: danger
+          partial: warn
+        default: neutral
 refresh:
   on_hint: [thread, activity, project]

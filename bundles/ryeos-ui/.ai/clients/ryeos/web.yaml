@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-14T10:03:08Z:1bfcdc1ae281da093c88a7410811da321418682a5aaf53cf2f22f69e34e43ce2:GZj95mIypq5zzWEPo7hw84EVD7nyBGfDcdlNQH3s/wLOZCOmMT+Zwhh7ZmFCP/Uwm7MDDH5MC864pIGeu8bxDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-19T22:29:39Z:4ad44795c3856b2bbe22018ab2df6c730ee012a2c44ada87c05c2d3596f2b322:ZHHGr0Xr9GHq2Wh24a+hwKUeahaURedolZjuAdgzVpiSfHJ+VfacFE3LQp+HPvoc/kQ5G9QS9lXkR8CSKyWfCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: client
 name: web
 version: "1.0.0"
@@ -12,6 +12,7 @@ launch:
   mode: cli_exec
   binary_ref: bin/{triple}/web
   args:
+    presentation: "--presentation"
     surface: "--surface"
     print_url: "--print-url"
     no_open: "--no-open"

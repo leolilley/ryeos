@@ -41,6 +41,16 @@ pub(crate) fn binding_request_bounds(
     Ok(ryeos_client_base::ui::UiBindingRequestBounds {
         max_request_bytes: maximum,
         max_input_bytes: maximum,
+        max_seat_append_bytes: state
+            .node_config
+            .routes
+            .iter()
+            .find(|route| {
+                route.response.source.as_deref()
+                    == Some(super::ui_seat::APPEND_DESCRIPTOR.service_ref)
+            })
+            .map(|route| route.limits.body_bytes_max)
+            .ok_or_else(|| HandlerError::Internal("UI seat append route is absent".into()))?,
     })
 }
 
@@ -175,7 +185,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         token,
         launch_url,
         session_id,
-        attachment: attachment.public_descriptor(binding_request_bounds(&state)?),
+        attachment: attachment.public_descriptor(binding_request_bounds(&state)?)?,
     };
 
     serde_json::to_value(response).map_err(Into::into)

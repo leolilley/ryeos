@@ -48,69 +48,6 @@ pub(crate) struct BoundExternalRealizations {
     _leases: Vec<fs::File>,
 }
 
-/// Complete-set consistency observed on the same retained owner. This is
-/// metadata only, not qualified product authority or applied mount proof.
-pub(crate) struct ExternalSetAssociation<'a> {
-    source: &'a std::sync::Arc<BoundExternalRealizations>,
-    project_path: &'a Path,
-}
-
-/// A single position in the complete associated inventory. No retained
-/// descriptor, mount authority, owner, or cache coordinate can be extracted.
-pub(crate) struct ExternalAssociationMetadata<'a> {
-    entry: &'a ryeos_state::objects::ExternalContentRealization,
-    project_path: &'a Path,
-}
-
-impl ExternalSetAssociation<'_> {
-    pub(crate) fn len(&self) -> usize {
-        self.source.realized.iter().len()
-    }
-
-    pub(crate) fn entry(&self, index: usize) -> Option<ExternalAssociationMetadata<'_>> {
-        self.source
-            .realized
-            .iter()
-            .nth(index)
-            .map(|entry| ExternalAssociationMetadata {
-                entry,
-                project_path: self.project_path,
-            })
-    }
-}
-
-impl ExternalAssociationMetadata<'_> {
-    pub(crate) fn id(&self) -> &str {
-        &self.entry.id
-    }
-    pub(crate) fn manifest_hash(&self) -> &str {
-        &self.entry.manifest_hash
-    }
-    pub(crate) fn kind(&self) -> ExternalContentKind {
-        self.entry.kind
-    }
-    pub(crate) fn mode(&self) -> ryeos_state::objects::ExternalContentMode {
-        self.entry.mode
-    }
-    pub(crate) fn mount_root(&self) -> ryeos_state::objects::ExternalContentMountRoot {
-        self.entry.mount_root
-    }
-    pub(crate) fn mount(&self) -> &str {
-        &self.entry.mount
-    }
-    pub(crate) fn entry_count(&self) -> usize {
-        self.entry.entry_count
-    }
-    pub(crate) fn total_bytes(&self) -> u64 {
-        self.entry.total_bytes
-    }
-    pub(crate) fn workload_destination(&self) -> anyhow::Result<PathBuf> {
-        self.entry
-            .mount_root
-            .destination(Some(self.project_path), &self.entry.mount)
-    }
-}
-
 // Count admission precedes decoding, quadratic canonical-set validation, and
 // descriptor work. Empty production inventories retain their existing None
 // behavior; a complete-set association itself must be nonempty.
@@ -139,7 +76,7 @@ impl BoundExternalRealizations {
         project_path: &'a Path,
     ) -> anyhow::Result<ryeos_gpu_loader_owner_contract::BorrowedGpuLoaderRealizationRoots<'a>>
     {
-        let _complete = Self::associate_complete_set(source, expected, project_path)?;
+        Self::associate_complete_set(source, expected, project_path)?;
         ryeos_gpu_loader_owner_contract::BorrowedGpuLoaderRealizationRoots::from_retained_parts(
             &source.realized,
             &source.guest_sources,
@@ -153,7 +90,7 @@ impl BoundExternalRealizations {
         source: &'a std::sync::Arc<Self>,
         expected: &RealizedExternalContentSet,
         project_path: &'a Path,
-    ) -> anyhow::Result<ExternalSetAssociation<'a>> {
+    ) -> anyhow::Result<()> {
         anyhow::ensure!(
             source.binding_mode == ExternalRealizationBinding::IsolationMounts
                 && source.private_workspace_identity.is_none(),
@@ -228,10 +165,7 @@ impl BoundExternalRealizations {
                 "external association retained generation identity changed"
             );
         }
-        Ok(ExternalSetAssociation {
-            source,
-            project_path,
-        })
+        Ok(())
     }
 
     /// Retention inputs only; these records never grant spawn or cleanup.
@@ -3705,65 +3639,6 @@ mod tests {
 
     #[test]
     #[cfg(target_os = "linux")]
-    fn association_complete_metadata_preserves_hash_aliases_for_both_tiers() {
-        for large in [false, true] {
-            let root = tempfile::tempdir().unwrap();
-            let (_state_owner, state) = ryeos_app::state::test_support::build(root.path()).unwrap();
-            let set = association_inventory(&state, large);
-            let owner = association_owner(&state, &set);
-            let references = std::sync::Arc::strong_count(&owner);
-            let view = BoundExternalRealizations::associate_complete_set(
-                &owner,
-                &set,
-                Path::new("/workspace"),
-            )
-            .unwrap();
-            assert_eq!(std::sync::Arc::strong_count(&owner), references);
-            assert!(std::ptr::eq(view.source, &owner));
-            assert_eq!(view.len(), 3);
-            let tree = view.entry(0).unwrap();
-            let alias = view.entry(1).unwrap();
-            let file = view.entry(2).unwrap();
-            assert_eq!(tree.manifest_hash(), alias.manifest_hash());
-            assert_ne!(tree.id(), alias.id());
-            assert_ne!(tree.mount_root(), alias.mount_root());
-            assert_eq!(tree.kind(), ExternalContentKind::Tree);
-            assert_eq!(file.kind(), ExternalContentKind::File);
-            assert_eq!(
-                tree.mode(),
-                ryeos_state::objects::ExternalContentMode::Pinned
-            );
-            assert_eq!(tree.mount(), "vendor/tree");
-            assert_eq!(tree.entry_count(), 1);
-            assert_eq!(file.total_bytes(), 8);
-            assert_eq!(
-                tree.workload_destination().unwrap(),
-                Path::new("/workspace/vendor/tree")
-            );
-            assert_eq!(
-                alias.workload_destination().unwrap(),
-                Path::new("/ryeos/realizations/tree-alias")
-            );
-            assert!(view.entry(3).is_none());
-            assert!(
-                owner.custody_generations[0]
-                    .1
-                    .is_same_directory(&owner.custody_generations[1].1)
-                    .unwrap()
-            );
-            assert!(
-                BoundExternalRealizations::associate_complete_set(
-                    &owner,
-                    &set,
-                    Path::new("relative-project")
-                )
-                .is_err()
-            );
-        }
-    }
-
-    #[test]
-    #[cfg(target_os = "linux")]
     fn association_refuses_incomplete_changed_and_noncanonical_expected_sets() {
         let root = tempfile::tempdir().unwrap();
         let (_state_owner, state) = ryeos_app::state::test_support::build(root.path()).unwrap();
@@ -4024,14 +3899,14 @@ mod tests {
                 &state.config.runtime_state_dir(),
             );
             {
-                let view = BoundExternalRealizations::associate_complete_set(
+                BoundExternalRealizations::associate_complete_set(
                     &owner,
                     &set,
                     Path::new("/workspace"),
                 )
                 .unwrap();
                 cache.sweep_to_budget(0).unwrap();
-                assert_eq!(view.len(), 3);
+                assert_eq!(set.iter().count(), 3);
                 for entry in set.iter() {
                     assert!(cache.root.join(&entry.manifest_hash).exists());
                 }

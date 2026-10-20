@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-19T07:22:30Z:17fd2825446ad9c2cd246d79dbde5682dde632d0666530d3cb3be7743e5f5e93:oyP+oqlj3wLJZSRGQq7i3KfkJ5YqzvVTrDTFyE0zU4WnVGXt8JOr3HGoyw10t4BqPYQNLBTRoC/0uFFzMIq7AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-19T22:29:39Z:cbe8ca469b3624ee6375f1b081084d1242d7e236fa5d07a4beabce2dc406e6a6:IpT2tnwZ67Zm4pCzO1ztwSnNm0tL72rKMqkepIXzytupTtXSA49ii3xJC8ahFibA7UBUSpgHXP54tA/KvypeAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/ryeos-ui"
 name: "navigation-tree-v1"
@@ -361,10 +361,16 @@ view:ryeos/threads/history          view:ryeos/node/threads/history
 view:ryeos/files/list               view:ryeos/project/files
 view:ryeos/items/space              view:ryeos/project/items
 view:ryeos/schedules/list           view:ryeos/project/schedules
-view:ryeos/remotes/list             view:ryeos/node/remotes
-view:ryeos/bundles/list             view:ryeos/node/bundles
-view:ryeos/gc/status                view:ryeos/node/gc
 ```
+
+Node bundles, remotes, and garbage collection each have one authored View,
+under `view:ryeos/node/`. Saved arrangements re-resolve their exact authored
+origins. A removed origin fails resolution; it is not silently redirected to
+a different View or granted a replacement attachment. Reopen the current
+authored View explicitly when an old saved arrangement reports a missing origin.
+
+The remote table reports configured remote nodes. Selecting a row does not
+retarget a conversation, change input routing, or establish remote authority.
 
 `view:ryeos/threads/history` is project-scoped by default:
 

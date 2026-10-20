@@ -46,7 +46,7 @@ fn secondary_attachment(
     let session = ui.browser_sessions.get_session(session_id).unwrap();
     let origin = session
         .attachments
-        .get(&session.surface_attachment_id)
+        .get(&session.root_attachment_id)
         .unwrap()
         .coordinate();
     let mut candidate = context("surface:ryeos/test/secondary");
@@ -81,7 +81,7 @@ async fn detach_refuses_surface_attachment() {
         .unwrap();
     let coordinate = session
         .attachments
-        .get(&session.surface_attachment_id)
+        .get(&session.root_attachment_id)
         .unwrap()
         .coordinate();
     let result = (ryeos_ui::handlers::ui_session_attachments::DETACH_DESCRIPTOR.handler)(

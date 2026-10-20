@@ -1422,11 +1422,13 @@ impl RetainedOriginalWitnessFile {
         if original.phase == OriginalWitnessRemovalPhase::Conflict {
             return None;
         }
+        // Progress exists only once the removal has cached its parent and its
+        // first deadline.
+        original.parent.as_ref()?;
+        original.deadline?;
         Some(OriginalWitnessRemovalProgress {
             owner: self.clone(),
             work: work.clone(),
-            parent: Arc::downgrade(original.parent.as_ref()?),
-            deadline: original.deadline?,
             phase: original.phase,
         })
     }
@@ -1616,8 +1618,6 @@ pub struct RemovedOriginalWitnessFile {
 pub struct OriginalWitnessRemovalProgress {
     owner: Arc<RetainedOriginalWitnessFile>,
     work: Arc<dyn OriginalWitnessCleanupWork>,
-    parent: std::sync::Weak<PinnedDirectory>,
-    deadline: lillux::time::MonotonicDeadline,
     phase: OriginalWitnessRemovalPhase,
 }
 impl OriginalWitnessRemovalProgress {

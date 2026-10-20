@@ -46,11 +46,14 @@ mod public_native_mechanism_flow;
 #[path = "../../../../tests/e2e/external-execution/support/codex_runtime_producer.rs"]
 mod codex_runtime_producer;
 
-#[path = "../../../../tests/e2e/external-execution/support/candidate_authoring.rs"]
-mod candidate_authoring;
+#[path = "../../../../tests/e2e/external-execution/support/candidate_requirement.rs"]
+mod candidate_requirement;
 
 #[path = "../../../../tests/e2e/external-execution/support/independent_verifier_scenario.rs"]
 mod independent_verifier_scenario;
+
+#[path = "../../../../tests/e2e/external-execution/support/independent_verifier_race.rs"]
+mod independent_verifier_race;
 
 #[path = "../../../../tests/e2e/external-execution/support/admitted_worker_evidence.rs"]
 mod admitted_worker_evidence;
@@ -79,7 +82,7 @@ fn signed_codex_worker_source_admits_direct_qualification_profile() -> anyhow::R
         .profile
         .external_candidate_requirement()?
         .ok_or_else(|| anyhow::anyhow!("admitted Codex Worker has no external candidate"))?;
-    let mut fixture_requirement = candidate_authoring::real_codex_requirement();
+    let mut fixture_requirement = candidate_requirement::real_codex_requirement();
     fixture_requirement.runtime_product_declaration_id = "guest-runtime".into();
     fixture_requirement
         .required_lifecycle_capabilities
@@ -2767,9 +2770,10 @@ async fn signed_external_adapter_remains_admitted_after_real_daemon_restart() {
     let (mut harness, _) = DaemonHarness::start_fast_with(
         |state_path, _user_space, fixture| {
             common::fast_fixture::register_workflow_bundles(state_path, fixture)?;
-            let (bundle, _, _) = signed_bundle::install_signed_test_bundle(
+            let (bundle, _, _) = signed_bundle::install_signed_test_bundle_with_guest_admission(
                 state_path,
                 true,
+                false,
                 &fixture.publisher,
                 &artifacts,
             );

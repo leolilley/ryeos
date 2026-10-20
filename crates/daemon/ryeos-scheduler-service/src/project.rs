@@ -220,14 +220,6 @@ struct ScheduleDeclaration {
     execution_policy: ryeos_engine::execution_contract::ExecutionPolicy,
 }
 
-#[cfg(test)]
-pub(crate) fn validate_declarations_for_test(
-    staging_root: &Path,
-    project_path: &Path,
-) -> Result<usize> {
-    Ok(load_desired_schedules(staging_root, project_path)?.len())
-}
-
 pub(crate) fn plan(ctx: &ProjectContext) -> Result<ScheduleDeployPlan> {
     let desired = load_desired_schedules(
         ctx.request.staging_root.as_path(),
@@ -1130,17 +1122,6 @@ struct ScheduleReconcileTx {
 }
 
 impl ScheduleReconcileTx {
-    fn new(schedules_dir: &Path) -> Result<Self> {
-        let directory = lillux::PinnedDirectory::open_or_create(schedules_dir)?;
-        let directory_lock = directory.lock_exclusive()?;
-        Ok(Self {
-            directory,
-            _directory_lock: directory_lock,
-            backups: Vec::new(),
-            touched: HashSet::new(),
-        })
-    }
-
     fn new_with_timeout(schedules_dir: &Path, timeout: lillux::time::Duration) -> Result<Self> {
         let directory = lillux::PinnedDirectory::open_or_create(schedules_dir)?;
         let directory_lock = directory.lock_exclusive_with_timeout(timeout)?;

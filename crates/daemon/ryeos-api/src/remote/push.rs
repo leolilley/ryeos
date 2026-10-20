@@ -847,28 +847,6 @@ async fn send_raw_object_batch(
     Ok(())
 }
 
-fn chunk_upload_entries<T, F>(entries: &[T], mut encoded_size: F) -> Vec<&[T]>
-where
-    F: FnMut(&T) -> usize,
-{
-    let mut chunks = Vec::new();
-    let mut start = 0;
-    let mut size: usize = 256;
-    for (index, entry) in entries.iter().enumerate() {
-        let entry_size = encoded_size(entry);
-        if index > start && size.saturating_add(entry_size) > OBJECTS_PUT_BODY_BUDGET_BYTES {
-            chunks.push(&entries[start..index]);
-            start = index;
-            size = 256;
-        }
-        size = size.saturating_add(entry_size);
-    }
-    if start < entries.len() {
-        chunks.push(&entries[start..]);
-    }
-    chunks
-}
-
 fn validate_upload_session(
     response: &ObjectsPutResponse,
     staging_id: &str,

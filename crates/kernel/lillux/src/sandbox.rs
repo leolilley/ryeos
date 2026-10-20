@@ -692,9 +692,6 @@ pub(crate) struct NativeNamespaceOccupancyAuthority {
 }
 #[cfg(target_os = "linux")]
 impl NativeNamespaceOccupancyAuthority {
-    pub(crate) fn into_pidfd(self) -> std::os::fd::OwnedFd {
-        self.lifetime
-    }
     pub(crate) fn into_parts(self) -> (std::os::fd::OwnedFd, u32) {
         (self.lifetime, self.owned_fork_pid)
     }
@@ -1106,57 +1103,6 @@ pub fn prepare_linux_sandbox_with_original_namespace_occupancy(
 }
 
 impl HeldLinuxSandboxProcess {
-    /// Arm the SAME existing watchdog on this actual held native namespace.
-    /// This installs stronger termination while retaining the held owner. It
-    /// grants NO release: independently admitted cessation and the higher
-    /// original Runtime/funding authorization are still missing.
-    #[cfg(target_os = "linux")]
-    pub(crate) fn prepare_namespace_occupancy(
-        &mut self,
-        limit: &crate::time::OccupancyLimit,
-        cleanup_allowance: crate::time::Duration,
-    ) -> Result<(), String> {
-        if self.namespace_occupancy_attempted || self.release_succeeded || self.release.is_none() {
-            return Err(
-                "original native namespace occupancy attempt cannot replay or follow release"
-                    .into(),
-            );
-        }
-        // Poison before a fallible step. Refusal retains the release handle
-        // and original native owner, but cannot fall through to bare release.
-        self.namespace_occupancy_attempted = true;
-        if !matches!(
-            limit.window(cleanup_allowance)?,
-            crate::time::OccupancyWindowState::Service { .. }
-        ) {
-            return Err("original namespace occupancy service window is not open".into());
-        }
-        if self.process.termination_requested || self.process.pid <= 0 {
-            return Err("namespace occupancy requires the original live held PID-1 owner".into());
-        }
-        let lifetime = self
-            .process
-            .namespace_lifetime
-            .as_ref()
-            .ok_or("ordinary sandbox process has no native namespace lifetime authority")?;
-        let preparation = self.process.mount_preparation_receipt()?;
-        if preparation.owned_child_pid != self.process.child_pid() {
-            return Err("native namespace occupancy changed its actual child readiness".into());
-        }
-        let authority = NativeNamespaceOccupancyAuthority {
-            owned_fork_pid: self.process.child_pid(),
-            lifetime: lifetime
-                .try_clone()
-                .map_err(|error| format!("retain native PID-1 lifetime: {error}"))?,
-        };
-        self.namespace_occupancy_watchdog = Some(crate::exec::arm_namespace_occupancy_watchdog(
-            authority,
-            limit,
-            cleanup_allowance,
-        )?);
-        Ok(())
-    }
-
     #[cfg(target_os = "linux")]
     fn cancel_namespace_occupancy_after_exact_death(&mut self) -> Result<(), String> {
         if let Some(watchdog) = self.namespace_occupancy_watchdog.as_mut() {
@@ -8442,7 +8388,6 @@ mod imp {
             ExecFailure,
             PendingThenCleanup,
             Descendant,
-            OccupancyForkRefusal,
             PreforkWatchdogExpiry,
             PreforkWatchdogOwnerLoss,
         }
@@ -8461,17 +8406,6 @@ mod imp {
             ] {
                 exercise_native_proc_with_observation(true, true, Some(case), false);
             }
-        }
-
-        #[test]
-        #[ignore = "requires actual native namespaces and pidfd; capability refusal is not a pass"]
-        fn native_namespace_occupancy_refuses_workload_side_watchdog_fork() {
-            exercise_native_proc_with_observation(
-                true,
-                true,
-                Some(TargetObservationCase::OccupancyForkRefusal),
-                false,
-            );
         }
 
         #[test]
@@ -8773,8 +8707,7 @@ mod imp {
                             }
                             TargetObservationCase::PendingThenCleanup => "observe-pending".into(),
                             TargetObservationCase::Descendant => "observe-descendant".into(),
-                            TargetObservationCase::OccupancyForkRefusal
-                            | TargetObservationCase::PreforkWatchdogExpiry
+                            TargetObservationCase::PreforkWatchdogExpiry
                             | TargetObservationCase::PreforkWatchdogOwnerLoss => {
                                 "observe-pending".into()
                             }
@@ -9002,39 +8935,6 @@ mod imp {
                             }
                             return Ok(LinuxSandboxExit::Code(0));
                         }
-                        if matches!(
-                            observation,
-                            Some(TargetObservationCase::OccupancyForkRefusal)
-                        ) {
-                            let limit = crate::time::OccupancyLimit::new(
-                                crate::time::occupancy_now()?,
-                                10_000_000_000,
-                            )?;
-                            let error = process
-                                .prepare_namespace_occupancy(
-                                    &limit,
-                                    std::time::Duration::from_secs(1),
-                                )
-                                .err()
-                                .ok_or("watchdog fork inside workload namespace was accepted")?;
-                            if !error.contains("original outside namespace fork boundary")
-                                || process.namespace_occupancy_watchdog.is_some()
-                                || process.process.namespace_lifetime.is_none()
-                                || process.release_once().is_ok()
-                                || writer_ready()?
-                            {
-                                return Err("namespace fork refusal lost original held custody or permitted release".into());
-                            }
-                            let death = process.terminate_namespace_for_export(
-                                std::time::Duration::from_secs(5),
-                            )?;
-                            if death.exit() != LinuxSandboxExit::Signal(libc::SIGKILL) {
-                                return Err(
-                                    "refused native namespace lacked exact retirement".into()
-                                );
-                            }
-                            return Ok(LinuxSandboxExit::Code(0));
-                        }
                         if !release_target {
                             // Exercise a valid but exhausted observation budget,
                             // not merely validation of Duration::ZERO. Signalling
@@ -9188,7 +9088,6 @@ mod imp {
                                 TargetObservationCase::ExecFailure => LinuxSandboxExit::Code(125),
                                 TargetObservationCase::Descendant => LinuxSandboxExit::Code(0),
                                 TargetObservationCase::PendingThenCleanup
-                                | TargetObservationCase::OccupancyForkRefusal
                                 | TargetObservationCase::PreforkWatchdogExpiry
                                 | TargetObservationCase::PreforkWatchdogOwnerLoss => unreachable!(),
                             };
@@ -10074,50 +9973,6 @@ mod tests {
             drop(writer);
             assert!(imp::read_applied_launch(reader.as_raw_fd()).is_err());
         }
-    }
-
-    #[test]
-    #[cfg(target_os = "linux")]
-    fn namespace_occupancy_refusal_poison_keeps_release_and_never_mints_lifetime() {
-        let mut held = HeldLinuxSandboxProcess {
-            process: LinuxSandboxProcess {
-                pid: 0,
-                namespace_lifetime: None,
-                native_terminal_observation: None,
-                namespace_occupancy_watchdog: None,
-                launch_failure: None,
-                applied_launch: None,
-                observed_applied_launch: None,
-                mount_preparation: None,
-                termination_requested: false,
-            },
-            release: Some(std::fs::File::open("/dev/null").unwrap()),
-            release_succeeded: false,
-            namespace_occupancy_attempted: false,
-            namespace_occupancy_watchdog: None,
-        };
-        let limit =
-            crate::time::OccupancyLimit::new(crate::time::occupancy_now().unwrap(), 30_000_000_000)
-                .unwrap();
-        assert!(
-            held.prepare_namespace_occupancy(&limit, std::time::Duration::from_secs(1))
-                .unwrap_err()
-                .contains("original live held PID-1 owner")
-        );
-        assert!(held.namespace_occupancy_attempted);
-        assert!(held.namespace_occupancy_watchdog.is_none());
-        assert!(held.release.is_some());
-        assert!(
-            held.release_once()
-                .unwrap_err()
-                .contains("bare release refused")
-        );
-        assert!(held.release.is_some());
-        assert!(
-            held.prepare_namespace_occupancy(&limit, std::time::Duration::from_secs(1))
-                .unwrap_err()
-                .contains("cannot replay")
-        );
     }
 
     #[test]

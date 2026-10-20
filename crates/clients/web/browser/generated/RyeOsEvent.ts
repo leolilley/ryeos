@@ -7,11 +7,17 @@ import type { RyeOsTransportChannel } from "./RyeOsTransportChannel";
 import type { RyeOsTransportFreshness } from "./RyeOsTransportFreshness";
 import type { RyeOsUiError } from "./RyeOsUiError";
 import type { RyeOsUiEvent } from "./RyeOsUiEvent";
+import type { UiPresentationProducer } from "./UiPresentationProducer";
 
 export type RyeOsEvent =
-  | { type: "start"; session: BrowserSession; viewport: BrowserViewport; now_ms: bigint }
+  | { type: "start"; session: BrowserSession; presentation_id: string; viewport: BrowserViewport; now_ms: bigint }
   | { type: "ui"; event: RyeOsUiEvent }
   | { type: "effect_result"; result: RyeOsEffectResult }
+  /**
+   * Adapter observation after exact authenticated claim and replay; this
+   * event cannot claim a daemon producer or manufacture its authority.
+   */
+  | { type: "presentation_producer_ready"; producer: UiPresentationProducer; next_engine_seq: bigint }
   | { type: "daemon_event"; payload: unknown }
   /**
    * Immediate lossy presentation patch. It never emits a fetch.

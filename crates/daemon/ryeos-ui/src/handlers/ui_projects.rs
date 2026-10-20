@@ -410,7 +410,7 @@ pub async fn handle_projects_open(
         usize::try_from(policy.max_live_binding_attachments_per_session)?,
         state.node_policy.generation_digest(),
     )?;
-    let descriptor = attachment.public_descriptor(request_bounds);
+    let descriptor = attachment.public_descriptor(request_bounds)?;
     // Recent history is presentation metadata, not attachment authority. Once
     // publication succeeds, a recent-file failure must not turn the admitted
     // attachment into an unreturned/stranded capability.
@@ -579,7 +579,7 @@ pub async fn handle_particular_view_set_resume(
             usize::try_from(policy.max_live_binding_attachments_per_session)?,
             state.node_policy.generation_digest(),
         )?;
-        let descriptor = retained.public_descriptor(request_bounds);
+        let descriptor = retained.public_descriptor(request_bounds)?;
         let insertion = descriptor.binding_attachment_id.clone();
         (Some(descriptor), insertion)
     } else {
@@ -788,17 +788,6 @@ fn canonical_project_root(root: &str) -> Result<PathBuf> {
         return Err(HandlerError::BadRequest("project root is not a directory".into()).into());
     }
     Ok(canonical)
-}
-
-fn project_root_locator_for_forget(root: &str) -> Result<String> {
-    let path = PathBuf::from(root);
-    if !path.is_absolute() {
-        return Err(HandlerError::BadRequest("project root must be absolute".into()).into());
-    }
-    match path.canonicalize() {
-        Ok(canonical) => Ok(canonical.display().to_string()),
-        Err(_) => Ok(path.display().to_string()),
-    }
 }
 
 trait RyeOsPrincipalStoreExt {
@@ -1221,14 +1210,14 @@ mod tests {
                     "id": "development",
                     "name": "Development",
                     "composition": {
+                        "schema": 2,
                         "id": "development",
                         "title": "Development",
                         "root": {
                             "type": "group",
                             "views": ["view:ryeos/development"],
                             "active": 0
-                        },
-                        "slots": {}
+                        }
                     },
                     "relationships": [{
                         "mount": {"kind": "tile", "index": 0},
@@ -1261,20 +1250,21 @@ mod tests {
                     "id": "development-current",
                     "name": "Development current",
                     "composition": {
+                        "schema": 2,
                         "id": "development-current",
                         "title": "Development current",
                         "root": {
                             "type": "group",
                             "views": ["view:ryeos/development"],
                             "active": 0
-                        },
-                        "slots": {}
+                        }
                     },
                     "relationships": [{
                         "mount": {"kind": "tile", "index": 0},
                         "source": {"mode": "follow_own_set"}
                     }],
                     "context": {
+                        "surface_ref": "surface:ryeos/ui/base",
                         "project": {"local_id": "prj_example"},
                         "work": {"chain_root_id": "T-root"}
                     }
@@ -1302,13 +1292,6 @@ mod tests {
     fn relative_project_root_is_rejected() {
         let err = canonical_project_root("relative/path").unwrap_err();
         assert!(err.to_string().contains("project root must be absolute"));
-    }
-
-    #[test]
-    fn forget_root_locator_accepts_missing_absolute_paths() {
-        let locator = project_root_locator_for_forget("/definitely/missing/ryeos/project")
-            .expect("missing absolute path should still be usable for forget");
-        assert_eq!(locator, "/definitely/missing/ryeos/project");
     }
 
     #[test]

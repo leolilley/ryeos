@@ -2226,8 +2226,10 @@ mod tests {
 
     #[test]
     fn candidate_protocol_partial_write_never_restarts_or_crosses_revocation() {
-        let mut input = CandidateProtocolInput::default();
-        input.frontier = 1;
+        let mut input = CandidateProtocolInput {
+            frontier: 1,
+            ..Default::default()
+        };
         let mut writer = BoundedWriter {
             bytes: Vec::new(),
             limit: 1,

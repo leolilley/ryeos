@@ -1,5 +1,6 @@
-# ryeos:signed:2026-09-14T10:03:09Z:69c1918d3ac8208870b2b237e5d1d2404ae13e5095c78a3519504d951d9775bc:ab0u1DA6HFkv2bUI4R07GbbmNKl195zefLnJB3uCct4axtJu+RWxBOyMleQ/ygUc9HDzCeAoVybmv+XtAg8bBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-19T22:29:40Z:5b9adab869fce579cc9b9e95dfcdbaec3021cf9e12a3a75b05f703e78d09277f:08DFTM7VEaBrebsY40ISFRS2Te9USnemm52PkDQsClFtRAoAAf3dja/g9az/uBB94fSkYSvHV75NFwbaCwEdCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-atlas
+title: Atlas
 version: "1.0.0"
 description: RyeOS UI with a Three.js 2D namespace atlas background
 
@@ -57,11 +58,6 @@ tiling:
 
 tiles: []
 
-slots:
-  bottom: { content: "view:ryeos/input", open: true, size: 7 }
-  left: { content: "view:ryeos/threads/history", open: false, size: 32 }
-  right: { content: "view:ryeos/item/inspector", open: false, size: 40 }
-
 style:
   border: thin
 
@@ -94,3 +90,9 @@ affordances:
   - id: view.services
     label: Services
     category: View
+
+library:
+  - group: Inspection
+    views:
+      - view:ryeos/threads/history
+      - view:ryeos/item/inspector

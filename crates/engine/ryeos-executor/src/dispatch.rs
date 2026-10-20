@@ -396,19 +396,18 @@ fn check_dispatch_capabilities(
     Ok(())
 }
 
-// Protected root availability is separate from a request for its selected
-// driver. Neither variant is native admission; the closed dedicated proof is
-// still required at the actual finalized dependency/owner boundary.
+// Whether the request demands the selected-invocation owner path. A required
+// root is not native admission; the closed dedicated proof is still required
+// at the actual finalized dependency/owner boundary.
 #[derive(Clone, Copy)]
-pub(crate) enum InvocationRootCarrier<'a> {
+pub(crate) enum InvocationRootCarrier {
     Ordinary,
-    Available(&'a crate::SelectedInvocationAttachment),
-    Required(&'a crate::SelectedInvocationAttachment),
+    Required,
 }
 
-impl InvocationRootCarrier<'_> {
+impl InvocationRootCarrier {
     fn requires_selected(self) -> bool {
-        matches!(self, Self::Required(_))
+        matches!(self, Self::Required)
     }
 }
 
@@ -426,7 +425,7 @@ pub(crate) struct SubprocessDispatchContext<'a> {
     root_subject: Option<RootSubject>,
     hop_runtime: Option<VerifiedRuntime>,
     launch_handoff: Option<&'a crate::execution::launch::LaunchHandoff>,
-    invocation_root: InvocationRootCarrier<'a>,
+    invocation_root: InvocationRootCarrier,
 }
 
 // ── A4: per-hop resolution helper + HopAction ─────────────────────────
@@ -3684,7 +3683,6 @@ pub async fn dispatch_with_handler_context(
             request,
             ctx,
             state,
-            None,
         )
         .await
         .map_err(|error| {
@@ -3719,7 +3717,7 @@ pub fn dispatch_daemon_owned(
     ctx: &ExecutionContext,
     state: &AppState,
 ) -> tokio::task::JoinHandle<Result<Value, DispatchError>> {
-    dispatch_daemon_owned_inner(item_ref, None, None, request, ctx, state, None)
+    dispatch_daemon_owned_inner(item_ref, None, None, request, ctx, state)
 }
 
 fn dispatch_daemon_owned_inner(
@@ -3729,7 +3727,6 @@ fn dispatch_daemon_owned_inner(
     request: &DispatchRequest<'_>,
     ctx: &ExecutionContext,
     state: &AppState,
-    available_root: Option<crate::SelectedInvocationAttachment>,
 ) -> tokio::task::JoinHandle<Result<Value, DispatchError>> {
     let item_ref = item_ref.to_owned();
     let launch_mode = request.launch_mode.to_owned();
@@ -3793,10 +3790,7 @@ fn dispatch_daemon_owned_inner(
             &ctx,
             &state,
             None,
-            match available_root.as_ref() {
-                Some(attachment) => InvocationRootCarrier::Available(attachment),
-                None => InvocationRootCarrier::Ordinary,
-            },
+            InvocationRootCarrier::Ordinary,
         ))
         .await;
         drop(request);
@@ -3862,7 +3856,6 @@ pub async fn dispatch_verified(
             request,
             ctx,
             state,
-            None,
         )
         .await
         .map_err(|error| {
@@ -3905,7 +3898,6 @@ pub async fn dispatch_verified_with_handler_context(
             request,
             ctx,
             state,
-            None,
         )
         .await
         .map_err(|error| {
@@ -3927,7 +3919,7 @@ pub async fn dispatch_verified_with_handler_context(
     .await
 }
 
-/// Carry the matching publication as available context without selecting an
+/// Dispatch under the matching publication's AppState without selecting an
 /// invocation. Only exact admitted dependency proof may choose its owner path.
 /// Ordinary wait/detached/validation/method requests keep ordinary semantics.
 pub async fn dispatch_with_application_publication(
@@ -3950,7 +3942,6 @@ pub async fn dispatch_with_application_publication(
             request,
             ctx,
             state,
-            Some(publication.attachment().clone()),
         )
         .await
         .map_err(|error| {
@@ -3967,7 +3958,7 @@ pub async fn dispatch_with_application_publication(
         ctx,
         state,
         launch_handoff,
-        InvocationRootCarrier::Available(publication.attachment()),
+        InvocationRootCarrier::Ordinary,
     ))
     .await;
     if let (Some(handoff), Err(error)) = (launch_handoff, &result) {
@@ -3998,7 +3989,7 @@ pub async fn dispatch_with_selected_invocation(
         ctx,
         state,
         launch_handoff,
-        InvocationRootCarrier::Required(attachment),
+        InvocationRootCarrier::Required,
     ))
     .await;
     if let (Some(handoff), Err(error)) = (launch_handoff, &result) {
@@ -4015,7 +4006,7 @@ async fn dispatch_inner(
     ctx: &ExecutionContext,
     state: &AppState,
     launch_handoff: Option<&crate::execution::launch::LaunchHandoff>,
-    invocation_root: InvocationRootCarrier<'_>,
+    invocation_root: InvocationRootCarrier,
 ) -> Result<Value, DispatchError> {
     const MAX_HOPS: usize = 8;
     let mut visited: HashSet<CanonicalRef> = HashSet::new();
@@ -6381,7 +6372,7 @@ async fn dispatch_by(
     role: &SubprocessRole,
     local_handler_context: Option<ryeos_app::handler_context::HandlerContext>,
     launch_handoff: Option<&crate::execution::launch::LaunchHandoff>,
-    invocation_root: InvocationRootCarrier<'_>,
+    invocation_root: InvocationRootCarrier,
 ) -> Result<Value, DispatchError> {
     let DispatchByParams {
         terminator,

@@ -1198,16 +1198,6 @@ struct PooledStartRetention {
     // Group/pool destruction is never native or financial settlement proof.
     retained_running: Vec<ryeos_engine::dispatch::RunningExecution>,
     original_native_acceptance: Option<OriginalNamespaceReporterAcceptance>,
-    original_startup_channel:
-        Option<crate::persistent_session_admission::cleanup_channel::TrustedCleanupChannel>,
-    quarantined_startup_channels:
-        Vec<crate::persistent_session_admission::cleanup_channel::TrustedCleanupChannel>,
-    startup_check_attempted: bool,
-    startup_check_in_flight: bool,
-    startup_check_refused: bool,
-    // Only the unique inert checkout guard writes this reserved restoration
-    // slot. Competing deposits use existing running/input/channel quarantine.
-    original_startup_restored: Option<OriginalStartupRetainedOwners>,
     manifest_preparation: OriginalManifestPreparationPhase,
     // Only the unique inert precontact guard writes this reserved owner slot.
     // Its original inputs stay rooted through funding/physical settlement.
@@ -1251,23 +1241,6 @@ struct OriginalNamespaceReporterAcceptance {
     original_deadline: lillux::time::MonotonicDeadline,
 }
 
-/// Inert original-owner checkout. SAME mutable channel retains its request and
-/// candidate internally. No acceptance/Init constructor or production caller.
-struct OriginalStartupCheckGuard<'a> {
-    running: Option<ryeos_engine::dispatch::RunningExecution>,
-    inputs: Option<crate::persistent_session_admission::VerifiedTrustedPooledSessionInputs>,
-    channel: Option<crate::persistent_session_admission::cleanup_channel::TrustedCleanupChannel>,
-    held_occurrence: Arc<lillux::exec::ProcessLocalHeldOccurrence>,
-    original: &'a PersistentSessionPooledStart,
-    cancelled: &'a dyn Fn() -> bool,
-}
-
-struct OriginalStartupRetainedOwners {
-    _running: Option<ryeos_engine::dispatch::RunningExecution>,
-    _inputs: Option<crate::persistent_session_admission::VerifiedTrustedPooledSessionInputs>,
-    _channel: Option<crate::persistent_session_admission::cleanup_channel::TrustedCleanupChannel>,
-}
-
 /// Exclusive unfunded preparation. All partial document owners stay in SAME
 /// inputs. Completion only restores DATA custody; native permission stays closed.
 struct OriginalManifestPrecontactGuard<'a> {
@@ -1301,12 +1274,7 @@ impl OriginalManifestPrecontactGuard<'_> {
             && !retained.native_check_attempted
             && !retained.native_check_in_flight
             && !retained.native_check_refused
-            && !retained.startup_check_attempted
-            && !retained.startup_check_in_flight
-            && !retained.startup_check_refused
-            && retained.original_startup_restored.is_none()
             && retained.quarantined_inputs.is_empty()
-            && retained.quarantined_startup_channels.is_empty()
             && self.original.is_in_flight();
         drop(retained);
         anyhow::ensure!(
@@ -1338,8 +1306,7 @@ impl OriginalManifestPrecontactGuard<'_> {
             .context("original manifest inputs checked out")?
             .retain_original_manifest_documents(state)?;
         self.require_exclusive()?;
-        let _ = self
-            .inputs
+        self.inputs
             .as_mut()
             .context("original manifest inputs checked out")?
             .original_manifest_documents(state)?;
@@ -1370,8 +1337,7 @@ impl OriginalManifestPrecontactGuard<'_> {
         self.require_exclusive()?;
         // Completion validates the actual prepared pair itself; mere checkout
         // cannot call this private operation into a fabricated Prepared phase.
-        let _ = self
-            .inputs
+        self.inputs
             .as_mut()
             .context("original prepared inputs checked out")?
             .original_manifest_documents(state)?;
@@ -1406,12 +1372,7 @@ impl OriginalManifestPrecontactGuard<'_> {
             && !retained.native_check_attempted
             && !retained.native_check_in_flight
             && !retained.native_check_refused
-            && !retained.startup_check_attempted
-            && !retained.startup_check_in_flight
-            && !retained.startup_check_refused
-            && retained.original_startup_restored.is_none()
             && retained.quarantined_inputs.is_empty()
-            && retained.quarantined_startup_channels.is_empty()
             && self.original.is_in_flight();
         if !eligible {
             drop(retained);
@@ -1445,118 +1406,6 @@ impl Drop for OriginalManifestPrecontactGuard<'_> {
         retained.manifest_preparation = OriginalManifestPreparationPhase::Refused;
         retained.admission_refused = true;
         retained.phase = PooledStartPhase::Unsettled;
-    }
-}
-
-impl OriginalStartupCheckGuard<'_> {
-    fn retain_original_manifest_documents(&mut self, state: &crate::state::AppState) -> Result<()> {
-        self.require_exclusive()?;
-        // SAME prepared inputs are guard-owned, outside the locked slot.
-        // Validation/re-read only: no second producer or fallback sealing.
-        self.inputs
-            .as_mut()
-            .context("actual original inputs checked out")?
-            .original_manifest_documents(state)?;
-        self.require_exclusive()?;
-        // No descriptor export/acceptance/Init, and Drop always restores owners.
-        Ok(())
-    }
-    fn require_exclusive(&self) -> Result<()> {
-        // Ownership checks only. Never hold this mutex during source/CAS/live
-        // or FD4 operations. Poison retains originals but cannot admit a join.
-        let retained = self
-            .original
-            .lock_original_contact_retention(Some(self.cancelled))?;
-        let exclusive = !self.original.retained.is_poisoned()
-            && retained.startup_check_attempted
-            && retained.startup_check_in_flight
-            && !retained.startup_check_refused
-            && !retained.admission_refused
-            && retained.manifest_preparation == OriginalManifestPreparationPhase::Prepared
-            && retained.original_manifest_restored.is_none()
-            && !retained.native_check_attempted
-            && !retained.native_check_in_flight
-            && !retained.native_check_refused
-            && retained.original_native_acceptance.is_none()
-            && retained.phase == PooledStartPhase::Preparing
-            && retained.retained_running.is_empty()
-            && retained.trusted_inputs.is_none()
-            && retained.original_startup_channel.is_none()
-            && retained.original_startup_restored.is_none()
-            && retained.quarantined_inputs.is_empty()
-            && retained.quarantined_startup_channels.is_empty()
-            && retained.original_spawn_permit.is_some()
-            && retained.original_contact_attempted
-            && retained.original_held_attached
-            && self.original.is_in_flight()
-            && retained
-                .original_funding
-                .as_ref()
-                .and_then(|funding| funding.acknowledged_held_occurrence())
-                .is_some_and(|held| Arc::ptr_eq(held, &self.held_occurrence));
-        drop(retained);
-        anyhow::ensure!(
-            exclusive,
-            "original startup checkout lost exclusive actual owners"
-        );
-        anyhow::ensure!(
-            !(self.cancelled)()
-                && self
-                    .original
-                    .original_callback_budget
-                    .get()
-                    .is_some_and(|budget| !budget.contact_expiry().has_elapsed()),
-            "original startup validation cancelled or expired"
-        );
-        Ok(())
-    }
-
-    fn prepare_request_inputs(
-        &self,
-        state: &crate::state::AppState,
-    ) -> Result<crate::persistent_session_admission::cleanup_channel::PreflightInputs> {
-        self.require_exclusive()?;
-        let inputs = self
-            .inputs
-            .as_ref()
-            .context("original inputs checked out")?;
-        let original = inputs.original_startup_request_inputs(state)?;
-        let request =
-            crate::persistent_session_admission::cleanup_channel::PreflightInputs::from_original(
-                &original,
-            )?;
-        self.require_exclusive()?;
-        // No queue/read/acceptance/Init in N1. Source provider implementation,
-        // typed applied-receipt readiness and authorized lifecycle remain gates.
-        Ok(request)
-    }
-
-    fn restore_owned(&mut self, retained: &mut PooledStartRetention) {
-        // This private Option destination is reserved by the unique checkout;
-        // no competing deposit writes it and this Drop occurs exactly once.
-        // Keeping a bundle beside the quarantine avoids vector allocation and
-        // replacement of colliding originals during poisoned/unwind restore.
-        retained.original_startup_restored = Some(OriginalStartupRetainedOwners {
-            _running: self.running.take(),
-            _inputs: self.inputs.take(),
-            _channel: self.channel.take(),
-        });
-    }
-}
-
-impl Drop for OriginalStartupCheckGuard<'_> {
-    fn drop(&mut self) {
-        // Unwind/poison/expiry must restore custody, not attempt acceptance or
-        // obtain another budget. Blocking restoration is NOT timed admission.
-        let original = self.original;
-        let mut retained = original.retained.lock().unwrap_or_else(|p| p.into_inner());
-        self.restore_owned(&mut retained);
-        retained.startup_check_in_flight = false;
-        retained.startup_check_refused = true;
-        retained.manifest_preparation = OriginalManifestPreparationPhase::Refused;
-        retained.admission_refused = true;
-        retained.phase = PooledStartPhase::Unsettled;
-        // Deliberately no success/disarm method: N1 cannot mint acceptance.
     }
 }
 
@@ -1734,7 +1583,6 @@ impl PersistentSessionPooledStart {
             && retained.original_spawn_permit.is_none()
             && !retained.original_held_attached
             && retained.retained_running.is_empty()
-            && retained.original_startup_restored.is_none()
             && retained.original_manifest_restored.is_none()
             && self.is_in_flight();
         if !eligible {
@@ -1767,121 +1615,6 @@ impl PersistentSessionPooledStart {
         guard.require_exclusive()?;
         Ok(guard)
     }
-    /// Inert N1 preparation seam; no caller until separate N2 authorization.
-    /// Pair creation is outside the retention mutex. No queue/release/Init.
-    fn prepare_original_startup_channel(
-        &self,
-    ) -> Result<ryeos_engine::isolation::IsolationTargetChannelAuthority> {
-        let deadline = self
-            .original_callback_budget
-            .get()
-            .context("startup channel lacks actual original callback budget")?
-            .contact_expiry();
-        let (channel, target) = crate::persistent_session_admission::cleanup_channel::TrustedCleanupChannel::prepare_preflight(deadline)?;
-        // Owned channel deposit cannot be lost merely because admission locking
-        // expired. This lock retains only; it performs no channel/CAS/live IO.
-        let mut retained = self.retained.lock().unwrap_or_else(|p| p.into_inner());
-        let duplicate = retained.original_startup_channel.is_some();
-        if duplicate {
-            retained.quarantined_startup_channels.push(channel);
-        } else {
-            retained.original_startup_channel = Some(channel);
-        }
-        let eligible = !duplicate
-            && !self.retained.is_poisoned()
-            && !deadline.has_elapsed()
-            && !Self::native_check_blocks_mutation(&retained)
-            && !retained.admission_refused
-            && retained.phase == PooledStartPhase::Preparing
-            && self.is_in_flight()
-            && retained
-                .trusted_inputs
-                .as_ref()
-                .is_some_and(|inputs| inputs.has_selected_startup_contract());
-        if !eligible {
-            retained.startup_check_refused = true;
-            retained.admission_refused = true;
-        }
-        drop(retained);
-        anyhow::ensure!(
-            eligible,
-            "original startup channel lacks exclusive signed original input"
-        );
-        Ok(target)
-    }
-
-    /// Own supplied originals BEFORE checking eligibility. Inert: no Executor
-    /// caller, terminal polling, pending-receipt string classifier or Init.
-    fn checkout_original_startup<'a>(
-        &'a self,
-        cancelled: &'a dyn Fn() -> bool,
-        running: ryeos_engine::dispatch::RunningExecution,
-        lifelines: Vec<Box<dyn Send + Sync>>,
-        resource: Option<PersistentSessionCleanupObserver>,
-        retirement: Option<PersistentSessionCleanupObserver>,
-    ) -> Result<OriginalStartupCheckGuard<'a>> {
-        let mut retained = self.retained.lock().unwrap_or_else(|p| p.into_inner());
-        retained.retained_running.push(running);
-        retained.lifelines.extend(lifelines);
-        stage_pooled_obligation_owners(&mut retained, &resource, &retirement);
-        let eligible = !self.retained.is_poisoned()
-            && retained.manifest_preparation == OriginalManifestPreparationPhase::Prepared
-            && !retained.native_check_attempted
-            && !retained.native_check_in_flight
-            && !retained.native_check_refused
-            && !retained.startup_check_attempted
-            && !retained.startup_check_in_flight
-            && !retained.startup_check_refused
-            && retained.original_manifest_restored.is_none()
-            && retained.quarantined_inputs.is_empty()
-            && retained.quarantined_startup_channels.is_empty()
-            && !retained.admission_refused
-            && retained.phase == PooledStartPhase::Preparing
-            && retained.retained_running.len() == 1
-            && retained.trusted_inputs.is_some()
-            && retained.original_startup_channel.is_some()
-            && retained.original_startup_restored.is_none()
-            && retained.original_spawn_permit.is_some()
-            && retained.original_contact_attempted
-            && retained.original_held_attached
-            && retained
-                .original_funding
-                .as_ref()
-                .and_then(|funding| funding.acknowledged_held_occurrence())
-                .is_some()
-            && self.is_in_flight()
-            && self
-                .original_callback_budget
-                .get()
-                .is_some_and(|budget| !budget.contact_expiry().has_elapsed());
-        retained.startup_check_attempted = true;
-        if !eligible {
-            retained.startup_check_refused = true;
-            retained.admission_refused = true;
-            retained.phase = PooledStartPhase::Unsettled;
-            drop(retained);
-            bail!("original startup requires exclusive Attached funded original custody");
-        }
-        retained.startup_check_in_flight = true;
-        let guard = OriginalStartupCheckGuard {
-            running: retained.retained_running.pop(),
-            inputs: retained.trusted_inputs.take(),
-            channel: retained.original_startup_channel.take(),
-            held_occurrence: Arc::clone(
-                retained
-                    .original_funding
-                    .as_ref()
-                    .and_then(|funding| funding.acknowledged_held_occurrence())
-                    .expect("actual acknowledged occurrence checked before checkout"),
-            ),
-            original: self,
-            cancelled,
-        };
-        drop(retained);
-        guard.require_exclusive()?;
-        Ok(guard)
-    }
-
     // Root EVERY supplied guard before checking multiplicity. A duplicate
     // remains in existing lifelines; the first typed original is never replaced.
     fn retain_original_scratch(
@@ -1903,10 +1636,6 @@ impl PersistentSessionPooledStart {
             || retained.native_check_in_flight
             || retained.native_check_refused
             || !retained.quarantined_inputs.is_empty()
-            || retained.startup_check_attempted
-            || retained.startup_check_in_flight
-            || retained.startup_check_refused
-            || !retained.quarantined_startup_channels.is_empty()
     }
 
     fn new() -> Self {
@@ -1914,12 +1643,6 @@ impl PersistentSessionPooledStart {
             retained: Mutex::new(PooledStartRetention {
                 retained_running: Vec::new(),
                 original_native_acceptance: None,
-                original_startup_channel: None,
-                quarantined_startup_channels: Vec::new(),
-                startup_check_attempted: false,
-                startup_check_in_flight: false,
-                startup_check_refused: false,
-                original_startup_restored: None,
                 manifest_preparation: OriginalManifestPreparationPhase::Unattempted,
                 original_manifest_restored: None,
                 quarantined_inputs: Vec::new(),
@@ -2086,13 +1809,8 @@ impl PersistentSessionPooledStart {
                     && !retained.native_check_attempted
                     && !retained.native_check_in_flight
                     && !retained.native_check_refused
-                    && !retained.startup_check_attempted
-                    && !retained.startup_check_in_flight
-                    && !retained.startup_check_refused
                     && retained.original_manifest_restored.is_none()
-                    && retained.original_startup_restored.is_none()
                     && retained.quarantined_inputs.is_empty()
-                    && retained.quarantined_startup_channels.is_empty()
             } else {
                 !Self::native_check_blocks_mutation(&retained)
             };

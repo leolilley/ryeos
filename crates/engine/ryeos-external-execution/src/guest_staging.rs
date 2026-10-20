@@ -865,8 +865,8 @@ mod tests {
         };
         let mut stream =
             GuestStagingStreamWriter::new(Vec::new(), manifest.clone(), &expected).unwrap();
-        for payload in [bootstrap, configuration, launcher, supervisor] {
-            stream.copy_next_file(&mut payload.as_ref()).unwrap();
+        for mut payload in [bootstrap, configuration, launcher, supervisor] {
+            stream.copy_next_file(&mut payload).unwrap();
         }
         let bytes = stream.finish().unwrap();
         let private = tempfile::tempdir().unwrap();

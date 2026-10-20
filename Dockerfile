@@ -81,6 +81,18 @@ RUN groupadd --gid 10000 ryeos && \
       --shell /usr/sbin/nologin ryeos && \
     install -d -o ryeos -g ryeos -m 0750 /data /data/app
 
+# Platform shells (Render's SSH and dashboard shell) attach as the image's
+# running user, which is root here because tini and the entrypoint start as
+# root, and they require that user's ~/.ssh to exist with mode 0700. Without
+# it the session is closed right after the platform authenticates the
+# operator, and they refuse a root account whose password field is locked,
+# which is how the base image ships it. The password set below is random
+# and discarded: it only moves the account from locked to set; nothing
+# authenticates with it, and the node account runs with no_new_privs. The
+# ssh directory stays empty in the image.
+RUN install -d -m 0700 /root/.ssh && \
+    usermod -p "$(openssl rand -base64 48 | openssl passwd -6 -stdin)" root
+
 # Daemon + ops CLI + core tools (authorize-client, sign, identity, etc.).
 COPY --from=builder /build/target/release/ryeosd             /usr/local/bin/ryeosd
 COPY --from=builder /build/target/release/ryeos              /usr/local/bin/ryeos
@@ -107,7 +119,6 @@ COPY --from=builder /build/bundles/opencode  /opt/ryeos/opencode
 COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
-ENV HOME=/data/app
 ENV RYEOS_APP_ROOT=/data/app
 LABEL io.ryeos.node-uid="10000"
 LABEL io.ryeos.node-gid="10000"

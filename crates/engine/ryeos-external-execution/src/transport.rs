@@ -1732,7 +1732,7 @@ mod tests {
     ) {
         let owner = lillux::crypto::SigningKey::from_bytes(&[11; 32]);
         let supervisor = lillux::crypto::SigningKey::from_bytes(&[12; 32]);
-        let now = i64::try_from(lillux::time::timestamp_millis()).unwrap();
+        let now = lillux::time::timestamp_millis();
         let binding = ExecutionChannelBinding {
             schema: ryeos_state::external_execution::EXECUTION_CHANNEL_BINDING_SCHEMA,
             execution_mode:

@@ -44,23 +44,29 @@ mod signed_bundle;
 mod admitted_worker_evidence;
 #[path = "../../support/candidate_authoring.rs"]
 mod candidate_authoring;
+#[path = "../../support/candidate_operation_sources.rs"]
+mod candidate_operation_sources;
+#[path = "../../support/candidate_requirement.rs"]
+mod candidate_requirement;
 #[path = "../../support/independent_verifier_scenario.rs"]
 mod independent_verifier_scenario;
 #[path = "../../support/qualification_node.rs"]
 mod qualification_node;
 #[path = "../../support/runtime_qualification.rs"]
 mod runtime_qualification;
+#[path = "../../support/runtime_qualification_placement.rs"]
+mod runtime_qualification_placement;
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[path = "routed_verifier/mod.rs"]
 mod routed_verifier;
 
 use candidate_authoring::{
-    CandidateAuthoringBundle, authored_codex_hosted_sources,
-    configure_real_codex_scripted_turn_profile, joined_external_candidate_requirement,
-    real_codex_requirement, sign_candidate_qualification_inputs,
-    signed_candidate_operation_sources, write_candidate_authoring_bundle,
+    authored_codex_hosted_sources, configure_real_codex_scripted_turn_profile,
+    joined_external_candidate_requirement, real_codex_requirement,
+    sign_candidate_qualification_inputs, write_candidate_authoring_bundle,
 };
+use candidate_operation_sources::signed_candidate_operation_sources;
 
 /// Observe the signed Worker source before selecting its subject product. This
 /// authoring preview cannot borrow an identity from D1 qualification or a
@@ -82,7 +88,7 @@ fn admit_external_worker_evidence(
 }
 
 fn fixture_qualification_use(
-    bundle: &CandidateAuthoringBundle,
+    provider_runtime_manifest_hash: &str,
     evidence: &admitted_worker_evidence::AdmittedWorkerEvidence,
     runtime: &ryeos_state::objects::ExternalLargeContentManifestObject,
     real_codex: bool,
@@ -110,7 +116,7 @@ fn fixture_qualification_use(
             id: "auxiliary".into(),
             kind: ExternalContentKind::Tree,
             mode: ExternalContentMode::Pinned,
-            manifest_hash: bundle.provider_runtime_manifest_hash.clone(),
+            manifest_hash: provider_runtime_manifest_hash.to_owned(),
             entry_count: runtime.entry_count,
             total_bytes: runtime.total_bytes,
             mount_root: ExternalContentMountRoot::ExecutionRuntime,
@@ -120,7 +126,7 @@ fn fixture_qualification_use(
             id: "provider-runtime".into(),
             kind: ExternalContentKind::Tree,
             mode: ExternalContentMode::Pinned,
-            manifest_hash: bundle.provider_runtime_manifest_hash.clone(),
+            manifest_hash: provider_runtime_manifest_hash.to_owned(),
             entry_count: runtime.entry_count,
             total_bytes: runtime.total_bytes,
             mount_root: ExternalContentMountRoot::ExecutionRuntime,
@@ -952,13 +958,13 @@ fn prepare_runtime_qualification_inputs(
         .unwrap()
         .tighten_owner_private_directory()
         .unwrap();
-    runtime_qualification::write_owner_runtime_tree(
+    runtime_qualification_placement::write_owner_runtime_tree(
         guest_tree.path(),
         state.identity.verifying_key(),
         b"synthetic guest owner executable",
     );
     let guest_manifest =
-        runtime_qualification::install_ordinary_runtime_content(state, guest_tree.path());
+        runtime_qualification_placement::install_ordinary_runtime_content(state, guest_tree.path());
     let guest_manifest_hash =
         ryeos_state::external_content_manifest_digest(&guest_manifest).unwrap();
     let archive = runtime_qualification::RuntimeArchive::from_tree(session_runtime);
@@ -988,7 +994,7 @@ fn author_guest_runtime_sources(
         &inputs.guest_manifest_hash,
         verifier_runtime_manifest_hash,
         &runtime_qualification::GUEST_RUNTIME_REQUIRED_CLAIMS,
-        &runtime_qualification::OWNER_GUEST_PRODUCT,
+        &runtime_qualification_placement::OWNER_GUEST_PRODUCT,
     );
 }
 
@@ -1028,7 +1034,7 @@ async fn qualify_runtime_selection(
     ryeos_app::external_placement::test_support::PlacementQualificationSelection,
 ) {
     let state = Arc::new(state);
-    let guest = runtime_qualification::qualify_guest_runtime_subject(
+    let guest = runtime_qualification_placement::qualify_guest_runtime_subject(
         &state,
         &runtime_qualification::GuestProductSubject::ordinary(&inputs.guest_manifest),
         verifier_runtime_manifest_hash,
@@ -1039,14 +1045,14 @@ async fn qualify_runtime_selection(
         guest.guest_runtime_manifest_hash,
         inputs.guest_manifest_hash
     );
-    let content = runtime_qualification::activate_and_qualify_runtime(
+    let content = runtime_qualification_placement::activate_and_qualify_runtime(
         &state,
         runtime_manifest_hash,
         verifier_runtime_manifest_hash,
         runtime_qualification::CONTENT_RUNTIME_CLAIMS,
     )
     .await;
-    let selection = runtime_qualification::placement_selection(&guest, &content);
+    let selection = runtime_qualification_placement::placement_selection(&guest, &content);
     let state = match Arc::try_unwrap(state) {
         Ok(state) => state,
         Err(_) => panic!("runtime qualification retained unexpected daemon state ownership"),
@@ -1438,7 +1444,7 @@ fn run_signed_worker_admission_on(
         )
         .unwrap();
     std::fs::create_dir_all(state.config.runtime_root().trusted_keys_dir()).unwrap();
-    let candidate_authoring_bundle = write_candidate_authoring_bundle(
+    let (candidate_authoring_bundle, authored_profile) = write_candidate_authoring_bundle(
         fixture_repository_source_root(),
         root.path(),
         &state.identity,
@@ -1466,15 +1472,11 @@ fn run_signed_worker_admission_on(
     );
     let admitted = admit_external_worker_evidence(&state);
     assert_eq!(
-        admitted.profile, candidate_authoring_bundle.profile,
+        admitted.profile, authored_profile,
         "signed Worker capture compiled a different profile than authoring"
     );
-    let qualification_use = fixture_qualification_use(
-        &candidate_authoring_bundle,
-        &admitted,
-        &runtime_manifest,
-        false,
-    );
+    let qualification_use =
+        fixture_qualification_use(&runtime_manifest_hash, &admitted, &runtime_manifest, false);
     sign_candidate_qualification_inputs(
         &candidate_authoring_bundle.root,
         &state.identity,
@@ -3009,7 +3011,7 @@ fn composed_controller_attachment_on(
     let verifier_manifest_hash = qualification_node::manifest_hash(&verifier_manifest);
     let qualification_inputs =
         prepare_runtime_qualification_inputs(root.path(), &state, runtime.path());
-    let authoring = write_candidate_authoring_bundle(
+    let (authoring, _) = write_candidate_authoring_bundle(
         fixture_repository_source_root(),
         root.path(),
         &state.identity,
@@ -3695,7 +3697,7 @@ async fn run_production_tls_candidate(
     std::fs::create_dir_all(state.config.runtime_root().trusted_keys_dir()).unwrap();
     std::fs::create_dir_all(state.config.uds_path.parent().unwrap()).unwrap();
     let uds_listener = tokio::net::UnixListener::bind(&state.config.uds_path).unwrap();
-    let candidate_authoring_bundle = write_candidate_authoring_bundle(
+    let (candidate_authoring_bundle, authored_profile) = write_candidate_authoring_bundle(
         fixture_repository_source_root(),
         root.path(),
         &state.identity,
@@ -3726,9 +3728,9 @@ async fn run_production_tls_candidate(
         Some(&qualification_inputs.grant),
     );
     let admitted = admit_external_worker_evidence(&state);
-    assert_eq!(admitted.profile, candidate_authoring_bundle.profile);
+    assert_eq!(admitted.profile, authored_profile);
     let qualification_use = fixture_qualification_use(
-        &candidate_authoring_bundle,
+        &runtime_manifest_hash,
         &admitted,
         &runtime_manifest,
         codex.is_some(),

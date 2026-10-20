@@ -366,8 +366,8 @@ struct OriginalPacketProgressParts {
     source_parts_consumed: bool,
     optional_source_census: Option<PacketOptionalSourceCensus>,
     scheduler_handoff: Option<(
-        ryeos_scheduler::db::SchedulerNativeStoreHandoffId,
-        ryeos_scheduler::db::SchedulerNativeStoreSourceRole,
+        ryeos_scheduler_contract::SchedulerNativeStoreHandoffId,
+        ryeos_scheduler_contract::SchedulerNativeStoreSourceRole,
     )>,
     // Producer domain copied when an auxiliary packet joins; it selects the
     // per-domain bound inside the shared Scheduler/accounting collection.
@@ -455,8 +455,8 @@ impl OriginalPacketPartsProgress {
         raw: Option<lillux_sqlite::OriginalNativeOutsideConnectionCustody>,
         parts: Option<lillux_sqlite::OriginalNativeOutsideConnectionParts>,
         scheduler_handoff: Option<(
-            ryeos_scheduler::db::SchedulerNativeStoreHandoffId,
-            ryeos_scheduler::db::SchedulerNativeStoreSourceRole,
+            ryeos_scheduler_contract::SchedulerNativeStoreHandoffId,
+            ryeos_scheduler_contract::SchedulerNativeStoreSourceRole,
         )>,
         source_kind: OriginalPacketSourceKind,
         native_domain: Option<lillux_sqlite::OriginalNativeDomain>,
@@ -510,8 +510,8 @@ impl OriginalPacketPartsProgress {
     pub(super) fn from_parts(
         parts: lillux_sqlite::OriginalNativeOutsideConnectionParts,
         scheduler_handoff: Option<(
-            ryeos_scheduler::db::SchedulerNativeStoreHandoffId,
-            ryeos_scheduler::db::SchedulerNativeStoreSourceRole,
+            ryeos_scheduler_contract::SchedulerNativeStoreHandoffId,
+            ryeos_scheduler_contract::SchedulerNativeStoreSourceRole,
         )>,
         source_kind: OriginalPacketSourceKind,
     ) -> Self {
@@ -1411,8 +1411,8 @@ impl OriginalPacketPartsProgress {
 
     fn require_scheduler_store_acceptance(
         &self,
-        handoff_id: &ryeos_scheduler::db::SchedulerNativeStoreHandoffId,
-        role: ryeos_scheduler::db::SchedulerNativeStoreSourceRole,
+        handoff_id: &ryeos_scheduler_contract::SchedulerNativeStoreHandoffId,
+        role: ryeos_scheduler_contract::SchedulerNativeStoreSourceRole,
         factory: &std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
         aggregate: &lillux_sqlite::OriginalNativeTerminal,
         registry: &lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry,
@@ -1506,7 +1506,7 @@ struct UnopenedSchedulerDatabaseParts {
         std::sync::Arc<dyn lillux_sqlite::SqliteInspectionSqlWork>,
     )>,
     registration: Option<lillux_sqlite::original_physical_custody::OriginalPhysicalRegistration>,
-    handoff_id: Option<ryeos_scheduler::db::SchedulerNativeStoreHandoffId>,
+    handoff_id: Option<ryeos_scheduler_contract::SchedulerNativeStoreHandoffId>,
     name: Option<lillux_sqlite::OriginalNativeOutsideBoundCoordinate>,
     mode: Option<lillux_sqlite::OriginalNativeBoundMode>,
     domain: Option<lillux_sqlite::OriginalNativeDomain>,
@@ -1532,7 +1532,7 @@ fn unopened_scheduler_database_settled(parts: &UnopenedSchedulerDatabaseParts) -
 impl UnopenedSchedulerDatabaseProgress {
     fn from_parts(
         parts: lillux_sqlite::OriginalNativeOutsideBoundParts,
-        handoff_id: Option<ryeos_scheduler::db::SchedulerNativeStoreHandoffId>,
+        handoff_id: Option<ryeos_scheduler_contract::SchedulerNativeStoreHandoffId>,
     ) -> Self {
         let lillux_sqlite::OriginalNativeOutsideBoundParts {
             root,
@@ -1944,10 +1944,10 @@ pub(super) fn issue_scheduler_store_handoff_receipt<'store, Store: ?Sized>(
     unopened_schema: Option<&UnopenedNativeTransientProgress>,
     admission_sources: Option<&super::live_native::LiveSchedulerNativeAdmissionOutsideSources>,
     registry: Option<&lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry>,
-    handoff_id: &ryeos_scheduler::db::SchedulerNativeStoreHandoffId,
+    handoff_id: &ryeos_scheduler_contract::SchedulerNativeStoreHandoffId,
     factory: &std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
     aggregate: &lillux_sqlite::OriginalNativeTerminal,
-) -> Result<ryeos_scheduler::db::SchedulerNativeStoreHandoffReceipt<'store>> {
+) -> Result<ryeos_scheduler_contract::SchedulerNativeStoreHandoffReceipt<'store>> {
     factory.require_original_process()?;
     aggregate.require_original(factory)?;
     let registry =
@@ -1975,12 +1975,12 @@ pub(super) fn issue_scheduler_store_handoff_receipt<'store, Store: ?Sized>(
                 handoff_id, *role, factory, aggregate, registry,
             )?;
             match role {
-                ryeos_scheduler::db::SchedulerNativeStoreSourceRole::Database => {
+                ryeos_scheduler_contract::SchedulerNativeStoreSourceRole::Database => {
                     database_sources = database_sources
                         .checked_add(1)
                         .context("Scheduler database source count overflow")?
                 }
-                ryeos_scheduler::db::SchedulerNativeStoreSourceRole::Schema => {
+                ryeos_scheduler_contract::SchedulerNativeStoreSourceRole::Schema => {
                     schema_sources = schema_sources
                         .checked_add(1)
                         .context("Scheduler schema source count overflow")?
@@ -2036,7 +2036,7 @@ pub(super) fn issue_scheduler_store_handoff_receipt<'store, Store: ?Sized>(
     // handoff identity, one retained database source, one retained schema
     // source, and all associated unopened/failure inputs in this Store frame.
     unsafe {
-        ryeos_scheduler::db::SchedulerNativeStoreHandoffReceipt::from_store_source_join(
+        ryeos_scheduler_contract::SchedulerNativeStoreHandoffReceipt::from_store_source_join(
             store,
             handoff_id.clone(),
         )
@@ -2121,8 +2121,8 @@ pub(super) fn prepare_scheduler_packet_parts(
     aggregate: &lillux_sqlite::OriginalNativeTerminal,
     prepay: &dyn Fn(u64, u64) -> Result<()>,
     handoff: Option<(
-        ryeos_scheduler::db::SchedulerNativeStoreHandoffId,
-        ryeos_scheduler::db::SchedulerNativeStoreSourceRole,
+        ryeos_scheduler_contract::SchedulerNativeStoreHandoffId,
+        ryeos_scheduler_contract::SchedulerNativeStoreSourceRole,
     )>,
 ) -> Result<()> {
     factory.require_original_process()?;
@@ -2188,7 +2188,7 @@ pub(super) fn advance_unopened_scheduler_database(
     aggregate: &lillux_sqlite::OriginalNativeTerminal,
     registry: &mut lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry,
     prepay: &dyn Fn(u64, u64) -> Result<()>,
-    handoff_id: Option<ryeos_scheduler::db::SchedulerNativeStoreHandoffId>,
+    handoff_id: Option<ryeos_scheduler_contract::SchedulerNativeStoreHandoffId>,
 ) -> Result<()> {
     factory.require_original_process()?;
     aggregate.require_original(factory)?;
@@ -3011,7 +3011,7 @@ impl LiveStateStoreOutsideCustody {
     /// used by the Store-issued acceptance receipt.
     pub fn advance_scheduler_native_handoff(
         &mut self,
-        sources: &mut Option<ryeos_scheduler::db::SchedulerNativeOutsideSources>,
+        sources: &mut Option<ryeos_scheduler_contract::SchedulerNativeOutsideSources>,
         factory: &std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
         aggregate: &lillux_sqlite::OriginalNativeTerminal,
         prepay: &dyn Fn(u64, u64) -> Result<()>,
@@ -3037,7 +3037,7 @@ impl LiveStateStoreOutsideCustody {
                 }
             };
             match taken {
-                ryeos_scheduler::db::TakenSchedulerNativeDatabaseSource::Connection(parts) => {
+                ryeos_scheduler_contract::TakenSchedulerNativeDatabaseSource::Connection(parts) => {
                     let mut source = Some(parts);
                     let result = self.advance_scheduler_packet_parts_with_handoff(
                         &mut source,
@@ -3046,29 +3046,30 @@ impl LiveStateStoreOutsideCustody {
                         prepay,
                         Some((
                             handoff_id.clone(),
-                            ryeos_scheduler::db::SchedulerNativeStoreSourceRole::Database,
+                            ryeos_scheduler_contract::SchedulerNativeStoreSourceRole::Database,
                         )),
                     );
-                    let unaccepted =
-                        if let Some(parts) = source.take() {
-                            // SAFETY: these are the exact source parts just taken
-                            // from this wrapper; the Store progress did not accept them.
-                            unsafe {
-                                sources.restore_database(
-                            ryeos_scheduler::db::SchedulerNativeDatabaseSource::from_connection(
+                    let unaccepted = if let Some(parts) = source.take() {
+                        // SAFETY: these are the exact source parts just taken
+                        // from this wrapper; the Store progress did not accept them.
+                        unsafe {
+                            sources.restore_database(
+                            ryeos_scheduler_contract::SchedulerNativeDatabaseSource::from_connection(
                                 parts));
-                            }
-                            true
-                        } else {
-                            false
-                        };
+                        }
+                        true
+                    } else {
+                        false
+                    };
                     result?;
                     ensure!(
                         !unaccepted,
                         "Scheduler database packet was not accepted by Store progress"
                     );
                 }
-                ryeos_scheduler::db::TakenSchedulerNativeDatabaseSource::NeverOpened(inputs) => {
+                ryeos_scheduler_contract::TakenSchedulerNativeDatabaseSource::NeverOpened(
+                    inputs,
+                ) => {
                     let mut source = Some(inputs);
                     let result = self.advance_unopened_scheduler_database_with_handoff(
                         &mut source,
@@ -3082,7 +3083,7 @@ impl LiveStateStoreOutsideCustody {
                         // from this wrapper; Store progress did not accept them.
                         unsafe {
                             sources.restore_database(
-                            ryeos_scheduler::db::SchedulerNativeDatabaseSource::from_never_opened(
+                            ryeos_scheduler_contract::SchedulerNativeDatabaseSource::from_never_opened(
                                 inputs));
                         }
                         true
@@ -3109,7 +3110,7 @@ impl LiveStateStoreOutsideCustody {
                 prepay,
                 Some((
                     handoff_id,
-                    ryeos_scheduler::db::SchedulerNativeStoreSourceRole::Schema,
+                    ryeos_scheduler_contract::SchedulerNativeStoreSourceRole::Schema,
                 )),
             );
             let unaccepted = if let Some(schema) = source.take() {
@@ -3150,8 +3151,8 @@ impl LiveStateStoreOutsideCustody {
         aggregate: &lillux_sqlite::OriginalNativeTerminal,
         prepay: &dyn Fn(u64, u64) -> Result<()>,
         handoff: Option<(
-            ryeos_scheduler::db::SchedulerNativeStoreHandoffId,
-            ryeos_scheduler::db::SchedulerNativeStoreSourceRole,
+            ryeos_scheduler_contract::SchedulerNativeStoreHandoffId,
+            ryeos_scheduler_contract::SchedulerNativeStoreSourceRole,
         )>,
     ) -> Result<()> {
         self.require_original_process()?;
@@ -3198,7 +3199,7 @@ impl LiveStateStoreOutsideCustody {
         factory: &std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
         aggregate: &lillux_sqlite::OriginalNativeTerminal,
         prepay: &dyn Fn(u64, u64) -> Result<()>,
-        handoff_id: Option<ryeos_scheduler::db::SchedulerNativeStoreHandoffId>,
+        handoff_id: Option<ryeos_scheduler_contract::SchedulerNativeStoreHandoffId>,
     ) -> Result<()> {
         self.require_original_process()?;
         let store_source = std::cell::RefCell::new(&mut self.held.get_mut().source);
@@ -3353,10 +3354,10 @@ impl LiveStateStoreOutsideCustody {
     /// associated unopened or failed-admission input joined.
     pub fn scheduler_native_store_handoff_receipt<'store>(
         &'store self,
-        handoff_id: &ryeos_scheduler::db::SchedulerNativeStoreHandoffId,
+        handoff_id: &ryeos_scheduler_contract::SchedulerNativeStoreHandoffId,
         factory: &std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
         aggregate: &lillux_sqlite::OriginalNativeTerminal,
-    ) -> Result<ryeos_scheduler::db::SchedulerNativeStoreHandoffReceipt<'store>> {
+    ) -> Result<ryeos_scheduler_contract::SchedulerNativeStoreHandoffReceipt<'store>> {
         self.require_original_process()?;
         match &self.held.source {
             LiveStateStoreOutsideSource::Closed(store) => {

@@ -1,52 +1,31 @@
-# ryeos:signed:2026-09-14T10:03:09Z:39e5233d4a943b84ccb8286914c027829a905905fea63ee202e6dd97d7b62e9e:xoWQwe5ixSB5v3jjnPSAfMPRLlxCnQkl4eMbqvFyjc7jVZfLSNbyEEkpJoBY+JT0weoMewSxJ8neazUTflmoBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-19T22:29:40Z:541e54c97e8ae3570ed2cba91227d3386b26e15fc835f4d5291f3491a70f41ba:ibDb6KCtfgV8GjzIYhHSvV/iE5TWRzr6t5a0UBZfZow0YC2y5Om+1r0dvGxv3v4qNRP1LqPm0XgwQvbFcYh6BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: projects-list
 title: Projects
 version: "1.0.0"
 description: >-
-  Registered project contexts for this operator. The current TUI project is
-  marked in-row; Enter opens a project so current-project lenses and foot-input
-  launches retarget to that root.
+  Registered project contexts for this operator. Opening admits a new project
+  Surface in the existing presentation without retargeting other mounted Views
+  or their inputs. Registration is a separate explicitly admitted operation.
 
-widget: table
+widget: sections
 sources:
   default:
     ref: service:projects/list
-    collection: projects
-projections:
-  columns:
-    - label: current
-      field: current
-      tone:
-        field: current
-        map:
-          "true": accent
-    - label: saved
-      field: registered
-    - label: name
-      field: name
-    - label: root
-      field: root
-    - label: exists
-      field: exists
-    - label: added
-      field: added_at
-  expand:
-    fields: [local_id, name, root, current, registered, exists, tags, added_at]
-  tone:
-    field: current
-    map:
-      "true": accent
-    default: neutral
-selection:
-  activate: open-project
 affordances:
   - id: open-project
     label: Open project
+    enabled_when: { field: registered, equals: true }
+    presentation_operation: surface_opening
     invoke:
       plane: rye
       ref: service:projects/open
       args:
+        placement: { kind: new_surface }
         local_id: "{record.local_id}"
+        selection:
+          kind: authored
+          surface_ref: surface:ryeos/ui/project
+        creation_request_id: "{record.creation_request_id}"
       notice: "Opened {result.project.name}."
   - id: register-project
     label: Register project
@@ -56,5 +35,39 @@ affordances:
       args:
         root: "{record.root}"
       notice: "Registered {result.project.name}."
+  - id: open-project-surface
+    label: Open project Surface
+    presentation_operation: surface_opening
+    invoke:
+      plane: rye
+      ref: service:projects/open
+      args:
+        placement: { kind: new_surface }
+        local_id: "{record.local_id}"
+        selection:
+          kind: authored
+          surface_ref: "{record.surface_ref}"
+        creation_request_id: "{record.creation_request_id}"
+      notice: "Opened {record.title}."
+sections:
+  - title: Registered projects
+    source_channel: default
+    collection: projects
+    projection:
+      primary: name
+      meta: root
+    activate: open-project
+  - title: Project-owned Surfaces
+    source_channel: default
+    collection: project_surfaces
+    projection:
+      primary: title
+      meta: project_name
+    activate: open-project-surface
+  - title: Surface discovery
+    source_channel: default
+    collection: project_surface_notices
+    projection:
+      primary: label
 refresh:
   on_hint: [project]

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-18T22:44:50Z:39b8c14308af5d40f78db5710209431209d88f903703259c7edd211f9322a419:hwmeiIwyLgCIDAYb069gzdrUTAWqAhCHdCLgpFU/sz5vw1bOKkDeDb/tDGGeeE4iiwtcbaanlgZsLJLh2kUiCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-19T22:29:40Z:f9aaca9c4b90100ccf46a5715c1b7d7fa75216a2065a352c057dbb2c89903443:pqti5W6C0WZpWUcCt5rVt/RvYL996LenTJQbmDp/kMlRwAyL9upEcoBWFPgfdmPD0hTAA4Ojvvf9Zn6YWrnzAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/surface"
 version: "2.0.0"
 location:
@@ -20,6 +20,9 @@ effective_trust:
 composer_config:
   extends_field: extends
   fields:
+    - name: title
+      strategy: replace_root_last
+      expect_value_type: string
     - name: tiling
       strategy: dict_merge_root_last
       expect_value_type: mapping
@@ -29,9 +32,9 @@ composer_config:
     - name: view_sets
       strategy: replace_root_last
       expect_value_type: sequence
-    - name: slots
-      strategy: dict_merge_root_last
-      expect_value_type: mapping
+    - name: dialogs
+      strategy: replace_root_last
+      expect_value_type: sequence
     - name: style
       strategy: dict_merge_root_last
       expect_value_type: mapping
@@ -67,14 +70,20 @@ composer_config:
     - name: backdrop
       strategy: replace_root_last
       expect_value_type: string
-    - name: overlays
-      strategy: dict_merge_root_last
-      expect_value_type: mapping
+    - name: launch_entry
+      strategy: replace_root_last
+      expect_value_type: boolean
 
 composed_value_contract:
   root_type: mapping
   required: {}
   optional:
+    title:
+      type: single
+      prim: string
+    launch_entry:
+      type: single
+      prim: boolean
     tiling:
       type: single
       prim: mapping
@@ -84,9 +93,19 @@ composed_value_contract:
     view_sets:
       type: single
       prim: sequence
-    slots:
+    dialogs:
       type: single
-      prim: mapping
+      prim: sequence
+      elements:
+        type: single
+        prim: mapping
+        contract:
+          root_type: mapping
+          required:
+            id: { type: single, prim: string }
+            title: { type: single, prim: string }
+            view: { type: single, prim: string }
+          optional: {}
     style:
       type: single
       prim: mapping
@@ -233,9 +252,6 @@ composed_value_contract:
     backdrop:
       type: single
       prim: string
-    overlays:
-      type: single
-      prim: mapping
 
 metadata:
   rules:

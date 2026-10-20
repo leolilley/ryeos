@@ -1,11 +1,25 @@
-# ryeos:signed:2026-09-14T10:03:09Z:554c35ca435e39e59ede32e573e81cf8affd864bf5af2700122b11006e5c0b63:UOFDkC81xA7JF1kE4VI+MekmoS88l4APgBMyO/Aw57ANTEG2Q19nYQs6l2Q7erXDp/UvIM9ti8VlD3mb5BiuCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-19T22:29:40Z:77cbd7a0394f9bff0a6b3cfc43e940f04f81c0c23fa613f252b381e885968e7c:VOSZGfoKCJ3xAswQgILiTEJij8ldmknBjfH8tnkZKBHtQ9rS5fEFuOcIs9yBv++DlEpvtioVDR6tzKpLPorYBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-node
+title: Node
 version: "1.0.0"
-description: Node overview for all live threads, projects, events, remotes, and maintenance
+description: Admitted node inspection with explicit execution subjects, registered project navigation and bounded maintenance observations
 
 capabilities:
-  sources: ["ryeos.execute.service.*"]
-  affordances: ["ryeos.execute.service.*"]
+  sources:
+    - ryeos.execute.service.node/status
+    - ryeos.execute.service.bundle/list
+    - ryeos.execute.service.projects/list
+    - ryeos.execute.service.commands/list
+    - ryeos.execute.service.ui/ryeos-ui/threads/list
+    - ryeos.execute.service.ui/ryeos-ui/thread/inspect
+    - ryeos.execute.service.ui/ryeos-ui/thread/tree
+    - ryeos.execute.service.ui/ryeos-ui/node/activity
+    - ryeos.execute.service.ui/ryeos-ui/item/inspect
+    - ryeos.execute.service.ui/ryeos-ui/remotes/list
+    - ryeos.execute.service.ui/ryeos-ui/gc/status
+  affordances:
+    - ryeos.execute.service.projects/open
+    - ryeos.execute.service.projects/add
 
 tiling:
   mode: master_stack
@@ -18,17 +32,16 @@ tiles:
   - "view:ryeos/projects/list"
   - "view:ryeos/node/events"
 
-slots:
-  bottom: { content: "view:ryeos/input", open: true, size: 7 }
-  top:    { content: "view:ryeos/node/status", open: true, size: 3 }
-  right:  { content: "view:ryeos/item/inspector", open: false, size: 40 }
-
 style:
   border: thin
 
 backdrop: view:ryeos/backdrop/prism-shards
 
 library:
+  - group: Inspection
+    views:
+      - view:ryeos/node/status
+      - view:ryeos/item/inspector
   - group: Threads
     views:
       - view:ryeos/node/threads/history
@@ -42,41 +55,6 @@ library:
       - view:ryeos/node/gc
       - view:ryeos/commands/grammar
 
-input:
-  route:
-    requires_project: true
-    invoke:
-      type: service
-      ref: service:threads/input
-    bindings:
-      input_parameter: input
-      thread_target_parameter: target
-      interrupt_intent_parameter: intent
-    params:
-      target:
-        kind: fresh
-        item_ref: directive:ryeos/ops/base
-        project_path: "@session:project_root"
-        ref_bindings:
-          model: directive:ryeos/ops/base
-
 ambient:
   show_background: true
   opacity: 1.0
-
-affordances:
-  - id: view.all_threads
-    label: All threads
-    category: View
-  - id: view.projects
-    label: Projects
-    category: View
-  - id: view.events
-    label: Events
-    category: View
-  - id: view.remotes
-    label: Remotes
-    category: View
-  - id: view.maintenance
-    label: Maintenance
-    category: View

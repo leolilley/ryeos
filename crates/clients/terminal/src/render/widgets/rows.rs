@@ -69,7 +69,7 @@ pub fn draw_rows(
         let glyph = if row.expandable {
             if row.expanded { "▾" } else { "▸" }
         } else {
-            tone_glyph(row.tone)
+            row.glyph.as_deref().unwrap_or_else(|| tone_glyph(row.tone))
         };
         surface.draw_text(rect.x as usize, y, glyph, glyph_style);
 
@@ -124,5 +124,42 @@ pub(super) fn draw_detail(
     if x < left + width {
         let style = detail.tone.map(tone_style).unwrap_or_else(style_fg);
         surface.draw_text(x, y, &truncate(&detail.value, left + width - x), style);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ryeos_client_base::ui::view_model::RyeOsTone;
+
+    #[test]
+    fn projected_glyph_precedes_the_tone_fallback() {
+        let mut surface = TextSurface::new(48, 2);
+        let rect = Rect {
+            x: 0,
+            y: 0,
+            w: 48,
+            h: 2,
+        };
+        let row = RyeOsRowVm {
+            id: "unavailable".into(),
+            cursor: 0,
+            glyph: Some("×".into()),
+            primary: "Close view set".into(),
+            secondary: Some("Unavailable — keep one view set open".into()),
+            meta: None,
+            kind: Some("unavailable".into()),
+            intent: None,
+            tone: RyeOsTone::Neutral,
+            selected: true,
+            expandable: false,
+            expanded: false,
+            detail: Vec::new(),
+            changed_at_ms: None,
+            changed_tone: None,
+        };
+
+        draw_rows(&mut surface, rect, &[], &[row], 0);
+        assert_eq!(surface.get(0, 0).rune, '×');
     }
 }

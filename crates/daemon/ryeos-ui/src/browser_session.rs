@@ -80,21 +80,37 @@ impl AdmittedBindingAttachment {
     pub fn public_descriptor(
         &self,
         binding_request_bounds: ryeos_client_base::ui::UiBindingRequestBounds,
-    ) -> ryeos_client_base::ui::UiBindingAttachment {
-        ryeos_client_base::ui::UiBindingAttachment {
+    ) -> anyhow::Result<ryeos_client_base::ui::UiBindingAttachment> {
+        let presentation =
+            ryeos_client_base::presentation::UiCompositionPresentation::from_effective_surface(
+                self.effective_surface.clone(),
+            )?;
+        let subject = match (&self.registered_project_id, &self.project_query_identity) {
+            (Some(local_id), _) => {
+                ryeos_client_base::ui::binding::UiBindingSubject::RegisteredProject {
+                    local_id: local_id.clone(),
+                }
+            }
+            (None, Some(_)) => {
+                ryeos_client_base::ui::binding::UiBindingSubject::UnregisteredProject
+            }
+            (None, None) => ryeos_client_base::ui::binding::UiBindingSubject::Projectless,
+        };
+        Ok(ryeos_client_base::ui::UiBindingAttachment {
             binding_attachment_id: self.binding_attachment_id.clone(),
             binding_generation: self.binding_generation,
             binding_digest: self.compiled_binding.binding_digest.clone(),
-            surface_ref: self.surface_ref.clone(),
-            surface_generation: self
+            root_ref: self.surface_ref.clone(),
+            root_generation: self
                 .compiled_binding
                 .binding
                 .surface
                 .effective_definition_digest
                 .as_str()
                 .to_owned(),
-            effective_surface: self.effective_surface.clone(),
+            presentation,
             project_path: self.project_query_identity.clone(),
+            subject,
             posture: match self.compiled_binding.posture {
                 crate::compiled_binding::EffectiveUiPosture::ObservationOnly => {
                     ryeos_client_base::ui::UiEffectivePosture::ObservationOnly
@@ -104,7 +120,7 @@ impl AdmittedBindingAttachment {
                 }
             },
             binding_request_bounds,
-        }
+        })
     }
 }
 
@@ -166,7 +182,7 @@ pub struct BrowserSession {
     pub user_principal_id: Option<String>,
     /// Original authored launch composition. It is immutable provenance, not
     /// a mutable current/default project authority.
-    pub surface_attachment_id: String,
+    pub root_attachment_id: String,
     pub attachments: HashMap<String, Arc<AdmittedBindingAttachment>>,
     pub(crate) next_attachment_generation: u64,
 }
@@ -264,7 +280,7 @@ impl BrowserSessionStore {
             principal_id,
             granted_caps: ctx.granted_caps,
             user_principal_id: ctx.user_principal_id,
-            surface_attachment_id: attachment_id.clone(),
+            root_attachment_id: attachment_id.clone(),
             attachments: HashMap::from([(attachment_id, attachment.clone())]),
             next_attachment_generation: 2,
         };
@@ -444,7 +460,7 @@ impl BrowserSessionStore {
         {
             return Err(AttachmentStoreError::AttachmentStale);
         }
-        if coordinate.binding_attachment_id == session.surface_attachment_id {
+        if coordinate.binding_attachment_id == session.root_attachment_id {
             return Err(AttachmentStoreError::SurfaceAttachmentImmutable);
         }
         if let Some(attachment) = session.attachments.get(&coordinate.binding_attachment_id) {
@@ -613,7 +629,7 @@ mod tests {
                 None,
                 crate::compiled_binding::EffectiveUiPosture::Interactive,
             ),
-            effective_surface: serde_json::json!({"kind": "Surface"}),
+            effective_surface: serde_json::json!({"name": "test-surface"}),
             granted_caps: vec!["ui.read".into()],
             user_principal_id: None,
             project_authority: None,
@@ -644,7 +660,7 @@ mod tests {
         assert_eq!(session.granted_caps, vec!["ui.read"]);
         let attachment = session
             .attachments
-            .get(&session.surface_attachment_id)
+            .get(&session.root_attachment_id)
             .expect("launch attachment");
         assert_eq!(attachment.surface_ref, "surface:ryeos/ui/base");
         assert!(matches!(
@@ -664,7 +680,7 @@ mod tests {
         let first = store.get_session(&first_id).expect("first session");
         let surface = first
             .attachments
-            .get(&first.surface_attachment_id)
+            .get(&first.root_attachment_id)
             .expect("surface")
             .coordinate();
         assert!(matches!(
@@ -683,7 +699,7 @@ mod tests {
                         None,
                         crate::compiled_binding::EffectiveUiPosture::Interactive,
                     ),
-                    effective_surface: serde_json::json!({"kind":"Surface"}),
+                    effective_surface: serde_json::json!({"name": "test-surface"}),
                     project_authority: None,
                 },
                 4,
@@ -737,7 +753,7 @@ mod tests {
                 None,
                 crate::compiled_binding::EffectiveUiPosture::ObservationOnly,
             ),
-            effective_surface: serde_json::json!({"kind": "Surface"}),
+            effective_surface: serde_json::json!({"name": "test-surface"}),
             granted_caps: vec![],
             user_principal_id: Some(format!("fp:{}", "ab".repeat(32))),
             project_authority: None,
@@ -750,7 +766,7 @@ mod tests {
         let session = store.get_session(&session_id).unwrap();
         let attachment = session
             .attachments
-            .get(&session.surface_attachment_id)
+            .get(&session.root_attachment_id)
             .expect("launch attachment");
         assert_eq!(attachment.surface_ref, "surface:ryeos/test/ro");
         assert!(matches!(
@@ -837,7 +853,7 @@ mod tests {
         let session = store.get_session(&session_id).expect("session");
         let attachment = session
             .attachments
-            .get(&session.surface_attachment_id)
+            .get(&session.root_attachment_id)
             .expect("launch attachment");
         let coordinate = attachment.coordinate();
         let admitted = store
@@ -869,7 +885,7 @@ mod tests {
                 None,
                 crate::compiled_binding::EffectiveUiPosture::Interactive,
             ),
-            effective_surface: serde_json::json!({"kind": "Surface"}),
+            effective_surface: serde_json::json!({"name": "test-surface"}),
             project_authority: None,
         };
         assert!(matches!(
@@ -933,7 +949,7 @@ mod tests {
         let session = store.get_session(&session_id).expect("active session");
         let coordinate = session
             .attachments
-            .get(&session.surface_attachment_id)
+            .get(&session.root_attachment_id)
             .expect("surface attachment")
             .coordinate();
         store

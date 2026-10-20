@@ -28,7 +28,7 @@ fn surface_attachment(
         .expect("live browser session");
     session
         .attachments
-        .get(&session.surface_attachment_id)
+        .get(&session.root_attachment_id)
         .expect("launch attachment")
         .clone()
 }

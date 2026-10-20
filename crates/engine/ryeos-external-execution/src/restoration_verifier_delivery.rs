@@ -855,7 +855,6 @@ fn seal_verifier_upload(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Read as _;
 
     #[test]
     fn consumer_archive_requires_exact_selected_executable_member() {

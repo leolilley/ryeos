@@ -19,11 +19,25 @@ pub struct RyeOsNavigationItemVm {
 pub struct RyeOsSessionVm {
     pub session_id: String,
     pub project_path: Option<String>,
-    pub surface_ref: String,
+    pub root_ref: String,
+    pub title: String,
+    pub surface_ordinal: Option<u64>,
+    pub surfaces: Vec<RyeOsSurfaceChoiceVm>,
     #[serde(default)]
     pub ambient: RyeOsAmbientVm,
     pub user_principal_id: Option<String>,
     pub posture: crate::ui::binding::UiEffectivePosture,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RyeOsSurfaceChoiceVm {
+    pub surface_instance_id: crate::ids::SurfaceInstanceId,
+    pub ordinal: u64,
+    pub title: String,
+    pub active: bool,
+    pub select_intent: RyeOsUiIntent,
+    pub rename_intent: Option<RyeOsUiIntent>,
+    pub close_intent: Option<RyeOsUiIntent>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

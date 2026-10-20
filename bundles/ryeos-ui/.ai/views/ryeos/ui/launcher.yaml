@@ -1,0 +1,11 @@
+# ryeos:signed:2026-10-19T22:29:41Z:2cdd279cecff6a94fae7e1142a3305b33411ac132c723f5fe808cd45e2f6fc29:fzn+60OSOM4Tb91VZiYHMkJeJmg5Z2lEhxAyS23yv2ybZnb7vuTIapTVso6JwRewlmffc4AtM5n0jQkC/S1kCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: presentation-launcher
+title: Launch
+version: "1.0.0"
+description: Rust-projected presentation actions from exact admitted mounts and the captured insertion destination.
+widget: rows
+local_projection: launcher
+input:
+  id: filter
+  placeholder: Find a view or presentation action
+  local_filter: true

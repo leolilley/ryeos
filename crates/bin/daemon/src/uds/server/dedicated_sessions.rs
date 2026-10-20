@@ -735,7 +735,7 @@ pub(super) async fn start(
     state: &AppState,
     cap: &CallbackCapability,
     _publication: Option<&ryeos_executor::SelectedApplicationPublication>,
-    _credentials: Option<ryeos_app::DedicatedWorkerCredentialTransport>,
+    credentials: Option<ryeos_app::DedicatedWorkerCredentialTransport>,
 ) -> Result<Value> {
     require_start_authority(state, cap)?;
     if cap
@@ -749,6 +749,13 @@ pub(super) async fn start(
     let request: DedicatedSessionStartRequest = serde_json::from_value(params.clone())?;
     if request.thread_id != cap.thread_id {
         bail!("dedicated-session start is restricted to the callback root");
+    }
+    if let Some(credentials) = credentials.as_ref() {
+        credentials.require_current_for_thread(
+            &state.callback_tokens,
+            &state.thread_auth,
+            &request.thread_id,
+        )?;
     }
     let _root_operation = ryeos_app::hosted_operation::begin_hosted_root_operation_async(
         &state.state_store,

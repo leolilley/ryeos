@@ -64,7 +64,7 @@ pub use direct_execution::{
 };
 pub(crate) use direct_execution::{
     CompiledExternalDirectProgram, compile_external_direct_program,
-    prepare_captured_external_member_plan, validate_retained_external_direct_program,
+    validate_retained_external_direct_program,
 };
 #[cfg(test)]
 use sealed_request::SEALED_ROOT_EXECUTION_REQUEST_SCHEMA_VERSION;

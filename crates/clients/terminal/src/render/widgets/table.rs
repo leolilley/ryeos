@@ -5,7 +5,7 @@
 
 use ryeos_client_base::layout::Rect;
 use ryeos_client_base::text_surface::TextSurface;
-use ryeos_client_base::ui::view_model::{RyeOsTableRowVm, RyeOsTone};
+use ryeos_client_base::ui::view_model::{RyeOsTableCoverageVm, RyeOsTableRowVm, RyeOsTone};
 
 use super::super::primitives::fill_line;
 use super::super::text::{display_width, truncate};
@@ -18,11 +18,23 @@ use super::rows::draw_detail;
 /// Cells sit two columns in, past the tone-glyph gutter.
 const GUTTER: usize = 2;
 
+#[cfg(test)]
 pub fn draw_table(
     surface: &mut TextSurface,
     rect: Rect,
     columns: &[String],
     rows: &[RyeOsTableRowVm],
+    now_ms: u64,
+) {
+    draw_table_with_coverage(surface, rect, columns, rows, None, now_ms);
+}
+
+pub fn draw_table_with_coverage(
+    surface: &mut TextSurface,
+    rect: Rect,
+    columns: &[String],
+    rows: &[RyeOsTableRowVm],
+    coverage: Option<&RyeOsTableCoverageVm>,
     now_ms: u64,
 ) {
     let width = rect.w as usize;
@@ -33,6 +45,11 @@ pub fn draw_table(
     let left = rect.x as usize;
     let bottom = rect.y as usize + height;
     let mut y = rect.y as usize;
+    if let Some(coverage) = coverage {
+        let line = format!("{} / {}", coverage.state, coverage.reason);
+        surface.draw_text(left, y, &truncate(&line, width), style_muted());
+        y += 1;
+    }
 
     // Column count drives the layout: prefer the declared headers, else fall
     // back to the widest row so cells still align when headers are absent.
@@ -68,7 +85,7 @@ pub fn draw_table(
         return;
     }
     if rows.is_empty() {
-        surface.draw_text(left, y, "no rows loaded", style_muted());
+        surface.draw_text(left, y, "no rows in this page", style_muted());
         return;
     }
 
@@ -310,6 +327,24 @@ mod tests {
     }
 
     #[test]
+    fn table_coverage_is_visible_on_nonempty_page() {
+        let (mut s, rect) = surface(72, 4);
+        draw_table_with_coverage(
+            &mut s,
+            rect,
+            &columns(),
+            &[trow(RyeOsTone::Neutral, &["T-ab", "work", "running"])],
+            Some(&RyeOsTableCoverageVm {
+                state: "observed".into(),
+                reason: "projection_locator_not_exhaustive".into(),
+            }),
+            0,
+        );
+        assert!(row_text(&s, 72, 0).contains("observed / projection_locator_not_exhaustive"));
+        assert!(row_text(&s, 72, 2).contains("T-ab"));
+    }
+
+    #[test]
     fn headers_and_cells_share_column_origins() {
         let (mut s, rect) = surface(60, 4);
         draw_table(
@@ -516,6 +551,6 @@ mod tests {
         let (mut s, rect) = surface(40, 4);
         draw_table(&mut s, rect, &columns(), &[], 0);
         // The "no rows" notice sits on the line below the header.
-        assert!(row_text(&s, 40, 1).contains("no rows loaded"));
+        assert!(row_text(&s, 40, 1).contains("no rows in this page"));
     }
 }

@@ -2,7 +2,7 @@
 name = "ryeos-scheduler-contract"
 version = "0.1.0"
 edition = "2024"
-description = "Canonical schedule policy, execution testimony, and pure validation"
+description = "Canonical schedule policy, execution testimony, validation, and the scheduler native-store custody contract"
 license.workspace = true
 
 [dependencies]
@@ -10,6 +10,8 @@ anyhow = { workspace = true }
 chrono = { workspace = true }
 chrono-tz = { workspace = true }
 cron = { workspace = true }
+lillux = { workspace = true }
+lillux-sqlite = { workspace = true }
 ryeos-engine = { workspace = true }
 ryeos-state = { workspace = true }
 serde = { workspace = true }

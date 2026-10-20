@@ -44,57 +44,21 @@ pub async fn handle(_params: Value, ctx: HandlerContext, state: Arc<AppState>) -
         .browser_sessions
         .get_session(&session_id)
         .ok_or(HandlerError::Forbidden("session expired or invalid".into()))?;
-    let route_max = state
-        .node_config
-        .routes
-        .iter()
-        .find(|route| {
-            route.response.source.as_deref()
-                == Some(super::ui_invocations_dispatch::DESCRIPTOR.service_ref)
-        })
-        .map(|route| route.limits.body_bytes_max)
-        .ok_or_else(|| HandlerError::Internal("UI binding dispatch route is absent".into()))?;
+    let bounds = super::ui_launch_mint::binding_request_bounds(&state)?;
 
     let mut binding_attachments = session
         .attachments
         .values()
-        .map(
-            |attachment| ryeos_client_base::ui::binding::UiBindingAttachment {
-                binding_attachment_id: attachment.binding_attachment_id.clone(),
-                binding_generation: attachment.binding_generation,
-                binding_digest: attachment.compiled_binding.binding_digest.clone(),
-                surface_ref: attachment.surface_ref.clone(),
-                surface_generation: attachment
-                    .compiled_binding
-                    .binding
-                    .surface
-                    .effective_definition_digest
-                    .as_str()
-                    .to_owned(),
-                effective_surface: attachment.effective_surface.clone(),
-                project_path: attachment.project_query_identity.clone(),
-                posture: match attachment.compiled_binding.posture {
-                    crate::compiled_binding::EffectiveUiPosture::ObservationOnly => {
-                        ryeos_client_base::ui::binding::UiEffectivePosture::ObservationOnly
-                    }
-                    crate::compiled_binding::EffectiveUiPosture::Interactive => {
-                        ryeos_client_base::ui::binding::UiEffectivePosture::Interactive
-                    }
-                },
-                binding_request_bounds: ryeos_client_base::ui::UiBindingRequestBounds {
-                    max_request_bytes: route_max,
-                    max_input_bytes: route_max,
-                },
-            },
-        )
-        .collect::<Vec<_>>();
+        .map(|attachment| attachment.public_descriptor(bounds))
+        .collect::<Result<Vec<_>>>()?;
     binding_attachments
         .sort_by(|left, right| left.binding_attachment_id.cmp(&right.binding_attachment_id));
     let response = ryeos_client_base::ui::BrowserSession {
         ui_binding_contract_revision: crate::UI_BINDING_CONTRACT_REVISION.to_string(),
         session_id: session.session_id.clone(),
-        surface_attachment_id: session.surface_attachment_id.clone(),
         binding_attachments,
+        root_attachment_id: session.root_attachment_id.clone(),
+        presentations: Vec::new(),
         user_principal_id: session.user_principal_id.clone(),
         events_url: Some(format!("/ui/events/session/{}", session.session_id)),
     };

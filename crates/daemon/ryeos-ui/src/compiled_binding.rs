@@ -1113,7 +1113,7 @@ mod tests {
         let mut value = surface(serde_json::json!([]));
         value["sources"]["shell"]["ref"] = serde_json::json!("service:test/write");
         let compiled = compile(value);
-        assert!(compiled.binding.sources.get("surface:test/root").is_none());
+        assert!(!compiled.binding.sources.contains_key("surface:test/root"));
         assert!(
             compiled
                 .binding

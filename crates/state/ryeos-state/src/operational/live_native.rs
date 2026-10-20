@@ -348,6 +348,19 @@ pub(crate) struct AbandonedLiveOperationalOpening {
     _original: Arc<LiveStateNativeOwner>,
 }
 
+impl AbandonedLiveOperationalOpening {
+    /// How many partial owners this discarded opening still holds, so a
+    /// diagnostic can say how much native custody stays retained.
+    pub(crate) fn retained_owner_count(&self) -> usize {
+        usize::from(self._marker.is_some())
+            + usize::from(self._initialization.is_some())
+            + usize::from(self._sync_failure.is_some())
+            + usize::from(self._owner.is_some())
+            + usize::from(self._acquisition.is_some())
+            + usize::from(self._references.is_some())
+    }
+}
+
 /// A refused live Operational opening. It retains every partial owner;
 /// settle it through [`Self::close_retained`]. Discarding it moves the owners
 /// into the process-lifetime abandoned-opening registry.

@@ -1,12 +1,8 @@
-# ryeos:signed:2026-09-14T10:03:09Z:192abfd53b4672f5251387934db9ab9588a31cb52e3ecdc6c1ce6fb403ef0ea1:TQ3+ilDphZwN8jKaY+ywhanM51iOF7rKhtdhl4RfuZfaeb1wmCeCxQMYUKrwX9Vl2RR0I57394D0iWr78xn4Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-19T22:29:40Z:18fcb47d54776b9deb23690b5dd6084cddac2457a15a38320937779ae9a41dbf:FyMpR0lnsqIOGeFCcOTRrr5v+IdpVosbX+BOWTi4nMrkJvhzveC1EQtIARu/zPHu2hAASqOAxv8n1k1iG8+2Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-lens
+title: Lens
 version: "1.0.0"
-description: >-
-  The cell-grid single-lens operator surface. One center lens fills the
-  screen at a time; breadth comes from swapping the lens (Ctrl+K view overlay),
-  never from arranging panes. The foot input routes at the directive, so the
-  timeline lens reads as a live cognition feed you talk into. This is the
-  TUI's own composition over the shared model — not the web's tiled RyeOS UI.
+description: Single-lens composition over the shared presentation model
 
 capabilities:
   sources: ["ryeos.execute.service.*"]
@@ -62,17 +58,9 @@ tiling:
   stack: { arrange: vertical }
   insert: end
 
-# Land on a chrome-less splash text view over the prism backdrop until the
-# operator picks a lens (Ctrl+K) or speaks into the foot input. Every lens in
-# the library — the live activity table, a thread's braid, the item space — is
-# one view-overlay stroke away; breadth is swapping the lens, never arranging panes.
+# Start with the splash View; opening another View replaces the current lens.
 tiles:
   - "view:ryeos/backdrop/splash"
-
-# Only the foot input and a thin top status strip — no edge panes.
-slots:
-  bottom: { content: "view:ryeos/input", open: true, size: 7 }
-  top:    { content: "view:ryeos/node/status", open: true, size: 3 }
 
 style:
   border: thin
@@ -84,6 +72,9 @@ backdrop: view:ryeos/backdrop/prism-shards
 # order. Views no group lists still surface: the engine appends them under
 # path-derived groups, so nothing is unreachable.
 library:
+  - group: Inspection
+    views:
+      - view:ryeos/node/status
   - group: Threads
     views:
       - view:ryeos/threads/history
@@ -106,31 +97,6 @@ library:
       - view:ryeos/node/gc
       - view:ryeos/graph/topology
       - view:ryeos/commands/grammar
-
-overlays:
-  views:
-    title: Views
-    widget: table
-    columns: [View, Description]
-    source: { ref: "runtime:views/launchable" }
-    hint: "type to filter views · enter to open"
-  commands:
-    title: Commands
-    widget: palette
-    source: { ref: "runtime:commands/available" }
-    hint: "type to filter commands · enter to run"
-  help:
-    title: Help
-    widget: table
-    columns: [Topic, Open]
-    source: { ref: "runtime:help" }
-    hint: "type to filter help · esc to close"
-  shortcuts:
-    title: Shortcuts
-    widget: table
-    columns: [Keys, Intent]
-    source: { ref: "runtime:shortcuts" }
-    hint: "type to filter shortcuts · esc to close"
 
 input:
   route:

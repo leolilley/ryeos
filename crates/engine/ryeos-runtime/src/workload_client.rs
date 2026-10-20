@@ -929,7 +929,8 @@ mod tests {
             selection: selection.clone(),
         };
         let admitted =
-            admitted_execution_product_selections(&[input.clone()], Some(&request)).unwrap();
+            admitted_execution_product_selections(std::slice::from_ref(&input), Some(&request))
+                .unwrap();
         assert_eq!(
             admitted["tool:project/check"],
             vec![ProductSelectionInput {
@@ -937,7 +938,7 @@ mod tests {
                 selection,
             }]
         );
-        assert!(admitted_execution_product_selections(&[input.clone()], None).is_err());
+        assert!(admitted_execution_product_selections(std::slice::from_ref(&input), None).is_err());
 
         let mut outside = input;
         outside.target = ProductSelectionTarget::WorkloadExecution {

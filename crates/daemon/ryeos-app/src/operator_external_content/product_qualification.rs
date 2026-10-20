@@ -15,8 +15,7 @@ pub(super) mod content_proof;
 pub mod launch;
 mod mechanism_probe;
 pub use mechanism_probe::{
-    CapturedMechanismProbeSource, PreparedMechanismFixtureTransfer,
-    capture_root_mechanism_probe_source,
+    CapturedMechanismProbeSource, capture_root_mechanism_probe_source,
 };
 mod worker_launch_contract;
 pub use worker_launch_contract::{

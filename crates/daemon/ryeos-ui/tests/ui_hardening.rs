@@ -41,7 +41,7 @@ fn mint_session(
         .expect("live browser session");
     let attachment = session
         .attachments
-        .get(&session.surface_attachment_id)
+        .get(&session.root_attachment_id)
         .expect("launch attachment")
         .clone();
     (

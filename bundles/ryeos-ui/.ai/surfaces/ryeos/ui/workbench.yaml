@@ -1,5 +1,6 @@
-# ryeos:signed:2026-09-14T10:03:09Z:19c9867a3f923d6112042e2afac1f62436a56a06dc6af837c4144183c1db21ad:gtKrfGwikG4Dia8EexhKFl4VbVsqMloMtVW7ZSK+o9OTgGN/TnrCvG7HkznSJdIrlf2d5iS2P8KemNfD3dlaCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-19T22:29:40Z:2fc4de47e61a2f3c24ec9b2fca5b3cd6ba9f925f7f59876107c399b44f712395:t2Ln3a8PpSFYTC7zWAdyadhqi3H1O3JBfWpwGtT48xSUGuYpoQuQUmIjdsmSwQxSoWTihxsQtdaj92pAFHULAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-workbench
+title: Workbench
 version: "1.0.0"
 description: Working seat - home pane beside a content-bound thread list
 
@@ -17,14 +18,13 @@ tiles:
   - "view:ryeos/graph/topology"
   - "view:ryeos/threads/history"
 
-slots:
-  bottom: { content: "view:ryeos/input", open: true, size: 7 }
-  right: { content: "view:ryeos/item/inspector", open: false, size: 40 }
-
 style:
   border: thin
 
 library:
+  - group: Inspection
+    views:
+      - view:ryeos/item/inspector
   - group: Threads
     views:
       - view:ryeos/threads/history

@@ -53,7 +53,7 @@ pub fn launch_context(
                 attenuated: Vec::new(),
             },
         }),
-        effective_surface: serde_json::json!({"kind": "Surface"}),
+        effective_surface: serde_json::json!({"name": "test-surface"}),
         granted_caps: vec!["ui.read".into()],
         user_principal_id,
         project_authority: project_root.map(|project_root| {
@@ -353,8 +353,18 @@ fn build_app_state(
                 ),
                 Arc::new(
                     ryeos_node_runtime::node_policy::sections::ui_browser_sessions::UiBrowserSessionPolicy {
-                        schema: 1,
+                        schema: 3,
+                        max_session_bootstrap_bytes: 4194304,
                         max_live_binding_attachments_per_session: 16,
+                        max_presentations_per_session: 16,
+                        max_surface_instances_per_presentation: 16,
+                        shared_presentation: ryeos_node_runtime::node_policy::sections::ui_browser_sessions::SharedPresentationPolicyLimits {
+                            max_declaration_bytes: 65536,
+                            max_dialogs: 16,
+                            max_initial_surfaces: 16,
+                            max_label_bytes: 128,
+                            max_mount_id_bytes: 64,
+                        },
                     },
                 ),
             ]),
@@ -424,6 +434,13 @@ fn test_ui_routes() -> Vec<ryeos_app::route_raw::RawRouteSpec> {
             "/ui/api/invocations/dispatch",
             "POST",
             ryeos_ui::handlers::ui_invocations_dispatch::DESCRIPTOR.service_ref,
+            serde_json::json!({}),
+        ),
+        route(
+            "ui/session/seat/append",
+            "/ui/api/session/seat/append",
+            "POST",
+            ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR.service_ref,
             serde_json::json!({}),
         ),
     ]

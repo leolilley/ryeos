@@ -8,20 +8,15 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use base64::{Engine as _, engine::general_purpose::STANDARD};
-use lillux::crypto::EncodePublicKey as _;
-use ryeos_state::external_execution::admission::{
-    ExternalCandidateExecutionRoute, ExternalCandidateProcFilesystem, ExternalCandidateRequirement,
-    ExternalCandidateRuntimeRecipe,
+pub use super::candidate_requirement::{
+    joined_external_candidate_requirement, real_codex_requirement,
 };
 
-/// Exact signed fixture source, before runtime-product selection. The profile
-/// is compiled from the bytes written below; its admitted source binding is
-/// independently previewed from this signed root by the test caller.
+/// Exact signed fixture source, before runtime-product selection. Its admitted
+/// source binding is independently previewed from this signed root by the test
+/// caller.
 pub struct CandidateAuthoringBundle {
     pub root: PathBuf,
-    pub profile: ryeos_state::objects::AdmittedStructuredSessionProfile,
-    pub provider_runtime_manifest_hash: String,
 }
 
 /// A signed draft permits source preview but cannot qualify the relationship's
@@ -263,7 +258,10 @@ pub fn write_candidate_authoring_bundle(
     large_runtime: bool,
     scripted_model_origin: Option<&str>,
     command_tools_manifest_hash: Option<&str>,
-) -> CandidateAuthoringBundle {
+) -> (
+    CandidateAuthoringBundle,
+    ryeos_state::objects::AdmittedStructuredSessionProfile,
+) {
     let bundle = root.join("external-candidate-authoring");
     let ai = bundle.join(".ai");
     let tool_path = ai.join("tools/external-candidate-authoring/integrate.yaml");
@@ -710,11 +708,7 @@ requires:
         lillux::signature::sign_content(&execution, identity.signing_key(), "#", None),
     )
     .unwrap();
-    CandidateAuthoringBundle {
-        root: bundle,
-        profile: compiled_profile,
-        provider_runtime_manifest_hash: external_runtime_manifest_hash.to_owned(),
-    }
+    (CandidateAuthoringBundle { root: bundle }, compiled_profile)
 }
 
 fn configure_real_codex_handshake_profile(
@@ -903,110 +897,6 @@ pub fn configure_real_codex_scripted_turn_profile(
          request_max_retries = 0\nstream_max_retries = 0\n"
     );
     sources.insert("scripted.config.toml".into(), baseline.into_bytes());
-}
-
-pub fn real_codex_requirement() -> ExternalCandidateRequirement {
-    let mut requirement = joined_external_candidate_requirement();
-    requirement.runtime_recipe.executable_relative_path = "bin/codex".into();
-    requirement.runtime_recipe.argv0 = "codex".into();
-    requirement.runtime_recipe.arguments =
-        vec!["exec-server".into(), "--listen".into(), "stdio".into()];
-    requirement.runtime_recipe.environment.clear();
-    requirement
-}
-
-pub fn joined_external_candidate_requirement() -> ExternalCandidateRequirement {
-    ExternalCandidateRequirement {
-        schema: 7,
-        required_lifecycle_capabilities: Default::default(),
-        protocol: ryeos_state::external_execution::admission::PROTOCOL.into(),
-        connector_protocol: ryeos_state::external_execution::admission::CONNECTOR_PROTOCOL.into(),
-        execution_route: ExternalCandidateExecutionRoute::ConnectorOnly,
-        provider_declaration_id: "codex-hosted".into(),
-        provider_configuration_destination: "environments.toml".into(),
-        runtime_product_declaration_id: "auxiliary".into(),
-        runtime_authority: ryeos_state::external_execution::admission::ExternalCandidateRuntimeAuthority::CapturedProduct,
-        runtime_recipe: ExternalCandidateRuntimeRecipe {
-            schema: 2,
-            runtime_mount_destination: "/runtime".into(),
-            executable_relative_path: "lib64/ld-linux-x86-64.so.2".into(),
-            argv0: "ld-linux-x86-64.so.2".into(),
-            arguments: vec![
-                "--library-path".into(),
-                "/runtime/usr/lib".into(),
-                "/runtime/bin/candidate".into(),
-            ],
-            cwd: "/workspace".into(),
-            environment: BTreeMap::from([(
-                "RYEOS_SYNTHETIC_JOINED_PROVIDER_REQUIRED".into(),
-                "1".into(),
-            )]),
-            max_stdout_bytes: 1024 * 1024,
-            max_stderr_bytes: 1024 * 1024,
-            proc_filesystem: ExternalCandidateProcFilesystem::PidNamespaceNested,
-            contain_process_group: false,
-            nested_sandbox: true,
-        },
-    }
-}
-
-pub fn signed_candidate_operation_sources(
-    identity: &ryeos_node_runtime::identity::NodeIdentity,
-) -> BTreeMap<String, (Vec<u8>, u32)> {
-    let metadata = |description: &str, workspace_access: &str| {
-        format!(
-            "# ryeos-tool:\n#   category: test/external-candidate\n#   version: \"1.0.0\"\n#   description: {description}\n#   executor_id: tool:ryeos/core/runtimes/python/script\n#   execution_protocol: protocol:ryeos/core/opaque\n#   effects: live\n#   workspace_access: {workspace_access}\n#   filesystem_authority: node_policy\n#   network_authority: node_policy\n#   config_schema:\n#     type: object\n#     additionalProperties: true\n"
-        )
-    };
-    let evaluator = format!(
-        "{}{}",
-        metadata(
-            "Independently evaluate one exact candidate generation",
-            "immutable_current_generation",
-        ),
-        r##"import json, sys
-from pathlib import Path
-
-request = json.loads(sys.stdin.buffer.read(65537))
-project = Path(sys.argv[2])
-candidate = request["candidate_snapshot_hash"]
-base = request["base_snapshot_hash"]
-accepted = candidate != base and (project / "candidate-strategy.txt").read_text() == "composed external candidate C\n"
-if request.get("expect_integration"):
-    integration = project / ".ai/knowledge/test/external-candidate/integration.md"
-    accepted = accepted and integration.is_file() and "# Integration D" in integration.read_text()
-print(json.dumps({"schema_version": 1, "candidate_snapshot_hash": candidate,
-                  "base_snapshot_hash": base, "accepted": accepted,
-                  "evidence": {"operation": "independent-test-evaluator"}},
-                 sort_keys=True, separators=(",", ":")))
-"##,
-    );
-    let signing_key = identity.signing_key();
-    let fingerprint = identity.fingerprint();
-    let public_der = identity.verifying_key().to_public_key_der().unwrap();
-    let public_pem = format!(
-        "-----BEGIN PUBLIC KEY-----\n{}\n-----END PUBLIC KEY-----\n",
-        STANDARD.encode(public_der.as_bytes())
-    );
-    let trust = format!(
-        "version = \"1.0.0\"\nfingerprint = \"{fingerprint}\"\nowner = \"external candidate E2E\"\nattestation = \"\"\n\n[public_key]\npem = \"\"\"\n{public_pem}\"\"\"\n"
-    );
-    BTreeMap::from([
-        (
-            ".ai/config/keys/trusted/e2e.toml".into(),
-            (
-                trust.into_bytes(),
-                ryeos_state::objects::ProjectFile::REGULAR_MODE,
-            ),
-        ),
-        (
-            ".ai/tools/test/external-candidate/evaluate.py".into(),
-            (
-                lillux::signature::sign_content(&evaluator, signing_key, "#", None).into_bytes(),
-                ryeos_state::objects::ProjectFile::REGULAR_MODE,
-            ),
-        ),
-    ])
 }
 
 #[cfg(test)]

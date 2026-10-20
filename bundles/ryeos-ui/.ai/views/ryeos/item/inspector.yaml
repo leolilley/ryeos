@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-14T10:03:09Z:8e302696b05d68e3f9bb107aa38e43c98dc90e38de002ec6f0a9409fc1091cd8:PDweNrwYCA8r5s/0qeGtWVcNIIw4jTQ+P6BQmPsnH/iKkRVo83PRuQTmCrkMpKv3G5DTe/4FdJJiZi6ltKhdCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-19T22:29:40Z:6ce3090ff23aee82dbb0df6e1a856f1d963005dd6b9ac856cf3b05464dd71f0a:IM6VDalaZHF+97os8WNBy7CDDuoM6jcFpbr8bI6RL/3Bb2qW6sTnE+I3sLLio7vO0oPfGhEJ2jXyMzobYHaBDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: item-inspector
 version: "1.0.0"
 description: Key-value inspection of the selection — an item (provenance first), or an inspected summary (an error terminal's full event)
@@ -16,15 +16,20 @@ sources:
       canonical_ref: "@facet:selection.item"
       include_raw: false
       include_effective: true
-      project_path: "@session:project_root"
-    requires_project: true
 projections:
   detail:
-    - canonical_ref
-    - kind
-    - signer
-    - version
-    - description
+    - item.canonical_ref
+    - item.item_kind
+    - item.space
+    - item.executable
+    - item.trust
+    - item.shadowed
+    - effective
+    - effective_coverage.state
+    - effective_coverage.reason
+    - raw_coverage.state
+    - raw_coverage.reason
+    # Inline event summaries use a separate response shape.
     - title
     - detail
 refresh:

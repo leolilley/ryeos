@@ -26197,7 +26197,6 @@ mod tests {
             Occupied,
             Borrowed,
             RestoredAwaitingBorrowAck,
-            Retiring,
         ] {
             for refused in [false, true] {
                 let (store, claim) = selected_fence_fixture(phase, refused);

@@ -1,0 +1,15 @@
+# ryeos:signed:2026-10-19T22:29:41Z:55c6afd13d177470d811f65e3701f64d88d53c2ce6dcdb375633f0d11d1a5095:3HC4hEnqYCi51KkKtDPNb1YReDPyqGZ6d94o1yuMgqgSiokWQfNHCiq4nIRMKy1R2RxrT7/ZOk9MMQJXjJU/DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens:
+- web
+- surface
+description: Open an explicitly selected signed Surface as the browser presentation root.
+forms:
+- slots:
+  - field: surface
+project:
+  resolution: optional
+  bind_parameter: project
+  no_project_flag: true
+dispatch:
+  kind: execute_ref
+  execute: client:ryeos/web

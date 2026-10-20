@@ -8,7 +8,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use ryeos_client_base::layout::Rect;
 use ryeos_client_base::text_surface::{Style, TextSurface};
-use ryeos_client_base::ui::field::{FieldFill, FieldShape, RyeOsFieldEntityVm, RyeOsFieldVm};
+use ryeos_client_base::ui::field::{
+    FieldFill, FieldShape, RyeOsFieldEntityVm, RyeOsFieldVm, RyeOsSourcePhase,
+};
 
 use super::super::primitives::fill_line;
 use super::super::text::{display_width, truncate};
@@ -24,12 +26,44 @@ pub fn draw_field(surface: &mut TextSurface, rect: Rect, field: &RyeOsFieldVm) {
     let bottom = rect.y as usize + height;
     let mut y = rect.y as usize;
 
-    let source_health = field
+    let source_errors = field
         .sources
         .iter()
-        .map(|source| format!("{}:{:?}", source.name, source.phase).to_ascii_lowercase())
-        .collect::<Vec<_>>()
-        .join(" · ");
+        .filter(|source| source.error.is_some() || source.phase == RyeOsSourcePhase::Error)
+        .count();
+    let bounded_sources = field
+        .sources
+        .iter()
+        .filter(|source| source.truncated)
+        .count();
+    let mut source_health = Vec::new();
+    if source_errors > 0 {
+        source_health.push(format!("source errors:{source_errors}"));
+    }
+    if bounded_sources > 0 {
+        source_health.push(format!("bounded sources:{bounded_sources}"));
+    }
+    if !field.replay.outside_cut.is_empty() {
+        source_health.push(format!("outside cut:{}", field.replay.outside_cut.len()));
+    }
+    if field.search.truncated {
+        source_health.push("bounded search".to_string());
+    }
+    source_health.extend(field.sources.iter().map(|source| {
+        format!(
+            "{}:{:?}{}{}",
+            source.name,
+            source.phase,
+            if source.truncated { ":bounded" } else { "" },
+            if source.error.is_some() || source.phase == RyeOsSourcePhase::Error {
+                ":error"
+            } else {
+                ""
+            },
+        )
+        .to_ascii_lowercase()
+    }));
+    let source_health = source_health.join(" · ");
     let mode = if field.replay.mode == "live" {
         "LIVE".to_string()
     } else {
@@ -215,6 +249,44 @@ pub fn draw_field(surface: &mut TextSurface, rect: Rect, field: &RyeOsFieldVm) {
         .selected
         .as_deref()
         .and_then(|id| field.entities.iter().find(|entity| entity.id == id));
+    let selected_source = selected_entity.and_then(|entity| {
+        field
+            .sources
+            .iter()
+            .find(|source| source.name == entity.source)
+    });
+    let detail_source = selected_source
+        .filter(|source| {
+            source.error.is_some() || source.phase == RyeOsSourcePhase::Error || source.truncated
+        })
+        .or_else(|| {
+            field.sources.iter().find(|source| {
+                source.error.is_some()
+                    || source.phase == RyeOsSourcePhase::Error
+                    || source.truncated
+            })
+        })
+        .or(selected_source)
+        .or_else(|| field.sources.first());
+    let source_evidence = detail_source.and_then(|source| {
+        if source.error.is_none() && source.revision.is_none() && source.evidence.is_empty() {
+            return None;
+        }
+        let mut parts = vec![format!("source {}", source.name)];
+        if let Some(error) = &source.error {
+            parts.push(format!("error: {error}"));
+        }
+        if let Some(revision) = &source.revision {
+            parts.push(format!("revision {revision}"));
+        }
+        if let Some(evidence) = source.evidence.first() {
+            parts.push(format!("evidence: {evidence}"));
+            if source.evidence.len() > 1 {
+                parts.push(format!("+{} more", source.evidence.len() - 1));
+            }
+        }
+        Some(parts.join(" · "))
+    });
     let selected_preview = selected_entity.and_then(|entity| {
         entity
             .preview_ids
@@ -233,7 +305,13 @@ pub fn draw_field(surface: &mut TextSurface, rect: Rect, field: &RyeOsFieldVm) {
     let list_width = width.saturating_sub(grid_width + usize::from(grid_width > 0));
     let footer_lines = 1
         + field.warnings.len().min(3)
+        + field.metrics.len().min(3)
+        + usize::from(field.metrics.len() > 3)
+        + field.subjects.len().min(2)
+        + usize::from(field.subjects.len() > 2)
         + usize::from(selected_entity.is_some())
+        + usize::from(selected_entity.is_some_and(|entity| entity.artifact_ref.is_some()))
+        + usize::from(source_evidence.is_some())
         + usize::from(!field.provenance.is_empty());
     let footer_y = bottom.saturating_sub(footer_lines).max(y).min(bottom);
     let available = footer_y.saturating_sub(y);
@@ -341,6 +419,37 @@ pub fn draw_field(surface: &mut TextSurface, rect: Rect, field: &RyeOsFieldVm) {
     if y < bottom
         && let Some(entity) = selected_entity
     {
+        if let Some(reference) = &entity.artifact_ref {
+            let coordinate = format!(
+                "artifact {} / {}{}",
+                reference.thread_id,
+                reference.artifact_id,
+                reference
+                    .content_hash
+                    .as_ref()
+                    .map(|hash| format!(" @ {hash}"))
+                    .unwrap_or_default()
+            );
+            let coordinate = if display_width(&coordinate) <= width {
+                coordinate
+            } else if width >= display_width("! artifact coordinate incomplete; widen view") {
+                "! artifact coordinate incomplete; widen view".to_string()
+            } else if width >= display_width("! incomplete") {
+                "! incomplete".to_string()
+            } else {
+                "!".to_string()
+            };
+            surface.draw_text(
+                rect.x as usize,
+                y,
+                &truncate(&coordinate, width),
+                style_muted(),
+            );
+            y += 1;
+        }
+        if y >= bottom {
+            return;
+        }
         let expansion = field
             .expansions
             .iter()
@@ -367,6 +476,45 @@ pub fn draw_field(surface: &mut TextSurface, rect: Rect, field: &RyeOsFieldVm) {
         y += 1;
     }
 
+    if y < bottom
+        && let Some(detail) = &source_evidence
+    {
+        surface.draw_text(rect.x as usize, y, &truncate(detail, width), style_muted());
+        y += 1;
+    }
+
+    for subject in field.subjects.iter().take(2) {
+        if y >= bottom {
+            break;
+        }
+        let mut coordinate = format!(
+            "subject {} / {} / {}",
+            subject.source, subject.kind, subject.id
+        );
+        if let Some(reference) = &subject.definition_ref {
+            coordinate.push_str(&format!(" · definition {reference}"));
+        }
+        if let Some(digest) = &subject.effective_definition_digest {
+            coordinate.push_str(&format!(" @ {digest}"));
+        }
+        let coordinate = if display_width(&coordinate) <= width {
+            coordinate
+        } else if width >= display_width("! subject coordinate incomplete; widen view") {
+            "! subject coordinate incomplete; widen view".to_string()
+        } else if width >= display_width("! incomplete") {
+            "! incomplete".to_string()
+        } else {
+            "!".to_string()
+        };
+        surface.draw_text(rect.x as usize, y, &coordinate, style_muted());
+        y += 1;
+    }
+    if y < bottom && field.subjects.len() > 2 {
+        let text = format!("+{} more projected subjects", field.subjects.len() - 2);
+        surface.draw_text(rect.x as usize, y, &truncate(&text, width), style_muted());
+        y += 1;
+    }
+
     for message in field.warnings.iter().take(3) {
         if y >= bottom {
             break;
@@ -381,6 +529,24 @@ pub fn draw_field(surface: &mut TextSurface, rect: Rect, field: &RyeOsFieldVm) {
         y += 1;
     }
 
+    for metric in field.metrics.iter().take(3) {
+        if y >= bottom {
+            break;
+        }
+        let value = metric.value.to_string();
+        let text = match &metric.unit {
+            Some(unit) if !unit.is_empty() => format!("{}: {value} {unit}", metric.label),
+            _ => format!("{}: {value}", metric.label),
+        };
+        surface.draw_text(rect.x as usize, y, &truncate(&text, width), style_muted());
+        y += 1;
+    }
+    if y < bottom && field.metrics.len() > 3 {
+        let text = format!("+{} more projected metrics", field.metrics.len() - 3);
+        surface.draw_text(rect.x as usize, y, &truncate(&text, width), style_muted());
+        y += 1;
+    }
+
     if y < bottom && !field.provenance.is_empty() {
         let text = format!("evidence: {}", field.provenance.join(" · "));
         surface.draw_text(rect.x as usize, y, &truncate(&text, width), style_muted());
@@ -388,7 +554,11 @@ pub fn draw_field(surface: &mut TextSurface, rect: Rect, field: &RyeOsFieldVm) {
     }
 
     if y < bottom {
-        let hints = "/ search · n/N matches · [/] replay · p play · l live · ←/→ group · space compare · e expand";
+        let hints = if field.selected_activation_intent().is_some() {
+            "Enter activate · / search · n/N matches · [/] replay · p play · l live · ←/→ group · space compare · e expand"
+        } else {
+            "/ search · n/N matches · [/] replay · p play · l live · ←/→ group · space compare · e expand"
+        };
         surface.draw_text(rect.x as usize, y, &truncate(hints, width), style_muted());
     }
 }
@@ -580,6 +750,218 @@ mod tests {
         assert!(row_text(&surface, 29).contains("/ search"));
         assert!(row_text(&surface, 28).contains("evidence:"));
         assert!(row_text(&surface, 27).contains("step:one"));
+    }
+
+    #[test]
+    fn selected_activation_hint_requires_an_admitted_intent() {
+        let mut field = fixture();
+        let mut surface = TextSurface::new(80, 30);
+        draw_field(&mut surface, Rect::new(0, 0, 80, 30), &field);
+        assert!(!row_text(&surface, 29).contains("Enter activate"));
+
+        field.entities[0].activate_intent = Some(ryeos_client_base::ui::RyeOsUiIntent::Refresh);
+        let mut actionable = TextSurface::new(80, 30);
+        draw_field(&mut actionable, Rect::new(0, 0, 80, 30), &field);
+        assert!(row_text(&actionable, 29).starts_with("Enter activate"));
+
+        field.entities[0].activate_intent = None;
+        field.relations.push(
+            serde_json::from_value(serde_json::json!({
+                "id":"edge:one", "kind":"link", "source_id":"step:one", "target_id":"step:two",
+                "directed":true, "tone":"accent", "stroke":"solid", "emphasis":"normal",
+                "motion":"none", "label":"Follow", "layer_ids":[], "selected":false,
+                "activate_intent":{"type":"refresh"}, "accessibility_label":"Follow"
+            }))
+            .unwrap(),
+        );
+        let mut relation = TextSurface::new(80, 30);
+        draw_field(&mut relation, Rect::new(0, 0, 80, 30), &field);
+        assert!(row_text(&relation, 29).starts_with("Enter activate"));
+
+        let mut second = field.relations[0].clone();
+        second.id = "edge:two".into();
+        field.relations.push(second);
+        let mut ambiguous = TextSurface::new(80, 30);
+        draw_field(&mut ambiguous, Rect::new(0, 0, 80, 30), &field);
+        assert!(!row_text(&ambiguous, 29).contains("Enter activate"));
+
+        field.selected = None;
+        let mut unselected = TextSurface::new(80, 30);
+        draw_field(&mut unselected, Rect::new(0, 0, 80, 30), &field);
+        assert!(!row_text(&unselected, 29).contains("Enter activate"));
+    }
+
+    #[test]
+    fn projected_metrics_are_visible_with_explicit_bounded_omission() {
+        let mut field = fixture();
+        field.metrics = (0..5)
+            .map(|index| ryeos_client_base::ui::field::RyeOsMetricVm {
+                id: format!("metric:{index}"),
+                label: format!("Metric {index}"),
+                value: serde_json::json!(index % 2 == 0),
+                unit: Some("count".into()),
+            })
+            .collect();
+        let mut surface = TextSurface::new(80, 30);
+        draw_field(&mut surface, Rect::new(0, 0, 80, 30), &field);
+        let text = (0..30)
+            .map(|y| row_text(&surface, y))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Metric 0: true count"));
+        assert!(text.contains("Metric 2: true count"));
+        assert!(text.contains("+2 more projected metrics"));
+        assert!(!text.contains("Metric 3:"));
+    }
+
+    #[test]
+    fn selected_artifact_coordinate_is_complete_or_explicitly_incomplete() {
+        let mut field = fixture();
+        let hash = "a".repeat(64);
+        field.entities[0].artifact_ref = Some(
+            serde_json::from_value(serde_json::json!({
+                "thread_id": "T-root", "artifact_id": 27, "content_hash": hash.clone()
+            }))
+            .unwrap(),
+        );
+        let mut narrow = TextSurface::new(80, 30);
+        draw_field(&mut narrow, Rect::new(0, 0, 80, 30), &field);
+        let narrow_rows = (0..30).map(|y| row_text(&narrow, y)).collect::<Vec<_>>();
+        assert!(
+            narrow_rows
+                .iter()
+                .any(|row| row.contains("artifact coordinate incomplete"))
+        );
+        assert!(narrow_rows.iter().any(|row| row.contains("step:one")));
+        assert!(!narrow_rows.iter().any(|row| row.contains(&hash)));
+
+        let mut compact = TextSurface::new(20, 30);
+        draw_field(&mut compact, Rect::new(0, 0, 20, 30), &field);
+        assert!((0..30).any(|y| row_text(&compact, y).contains("! incomplete")));
+
+        let mut wide = TextSurface::new(140, 30);
+        draw_field(&mut wide, Rect::new(0, 0, 140, 30), &field);
+        let wide_rows = (0..30).map(|y| row_text(&wide, y)).collect::<Vec<_>>();
+        assert!(
+            wide_rows
+                .iter()
+                .any(|row| { row.contains("artifact T-root / 27 @") && row.contains(&hash) })
+        );
+    }
+
+    #[test]
+    fn projected_subjects_remain_visible_without_entities_and_bound_overflow() {
+        let mut field = fixture();
+        field.entities.clear();
+        field.selected = None;
+        field.subjects = (0..4)
+            .map(|index| ryeos_client_base::ui::field::RyeOsFieldSubjectVm {
+                source: "execution".into(),
+                kind: "thread".into(),
+                id: format!("T-subject-{index}"),
+                definition_ref: Some("graph:arc3/solve/game_solver".into()),
+                effective_definition_digest: Some(format!("digest:{index}")),
+            })
+            .collect();
+        let mut surface = TextSurface::new(140, 30);
+        draw_field(&mut surface, Rect::new(0, 0, 140, 30), &field);
+        let text = (0..30)
+            .map(|y| row_text(&surface, y))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("subject execution / thread / T-subject-0"));
+        assert!(text.contains("definition graph:arc3/solve/game_solver @ digest:0"));
+        assert!(text.contains("subject execution / thread / T-subject-1"));
+        assert!(text.contains("+2 more projected subjects"));
+        assert!(!text.contains("T-subject-2"));
+    }
+
+    #[test]
+    fn narrow_subject_coordinate_is_not_silently_truncated() {
+        let mut field = fixture();
+        let exact_id = format!("T-{}", "a".repeat(64));
+        field.subjects = vec![ryeos_client_base::ui::field::RyeOsFieldSubjectVm {
+            source: "execution".into(),
+            kind: "thread".into(),
+            id: exact_id.clone(),
+            definition_ref: None,
+            effective_definition_digest: None,
+        }];
+        let mut surface = TextSurface::new(20, 30);
+        draw_field(&mut surface, Rect::new(0, 0, 20, 30), &field);
+        let text = (0..30)
+            .map(|y| row_text(&surface, y))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("! incomplete"));
+        assert!(!text.contains(&exact_id));
+    }
+
+    #[test]
+    fn bounded_and_outside_cut_source_evidence_is_visible_in_terminal_field() {
+        let mut field = fixture();
+        field.sources.push(
+            serde_json::from_value(serde_json::json!({
+                "name": "execution", "source_ref": "service:field/execution",
+                "subject_fingerprint": null, "revision": "revision:42",
+                "phase": "error", "truncated": true,
+                "error": "retained source unavailable", "evidence": ["signed:42"], "evidence_omitted": 0
+            }))
+            .unwrap(),
+        );
+        field.replay.outside_cut = vec!["concurrent:one".into(), "concurrent:two".into()];
+        field.search.truncated = true;
+        let mut surface = TextSurface::new(140, 30);
+        draw_field(&mut surface, Rect::new(0, 0, 140, 30), &field);
+        let text = (0..30)
+            .map(|y| row_text(&surface, y))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("execution:error:bounded:error"));
+        assert!(text.contains("outside cut:2"));
+        assert!(text.contains("bounded search"));
+        assert!(text.contains("retained source unavailable"));
+        assert!(text.contains("revision revision:42"));
+        assert!(text.contains("evidence: signed:42"));
+    }
+
+    #[test]
+    fn compact_field_prioritizes_failure_over_healthy_selected_source() {
+        let mut field = fixture();
+        field.sources = vec![
+            serde_json::from_value(serde_json::json!({
+                "name":"execution", "source_ref":"service:field/execution",
+                "subject_fingerprint":null, "revision":"healthy", "phase":"ready",
+                "truncated":false, "error":null, "evidence":[], "evidence_omitted":0
+            }))
+            .unwrap(),
+            serde_json::from_value(serde_json::json!({
+                "name":"board", "source_ref":"service:field/board",
+                "subject_fingerprint":null, "revision":null, "phase":"error",
+                "truncated":true, "error":"board unavailable", "evidence":[], "evidence_omitted":0
+            }))
+            .unwrap(),
+            serde_json::from_value(serde_json::json!({
+                "name":"archive", "source_ref":"service:field/archive",
+                "subject_fingerprint":null, "revision":null, "phase":"error",
+                "truncated":false, "error":null, "evidence":[], "evidence_omitted":0
+            }))
+            .unwrap(),
+        ];
+        field.replay.outside_cut = vec!["concurrent".into()];
+        field.search.truncated = true;
+        let mut surface = TextSurface::new(80, 30);
+        draw_field(&mut surface, Rect::new(0, 0, 80, 30), &field);
+        let health = row_text(&surface, 1);
+        assert!(health.contains("source errors:2"));
+        assert!(health.contains("bounded sources:1"));
+        assert!(health.contains("outside cut:1"));
+        assert!(health.contains("bounded search"));
+        let text = (0..30)
+            .map(|y| row_text(&surface, y))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("source board · error: board unavailable"));
     }
 
     #[test]

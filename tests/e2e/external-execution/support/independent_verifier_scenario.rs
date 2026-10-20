@@ -197,18 +197,7 @@ impl IndependentVerifierScenario {
         self.signed_sources_with_mode(publisher, signed_at, false)
     }
 
-    /// Test-only signed variant: the same selected producer and exact inputs,
-    /// but the root verifier concurrently requests START and exact RESUME.
-    /// It still issues no qualification claims.
-    pub fn signed_sources_for_reserved_resume_race(
-        &self,
-        publisher: &SigningKey,
-        signed_at: &str,
-    ) -> Result<BTreeMap<String, Vec<u8>>> {
-        self.signed_sources_with_mode(publisher, signed_at, true)
-    }
-
-    fn signed_sources_with_mode(
+    pub(crate) fn signed_sources_with_mode(
         &self,
         publisher: &SigningKey,
         signed_at: &str,
@@ -308,7 +297,7 @@ mod profile_acceptance;
 pub(crate) mod tests {
     use super::*;
     fn intended_requirement() -> ExternalCandidateRequirement {
-        let mut requirement = crate::candidate_authoring::real_codex_requirement();
+        let mut requirement = crate::candidate_requirement::real_codex_requirement();
         requirement.runtime_product_declaration_id = "guest-runtime".into();
         requirement
             .required_lifecycle_capabilities

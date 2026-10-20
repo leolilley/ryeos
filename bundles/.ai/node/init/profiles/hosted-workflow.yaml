@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-18T01:22:55Z:82f20049e34a443c28145264fa6335046099e2eab808e277eac568e1eb8583cf:DXhx5N2pErTWTFEQmxC1x6qRKtpGtzFPCmqZELr8N5CPqoWPwhj4FKEL/0aR620heE9tftDYY5G6h1wjfIElCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-19T22:29:39Z:184f67f67c7f4f9c91de59581d671de64f22a9289ec84f962b8f74ad8d50f1ee:QjuBbGEg5q5V6dLNyZyp9FezCuNcDPAf5KmEURrh5ARxMSf/P7qIlwBhD2haaIF4pngLgEyNgiodAiLGaaBFDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - codex
@@ -395,5 +395,14 @@ policies:
           capabilities:
             - ryeos.receive.provider_env.openai_api_key
   ui_browser_sessions:
-    schema: 1
+    schema: 3
+    max_session_bootstrap_bytes: 4194304
     max_live_binding_attachments_per_session: 16
+    max_presentations_per_session: 16
+    max_surface_instances_per_presentation: 16
+    shared_presentation:
+      max_declaration_bytes: 65536
+      max_dialogs: 16
+      max_initial_surfaces: 16
+      max_label_bytes: 128
+      max_mount_id_bytes: 64

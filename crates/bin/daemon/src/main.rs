@@ -731,7 +731,9 @@ impl DaemonSelectedComposition {
                         .native_sources
                         .scheduler_native_outside_sources()
                         .as_ref()
-                        .is_none_or(scheduler::db::SchedulerNativeOutsideSources::is_empty),
+                        .is_none_or(
+                            ryeos_scheduler_contract::SchedulerNativeOutsideSources::is_empty
+                        ),
                 "failed schema reference competes with a normal Scheduler source packet"
             );
             let released = self
@@ -896,7 +898,7 @@ impl DaemonSelectedComposition {
                 self.native_sources
                     .scheduler_native_outside_sources()
                     .as_ref()
-                    .is_none_or(scheduler::db::SchedulerNativeOutsideSources::is_empty),
+                    .is_none_or(ryeos_scheduler_contract::SchedulerNativeOutsideSources::is_empty),
                 "Scheduler Store source inputs outlived their finalization owner"
             );
         }
@@ -4522,7 +4524,7 @@ async fn run(
                     .take()
                     .expect("validated scheduler admission")
                     .into_parts();
-                let reference = match scheduler::db::SchedulerDb::prepare_scheduler_schema_reference(
+                let reference = match ryeos_scheduler_contract::prepare_scheduler_schema_reference(
                     Arc::clone(&scheduler_factory),
                     reference_inputs,
                 ) {

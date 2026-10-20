@@ -4,9 +4,45 @@
 //! decoding live here so lifecycle code never parses tile, dock, or section
 //! suffixes independently.
 
-use crate::ids::RyeOsViewInstanceKey;
+use crate::ids::{PresentationId, RyeOsViewInstanceKey, SurfaceInstanceId};
 
 const PREFIX: &str = "rsk1";
+
+/// A source authored on a Surface root, rather than on a mounted View.
+/// The owning membership is explicit; a Config root is never its substitute.
+/// Its prefix is disjoint from `RyeOsSourceInstanceKey`, so a platform
+/// `FetchSource.tile_id` remains one complete source coordinate across both
+/// source families (including startup deduplication).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RyeOsSurfaceSourceKey {
+    pub presentation_id: PresentationId,
+    pub surface_instance_id: SurfaceInstanceId,
+    pub channel: String,
+}
+
+impl RyeOsSurfaceSourceKey {
+    pub fn encode(&self) -> String {
+        format!(
+            "surface-source/{}/{}/{}",
+            self.presentation_id.as_str(),
+            self.surface_instance_id.as_str(),
+            self.channel
+        )
+    }
+
+    pub fn decode(encoded: &str) -> Option<Self> {
+        let mut parts = encoded.splitn(4, '/');
+        if parts.next()? != "surface-source" {
+            return None;
+        }
+        let key = Self {
+            presentation_id: PresentationId::try_new(parts.next()?).ok()?,
+            surface_instance_id: SurfaceInstanceId::try_new(parts.next()?).ok()?,
+            channel: parts.next()?.to_owned(),
+        };
+        (!key.channel.is_empty() && key.encode() == encoded).then_some(key)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum RyeOsSourceChannel {
@@ -125,12 +161,14 @@ fn hex(byte: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ids::{TileId, ViewSetId};
+    use crate::ids::TileId;
 
     #[test]
     fn codec_round_trips_every_current_channel_without_collisions() {
-        let tile = RyeOsViewInstanceKey::view_set_tile(TileId::new(7));
-        let dock = RyeOsViewInstanceKey::view_set_slot(ViewSetId::new(9), "left");
+        let presentation = PresentationId::try_new("presentation-one").unwrap();
+        let surface = SurfaceInstanceId::try_new("surface-one").unwrap();
+        let tile = RyeOsViewInstanceKey::surface_tile(&presentation, &surface, TileId::new(7));
+        let dock = RyeOsViewInstanceKey::shared_dock(&presentation, "left").unwrap();
         let keys = [
             RyeOsSourceInstanceKey::named(tile.clone(), "default"),
             RyeOsSourceInstanceKey::named(tile.clone(), "project"),
@@ -164,6 +202,37 @@ mod tests {
             "rsk1/tile%3A7/mention/%2f",
         ] {
             assert!(RyeOsSourceInstanceKey::decode(value).is_none(), "{value}");
+        }
+    }
+
+    #[test]
+    fn surface_channels_retain_exact_owner_and_channel_remainder() {
+        let key = RyeOsSurfaceSourceKey {
+            presentation_id: PresentationId::try_new("presentation-one").unwrap(),
+            surface_instance_id: SurfaceInstanceId::try_new("surface-one").unwrap(),
+            channel: "execution/selected".into(),
+        };
+        let encoded = key.encode();
+        assert_eq!(RyeOsSurfaceSourceKey::decode(&encoded), Some(key.clone()));
+        assert!(!encoded.starts_with("rsk1/"));
+        assert_ne!(
+            encoded,
+            RyeOsSourceInstanceKey::named(
+                RyeOsViewInstanceKey::shared_dock(&key.presentation_id, "left").unwrap(),
+                key.channel.clone(),
+            )
+            .encode()
+        );
+        let mut sibling = key;
+        sibling.surface_instance_id = SurfaceInstanceId::try_new("surface-two").unwrap();
+        assert_ne!(sibling.encode(), encoded);
+        for value in [
+            "surface-source/presentation-one/surface-one/",
+            "surface-source//surface-one/channel",
+            "surface-source/presentation-one//channel",
+            "surface/channel",
+        ] {
+            assert!(RyeOsSurfaceSourceKey::decode(value).is_none(), "{value}");
         }
     }
 }

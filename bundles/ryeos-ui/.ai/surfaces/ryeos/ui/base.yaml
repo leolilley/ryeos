@@ -1,53 +1,18 @@
-# ryeos:signed:2026-09-14T10:03:09Z:e38a8849845f37b6a7cf5bd3d56d1b526dfba4851419faf6bbcc326d714bc4b8:KSVRpd9aVrbk6PrJPxen1QWGs7xQVfRZbt4jmzE1S6PKnp5B1hDlfq9mMi8MZT0fP6aV6JYoPNmo0wOR3e7GBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-19T22:29:40Z:60d0f2957c65b8b2f7cfbb82876493a0caa14b9c512c95f932517cf4c5225529:fZuwlqy6iOKwlMpuF/qc4w15kFXoHnmLuxRb8oGQv+SDh/3NTh2LWSzs9ZhkZ643yElMhSX347wKrH5deTYDBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-base
+title: Home
 version: "1.0.0"
-description: RyeOS UI home space
+description: Neutral Home with an authored background; open independently admitted work through the shared launcher.
 
 capabilities:
-  sources: ["ryeos.execute.service.*"]
-  affordances: ["ryeos.execute.service.*"]
+  sources: []
+  affordances: []
 
-# Shell-wide observations are ordinary signed sources. Browser and terminal
-# clients address these coordinates through the compiled session binding.
-sources:
-  dimension:
-    ref: service:ui/ryeos-ui/dimension/get
-    role: dimension
-  projects:
-    ref: service:projects/list
-    role: projects
-  topology:
-    ref: service:ui/graph/topology
-    role: topology
-  items:
-    ref: service:ui/ryeos-ui/items/list
-    role: items
-    params:
-      limit: 1000
-      project_path: "@session:project_root"
-    dynamic_parameters: [query, kind]
-    requires_project: true
-  file_space:
-    ref: service:ui/ryeos-ui/files/tree
-    role: file_space
-    params:
-      root: project
-      path: ""
-      max_depth: 8
-      max_entries: 3000
-      project_path: "@session:project_root"
-    dynamic_parameters: [root, path]
-    requires_project: true
-  file_read:
-    ref: service:ui/ryeos-ui/files/read
-    role: file_read
-    params:
-      root: project
-      project_path: "@session:project_root"
-      path: ""
-    dynamic_parameters: [root, path]
-    activation: on_demand
-    requires_project: true
+# Home observes no domain merely because the browser was opened. Purpose-specific
+# Surfaces declare their own Views, sources and operations when admitted.
+sources: {}
+library: []
+affordances: []
 
 tiling:
   mode: master_stack
@@ -55,107 +20,13 @@ tiling:
   stack: { arrange: horizontal }
   insert: end
 
-# The base center starts empty — the backdrop scene (below) fills it
-# until the operator opens a lens.
 tiles: []
-
-slots:
-  bottom: { content: "view:ryeos/input", open: true, size: 7 }
-  top:    { content: "view:ryeos/node/status", open: true, size: 3 }
-  left: { content: "view:ryeos/threads/history", open: false, size: 32 }
-  right: { content: "view:ryeos/item/inspector", open: false, size: 40 }
 
 style:
   border: thin
 
 backdrop: view:ryeos/backdrop/prism-shards
 
-library:
-  - group: Threads
-    views:
-      - view:ryeos/threads/history
-      - view:ryeos/node/threads/history
-      - view:ryeos/thread/tree
-      - view:ryeos/thread/transcript
-      - view:ryeos/threads/detail
-  - group: Project
-    views:
-      - view:ryeos/project/files
-      - view:ryeos/project/items
-      - view:ryeos/project/schedules
-      - view:ryeos/items/space
-  - group: Node
-    views:
-      - view:ryeos/projects/list
-      - view:ryeos/node/events
-      - view:ryeos/node/remotes
-      - view:ryeos/node/bundles
-      - view:ryeos/node/gc
-      - view:ryeos/commands/grammar
-
-overlays:
-  views:
-    title: Views
-    widget: table
-    columns: [View, Description]
-    source: { ref: "runtime:views/launchable" }
-    hint: "type to filter views · enter to open · shift+enter for new tile"
-  commands:
-    title: Commands
-    widget: palette
-    source: { ref: "runtime:commands/available" }
-    hint: "type to filter commands · enter to run"
-  help:
-    title: Help
-    widget: table
-    columns: [Topic, Open]
-    source: { ref: "runtime:help" }
-    hint: "type to filter help · esc to close"
-  shortcuts:
-    title: Shortcuts
-    widget: table
-    columns: [Keys, Intent]
-    source: { ref: "runtime:shortcuts" }
-    hint: "type to filter shortcuts · esc to close"
-
-input:
-  route:
-    requires_project: true
-    invoke:
-      type: service
-      ref: service:threads/input
-    bindings:
-      input_parameter: input
-      thread_target_parameter: target
-      interrupt_intent_parameter: intent
-    params:
-      target:
-        kind: fresh
-        item_ref: directive:ryeos/ops/base
-        project_path: "@session:project_root"
-        ref_bindings:
-          model: directive:ryeos/ops/base
-
 ambient:
   show_background: true
   opacity: 0.35
-
-affordances:
-  - id: view.graph
-    label: Graph
-    category: View
-  - id: view.items
-    label: Items
-    category: View
-  - id: view.files
-    label: Files
-    category: View
-  - id: view.item_inspector
-    label: Inspector
-    category: View
-  - id: view.threads
-    label: Threads
-    category: View
-  - id: view.services
-    label: Services
-    category: View

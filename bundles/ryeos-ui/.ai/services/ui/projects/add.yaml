@@ -1,5 +1,6 @@
-# ryeos:signed:2026-07-06T08:36:51Z:cb92d57b6fd743dcdd402d5846ac40b67fb48979faec0627101804cd8136cba2:0VZkslSz8Y0hYSlEfGl4cYHjj//Sd2aGSXdpBAbq8rZh8683Bih2a8w3ZkbNYecxnQj4ZGLWRC+T1vTycT87Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-19T22:29:40Z:8d7754103a27b30a2b83dfa73244ade3ed02b87bd62bb58348349bcdaa44e20a:2f3Gtxh6YIaXQn3FIeDlT9RMFVRRGdcDatHTOcAs9P2FHlVPeTSjzLCl1jpE/fujtNdrnRZ36xlSBu3+s98oBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
+required_caps: ["ryeos.execute.service.projects/add"]
 name: projects/add
 version: "1.0.0"
 description: Add or update a canonical local project root in the project registry.

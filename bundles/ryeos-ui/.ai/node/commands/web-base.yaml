@@ -1,10 +1,10 @@
-# ryeos:signed:2026-09-14T10:03:08Z:d6b9bc9e7005a1b19e1ff54b2e758e0f83d4e4a32477d7111d350663bde771b3:DS71PjdMF4BAdv5icmVqEtTj+C+w4lOQSwB3tQ9YOnapRFKNCMPvP3mgSMO4YYMFW6BRK4BfXSuq2inL4XATDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-19T22:29:40Z:b37c05ae43a2a039d2ca4acd367ee1d39a78939d50ced281d1a56047319427f6:l0js6KgYm34/JL/8lQboTGexjAVfavJZ5B4sYUUZZ0Ffdgig5HjZSLfFfW+43ztXXjU+aAQUpWeAUAqqT4XvBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - web
 - base
-description: Open the observation-only browser RyeOS UI base surface.
+description: Open the RyeOS browser presentation with its authored observation-only Home Surface.
 defaults:
-  surface: surface:ryeos/ui/base-observe
+  presentation: config:ryeos/ui/presentation
 project:
   resolution: optional
   bind_parameter: project

@@ -137,8 +137,13 @@ pub fn install_before_start(
     let (adapter_hash, adapter_bytes) = identity(artifacts.adapter)?;
     let (supervisor_hash, supervisor_bytes) = identity(artifacts.supervisor)?;
     let (launcher_hash, launcher_bytes) = identity(artifacts.launcher)?;
-    let (bundle, trust, _) =
-        signed_bundle::install_signed_test_bundle(state_path, true, &fixture.publisher, artifacts);
+    let (bundle, trust, _) = signed_bundle::install_signed_test_bundle_with_guest_admission(
+        state_path,
+        true,
+        false,
+        &fixture.publisher,
+        artifacts,
+    );
     // The synthetic local backend has no independently qualified Render-style
     // snapshot, but its exact signed executable closure is still an identity
     // in the current placement binding. Do not fill this coordinate with a

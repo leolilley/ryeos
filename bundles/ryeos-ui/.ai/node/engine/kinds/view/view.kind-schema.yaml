@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-18T06:45:58Z:5057f4c4bf58e76f1647e08abb6aca6d6b041a4227db62053b71276d4234af52:lmNeHIBOMLPiX91GA2J3QZReAxDMZcMd11MeoU7RWA236D5AVHpIe9SdhWttt2E0jdfGYzTa9AYZutPKycc3Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-19T22:29:40Z:67dd0b0b4810b727a4bad6c870d96a1e930e0c563feb82b20ef1a257b454f409:URCLWANfavXrItn8hnnJFU9e1NbuoRVx0Vj/UATS0ll1pxalEIK3rOKC5crZ/O+a83CEYCWc4EZbU3SIg79SCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/view"
 version: "1.0.0"
 location:
@@ -24,6 +24,9 @@ composer_config:
       strategy: replace_root_last
       expect_value_type: string
       required: true
+    - name: local_projection
+      strategy: replace_root_last
+      expect_value_type: string
     - name: sources
       strategy: dict_merge_root_last
       expect_value_type: mapping
@@ -70,6 +73,10 @@ composed_value_contract:
       type: single
       prim: string
   optional:
+    local_projection:
+      type: single
+      prim: string
+      enum: [launcher, shortcuts, session_details]
     extends:
       type: union
       prims: [string, "null"]
@@ -86,6 +93,7 @@ composed_value_contract:
             role: { type: single, prim: string }
             params: { type: single, prim: mapping }
             collection: { type: single, prim: string }
+            coverage: { type: single, prim: string }
             refresh: { type: single, prim: mapping }
             dynamic_parameters:
               type: single
@@ -182,7 +190,7 @@ composed_value_contract:
                   operation:
                     type: single
                     prim: string
-                    enum: [open_saved_view_set, save_active_view_set, save_particular_view_set]
+                    enum: [open_saved_view_set, save_active_view_set, save_particular_view_set, save_active_surface, save_particular_surface]
                   persist_affordance: { type: single, prim: string }
                   value: { type: single, prim: any }
                   merge: { type: single, prim: mapping }
@@ -203,6 +211,7 @@ composed_value_contract:
         required:
           id: { type: single, prim: string }
         optional:
+          local_filter: { type: single, prim: boolean }
           placeholder: { type: single, prim: string }
           target_label: { type: single, prim: string }
           submit: { type: single, prim: string }

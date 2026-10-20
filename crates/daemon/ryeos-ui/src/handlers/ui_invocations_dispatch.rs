@@ -406,11 +406,8 @@ fn enforce_request_bounds(state: &AppState, req: &UiBindingRequest, input: &Valu
         ))
         .into());
     }
-    req.validate_bounds(ryeos_client_base::ui::UiBindingRequestBounds {
-        max_request_bytes: maximum,
-        max_input_bytes: maximum,
-    })
-    .map_err(|error| HandlerError::BadRequest(error.to_string()).into())
+    req.validate_bounds(super::ui_launch_mint::binding_request_bounds(state)?)
+        .map_err(|error| HandlerError::BadRequest(error.to_string()).into())
 }
 
 fn resolve_binding_request(
@@ -592,6 +589,10 @@ fn resolve_binding_request(
                 | ryeos_client_base::ui::content::AffordanceInvoke::OpenSavedViewSet { .. }
                 | ryeos_client_base::ui::content::AffordanceInvoke::SaveActiveViewSet { .. }
                 | ryeos_client_base::ui::content::AffordanceInvoke::SaveParticularViewSet {
+                    ..
+                }
+                | ryeos_client_base::ui::content::AffordanceInvoke::SaveActiveSurface { .. }
+                | ryeos_client_base::ui::content::AffordanceInvoke::SaveParticularSurface {
                     ..
                 } => {
                     return Err(HandlerError::BadRequest(
@@ -1088,7 +1089,7 @@ mod tests {
             principal_id: "fp:test".to_string(),
             granted_caps: vec!["ui.read".to_string()],
             user_principal_id,
-            surface_attachment_id: "attachment-1".to_string(),
+            root_attachment_id: "attachment-1".to_string(),
             attachments: Default::default(),
             next_attachment_generation: 1,
         }
@@ -1139,12 +1140,13 @@ mod tests {
                 "binding_attachment_id": "attachment-2",
                 "binding_generation": 2,
                 "binding_digest": "11",
-                "surface_ref": "surface:test/base",
-                "surface_generation": "22",
-                "effective_surface": {},
+                "root_ref": "surface:test/base",
+                "root_generation": "22",
+                "presentation": {"definition": {"kind": "surface", "surface": {"name": "base"}}, "views": {}},
                 "project_path": null,
+                "subject": {"kind": "projectless"},
                 "posture": "observation_only",
-                "binding_request_bounds": {"max_request_bytes": 1024, "max_input_bytes": 512}
+                "binding_request_bounds": {"max_request_bytes": 1024, "max_input_bytes": 512, "max_seat_append_bytes": 256}
             }
         });
         let mut result = json!({"ui_transition": transition.clone()});
@@ -1156,7 +1158,15 @@ mod tests {
         )
         .expect("retain signed result effect");
 
-        assert_eq!(result["ui_transition"], transition);
+        let canonical = serde_json::to_value(
+            serde_json::from_value::<ryeos_client_base::ui::UiBindingAttachment>(
+                transition["attachment"].clone(),
+            )
+            .expect("typed attachment fixture"),
+        )
+        .unwrap();
+        assert_eq!(result["ui_transition"]["kind"], transition["kind"]);
+        assert_eq!(result["ui_transition"]["attachment"], canonical);
     }
 
     #[test]
@@ -1204,10 +1214,10 @@ mod tests {
                 "id": "current",
                 "name": "Current",
                 "composition": {
+                    "schema": 2,
                     "id": "current",
                     "title": "Current",
-                    "root": null,
-                    "slots": {}
+                    "root": null
                 },
                 "relationships": [],
                 "resolved_selection_work": {
@@ -1251,12 +1261,13 @@ mod tests {
             "binding_attachment_id": "attachment-2",
             "binding_generation": 2,
             "binding_digest": "11",
-            "surface_ref": "surface:test/base",
-            "surface_generation": "22",
-            "effective_surface": {},
+            "root_ref": "surface:test/base",
+            "root_generation": "22",
+            "presentation": {"definition": {"kind": "surface", "surface": {"name": "base"}}, "views": {}},
             "project_path": null,
+            "subject": {"kind": "projectless"},
             "posture": "observation_only",
-            "binding_request_bounds": {"max_request_bytes": 1024, "max_input_bytes": 512}
+            "binding_request_bounds": {"max_request_bytes": 1024, "max_input_bytes": 512, "max_seat_append_bytes": 256}
         });
         assert!(
             retain_declared_result_effect(

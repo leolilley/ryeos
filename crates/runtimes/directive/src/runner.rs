@@ -681,14 +681,6 @@ fn provider_retry_decision(
     Ok(decision)
 }
 
-/// Reservation intent hash (§9.3): binds the attempt coordinate, provider
-/// snapshot/config hash, route facts, effective provider output limit, the
-/// proven maximum charge authority, and the canonical body digest. The
-/// attempt KEY deliberately excludes this hash — replaying the key with the
-/// exact fingerprint recovers the recorded operation, while replaying it
-/// with different prepared bytes is an integrity conflict daemon-side.
-#[allow(clippy::too_many_arguments)] // one field per bound fact, by design
-
 /// Truncate a settlement diagnostic to the shared RPC bound (char-safe).
 fn bound_diagnostic(text: &str) -> String {
     if text.len() <= ryeos_accounting::MAX_DIAGNOSTIC_LEN {

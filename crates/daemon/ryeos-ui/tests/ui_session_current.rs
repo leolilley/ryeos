@@ -45,12 +45,12 @@ async fn session_current_returns_session_fields() {
     .expect("should succeed");
 
     assert_eq!(result["session_id"], session_id);
-    let surface_attachment_id = result["surface_attachment_id"].as_str().unwrap();
+    let root_attachment_id = result["root_attachment_id"].as_str().unwrap();
     let attachments = result["binding_attachments"].as_array().unwrap();
     assert_eq!(attachments.len(), 1);
     let attachment = &attachments[0];
-    assert_eq!(attachment["binding_attachment_id"], surface_attachment_id);
-    assert_eq!(attachment["surface_ref"], "surface:ryeos/ui/base");
+    assert_eq!(attachment["binding_attachment_id"], root_attachment_id);
+    assert_eq!(attachment["root_ref"], "surface:ryeos/ui/base");
     assert_eq!(attachment["project_path"], serde_json::Value::Null);
     assert_eq!(attachment["posture"], "interactive");
     assert_eq!(attachment["binding_digest"], "11".repeat(32));

@@ -1,8 +1,8 @@
-# ryeos:signed:2026-09-14T10:03:09Z:b2ff585b07afa2eecec8f4b81eefae104f98122e9f9537814467cfffce633372:rT2/lnwXNTAJQ45S1MSO9ctnbRREA9Xvie4yEpj++F1GAq5Cv8/6BjH65ZlkYml7b2OQ1ogE2rOfIiWYyA3TBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-19T22:29:40Z:100c263168955aa77d5889f426c35ef9f8e3630aef041b83a5cace6962809e83:Plb41nAi2sOeyFxMQqjLX4sl+N8I3NXm+OBjTRJu5LfYGVdsuk6w4P535pSgRl/m0hwJCRK+sKMUskm1F2PKCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: items-space
 title: Item Space
 version: "1.0.0"
-description: The item space - signed content across system, user, and project
+description: Content visible to the admitted attachment, including its project only when present
 
 widget: table
 sources:
@@ -10,9 +10,8 @@ sources:
     ref: service:ui/ryeos-ui/items/list
     params:
       limit: 500
-      project_path: "@session:project_root"
     collection: items
-    requires_project: true
+    coverage: coverage
 projections:
   columns:
     - label: item
@@ -41,6 +40,8 @@ affordances:
       facet: selection
       value:
         item: "{record.canonical_ref}"
+      open_view: view:ryeos/item/inspector
+      drill: true
   # Explain swaps the center lens to the item's "why" read: write the selected
   # item FIRST (the explain sources read @facet:selection.item), then open the
   # lens — the open_view ordering guarantees the facet is set before the new

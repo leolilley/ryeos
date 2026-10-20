@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-18T01:22:55Z:dfd4654f68d55f7f8d3b31773475def80e7ebe619cd6b402746e33a85d593fba:XkcRA/9vX595P8+/yU19IzgEUes1v8rzHjqR5lhgUkVgZBrzCFXXM0e0PNyxogILwA/4jjeduzBspG1uU6tNCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-19T22:29:39Z:d2cacf1d7115db7045ed393baa4c94b8e30b925cb7cd1db2e1d2ae57de1da0df:TJOU7BsadcRNIugQ2nlG87kIdQiMXV3HscGIyQ5ScWOKzid/df8nnQquaB2jzZnBLPDJ3+SAgs3tNKFQhaD2Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Controller of remote Codex authoring leases: runs the Codex app server
 # and the render-sandbox lease adapter, and runs no schedules.
 schema: 1
@@ -405,5 +405,14 @@ policies:
           capabilities:
             - ryeos.receive.provider_env.openai_api_key
   ui_browser_sessions:
-    schema: 1
+    schema: 3
+    max_session_bootstrap_bytes: 4194304
     max_live_binding_attachments_per_session: 16
+    max_presentations_per_session: 16
+    max_surface_instances_per_presentation: 16
+    shared_presentation:
+      max_declaration_bytes: 65536
+      max_dialogs: 16
+      max_initial_surfaces: 16
+      max_label_bytes: 128
+      max_mount_id_bytes: 64
