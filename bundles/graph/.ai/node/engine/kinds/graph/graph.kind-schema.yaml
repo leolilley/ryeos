@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-08T08:44:45Z:1e1b591c0cc46bad26a757416d1fe79f60d64c200374216a69235de1c6cdefb8:CH3RaIZz8/B86MdhyvDTwF7izFDyoX5MBjG7Obdi8Kwkki0NMKBo+e5MtP6NHGaxFzuN4dUVlIGvnH8vaF+DBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-20T20:37:21Z:bc6c94ff6aa57cd27dd84bfe91686560b6498f874024b1604b4c863265bd2b0d:B8kakFQIHMwkF0KdJ3dw0xxUKwyXqCo1gCfl4854tEoDKiphGicnim3PV+UvVsJCiEYxXpxhwBVaP7Y5srPeCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/graph"
 inventory_policy:
   admission:
@@ -119,10 +119,10 @@ composer_config:
     # set entirely; explicit `[]` declares none and is preserved as such.
     - name: external_content
       strategy: replace_root_last
-      expect_value_type: array
+      expect_value_type: sequence
     - name: external_product_slots
       strategy: replace_root_last
-      expect_value_type: array
+      expect_value_type: sequence
     # Product declarations belong to the signed producer root. Descendants
     # must restate the complete relationship intentionally rather than inherit
     # a recipe selected by an ancestor.
@@ -162,10 +162,10 @@ composed_value_contract:
       prim: mapping
     external_content:
       type: single
-      prim: array
+      prim: sequence
     external_product_slots:
       type: single
-      prim: array
+      prim: sequence
     product_recipe:
       type: single
       prim: string
