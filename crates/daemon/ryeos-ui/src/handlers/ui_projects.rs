@@ -1091,8 +1091,7 @@ descriptor!(
     PROJECTS_OPEN_DESCRIPTOR,
     "service:projects/open",
     "projects.open",
-    handle_projects_open,
-    &["ryeos.execute.service.projects/open"]
+    handle_projects_open
 );
 descriptor!(
     UI_PROJECTS_LIST_DESCRIPTOR,
