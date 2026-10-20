@@ -1139,3 +1139,249 @@ async fn forged_presentation_operation_records_do_not_change_the_seat() {
         );
     }
 }
+
+fn install_transfer_composition() {
+    ryeos_app::object_contracts::install_with_event_contracts(
+        ryeos_ui::transfer_store::retention::event_contracts(),
+    )
+    .unwrap();
+    ryeos_app::object_contracts::install_retained_evidence_validator(
+        ryeos_ui::transfer_store::retention::validate_retained_evidence,
+    )
+    .unwrap();
+}
+
+/// A second presentation in the same session: its own creation request and
+/// claim intent, otherwise the same Prepare and fresh Claim.
+async fn fresh_distinct(
+    state: &Arc<ryeos_app::state::AppState>,
+    session: &str,
+    request_id: &str,
+    nonce: &str,
+) -> Value {
+    let prepared = route(
+        state,
+        session,
+        &ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR,
+        prepare_request(state, session, request_id),
+    )
+    .await
+    .unwrap();
+    let request = claim_request(state, session, &prepared, nonce, json!({"kind":"fresh"}))
+        .await
+        .unwrap();
+    route(
+        state,
+        session,
+        &ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR,
+        request,
+    )
+    .await
+    .unwrap()
+}
+
+fn transfer_seat(
+    opened: &Value,
+    revision: u64,
+) -> ryeos_ui_presentation_contract::transfer::TransferSeat {
+    ryeos_ui_presentation_contract::transfer::TransferSeat {
+        presentation_id: opened["presentation_id"].as_str().unwrap().into(),
+        thread_id: opened["thread_id"].as_str().unwrap().into(),
+        chain_root_id: opened["chain_root_id"].as_str().unwrap().into(),
+        producer_incarnation: opened["producer_incarnation"].as_str().unwrap().into(),
+        revision,
+    }
+}
+
+/// The destination's inbound commitment, written where a seat's own browser
+/// transfer testimony lands: after its authenticated producer frontier.
+fn append_inbound(
+    state: &ryeos_app::state::AppState,
+    destination: &Value,
+    seq: u64,
+    transfer: &ryeos_ui_presentation_contract::transfer::TransferIdentity,
+) {
+    let record = ryeos_ui_presentation_contract::transfer::TransferRecord {
+        schema: 1,
+        transfer: transfer.clone(),
+        phase: ryeos_ui_presentation_contract::transfer::TransferPhase::InboundCommitment,
+    };
+    state
+        .state_store
+        .append_events(
+            destination["chain_root_id"].as_str().unwrap(),
+            destination["thread_id"].as_str().unwrap(),
+            &[ryeos_app::state_store::NewEventRecord {
+                event_type: ryeos_ui_presentation_contract::transfer::TRANSFER_EVENT.into(),
+                storage_class: "indexed".into(),
+                payload: serde_json::to_value(
+                    ryeos_ui_presentation_contract::transfer::TransferEventPayload {
+                        seq,
+                        operation_id: transfer.operation_id.clone(),
+                        payload: record,
+                    },
+                )
+                .unwrap(),
+            }],
+        )
+        .unwrap();
+}
+
+fn pair_transfer(
+    source: ryeos_ui_presentation_contract::transfer::TransferSeat,
+    destination: ryeos_ui_presentation_contract::transfer::TransferSeat,
+) -> ryeos_ui_presentation_contract::transfer::TransferIdentity {
+    ryeos_ui_presentation_contract::transfer::TransferIdentity {
+        operation_id: "33333333-3333-4333-8333-333333333333".into(),
+        source,
+        destination,
+        export_digest: ryeos_ui_presentation_contract::payload_digest::seat_payload_digest(
+            &json!({"mode":"copy"}),
+        )
+        .unwrap(),
+    }
+}
+
+#[tokio::test]
+async fn session_current_folds_a_transfer_bearing_seat_through_its_completed_paired_cut() {
+    use ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR;
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+    install_transfer_composition();
+    let session = activate(&state);
+    let state = Arc::new(state);
+    let source = fresh_distinct(
+        &state,
+        &session,
+        "00000000-0000-4000-8000-000000000020",
+        "00000000-0000-4000-8000-000000000021",
+    )
+    .await;
+    let destination = fresh_distinct(
+        &state,
+        &session,
+        "00000000-0000-4000-8000-000000000030",
+        "00000000-0000-4000-8000-000000000031",
+    )
+    .await;
+    let ordinary = ryeos_ui::handlers::ui_session_current::handle(
+        json!({}),
+        handler_context(&session),
+        state.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(ordinary["presentations"].as_array().unwrap().len(), 2);
+    let reported = ordinary["presentations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["presentation_id"] == source["presentation_id"])
+        .unwrap();
+    assert_eq!(reported["thread_id"], source["thread_id"]);
+    assert_eq!(reported["chain_root_id"], source["chain_root_id"]);
+
+    let source_revision = observe(&state, &session, &source).await.unwrap().revision;
+    let destination_revision = observe(&state, &session, &destination)
+        .await
+        .unwrap()
+        .revision;
+    let transfer = pair_transfer(
+        transfer_seat(&source, source_revision),
+        transfer_seat(&destination, destination_revision),
+    );
+    let next_engine_seq: u64 = destination["next_engine_seq"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    append_inbound(&state, &destination, next_engine_seq, &transfer);
+
+    // One seat's fold cannot judge transfer testimony; only the completed
+    // paired cut reads it.
+    route(
+        &state,
+        &session,
+        &OPEN_DESCRIPTOR,
+        json!({"action":"observe","presentation_id":destination["presentation_id"],
+            "thread_id":destination["thread_id"],"chain_root_id":destination["chain_root_id"]}),
+    )
+    .await
+    .expect_err("transfer testimony needs phase-aware two-seat admission");
+    let current = ryeos_ui::handlers::ui_session_current::handle(
+        json!({}),
+        handler_context(&session),
+        state.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(current["presentations"], ordinary["presentations"]);
+}
+
+#[tokio::test]
+async fn session_current_refuses_a_transfer_naming_a_seat_the_session_does_not_hold() {
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+    install_transfer_composition();
+    let session = activate(&state);
+    let state = Arc::new(state);
+    let destination = fresh_distinct(
+        &state,
+        &session,
+        "00000000-0000-4000-8000-000000000030",
+        "00000000-0000-4000-8000-000000000031",
+    )
+    .await;
+    let destination_revision = observe(&state, &session, &destination)
+        .await
+        .unwrap()
+        .revision;
+    let mut ghost = transfer_seat(&destination, 0);
+    ghost.presentation_id = "55555555-5555-4555-8555-555555555555".into();
+    ghost.thread_id = "T-ghost".into();
+    ghost.chain_root_id = "T-ghost".into();
+    let transfer = pair_transfer(ghost, transfer_seat(&destination, destination_revision));
+    let next_engine_seq: u64 = destination["next_engine_seq"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    append_inbound(&state, &destination, next_engine_seq, &transfer);
+    ryeos_ui::handlers::ui_session_current::handle(
+        json!({}),
+        handler_context(&session),
+        state.clone(),
+    )
+    .await
+    .expect_err("a counterpart with neither a signed head nor a fence has no authenticated cut");
+}
+
+#[tokio::test]
+async fn session_current_refuses_a_transfer_whose_witness_is_stale() {
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+    install_transfer_composition();
+    let session = activate(&state);
+    let state = Arc::new(state);
+    let source = fresh_distinct(
+        &state,
+        &session,
+        "00000000-0000-4000-8000-000000000020",
+        "00000000-0000-4000-8000-000000000021",
+    )
+    .await;
+    let destination = fresh_distinct(
+        &state,
+        &session,
+        "00000000-0000-4000-8000-000000000030",
+        "00000000-0000-4000-8000-000000000031",
+    )
+    .await;
+    let transfer = pair_transfer(transfer_seat(&source, 0), transfer_seat(&destination, 0));
+    // The witness names a producer sequence the seat has not reached.
+    append_inbound(&state, &destination, 7, &transfer);
+    ryeos_ui::handlers::ui_session_current::handle(
+        json!({}),
+        handler_context(&session),
+        state.clone(),
+    )
+    .await
+    .expect_err("a transfer witness must equal the authenticated producer frontier");
+}

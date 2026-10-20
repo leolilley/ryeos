@@ -262,18 +262,6 @@ async fn session_current_reports_the_real_presentation_memberships_sorted() {
                 .unwrap(),
         );
     }
-    let bound = ui
-        .browser_sessions
-        .bind_presentation_seat(
-            &session_id,
-            &created[1].presentation_id,
-            &root,
-            "T-seat-one",
-            "T-seat-one",
-            &digest,
-        )
-        .unwrap();
-
     let state = Arc::new(state);
     let result = current_call(&session_id, &state).await.expect("current");
     let reported = result["presentations"].as_array().unwrap();
@@ -300,12 +288,9 @@ async fn session_current_reports_the_real_presentation_memberships_sorted() {
         );
         assert_eq!(entry["surfaces"], serde_json::json!([]));
     }
-    let seated = reported
-        .iter()
-        .find(|entry| entry["presentation_id"] == bound.presentation_id)
-        .unwrap();
-    assert_eq!(seated["thread_id"], "T-seat-one");
-    assert_eq!(seated["chain_root_id"], "T-seat-one");
+    for entry in reported {
+        assert!(entry["thread_id"].is_null(), "no seat is bound yet");
+    }
     // The launch root is the only current attachment; a presentation does not
     // add attachments of its own when no Surface was seeded.
     assert_eq!(result["binding_attachments"].as_array().unwrap().len(), 1);
@@ -401,5 +386,48 @@ async fn presentation_admission_is_bounded_by_the_signed_policy() {
     assert_eq!(
         result["presentations"].as_array().unwrap().len(),
         limits.max_presentations
+    );
+}
+
+#[tokio::test]
+async fn session_current_refuses_a_bound_seat_with_neither_a_head_nor_a_fence() {
+    let (_tmp, _state_owner, state) = build_test_state();
+    let (session_id, token) = mint_launch(
+        &state,
+        shared_launch_context("config:ryeos/test/presentation", None),
+    );
+    let ui = get_ui_state(&state).unwrap();
+    ui.browser_sessions.consume_launch_token(&token).unwrap();
+    let session = ui.browser_sessions.get_session(&session_id).unwrap();
+    let root = session.attachments[&session.root_attachment_id].coordinate();
+    let digest = state.node_policy.generation_digest().to_owned();
+    let created = ui
+        .browser_sessions
+        .prepare_presentation(
+            &session_id,
+            &uuid::Uuid::new_v4().to_string(),
+            &root,
+            &limits(&state),
+            &digest,
+            bounds(),
+        )
+        .unwrap();
+    ui.browser_sessions
+        .bind_presentation_seat(
+            &session_id,
+            &created.presentation_id,
+            &root,
+            "T-seat-one",
+            "T-seat-one",
+            &digest,
+        )
+        .unwrap();
+    let error = current_call(&session_id, &Arc::new(state))
+        .await
+        .expect_err("a seat nothing signed and nothing fenced is not reported");
+    assert!(
+        error
+            .to_string()
+            .contains("neither live head nor retired fence")
     );
 }

@@ -32,6 +32,9 @@ mod append_ack;
 mod authenticated_history;
 mod composition;
 pub(crate) mod initialization;
+pub(crate) mod paired_read;
+
+pub(crate) use authenticated_history::{FixedAnchorReplay, FixedAnchorReplayStep};
 
 fn initial_surface_seeds(
     definition: &ryeos_client_base::presentation::UiCompositionDefinition,
@@ -572,6 +575,82 @@ fn reconcile_surface_closures(
         )
         .map_err(|error| HandlerError::Conflict(error.to_string()))?;
     Ok(false)
+}
+
+/// What session bootstrap found while repairing the closure projection of
+/// every seat the session holds.
+pub(crate) struct SessionReconciliation {
+    /// Live seats whose history names transfers: their composition is only
+    /// readable through a completed paired cut.
+    pub paired: Vec<crate::browser_session::PresentationMembership>,
+    /// Seats whose chains were retired, read through their retirement fences.
+    pub retired: Vec<(
+        crate::browser_session::PresentationMembership,
+        crate::transfer_store::retained::RetiredSeatEvidence,
+    )>,
+}
+
+/// Session bootstrap observes the same retained closure projection as
+/// dispatch. Prepared-but-unbound memberships have no seat history to
+/// reconcile.
+pub(crate) fn reconcile_session_surface_closures(
+    state: &AppState,
+    session: &BrowserSession,
+) -> Result<SessionReconciliation, HandlerError> {
+    let mut reconciliation = SessionReconciliation {
+        paired: Vec::new(),
+        retired: Vec::new(),
+    };
+    for membership in session.presentations.values() {
+        let Some(thread_id) = membership.thread_id.as_deref() else {
+            continue;
+        };
+        let root = membership
+            .chain_root_id
+            .as_deref()
+            .ok_or_else(|| HandlerError::Conflict("session seat has no chain root".into()))?;
+        if state
+            .state_store
+            .capture_thread_event_read_anchor(root, thread_id)
+            .map_err(|error| HandlerError::Internal(error.to_string()))?
+            .is_none()
+        {
+            if root != thread_id {
+                return Err(HandlerError::Conflict(
+                    "retired session seat is not an exact root".into(),
+                ));
+            }
+            let evidence = crate::transfer_store::retained::capture_retired_seat(
+                state.state_store.as_ref(),
+                root,
+            )
+            .map_err(|error| HandlerError::Conflict(error.to_string()))?
+            .ok_or_else(|| {
+                HandlerError::Conflict(
+                    "session seat has neither live head nor retired fence".into(),
+                )
+            })?;
+            reconciliation.retired.push((membership.clone(), evidence));
+            continue;
+        }
+        let transfer_bearing = match require_presentation_seat_with_reconcile(
+            state,
+            session,
+            &membership.presentation_id,
+            None,
+            None,
+        ) {
+            Ok((_, transfer_bearing)) => transfer_bearing,
+            // The singleton fold can fail once transfer phases follow later
+            // edits. That is only a request for the full fixed-cut reader: an
+            // empty discovery or a failed proof still refuses bootstrap.
+            Err(_) => true,
+        };
+        if transfer_bearing {
+            reconciliation.paired.push(membership.clone());
+        }
+    }
+    Ok(reconciliation)
 }
 
 fn require_writer(

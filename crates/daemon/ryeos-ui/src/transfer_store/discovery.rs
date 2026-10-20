@@ -165,3 +165,28 @@ pub fn discover_seat_transfer_identities(
         }
     }
 }
+
+/// Every transfer identity a retired seat's retained evidence names. The
+/// retained events are the seat's entire surviving testimony, so this is
+/// exhaustive for the seat without a scan.
+pub fn discover_retired_seat_transfer_identities(
+    evidence: &super::retained::RetiredSeatEvidence,
+) -> anyhow::Result<BTreeMap<String, TransferIdentity>> {
+    let mut found: BTreeMap<String, TransferIdentity> = BTreeMap::new();
+    for (_, event) in evidence.owner_events() {
+        let Some(identity) = signed_transfer_identity_for_seat(evidence.chain_root_id(), event)?
+        else {
+            continue;
+        };
+        match found.get(&identity.operation_id) {
+            Some(prior) if prior != &identity => {
+                bail!("retired seat evidence names one transfer operation with two identities")
+            }
+            Some(_) => {}
+            None => {
+                found.insert(identity.operation_id.clone(), identity);
+            }
+        }
+    }
+    Ok(found)
+}
