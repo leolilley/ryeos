@@ -83,6 +83,13 @@ type_complexity = "allow"
 [workspace.package]
 license = "MIT"
 
+# Debug binaries carry every crate of the workspace; with full debuginfo the
+# daemon test binary passes the executable-measurement bound that every node
+# start applies to itself. Line tables keep file:line backtraces at a fraction
+# of the size and compile memory.
+[profile.dev]
+debug = "line-tables-only"
+
 [profile.release]
 lto = "thin"
 # Keep the symbol table (debuginfo is already absent at debug=0) so a live
