@@ -1511,6 +1511,61 @@ pub struct ThreadResultRecord {
     pub metadata: Option<Value>,
 }
 
+/// The exact seat a conditional lease or publication action targets. The seat
+/// is a chain root; its signed snapshot must be a running thread of a fenced
+/// chain kind carrying this owner, item and executor.
+#[derive(Debug, Clone, Copy)]
+pub struct ExactSeat<'a> {
+    pub root_id: &'a str,
+    pub owner: &'a str,
+    pub item_ref: &'a str,
+    pub executor_ref: &'a str,
+}
+
+/// The completed historical cut a seat action depends on. `expected` is the
+/// seat root's own anchor and must also appear in `anchors`; `retired` names
+/// chains that must still be fenced with the recorded closure.
+#[derive(Debug, Clone, Copy)]
+pub struct SeatCut<'a> {
+    pub expected: &'a ryeos_state::AuthoritativeThreadEventReadAnchor,
+    pub anchors: &'a [ryeos_state::AuthoritativeThreadEventReadAnchor],
+    pub retired: &'a [ryeos_state::RetiredChainDependency],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SeatAnchorState {
+    Current,
+    Moved,
+    NotThisSeat,
+}
+
+/// Outcome of an append conditioned on an exact cut. `Conflict` means a
+/// supplied cut or admission moved and nothing was written; `NotRunning`
+/// means the target is not an admitted running target (or its seat lease is
+/// already claimed for reaping) and nothing was written.
+#[derive(Debug)]
+pub enum CutAppendResult {
+    Committed(Vec<PersistedEventRecord>),
+    Conflict,
+    NotRunning,
+}
+
+/// One append to a running chain root that depends on a second live chain,
+/// any further live chains, and any retired chains staying exactly as the
+/// caller read them.
+#[derive(Debug, Clone, Copy)]
+pub struct MixedCutAppend<'a> {
+    pub chain_root_id: &'a str,
+    pub thread_id: &'a str,
+    pub events: &'a [NewEventRecord],
+    pub expected: &'a ryeos_state::AuthoritativeThreadEventReadAnchor,
+    pub counterpart: &'a ryeos_state::AuthoritativeThreadEventReadAnchor,
+    /// Kind the target thread's signed snapshot must carry.
+    pub required_target_kind: &'a str,
+    pub current_anchors: &'a [ryeos_state::AuthoritativeThreadEventReadAnchor],
+    pub retired: &'a [ryeos_state::RetiredChainDependency],
+}
+
 /// CAS-authoritative terminal fields used to reconcile a runtime's process
 /// result with an earlier callback finalization. This deliberately reads the
 /// signed thread snapshot rather than treating subprocess stdout as a second
@@ -3843,6 +3898,40 @@ fn ephemeral_record(
     }
 }
 
+/// Resolve an append that returned an error: signed history decides whether
+/// the exact batch was published (continue from the readback), provably was
+/// not (the original error), or cannot be told (an uncertain commit).
+fn committed_append_after_error(
+    g: &Inner,
+    chain_root_id: &str,
+    thread_id: &str,
+    predecessor: &ryeos_state::AuthoritativeThreadAppendAnchorReadback,
+    attempted: &[ryeos_state::objects::ThreadEvent],
+    events: &[NewEventRecord],
+    error: anyhow::Error,
+) -> Result<Vec<PersistedEventRecord>> {
+    match read_exact_committed_event_append(g, chain_root_id, thread_id, predecessor, attempted) {
+        Ok(EventAppendCommitReadback::Exact(stored_events)) => {
+            tracing::error!(
+                thread_id,
+                chain_root_id,
+                error = %error,
+                "event append returned an error after publishing the exact authoritative batch; continuing from signed-head readback"
+            );
+            persisted_from_stored_events(&stored_events, events)
+        }
+        Ok(EventAppendCommitReadback::ProvenAbsent) => Err(error),
+        Ok(EventAppendCommitReadback::Ambiguous(reason)) => {
+            Err(anyhow::Error::new(EventAppendCommitUncertain).context(format!(
+                "event append failed with ambiguous authoritative readback ({reason}); write error: {error:#}"
+            )))
+        }
+        Err(readback_error) => Err(anyhow::Error::new(EventAppendCommitUncertain).context(format!(
+            "event append failed and authoritative readback was unavailable; write error: {error:#}; readback error: {readback_error:#}"
+        ))),
+    }
+}
+
 fn append_events_locked(
     g: &Inner,
     cas_mutation_guard: Option<&ryeos_state::CasMutationGuard>,
@@ -3895,34 +3984,15 @@ fn append_events_locked(
         );
         let persisted = match committed {
             Ok(committed) => persisted_from_append(&committed_value(committed), &durable_events)?,
-            Err(error) => match read_exact_committed_event_append(
+            Err(error) => committed_append_after_error(
                 g,
                 chain_root_id,
                 thread_id,
                 &predecessor,
                 &durable_thread_events,
-            ) {
-                Ok(EventAppendCommitReadback::Exact(stored_events)) => {
-                    tracing::error!(
-                        thread_id,
-                        chain_root_id,
-                        error = %error,
-                        "event append returned an error after publishing the exact authoritative batch; continuing from signed-head readback"
-                    );
-                    persisted_from_stored_events(&stored_events, &durable_events)?
-                }
-                Ok(EventAppendCommitReadback::ProvenAbsent) => return Err(error),
-                Ok(EventAppendCommitReadback::Ambiguous(reason)) => {
-                    return Err(anyhow::Error::new(EventAppendCommitUncertain).context(format!(
-                        "event append failed with ambiguous authoritative readback ({reason}); write error: {error:#}"
-                    )));
-                }
-                Err(readback_error) => {
-                    return Err(anyhow::Error::new(EventAppendCommitUncertain).context(format!(
-                        "event append failed and authoritative readback was unavailable; write error: {error:#}; readback error: {readback_error:#}"
-                    )));
-                }
-            },
+                &durable_events,
+                error,
+            )?,
         };
         for (idx, record) in durable_indices.into_iter().zip(persisted) {
             records[idx] = Some(record);
@@ -14741,6 +14811,612 @@ impl StateStore {
         let g = self.lock()?;
         let _admission = Self::authorize_runtime_pin_for_thread(&g, thread_id)?;
         g.runtime_db.claim_expired_seat_lease(thread_id, cutoff_ms)
+    }
+
+    /// Run a short, synchronous action only while every supplied thread is
+    /// still at its exact trust-verified signed frontier; `None` means a cut is
+    /// stale. The callback holds the Store and every chain lock: it must not
+    /// reenter StateStore, state authority or CAS, take locks, do I/O or write
+    /// durable state.
+    pub fn with_thread_event_read_anchors<T>(
+        &self,
+        anchors: &[ryeos_state::AuthoritativeThreadEventReadAnchor],
+        action: impl FnOnce() -> Result<T>,
+    ) -> Result<Option<T>> {
+        let guard = self.state_authority.acquire_shared_guard()?;
+        let g = self.lock()?;
+        g.state_db
+            .with_thread_event_read_anchors(&guard, anchors, action)
+    }
+
+    /// The same exclusion for a cut that also depends on retired chains, which
+    /// must still be headless and fenced with the recorded closure. At least
+    /// one retired dependency is required.
+    pub fn with_thread_event_read_mixed_cut<T>(
+        &self,
+        current_anchors: &[ryeos_state::AuthoritativeThreadEventReadAnchor],
+        retired: &[ryeos_state::RetiredChainDependency],
+        action: impl FnOnce() -> Result<T>,
+    ) -> Result<Option<T>> {
+        let guard = self.state_authority.acquire_shared_guard()?;
+        let g = self.lock()?;
+        g.state_db
+            .with_thread_event_read_mixed_cut(&guard, current_anchors, retired, action)
+    }
+
+    /// One immutable thread event by exact CAS hash, authenticated against its
+    /// content hash and never taken from the projection. `None` means the
+    /// object is not retained; a non-canonical hash refuses.
+    pub fn retained_thread_event_by_hash(
+        &self,
+        event_hash: &str,
+    ) -> Result<Option<ryeos_state::objects::ThreadEvent>> {
+        let guard = self.state_authority.acquire_shared_guard()?;
+        let g = self.lock()?;
+        g.state_db.retained_thread_event_by_hash(event_hash, &guard)
+    }
+
+    fn with_cut_locked<T>(
+        g: &Inner,
+        guard: &ryeos_state::CasMutationGuard,
+        anchors: &[ryeos_state::AuthoritativeThreadEventReadAnchor],
+        retired: &[ryeos_state::RetiredChainDependency],
+        action: impl FnOnce() -> Result<T>,
+    ) -> Result<Option<T>> {
+        if retired.is_empty() {
+            g.state_db
+                .with_thread_event_read_anchors(guard, anchors, action)
+        } else {
+            g.state_db
+                .with_thread_event_read_mixed_cut(guard, anchors, retired, action)
+        }
+    }
+
+    fn validate_seat_cut(seat: &ExactSeat<'_>, cut: &SeatCut<'_>) -> Result<()> {
+        if seat.root_id.is_empty()
+            || cut.expected.chain_root_id() != seat.root_id
+            || cut.expected.thread_id() != seat.root_id
+        {
+            bail!("seat action requires an exact seat root anchor");
+        }
+        if !cut.anchors.iter().any(|anchor| anchor == cut.expected) {
+            bail!("seat action cut omits the exact seat root anchor");
+        }
+        Ok(())
+    }
+
+    fn seat_snapshot_matches(
+        snapshot: &ThreadSnapshot,
+        seat: &ExactSeat<'_>,
+        fenced: &ryeos_state::FencedChainKinds,
+    ) -> bool {
+        snapshot.chain_root_id == seat.root_id
+            && snapshot.thread_id == seat.root_id
+            && fenced.contains(&snapshot.kind_name)
+            && snapshot.status == ThreadStatus::Running
+            && snapshot.requested_by.as_deref() == Some(seat.owner)
+            && snapshot.item_ref == seat.item_ref
+            && snapshot.executor_ref == seat.executor_ref
+    }
+
+    /// Whether the seat root is, right now, exactly the anchored running seat.
+    /// The anchor is compared first and the snapshot read after it; the
+    /// caller's later exclusion re-proves the anchor, and a signed head only
+    /// moves forward, so the snapshot read between the two is the anchored one.
+    fn seat_anchor_state(
+        &self,
+        g: &Inner,
+        guard: &ryeos_state::CasMutationGuard,
+        seat: &ExactSeat<'_>,
+        expected: &ryeos_state::AuthoritativeThreadEventReadAnchor,
+    ) -> Result<SeatAnchorState> {
+        let fenced = self
+            .fenced_chain_kinds
+            .get()
+            .ok_or_else(|| anyhow!("fenced chain kinds are not installed"))?;
+        let current =
+            g.state_db
+                .capture_thread_event_read_anchor(seat.root_id, seat.root_id, guard)?;
+        if current.as_ref() != Some(expected) {
+            return Ok(SeatAnchorState::Moved);
+        }
+        let Some(snapshot) = g
+            .state_db
+            .read_authoritative_thread_snapshot(seat.root_id, seat.root_id)?
+        else {
+            return Ok(SeatAnchorState::Moved);
+        };
+        Ok(if Self::seat_snapshot_matches(&snapshot, seat, fenced) {
+            SeatAnchorState::Current
+        } else {
+            SeatAnchorState::NotThisSeat
+        })
+    }
+
+    fn with_exact_seat_cut<T>(
+        &self,
+        seat: &ExactSeat<'_>,
+        cut: &SeatCut<'_>,
+        refuse_claimed: bool,
+        action: impl FnOnce(&runtime_db::RuntimeDb) -> Result<T>,
+    ) -> Result<Option<T>> {
+        Self::validate_seat_cut(seat, cut)?;
+        let permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        if self.seat_anchor_state(&g, permit.cas_guard(), seat, cut.expected)?
+            != SeatAnchorState::Current
+        {
+            return Ok(None);
+        }
+        let outcome =
+            Self::with_cut_locked(&g, permit.cas_guard(), cut.anchors, cut.retired, || {
+                if refuse_claimed && g.runtime_db.seat_lease_is_reaping(seat.root_id)? {
+                    return Ok(None);
+                }
+                action(&g.runtime_db).map(Some)
+            })?;
+        Ok(outcome.flatten())
+    }
+
+    /// Admit a short, synchronous publication for one exact running seat. The
+    /// seat's signed snapshot and the cut are proved under the same chain
+    /// locks the callback runs under, and a seat whose lease is claimed for
+    /// reaping is refused. `None` means not admitted. A seat identity the
+    /// signed snapshot does not carry is not admitted either. The callback must
+    /// not reenter StateStore, state authority or CAS.
+    pub fn with_exact_seat_action_if_anchor<T>(
+        &self,
+        seat: &ExactSeat<'_>,
+        expected: &ryeos_state::AuthoritativeThreadEventReadAnchor,
+        action: impl FnOnce() -> Result<T>,
+    ) -> Result<Option<T>> {
+        self.with_exact_seat_action_if_anchors(
+            seat,
+            expected,
+            std::slice::from_ref(expected),
+            action,
+        )
+    }
+
+    /// The same admission conditioned on every completed paired-cut head.
+    pub fn with_exact_seat_action_if_anchors<T>(
+        &self,
+        seat: &ExactSeat<'_>,
+        expected: &ryeos_state::AuthoritativeThreadEventReadAnchor,
+        anchors: &[ryeos_state::AuthoritativeThreadEventReadAnchor],
+        action: impl FnOnce() -> Result<T>,
+    ) -> Result<Option<T>> {
+        self.with_exact_seat_action_if_mixed_cut(
+            seat,
+            &SeatCut {
+                expected,
+                anchors,
+                retired: &[],
+            },
+            action,
+        )
+    }
+
+    /// The same admission conditioned on live frontiers and retired fences.
+    pub fn with_exact_seat_action_if_mixed_cut<T>(
+        &self,
+        seat: &ExactSeat<'_>,
+        cut: &SeatCut<'_>,
+        action: impl FnOnce() -> Result<T>,
+    ) -> Result<Option<T>> {
+        self.with_exact_seat_cut(seat, cut, true, |_| action())
+    }
+
+    /// Renew an exact seat's lease only while the seat is the anchored running
+    /// seat and every supplied live head is current. `false` means not
+    /// renewed: a stale cut, a different seat identity, or a claimed lease.
+    pub fn touch_seat_lease_if_anchors(
+        &self,
+        seat: &ExactSeat<'_>,
+        expected: &ryeos_state::AuthoritativeThreadEventReadAnchor,
+        anchors: &[ryeos_state::AuthoritativeThreadEventReadAnchor],
+    ) -> Result<bool> {
+        self.touch_seat_lease_if_mixed_cut(
+            seat,
+            &SeatCut {
+                expected,
+                anchors,
+                retired: &[],
+            },
+        )
+    }
+
+    /// Lease renewal conditioned on live frontiers and retired fences.
+    pub fn touch_seat_lease_if_mixed_cut(
+        &self,
+        seat: &ExactSeat<'_>,
+        cut: &SeatCut<'_>,
+    ) -> Result<bool> {
+        self.with_exact_seat_cut(seat, cut, false, |db| {
+            db.touch_seat_lease(seat.root_id, seat.owner, seat.item_ref, seat.executor_ref)
+        })
+        .map(|renewed| renewed.unwrap_or(false))
+    }
+
+    /// Mark an exact seat's lease for reaping only when the anchored tip of
+    /// its signed history is the event `is_closing_tip` accepts, the seat is
+    /// still the anchored running seat, and the cut is current. A later
+    /// suffix, a stale cut, a missing or non-matching tip, or a different
+    /// lease identity returns `false`. Claiming an already claimed lease keeps
+    /// its first marker and returns `true`.
+    pub fn claim_closed_seat_lease_if_tip(
+        &self,
+        seat: &ExactSeat<'_>,
+        cut: &SeatCut<'_>,
+        is_closing_tip: impl FnOnce(&ryeos_state::objects::ThreadEvent) -> Result<bool>,
+    ) -> Result<bool> {
+        Self::validate_seat_cut(seat, cut)?;
+        let Some((tip_hash, tip_seq)) = cut.expected.tip() else {
+            return Ok(false);
+        };
+        let Some(tip) = self.retained_thread_event_by_hash(tip_hash)? else {
+            return Ok(false);
+        };
+        if tip.chain_root_id != seat.root_id
+            || tip.thread_id != seat.root_id
+            || tip.thread_seq != tip_seq
+            || !is_closing_tip(&tip)?
+        {
+            return Ok(false);
+        }
+        self.with_exact_seat_cut(seat, cut, false, |db| {
+            db.claim_closed_seat_lease(seat.root_id, seat.owner, seat.item_ref, seat.executor_ref)
+        })
+        .map(|claimed| claimed.unwrap_or(false))
+    }
+
+    /// Release a claimed lease's durable fence, but only once the exact root
+    /// is terminal in signed authority and of a fenced kind. Projection
+    /// absence or a projected status is never evidence. `false` means the
+    /// proof does not hold (including a head that moved while proving).
+    pub fn remove_terminal_seat_lease_if_proved(&self, thread_id: &str) -> Result<bool> {
+        let fenced = self
+            .fenced_chain_kinds
+            .get()
+            .ok_or_else(|| anyhow!("fenced chain kinds are not installed"))?;
+        let g = self.lock()?;
+        let Some(readback) = g
+            .state_db
+            .read_authoritative_thread_snapshot_with_last_event(thread_id, thread_id)?
+        else {
+            return Ok(false);
+        };
+        let admission = g.state_db.authorize_runtime_pin(thread_id)?;
+        let snapshot = &readback.snapshot;
+        if admission.head_hash != readback.chain_head_hash
+            || snapshot.thread_id != thread_id
+            || snapshot.chain_root_id != thread_id
+            || !fenced.contains(&snapshot.kind_name)
+            || !snapshot.status.is_terminal()
+        {
+            return Ok(false);
+        }
+        g.runtime_db.remove_seat_lease(thread_id)?;
+        Ok(true)
+    }
+
+    /// Whether a running target may take an ordinary append now: its row is
+    /// running, it has no stop intent, and process-attachment admission is open.
+    fn running_append_admitted(&self, g: &Inner, thread_id: &str) -> Result<bool> {
+        let Some(thread) = g.state_db.get_thread(thread_id)? else {
+            return Ok(false);
+        };
+        if thread.status != ThreadStatus::Running.as_str() {
+            return Ok(false);
+        }
+        let runtime = g
+            .runtime_db
+            .get_runtime_info(thread_id)?
+            .ok_or_else(|| anyhow!("runtime row missing while appending events: {thread_id}"))?;
+        Ok(runtime.stop_intent.is_none()
+            && self
+                .process_attachment_admission_open
+                .load(Ordering::Acquire))
+    }
+
+    fn durable_cut_events(
+        events: &[NewEventRecord],
+        chain_root_id: &str,
+        thread_id: &str,
+    ) -> Result<Vec<ryeos_state::objects::ThreadEvent>> {
+        if events.is_empty()
+            || events
+                .iter()
+                .any(|event| event.storage_class == "ephemeral")
+            || has_indexed_collection_events(events)
+        {
+            bail!("conditional append requires a nonempty durable batch without collection events");
+        }
+        let converted = convert_events(events, chain_root_id, thread_id);
+        for event in &converted {
+            event.validate()?;
+        }
+        Ok(converted)
+    }
+
+    /// Append to a running chain root only while its own frontier, a live
+    /// counterpart chain, every further live head and every retired fence in
+    /// the request are exactly as read, all checked under the ordered chain
+    /// locks that publish. `admit` runs under those locks immediately before
+    /// publication and must not reenter StateStore. A moved cut or a `false`
+    /// admission returns `Conflict` with nothing written; an error leaves
+    /// retry policy with the caller. A batch whose commit cannot be proved or
+    /// disproved from signed history fails as an uncertain commit.
+    pub fn append_events_if_mixed_cut(
+        &self,
+        request: &MixedCutAppend<'_>,
+        admit: impl FnOnce(ryeos_state::TwoAnchorAdmissionView<'_>) -> Result<bool>,
+    ) -> Result<CutAppendResult> {
+        let converted =
+            Self::durable_cut_events(request.events, request.chain_root_id, request.thread_id)?;
+        let permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        if !self.running_append_admitted(&g, request.thread_id)? {
+            return Ok(CutAppendResult::NotRunning);
+        }
+        let predecessor = g
+            .state_db
+            .read_authoritative_thread_append_anchor(request.chain_root_id, request.thread_id)?
+            .ok_or_else(|| anyhow!("conditional append has no signed predecessor"))?;
+        let committed = g
+            .state_db
+            .append_running_events_admitted_if_mixed_cut_with_admission(
+                ryeos_state::TwoAnchorThreadAppend {
+                    chain_root_id: request.chain_root_id,
+                    thread_id: request.thread_id,
+                    events: converted.clone(),
+                    signer: g.signer.as_ref(),
+                    runtime_liveness: &g.runtime_db,
+                    expected: request.expected,
+                    counterpart: request.counterpart,
+                    required_target_kind: request.required_target_kind,
+                },
+                ryeos_state::MixedCutDependencies {
+                    current_anchors: request.current_anchors,
+                    retired: request.retired,
+                },
+                permit.cas_guard(),
+                admit,
+            );
+        Self::cut_append_result(
+            &g,
+            request.chain_root_id,
+            request.thread_id,
+            &predecessor,
+            &converted,
+            request.events,
+            committed,
+        )
+        .map(|result| result.unwrap_or(CutAppendResult::Conflict))
+    }
+
+    fn cut_append_result(
+        g: &Inner,
+        chain_root_id: &str,
+        thread_id: &str,
+        predecessor: &ryeos_state::AuthoritativeThreadAppendAnchorReadback,
+        attempted: &[ryeos_state::objects::ThreadEvent],
+        events: &[NewEventRecord],
+        committed: Result<ryeos_state::ConditionalThreadEventAppendResult>,
+    ) -> Result<Option<CutAppendResult>> {
+        match committed {
+            Ok(ryeos_state::ConditionalThreadEventAppendResult::Committed(committed)) => {
+                Ok(Some(CutAppendResult::Committed(persisted_from_append(
+                    &committed_value(committed),
+                    events,
+                )?)))
+            }
+            Ok(ryeos_state::ConditionalThreadEventAppendResult::Conflict) => Ok(None),
+            Err(error) => committed_append_after_error(
+                g,
+                chain_root_id,
+                thread_id,
+                predecessor,
+                attempted,
+                events,
+                error,
+            )
+            .map(|persisted| Some(CutAppendResult::Committed(persisted))),
+        }
+    }
+
+    /// Append durable events to an exact running seat root and renew its
+    /// lease in the same gated step. The seat identity, the cut, and the lease
+    /// being unclaimed are proved under the chain locks that publish. A seat
+    /// that is not the admitted running seat, or whose lease is claimed,
+    /// returns `NotRunning`; a moved cut returns `Conflict`. Neither writes.
+    /// When the cut names another live chain, that chain is the counterpart of
+    /// the guarded append; a cut with retired dependencies requires one.
+    pub fn append_seat_events_and_renew_if_mixed_cut(
+        &self,
+        seat: &ExactSeat<'_>,
+        events: &[NewEventRecord],
+        cut: &SeatCut<'_>,
+    ) -> Result<CutAppendResult> {
+        Self::validate_seat_cut(seat, cut)?;
+        let converted = Self::durable_cut_events(events, seat.root_id, seat.root_id)?;
+        let fenced = self
+            .fenced_chain_kinds
+            .get()
+            .ok_or_else(|| anyhow!("fenced chain kinds are not installed"))?;
+        let permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        if !self.running_append_admitted(&g, seat.root_id)? {
+            return Ok(CutAppendResult::NotRunning);
+        }
+        let predecessor = g
+            .state_db
+            .read_authoritative_thread_append_anchor(seat.root_id, seat.root_id)?
+            .ok_or_else(|| anyhow!("seat append has no signed predecessor"))?;
+        let renew = || {
+            g.runtime_db.touch_seat_lease(
+                seat.root_id,
+                seat.owner,
+                seat.item_ref,
+                seat.executor_ref,
+            )
+        };
+        let refused = std::cell::Cell::new(false);
+        let committed = match cut
+            .anchors
+            .iter()
+            .find(|anchor| anchor.chain_root_id() != seat.root_id)
+        {
+            Some(counterpart) => {
+                let Some(kind) = g
+                    .state_db
+                    .get_thread(seat.root_id)?
+                    .map(|thread| thread.kind)
+                else {
+                    return Ok(CutAppendResult::NotRunning);
+                };
+                g.state_db
+                    .append_running_events_admitted_if_mixed_cut_with_admission(
+                        ryeos_state::TwoAnchorThreadAppend {
+                            chain_root_id: seat.root_id,
+                            thread_id: seat.root_id,
+                            events: converted.clone(),
+                            signer: g.signer.as_ref(),
+                            runtime_liveness: &g.runtime_db,
+                            expected: cut.expected,
+                            counterpart,
+                            required_target_kind: &kind,
+                        },
+                        ryeos_state::MixedCutDependencies {
+                            current_anchors: cut.anchors,
+                            retired: cut.retired,
+                        },
+                        permit.cas_guard(),
+                        |view| {
+                            if !Self::seat_snapshot_matches(view.target, seat, fenced) || !renew()?
+                            {
+                                refused.set(true);
+                                return Ok(false);
+                            }
+                            Ok(true)
+                        },
+                    )
+            }
+            None => {
+                if !cut.retired.is_empty() {
+                    bail!(
+                        "a seat append with retired dependencies requires a live counterpart chain"
+                    );
+                }
+                match self.seat_anchor_state(&g, permit.cas_guard(), seat, cut.expected)? {
+                    SeatAnchorState::Current => {}
+                    SeatAnchorState::Moved => return Ok(CutAppendResult::Conflict),
+                    SeatAnchorState::NotThisSeat => return Ok(CutAppendResult::NotRunning),
+                }
+                let lock = g.state_db.acquire_existing_chain_lock(seat.root_id)?;
+                if !renew()? {
+                    return Ok(CutAppendResult::NotRunning);
+                }
+                g.state_db.append_events_admitted_if_anchor_under_lock(
+                    ryeos_state::AnchoredThreadAppend {
+                        chain_root_id: seat.root_id,
+                        thread_id: seat.root_id,
+                        events: converted.clone(),
+                        snapshot_updates: Vec::new(),
+                        signer: g.signer.as_ref(),
+                        runtime_liveness: &g.runtime_db,
+                        expected: cut.expected,
+                    },
+                    &lock,
+                    permit.cas_guard(),
+                )
+            }
+        };
+        let result = Self::cut_append_result(
+            &g,
+            seat.root_id,
+            seat.root_id,
+            &predecessor,
+            &converted,
+            events,
+            committed,
+        )?;
+        Ok(match result {
+            Some(result) => result,
+            None if refused.get() => CutAppendResult::NotRunning,
+            None => CutAppendResult::Conflict,
+        })
+    }
+
+    /// Seat append conditioned on a completed paired history cut.
+    pub fn append_seat_events_and_renew_if_anchors(
+        &self,
+        seat: &ExactSeat<'_>,
+        events: &[NewEventRecord],
+        expected: &ryeos_state::AuthoritativeThreadEventReadAnchor,
+        anchors: &[ryeos_state::AuthoritativeThreadEventReadAnchor],
+    ) -> Result<CutAppendResult> {
+        self.append_seat_events_and_renew_if_mixed_cut(
+            seat,
+            events,
+            &SeatCut {
+                expected,
+                anchors,
+                retired: &[],
+            },
+        )
+    }
+
+    /// Seat append conditioned only on the seat's own exact frontier.
+    pub fn append_seat_events_and_renew_if_anchor(
+        &self,
+        seat: &ExactSeat<'_>,
+        events: &[NewEventRecord],
+        expected: &ryeos_state::AuthoritativeThreadEventReadAnchor,
+    ) -> Result<CutAppendResult> {
+        self.append_seat_events_and_renew_if_anchors(
+            seat,
+            events,
+            expected,
+            std::slice::from_ref(expected),
+        )
+    }
+
+    /// Result facts from the signed thread snapshot instead of the rebuildable
+    /// result projection. The caller has already authorized this exact
+    /// thread; the signed status must still be `expected_status`.
+    pub fn get_thread_result_authoritative(
+        &self,
+        chain_root_id: &str,
+        thread_id: &str,
+        expected_status: &str,
+    ) -> Result<Option<ThreadResultRecord>> {
+        let snapshot = {
+            let g = self.lock()?;
+            g.state_db
+                .read_authoritative_thread_snapshot(chain_root_id, thread_id)?
+                .ok_or_else(|| anyhow!("thread is missing its signed snapshot"))?
+        };
+        if snapshot.chain_root_id != chain_root_id || snapshot.thread_id != thread_id {
+            bail!("result snapshot contradicts the requested thread");
+        }
+        if snapshot.status.as_str() != expected_status {
+            bail!("result snapshot changed after the caller's authorization");
+        }
+        if snapshot.result.is_none() && snapshot.error.is_none() && snapshot.outcome_code.is_none()
+        {
+            return Ok(None);
+        }
+        let record = ThreadResultRecord {
+            outcome_code: snapshot.outcome_code,
+            result: snapshot.result,
+            error: snapshot.error,
+            metadata: None,
+        };
+        if serde_json::to_vec(&record)?.len() > MAX_THREAD_RESULT_RESPONSE_BYTES {
+            bail!("thread {thread_id} signed result exceeds its response byte maximum");
+        }
+        Ok(Some(record))
     }
 
     fn inspect_terminal_chain_pins<F>(
@@ -34699,3 +35375,7 @@ mod tests {
 #[cfg(test)]
 #[path = "state_store/qualification_transcript_publication_tests.rs"]
 mod qualification_transcript_publication_tests;
+
+#[cfg(test)]
+#[path = "state_store/seat_cut_tests.rs"]
+mod seat_cut_tests;
