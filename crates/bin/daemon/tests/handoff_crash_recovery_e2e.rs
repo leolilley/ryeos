@@ -7219,6 +7219,9 @@ async fn settled_portable_command_lost_ack_replays_after_real_daemon_restart_on_
         cut.idempotency_key == COMMAND_KEY && cut.command_sequence == 1,
         "lost-ACK gate did not capture the first exact command"
     );
+    // The host's refusal of the worker's exclusive session is written by this
+    // first daemon; keep its stderr for the classification at the end.
+    let first_daemon_stderr = daemon.drain_stderr_nonblocking().await;
     daemon.kill_daemon().await?;
     let store = open_daemon_state(&daemon.state_path)?;
     let settled = store
@@ -7346,7 +7349,10 @@ async fn settled_portable_command_lost_ack_replays_after_real_daemon_restart_on_
         // The refusal of the worker's exclusive session arrives after the
         // launch answered, so a host that cannot qualify process scopes shows
         // up here, as a settled record that never became a real session.
-        let stderr = daemon.drain_stderr_nonblocking().await;
+        let stderr = format!(
+            "{first_daemon_stderr}\n{}",
+            daemon.drain_stderr_nonblocking().await
+        );
         let detail = format!(
             "exact replay created another worker command or altered the settled record: {replayed:?}\n{stderr}"
         );
