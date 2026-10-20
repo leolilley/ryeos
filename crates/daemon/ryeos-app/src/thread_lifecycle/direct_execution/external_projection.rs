@@ -630,7 +630,6 @@ fn compile_external_direct_program_parts_with_project_file(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn compile_direct_program_from_plan(
     plan: &ryeos_engine::contracts::ExecutionPlan,
     retained: &ryeos_engine::protocols::ProtocolDescriptor,

@@ -31,7 +31,7 @@
 //!     result carries it — proving the child's result was actually consumed, not
 //!     merely stepped past.
 
-mod common;
+use ryeosd::test_support as common;
 
 use std::path::Path;
 use std::time::{Duration, Instant};

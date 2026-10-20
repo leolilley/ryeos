@@ -34,7 +34,7 @@
 //!     `thread_completed` — the resumed graph drove past the checkpoint
 //!     to a clean terminal.
 
-mod common;
+use ryeosd::test_support as common;
 
 use std::path::Path;
 use std::time::{Duration, Instant};

@@ -10,7 +10,7 @@
 //!   5. Rendered strings appear in parent's composed_view.derived["rendered_contexts"]
 //!   6. Directive runtime reads rendered_contexts instead of resolving knowledge itself
 
-mod common;
+use ryeosd::test_support as common;
 
 use std::path::Path;
 

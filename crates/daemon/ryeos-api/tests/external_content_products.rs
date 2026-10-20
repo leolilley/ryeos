@@ -4,7 +4,7 @@
 //! bytes, deliberately without historical thread/capsule objects. They exercise
 //! the durable lookup/import contract, not admission or first-time capture of a
 //! producer. A full producer launch must qualify that separate boundary.
-mod test_state;
+use ryeos_api::test_support as test_state;
 
 use std::sync::Arc;
 

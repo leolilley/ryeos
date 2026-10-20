@@ -4244,7 +4244,6 @@ impl PinnedDirectory {
                 Ok(current)
             }
 
-            #[allow(clippy::too_many_arguments)]
             fn visit(
                 directory: &PinnedDirectory,
                 remaining_entries: &mut usize,

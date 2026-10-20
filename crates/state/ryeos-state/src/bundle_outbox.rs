@@ -156,23 +156,19 @@ pub fn claim_bundle_outbox_messages(
              ORDER BY next_attempt_at, id
              LIMIT ?",
         )?;
-        // Keep query temporaries scoped ahead of `stmt`'s drop under Edition 2024.
-        #[allow(clippy::let_and_return)]
-        let ids = stmt
-            .query_map(
-                params![
-                    projection_name,
-                    sink,
-                    max_attempts_i64,
-                    max_attempts_i64,
-                    now,
-                    now,
-                    limit as i64
-                ],
-                |row| row.get::<_, i64>(0),
-            )?
-            .collect::<Result<Vec<_>, _>>()?;
-        ids
+        stmt.query_map(
+            params![
+                projection_name,
+                sink,
+                max_attempts_i64,
+                max_attempts_i64,
+                now,
+                now,
+                limit as i64
+            ],
+            |row| row.get::<_, i64>(0),
+        )?
+        .collect::<Result<Vec<_>, _>>()?
     };
 
     for id in &ids {

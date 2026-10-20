@@ -10,6 +10,8 @@ pub mod engine_init;
 pub mod reconcile;
 #[cfg(feature = "scheduling")]
 pub mod scheduler_impl;
+#[cfg(feature = "test-support")]
+pub mod test_support;
 pub mod uds;
 
 // ── Extracted crates ─────────────────────────────────────────────

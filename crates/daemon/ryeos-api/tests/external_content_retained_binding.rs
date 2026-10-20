@@ -1,5 +1,5 @@
 //! Exact binding reuse keeps source testimony and destination admission separate.
-mod test_state;
+use ryeos_api::test_support as test_state;
 
 use std::sync::Arc;
 

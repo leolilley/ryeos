@@ -18,7 +18,7 @@
 //! while model routing and the directive are planted into the project passed
 //! as `project_path`.
 
-mod common;
+use ryeosd::test_support as common;
 
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};

@@ -180,7 +180,6 @@ pub mod test_support {
         .map(|fixture| fixture.capsule_hash)
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn admit_worker_session_with_selected_products_and_placement(
         state: &mut ryeos_app::state::AppState,
         worker_execution_ref: &str,

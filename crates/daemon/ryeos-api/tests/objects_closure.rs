@@ -1,4 +1,4 @@
-mod test_state;
+use ryeos_api::test_support as test_state;
 
 use base64::Engine as _;
 use serde_json::{Value, json};

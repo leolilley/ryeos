@@ -407,7 +407,6 @@ pub(crate) fn operate_create(adapter: &lillux::InheritedDescriptorAuthority) -> 
     write_response(&result)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn first_snapshot_attempt(
     request: &RuntimeSnapshotAdapterRequest,
     creation_intent: &SnapshotCreationIntent,
@@ -450,7 +449,6 @@ struct SnapshotUploadObservation {
     completed_at_ms: i64,
 }
 
-#[allow(clippy::too_many_arguments)]
 fn send_snapshot_upload(
     intent: &RuntimeSnapshotIntent,
     spec: &SnapshotProductionSpec,
@@ -570,7 +568,6 @@ fn send_snapshot_upload(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 fn send_snapshot_create(
     intent: &RuntimeSnapshotIntent,
     creation_intent: &SnapshotCreationIntent,
@@ -811,7 +808,6 @@ fn snapshot_readiness_url(
     Ok(url)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn send_control(
     network: &lillux::network::NetworkContext,
     url: &url::Url,

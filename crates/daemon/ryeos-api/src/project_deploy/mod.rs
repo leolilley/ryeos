@@ -649,7 +649,7 @@ mod tests {
 
     #[tokio::test]
     async fn core_without_scheduler_refuses_a_deploy_declaring_schedules() {
-        let (_root, store_owner, state) = shared_test_state::build_test_state();
+        let (_root, store_owner, state) = crate::test_support::build_test_state();
         assert!(
             state.scheduler().is_none(),
             "Core composes no scheduler participant"
@@ -719,7 +719,7 @@ schedules:
 
     #[tokio::test]
     async fn core_without_scheduler_accepts_a_deploy_declaring_none() {
-        let (_root, store_owner, state) = shared_test_state::build_test_state();
+        let (_root, store_owner, state) = crate::test_support::build_test_state();
         assert!(
             state.scheduler().is_none(),
             "Core composes no scheduler participant"
@@ -776,9 +776,5 @@ schedules:
         std::fs::write(config.join("schedules"), "not a directory\n").unwrap();
         let mut session = NoSchedulerProjectSession::default();
         assert!(session.plan(omission_request(staging.path())).is_err());
-    }
-
-    mod shared_test_state {
-        include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/test_state.rs"));
     }
 }

@@ -31,7 +31,6 @@ impl QualificationInvocation {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn authenticate(
         &self,
         state: &AppState,

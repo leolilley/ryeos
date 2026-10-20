@@ -22,7 +22,7 @@
 //! subprocess executor). Adding one would modify production bundle
 //! content solely for test enablement — out of scope per plan.
 
-mod common;
+use ryeosd::test_support as common;
 
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};

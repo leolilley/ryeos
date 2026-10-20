@@ -907,7 +907,6 @@ impl RetainedExternalExecutionBinding {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn composed_test_fixture_with_settings(
         program: &ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram,
         controller_transport: ExternalControllerTransportContract,
@@ -1115,7 +1114,6 @@ pub fn provision_installed_test_placement_credential(
 
 impl InstalledExternalExecutionBinding {
     #[cfg(any(test, feature = "test-support"))]
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn composed_test_fixture_with_settings(
         program: &ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram,
         controller_transport: ExternalControllerTransportContract,

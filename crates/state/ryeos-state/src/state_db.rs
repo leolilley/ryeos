@@ -270,7 +270,6 @@ fn open_recovered_projection(
 
 // Recovery keeps each pinned/path authority and liveness observer explicit;
 // combining them would make authority substitution easier to miss at callers.
-#[allow(clippy::too_many_arguments)]
 fn rebuild_and_install_projection(
     runtime_state_dir: &Path,
     cas_root: &Path,
@@ -573,7 +572,6 @@ fn inspect_projection_history_discard(recovery: &RecoveryStore) -> anyhow::Resul
 }
 
 // Bounded housekeeping knobs plus the guarded-read owner stay explicit here.
-#[allow(clippy::too_many_arguments)]
 fn cleanup_projection_instances(
     recovery: &RecoveryStore,
     native_factory: Option<&lillux_sqlite::OriginalNativeFactory>,
@@ -1220,7 +1218,6 @@ impl RecoveryObserverThrottle {
 
 // Replay exposes acknowledgment, liveness, trust, and recovery authority as
 // independent inputs because each changes the safety of the operation.
-#[allow(clippy::too_many_arguments)]
 fn replay_pending_into(
     projection: &ProjectionDb,
     cas_root: &Path,
@@ -5614,7 +5611,6 @@ impl StateDb {
 
     // Admission authority, signer, liveness proof, and the held CAS guard stay
     // explicit because omitting any one changes the durability contract.
-    #[allow(clippy::too_many_arguments)]
     pub fn append_events_admitted(
         &self,
         chain_root_id: &str,
@@ -5704,7 +5700,6 @@ impl StateDb {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn append_events_inner(
         &self,
         chain_root_id: &str,
@@ -6048,7 +6043,6 @@ impl StateDb {
     /// Add a thread and append events to an existing thread under one signed
     /// chain head, then project the entire cross-thread transition in one
     /// projection transaction.
-    #[allow(clippy::too_many_arguments)]
     #[cfg(test)]
     pub fn add_thread_with_events_and_append(
         &self,
@@ -6074,7 +6068,6 @@ impl StateDb {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn add_thread_with_events_and_append_admitted(
         &self,
         chain_root_id: &str,
@@ -6100,7 +6093,6 @@ impl StateDb {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn add_thread_with_events_and_append_inner(
         &self,
         chain_root_id: &str,
@@ -8762,7 +8754,6 @@ impl StateDb {
 
     // Paging bounds and signing/trust authority remain explicit at the public
     // state boundary rather than being hidden in an unchecked options bag.
-    #[allow(clippy::too_many_arguments)]
     pub fn read_bundle_event_chain_page(
         &self,
         bundle_id: &str,

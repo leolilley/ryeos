@@ -20,14 +20,13 @@ use ryeos_engine::kind_registry::KindRegistry;
 /// Authored test fixture consumed through the real Config resolver/compiler.
 /// Test code signs this temporary project input with the established publisher;
 /// it does not fabricate an effective Config identity or an admitted binding.
-#[allow(dead_code)]
 pub async fn live_presentation(
     state: &AppState,
 ) -> (
     String,
     ryeos_app::handler_context::HandlerContext,
     ryeos_client_base::ui::UiPresentationProducer,
-    ryeos_ui::browser_session::BindingAttachmentCoordinate,
+    crate::browser_session::BindingAttachmentCoordinate,
 ) {
     live_presentation_seeded(state, None).await
 }
@@ -39,7 +38,7 @@ async fn live_presentation_seeded(
     String,
     ryeos_app::handler_context::HandlerContext,
     ryeos_client_base::ui::UiPresentationProducer,
-    ryeos_ui::browser_session::BindingAttachmentCoordinate,
+    crate::browser_session::BindingAttachmentCoordinate,
 ) {
     let root = state.config.app_root.clone();
     live_presentation_in_project(state, &root, &root, initial_surface).await
@@ -57,7 +56,7 @@ async fn live_presentation_in_project(
     String,
     ryeos_app::handler_context::HandlerContext,
     ryeos_client_base::ui::UiPresentationProducer,
-    ryeos_ui::browser_session::BindingAttachmentCoordinate,
+    crate::browser_session::BindingAttachmentCoordinate,
 ) {
     let mut body = String::from(
         "category: test\nversion: '1'\nshared_presentation:\n  schema: 1\n  title: Test presentation\n  launcher: launch\n  dialogs:\n    - id: launch\n      title: Launch\n      view: 'view:ryeos/ui/launcher'\n  capabilities:\n    sources: []\n    affordances: []\n",
@@ -91,9 +90,9 @@ async fn live_presentation_in_project(
         store
             .write_yaml(
                 &store.paths().projects_config(),
-                &ryeos_ui::handlers::ui_projects::ProjectsFile {
+                &crate::handlers::ui_projects::ProjectsFile {
                     version: 1,
-                    projects: vec![ryeos_ui::handlers::ui_projects::ProjectEntry {
+                    projects: vec![crate::handlers::ui_projects::ProjectEntry {
                         local_id: "prj_fixture".into(),
                         name: "Fixture".into(),
                         root: project_root.display().to_string(),
@@ -104,9 +103,9 @@ async fn live_presentation_in_project(
             )
             .unwrap();
     }
-    let minted = ryeos_ui::handlers::ui_launch_mint::handle(
-        ryeos_ui::handlers::ui_launch_mint::Request {
-            ui_binding_contract_revision: ryeos_ui::UI_BINDING_CONTRACT_REVISION.into(),
+    let minted = crate::handlers::ui_launch_mint::handle(
+        crate::handlers::ui_launch_mint::Request {
+            ui_binding_contract_revision: crate::UI_BINDING_CONTRACT_REVISION.into(),
             surface_ref: "config:test/presentation".into(),
             project_path: Some(spelling.display().to_string()),
             user_principal_id: Some(principal.clone()),
@@ -122,19 +121,18 @@ async fn live_presentation_in_project(
 /// A projectless presentation under the shipped shared Config, for a verified
 /// non-operator principal. Its dialogs carry the real project registry
 /// affordances, and nothing in it names a project.
-#[allow(dead_code)]
 pub async fn live_shipped_presentation(
     state: &AppState,
 ) -> (
     String,
     ryeos_app::handler_context::HandlerContext,
     ryeos_client_base::ui::UiPresentationProducer,
-    ryeos_ui::browser_session::BindingAttachmentCoordinate,
+    crate::browser_session::BindingAttachmentCoordinate,
 ) {
     let principal = format!("fp:{}", "ab".repeat(32));
-    let minted = ryeos_ui::handlers::ui_launch_mint::handle(
-        ryeos_ui::handlers::ui_launch_mint::Request {
-            ui_binding_contract_revision: ryeos_ui::UI_BINDING_CONTRACT_REVISION.into(),
+    let minted = crate::handlers::ui_launch_mint::handle(
+        crate::handlers::ui_launch_mint::Request {
+            ui_binding_contract_revision: crate::UI_BINDING_CONTRACT_REVISION.into(),
             surface_ref: "config:ryeos/ui/presentation".into(),
             project_path: None,
             user_principal_id: Some(principal.clone()),
@@ -155,10 +153,10 @@ async fn claim_minted_presentation(
     String,
     ryeos_app::handler_context::HandlerContext,
     ryeos_client_base::ui::UiPresentationProducer,
-    ryeos_ui::browser_session::BindingAttachmentCoordinate,
+    crate::browser_session::BindingAttachmentCoordinate,
 ) {
     let id = minted["session_id"].as_str().unwrap().to_owned();
-    let ui = ryeos_ui::state::get_ui_state(state).unwrap();
+    let ui = crate::state::get_ui_state(state).unwrap();
     assert_eq!(
         ui.browser_sessions
             .consume_launch_token(minted["token"].as_str().unwrap()),
@@ -174,9 +172,9 @@ fn session_context_and_root(
     id: &str,
 ) -> (
     ryeos_app::handler_context::HandlerContext,
-    ryeos_ui::browser_session::BindingAttachmentCoordinate,
+    crate::browser_session::BindingAttachmentCoordinate,
 ) {
-    let session = ryeos_ui::state::get_ui_state(state)
+    let session = crate::state::get_ui_state(state)
         .unwrap()
         .browser_sessions
         .get_session(id)
@@ -192,7 +190,6 @@ fn session_context_and_root(
 
 /// A further independently owned presentation in an existing session, with
 /// its producer claimed.
-#[allow(dead_code)]
 pub async fn additional_presentation(
     state: &AppState,
     session_id: &str,
@@ -204,19 +201,19 @@ pub async fn additional_presentation(
 async fn claim_presentation_in_session(
     state: &AppState,
     ctx: &ryeos_app::handler_context::HandlerContext,
-    root: &ryeos_ui::browser_session::BindingAttachmentCoordinate,
+    root: &crate::browser_session::BindingAttachmentCoordinate,
 ) -> ryeos_client_base::ui::UiPresentationProducer {
     let mut request = serde_json::to_value(root).unwrap();
     request["action"] = serde_json::json!("prepare");
     request["creation_request_id"] = serde_json::json!(uuid::Uuid::new_v4().to_string());
-    let prepared = (ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR.handler)(
+    let prepared = (crate::handlers::ui_seat::OPEN_DESCRIPTOR.handler)(
         request,
         ctx.clone(),
         Arc::new(state.clone()),
     )
     .await
     .expect("prepare independently owned presentation");
-    let observed = (ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR.handler)(
+    let observed = (crate::handlers::ui_seat::OPEN_DESCRIPTOR.handler)(
         serde_json::json!({
             "action":"observe", "presentation_id":prepared["presentation_id"],
             "thread_id":prepared["thread_id"], "chain_root_id":prepared["chain_root_id"]
@@ -241,7 +238,7 @@ async fn claim_presentation_in_session(
     claim
         .assign_identity()
         .expect("derive exact control intent");
-    let claimed = (ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR.handler)(
+    let claimed = (crate::handlers::ui_seat::OPEN_DESCRIPTOR.handler)(
         serde_json::to_value(claim).unwrap(),
         ctx.clone(),
         Arc::new(state.clone()),
@@ -255,7 +252,6 @@ async fn claim_presentation_in_session(
     }
 }
 
-#[allow(dead_code)]
 pub async fn live_presentation_with_surface(
     state: &AppState,
     surface_ref: &str,
@@ -263,7 +259,7 @@ pub async fn live_presentation_with_surface(
     String,
     ryeos_app::handler_context::HandlerContext,
     ryeos_client_base::ui::UiPresentationProducer,
-    ryeos_ui::browser_session::BindingAttachmentCoordinate,
+    crate::browser_session::BindingAttachmentCoordinate,
 ) {
     let root = state.config.app_root.clone();
     live_presentation_with_surface_in_project(state, &root, &root, surface_ref).await
@@ -271,7 +267,6 @@ pub async fn live_presentation_with_surface(
 
 /// The presentation fixture rooted in `project_root`, returning the
 /// coordinate of its one authored initial Surface rather than the root.
-#[allow(dead_code)]
 pub async fn live_presentation_with_surface_in_project(
     state: &AppState,
     project_root: &std::path::Path,
@@ -281,11 +276,11 @@ pub async fn live_presentation_with_surface_in_project(
     String,
     ryeos_app::handler_context::HandlerContext,
     ryeos_client_base::ui::UiPresentationProducer,
-    ryeos_ui::browser_session::BindingAttachmentCoordinate,
+    crate::browser_session::BindingAttachmentCoordinate,
 ) {
     let (id, ctx, producer, _) =
         live_presentation_in_project(state, project_root, spelling, Some(surface_ref)).await;
-    let session = ryeos_ui::state::get_ui_state(state)
+    let session = crate::state::get_ui_state(state)
         .unwrap()
         .browser_sessions
         .get_session(&id)
@@ -302,25 +297,24 @@ pub async fn live_presentation_with_surface_in_project(
     (id, ctx, producer, coordinate)
 }
 
-#[allow(dead_code)]
 pub fn launch_context(
     surface_ref: &str,
     project_root: Option<&str>,
-    posture: ryeos_ui::compiled_binding::EffectiveUiPosture,
+    posture: crate::compiled_binding::EffectiveUiPosture,
     user_principal_id: Option<String>,
-) -> ryeos_ui::browser_session::LaunchContext {
+) -> crate::browser_session::LaunchContext {
     use std::collections::BTreeMap;
 
+    use crate::compiled_binding::{CompiledUiBinding, SessionCompiledUiBinding};
     use ryeos_api::surface_views::EffectiveUiItemIdentity;
     use ryeos_engine::resolution::{EffectiveDefinitionDigest, TrustClass};
-    use ryeos_ui::compiled_binding::{CompiledUiBinding, SessionCompiledUiBinding};
 
-    ryeos_ui::browser_session::LaunchContext {
+    crate::browser_session::LaunchContext {
         compiled_binding: Arc::new(SessionCompiledUiBinding {
             binding_digest: "11".repeat(32),
             posture,
             binding: CompiledUiBinding {
-                contract_revision: ryeos_ui::UI_BINDING_CONTRACT_REVISION.to_string(),
+                contract_revision: crate::UI_BINDING_CONTRACT_REVISION.to_string(),
                 principal_id: "fp:test".to_string(),
                 project_root: project_root.map(str::to_string),
                 request_engine_generation_identity: "generation:test".to_string(),
@@ -356,10 +350,9 @@ pub fn launch_context(
     }
 }
 
-#[allow(dead_code)]
 pub fn mint_launch(
     state: &AppState,
-    mut context: ryeos_ui::browser_session::LaunchContext,
+    mut context: crate::browser_session::LaunchContext,
 ) -> (String, String) {
     let identity = state
         .engine
@@ -372,7 +365,7 @@ pub fn mint_launch(
         binding.node_policy_generation_digest = state.node_policy.generation_digest().to_owned();
         binding.request_engine_generation_identity = identity;
     }
-    let (session_id, token, _) = ryeos_ui::state::get_ui_state(state)
+    let (session_id, token, _) = crate::state::get_ui_state(state)
         .expect("UI state")
         .browser_sessions
         .mint_token(context, 16, state.node_policy.generation_digest())
@@ -387,7 +380,7 @@ fn service_descriptors() -> &'static [ryeos_app::service_registry::ServiceDescri
         .get_or_init(|| {
             ryeos_api::handlers::ALL
                 .iter()
-                .chain(ryeos_ui::handlers::ALL.iter())
+                .chain(crate::handlers::ALL.iter())
                 .copied()
                 .collect()
         })
@@ -396,7 +389,6 @@ fn service_descriptors() -> &'static [ryeos_app::service_registry::ServiceDescri
 
 /// Build a minimal AppState with an empty engine.
 /// Suitable only for paths that reject before canonical item resolution.
-#[allow(dead_code)]
 pub fn build_test_state() -> (tempfile::TempDir, TestStateStore, AppState) {
     let tmpdir = tempfile::TempDir::new().unwrap();
     let native = NativeTestState::open(tmpdir.path()).expect("open native test state");
@@ -462,7 +454,6 @@ pub fn build_test_state() -> (tempfile::TempDir, TestStateStore, AppState) {
 /// Build an AppState backed by the live workspace core + standard + RyeOS UI bundles.
 /// Suitable for happy-path topology/session tests that need real kind schemas,
 /// verified item resolution, and effective-item composition.
-#[allow(dead_code)]
 pub fn build_test_state_with_live_bundles() -> (tempfile::TempDir, TestStateStore, AppState) {
     let tmpdir = tempfile::TempDir::new().unwrap();
     let native = NativeTestState::open(tmpdir.path()).expect("open native test state");
@@ -519,7 +510,6 @@ pub fn build_test_state_with_live_bundles() -> (tempfile::TempDir, TestStateStor
     )
 }
 
-#[allow(dead_code)]
 pub fn local_operator_context(
     state: &AppState,
     scopes: Vec<String>,
@@ -536,7 +526,6 @@ pub fn local_operator_context(
     )
 }
 
-#[allow(dead_code)]
 fn build_live_bundle_engine() -> ryeos_engine::engine::Engine {
     let trust_store = ryeos_engine::test_support::live_trust_store();
     let core_bundle = ryeos_engine::test_support::core_bundle_root();
@@ -572,7 +561,6 @@ fn build_live_bundle_engine() -> ryeos_engine::engine::Engine {
 }
 
 // Test fixture: one argument per AppState component under test.
-#[allow(clippy::too_many_arguments)]
 fn build_app_state(
     tmpdir: tempfile::TempDir,
     store_owner: TestStateStore,
@@ -624,7 +612,7 @@ fn build_app_state(
         controller_lifetime,
         extensions: {
             let ext = ryeos_app::extension_state::ExtensionState::new();
-            ext.insert(std::sync::Arc::new(ryeos_ui::UiState::new()));
+            ext.insert(std::sync::Arc::new(crate::UiState::new()));
             Arc::new(ext)
         },
         write_barrier: Arc::new(write_barrier),
@@ -738,21 +726,21 @@ fn test_ui_routes() -> Vec<ryeos_app::route_raw::RawRouteSpec> {
             "ui/launch",
             "/ui/launch/{token}",
             "GET",
-            ryeos_ui::handlers::ui_launch::DESCRIPTOR.service_ref,
+            crate::handlers::ui_launch::DESCRIPTOR.service_ref,
             serde_json::json!({"token": "${path.token}"}),
         ),
         route(
             "ui/invocations/dispatch",
             "/ui/api/invocations/dispatch",
             "POST",
-            ryeos_ui::handlers::ui_invocations_dispatch::DESCRIPTOR.service_ref,
+            crate::handlers::ui_invocations_dispatch::DESCRIPTOR.service_ref,
             serde_json::json!({}),
         ),
         route(
             "ui/session/seat/append",
             "/ui/api/session/seat/append",
             "POST",
-            ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR.service_ref,
+            crate::handlers::ui_seat::APPEND_DESCRIPTOR.service_ref,
             serde_json::json!({}),
         ),
     ]

@@ -668,7 +668,6 @@ pub(crate) fn capture_requested(root: &PinnedDirectory) -> Result<bool> {
 /// threaded verifier process. Namespace preparation and whole-namespace
 /// settlement remain Lillux-owned. Caller retains mount descriptors and writer
 /// authority through this call and independently checks the raw observation.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_prepared_protocol(
     mut completion_requested: impl FnMut() -> Result<bool>,
     native: lillux::LinuxSandboxRequest,

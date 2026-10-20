@@ -392,7 +392,6 @@ fn read_bundle_source_name(source: &Path) -> Result<String> {
     Ok(manifest.name)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn sign_bundle_source_units(
     source: &Path,
     registry_roots: &[PathBuf],

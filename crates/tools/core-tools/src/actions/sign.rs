@@ -225,7 +225,6 @@ fn ensure_operator_key_is_trusted(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn run_sign_prepared_batch(
     item_refs: &[String],
     project_path: Option<&Path>,
@@ -578,7 +577,6 @@ struct PendingProjectSourceUnit {
     expected_source_digest: String,
 }
 
-#[allow(clippy::too_many_arguments)]
 fn sign_project_source_units(
     source_root: &Path,
     kinds: &KindRegistry,

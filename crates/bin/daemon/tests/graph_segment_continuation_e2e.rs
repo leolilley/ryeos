@@ -17,7 +17,7 @@
 //!      covered at the walker boundary where a retryable callback failure can
 //!      be injected deterministically.
 
-mod common;
+use ryeosd::test_support as common;
 
 use std::collections::HashSet;
 use std::path::Path;

@@ -552,7 +552,6 @@ fn open_existing_portable_parent(
     Ok(Some((parent, OsString::from(file_name))))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn capture_portable_state_directory(
     directory: &lillux::PinnedDirectory,
     relative: &Path,

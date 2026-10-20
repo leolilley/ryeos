@@ -4,7 +4,7 @@
 //! is sufficient for the daemon to boot, accept HTTP traffic, and
 //! return its own self-introspection via `/health` + `service:node/status`.
 
-mod common;
+use ryeosd::test_support as common;
 
 use common::DaemonHarness;
 use common::fast_fixture::register_config_fixture_bundle;

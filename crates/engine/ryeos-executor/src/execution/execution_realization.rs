@@ -357,7 +357,6 @@ pub(crate) fn transition_continuation_project_authority(
     store_realization_candidate(state, candidate, None)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn store_new_realization(
     state: &AppState,
     launch_authority_digest: String,

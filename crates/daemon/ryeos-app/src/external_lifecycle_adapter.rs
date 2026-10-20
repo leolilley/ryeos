@@ -925,7 +925,6 @@ impl ExecutableExternalPlacementBackend {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn invoke_sealed_snapshot_operation(
         &self,
         network_policy: &ryeos_state::external_execution::transport::ExternalNetworkInputPolicy,
@@ -2021,7 +2020,6 @@ impl ExternalPlacementBackend for ExecutableExternalPlacementBackend {
             .map_err(|_| anyhow::anyhow!("invalid lifecycle runtime probe response"))
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn prepare_guest_package(
         &self,
         contract: &ExternalPlacementBackendContract,
@@ -2398,7 +2396,6 @@ impl ExecutableExternalPlacementBackend {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn activation_operation(
         &self,
         contract: &ExternalPlacementBackendContract,

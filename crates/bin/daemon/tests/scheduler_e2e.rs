@@ -14,7 +14,7 @@
 //! directive item exists in the test bundle), but the fire record proves
 //! the timer loop ticked and attempted dispatch.
 
-mod common;
+use ryeosd::test_support as common;
 
 use common::DaemonHarness;
 use serde_json::{Value, json};

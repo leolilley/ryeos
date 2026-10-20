@@ -536,7 +536,6 @@ pub struct ResolvedExecutionContract {
     pub lifecycle_authority: ryeos_state::objects::ExecutionLifecycleAuthority,
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn resolve_execution_contract(
     policy: &ExecutionPolicy,
     project_source: &ProjectSource,

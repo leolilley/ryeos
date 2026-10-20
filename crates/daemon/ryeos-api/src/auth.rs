@@ -1073,7 +1073,6 @@ mod tests {
     /// Signature = Ed25519(sk, sha256(canonical_string).as_bytes()).
     /// The canonical string is computed over `signed_uri`, which may
     /// differ from the URI later presented to verify_request.
-    #[allow(clippy::too_many_arguments)]
     fn signed_headers(
         client_key: &SigningKey,
         fingerprint: &str,
@@ -1110,7 +1109,6 @@ mod tests {
         headers
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn add_forwarding_proof(
         headers: &mut axum::http::HeaderMap,
         forwarding_key: &SigningKey,

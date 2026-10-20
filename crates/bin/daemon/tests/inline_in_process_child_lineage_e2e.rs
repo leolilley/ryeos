@@ -7,7 +7,7 @@
 //! reader change: `threads.children`, `threads.get`, `threads.chain`, and the
 //! graph thread's own `child_thread_spawned` event.
 
-mod common;
+use ryeosd::test_support as common;
 
 use std::path::Path;
 

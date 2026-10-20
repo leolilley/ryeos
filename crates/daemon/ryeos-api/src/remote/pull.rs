@@ -127,7 +127,6 @@ pub async fn pull_results(
 
 // The staged pull transaction keeps its remote, authority, lease, and three
 // snapshot identities explicit so none can be silently substituted.
-#[allow(clippy::too_many_arguments)]
 async fn pull_results_staged(
     client: &RemoteClient,
     authority: &PinnedStateAuthority,

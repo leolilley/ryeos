@@ -249,7 +249,6 @@ fn safe_error_body(body: &str) -> String {
 /// classification.
 // MidStream carries the full cut-attempt state by design; the pre-stream
 // variants are small rejection records.
-#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum ProviderStreamError {
     /// The provider returned a non-success HTTP status before streaming began.
@@ -451,23 +450,12 @@ impl std::fmt::Display for RuntimeCallbackPublicationError {
 
 impl std::error::Error for RuntimeCallbackPublicationError {}
 
-/// Accounting and locally observed output retained when an out-of-band signal
+/// Accounting retained when an out-of-band signal
 /// cuts an in-flight provider attempt. Cancellation/interruption are not
 /// provider failures, but any usage received before the signal must not vanish.
 #[derive(Debug, Clone)]
 pub struct CutAttemptState {
     pub usage: Option<TokenUsage>,
-    // Diagnostic parity with `AdapterResponse`; the runner consumes only
-    // `usage` since settlement moved to the daemon ledger, but cut-state
-    // provenance stays available to adapter-level tests and tracing.
-    #[allow(dead_code)]
-    pub generation_header_id: Option<String>,
-    #[allow(dead_code)]
-    pub response_id: Option<String>,
-    #[allow(dead_code)]
-    pub requested_output_tokens: Option<u64>,
-    #[allow(dead_code)]
-    pub observed_output: ObservedOutput,
 }
 
 /// Provider-neutral partial cognition retained when an interrupt cuts a turn.
@@ -1544,13 +1532,7 @@ pub async fn send_prepared_local_streaming(
         None
     };
     if let Some(interrupted) = pre_start_cut {
-        let attempt = CutAttemptState {
-            usage: None,
-            generation_header_id: None,
-            response_id: None,
-            requested_output_tokens,
-            observed_output: ObservedOutput::default(),
-        };
+        let attempt = CutAttemptState { usage: None };
         return if interrupted {
             Ok(StreamOutcome::Interrupted {
                 partial_cognition: InterruptedCognition::default(),
@@ -1618,13 +1600,7 @@ pub async fn send_prepared_local_streaming(
         };
         if let Some(interrupted) = cut {
             cancel_local_stream(input.callback, attempt_id, request_hash, &stream_id).await?;
-            let attempt = CutAttemptState {
-                usage: None,
-                generation_header_id: None,
-                response_id: None,
-                requested_output_tokens,
-                observed_output: output_meter.observed_output(live_output_events_emitted),
-            };
+            let attempt = CutAttemptState { usage: None };
             return if interrupted {
                 Ok(StreamOutcome::Interrupted {
                     partial_cognition: InterruptedCognition {
@@ -2018,13 +1994,7 @@ async fn send_prepared_streaming_inner(
         req = req.header(name.as_str(), value.as_str());
     }
 
-    let empty_cut_attempt = || CutAttemptState {
-        usage: None,
-        generation_header_id: None,
-        response_id: None,
-        requested_output_tokens,
-        observed_output: ObservedOutput::default(),
-    };
+    let empty_cut_attempt = || CutAttemptState { usage: None };
     if flag_set(&input.cancel_flag) {
         return Ok(StreamOutcome::Cancelled {
             attempt: empty_cut_attempt(),
@@ -2604,13 +2574,7 @@ async fn send_prepared_streaming_inner(
     // before building any partial response.
     if exit == LoopExit::Cancelled {
         return Ok(StreamOutcome::Cancelled {
-            attempt: CutAttemptState {
-                usage: last_usage,
-                generation_header_id,
-                response_id: last_response_id,
-                requested_output_tokens,
-                observed_output: output_meter.observed_output(live_output_events_emitted),
-            },
+            attempt: CutAttemptState { usage: last_usage },
         });
     }
 
@@ -2851,13 +2815,7 @@ async fn send_prepared_streaming_inner(
                 reasoning_content,
             },
             events: all_events,
-            attempt: CutAttemptState {
-                usage: last_usage,
-                generation_header_id,
-                response_id: last_response_id,
-                requested_output_tokens,
-                observed_output: output_meter.observed_output(live_output_events_emitted),
-            },
+            attempt: CutAttemptState { usage: last_usage },
         });
     }
 

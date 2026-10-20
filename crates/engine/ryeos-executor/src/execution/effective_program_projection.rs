@@ -613,7 +613,6 @@ fn capture_and_finalize_fresh_effective_program_once(
 /// invokes the same kind-declared effective validator as launch. It does not
 /// realize external content, finalize an effective definition, build an
 /// execution plan, materialize an executor, or mint durable lifecycle state.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn validate_admitted_effective_program(
     state: &ryeos_app::state::AppState,
     engine: &ryeos_engine::engine::Engine,
@@ -744,7 +743,6 @@ fn invalid_external_content(error: anyhow::Error) -> DispatchError {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn capture_and_finalize_with_hook_snapshots(
     engine: &ryeos_engine::engine::Engine,
     kind: &str,

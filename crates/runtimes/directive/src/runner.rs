@@ -421,13 +421,7 @@ async fn wait_for_provider_retry_deadline(
 fn provider_retry_wait_terminal(
     outcome: ProviderRetryWaitOutcome,
 ) -> Option<crate::provider_adapter::StreamOutcome> {
-    let empty_attempt = || crate::provider_adapter::streaming::CutAttemptState {
-        usage: None,
-        generation_header_id: None,
-        response_id: None,
-        requested_output_tokens: None,
-        observed_output: Default::default(),
-    };
+    let empty_attempt = || crate::provider_adapter::streaming::CutAttemptState { usage: None };
     match outcome {
         ProviderRetryWaitOutcome::DeadlineReached => None,
         ProviderRetryWaitOutcome::Cancelled => {
@@ -1536,11 +1530,6 @@ impl Runner {
                                         attempt:
                                             crate::provider_adapter::streaming::CutAttemptState {
                                                 usage: None,
-                                                generation_header_id: None,
-                                                response_id: None,
-                                                requested_output_tokens: prepared
-                                                    .requested_output_tokens,
-                                                observed_output: Default::default(),
                                             },
                                     });
                                 }
@@ -1552,11 +1541,6 @@ impl Runner {
                                         attempt:
                                             crate::provider_adapter::streaming::CutAttemptState {
                                                 usage: None,
-                                                generation_header_id: None,
-                                                response_id: None,
-                                                requested_output_tokens: prepared
-                                                    .requested_output_tokens,
-                                                observed_output: Default::default(),
                                             },
                                     });
                                 }
@@ -2414,19 +2398,16 @@ impl Runner {
                                             }
                                         }
                                     } else {
-                                        #[allow(clippy::let_and_return)]
                                         let settled = match self.compute_cost_for_usage(Some(usage))
                                         {
                                             Ok(cost) => {
-                                                let settlement_result = self
-                                                    .settle_provider_usage(
+                                                self.settle_provider_usage(
                                                     turn,
                                                     usage,
                                                     cost.usd,
                                                     turn_start.elapsed().as_millis() as u64,
                                                 )
-                                                .await;
-                                                settlement_result
+                                                .await
                                             }
                                             Err(error) => Err(error),
                                         };
@@ -2483,7 +2464,6 @@ impl Runner {
                                         let (input_tokens, output_tokens) = usage
                                             .complete_token_counts()
                                             .expect("valid provider usage has complete token counts");
-                                        #[allow(clippy::let_and_return)]
                                         let settled = match self.compute_cost_for_usage(Some(usage))
                                         {
                                             Ok(cost) => {
@@ -2500,15 +2480,14 @@ impl Runner {
                                                         self.model_name
                                                     ));
                                                 }
-                                                let settlement_result = self
+                                                self
                                                     .settle_provider_usage(
                                                     turn,
                                                     usage,
                                                     cost.usd,
                                                     turn_start.elapsed().as_millis() as u64,
                                                 )
-                                                .await;
-                                                settlement_result
+                                                .await
                                             }
                                             Err(error) => Err(error),
                                         };
@@ -2595,19 +2574,16 @@ impl Runner {
                                 let mut detail = protocol_error.to_string();
                                 if let Some(usage) = protocol_error.usage.as_ref() {
                                     if usage.is_valid() {
-                                        #[allow(clippy::let_and_return)]
                                         let settled = match self.compute_cost_for_usage(Some(usage))
                                         {
                                             Ok(cost) => {
-                                                let settlement_result = self
-                                                    .settle_provider_usage(
+                                                self.settle_provider_usage(
                                                     turn,
                                                     usage,
                                                     cost.usd,
                                                     turn_start.elapsed().as_millis() as u64,
                                                 )
-                                                .await;
-                                                settlement_result
+                                                .await
                                             }
                                             Err(error) => Err(error),
                                         };
@@ -3962,7 +3938,6 @@ impl Runner {
     /// verified prepared-request bound, release on a pre-issue runner signal,
     /// then durably mark issued. No provider request may start unless every
     /// step is proven; ambiguity fails closed with zero provider contact.
-    #[allow(clippy::too_many_arguments)] // one argument per lifecycle input
     async fn admit_ledger_attempt(
         &self,
         turn: u32,

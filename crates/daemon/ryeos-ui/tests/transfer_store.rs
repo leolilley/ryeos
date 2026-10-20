@@ -2,7 +2,7 @@
 //! claimed seats, qualification and retirement through retained evidence, and
 //! the refusal of every predecessor lifecycle version.
 
-mod test_state;
+use ryeos_ui::test_support as test_state;
 use test_state::{build_test_state, launch_context, mint_launch};
 
 use std::sync::Arc;

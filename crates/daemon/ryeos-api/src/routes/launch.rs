@@ -332,7 +332,6 @@ impl DispatchLaunchOptions {
 /// exposed or authoritatively published. This is the public-route admission
 /// boundary shared by launch, stream, and thread-input callers; it deliberately
 /// understands no kind or service name.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn preflight_dispatch_launch(
     state: &AppState,
     item_ref: &crate::routes::parsed_ref::ParsedItemRef,
@@ -571,7 +570,6 @@ pub(crate) async fn preflight_dispatch_launch_off_thread(
 // not simplify. Restructure with a compiler in the loop, not here.
 /// Spawn an acknowledged subprocess launch. The receiver resolves only after
 /// durable execution authority has been handed to the scheduled task.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_dispatch_launch_with_handoff(
     state: &AppState,
     item_ref: crate::routes::parsed_ref::ParsedItemRef,
@@ -630,7 +628,6 @@ pub(crate) fn retain_launch_workspace_until_task_terminal(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 fn spawn_dispatch_launch_inner(
     state: &AppState,
     item_ref: crate::routes::parsed_ref::ParsedItemRef,

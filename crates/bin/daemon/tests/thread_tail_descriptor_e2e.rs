@@ -12,7 +12,7 @@
 //!   4. A non-owner asking for the descriptor gets 404 (no existence leak),
 //!      matching the route's own ownership check.
 
-mod common;
+use ryeosd::test_support as common;
 
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};

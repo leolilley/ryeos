@@ -965,7 +965,7 @@ mod tests {
     /// A real signed seat thread supplies the anchor; events then enter the
     /// fold directly, so the fold tests exercise one rule at a time.
     fn replay_fixture() -> Fixture {
-        let (directory, owner, state) = crate::test_state::build_test_state();
+        let (directory, owner, state) = crate::test_support::build_test_state();
         state
             .state_store
             .create_thread_for_test(&seat_thread())
@@ -1034,7 +1034,7 @@ mod tests {
 
     #[test]
     fn replay_frames_are_bounded_by_the_signed_policy() {
-        let (_directory, _owner, state) = crate::test_state::build_test_state();
+        let (_directory, _owner, state) = crate::test_support::build_test_state();
         assert_eq!(
             replay_frame_bounds(&state).unwrap(),
             ReplayFrameBounds {
@@ -1070,7 +1070,7 @@ mod tests {
 
     #[test]
     fn initialization_only_history_completes_but_is_not_paired_testimony() {
-        let (_directory, _owner, state) = crate::test_state::build_test_state();
+        let (_directory, _owner, state) = crate::test_support::build_test_state();
         state
             .state_store
             .create_thread_for_test(&seat_thread())
@@ -1127,7 +1127,7 @@ mod tests {
     fn replay_after_finalize(
         params: impl FnOnce(&str) -> ryeos_app::thread_lifecycle::ThreadFinalizeParams,
     ) -> Result<FixedAnchorReplayStep, HandlerError> {
-        let (_directory, _owner, state) = crate::test_state::build_test_state();
+        let (_directory, _owner, state) = crate::test_support::build_test_state();
         let store = &state.state_store;
         store.create_thread_for_test(&seat_thread()).unwrap();
         store

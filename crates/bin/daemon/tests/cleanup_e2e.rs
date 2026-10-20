@@ -19,7 +19,7 @@
 //! Each test brings up its own daemon in a tempdir to avoid cross-test
 //! interference. The daemon binds `127.0.0.1:0` (kernel-assigned port).
 
-mod common;
+use ryeosd::test_support as common;
 
 use common::{DaemonHarness, run_service_standalone_fresh, ryeos_binary, ryeosd_binary};
 

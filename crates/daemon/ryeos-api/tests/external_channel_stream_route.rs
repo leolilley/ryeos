@@ -2,7 +2,7 @@
 //! socket: it compiles from its signed YAML, accepts no body, keeps the
 //! connection's upgrade through the dispatcher, and refuses by name.
 
-mod test_state;
+use ryeos_api::test_support as test_state;
 
 use std::sync::Arc;
 use std::time::Duration;

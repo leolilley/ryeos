@@ -14,11 +14,10 @@ use crate::routing_observation::{MAX_EVENT_BYTES, MAX_EVENTS, MAX_TOTAL_BYTES};
 
 // This product-local, statically dispatched protocol is used only by the
 // verifier binary and its fixtures; it promises no Send or object-safe API.
-#[allow(async_fn_in_trait)]
 pub trait AppServerTransport {
-    async fn write_frame(&mut self, frame: &[u8]) -> Result<()>;
-    async fn read_chunk(&mut self) -> Result<Vec<u8>>;
-    async fn close_input(&mut self) -> Result<()>;
+    fn write_frame(&mut self, frame: &[u8]) -> impl std::future::Future<Output = Result<()>>;
+    fn read_chunk(&mut self) -> impl std::future::Future<Output = Result<Vec<u8>>>;
+    fn close_input(&mut self) -> impl std::future::Future<Output = Result<()>>;
 }
 
 /// Exact attempts and owner callback authority are supplied by the enclosing

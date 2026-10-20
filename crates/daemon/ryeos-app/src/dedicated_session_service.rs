@@ -269,7 +269,6 @@ pub async fn wait_for_worker_attachment_projection(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub async fn wait_for_exact_approval_state(
     state: &AppState,
     placement_thread_id: &str,
@@ -4068,7 +4067,6 @@ fn command_batch_after_progress(
     Ok(remaining)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn append_command_observation_batch_phase(
     state: &AppState,
     session: &DedicatedSessionRecord,

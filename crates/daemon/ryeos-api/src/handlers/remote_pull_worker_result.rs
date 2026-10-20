@@ -693,7 +693,6 @@ fn validate_response(response: &Response, operation: &PullOperation, job_id: &st
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn settle_attempt(
     state: &AppState,
     job: &SyncJobRecord,

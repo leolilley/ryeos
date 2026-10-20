@@ -30,7 +30,6 @@ pub struct RuntimeContentRecordJoin {
 }
 
 impl RuntimeContentRecordJoin {
-    #[allow(clippy::too_many_arguments)]
     pub fn verify(
         activation_receipt_hash: &str,
         receipt: &ExternalContentActivationReceipt,

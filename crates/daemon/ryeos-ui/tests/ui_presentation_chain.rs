@@ -4,7 +4,7 @@
 //! (prepare, accept, commit, activate), the authenticated seat history stream,
 //! `projects/open` and a particular Surface resume.
 
-mod test_state;
+use ryeos_ui::test_support as test_state;
 use test_state::build_test_state_with_live_bundles;
 
 use ryeos_app::handler_context::HandlerContext;

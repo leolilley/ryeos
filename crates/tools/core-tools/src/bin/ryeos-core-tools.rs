@@ -848,7 +848,6 @@ fn run_snapshot(cmd: SnapshotCmd, stdin_json: bool) -> anyhow::Result<()> {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn run_build(
     bundle_source: Option<PathBuf>,
     registry_roots: Vec<PathBuf>,
@@ -1820,7 +1819,6 @@ fn run_authorize_client(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn run_remote_descriptor(
     app_root: Option<String>,
     name: Option<String>,

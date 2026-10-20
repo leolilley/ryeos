@@ -209,7 +209,6 @@ fn validate_capture_batch_requests(requests: &[ProductRequest], owner: &str) -> 
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn capture_guarded(
     state: Arc<AppState>,
     context: HandlerContext,
@@ -499,7 +498,6 @@ fn selected_workspace_output_capture_hash<'a>(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn import_workspace_output_product(
     state: &AppState,
     authority: &ryeos_state::PinnedStateAuthority,

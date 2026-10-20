@@ -22,7 +22,7 @@
 
 const TEST_PURPOSE: lillux::TempPurpose = lillux::TempPurpose::new("test");
 
-mod common;
+use ryeosd::test_support as common;
 
 use std::path::Path;
 use std::time::{Duration, Instant};

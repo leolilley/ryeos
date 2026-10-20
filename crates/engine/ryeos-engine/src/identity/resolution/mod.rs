@@ -86,7 +86,6 @@ pub fn run_resolution_pipeline_with_probes(
 
 /// Run the effective pipeline with project discovery and reads sourced
 /// exclusively from one admitted project-content authority.
-#[allow(clippy::too_many_arguments)]
 pub fn run_resolution_pipeline_with_probes_under_project_authority(
     item: &CanonicalRef,
     kinds: &KindRegistry,
@@ -108,7 +107,6 @@ pub fn run_resolution_pipeline_with_probes_under_project_authority(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn run_resolution_pipeline_with_probes_from_authority(
     item: &CanonicalRef,
     kinds: &KindRegistry,
@@ -190,7 +188,6 @@ pub fn run_effective_item_pipeline_with_probes(
 
 /// Resolve and compose an executable or data item exclusively beneath one
 /// admitted project-content authority.
-#[allow(clippy::too_many_arguments)]
 pub fn run_effective_item_pipeline_with_probes_under_project_authority(
     item: &CanonicalRef,
     kinds: &KindRegistry,
@@ -212,7 +209,6 @@ pub fn run_effective_item_pipeline_with_probes_under_project_authority(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn run_effective_item_pipeline_with_probes_from_authority(
     item: &CanonicalRef,
     kinds: &KindRegistry,
@@ -256,7 +252,6 @@ fn run_effective_item_pipeline_with_probes_from_authority(
 // The tail is one resolution environment (registries + roots + trust);
 // both entry points thread it verbatim — a context struct would only
 // rename the same nine things.
-#[allow(clippy::too_many_arguments)]
 fn run_item_pipeline_inner(
     item: &CanonicalRef,
     resolution: &[ResolutionStepDecl],

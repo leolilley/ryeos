@@ -2920,7 +2920,6 @@ fn settle_pre_attachment_target_terminal(
     Ok(true)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn settle_pre_attachment_target_completion(
     state: &AppState,
     job: &ryeos_state::SyncJobRecord,
@@ -3470,7 +3469,6 @@ async fn complete_if_target_worker_attached(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn complete_if_target_worker_attached_under_profile_lock(
     state: &AppState,
     job_id: &str,
@@ -4972,7 +4970,6 @@ fn begin_target_handoff_attempt(
     Ok(attempt_id)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn settle_target_handoff_attempt(
     state: &AppState,
     job_id: &str,

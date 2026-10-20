@@ -13,7 +13,7 @@
 //! the durable row and exact execution request; later failures finalize that
 //! row, so accepted launch never returns a phantom or leaves `created` stuck.
 
-mod common;
+use ryeosd::test_support as common;
 
 use std::path::Path;
 use std::time::{Duration, Instant};

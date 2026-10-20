@@ -23,7 +23,7 @@
 #![cfg(all(unix, feature = "scheduling"))]
 #![recursion_limit = "256"]
 
-mod common;
+use ryeosd::test_support as common;
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};

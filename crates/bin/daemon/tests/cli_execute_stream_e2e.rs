@@ -9,7 +9,7 @@
 //!   - a failing run exits non-zero;
 //!   - `--json` prints only the buffered JSON result (no live markers).
 
-mod common;
+use ryeosd::test_support as common;
 
 use std::path::Path;
 

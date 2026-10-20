@@ -38,7 +38,6 @@ impl<'de> Deserialize<'de> for SecretToken {
 /// A validated, one-use proxy destination and short-lived bearer. The caller
 /// must still hold the original activation mutation fence; this value does
 /// not authorize a retry after an uncertain upload or run.
-#[allow(dead_code)]
 pub(crate) struct BoundConnectToken {
     pub(crate) execution_id: String,
     pub(crate) expires_at_ms: i64,
@@ -58,7 +57,6 @@ pub(crate) enum ProxyOperation<'a> {
 /// mint can itself be contact-ambiguous, so this only constructs one request;
 /// callers must retain their original durable activation claim and never
 /// mint again during reconciliation.
-#[allow(dead_code)]
 pub(crate) fn connect_token_url(
     occurrence_id: &str,
     owner_id: &str,
@@ -103,7 +101,6 @@ pub(crate) fn connect_token_url(
     Ok(url)
 }
 
-#[allow(dead_code)]
 pub(crate) fn bind_connect_response(
     response_bytes: &Zeroizing<Vec<u8>>,
     occurrence_id: &str,

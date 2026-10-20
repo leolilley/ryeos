@@ -14,7 +14,7 @@
 //! behavioral loop is validated by the post-deploy smoke test (it needs a live
 //! provider + a running-window, which isn't deterministically reproducible here).
 
-mod test_state;
+use ryeos_api::test_support as test_state;
 
 use ryeos_app::event_store_service::EventReplayParams;
 use ryeos_app::live_input_queue::EnqueueOutcome;

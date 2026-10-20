@@ -176,11 +176,10 @@ fn typed_value_is_capsule(value: &Value) -> bool {
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawPutEnvelope {
-    #[allow(dead_code)]
-    project_path: String,
-    #[allow(dead_code)]
-    #[serde(default)]
-    staging_id: Option<String>,
+    #[serde(rename = "project_path")]
+    _project_path: String,
+    #[serde(default, rename = "staging_id")]
+    _staging_id: Option<String>,
     #[serde(default)]
     blobs: BoundedRawEntries,
     #[serde(default)]

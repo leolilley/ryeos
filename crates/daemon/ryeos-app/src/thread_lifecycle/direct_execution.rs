@@ -809,7 +809,6 @@ impl PreparedItemPlan {
     /// Guard-aware form for callers that already hold one CAS mutation guard
     /// across a larger admission proof. This preserves the same realization
     /// and executable-member checks without recursively acquiring authority.
-    #[allow(clippy::too_many_arguments)]
     pub fn bind_realization_command_guarded(
         &mut self,
         authority: &ryeos_state::PinnedStateAuthority,
@@ -1071,7 +1070,6 @@ impl PreparedItemPlan {
     /// runnable plan or executable authority. It shares the exact member proof
     /// and canonical logical-path/artifact assembly with execution, but local
     /// spawn prerequisites do not apply to consumption of retained testimony.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn into_current_artifact_identity_guarded(
         mut self,
         authority: &ryeos_state::PinnedStateAuthority,
@@ -2937,7 +2935,6 @@ pub fn with_prepared_external_qualification_local_worker_plan<T>(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 fn prepare_item_plan_with_logical_context(
     engine: &Engine,
     resolved: &ResolvedExecutionRequest,

@@ -398,7 +398,6 @@ pub fn load_launch_config_snapshots_with_proof(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn load_launch_config_snapshots_with_proof_under_project_authority(
     declarations: &BTreeMap<String, LaunchConfigInputDecl>,
     roots: &ResolutionRoots,
@@ -422,7 +421,6 @@ pub fn load_launch_config_snapshots_with_proof_under_project_authority(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn load_launch_config_snapshots_with_proof_from_authority(
     declarations: &BTreeMap<String, LaunchConfigInputDecl>,
     roots: &ResolutionRoots,

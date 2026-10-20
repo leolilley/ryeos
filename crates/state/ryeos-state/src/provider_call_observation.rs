@@ -148,7 +148,6 @@ impl ProviderCallObservationRecordedPayload {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn provider_call_observation_id(
     chain_root_id: &str,
     thread_id: &str,

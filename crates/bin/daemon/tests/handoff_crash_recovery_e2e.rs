@@ -11,7 +11,7 @@
 #![cfg(all(unix, feature = "handoff-test-support"))]
 #![recursion_limit = "256"]
 
-mod common;
+use ryeosd::test_support as common;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -1277,30 +1277,35 @@ struct LiveSyncJobAttemptRetention {
     terminal_row_limit: Option<u64>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LiveSyncJobRecord {
     job_id: String,
     operation_type: String,
     operation: serde_json::Value,
-    peer: Option<String>,
+    #[serde(rename = "peer")]
+    _peer: Option<String>,
     state: String,
     phase: String,
     roots: Vec<String>,
     heads: Vec<String>,
-    uploaded_hashes: Vec<String>,
-    fetched_hashes: Vec<String>,
+    #[serde(rename = "uploaded_hashes")]
+    _uploaded_hashes: Vec<String>,
+    #[serde(rename = "fetched_hashes")]
+    _fetched_hashes: Vec<String>,
     attempt_count: u64,
     max_attempts: u64,
-    last_error: Option<String>,
+    #[serde(rename = "last_error")]
+    _last_error: Option<String>,
     result: Option<serde_json::Value>,
-    created_at: String,
-    updated_at: String,
-    finished_at: Option<String>,
+    #[serde(rename = "created_at")]
+    _created_at: String,
+    #[serde(rename = "updated_at")]
+    _updated_at: String,
+    #[serde(rename = "finished_at")]
+    _finished_at: Option<String>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LiveSyncJobAttemptRecord {
@@ -1310,9 +1315,12 @@ struct LiveSyncJobAttemptRecord {
     worker_id: Option<String>,
     state: String,
     phase: String,
-    started_at: String,
-    updated_at: String,
-    finished_at: Option<String>,
+    #[serde(rename = "started_at")]
+    _started_at: String,
+    #[serde(rename = "updated_at")]
+    _updated_at: String,
+    #[serde(rename = "finished_at")]
+    _finished_at: Option<String>,
     error: Option<String>,
     result: Option<serde_json::Value>,
 }

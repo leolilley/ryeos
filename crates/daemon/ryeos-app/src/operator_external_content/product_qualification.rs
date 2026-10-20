@@ -194,7 +194,6 @@ pub struct QualificationPinnedAdmissionContext<'a> {
 /// has admitted the daemon-derived selected Root product under an exact pinned
 /// read-only snapshot. D1 comes from root admission; D2 is rebuilt through the
 /// same current-verifier finalization path used by qualification proof.
-#[allow(clippy::too_many_arguments)]
 pub fn finalize_pinned_qualification_launch(
     state: &AppState,
     context: &HandlerContext,
@@ -3928,7 +3927,6 @@ fn current_verifier_binding_subject_authority<'a>(
 /// excluded exclusive CAS owners, never ordinary publishers, and anything an
 /// exclusive owner removes or changes in the gap is refused by the caller's
 /// guarded re-read rather than accepted from this function's earlier view.
-#[allow(clippy::too_many_arguments)]
 fn resolve_current_bundle_verifier_identity_against_admitted(
     state: &AppState,
     authority: &ryeos_state::PinnedStateAuthority,
@@ -3953,7 +3951,6 @@ fn resolve_current_bundle_verifier_identity_against_admitted(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 fn resolve_current_bundle_verifier_identity_in_generation(
     state: &AppState,
     authority: &ryeos_state::PinnedStateAuthority,

@@ -622,7 +622,6 @@ fn validate_authorities(inputs: &ExternalCandidateSupervisorInputs) -> Result<()
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn verify_source_input(
     mount: &lillux::InheritedDescriptorAuthority,
     projection: &ryeos_external_execution_contract::GuestMountInput,

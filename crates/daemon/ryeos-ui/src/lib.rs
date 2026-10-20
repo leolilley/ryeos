@@ -5,10 +5,6 @@
 
 #[cfg(test)]
 extern crate self as ryeos_ui;
-#[cfg(test)]
-#[path = "../tests/test_state.rs"]
-mod test_state;
-
 pub mod assets;
 pub mod browser_session;
 pub mod compiled_binding;
@@ -17,6 +13,8 @@ pub mod invokers;
 pub mod seat_auth;
 pub mod session_bus;
 pub mod state;
+#[cfg(feature = "test-support")]
+pub mod test_support;
 mod thread_authorization;
 pub mod transfer_store;
 

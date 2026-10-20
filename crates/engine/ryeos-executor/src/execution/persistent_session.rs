@@ -1463,7 +1463,6 @@ type RealizationsByDependency =
 /// Resolve invocation-time witnesses before any manifest preview, target
 /// aggregation, or admission. A preparer only selects signed dependency slots;
 /// it cannot manufacture the configured operator's product authority.
-#[allow(clippy::too_many_arguments)]
 fn prepare_product_selections(
     state: &AppState,
     engine: &ryeos_engine::engine::Engine,

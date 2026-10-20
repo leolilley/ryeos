@@ -2516,7 +2516,6 @@ fn known_hook_dispatch_integrity_response(message: String, action_digest: &str) 
     .expect("hook dispatch integrity response is infallibly serializable")
 }
 
-#[allow(clippy::too_many_arguments)]
 fn hook_dispatch_ledger_seed(
     identity: &ryeos_runtime::callback::HookDispatchIdentity,
     action: &ryeos_runtime::callback::ActionPayload,
@@ -2616,7 +2615,6 @@ fn runtime_action_request_product_selections(
     Ok(serde_json::to_value(&action.product_selections)?)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn runtime_action_request_hash(
     action_digest: &str,
     action: &ryeos_runtime::callback::ActionPayload,

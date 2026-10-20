@@ -45,7 +45,6 @@ pub struct RemoteFollowReservationEvidence {
 }
 
 impl RemoteFollowReservationEvidence {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         owner_principal: String,
         parent_site_id: String,
@@ -196,7 +195,6 @@ pub struct RemoteFollowTerminalEvidence {
 }
 
 impl RemoteFollowTerminalEvidence {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         reservation_attestation_hash: String,
         child_chain_root_id: String,
@@ -351,7 +349,6 @@ pub struct RemoteFollowDeliveryJobOperation {
 }
 
 impl RemoteFollowDeliveryJobOperation {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         role: RemoteFollowDeliveryJobRole,
         operation_id: String,

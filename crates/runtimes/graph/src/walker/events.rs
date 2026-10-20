@@ -142,7 +142,6 @@ impl Walker {
         self.record_callback_warning("graph_follow_suspended", r);
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(super) async fn emit_graph_node_retry(
         &self,
         graph_run_id: &str,

@@ -1,6 +1,6 @@
 // Tests for principal-aware RyeOS UI user-space storage.
 
-mod test_state;
+use ryeos_ui::test_support as test_state;
 use test_state::{build_test_state, launch_context};
 
 use ryeos_app::handler_context::HandlerContext;

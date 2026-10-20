@@ -7716,7 +7716,6 @@ impl StateStore {
             .dedicated_session_approval(placement_thread_id, approval_id)
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn dedicated_approval_has_exact_state(
         &self,
         placement_thread_id: &str,
@@ -7814,7 +7813,6 @@ impl StateStore {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn reserve_dedicated_session_approval_decision(
         &self,
         placement_thread_id: &str,
@@ -10060,7 +10058,6 @@ impl StateStore {
     /// so rejected bytes cannot race GC or become retry/recovery authority.
     /// This boundary is deliberately schema-blind: the caller supplies the
     /// proof over the pinned CAS view.
-    #[allow(clippy::too_many_arguments)]
     pub fn stage_verified_sync_payload_for_existing_job<F>(
         &self,
         payload: &ryeos_state::sync::ExportPayload,
@@ -12167,7 +12164,6 @@ impl StateStore {
         validate_external_direct_result(update, &output)
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn finalize_thread_with_rows(
         &self,
         g: &Inner,
@@ -12825,7 +12821,6 @@ impl StateStore {
 
     // Source lineage, resume proof, launch metadata, and initial durable events
     // stay explicit because each is validated under the same write permit.
-    #[allow(clippy::too_many_arguments)]
     pub fn create_machine_continuation_with_events(
         &self,
         successor: &NewThreadRecord,
@@ -13004,7 +12999,6 @@ impl StateStore {
     /// first), then settle the source `continued`. A race or seed failure aborts
     /// with the source still running — never `continued` behind an unlaunchable
     /// successor.
-    #[allow(clippy::too_many_arguments)]
     fn create_running_continuation_successor(
         &self,
         successor: &NewThreadRecord,
@@ -13934,7 +13928,6 @@ impl StateStore {
     /// `continued` (same as `create_continuation`).
     // Idempotency identity, source lineage, launch metadata, and initial events
     // remain explicit at this atomic admission boundary.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn create_or_get_continuation_admitted(
         &self,
         successor: &NewThreadRecord,
@@ -23860,7 +23853,6 @@ impl StateStore {
     /// RuntimeActionIntent transaction. `execution_workspace` remains the
     /// materialization journal; it must not be repurposed as a transient lease
     /// state machine, and no parallel workspace-lock table may be introduced.
-    #[allow(clippy::too_many_arguments)]
     pub fn reserve_runtime_action_intent_with_workspace(
         &self,
         operation_id: &str,
@@ -24351,7 +24343,6 @@ impl StateStore {
 
     // Slot identity, item/spec identity, child lineage, and sealed authority
     // stay explicit because each is independently verified under the store lock.
-    #[allow(clippy::too_many_arguments)]
     pub fn set_follow_child(
         &self,
         follow_key: &str,

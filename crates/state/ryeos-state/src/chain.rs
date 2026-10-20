@@ -1572,7 +1572,6 @@ pub(crate) fn read_authoritative_root_birth_with_trust(
 /// returns. The pending Set is durable before the signed head becomes visible.
 // The authority-bearing lock, expected head, signer, and trust store stay
 // explicit so publication provenance cannot be hidden in an opaque argument bag.
-#[allow(clippy::too_many_arguments)]
 fn publish_chain_head(
     cas_root: &Path,
     refs_root: &Path,
@@ -1694,7 +1693,6 @@ pub(crate) fn create_chain_with_trust(
 
 // Mutation authority and trust inputs deliberately remain explicit at this
 // boundary; callers must prove each prerequisite independently.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn create_chain_with_trust_under_lock(
     cas_root: &Path,
     refs_root: &Path,
@@ -1816,7 +1814,6 @@ pub(crate) fn create_chain_with_trust_under_lock(
 /// authoritative chain write.
 // Mutation authority and trust inputs deliberately remain explicit at this
 // boundary; callers must prove each prerequisite independently.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn create_chain_with_events_and_trust_under_lock(
     cas_root: &Path,
     refs_root: &Path,
@@ -2446,7 +2443,6 @@ pub(crate) fn add_thread_to_chain_with_trust(
 
 // Mutation authority and trust inputs deliberately remain explicit at this
 // boundary; callers must prove each prerequisite independently.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn add_thread_to_chain_with_trust_under_lock(
     cas_root: &Path,
     refs_root: &Path,
@@ -2595,7 +2591,6 @@ pub(crate) fn add_thread_to_chain_with_trust_under_lock(
 #[cfg(test)]
 // The test adapter mirrors the authority-bearing production boundary, keeping
 // CAS, refs, signer, trust, and cache inputs independently visible.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn add_thread_to_chain_with_events(
     cas_root: &Path,
     refs_root: &Path,
@@ -2621,7 +2616,6 @@ pub(crate) fn add_thread_to_chain_with_events(
 #[cfg(test)]
 // Preserve the explicit authority/trust seam in tests rather than hiding
 // security-relevant inputs inside a convenience fixture.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn add_thread_to_chain_with_events_and_trust(
     cas_root: &Path,
     refs_root: &Path,
@@ -2658,7 +2652,6 @@ pub(crate) fn add_thread_to_chain_with_events_and_trust(
 /// same way a root birth publishes its event successor.
 // Mutation authority and trust inputs deliberately remain explicit at this
 // boundary; callers must prove each prerequisite independently.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn add_thread_to_chain_with_events_and_trust_under_lock(
     cas_root: &Path,
     refs_root: &Path,
@@ -2927,7 +2920,6 @@ pub(crate) fn add_thread_to_chain_with_events_and_trust_under_lock(
 /// Add one thread and append events to an existing thread in one signed head
 /// transition. This is the generic cross-thread primitive for continuation
 /// creation: neither thread's relation event can become authoritative alone.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn add_thread_to_chain_with_events_and_append_with_trust_under_lock(
     cas_root: &Path,
     refs_root: &Path,

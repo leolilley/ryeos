@@ -439,7 +439,6 @@ impl SealedResolvedItem {
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 // This exact durable wire shape keeps delegated-principal fields flattened.
 // Adding indirection would change the sealed request representation.
-#[allow(clippy::large_enum_variant)]
 enum SealedPrincipal {
     Local {
         fingerprint: String,

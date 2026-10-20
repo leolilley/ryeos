@@ -661,7 +661,6 @@ fn publish_interrupt(
     Ok(true)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn run_connector_owner(
     state: AppState,
     placement: String,
@@ -733,7 +732,6 @@ fn accept_connector(
     Ok(None)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn run_authenticated_connector(
     state: &AppState,
     placement: &str,

@@ -261,7 +261,6 @@ struct RetryEventCtx {
 /// emits a braid-visible `graph_node_retry` event, then sleeps the backoff.
 // Retry plumbing: the policy, backoff, and per-item event context for one
 // dispatch attempt, threaded verbatim from the foreach loop.
-#[allow(clippy::too_many_arguments)]
 async fn dispatch_item_with_retry(
     client: &CallbackClient,
     action: &Value,

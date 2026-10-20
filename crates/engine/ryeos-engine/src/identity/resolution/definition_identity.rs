@@ -898,7 +898,6 @@ impl DefinitionDiffBuilder {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn diff_json(
         &mut self,
         category: DefinitionChangeCategory,

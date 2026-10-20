@@ -12,7 +12,6 @@ use ryeos_state::objects::{
 };
 use std::collections::BTreeMap;
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_output_delta(
     authority: &ryeos_state::PinnedStateAuthority,
     guard: &ryeos_state::CasMutationGuard,

@@ -821,7 +821,7 @@ mod tests {
 
     #[test]
     fn frame_bounds_come_from_the_signed_policy_not_a_literal() {
-        let (_directory, _owner, state) = crate::test_state::build_test_state();
+        let (_directory, _owner, state) = crate::test_support::build_test_state();
         let policy = state
             .node_policy
             .require::<ryeos_node_runtime::node_policy::sections::ui_browser_sessions::UiBrowserSessionPolicy>()

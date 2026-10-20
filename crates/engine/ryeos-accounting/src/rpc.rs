@@ -625,7 +625,6 @@ pub struct ProviderAttemptBudgetRecord {
 /// against the reservation row. Both sides hash the same canonical value, so
 /// equality with the stored `request_hash` binds every component — including
 /// the exact request body digest — to the reservation the ledger billed.
-#[allow(clippy::too_many_arguments)]
 pub fn provider_attempt_request_hash(
     thread_id: &str,
     turn: u32,

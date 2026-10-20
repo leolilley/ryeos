@@ -16,7 +16,6 @@ use crate::error::CliDispatchError;
 ///
 /// Thin wrapper around the shared binder, returning `Result` to match
 /// the fallible binding seam used at the call sites.
-#[allow(dead_code)]
 pub fn bind_tail(tail: &[String]) -> Result<Value, CliDispatchError> {
     Ok(ryeos_runtime::bind_argv(tail))
 }

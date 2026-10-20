@@ -1095,10 +1095,6 @@ pub(crate) async fn publish_qualification(
 }
 
 #[cfg(test)]
-#[path = "../../tests/test_state.rs"]
-mod release_test_state;
-
-#[cfg(test)]
 mod tests {
     use super::{
         normalize_retained_dispatch_terminal, release_stage_launch_id,
@@ -1117,7 +1113,7 @@ mod tests {
         use ryeos_state::external_content::products::transfer::ProductWitnessSource;
         use std::{sync::Arc, time::Duration};
 
-        let (directory, _state_owner, state) = super::release_test_state::build_test_state();
+        let (directory, _state_owner, state) = crate::test_support::build_test_state();
         let state = Arc::new(state);
         let operator = NodeIdentity::load(&state.config.operator_signing_key_path).unwrap();
         let scopes =

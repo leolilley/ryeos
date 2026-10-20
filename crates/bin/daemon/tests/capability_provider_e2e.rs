@@ -11,7 +11,7 @@
 //! admission records which proof met each entry, and the refusals are the
 //! exact texts the node writes.
 
-mod common;
+use ryeosd::test_support as common;
 
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};

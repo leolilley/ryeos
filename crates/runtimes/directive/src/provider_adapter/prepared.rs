@@ -48,9 +48,7 @@ pub struct PreparedProviderRequest {
     /// Behavior-bearing public headers for provider effect identity. Values
     /// are committed by digest; credential-bearing headers remain a separate
     /// name-only set so secret values can never enter durable evidence.
-    #[allow(dead_code)] // consumed by durable provider-effect publication
     pub public_header_coordinates: Vec<ryeos_provider_contract::PublicHeaderCoordinate>,
-    #[allow(dead_code)] // consumed by durable provider-effect publication
     pub credential_header_names: Vec<String>,
     /// Exact serialized body bytes; transport sends these bytes verbatim.
     pub body_bytes: Vec<u8>,

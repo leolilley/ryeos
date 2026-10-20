@@ -555,7 +555,6 @@ pub fn collect_owned_consumer_protocol(
 /// error: callers must settle/quarantine, never relaunch to recreate pipes.
 /// This join checks complete tail semantics but does not authenticate the owner
 /// launch or establish provider death, and emits no qualification claim.
-#[allow(clippy::too_many_arguments)]
 pub fn collect_outer_settlement<T: AppServerTransport>(
     app: &mut AppServerProtocol<T>,
     imported: &ImportedConsumerInputs,

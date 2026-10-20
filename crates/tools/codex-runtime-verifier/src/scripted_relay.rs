@@ -29,7 +29,7 @@ pub struct RunningScriptedRelay {
     finish: Arc<AtomicBool>,
     provider_permitted: Arc<AtomicBool>,
     /// Test-visible synchronization witness; never authorizes contact.
-    #[allow(dead_code)]
+    #[cfg(test)]
     request_buffered: Arc<AtomicBool>,
     task: Option<HostTask<Result<usize>>>,
 }
@@ -144,9 +144,11 @@ pub fn start_from_transferred(
     let local_interrupt = LocalConnectInterrupt::default();
     let finish = Arc::new(AtomicBool::new(false));
     let provider_permitted = Arc::new(AtomicBool::new(false));
+    #[cfg(test)]
     let request_buffered = Arc::new(AtomicBool::new(false));
     let task_finish = Arc::clone(&finish);
     let task_provider_permitted = Arc::clone(&provider_permitted);
+    #[cfg(test)]
     let task_request_buffered = Arc::clone(&request_buffered);
     let task_local_interrupt = local_interrupt.clone();
     let task = spawn_host_task("verifier-scripted-relay", move || {
@@ -157,6 +159,7 @@ pub fn start_from_transferred(
             deadline,
             task_finish,
             task_provider_permitted,
+            #[cfg(test)]
             task_request_buffered,
             task_local_interrupt,
         )
@@ -166,6 +169,7 @@ pub fn start_from_transferred(
         local_interrupt,
         finish,
         provider_permitted,
+        #[cfg(test)]
         request_buffered,
         task: Some(task),
     })
@@ -178,7 +182,7 @@ fn serve(
     deadline: MonotonicDeadline,
     finish: Arc<AtomicBool>,
     provider_permitted: Arc<AtomicBool>,
-    request_buffered: Arc<AtomicBool>,
+    #[cfg(test)] request_buffered: Arc<AtomicBool>,
     local_interrupt: LocalConnectInterrupt,
 ) -> Result<usize> {
     let mut connections = Vec::with_capacity(REQUEST_COUNT);
@@ -194,6 +198,7 @@ fn serve(
             lillux::time::sleep(Duration::from_millis(1));
         };
         let request = read_request(&mut client, address_from_listener(&listener)?)?;
+        #[cfg(test)]
         request_buffered.store(true, Ordering::Release);
         while !provider_permitted.load(Ordering::Acquire) {
             ensure!(

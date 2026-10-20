@@ -53,7 +53,6 @@ use ryeos_runtime::events::RuntimeEventType;
 // Execution plumbing: each argument is a distinct leg of the thread's
 // auth/provenance context, threaded verbatim — a struct would rename,
 // not simplify. Restructure with a compiler in the loop, not here.
-#[allow(clippy::too_many_arguments)]
 pub async fn spawn_detached_child(
     state: &AppState,
     thread_auth: &ThreadAuthState,

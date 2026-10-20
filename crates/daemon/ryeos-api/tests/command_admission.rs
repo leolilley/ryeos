@@ -1,4 +1,4 @@
-mod test_state;
+use ryeos_api::test_support as test_state;
 
 use ryeos_api::handlers::commands_dispatch::{self, Request};
 use ryeos_app::handler_context::HandlerContext;

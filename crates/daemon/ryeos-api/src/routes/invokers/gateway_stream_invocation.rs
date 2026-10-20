@@ -1219,12 +1219,13 @@ mod tests {
     #[tokio::test]
     async fn launch_task_panic_before_handoff_is_a_launch_task_error() {
         let (sender, ready) = tokio::sync::oneshot::channel();
-        let mut launch_handle = tokio::spawn(async move {
+        async fn panic_before_handoff<T: Send + 'static>(
+            sender: tokio::sync::oneshot::Sender<T>,
+        ) -> Result<(), crate::routes::launch::LaunchSpawnError> {
             let _sender = sender;
             panic!("synthetic launch panic");
-            #[allow(unreachable_code)]
-            Ok::<(), crate::routes::launch::LaunchSpawnError>(())
-        });
+        }
+        let mut launch_handle = tokio::spawn(panic_before_handoff(sender));
 
         let result = await_launch_handoff(&mut launch_handle, ready).await;
         let Err(envelope) = result else {

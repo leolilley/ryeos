@@ -1574,7 +1574,6 @@ impl Walker {
     // Execution plumbing: each argument is a distinct leg of the thread's
     // auth/provenance context, threaded verbatim — a struct would rename,
     // not simplify. Restructure with a compiler in the loop, not here.
-    #[allow(clippy::too_many_arguments)]
     async fn write_checkpoint_or_error(
         &self,
         graph_run_id: &str,

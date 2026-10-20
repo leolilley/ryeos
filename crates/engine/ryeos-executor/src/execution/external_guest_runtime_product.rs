@@ -149,7 +149,6 @@ impl StagedGuestOwnerRuntimeMaterialization {
 /// Stage a retained materialization without consulting the live Bundle path
 /// for bytes. Current grant/binding/generation checks occur at head lookup;
 /// snapshot production must repeat admission before provider contact.
-#[allow(clippy::too_many_arguments)]
 pub fn stage_current_guest_owner_runtime_materialization(
     state: &ryeos_app::state::AppState,
     context: &ryeos_app::handler_context::HandlerContext,
@@ -201,7 +200,6 @@ pub fn stage_current_guest_owner_runtime_materialization(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 fn produce_retained_guest_owner_tree(
     cas: &lillux::CasStore,
     owner_hash: &str,

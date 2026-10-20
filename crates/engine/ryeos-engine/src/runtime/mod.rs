@@ -590,7 +590,6 @@ impl std::fmt::Debug for RuntimeHandlerRegistry {
 /// does NOT route through the handler registry (e.g. `version`,
 /// `executor_id`). Any other key that is not registered is a hard
 /// `EngineError::UnknownRuntimeBlock`.
-#[allow(clippy::too_many_arguments)]
 pub fn compile_with_handlers(
     chain: &[ChainIntermediate],
     root_source_path: &Path,
@@ -639,7 +638,6 @@ pub fn compile_with_handlers(
 /// Separate process-path templating from authority to inspect project files.
 /// A logical execution root may populate argv/env/cwd, but it is never made
 /// available to interpreter discovery or source/config lookup handlers.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn compile_with_handlers_and_execution_root(
     chain: &[ChainIntermediate],
     root_source_path: &Path,

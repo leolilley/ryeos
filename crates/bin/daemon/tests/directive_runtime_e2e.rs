@@ -12,7 +12,7 @@
 //! P3b.3 — root semantics pin re-asserted vs real spawn (this file).
 //! P3b.4 / P3b.5 — tool-call round-trip + cap-denial (follow-on).
 
-mod common;
+use ryeosd::test_support as common;
 
 use std::path::Path;
 

@@ -44,8 +44,6 @@
 //! `fast_fixture::direct_host_isolation`). Per-scope containment is
 //! qualified only against an administrator-prepared host-backed node.
 
-#![allow(dead_code)]
-
 #[cfg(all(unix, feature = "crash-qualification-test-support"))]
 pub mod dedicated_command_cut;
 pub mod fast_fixture;
@@ -248,10 +246,16 @@ fn daemon_startup_deadline() -> anyhow::Result<Instant> {
     Ok(Instant::now() + timeout)
 }
 
-/// Path to the built `ryeosd` binary (set by Cargo for integration tests
-/// in this crate).
+/// Path to the built `ryeosd` binary. Cargo builds it beside the integration
+/// test executables: the test executable lives in `<profile>/deps/` and the
+/// binary in `<profile>/`.
 pub fn ryeosd_binary() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_ryeosd"))
+    let test_executable = std::env::current_exe().expect("resolve the running test executable");
+    let profile_directory = test_executable
+        .parent()
+        .and_then(Path::parent)
+        .expect("test executable sits in <profile>/deps");
+    profile_directory.join(format!("ryeosd{}", std::env::consts::EXE_SUFFIX))
 }
 
 fn ryeosd_command() -> Command {

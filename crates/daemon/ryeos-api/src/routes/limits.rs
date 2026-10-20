@@ -19,7 +19,6 @@ impl RouteLimiter {
         }
     }
 
-    #[allow(clippy::result_large_err)] // Err type is axum::response::Response (third-party)
     pub fn check_content_length(
         &self,
         headers: &axum::http::HeaderMap,
