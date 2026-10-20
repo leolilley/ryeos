@@ -17,6 +17,179 @@ use ryeos_app::state::AppState;
 use ryeos_app::test_support::{NativeTestState, TestStateStore};
 use ryeos_engine::kind_registry::KindRegistry;
 
+/// Authored test fixture consumed through the real Config resolver/compiler.
+/// Test code signs this temporary project input with the established publisher;
+/// it does not fabricate an effective Config identity or an admitted binding.
+#[allow(dead_code)]
+pub async fn live_presentation(
+    state: &AppState,
+) -> (
+    String,
+    ryeos_app::handler_context::HandlerContext,
+    ryeos_client_base::ui::UiPresentationProducer,
+    ryeos_ui::browser_session::BindingAttachmentCoordinate,
+) {
+    live_presentation_seeded(state, None).await
+}
+
+async fn live_presentation_seeded(
+    state: &AppState,
+    initial_surface: Option<&str>,
+) -> (
+    String,
+    ryeos_app::handler_context::HandlerContext,
+    ryeos_client_base::ui::UiPresentationProducer,
+    ryeos_ui::browser_session::BindingAttachmentCoordinate,
+) {
+    let mut body = String::from(
+        "category: test\nversion: '1'\nshared_presentation:\n  schema: 1\n  title: Test presentation\n  launcher: launch\n  dialogs:\n    - id: launch\n      title: Launch\n      view: 'view:ryeos/ui/launcher'\n  capabilities:\n    sources: []\n    affordances: []\n",
+    );
+    if let Some(surface) = initial_surface {
+        // JSON scalars are valid YAML scalars; no unescaped authored ref is
+        // interpolated into this signed temporary Config fixture.
+        body.push_str(&format!("  initial_surfaces:\n    - id: fixture\n      title: Fixture Surface\n      surface: {}\n", serde_json::to_string(surface).unwrap()));
+    }
+    let key = lillux::crypto::load_signing_key(
+        &ryeos_engine::test_support::workspace_root().join(".dev-keys/PUBLISHER_DEV.pem"),
+    )
+    .expect("established development publisher key");
+    let config_dir = state.config.app_root.join(".ai/config/test");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("presentation.yaml"),
+        lillux::signature::sign_content(&body, &key, "#", None),
+    )
+    .unwrap();
+    let principal = format!("fp:{}", "ab".repeat(32));
+    let project_root = state.config.app_root.canonicalize().unwrap();
+    // This verified non-operator principal selects only its private, explicitly
+    // registered temporary project; no test touches the user's local registry.
+    let resolver =
+        ryeos_app::principal::HostedPrincipalResolver::for_app_root(&state.config.app_root);
+    {
+        let store = ryeos_app::principal::PrincipalStore::locked_with(&resolver, &principal)
+            .await
+            .unwrap();
+        store
+            .write_yaml(
+                &store.paths().projects_config(),
+                &ryeos_ui::handlers::ui_projects::ProjectsFile {
+                    version: 1,
+                    projects: vec![ryeos_ui::handlers::ui_projects::ProjectEntry {
+                        local_id: "prj_fixture".into(),
+                        name: "Fixture".into(),
+                        root: project_root.display().to_string(),
+                        added_at: lillux::time::iso8601_now(),
+                        tags: vec![],
+                    }],
+                },
+            )
+            .unwrap();
+    }
+    let minted = ryeos_ui::handlers::ui_launch_mint::handle(
+        ryeos_ui::handlers::ui_launch_mint::Request {
+            ui_binding_contract_revision: ryeos_ui::UI_BINDING_CONTRACT_REVISION.into(),
+            surface_ref: "config:test/presentation".into(),
+            project_path: Some(project_root.display().to_string()),
+            user_principal_id: Some(principal.clone()),
+        },
+        ryeos_app::handler_context::HandlerContext::new(principal, vec!["*".into()], true),
+        Arc::new(state.clone()),
+    )
+    .await
+    .expect("compile real signed shared Config fixture");
+    let id = minted["session_id"].as_str().unwrap().to_owned();
+    let ui = ryeos_ui::state::get_ui_state(state).unwrap();
+    assert_eq!(
+        ui.browser_sessions
+            .consume_launch_token(minted["token"].as_str().unwrap()),
+        Some(id.clone())
+    );
+    let session = ui.browser_sessions.get_session(&id).unwrap();
+    let root = session.attachments[&session.root_attachment_id].coordinate();
+    let ctx = ryeos_app::handler_context::HandlerContext::new(
+        format!("session:{id}"),
+        session.granted_caps.clone(),
+        false,
+    );
+    let mut request = serde_json::to_value(&root).unwrap();
+    request["action"] = serde_json::json!("prepare");
+    request["creation_request_id"] = serde_json::json!(uuid::Uuid::new_v4().to_string());
+    let prepared = (ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR.handler)(
+        request,
+        ctx.clone(),
+        Arc::new(state.clone()),
+    )
+    .await
+    .expect("prepare independently owned presentation");
+    let observed = (ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR.handler)(
+        serde_json::json!({
+            "action":"observe", "presentation_id":prepared["presentation_id"],
+            "thread_id":prepared["thread_id"], "chain_root_id":prepared["chain_root_id"]
+        }),
+        ctx.clone(),
+        Arc::new(state.clone()),
+    )
+    .await
+    .expect("observe exact initialization CAS predecessor");
+    let observed: ryeos_client_base::ui::UiPresentationProducerObservation =
+        serde_json::from_value(observed).unwrap();
+    let mut claim = ryeos_client_base::ui::UiSeatControlRequest::Claim {
+        schema: 2,
+        operation_id: String::new(),
+        presentation_id: observed.presentation_id,
+        thread_id: observed.thread_id,
+        chain_root_id: observed.chain_root_id,
+        predecessor: observed.control_predecessor,
+        intent_nonce: uuid::Uuid::new_v4().to_string(),
+        claim: ryeos_client_base::ui::UiSeatProducerClaim::Fresh,
+    };
+    claim
+        .assign_identity()
+        .expect("derive exact control intent");
+    let claimed = (ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR.handler)(
+        serde_json::to_value(claim).unwrap(),
+        ctx.clone(),
+        Arc::new(state.clone()),
+    )
+    .await
+    .expect("claim exact presentation producer");
+    let producer = ryeos_client_base::ui::UiPresentationProducer {
+        presentation_id: claimed["presentation_id"].as_str().unwrap().into(),
+        thread_id: claimed["thread_id"].as_str().unwrap().into(),
+        producer_incarnation: claimed["producer_incarnation"].as_str().unwrap().into(),
+    };
+    (id, ctx, producer, root)
+}
+
+#[allow(dead_code)]
+pub async fn live_presentation_with_surface(
+    state: &AppState,
+    surface_ref: &str,
+) -> (
+    String,
+    ryeos_app::handler_context::HandlerContext,
+    ryeos_client_base::ui::UiPresentationProducer,
+    ryeos_ui::browser_session::BindingAttachmentCoordinate,
+) {
+    let (id, ctx, producer, _) = live_presentation_seeded(state, Some(surface_ref)).await;
+    let session = ryeos_ui::state::get_ui_state(state)
+        .unwrap()
+        .browser_sessions
+        .get_session(&id)
+        .unwrap();
+    let membership = &session.presentations[&producer.presentation_id];
+    assert_eq!(membership.surfaces.len(), 1, "one authored initial Surface");
+    let coordinate = membership
+        .surfaces
+        .values()
+        .next()
+        .unwrap()
+        .coordinate
+        .clone();
+    (id, ctx, producer, coordinate)
+}
+
 #[allow(dead_code)]
 pub fn launch_context(
     surface_ref: &str,

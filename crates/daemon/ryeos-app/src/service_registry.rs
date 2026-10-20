@@ -240,8 +240,9 @@ pub enum UiDispatchMode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UiResultEffect {
-    AdmitBindingAttachment,
+    SurfaceOpening,
     ResumeParticularViewSet,
+    ResumeParticularSurface,
 }
 
 /// Renderer effect a signed service is allowed to return through compiled UI
@@ -252,14 +253,17 @@ pub fn extract_ui_result_effect(
 ) -> Result<Option<UiResultEffect>> {
     match metadata_extra.get("ui_result_effect") {
         None => Ok(None),
-        Some(Value::String(value)) if value == "admit_binding_attachment" => {
-            Ok(Some(UiResultEffect::AdmitBindingAttachment))
+        Some(Value::String(value)) if value == "surface_opening" => {
+            Ok(Some(UiResultEffect::SurfaceOpening))
         }
         Some(Value::String(value)) if value == "resume_particular_view_set" => {
             Ok(Some(UiResultEffect::ResumeParticularViewSet))
         }
+        Some(Value::String(value)) if value == "resume_particular_surface" => {
+            Ok(Some(UiResultEffect::ResumeParticularSurface))
+        }
         Some(Value::String(other)) => anyhow::bail!(
-            "service YAML field 'ui_result_effect' has invalid value '{other}'; expected admit_binding_attachment or resume_particular_view_set"
+            "service YAML field 'ui_result_effect' has invalid value '{other}'; expected surface_opening, resume_particular_view_set or resume_particular_surface"
         ),
         Some(_) => anyhow::bail!("service YAML field 'ui_result_effect' must be a string"),
     }
@@ -334,5 +338,43 @@ mod tests {
         let metadata = HashMap::from([("ui_dispatch".to_string(), serde_json::json!({}))]);
         let error = extract_ui_dispatch(&metadata).unwrap_err();
         assert!(error.to_string().contains("must be a string"));
+    }
+
+    #[test]
+    fn ui_result_effect_parses_the_three_declared_effects() {
+        for (value, expected) in [
+            ("surface_opening", UiResultEffect::SurfaceOpening),
+            (
+                "resume_particular_view_set",
+                UiResultEffect::ResumeParticularViewSet,
+            ),
+            (
+                "resume_particular_surface",
+                UiResultEffect::ResumeParticularSurface,
+            ),
+        ] {
+            let metadata =
+                HashMap::from([("ui_result_effect".to_string(), serde_json::json!(value))]);
+            assert_eq!(extract_ui_result_effect(&metadata).unwrap(), Some(expected));
+        }
+        assert_eq!(extract_ui_result_effect(&HashMap::new()).unwrap(), None);
+    }
+
+    #[test]
+    fn ui_result_effect_refuses_retired_and_literal_spellings() {
+        for value in ["admit_binding_attachment", "open_surface"] {
+            let metadata =
+                HashMap::from([("ui_result_effect".to_string(), serde_json::json!(value))]);
+            let error = extract_ui_result_effect(&metadata).unwrap_err().to_string();
+            assert!(error.contains("invalid value"), "{value}: {error}");
+            assert!(
+                error.contains("surface_opening")
+                    && error.contains("resume_particular_view_set")
+                    && error.contains("resume_particular_surface"),
+                "{error}"
+            );
+        }
+        let metadata = HashMap::from([("ui_result_effect".to_string(), serde_json::json!(1))]);
+        assert!(extract_ui_result_effect(&metadata).is_err());
     }
 }

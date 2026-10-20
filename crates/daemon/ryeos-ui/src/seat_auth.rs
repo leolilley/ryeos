@@ -190,7 +190,14 @@ tokio::task_local! {
     /// Daemon-retained authority for one compiled UI dispatch. This sideband
     /// is scoped by `ui.invocations.dispatch`; it is neither serialized into
     /// a request nor reconstructible from a browser cookie.
-    static COMPILED_UI_ATTACHMENT: std::sync::Arc<AdmittedBindingAttachment>;
+    static COMPILED_UI_DISPATCH: CompiledUiDispatchContext;
+}
+
+#[derive(Clone)]
+struct CompiledUiDispatchContext {
+    attachment: std::sync::Arc<AdmittedBindingAttachment>,
+    browser_session_id: Option<String>,
+    producer: Option<ryeos_client_base::ui::UiPresentationProducer>,
 }
 
 pub async fn with_compiled_ui_attachment<F>(
@@ -200,11 +207,111 @@ pub async fn with_compiled_ui_attachment<F>(
 where
     F: std::future::Future,
 {
-    COMPILED_UI_ATTACHMENT.scope(attachment, future).await
+    COMPILED_UI_DISPATCH
+        .scope(
+            CompiledUiDispatchContext {
+                attachment,
+                browser_session_id: None,
+                producer: None,
+            },
+            future,
+        )
+        .await
 }
 
 pub fn compiled_ui_attachment() -> Option<std::sync::Arc<AdmittedBindingAttachment>> {
-    COMPILED_UI_ATTACHMENT.try_with(Clone::clone).ok()
+    COMPILED_UI_DISPATCH
+        .try_with(|context| context.attachment.clone())
+        .ok()
+}
+
+/// Retain the authenticated transport association without replacing the
+/// durable principal used by verified execution. Only the dispatch owner can
+/// establish this scope after resolving the attachment in the browser session.
+pub(crate) async fn with_compiled_ui_session<F>(
+    session: &crate::browser_session::BrowserSession,
+    attachment: std::sync::Arc<AdmittedBindingAttachment>,
+    producer: Option<ryeos_client_base::ui::UiPresentationProducer>,
+    future: F,
+) -> F::Output
+where
+    F: std::future::Future,
+{
+    COMPILED_UI_DISPATCH
+        .scope(
+            CompiledUiDispatchContext {
+                attachment,
+                browser_session_id: Some(session.session_id.clone()),
+                producer,
+            },
+            future,
+        )
+        .await
+}
+
+pub(crate) fn require_compiled_ui_producer()
+-> Result<ryeos_client_base::ui::UiPresentationProducer, HandlerError> {
+    COMPILED_UI_DISPATCH
+        .try_with(|context| context.producer.clone())
+        .ok()
+        .flatten()
+        .ok_or_else(|| HandlerError::Forbidden("compiled presentation producer required".into()))
+}
+
+pub(crate) fn require_compiled_ui_session(
+    ctx: &HandlerContext,
+    state: &AppState,
+) -> Result<
+    (
+        crate::browser_session::BrowserSession,
+        std::sync::Arc<AdmittedBindingAttachment>,
+    ),
+    HandlerError,
+> {
+    let ui = get_ui_state(state).ok_or_else(|| HandlerError::Internal("UiState not set".into()))?;
+    resolve_compiled_ui_session(ctx, &ui.browser_sessions)
+}
+
+fn resolve_compiled_ui_session(
+    ctx: &HandlerContext,
+    store: &crate::browser_session::BrowserSessionStore,
+) -> Result<
+    (
+        crate::browser_session::BrowserSession,
+        std::sync::Arc<AdmittedBindingAttachment>,
+    ),
+    HandlerError,
+> {
+    let dispatch = COMPILED_UI_DISPATCH
+        .try_with(Clone::clone)
+        .map_err(|_| HandlerError::Forbidden("compiled browser UI dispatch required".into()))?;
+    let session_id = dispatch.browser_session_id.as_deref().ok_or_else(|| {
+        HandlerError::Forbidden("authenticated browser session association required".into())
+    })?;
+    let session = store
+        .get_session(session_id)
+        .ok_or_else(|| HandlerError::Forbidden("session expired or invalid".into()))?;
+    let caller_matches = if ctx.verified {
+        ctx.fingerprint == session.principal_id
+    } else {
+        ctx.fingerprint.strip_prefix("session:") == Some(session_id)
+    };
+    if !caller_matches
+        || dispatch.attachment.compiled_binding.binding.principal_id != session.principal_id
+    {
+        return Err(HandlerError::Forbidden(
+            "compiled UI session principal mismatch".into(),
+        ));
+    }
+    let retained = store
+        .resolve_attachment(session_id, &dispatch.attachment.coordinate())
+        .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
+    if !std::sync::Arc::ptr_eq(&retained, &dispatch.attachment) {
+        return Err(HandlerError::Forbidden(
+            "compiled UI attachment association mismatch".into(),
+        ));
+    }
+    Ok((session, retained))
 }
 
 pub enum SeatCaller {
@@ -354,6 +461,119 @@ mod tests {
         })
         .await;
         assert!(compiled_ui_attachment().is_none());
+    }
+
+    fn active_session(
+        store: &crate::browser_session::BrowserSessionStore,
+    ) -> (
+        crate::browser_session::BrowserSession,
+        Arc<AdmittedBindingAttachment>,
+    ) {
+        let seed = attachment();
+        let launch = crate::browser_session::LaunchContext {
+            compiled_binding: seed.compiled_binding.clone(),
+            presentation: seed.presentation.clone(),
+            granted_caps: vec!["ui.read".into()],
+            user_principal_id: None,
+            project_authority: None,
+            registered_project_id: None,
+        };
+        let (id, token, retained) = store
+            .mint_token(launch, 8, &"22".repeat(32))
+            .expect("mint fixture session");
+        store
+            .activate_launch_token(&token)
+            .expect("activate fixture session");
+        (
+            store.get_session(&id).expect("active fixture session"),
+            retained,
+        )
+    }
+
+    #[tokio::test]
+    async fn verified_dispatch_retains_exact_browser_session_without_replacing_principal() {
+        let store = crate::browser_session::BrowserSessionStore::new();
+        let (session, retained) = active_session(&store);
+        let ctx = HandlerContext::new(
+            session.principal_id.clone(),
+            session.granted_caps.clone(),
+            true,
+        );
+        assert!(resolve_compiled_ui_session(&ctx, &store).is_err());
+        with_compiled_ui_session(&session, retained.clone(), None, async {
+            tokio::task::yield_now().await;
+            let (resolved, binding) = resolve_compiled_ui_session(&ctx, &store)
+                .expect("verified dispatch keeps browser association");
+            assert_eq!(resolved.session_id, session.session_id);
+            assert!(Arc::ptr_eq(&binding, &retained));
+            assert_eq!(ctx.fingerprint, session.principal_id);
+            assert!(ctx.verified);
+            assert_eq!(ctx.scopes, session.granted_caps);
+        })
+        .await;
+        assert!(resolve_compiled_ui_session(&ctx, &store).is_err());
+    }
+
+    #[tokio::test]
+    async fn browser_session_association_refuses_foreign_callers_and_attachments() {
+        let store = crate::browser_session::BrowserSessionStore::new();
+        let (session, retained) = active_session(&store);
+        let (other, foreign_attachment) = active_session(&store);
+        let ctx = HandlerContext::new(
+            session.principal_id.clone(),
+            session.granted_caps.clone(),
+            true,
+        );
+        with_compiled_ui_session(&session, retained.clone(), None, async {
+            let foreign = HandlerContext::new("another-principal".into(), vec!["*".into()], true);
+            assert!(resolve_compiled_ui_session(&foreign, &store).is_err());
+            let other_cookie = HandlerContext::new(
+                format!("session:{}", other.session_id),
+                vec!["*".into()],
+                false,
+            );
+            assert!(resolve_compiled_ui_session(&other_cookie, &store).is_err());
+            let unsigned_principal =
+                HandlerContext::new(session.principal_id.clone(), vec!["*".into()], false);
+            assert!(resolve_compiled_ui_session(&unsigned_principal, &store).is_err());
+            let exact_cookie =
+                HandlerContext::new(format!("session:{}", session.session_id), vec![], false);
+            assert!(resolve_compiled_ui_session(&exact_cookie, &store).is_ok());
+        })
+        .await;
+        with_compiled_ui_session(&session, foreign_attachment, None, async {
+            assert!(resolve_compiled_ui_session(&ctx, &store).is_err());
+        })
+        .await;
+        // Reconstructed JSON/coordinates cannot substitute for the retained object.
+        with_compiled_ui_session(&session, Arc::new((*retained).clone()), None, async {
+            assert!(resolve_compiled_ui_session(&ctx, &store).is_err());
+        })
+        .await;
+        with_compiled_ui_attachment(retained, async {
+            assert!(resolve_compiled_ui_session(&ctx, &store).is_err());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn browser_session_association_rechecks_revocation_inside_dispatch_scope() {
+        let store = crate::browser_session::BrowserSessionStore::new();
+        let (session, retained) = active_session(&store);
+        let ctx = HandlerContext::new(
+            session.principal_id.clone(),
+            session.granted_caps.clone(),
+            true,
+        );
+        with_compiled_ui_session(&session, retained.clone(), None, async {
+            assert!(resolve_compiled_ui_session(&ctx, &store).is_ok());
+            store
+                .revoke_attachment(&session.session_id, &retained.coordinate())
+                .expect("revoke fixture attachment");
+            tokio::task::yield_now().await;
+            assert!(resolve_compiled_ui_session(&ctx, &store).is_err());
+        })
+        .await;
     }
 
     #[tokio::test]

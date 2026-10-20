@@ -32,6 +32,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     ui_launch::DESCRIPTOR,
     ui_launch_mint::DESCRIPTOR,
     ui_session_current::DESCRIPTOR,
+    ui_session_attachments::OPEN_SURFACE_DESCRIPTOR,
     ui_session_attachments::DETACH_DESCRIPTOR,
     ui_invocations_dispatch::DESCRIPTOR,
     ui_graph_topology::DESCRIPTOR,
@@ -84,6 +85,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     ui_projects::CONFIG_GET_DESCRIPTOR,
     ui_projects::CONFIG_UPDATE_DESCRIPTOR,
     ui_projects::PARTICULAR_VIEW_SET_RESUME_DESCRIPTOR,
+    ui_projects::PARTICULAR_SURFACE_RESUME_DESCRIPTOR,
     ui_remotes::REMOTES_LIST_DESCRIPTOR,
     ui_remotes::REMOTES_PROBE_DESCRIPTOR,
 ];

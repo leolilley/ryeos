@@ -16,44 +16,10 @@ async fn mint_live_session(
 ) -> (
     String,
     HandlerContext,
-    ryeos_ui::browser_session::BrowserSession,
+    ryeos_client_base::ui::UiPresentationProducer,
+    ryeos_ui::browser_session::BindingAttachmentCoordinate,
 ) {
-    let principal = format!("fp:{}", "ab".repeat(32));
-    let scopes = vec!["*".to_string()];
-    let response = ryeos_ui::handlers::ui_launch_mint::handle(
-        ryeos_ui::handlers::ui_launch_mint::Request {
-            ui_binding_contract_revision: ryeos_ui::UI_BINDING_CONTRACT_REVISION.to_string(),
-            surface_ref: "surface:ryeos/ui/base".to_string(),
-            project_path: None,
-            user_principal_id: Some(principal.clone()),
-        },
-        HandlerContext::new(principal, scopes.clone(), true),
-        Arc::new(state.clone()),
-    )
-    .await
-    .expect("compile live UI binding");
-    let session_id = response["session_id"]
-        .as_str()
-        .expect("minted session id")
-        .to_string();
-    let token = response["token"].as_str().expect("minted activation token");
-    assert_eq!(
-        get_ui_state(state)
-            .expect("UI state")
-            .browser_sessions
-            .consume_launch_token(token),
-        Some(session_id.clone())
-    );
-    let session = get_ui_state(state)
-        .expect("UI state")
-        .browser_sessions
-        .get_session(&session_id)
-        .expect("minted session");
-    (
-        session_id.clone(),
-        HandlerContext::new(format!("session:{session_id}"), scopes, false),
-        session,
-    )
+    test_state::live_presentation_with_surface(state, "surface:ryeos/ui/base").await
 }
 
 fn test_context() -> ryeos_ui::browser_session::LaunchContext {
@@ -77,16 +43,6 @@ fn observation_context() -> ryeos_ui::browser_session::LaunchContext {
         "ryeos.execute.service.commands/submit".into(),
     ];
     context
-}
-
-fn attachment_coordinate(
-    session: &ryeos_ui::browser_session::BrowserSession,
-) -> ryeos_ui::browser_session::BindingAttachmentCoordinate {
-    session
-        .attachments
-        .get(&session.root_attachment_id)
-        .expect("surface attachment")
-        .coordinate()
 }
 
 #[test]
@@ -197,17 +153,46 @@ async fn legacy_client_authority_flags_are_rejected() {
 
 #[tokio::test]
 async fn session_cookie_required() {
-    let (_tmp, _state_owner, state) = build_test_state();
+    let (_tmp, _state_owner, mut state) = build_test_state();
+    // Dispatch validates both transport bounds before authenticating. Supply
+    // the ordinary append route in this empty-engine handler fixture so an
+    // absent route cannot masquerade as anonymous-session rejection.
+    let mut append_route = state
+        .node_config
+        .routes
+        .iter()
+        .find(|route| {
+            route.response.source.as_deref()
+                == Some(ryeos_ui::handlers::ui_invocations_dispatch::DESCRIPTOR.service_ref)
+        })
+        .unwrap()
+        .clone();
+    append_route.id = "ui/seat/append".into();
+    append_route.path = "/ui/api/seat/append".into();
+    append_route.response.source = Some(
+        ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR
+            .service_ref
+            .into(),
+    );
+    Arc::make_mut(&mut state.node_config)
+        .routes
+        .push(append_route);
 
     let ctx = HandlerContext::anonymous();
 
     let result = (ryeos_ui::handlers::ui_invocations_dispatch::DESCRIPTOR.handler)(
         serde_json::json!({
-            "binding_attachment_id": "attachment-fixture",
-            "binding_generation": 1,
-            "binding_digest": "fixture",
-            "coordinate": { "kind": "source", "view_ref": "view:test/x", "channel": "default" },
-            "payload": { "kind": "source_parameters", "params": {} }
+            "binding": {
+                "binding_attachment_id": "attachment-fixture",
+                "binding_generation": 1,
+                "binding_digest": "11".repeat(32),
+                "coordinate": { "kind": "source", "view_ref": "view:test/x", "channel": "default" },
+                "payload": { "kind": "source_parameters", "params": {} }
+            },
+            "producer": {
+                "presentation_id": "00000000-0000-4000-8000-000000000001",
+                "thread_id": "T-fixture", "producer_incarnation": "22".repeat(32)
+            }
         }),
         ctx,
         Arc::new(state),
@@ -215,7 +200,12 @@ async fn session_cookie_required() {
     .await;
 
     assert!(result.is_err(), "anonymous should be rejected");
-    let msg = format!("{:#}", result.unwrap_err());
+    let error = result.unwrap_err();
+    assert!(matches!(
+        error.downcast_ref::<ryeos_app::handler_error::HandlerError>(),
+        Some(ryeos_app::handler_error::HandlerError::Forbidden(_))
+    ));
+    let msg = format!("{error:#}");
     assert!(
         msg.contains("session"),
         "expected session mention, got: {msg}"
@@ -226,8 +216,7 @@ async fn session_cookie_required() {
 #[ignore = "requires populated handler binaries via scripts/populate-bundles.sh"]
 async fn session_local_invocation_publishes_to_session_bus() {
     let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
-    let (session_id, ctx, session) = mint_live_session(&state).await;
-    let coordinate = attachment_coordinate(&session);
+    let (session_id, ctx, producer, coordinate) = mint_live_session(&state).await;
 
     // Subscribe to the session bus before invoking.
     let mut rx = get_ui_state(&state)
@@ -237,6 +226,8 @@ async fn session_local_invocation_publishes_to_session_bus() {
 
     let result = (ryeos_ui::handlers::ui_invocations_dispatch::DESCRIPTOR.handler)(
         serde_json::json!({
+            "producer": producer,
+            "binding": {
             "binding_attachment_id": coordinate.binding_attachment_id,
             "binding_generation": coordinate.binding_generation,
             "binding_digest": coordinate.binding_digest,
@@ -248,6 +239,7 @@ async fn session_local_invocation_publishes_to_session_bus() {
             "payload": {
                 "kind": "selection",
                 "record": { "root": state.config.app_root }
+            }
             }
         }),
         ctx,
@@ -274,25 +266,24 @@ async fn session_local_invocation_publishes_to_session_bus() {
 #[ignore = "requires populated handler binaries via scripts/populate-bundles.sh"]
 async fn read_only_thread_sources_replay_without_recording_service_threads() {
     let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
-    let (_session_id, ctx, session) = mint_live_session(&state).await;
-    let coordinate = attachment_coordinate(&session);
+    let (_session_id, ctx, producer, coordinate) = mint_live_session(&state).await;
     let state = Arc::new(state);
 
-    let opened = (ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR.handler)(
-        serde_json::json!({}),
-        ctx.clone(),
-        state.clone(),
-    )
-    .await
-    .expect("open seat fixture");
-    let chain_root_id = opened["chain_root_id"].as_str().unwrap();
+    let chain_root_id = producer.thread_id.as_str();
+    let events = serde_json::json!([{
+        "engine_seq": 0, "event_type": "seat.facet",
+        "payload": { "key": "selection", "value": "T-fixture" }
+    }]);
+    let payload_digest =
+        ryeos_ui_presentation_contract::payload_digest::seat_payload_digest(&events).unwrap();
     (ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR.handler)(
         serde_json::json!({
-            "thread_id": opened["thread_id"],
-            "events": [{
-                "event_type": "seat.facet",
-                "payload": { "key": "selection", "value": "T-fixture" }
-            }]
+            "presentation_id": producer.presentation_id,
+            "thread_id": producer.thread_id,
+            "producer_incarnation": producer.producer_incarnation,
+            "operation_id": uuid::Uuid::new_v4().to_string(),
+            "first_engine_seq": 0, "last_engine_seq": 0, "event_count": 1,
+            "payload_digest": payload_digest, "events": events
         }),
         ctx.clone(),
         state.clone(),
@@ -312,14 +303,8 @@ async fn read_only_thread_sources_replay_without_recording_service_threads() {
         state.clone(),
     )
     .await
-    .expect("fetch node thread projection");
-    assert_eq!(
-        node_rows["threads"]
-            .as_array()
-            .expect("node thread collection")
-            .len(),
-        1
-    );
+    .expect_err("cookie cannot bypass compiled node source binding");
+    assert!(format!("{node_rows:#}").contains("compiled binding coordinate"));
 
     let project_rows = (ryeos_ui::handlers::ui_threads::DESCRIPTOR.handler)(
         serde_json::json!({
@@ -332,17 +317,13 @@ async fn read_only_thread_sources_replay_without_recording_service_threads() {
         state.clone(),
     )
     .await
-    .expect("fetch project thread projection");
-    assert_eq!(
-        project_rows["threads"]
-            .as_array()
-            .expect("project thread collection")
-            .len(),
-        1
-    );
+    .expect_err("browser project_path is not admitted project source authority");
+    assert!(format!("{project_rows:#}").contains("compiled binding coordinate"));
 
     let listed = (ryeos_ui::handlers::ui_invocations_dispatch::DESCRIPTOR.handler)(
         serde_json::json!({
+            "producer": producer,
+            "binding": {
             "binding_attachment_id": coordinate.binding_attachment_id,
             "binding_generation": coordinate.binding_generation,
             "binding_digest": coordinate.binding_digest,
@@ -352,6 +333,7 @@ async fn read_only_thread_sources_replay_without_recording_service_threads() {
                 "channel": "input.line.mentions"
             },
             "payload": { "kind": "source_parameters", "params": {} }
+            }
         }),
         ctx.clone(),
         state.clone(),
@@ -374,6 +356,8 @@ async fn read_only_thread_sources_replay_without_recording_service_threads() {
 
     let replayed = (ryeos_ui::handlers::ui_invocations_dispatch::DESCRIPTOR.handler)(
         serde_json::json!({
+            "producer": producer,
+            "binding": {
             "binding_attachment_id": coordinate.binding_attachment_id,
             "binding_generation": coordinate.binding_generation,
             "binding_digest": coordinate.binding_digest,
@@ -385,6 +369,7 @@ async fn read_only_thread_sources_replay_without_recording_service_threads() {
             "payload": {
                 "kind": "source_parameters",
                 "params": { "chain_root_id": chain_root_id }
+            }
             }
         }),
         ctx,
@@ -403,8 +388,8 @@ async fn read_only_thread_sources_replay_without_recording_service_threads() {
             .as_array()
             .expect("events collection")
             .len(),
-        3,
-        "thread_created, thread_started, and seat.facet are replayed"
+        5,
+        "root creation/start, producer claim, facet and its exact append receipt are retained"
     );
 
     let rows_after = state

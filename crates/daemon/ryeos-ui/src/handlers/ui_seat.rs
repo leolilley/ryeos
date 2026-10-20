@@ -878,6 +878,356 @@ pub(crate) struct UiSeatActionAdmission {
 const PRESENTATION_PREPARED_EVENT: &str = "seat.presentation_operation.prepared";
 const PRESENTATION_COMPLETED_EVENT: &str = "seat.presentation_operation.completed";
 
+/// Validate a retained admission description, not layout/tab ownership. The
+/// current writer fence is separate: its incarnation may replace the original.
+fn validate_prepared_operation(
+    state: &AppState,
+    session: &BrowserSession,
+    operation: &ryeos_client_base::ui::admission_operation::UiPreparedPresentationOperation,
+) -> Result<()> {
+    operation
+        .validate()
+        .map_err(|error| HandlerError::BadRequest(error.into()))?;
+    let admission = operation.admission().ok_or_else(|| {
+        HandlerError::BadRequest(
+            "composition operations are not supported until causal validation is integrated".into(),
+        )
+    })?;
+    if !canonical_operation_id(&operation.operation_id)
+        || !canonical_digest(&operation.producer.producer_incarnation)
+    {
+        return Err(HandlerError::BadRequest("invalid prepared operation identity".into()).into());
+    }
+    let ui = get_ui_state(state).expect("UiState not set");
+    let membership = ui
+        .browser_sessions
+        .require_presentation(
+            &session.session_id,
+            &operation.producer.presentation_id,
+            Some(&operation.producer.thread_id),
+            None,
+            state.node_policy.generation_digest(),
+        )
+        .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
+    let root = &operation.root_binding;
+    if membership.root_coordinate.binding_attachment_id != root.binding_attachment_id
+        || membership.root_coordinate.binding_generation != root.binding_generation
+        || membership.root_coordinate.binding_digest != root.binding_digest
+        || operation.request_bounds != super::ui_launch_mint::binding_request_bounds(state)?
+    {
+        return Err(HandlerError::Forbidden(
+            "prepared operation root or bounds differ from retained presentation".into(),
+        )
+        .into());
+    }
+    let coordinate = BindingAttachmentCoordinate {
+        binding_attachment_id: admission.request.binding_attachment_id.clone(),
+        binding_generation: admission.request.binding_generation,
+        binding_digest: admission.request.binding_digest.clone(),
+    };
+    let attachment = ui
+        .browser_sessions
+        .require_presentation_attachment(
+            &session.session_id,
+            &operation.producer.presentation_id,
+            &coordinate,
+            state.node_policy.generation_digest(),
+        )
+        .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
+    use ryeos_client_base::ids::UiViewMountOwner;
+    let owned = match admission.invocation_origin.mount_owner() {
+        Some(UiViewMountOwner::Shared { presentation_id }) => {
+            presentation_id.as_str() == operation.producer.presentation_id
+                && coordinate == membership.root_coordinate
+        }
+        Some(UiViewMountOwner::Surface {
+            presentation_id,
+            surface_instance_id,
+        }) => {
+            presentation_id.as_str() == operation.producer.presentation_id
+                && membership
+                    .surfaces
+                    .get(surface_instance_id.as_str())
+                    .is_some_and(|surface| surface.owns_coordinate(&coordinate))
+        }
+        None => false,
+    };
+    if !owned {
+        return Err(HandlerError::Forbidden(
+            "prepared operation origin is not owned by its binding".into(),
+        )
+        .into());
+    }
+    super::ui_invocations_dispatch::validate_prepared_operation_binding(&attachment, operation)
+}
+
+fn validate_completed_operation(
+    state: &AppState,
+    session: &BrowserSession,
+    producer: &ryeos_client_base::ui::UiPresentationProducer,
+    completed: &ryeos_client_base::ui::admission_operation::UiCompletedPresentationOperation,
+    prepared: &ryeos_client_base::ui::admission_operation::UiPreparedPresentationOperation,
+) -> Result<()> {
+    completed
+        .validate_for(prepared)
+        .map_err(|error| HandlerError::BadRequest(error.into()))?;
+    let admission = prepared.admission().ok_or_else(|| {
+        HandlerError::BadRequest("composition completion is not an executable admission".into())
+    })?;
+    if admission.purpose == ryeos_client_base::ui::admission_operation::UiPresentationOperationKind::OpenPresentationDocument {
+        let transition:ryeos_client_base::ui::binding::UiPreparedPresentationDocumentTransition=serde_json::from_value(
+            completed.result.get("ui_transition").cloned().ok_or_else(||HandlerError::BadRequest("prepared document receipt absent".into()))?
+        ).map_err(|error|HandlerError::BadRequest(format!("invalid prepared document: {error}")))?;
+        transition.validate().map_err(HandlerError::BadRequest)?;
+        if transition.presentation_id!=producer.presentation_id { return Err(HandlerError::Forbidden("prepared document parent differs".into()).into()); }
+        let child=&transition.prepared;
+        let membership=get_ui_state(state).expect("UiState not set").browser_sessions.require_presentation(
+            &session.session_id,&child.presentation_id,Some(&child.thread_id),Some(&child.chain_root_id),state.node_policy.generation_digest(),
+        ).map_err(|error|HandlerError::Forbidden(error.to_string()))?;
+        if !membership.matches_prepared_document(&completed.operation_id,child) {
+            return Err(HandlerError::Forbidden("prepared document differs from retained initialization".into()).into());
+        }
+        let signed=authenticated_history::initialization_record(state,&child.chain_root_id,&child.thread_id)?
+            .ok_or_else(||HandlerError::Conflict("prepared document initialization not durably published".into()))?;
+        if signed.initialization!=child.initialization || signed.operation_id!=completed.operation_id {
+            return Err(HandlerError::Forbidden("prepared document testimony differs".into()).into());
+        }
+        state.engine.with_checked_bundle_generation(|generation| initialization::revalidate_current_admission(generation,state,&session.session_id,&membership))?;
+        return Ok(());
+    }
+    if admission.purpose == ryeos_client_base::ui::admission_operation::UiPresentationOperationKind::ImportSurfaceTabs {
+        let transition: ryeos_client_base::ui::binding::UiSurfaceTabsAdmissionTransition = serde_json::from_value(
+            completed.result.get("ui_transition").cloned().ok_or_else(||HandlerError::BadRequest("completed import has no transition".into()))?
+        ).map_err(|error|HandlerError::BadRequest(format!("invalid completed import: {error}")))?;
+        transition.validate().map_err(HandlerError::BadRequest)?;
+        let ryeos_client_base::surface::opening::SurfaceOpenPlacement::AppendTabs {destination_surface_instance_id,destination_binding,..}=&transition.opening.placement else {
+            return Err(HandlerError::BadRequest("import has no destination placement".into()).into());
+        };
+        let ui=get_ui_state(state).expect("UiState not set");
+        let membership=ui.browser_sessions.require_presentation(&session.session_id,&producer.presentation_id,Some(&producer.thread_id),None,state.node_policy.generation_digest())
+            .map_err(|error|HandlerError::Forbidden(error.to_string()))?;
+        let surface=membership.surfaces.get(destination_surface_instance_id.as_str()).filter(|surface| !surface.closed
+            && surface.coordinate.binding_attachment_id==destination_binding.binding_attachment_id
+            && surface.coordinate.binding_generation==destination_binding.binding_generation
+            && surface.coordinate.binding_digest==destination_binding.binding_digest)
+            .ok_or_else(||HandlerError::Forbidden("import completion has no exact live destination".into()))?;
+        let retained=surface.tab_openings.get(&completed.operation_id)
+            .ok_or_else(||HandlerError::Forbidden("import completion has no retained admission receipt".into()))?;
+        if transition.presentation_id!=producer.presentation_id || transition!=retained.result {
+            return Err(HandlerError::Forbidden("import completion differs from retained atomic admission".into()).into());
+        }
+        let bounds=super::ui_launch_mint::binding_request_bounds(state)?;
+        for descriptor in std::iter::once(&transition.origin_attachment).chain(&transition.tab_attachments) {
+            let coordinate=BindingAttachmentCoordinate {binding_attachment_id:descriptor.binding_attachment_id.clone(),binding_generation:descriptor.binding_generation,binding_digest:descriptor.binding_digest.clone()};
+            if !retained.current_coordinates.contains(&coordinate) {
+                return Err(HandlerError::Forbidden("import admission attachment was retired".into()).into());
+            }
+            let admitted=ui.browser_sessions.require_presentation_attachment(&session.session_id,&producer.presentation_id,&coordinate,state.node_policy.generation_digest())
+                .map_err(|error|HandlerError::Forbidden(error.to_string()))?;
+            if admitted.public_descriptor(bounds)!=*descriptor {
+                return Err(HandlerError::Forbidden("import completion attachment changed".into()).into());
+            }
+        }
+        return Ok(());
+    }
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Transition {
+        kind: String,
+        presentation_id: String,
+        surface: ryeos_client_base::ui::binding::UiSurfaceMembership,
+        attachment: ryeos_client_base::ui::UiBindingAttachment,
+        #[serde(default)]
+        creation_request_id: Option<String>,
+        #[serde(default)]
+        tab_attachments: Option<Vec<ryeos_client_base::ui::UiBindingAttachment>>,
+        #[serde(default)]
+        opening: Option<ryeos_client_base::surface::opening::SurfaceOpenRequest>,
+    }
+    let transition: Transition =
+        serde_json::from_value(completed.result.get("ui_transition").cloned().ok_or_else(
+            || HandlerError::BadRequest("completed admission has no transition".into()),
+        )?)
+        .map_err(|error| {
+            HandlerError::BadRequest(format!("invalid completed admission: {error}"))
+        })?;
+    let membership = get_ui_state(state)
+        .expect("UiState not set")
+        .browser_sessions
+        .require_presentation(
+            &session.session_id,
+            &producer.presentation_id,
+            Some(&producer.thread_id),
+            None,
+            state.node_policy.generation_digest(),
+        )
+        .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
+    let surface = membership
+        .surfaces
+        .get(&transition.surface.surface_instance_id)
+        .filter(|surface| !surface.closed && surface.creation_request_id == completed.operation_id)
+        .ok_or_else(|| {
+            HandlerError::Forbidden("completion has no exact admitted Surface".into())
+        })?;
+    let attachment = get_ui_state(state)
+        .expect("UiState not set")
+        .browser_sessions
+        .resolve_attachment(&session.session_id, &surface.coordinate)
+        .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
+    use ryeos_client_base::ui::admission_operation::UiPresentationOperationKind;
+    let expected_kind = match admission.purpose {
+        UiPresentationOperationKind::OpenSurface => "open_surface",
+        UiPresentationOperationKind::ResumeParticularViewSet => "resume_particular_view_set",
+        UiPresentationOperationKind::ResumeParticularSurface => "resume_particular_surface",
+        UiPresentationOperationKind::ImportSurfaceTabs => unreachable!("handled import receipt"),
+        UiPresentationOperationKind::OpenPresentationDocument => {
+            unreachable!("handled prepared document receipt")
+        }
+    };
+    if transition.kind != expected_kind
+        || (admission.purpose == UiPresentationOperationKind::OpenSurface)
+            != transition.opening.is_some()
+        || transition.presentation_id != producer.presentation_id
+        || transition.surface != surface.public_descriptor()
+        || transition.attachment
+            != attachment.public_descriptor(super::ui_launch_mint::binding_request_bounds(state)?)
+        || transition
+            .creation_request_id
+            .as_ref()
+            .is_some_and(|id| id != &completed.operation_id)
+    {
+        return Err(HandlerError::Forbidden(
+            "completion differs from retained admission membership".into(),
+        )
+        .into());
+    }
+    let received_particular_selection = completed
+        .result
+        .get("particular_selection")
+        .cloned()
+        .map(
+            serde_json::from_value::<
+                ryeos_client_base::ui::admission_operation::UiParticularAdmissionSelection,
+            >,
+        )
+        .transpose()
+        .map_err(|_| {
+            HandlerError::BadRequest(
+                "completion has an invalid particular selection receipt".into(),
+            )
+        })?;
+    let retained_particular_selection = match (
+        &surface.particular_resume,
+        &surface.saved_resume,
+        admission.purpose,
+    ) {
+        (Some(receipt), None, UiPresentationOperationKind::ResumeParticularViewSet) => {
+            Some(receipt.particular_selection())
+        }
+        (None, Some(receipt), UiPresentationOperationKind::ResumeParticularSurface) => {
+            receipt.particular_selection()
+        }
+        (None, None, UiPresentationOperationKind::OpenSurface)
+        | (None, Some(_), UiPresentationOperationKind::OpenSurface) => None,
+        _ => {
+            return Err(HandlerError::Forbidden(
+                "completion purpose has no exact retained particular receipt".into(),
+            )
+            .into());
+        }
+    };
+    if received_particular_selection != retained_particular_selection
+        || admission.particular_selection != retained_particular_selection
+    {
+        return Err(HandlerError::Forbidden(
+            "completion particular selection differs from its retained receipt".into(),
+        )
+        .into());
+    }
+    match (
+        &surface.particular_resume,
+        &surface.saved_resume,
+        admission.purpose,
+    ) {
+        (None, None, UiPresentationOperationKind::OpenSurface)
+            if transition.creation_request_id.as_deref()
+                == Some(completed.operation_id.as_str())
+                && transition
+                    .tab_attachments
+                    .as_ref()
+                    .is_some_and(Vec::is_empty) => {}
+        (Some(receipt), None, UiPresentationOperationKind::ResumeParticularViewSet)
+            if transition.creation_request_id.as_deref()
+                == Some(completed.operation_id.as_str())
+                && transition.tab_attachments.is_none()
+                && completed.result.get("particular_view_set")
+                    == Some(&serde_json::to_value(&receipt.resolved)?) => {}
+        (None, Some(receipt), purpose)
+            if transition.creation_request_id.as_deref()
+                == Some(completed.operation_id.as_str())
+                && match (&receipt.body, purpose) {
+                    (
+                        crate::browser_session::SavedSurfaceReceiptBody::Particular { .. },
+                        UiPresentationOperationKind::ResumeParticularSurface,
+                    ) => {
+                        completed.result.get("particular_surface")
+                            == Some(&serde_json::to_value(receipt.public_descriptor())?)
+                    }
+                    (
+                        crate::browser_session::SavedSurfaceReceiptBody::Reusable { .. }
+                        | crate::browser_session::SavedSurfaceReceiptBody::Composed { .. },
+                        UiPresentationOperationKind::OpenSurface,
+                    ) => completed.result.get("particular_surface").is_none(),
+                    _ => false,
+                } =>
+        {
+            let received = transition.tab_attachments.as_ref().ok_or_else(|| {
+                HandlerError::Forbidden(
+                    "saved Surface completion has no exact tab attachments".into(),
+                )
+            })?;
+            let mut exact = std::collections::BTreeMap::new();
+            for coordinate in receipt.coordinates() {
+                let admitted = get_ui_state(state)
+                    .expect("UiState not set")
+                    .browser_sessions
+                    .resolve_attachment(&session.session_id, coordinate)
+                    .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
+                exact.insert(
+                    admitted.binding_attachment_id.clone(),
+                    admitted
+                        .public_descriptor(super::ui_launch_mint::binding_request_bounds(state)?),
+                );
+            }
+            let mut supplied = std::collections::BTreeMap::new();
+            for descriptor in received {
+                if supplied
+                    .insert(descriptor.binding_attachment_id.clone(), descriptor.clone())
+                    .is_some()
+                {
+                    return Err(HandlerError::Forbidden(
+                        "saved Surface completion duplicates tab attachments".into(),
+                    )
+                    .into());
+                }
+            }
+            if supplied != exact {
+                return Err(HandlerError::Forbidden(
+                    "saved Surface completion differs from retained tab attachments".into(),
+                )
+                .into());
+            }
+        }
+        _ => {
+            return Err(HandlerError::Forbidden(
+                "completion purpose or particular receipt differs".into(),
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
 fn producer_response(
     presentation_id: &str,
     detail: &ryeos_app::state_store::ThreadDetail,
@@ -1500,7 +1850,7 @@ pub(crate) struct CompletedSeatIngressAdmission {
 }
 
 impl CompletedSeatIngressAdmission {
-    fn seat(&self) -> ExactSeat<'_> {
+    pub(crate) fn seat(&self) -> ExactSeat<'_> {
         ExactSeat {
             root_id: self.action.anchor.chain_root_id(),
             owner: &self.action.owner,
@@ -1509,13 +1859,27 @@ impl CompletedSeatIngressAdmission {
         }
     }
 
-    fn cut(&self) -> SeatCut<'_> {
+    pub(crate) fn cut(&self) -> SeatCut<'_> {
         SeatCut {
             expected: &self.action.anchor,
             anchors: &self.anchors,
             retired: &self.retired,
         }
     }
+}
+
+pub(crate) async fn read_completed_seat_ingress(
+    state: Arc<AppState>,
+    session: &BrowserSession,
+    producer: &ryeos_client_base::ui::UiPresentationProducer,
+) -> Result<CompletedSeatIngressRead> {
+    read_completed_seat_history(
+        state,
+        session,
+        &producer.presentation_id,
+        &producer.thread_id,
+    )
+    .await
 }
 
 pub(crate) async fn read_completed_seat_history(
@@ -1544,6 +1908,34 @@ pub(crate) async fn read_completed_seat_history(
 }
 
 impl CompletedSeatIngressRead {
+    /// Caller holds the transition lock. Actual publication must additionally
+    /// hold every returned anchor through the existing atomic action owner.
+    pub(crate) fn authorize(
+        &self,
+        state: &AppState,
+        session: &BrowserSession,
+        producer: &ryeos_client_base::ui::UiPresentationProducer,
+    ) -> Result<CompletedSeatIngressAdmission> {
+        let admission = self.authorize_history(
+            state,
+            session,
+            &producer.presentation_id,
+            &producer.thread_id,
+        )?;
+        if !canonical_digest(&producer.producer_incarnation)
+            || !self.verified.control.as_ref().is_some_and(|control| {
+                control.state == ProducerState::Active
+                    && control.producer_incarnation == producer.producer_incarnation
+            })
+        {
+            return Err(HandlerError::Conflict(
+                "ingress producer is not current and active".into(),
+            )
+            .into());
+        }
+        Ok(admission)
+    }
+
     /// Exact target/cut only: selecting or replacing a producer remains the
     /// control writer's responsibility. This is not active action authority.
     pub(crate) fn authorize_history(
@@ -1599,6 +1991,14 @@ impl CompletedSeatIngressRead {
         })
     }
 
+    pub(crate) fn next_mount_id(&self) -> u64 {
+        self.verified.replay.next_mount_id
+    }
+    pub(crate) fn composition_replay(
+        &self,
+    ) -> &ryeos_client_base::ui::composition_replay::UiCompositionReplay {
+        &self.verified.replay
+    }
     pub(crate) fn next_engine_seq(&self) -> u64 {
         self.verified.next_engine_seq
     }
@@ -1609,6 +2009,47 @@ impl CompletedSeatIngressRead {
         &self,
     ) -> ryeos_ui_presentation_contract::seat_control::UiSeatControlPredecessor {
         self.verified.control_predecessor.clone()
+    }
+
+    pub(crate) fn require_prepared(
+        &self,
+        state: &AppState,
+        session: &BrowserSession,
+        producer: &ryeos_client_base::ui::UiPresentationProducer,
+        operation_id: &str,
+        request: &ryeos_client_base::ui::UiBindingRequest,
+    ) -> Result<ryeos_client_base::ui::admission_operation::UiPreparedPresentationOperation> {
+        self.authorize(state, session, producer)?;
+        if !canonical_operation_id(operation_id) {
+            return Err(
+                HandlerError::BadRequest("invalid presentation operation UUID".into()).into(),
+            );
+        }
+        let operation = self
+            .verified
+            .replay
+            .pending
+            .get(operation_id)
+            .cloned()
+            .ok_or_else(|| {
+                HandlerError::Conflict(
+                    "presentation operation has no authenticated pending preparation".into(),
+                )
+            })?;
+        if operation.operation_id != operation_id
+            || operation
+                .admission()
+                .is_none_or(|admission| admission.request != *request)
+            || operation.producer.presentation_id != producer.presentation_id
+            || operation.producer.thread_id != producer.thread_id
+        {
+            return Err(HandlerError::Conflict(
+                "invocation differs from retained presentation operation".into(),
+            )
+            .into());
+        }
+        validate_prepared_operation(state, session, &operation)?;
+        Ok(operation)
     }
 }
 
@@ -1878,10 +2319,15 @@ pub async fn handle_append(
             .into());
         }
         if operation.admission().is_some() {
-            return Err(unvalidated_admission().into());
+            validate_prepared_operation(&state, &session, &operation)?;
         }
         prepared_batch.insert(operation.operation_id.clone(), operation);
     }
+    let current = ryeos_client_base::ui::UiPresentationProducer {
+        presentation_id: req.presentation_id.clone(),
+        thread_id: req.thread_id.clone(),
+        producer_incarnation: req.producer_incarnation.clone(),
+    };
     let mut completed_ids = std::collections::BTreeSet::new();
     let mut preceding_preparations = std::collections::BTreeSet::new();
     preceding_closures.clear();
@@ -1934,7 +2380,7 @@ pub async fn handle_append(
                         "completion has no authenticated pending preparation".into(),
                     ))?;
                 if prepared.admission().is_some() {
-                    return Err(unvalidated_admission().into());
+                    validate_prepared_operation(&state, &session, &prepared)?;
                 }
                 prepared
             }
@@ -1961,7 +2407,7 @@ pub async fn handle_append(
             .into());
         }
         if prepared.admission().is_some() {
-            return Err(unvalidated_admission().into());
+            validate_completed_operation(&state, &session, &current, &completed, &prepared)?;
         }
     }
 
@@ -2078,15 +2524,6 @@ pub async fn handle_append(
         "authoritative",
     ))
     })
-}
-
-/// An executable presentation admission is judged against the signed binding
-/// that produced it. Until binding dispatch can do that judgment, a seat
-/// append carrying one is refused rather than recorded unjudged.
-fn unvalidated_admission() -> HandlerError {
-    HandlerError::BadRequest(
-        "executable presentation admissions are not accepted without binding validation".into(),
-    )
 }
 
 fn reject_closed_origin(
