@@ -3854,6 +3854,7 @@ dependencies = [
  "ryeos-scheduler",
  "ryeos-scheduler-service",
  "ryeos-state",
+ "ryeos-ui-presentation-contract",
  "serde",
  "serde_json",
  "serde_yaml",

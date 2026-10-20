@@ -7,7 +7,7 @@ use crate::transfer::{
     MoveFreezeEvidence, TRANSFER_SCHEMA, TransferEvidence, TransferIdentity, TransferPhase,
     TransferRecord,
 };
-use crate::transfer_lifecycle_v2::TransferLifecycleFenceV2;
+use crate::transfer_lifecycle::TransferLifecycleFence;
 
 pub const MOVE_FREEZE_CANCELLED_EVENT: &str = "contract.ryeos_ui.move_freeze_cancelled.v1";
 
@@ -370,7 +370,7 @@ pub enum MoveFreezeCancellationWriter {
         next_engine_seq: u64,
     },
     /// The existing durable lifecycle fence, never a renderer's clock.
-    NodeLifecycle { fence: TransferLifecycleFenceV2 },
+    NodeLifecycle { fence: TransferLifecycleFence },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -463,7 +463,7 @@ impl MoveFreezeCancellation {
                 ..
             } if canonical_hash(producer_incarnation) => {}
             MoveFreezeCancellationWriter::NodeLifecycle { fence }
-                if fence.reaping_at_ms() >= 0 && fence.latest_control().chain_seq > 0 => {}
+                if fence.latest_control().chain_seq > 0 => {}
             _ => return Err("MOVE freeze cancellation writer witness is malformed".into()),
         }
         Ok(())
@@ -792,12 +792,11 @@ mod tests {
             original.transfer,
             original.freeze,
             MoveFreezeCancellationWriter::NodeLifecycle {
-                fence: TransferLifecycleFenceV2::LeaseReaping {
+                fence: TransferLifecycleFence::LeaseReaping {
                     latest_control: TransferEvidence {
                         event_hash: "03".repeat(32),
                         chain_seq: 15,
                     },
-                    reaping_at_ms: 1234,
                 },
             },
         )
