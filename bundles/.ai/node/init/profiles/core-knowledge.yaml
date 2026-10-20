@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-20T09:54:47Z:1c86d54d859d64e07c55a1b817844ac6c341e18b32274d3d90d34456ef87bc2b:O1wIgh9jtund06buh0ofeD0e13DCqUtdpZHqoqYRolT2j5VdhJs0rJZYRjjGMAd/d0NQz88uwL4+yW57XctwBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-20T18:29:03Z:1c716a2f8cc44b4abdde7ac3b902689f7b6c6336e4a8ce2954e976c252b4bd18:uJ0JkzUQJEwrorlg09ta8aL3+bQAKSz6GcWzS3QLBztcnPh2WLOJheF7IPVum8v4VHFX585UIU/K/MGkIAm7Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Core plus the knowledge bundle.
 schema: 1
 exact_bundles:
@@ -378,3 +378,10 @@ policies:
       kind: seat_session
       max_replay_frame_events: 64
       max_replay_frame_bytes: 4194304
+  ui_inspection:
+    schema: 1
+    max_event_limit: 500
+    max_facet_page_events: 64
+    max_facet_page_bytes: 524288
+    max_facet_pages_per_thread: 8
+    max_facet_pages_total: 64
