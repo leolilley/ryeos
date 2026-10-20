@@ -1047,11 +1047,14 @@ fn same_existing_dir(left: &str, right: &str) -> bool {
 
 macro_rules! descriptor {
     ($name:ident, $service_ref:literal, $endpoint:literal, $handler:ident) => {
+        descriptor!($name, $service_ref, $endpoint, $handler, &[]);
+    };
+    ($name:ident, $service_ref:literal, $endpoint:literal, $handler:ident, $caps:expr) => {
         pub const $name: ServiceDescriptor = ServiceDescriptor {
             service_ref: $service_ref,
             endpoint: $endpoint,
             availability: ServiceAvailability::DaemonOnly,
-            required_caps: &[],
+            required_caps: $caps,
             handler: |params, ctx, state| {
                 Box::pin(async move { $handler(params, ctx, state).await })
             },
@@ -1069,7 +1072,8 @@ descriptor!(
     PROJECTS_ADD_DESCRIPTOR,
     "service:projects/add",
     "projects.add",
-    handle_projects_add
+    handle_projects_add,
+    &["ryeos.execute.service.projects/add"]
 );
 descriptor!(
     PROJECTS_FORGET_DESCRIPTOR,
@@ -1087,7 +1091,8 @@ descriptor!(
     PROJECTS_OPEN_DESCRIPTOR,
     "service:projects/open",
     "projects.open",
-    handle_projects_open
+    handle_projects_open,
+    &["ryeos.execute.service.projects/open"]
 );
 descriptor!(
     UI_PROJECTS_LIST_DESCRIPTOR,
@@ -1099,7 +1104,8 @@ descriptor!(
     UI_PROJECTS_ADD_DESCRIPTOR,
     "service:ui/projects/add",
     "ui.projects.add",
-    handle_projects_add
+    handle_projects_add,
+    &["ryeos.execute.service.projects/add"]
 );
 descriptor!(
     UI_PROJECTS_FORGET_DESCRIPTOR,
@@ -1117,7 +1123,8 @@ descriptor!(
     UI_PROJECTS_OPEN_DESCRIPTOR,
     "service:ui/projects/open",
     "ui.projects.open",
-    handle_projects_open
+    handle_projects_open,
+    &["ryeos.execute.service.projects/open"]
 );
 descriptor!(
     RYEOS_UI_PROJECTS_LIST_DESCRIPTOR,
@@ -1129,7 +1136,8 @@ descriptor!(
     RYEOS_UI_PROJECTS_ADD_DESCRIPTOR,
     "service:ui/ryeos-ui/projects/add",
     "ui.ryeos.projects.add",
-    handle_projects_add
+    handle_projects_add,
+    &["ryeos.execute.service.projects/add"]
 );
 descriptor!(
     RYEOS_UI_PROJECTS_FORGET_DESCRIPTOR,
@@ -1147,7 +1155,8 @@ descriptor!(
     RYEOS_UI_PROJECTS_OPEN_DESCRIPTOR,
     "service:ui/ryeos-ui/projects/open",
     "ui.ryeos.projects.open",
-    handle_projects_open
+    handle_projects_open,
+    &["ryeos.execute.service.projects/open"]
 );
 descriptor!(
     RECENT_TOUCH_DESCRIPTOR,
@@ -1171,13 +1180,15 @@ descriptor!(
     CONFIG_UPDATE_DESCRIPTOR,
     "service:ui/ryeos-ui/config/update",
     "ui.ryeos.config.update",
-    handle_config_update
+    handle_config_update,
+    &["ryeos.execute.service.ui/ryeos-ui/config/update"]
 );
 descriptor!(
     PARTICULAR_VIEW_SET_RESUME_DESCRIPTOR,
     "service:ui/ryeos-ui/view-sets/resume",
     "ui.ryeos.view-sets.resume",
-    handle_particular_view_set_resume
+    handle_particular_view_set_resume,
+    &["ryeos.execute.service.ui/ryeos-ui/view-sets/resume"]
 );
 
 #[cfg(test)]

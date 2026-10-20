@@ -49,6 +49,24 @@ const {HttpResponseError} = await import(`data:text/javascript;base64,${Buffer.f
 const root={binding_attachment_id:"root",binding_generation:1n,binding_digest:"d".repeat(64)};
 const coord=id=>({presentation_id:id,thread_id:`thread-${id}`,chain_root_id:`chain-${id}`});
 const pause=()=>new Promise(resolve=>setImmediate(resolve));
+// The runtime's only genuinely asynchronous step outside the harness is
+// crypto.subtle.digest, which completes on the libuv thread pool and so has no
+// fixed relation to the event-loop turn count. Every digest is counted so a
+// test can wait for real quiescence instead of guessing a number of turns.
+let digestsInFlight=0;
+const subtle=new Proxy(webcrypto.subtle,{get(target,key){
+ if(key!=="digest")return Reflect.get(target,key).bind(target);
+ return async (...args)=>{digestsInFlight++;try{return await target.digest(...args);}finally{digestsInFlight--;}};
+}});
+const trackedCrypto=new Proxy(webcrypto,{get(target,key){if(key==="subtle")return subtle;const value=Reflect.get(target,key);return typeof value==="function"?value.bind(target):value;}});
+// Wait for an observable condition; failure is a deadline, never a turn budget.
+async function until(done,what="asynchronous owner transition"){
+ const deadline=Date.now()+20_000;
+ while(!done()){if(Date.now()>deadline)assert.fail(`timed out waiting for ${what}`);await pause();}
+}
+// Wait until every started digest has finished and the continuations it
+// released have run.
+async function idle(){do{await pause();await pause();}while(digestsInFlight>0);}
 // Transport tests stub the Rust bridge; commitment semantics are covered in Rust.
 const derivedAppendId="11111111-1111-8111-8111-111111111111";
 const derivedControlId="22222222-2222-8222-8222-222222222222";
@@ -69,7 +87,7 @@ function ack(body){
 }
 function harness(){
  globalThis.window=globalThis;
- Object.defineProperty(globalThis,"crypto",{configurable:true,value:webcrypto});
+ Object.defineProperty(globalThis,"crypto",{configurable:true,value:trackedCrypto});
  const storage=new Map();
  globalThis.localStorage={getItem:key=>storage.get(key)??null,setItem:(key,value)=>storage.set(key,value),removeItem:key=>storage.delete(key)};
  const h={storage,calls:[],encoded:[],controls:[],identityInputs:[],controlIdentityInputs:[],producers:new Map(),controlLost:0,lost:0,timeout:0,rateLimit:0,rateLimitAfterCommit:0,serverError:0,auth:0,next:0,receipt:null,committedOperation:null,committedBody:null,committedCount:0,notFound:false,historyFrames:null,historyCalls:[],lastClaimRequest:null,lastClaimResult:null,
@@ -160,7 +178,7 @@ function deferred(){let resolve;const promise=new Promise(done=>{resolve=done;})
 function historyWake(h,index,data={schema:1}){
  h.historyControllers[index].enqueue(new TextEncoder().encode(`event: ui_seat.replay.reproof_required.v1\ndata: ${JSON.stringify(data)}\n\n`));
 }
-async function eventually(predicate){for(let i=0;i<80&&!predicate();i++)await pause();assert.ok(predicate(),"expected asynchronous owner transition");}
+async function eventually(predicate){await until(predicate);}
 
 // Authenticated transport simulation only: these tests do not mint a Rust
 // completed candidate or qualify server CAS proofs. AUTHORED, NOT RUN.
@@ -195,7 +213,7 @@ test("promoted longer acknowledged journal never reappends historical rows",asyn
  }},events);
  try{
   await r.attachSeat();r.completeEngineBootstrap();historyWake(h,0);
-  await eventually(()=>published===1);await pause();
+  await eventually(()=>published===1);await idle();
   assert.equal(h.encoded.length,0);assert.equal(r.canAcceptMutations(),true);
   assert.equal(h.calls.filter(c=>c.body.action==="claim").length,1);
  }finally{r.close();await r.settle();}
@@ -217,7 +235,7 @@ test("wake during completion schedules another same-producer proof without publi
  }});
  try{
   await r.attachSeat();r.completeEngineBootstrap();historyWake(h,0);
-  await eventually(()=>completing===1);historyWake(h,1);await pause();gate.resolve();
+  await eventually(()=>completing===1);historyWake(h,1);await idle();gate.resolve();
   await eventually(()=>published===2);assert.equal(h.historyCalls.length,3);
   assert.equal(h.encoded.length,0);assert.equal(h.calls.filter(c=>c.body.action==="claim").length,1);
  }finally{gate.resolve();r.close();await r.settle();}
@@ -230,12 +248,12 @@ test("reproof wake cannot discard an unresolved append interval",async()=>{
   await r.attachSeat();r.completeEngineBootstrap();h.lost=5;
   globalThis.setTimeout=callback=>{queueMicrotask(callback);return 0;};
   events.push({seq:0n,event_type:"seat.facet",payload:{draft:"unresolved"}});r.observe({});
-  await eventually(()=>h.encoded.length===5);await pause();
+  await eventually(()=>h.encoded.length===5);await idle();
   globalThis.setTimeout=timeout;
   const retainedBytes=[...h.storage.entries()];assert.equal(retainedBytes.length,1);
   historyWake(h,0);
   await eventually(()=>h.calls.some(call=>call.url.endsWith("/replay")&&call.body.receipt));
-  await pause();await pause();assert.equal(r.canAcceptMutations(),false);
+  await idle();assert.equal(r.canAcceptMutations(),false);
   assert.deepEqual([...h.storage.entries()],retainedBytes);
   assert.ok(h.encoded.every(body=>body===h.encoded[0]));
   assert.equal(h.historyCalls.length,1,"unresolved append must precede a new proof scan");
@@ -350,7 +368,7 @@ test("engine exhaustion commits the fitting prefix before refusing the remaining
  const r=runtime({commitEvent:event=>reported.push(event)},events);
  try{
   await r.attachSeat();
-  for(let i=0;i<50&&!reported.some(event=>event.error?.error?.includes("exhausted"));i++)await pause();
+  await until(()=>reported.some(event=>event.error?.error?.includes("exhausted")));
   assert.equal(h.encoded.length,1);
   const append=JSON.parse(h.encoded[0]);
   assert.equal(append.first_engine_seq,"18446744073709551613");
@@ -550,7 +568,7 @@ test("independent documents create distinct control intent nonces",async()=>{
 test("exhausted unknown append preserves its exact interval and blocks replacement",async()=>{
  const h=harness();h.lost=5;const r=runtime({},[{seq:0n,event_type:"seat.facet",payload:{draft:"unknown"}}]);
  const timeout=globalThis.setTimeout;globalThis.setTimeout=callback=>{queueMicrotask(callback);return 0;};
- try{await r.attachSeat();for(let i=0;i<50&&h.encoded.length<5;i++)await pause();await pause();
+ try{await r.attachSeat();await until(()=>h.encoded.length>=5);await idle();
   assert.equal(h.encoded.length,5);assert.ok(h.encoded.every(body=>body===h.encoded[0]));assert.equal(h.storage.size,1);
   assert.equal(r.currentProducer(),null);assert.equal(r.canAcceptMutations(),false);
   r.close();h.notFound=true;const replacement=runtime({presentation:coord("A"),claim:{kind:"takeover",expected_producer_incarnation:"a".repeat(64),predecessor:controlPredecessor}});
@@ -562,7 +580,7 @@ test("exhausted unknown append preserves its exact interval and blocks replaceme
 });
 async function unknownCurrent(h,r) {
  const timeout=globalThis.setTimeout;globalThis.setTimeout=callback=>{queueMicrotask(callback);return 0;};h.lost=5;
- try{await r.attachSeat();for(let i=0;i<50&&h.encoded.length<5;i++)await pause();await pause();}
+ try{await r.attachSeat();await until(()=>h.encoded.length>=5);await idle();}
  finally{globalThis.setTimeout=timeout;}
  assert.equal(r.currentProducer(),null);
  h.receipt=ack(JSON.parse(h.encoded[0]));
@@ -572,7 +590,7 @@ test("found current receipt advances only proven prefix and resumes the same wri
  const h=harness(),events=[{seq:71n,event_type:"seat.facet",payload:{draft:"accepted"}}],r=runtime({commitEvent:event=>committed.push(event)},events);
  try{await unknownCurrent(h,r);r.completeEngineBootstrap();
   events.push({seq:1n,event_type:"seat.facet",payload:{draft:"suffix"}});
-  await r.reconcilePendingAppend();for(let i=0;i<20&&h.encoded.length<6;i++)await pause();
+  await r.reconcilePendingAppend();await until(()=>h.encoded.length>=6);
   const localAck=committed.find(event=>event.type==="seat_append_acknowledged");
   assert.deepEqual(localAck.events,[events[0]],"receipt acknowledges captured local prefix, not remapped wire sequence");
   assert.equal(localAck.events[0].seq,71n);
@@ -600,7 +618,7 @@ test("successful append acknowledges exact local events rather than wire positio
  const h=harness(),committed=[];
  const local={seq:91n,event_type:"seat.facet",payload:{draft:"local"}};
  const r=runtime({commitEvent:event=>committed.push(event)},[local]);
- try{await r.attachSeat();for(let i=0;i<20&&!committed.some(event=>event.type==="seat_append_acknowledged");i++)await pause();
+ try{await r.attachSeat();await until(()=>committed.some(event=>event.type==="seat_append_acknowledged"));
   assert.equal(JSON.parse(h.encoded[0]).events[0].engine_seq,"0");
   const acknowledgement=committed.find(event=>event.type==="seat_append_acknowledged");
   assert.deepEqual(acknowledgement.events,[local]);
@@ -638,11 +656,11 @@ test("verified frame before HTTP ACK never folds twice and keeps exact pending r
    event_hash:"e".repeat(64),thread_seq:4};
   emit("ui_seat.replay.append_verified.v1",verified);
   emit("ui_seat.replay.append_verified.v1",verified);
-  await pause();
+  await idle();
   assert.equal(h.storage.size,1);
   assert.equal(committed.filter(event=>event.type==="seat_append_acknowledged").length,0);
   deliver();
-  for(let i=0;i<20&&!committed.some(event=>event.type==="seat_append_acknowledged");i++)await pause();
+  await until(()=>committed.some(event=>event.type==="seat_append_acknowledged"));
   assert.equal(committed.filter(event=>event.type==="seat_append_acknowledged").length,1);
   assert.equal(unavailable.length,0);
  }finally{r.close();}
@@ -678,8 +696,8 @@ test("stream-before-ACK receipt hash disagreement fences the pending append",asy
    producer_incarnation:pending.producer_incarnation,first_engine_seq:pending.first_engine_seq,
    last_engine_seq:pending.last_engine_seq,event_count:pending.event_count,
    payload_digest:pending.payload_digest,event_hash:"e".repeat(64),thread_seq:4});
-  await pause();deliver();
-  for(let i=0;i<20&&unavailable.length===0;i++)await pause();
+  await idle();deliver();
+  await until(()=>unavailable.length>0);
   assert.equal(committed.some(event=>event.type==="seat_append_acknowledged"),false);
   assert.equal(h.storage.size,1);
   assert.ok(unavailable.length>0);
@@ -709,14 +727,14 @@ test("ACK-before-stream receipt position disagreement invalidates the live hando
  const r=runtime({commitEvent:event=>committed.push(event),onUnavailable:failure=>unavailable.push(failure)},[local]);
  try{
   await r.attachSeat();
-  for(let i=0;i<20&&!committed.some(event=>event.type==="seat_append_acknowledged");i++)await pause();
+  await until(()=>committed.some(event=>event.type==="seat_append_acknowledged"));
   assert.equal(committed.filter(event=>event.type==="seat_append_acknowledged").length,1);
   const receipt=h.receipt;
   emit("ui_seat.replay.append_verified.v1",{schema:1,operation_id:receipt.operation_id,
    producer_incarnation:receipt.producer_incarnation,first_engine_seq:receipt.first_engine_seq,
    last_engine_seq:receipt.last_engine_seq,event_count:receipt.event_count,
    payload_digest:receipt.payload_digest,event_hash:receipt.receipt_event_hash,thread_seq:99});
-  for(let i=0;i<20&&unavailable.length===0;i++)await pause();
+  await until(()=>unavailable.length>0);
   assert.ok(unavailable.length>0);
  }finally{r.close();}
 });
@@ -726,7 +744,7 @@ test("live acknowledgement permits distinct canonical chain and thread predecess
  h.append=body=>{const receipt=append(body);receipt.events[0].prev_thread_event_hash="e".repeat(64);return receipt;};
  const local={seq:92n,event_type:"seat.facet",payload:{draft:"distinct predecessors"}};
  const r=runtime({commitEvent:event=>committed.push(event)},[local]);
- try{await r.attachSeat();for(let i=0;i<20&&!committed.some(event=>event.type==="seat_append_acknowledged");i++)await pause();
+ try{await r.attachSeat();await until(()=>committed.some(event=>event.type==="seat_append_acknowledged"));
   assert.deepEqual(committed.find(event=>event.type==="seat_append_acknowledged").events,[local]);
   assert.equal(h.storage.size,0);
  }finally{r.close();}
@@ -752,7 +770,7 @@ test("malformed successful append acknowledgement remains unknown, not refused",
   [{seq:0n,event_type:"seat.facet",payload:{draft:"retained"}}]);
  try{
   await r.attachSeat();
-  for(let i=0;i<80&&unavailable.length===0;i++)await pause();
+  await until(()=>unavailable.length>0);
   assert.equal(h.encoded.length,5);
   assert.ok(h.encoded.every(encoded=>encoded===h.encoded[0]),"only exact retained bytes are retried");
   assert.equal(h.storage.size,1);
@@ -770,7 +788,7 @@ test("HTTP 408 append timeout preserves unknown outcome and exact retry bytes",a
   [{seq:0n,event_type:"seat.facet",payload:{draft:"retained"}}]);
  try{
   await r.attachSeat();
-  for(let i=0;i<80&&unavailable.length===0;i++)await pause();
+  await until(()=>unavailable.length>0);
   assert.equal(h.encoded.length,5);
   assert.ok(h.encoded.every(encoded=>encoded===h.encoded[0]));
   assert.equal(unavailable[0]?.kind,"append_unknown");
@@ -789,7 +807,7 @@ test("HTTP 429 append response preserves unknown outcome and exact retry bytes",
   [{seq:0n,event_type:"seat.facet",payload:{draft:"retained"}}]);
  try{
   await r.attachSeat();
-  for(let i=0;i<80&&unavailable.length===0;i++)await pause();
+  await until(()=>unavailable.length>0);
   assert.equal(h.encoded.length,5);
   assert.ok(h.encoded.every(encoded=>encoded===h.encoded[0]));
   assert.equal(unavailable[0]?.kind,"append_unknown");
@@ -806,8 +824,7 @@ test("HTTP 429 after commit reconciles one exact append on retry",async()=>{
   [{seq:0n,event_type:"seat.facet",payload:{draft:"committed before 429"}}]);
  try{
   await r.attachSeat();
-  for(let i=0;i<100&&committed.every(event=>event.type!=="seat_append_acknowledged");i++)
-   await new Promise(resolve=>setTimeout(resolve,10));
+  await until(()=>committed.some(event=>event.type==="seat_append_acknowledged"));
   assert.equal(h.encoded.length,2);
   assert.equal(h.encoded[0],h.encoded[1]);
   assert.equal(h.committedCount,1);
@@ -825,7 +842,7 @@ test("exhausted HTTP 5xx append retries cannot become a refusal",async()=>{
   [{seq:0n,event_type:"seat.facet",payload:{draft:"retained"}}]);
  try{
   await r.attachSeat();
-  for(let i=0;i<80&&unavailable.length===0;i++)await pause();
+  await until(()=>unavailable.length>0);
   assert.equal(h.encoded.length,5);
   assert.ok(h.encoded.every(encoded=>encoded===h.encoded[0]));
   assert.equal(unavailable[0]?.kind,"append_unknown");
@@ -846,7 +863,7 @@ test("authentication reconciliation rejects a membership with another root",asyn
  const h=harness();h.auth=401;
  h.current=()=>({session_id:"session",binding_attachments:[{...root,project_path:null,subject:{kind:"projectless"}}],presentations:[{...coord("A"),root_binding:{...root,binding_digest:"f".repeat(64)}}]});
  const r=runtime({},[{seq:0n,event_type:"seat.facet",payload:{draft:"text"}}]);
- try{await r.attachSeat();for(let i=0;i<20&&h.encoded.length===0;i++)await pause();await pause();
+ try{await r.attachSeat();await until(()=>h.encoded.length>0);await idle();
   assert.equal(h.encoded.length,1);assert.equal(h.storage.size,1);
  }finally{r.close();}
 });
@@ -855,26 +872,26 @@ test("storage refusal fences new mutations before any append is sent",async()=>{
  try{await r.attachSeat();r.completeEngineBootstrap();assert.equal(r.canAcceptMutations(),true);
   globalThis.localStorage.setItem=()=>{throw new Error("storage unavailable");};
   events.push({seq:0n,event_type:"seat.facet",payload:{draft:"not durable"}});
-  r.observe({});for(let i=0;i<20&&r.currentProducer()!==null;i++)await pause();
+  r.observe({});await until(()=>r.currentProducer()===null);
   assert.equal(r.currentProducer(),null);assert.equal(r.canAcceptMutations(),false);assert.equal(h.encoded.length,0);
  }finally{r.close();}
 });
 test("current producer retries unknown delivery with byte-identical append",async()=>{
  const h=harness();h.lost=1;const r=runtime({},[{seq:0n,event_type:"seat.facet",payload:{draft:"text"}}]);
- try{await r.attachSeat();await new Promise(resolve=>setTimeout(resolve,180));
+ try{await r.attachSeat();await until(()=>h.encoded.length>=2);await idle();
  assert.equal(h.encoded.length,2);assert.equal(h.encoded[0],h.encoded[1]);assert.equal(h.storage.size,0);
  assert.equal(JSON.parse(h.encoded[0]).presentation_id,"A");}finally{r.close();}
 });
 for(const status of [401,403])test(`authentication ${status} reconciles presentation membership`,async()=>{
  const h=harness();h.auth=status;const r=runtime({},[{seq:0n,event_type:"seat.facet",payload:{draft:"text"}}]);
- try{await r.attachSeat();await pause();await pause();assert.equal(h.encoded.length,2);
+ try{await r.attachSeat();await until(()=>h.encoded.length>=2);await idle();assert.equal(h.encoded.length,2);
  assert.equal(h.encoded[0],h.encoded[1]);assert.equal(h.storage.size,0);}finally{r.close();}
 });
 test("authentication reconciliation refuses missing mandatory subject without resending",async()=>{
  const h=harness();h.auth=403;
  h.current=()=>({session_id:"session",binding_attachments:[root],presentations:[{...coord("A"),root_binding:root}]});
  const r=runtime({},[{seq:0n,event_type:"seat.facet",payload:{draft:"retained"}}]);
- try{await r.attachSeat();for(let i=0;i<20&&r.currentProducer()!==null;i++)await pause();
+ try{await r.attachSeat();await until(()=>r.currentProducer()===null);
   assert.equal(h.encoded.length,1);assert.equal(h.storage.size,1);assert.equal(r.currentProducer(),null);
  }finally{r.close();}
 });
@@ -979,7 +996,7 @@ test("invalidation during relinquishment observation cannot restore writer permi
    }) : post(url,body);
    const pending=r.relinquish();await observed;
    if(!rejectObservation)events.push({seq:9n,event_type:"seat.facet",payload:{draft:"during observation"}});
-   emit("ui_seat.replay.invalidated.v1",{schema:1});await pause();release();
+   emit("ui_seat.replay.invalidated.v1",{schema:1});await idle();release();
    await assert.rejects(pending,rejectObservation?/observation failed/:/invalidated/);
    assert.equal(r.canAcceptMutations(),false);
    assert.equal(r.currentProducer(),null);
@@ -1002,7 +1019,7 @@ test("late heartbeat refusal from a disposed producer cannot publish failure",as
   ?new Promise((_resolve,reject)=>{rejectTouch=reject;}):post(url,body);
  const committed=[];const r=runtime({commitEvent:event=>committed.push(event)});
  try{await r.attachSeat();heartbeat();r.close();const count=committed.length;
-  rejectTouch(new Error("late heartbeat"));await pause();assert.equal(committed.length,count);
+  rejectTouch(new Error("late heartbeat"));await idle();assert.equal(committed.length,count);
  }finally{r.close();globalThis.setInterval=interval;}
 });
 test("touch renewal requires exact coordinates, touched true, and no extra fields",()=>{
@@ -1024,7 +1041,7 @@ test("definitive touch refusal fences only the current producer and overlapping 
   ?(touches++,new Promise((_resolve,reject)=>{rejectTouch=reject;})):post(url,body);
  const unavailable=[];const r=runtime({onUnavailable:value=>unavailable.push(value)});
  try{await r.attachSeat();heartbeat();heartbeat();assert.equal(touches,1);
-  rejectTouch(new HttpResponseError(404));await pause();
+  rejectTouch(new HttpResponseError(404));await idle();
   assert.equal(r.currentProducer(),null);assert.equal(r.canAcceptMutations(),false);
   assert.equal(unavailable.length,1);assert.equal(unavailable[0].kind,"writer_refused");
   heartbeat();assert.equal(touches,1);
@@ -1037,7 +1054,7 @@ test("blocked reconnect cannot discard an uncaptured local seat suffix",async()=
   ? Promise.reject(new HttpResponseError(404)) : post(url,body);
  const r=runtime({seatEvents:()=>events},events);
  try{
-  await r.attachSeat();r.completeEngineBootstrap();heartbeat();await pause();
+  await r.attachSeat();r.completeEngineBootstrap();heartbeat();await idle();
   assert.equal(r.canAcceptMutations(),false);
   events.push({seq:7n,event_type:"seat.facet",payload:{draft:"uncaptured"}});
   await assert.rejects(r.reconnect({kind:"independent"}),/uncaptured seat mutations/);
@@ -1059,7 +1076,7 @@ test("malformed success and transient touch failure retry without fencing the pr
  const unavailable=[];const r=runtime({onUnavailable:value=>unavailable.push(value)});
  try{await r.attachSeat();r.completeEngineBootstrap();
   for(let expected=1;expected<=3;expected++){
-   heartbeat();await pause();assert.equal(touches,expected);
+   heartbeat();await idle();assert.equal(touches,expected);
    assert.ok(r.currentProducer());assert.equal(r.canAcceptMutations(),true);
   }
   assert.equal(unavailable.length,0);
@@ -1069,12 +1086,12 @@ test("close during admitted append preserves exact recovery after late success",
  const h=harness();let deliver,started;const sent=new Promise(resolve=>{started=resolve;});
  h.append=body=>new Promise(resolve=>{deliver=()=>resolve(ack(body));started();});
  const r=runtime({},[{seq:0n,event_type:"seat.facet",payload:{draft:"text"}}]);
- await r.attachSeat();await sent;assert.equal(h.storage.size,1);r.close();deliver();await pause();
+ await r.attachSeat();await sent;assert.equal(h.storage.size,1);r.close();deliver();await idle();
  assert.equal(h.storage.size,1);assert.equal(h.calls.filter(c=>c.url.endsWith("/close")).length,0);
 });
 test("bounded append batches fit route bytes and advance contiguous intervals",async()=>{
  const h=harness();const r=runtime({},[0,1].map(seq=>({seq:BigInt(seq),event_type:"seat.facet",payload:{draft:"x".repeat(40000)}})));
- try{await r.attachSeat();for(let i=0;i<100&&h.encoded.length<2;i++)await pause();
+ try{await r.attachSeat();await until(()=>h.encoded.length>=2);
  assert.equal(h.encoded.length,2);assert.ok(h.encoded.every(body=>Buffer.byteLength(body)<=65536));
  const [first,second]=h.encoded.map(JSON.parse);assert.equal(first.first_engine_seq,"0");assert.equal(second.first_engine_seq,"1");
  assert.equal(h.identityInputs.length,2);
@@ -1089,7 +1106,7 @@ test("prepared producer position cannot be rebased by the browser batch adapter"
  const h=harness(),committed=[];
  const r=runtime({commitEvent:event=>committed.push(event)},[{seq:901n,event_type:"seat.presentation_operation.prepared",
   payload:{schema:2,prepared_engine_seq:1n}}]);
- try{await r.attachSeat();for(let i=0;i<10;i++)await pause();assert.equal(h.encoded.length,0);
+ try{await r.attachSeat();await idle();assert.equal(h.encoded.length,0);
   assert.equal(h.identityInputs.length,0);assert.ok(committed.some(event=>event.error?.error.includes("reserved producer position")));
  }finally{r.close();}
 });
@@ -1103,7 +1120,7 @@ test("predecessor random append identity is refused without deleting recovery ev
 });
 test("signed append route bound controls batching instead of a browser default",async()=>{
  const h=harness();const r=runtime({maxSeatAppendBytes:2000n},[0,1].map(seq=>({seq:BigInt(seq),event_type:"seat.facet",payload:{draft:"x".repeat(1100)}})));
- try{await r.attachSeat();for(let i=0;i<100&&h.encoded.length<2;i++)await pause();
+ try{await r.attachSeat();await until(()=>h.encoded.length>=2);
  assert.equal(h.encoded.length,2);assert.ok(h.encoded.every(body=>Buffer.byteLength(body)<=2000));
  }finally{r.close();}
 });
@@ -1134,6 +1151,6 @@ test("disposal during hashing cannot retain or initiate append",async()=>{
  Object.defineProperty(globalThis,"crypto",{configurable:true,value:{randomUUID:()=>webcrypto.randomUUID(),subtle:{
  digest:()=>new Promise(resolve=>{release=()=>resolve(new ArrayBuffer(32));started();})}}});
  const r=runtime({},[{seq:0n,event_type:"seat.facet",payload:{draft:"text"}}]);
- try{await r.attachSeat();await hashing;r.close();release();await pause();assert.equal(h.encoded.length,0);assert.equal(h.storage.size,0);}
- finally{r.close();Object.defineProperty(globalThis,"crypto",{configurable:true,value:webcrypto});}
+ try{await r.attachSeat();await hashing;r.close();release();await idle();assert.equal(h.encoded.length,0);assert.equal(h.storage.size,0);}
+ finally{r.close();Object.defineProperty(globalThis,"crypto",{configurable:true,value:trackedCrypto});}
 });
