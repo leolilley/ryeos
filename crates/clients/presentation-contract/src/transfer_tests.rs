@@ -7,12 +7,17 @@ fn transfer_family_classification_includes_lifecycle_and_future_versions() {
     assert!(is_transfer_testimony(
         crate::transfer_lifecycle::TRANSFER_LIFECYCLE_EVENT
     ));
-    assert!(is_transfer_testimony(
-        crate::transfer_lifecycle_v2::TRANSFER_LIFECYCLE_V2_EVENT
-    ));
-    assert!(is_transfer_testimony(
+    for earlier_or_later in [
+        "contract.ryeos_ui.presentation_transfer_lifecycle.v1",
+        "contract.ryeos_ui.presentation_transfer_lifecycle.v2",
+        "contract.ryeos_ui.presentation_transfer_lifecycle.v4",
+    ] {
+        assert!(is_transfer_testimony(earlier_or_later));
+    }
+    assert_eq!(
+        crate::transfer_lifecycle::TRANSFER_LIFECYCLE_EVENT,
         "contract.ryeos_ui.presentation_transfer_lifecycle.v3"
-    ));
+    );
     assert!(!is_transfer_testimony("seat.facet"));
     assert!(!is_transfer_testimony("contract.ryeos_ui.other.v1"));
 }

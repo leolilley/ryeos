@@ -9,7 +9,6 @@ pub mod payload_digest;
 pub mod seat_control;
 pub mod transfer;
 pub mod transfer_lifecycle;
-pub mod transfer_lifecycle_v2;
 pub mod transfer_proof;
 pub mod transfer_state;
 

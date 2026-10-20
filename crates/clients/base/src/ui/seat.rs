@@ -617,7 +617,7 @@ mod tests {
         for event_type in [
             ryeos_ui_presentation_contract::transfer::TRANSFER_EVENT,
             ryeos_ui_presentation_contract::transfer_lifecycle::TRANSFER_LIFECYCLE_EVENT,
-            ryeos_ui_presentation_contract::transfer_lifecycle_v2::TRANSFER_LIFECYCLE_V2_EVENT,
+            "contract.ryeos_ui.presentation_transfer_lifecycle.v2",
             ryeos_ui_presentation_contract::move_freeze_lifecycle::MOVE_FREEZE_CANCELLED_EVENT,
             "contract.ryeos_ui.presentation_transfer_lifecycle.v3",
         ] {

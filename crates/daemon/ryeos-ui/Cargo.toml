@@ -25,6 +25,7 @@ ryeos-executor = { workspace = true }
 ryeos-runtime = { workspace = true }
 ryeos-scheduler-service = { workspace = true, optional = true }
 ryeos-state = { workspace = true }
+ryeos-ui-presentation-contract = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }

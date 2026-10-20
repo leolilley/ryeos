@@ -395,10 +395,6 @@ impl ColdSeatReplay {
             ryeos_ui_presentation_contract::transfer_lifecycle::TRANSFER_LIFECYCLE_EVENT => {
                 ryeos_ui_presentation_contract::transfer_lifecycle::from_event_value(row)?.payload
             }
-            ryeos_ui_presentation_contract::transfer_lifecycle_v2::TRANSFER_LIFECYCLE_V2_EVENT => {
-                ryeos_ui_presentation_contract::transfer_lifecycle_v2::from_event_value(row)?
-                    .payload
-            }
             _ => return Err("unsupported transfer testimony family".into()),
         };
         let sequence = row

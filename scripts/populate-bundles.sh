@@ -640,6 +640,20 @@ if bundle_in_set modal-sandbox; then
   require_static_payload "$PAYLOAD_STAGE/modal-sandbox/ryeos-modal-guest-launcher"
   require_static_payload "$PAYLOAD_STAGE/modal-sandbox/ryeos-modal-sandbox-lifecycle-adapter"
 fi
+
+# Payloads one bundle builds and other bundles carry are installed from that
+# single build; the staged record holds the one digest every copy must match.
+shared_payload_tool() {
+  "$ROOT/scripts/release/shared-static-payloads.py" --repository-root "$ROOT" "$@" || {
+    ryeos_term_fail "shared static payload staging was rejected"
+    exit 2
+  }
+}
+shared_payload_tool records --bundle-set "$BUNDLE_SET" >/dev/null
+shared_payload_tool stage --bundle-set "$BUNDLE_SET" --stage-dir "$PAYLOAD_STAGE"
+while IFS=$'\t' read -r shared_bundle shared_binary; do
+  require_static_payload "$PAYLOAD_STAGE/$shared_bundle/$shared_binary"
+done < <(shared_payload_tool records --bundle-set "$BUNDLE_SET")
 prepare_bundle_trees
 
 # ── Stage binaries (only what each bundle owns) ──────────────────────
@@ -650,6 +664,11 @@ while IFS=$'\t' read -r payload_bundle payload_binary _payload_package _payload_
     "$PAYLOAD_STAGE/$payload_bundle/$payload_binary" \
     "$ROOT/bundles/$payload_bundle/.ai/bin/$TRIPLE/$payload_binary"
 done < <(staged_payload_records_for_set)
+while IFS=$'\t' read -r shared_bundle shared_binary; do
+  install -Dm755 \
+    "$PAYLOAD_STAGE/$shared_bundle/$shared_binary" \
+    "$ROOT/bundles/$shared_bundle/.ai/bin/$TRIPLE/$shared_binary"
+done < <(shared_payload_tool records --bundle-set "$BUNDLE_SET")
 
 # ── Publish ──────────────────────────────────────────────────────────
 
@@ -729,5 +748,10 @@ publish_bundle opencode "$OPENCODE" "signed manifests" "$KNOWLEDGE"
 publish_bundle local-inference "$LOCAL_INFERENCE" "signed manifests" "$DIRECTIVE" "$GRAPH" "$KNOWLEDGE"
 publish_bundle bundle-release "$RELEASE_BUNDLE" "signed release-authoring contracts" "$GRAPH"
 publish_bundle bundle-source "$BUNDLE_SOURCE" "signed catalog authority contracts"
+
+if [[ -s "$PAYLOAD_STAGE/shared-payloads.json" && "$(<"$PAYLOAD_STAGE/shared-payloads.json")" != "{}" ]]; then
+  ryeos_term_update "verifying shared static payloads" "one build, one hash"
+  shared_payload_tool verify --triple "$TRIPLE" --stage-dir "$PAYLOAD_STAGE"
+fi
 
 ryeos_term_end success "PUBLISH COMPLETE" "$BUNDLE_SET bundle set"

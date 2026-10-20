@@ -153,7 +153,8 @@ pub use state_db::{
     PendingRemoveHeadState, PendingReplayReport, PinnedStateAuthority, PreparedOfflineProjection,
     ProjectionRecoveryObserver, ProjectionRecoveryProgress, ProjectionRecoveryStage,
     ProjectionRepairRequest, ProjectionRepairSink, ProjectionStatus, RetiredChainDependency,
-    RuntimeLivenessInspector, StateDb, TwoAnchorAdmissionView, TwoAnchorThreadAppend,
+    RuntimeLivenessInspector, SingleAnchorAdmissionView, SingleAnchorThreadAppend, StateDb,
+    TwoAnchorAdmissionView, TwoAnchorThreadAppend,
 };
 pub use state_db::{
     ChainRetirement, ChainRetirementReport, FencedRetirementReplay, RetirementEvidenceRef,

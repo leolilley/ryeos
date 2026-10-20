@@ -695,18 +695,48 @@ fn seat_append_with_a_paired_cut_checks_the_counterpart_and_retired_fences() {
             .unwrap(),
         CutAppendResult::Committed(_)
     ));
-    // Retired dependencies without a live counterpart cannot be guarded.
+    // Retired dependencies without a live counterpart are guarded by the
+    // target's own frontier and the fence.
     let a = anchor(&store, "S-a");
+    let base = tip_seq(&store, "S-a");
     let alone = SeatCut {
         expected: &a,
         anchors: std::slice::from_ref(&a),
         retired: std::slice::from_ref(&retired),
     };
-    assert!(
+    assert!(matches!(
         store
             .append_seat_events_and_renew_if_mixed_cut(&seat("S-a"), &[event("w")], &alone)
-            .is_err()
-    );
+            .unwrap(),
+        CutAppendResult::Committed(_)
+    ));
+    assert_eq!(tip_seq(&store, "S-a"), base + 1);
+    // The same cut is now stale: the target moved, nothing is written.
+    assert!(matches!(
+        store
+            .append_seat_events_and_renew_if_mixed_cut(&seat("S-a"), &[event("v")], &alone)
+            .unwrap(),
+        CutAppendResult::Conflict
+    ));
+    assert_eq!(tip_seq(&store, "S-a"), base + 1);
+    // A dependency that still has a live head is not a retired chain.
+    let a = anchor(&store, "S-a");
+    let headed = RetiredChainDependency {
+        chain_root_id: "S-b".into(),
+        manifest_hash: retired.manifest_hash.clone(),
+    };
+    let headed_cut = SeatCut {
+        expected: &a,
+        anchors: std::slice::from_ref(&a),
+        retired: std::slice::from_ref(&headed),
+    };
+    assert!(matches!(
+        store
+            .append_seat_events_and_renew_if_mixed_cut(&seat("S-a"), &[event("u")], &headed_cut)
+            .unwrap(),
+        CutAppendResult::Conflict
+    ));
+    assert_eq!(tip_seq(&store, "S-a"), base + 1);
 }
 
 #[test]
@@ -725,14 +755,14 @@ fn mixed_cut_append_admits_under_the_locks_and_refuses_when_the_cut_moves() {
                 thread_id: "T-main",
                 events: evs,
                 expected: m,
-                counterpart: s,
+                counterpart: Some(s),
                 required_target_kind: FENCED_KIND,
                 current_anchors: &[],
                 retired: &[],
             },
             |view| {
                 assert_eq!(view.target.thread_id, "T-main");
-                assert_eq!(view.counterpart.thread_id, "T-side");
+                assert_eq!(view.counterpart.unwrap().thread_id, "T-side");
                 Ok(admit)
             },
         )
@@ -775,7 +805,7 @@ fn mixed_cut_append_admits_under_the_locks_and_refuses_when_the_cut_moves() {
                     thread_id: "T-main",
                     events: &evs,
                     expected: &m,
-                    counterpart: &s,
+                    counterpart: Some(&s),
                     required_target_kind: "directive",
                     current_anchors: &[],
                     retired: &[],
@@ -858,4 +888,367 @@ fn authoritative_thread_result_comes_from_the_signed_snapshot() {
             .get_thread_result_authoritative("S-other", "S-res", "completed")
             .is_err()
     );
+}
+
+fn wrong_closure(retired: &RetiredChainDependency) -> RetiredChainDependency {
+    RetiredChainDependency {
+        chain_root_id: retired.chain_root_id.clone(),
+        manifest_hash: "cd".repeat(32),
+    }
+}
+
+fn headed(id: &str, retired: &RetiredChainDependency) -> RetiredChainDependency {
+    RetiredChainDependency {
+        chain_root_id: id.into(),
+        manifest_hash: retired.manifest_hash.clone(),
+    }
+}
+
+#[test]
+fn refused_seat_append_never_creates_or_renews_a_lease() {
+    let store = new_store();
+    running_seat(&store, "S-x");
+    running_seat(&store, "S-y");
+    running_seat(&store, "S-z");
+    running_seat(&store, "S-gone");
+    finish(&store, "S-gone");
+    let retired = retire(&store, "S-gone");
+    let old = anchor(&store, "S-x");
+    push(&store, "S-x", "moved");
+    let a = anchor(&store, "S-x");
+    let y = anchor(&store, "S-y");
+    let base = tip_seq(&store, "S-x");
+    let try_append = |cut: &SeatCut<'_>| {
+        store.append_seat_events_and_renew_if_mixed_cut(&seat("S-x"), &[event("n")], cut)
+    };
+    let untouched = || {
+        assert_eq!(tip_seq(&store, "S-x"), base);
+        assert!(!lease_active(&store, "S-x"));
+    };
+
+    // A stale own frontier, on the single and the paired path.
+    assert!(matches!(
+        try_append(&SeatCut {
+            expected: &old,
+            anchors: std::slice::from_ref(&old),
+            retired: &[],
+        })
+        .unwrap(),
+        CutAppendResult::Conflict
+    ));
+    untouched();
+    let pair = [a.clone(), y.clone()];
+    assert!(matches!(
+        try_append(&SeatCut {
+            expected: &old,
+            anchors: &[old.clone(), y.clone()],
+            retired: &[],
+        })
+        .unwrap(),
+        CutAppendResult::Conflict
+    ));
+    untouched();
+
+    // A retired dependency that still has a head is a conflict; one whose
+    // fence names another closure is an error. Neither renews the lease.
+    let live = headed("S-z", &retired);
+    for anchors in [std::slice::from_ref(&a), pair.as_slice()] {
+        assert!(matches!(
+            try_append(&SeatCut {
+                expected: &a,
+                anchors,
+                retired: std::slice::from_ref(&live),
+            })
+            .unwrap(),
+            CutAppendResult::Conflict
+        ));
+        untouched();
+        let wrong = wrong_closure(&retired);
+        assert!(
+            try_append(&SeatCut {
+                expected: &a,
+                anchors,
+                retired: std::slice::from_ref(&wrong),
+            })
+            .is_err()
+        );
+        untouched();
+    }
+
+    // A second, different anchor for the seat's own chain is malformed on
+    // both paths.
+    assert!(
+        try_append(&SeatCut {
+            expected: &a,
+            anchors: &[a.clone(), old.clone()],
+            retired: &[],
+        })
+        .is_err()
+    );
+    assert!(
+        try_append(&SeatCut {
+            expected: &a,
+            anchors: &[a.clone(), old.clone(), y.clone()],
+            retired: &[],
+        })
+        .is_err()
+    );
+    untouched();
+
+    // A claimed lease fences the paired path too.
+    store
+        .touch_seat_lease_if_anchors(&seat("S-x"), &a, std::slice::from_ref(&a))
+        .unwrap();
+    assert!(store.claim_expired_seat_lease("S-x", i64::MAX).unwrap());
+    assert!(matches!(
+        try_append(&SeatCut {
+            expected: &a,
+            anchors: &pair,
+            retired: &[],
+        })
+        .unwrap(),
+        CutAppendResult::NotRunning
+    ));
+    assert_eq!(tip_seq(&store, "S-x"), base);
+
+    // A finished seat and a running chain of an unfenced kind are not seats.
+    running(&store, "S-plain", "directive");
+    let plain = anchor(&store, "S-plain");
+    assert!(matches!(
+        store
+            .append_seat_events_and_renew_if_anchor(&seat("S-plain"), &[event("n")], &plain)
+            .unwrap(),
+        CutAppendResult::NotRunning
+    ));
+    assert!(!lease_active(&store, "S-plain"));
+    finish(&store, "S-y");
+    let y = anchor(&store, "S-y");
+    let done = tip_seq(&store, "S-y");
+    assert!(matches!(
+        store
+            .append_seat_events_and_renew_if_anchor(&seat("S-y"), &[event("n")], &y)
+            .unwrap(),
+        CutAppendResult::NotRunning
+    ));
+    assert_eq!(tip_seq(&store, "S-y"), done);
+    assert!(!lease_active(&store, "S-y"));
+}
+
+#[test]
+fn a_stopping_seat_takes_no_append_touch_or_action() {
+    let store = new_store();
+    running_seat(&store, "S-stop");
+    let a = anchor(&store, "S-stop");
+    let base = tip_seq(&store, "S-stop");
+    store
+        .request_thread_stop("S-stop", crate::runtime_db::StopIntent::Cancel)
+        .unwrap();
+    assert!(matches!(
+        store
+            .append_seat_events_and_renew_if_anchor(&seat("S-stop"), &[event("n")], &a)
+            .unwrap(),
+        CutAppendResult::NotRunning
+    ));
+    assert!(
+        !store
+            .touch_seat_lease_if_anchors(&seat("S-stop"), &a, std::slice::from_ref(&a))
+            .unwrap()
+    );
+    assert!(
+        store
+            .with_exact_seat_action_if_anchor(&seat("S-stop"), &a, || Ok(()))
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(tip_seq(&store, "S-stop"), base);
+    assert!(!lease_active(&store, "S-stop"));
+}
+
+#[test]
+fn retired_fences_gate_touch_claim_action_and_plain_mixed_append() {
+    let store = new_store();
+    running_seat(&store, "S-r");
+    running_seat(&store, "S-live");
+    running_seat(&store, "S-z");
+    running_seat(&store, "S-gone");
+    finish(&store, "S-gone");
+    let retired = retire(&store, "S-gone");
+    let a = anchor(&store, "S-r");
+    let live = anchor(&store, "S-live");
+    let on_head = headed("S-z", &retired);
+    let wrong = wrong_closure(&retired);
+    let base = tip_seq(&store, "S-r");
+
+    for anchors in [std::slice::from_ref(&a), &[a.clone(), live.clone()][..]] {
+        let cut = |dep| cut_over(&a, anchors, dep);
+        // Headed: refused without side effects. Wrong closure: an error.
+        assert!(
+            !store
+                .touch_seat_lease_if_mixed_cut(&seat("S-r"), &cut(&on_head))
+                .unwrap()
+        );
+        assert!(
+            store
+                .touch_seat_lease_if_mixed_cut(&seat("S-r"), &cut(&wrong))
+                .is_err()
+        );
+        assert!(
+            store
+                .with_exact_seat_action_if_mixed_cut(&seat("S-r"), &cut(&on_head), || Ok(()))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            !store
+                .claim_closed_seat_lease_if_tip(&seat("S-r"), &cut(&on_head), |_| Ok(true))
+                .unwrap()
+        );
+        assert!(
+            store
+                .claim_closed_seat_lease_if_tip(&seat("S-r"), &cut(&wrong), |_| Ok(true))
+                .is_err()
+        );
+        assert!(!lease_active(&store, "S-r"));
+        assert!(!lease_claimed(&store, "S-r"));
+    }
+
+    // A tip the caller does not accept, or one that is not the anchor's, claims
+    // nothing; a cut whose expected anchor is not the seat root is malformed.
+    let ok = SeatCut {
+        expected: &a,
+        anchors: std::slice::from_ref(&a),
+        retired: std::slice::from_ref(&retired),
+    };
+    assert!(
+        !store
+            .claim_closed_seat_lease_if_tip(&seat("S-r"), &ok, |_| Ok(false))
+            .unwrap()
+    );
+    let foreign = SeatCut {
+        expected: &live,
+        anchors: std::slice::from_ref(&live),
+        retired: &[],
+    };
+    assert!(
+        store
+            .claim_closed_seat_lease_if_tip(&seat("S-r"), &foreign, |_| Ok(true))
+            .is_err()
+    );
+    assert!(!lease_active(&store, "S-r"));
+
+    // Under the right fence the same cut is admitted.
+    assert!(
+        store
+            .touch_seat_lease_if_mixed_cut(&seat("S-r"), &ok)
+            .unwrap()
+    );
+    assert!(
+        store
+            .with_exact_seat_action_if_mixed_cut(&seat("S-r"), &ok, || Ok(()))
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        store
+            .claim_closed_seat_lease_if_tip(&seat("S-r"), &ok, |tip| Ok(tip.thread_id == "S-r"))
+            .unwrap()
+    );
+    assert!(lease_claimed(&store, "S-r"));
+
+    // The plain mixed append honours the same fences.
+    running_seat(&store, "T-main");
+    let m = anchor(&store, "T-main");
+    let call = |dep: &RetiredChainDependency| {
+        store.append_events_if_mixed_cut(
+            &MixedCutAppend {
+                chain_root_id: "T-main",
+                thread_id: "T-main",
+                events: &[event("m")],
+                expected: &m,
+                counterpart: None,
+                required_target_kind: FENCED_KIND,
+                current_anchors: &[],
+                retired: std::slice::from_ref(dep),
+            },
+            |view| {
+                assert!(view.counterpart.is_none());
+                Ok(true)
+            },
+        )
+    };
+    let main_base = tip_seq(&store, "T-main");
+    assert!(matches!(call(&on_head).unwrap(), CutAppendResult::Conflict));
+    assert!(call(&wrong).is_err());
+    assert_eq!(tip_seq(&store, "T-main"), main_base);
+    assert!(matches!(
+        call(&retired).unwrap(),
+        CutAppendResult::Committed(_)
+    ));
+    assert_eq!(tip_seq(&store, "T-main"), main_base + 1);
+    assert!(matches!(call(&retired).unwrap(), CutAppendResult::Conflict));
+    assert_eq!(tip_seq(&store, "T-main"), main_base + 1);
+    assert_eq!(tip_seq(&store, "S-r"), base);
+}
+
+#[test]
+fn an_append_error_resolves_from_signed_history() {
+    let store = new_store();
+    running_seat(&store, "E-1");
+    let batch = [event("one")];
+    let attempted = StateStore::durable_cut_events(&batch, "E-1", "E-1").unwrap();
+    let predecessor = || {
+        store
+            .lock()
+            .unwrap()
+            .state_db
+            .read_authoritative_thread_append_anchor("E-1", "E-1")
+            .unwrap()
+            .unwrap()
+    };
+    let resolve = |predecessor: &_| {
+        let g = store.lock().unwrap();
+        StateStore::cut_append_result(
+            &g,
+            "E-1",
+            "E-1",
+            predecessor,
+            &attempted,
+            &batch,
+            Err(anyhow!("boom")),
+        )
+    };
+    let base = tip_seq(&store, "E-1");
+
+    // Nothing published: the original error.
+    let before = predecessor();
+    let error = resolve(&before).unwrap_err();
+    assert_eq!(error.to_string(), "boom");
+    assert!(error.downcast_ref::<EventAppendCommitUncertain>().is_none());
+
+    // The exact batch published before the error: committed, exactly once.
+    push(&store, "E-1", "one");
+    let Some(CutAppendResult::Committed(records)) = resolve(&before).unwrap() else {
+        panic!("a published batch resolves to committed");
+    };
+    assert_eq!(records.len(), 1);
+    assert_eq!(tip_seq(&store, "E-1"), base + 1);
+
+    // A different batch at that position cannot be told from ours.
+    let before = predecessor();
+    push(&store, "E-1", "other");
+    let error = resolve(&before).unwrap_err();
+    assert!(error.downcast_ref::<EventAppendCommitUncertain>().is_some());
+    assert_eq!(tip_seq(&store, "E-1"), base + 2);
+}
+
+fn cut_over<'a>(
+    expected: &'a Anchor,
+    anchors: &'a [Anchor],
+    dep: &'a RetiredChainDependency,
+) -> SeatCut<'a> {
+    SeatCut {
+        expected,
+        anchors,
+        retired: std::slice::from_ref(dep),
+    }
 }

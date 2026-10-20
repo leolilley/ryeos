@@ -3285,11 +3285,17 @@ async fn complete_shutdown_drain<T>(
 /// The one injection point for the domain composition's retention hooks: its
 /// event payload contracts, retained-evidence validator, fenced-chain
 /// qualifier and claimed-seat settler, supplied together or not at all. The
-/// UI composition supplies them by returning `Some` here; until it does the
-/// root installs the plain object contracts and no validator, so retirement
-/// of fenced kinds refuses instead of running on a stand-in.
+/// UI composition supplies them; its qualifier reads the store bound by
+/// [`bind_retention_store`] once the store is open.
 fn retention_composition() -> Option<ryeos_api::maintenance::RetentionComposition> {
-    None
+    Some(ryeos_ui::transfer_store::retention::retention_composition())
+}
+
+/// Give the retention qualifier the open store it reads. The qualifier hook
+/// receives only a chain root, so this binding is how it reaches the store.
+fn bind_retention_store(store: &Arc<state_store::StateStore>) -> Result<()> {
+    ryeos_ui::transfer_store::retention::bind_retention_store(store)
+        .context("bind the retention qualifier's store")
 }
 
 fn service_descriptors() -> &'static [ryeos_app::service_registry::ServiceDescriptor] {
@@ -4454,6 +4460,7 @@ async fn run(
             let (state_store, write_barrier) = state_store;
             let state_store = Arc::new(state_store);
             composition.install_live_state_store(Arc::clone(&state_store));
+            bind_retention_store(&state_store)?;
             tracing::info!("StateStore initialized successfully");
 
             // StateDb::open owns the one deterministic pending-transition replay
