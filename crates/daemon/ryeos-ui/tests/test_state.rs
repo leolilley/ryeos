@@ -76,9 +76,17 @@ pub fn mint_launch(
     state: &AppState,
     mut context: ryeos_ui::browser_session::LaunchContext,
 ) -> (String, String) {
-    Arc::make_mut(&mut context.compiled_binding)
-        .binding
-        .node_policy_generation_digest = state.node_policy.generation_digest().to_owned();
+    let identity = state
+        .engine
+        .with_checked_bundle_generation(|generation| -> anyhow::Result<String> {
+            Ok(generation.request_engine_generation_identity().to_owned())
+        })
+        .expect("live engine generation");
+    {
+        let binding = &mut Arc::make_mut(&mut context.compiled_binding).binding;
+        binding.node_policy_generation_digest = state.node_policy.generation_digest().to_owned();
+        binding.request_engine_generation_identity = identity;
+    }
     let (session_id, token, _) = ryeos_ui::state::get_ui_state(state)
         .expect("UI state")
         .browser_sessions

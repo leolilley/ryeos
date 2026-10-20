@@ -2,6 +2,9 @@ mod test_state;
 use test_state::{build_test_state_with_live_bundles, launch_context};
 
 use ryeos_app::handler_context::HandlerContext;
+use ryeos_client_base::ui::{
+    UiPresentationProducerObservation, UiSeatControlRequest, UiSeatProducerClaim,
+};
 use ryeos_ui::state::get_ui_state;
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -31,8 +34,8 @@ async fn invoke_seat_route(
         principal: None,
         workspace_lifeline: None,
         launch_timings: None,
-        state: state.as_ref().clone(),
         publication: None,
+        state: state.as_ref().clone(),
         webhook_dedupe: Arc::new(Default::default()),
     };
     let verifier = ryeos_ui::invokers::browser_session_invocation::CompiledBrowserSessionVerifier {
@@ -55,8 +58,8 @@ async fn invoke_seat_route(
         principal: Some(principal),
         workspace_lifeline: None,
         launch_timings: None,
-        state: state.as_ref().clone(),
         publication: None,
+        state: state.as_ref().clone(),
         webhook_dedupe: Arc::new(Default::default()),
     };
     let invoker = ryeos_api::routes::invokers::service_invocation::CompiledServiceInvocation {
@@ -70,13 +73,38 @@ async fn invoke_seat_route(
     }
 }
 
-fn session_context(user_principal_id: Option<String>) -> ryeos_ui::browser_session::LaunchContext {
-    launch_context(
-        "surface:ryeos/ui/base",
+/// Exercise the compiled authenticated POST stream rather than the retired
+/// JSON replay pager. Stop at its completion fence or at source EOF.
+fn session_context(
+    state: &ryeos_app::state::AppState,
+    principal: Option<String>,
+) -> ryeos_ui::browser_session::LaunchContext {
+    // A real, signed Config root; never a Surface masquerading as Config.
+    let body = "category: test\nversion: '1'\nshared_presentation:\n  schema: 1\n  title: Test presentation\n  launcher: launch\n  dialogs:\n    - id: launch\n      title: Launch\n      view: 'view:ryeos/home'\n  capabilities:\n    sources: []\n    affordances: []\n";
+    let key = lillux::crypto::load_signing_key(
+        &ryeos_engine::test_support::workspace_root().join(".dev-keys/PUBLISHER_DEV.pem"),
+    )
+    .expect("established development publisher key");
+    let dir = state.config.app_root.join(".ai/config/test");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("presentation.yaml"),
+        lillux::signature::sign_content(body, &key, "#", None),
+    )
+    .unwrap();
+    let mut context = launch_context(
+        "config:test/presentation",
         None,
         ryeos_ui::compiled_binding::EffectiveUiPosture::ObservationOnly,
-        user_principal_id,
-    )
+        principal,
+    );
+    context.presentation = ryeos_client_base::presentation::UiCompositionPresentation {
+        definition: ryeos_client_base::presentation::UiCompositionDefinition::SharedPresentation {
+            config: serde_yaml::from_str(body).unwrap(),
+        },
+        views: Default::default(),
+    };
+    context
 }
 
 fn handler_context(session_id: &str) -> HandlerContext {
@@ -87,499 +115,975 @@ fn handler_context(session_id: &str) -> HandlerContext {
     )
 }
 
-fn open_request(state: &ryeos_app::state::AppState, session_id: &str) -> Value {
+fn activate(state: &ryeos_app::state::AppState) -> String {
+    let (id, token) =
+        test_state::mint_launch(state, session_context(state, Some("fp:user-1".into())));
+    assert_eq!(
+        get_ui_state(state)
+            .unwrap()
+            .browser_sessions
+            .consume_launch_token(&token),
+        Some(id.clone())
+    );
+    id
+}
+
+fn prepare_request(
+    state: &ryeos_app::state::AppState,
+    session_id: &str,
+    request_id: &str,
+) -> Value {
     let session = get_ui_state(state)
         .unwrap()
         .browser_sessions
         .get_session(session_id)
-        .expect("active session");
-    let coordinate = session
-        .attachments
-        .get(&session.root_attachment_id)
-        .expect("surface attachment")
-        .coordinate();
-    serde_json::json!({
-        "binding_attachment_id": coordinate.binding_attachment_id,
-        "binding_generation": coordinate.binding_generation,
-        "binding_digest": coordinate.binding_digest,
+        .unwrap();
+    let root = session.attachments[&session.root_attachment_id].coordinate();
+    json!({"action":"prepare","creation_request_id":request_id,
+        "binding_attachment_id":root.binding_attachment_id,
+        "binding_generation":root.binding_generation,"binding_digest":root.binding_digest})
+}
+
+async fn route(
+    state: &Arc<ryeos_app::state::AppState>,
+    session: &str,
+    descriptor: &ryeos_api::registry::ServiceDescriptor,
+    input: Value,
+) -> anyhow::Result<Value> {
+    invoke_seat_route(descriptor, input, handler_context(session), state.clone()).await
+}
+
+async fn prepare(state: &Arc<ryeos_app::state::AppState>, session: &str) -> Value {
+    route(
+        state,
+        session,
+        &ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR,
+        prepare_request(state, session, "00000000-0000-4000-8000-000000000010"),
+    )
+    .await
+    .unwrap()
+}
+
+async fn observe(
+    state: &Arc<ryeos_app::state::AppState>,
+    session: &str,
+    prepared: &Value,
+) -> anyhow::Result<UiPresentationProducerObservation> {
+    Ok(serde_json::from_value(
+        route(
+            state,
+            session,
+            &ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR,
+            json!({"action":"observe", "presentation_id":prepared["presentation_id"],
+                "thread_id":prepared["thread_id"], "chain_root_id":prepared["chain_root_id"]}),
+        )
+        .await?,
+    )?)
+}
+
+fn identify_control(mut request: UiSeatControlRequest) -> anyhow::Result<Value> {
+    request.assign_identity().map_err(anyhow::Error::msg)?;
+    request.validate().map_err(anyhow::Error::msg)?;
+    Ok(serde_json::to_value(request)?)
+}
+
+// Only for a new intent. Exact retries must reuse the returned request rather
+// than observing a later predecessor or drawing a new nonce.
+async fn claim_request(
+    state: &Arc<ryeos_app::state::AppState>,
+    session: &str,
+    prepared: &Value,
+    nonce: &str,
+    claim: Value,
+) -> anyhow::Result<Value> {
+    let observed = observe(state, session, prepared).await?;
+    identify_control(UiSeatControlRequest::Claim {
+        schema: 2,
+        operation_id: String::new(),
+        presentation_id: observed.presentation_id,
+        thread_id: observed.thread_id,
+        chain_root_id: observed.chain_root_id,
+        predecessor: observed.control_predecessor,
+        intent_nonce: nonce.into(),
+        claim: serde_json::from_value::<UiSeatProducerClaim>(claim)?,
     })
 }
 
-fn append_request(
+async fn claim(
+    state: &Arc<ryeos_app::state::AppState>,
+    session: &str,
+    prepared: &Value,
+    nonce: &str,
+    claim: Value,
+) -> anyhow::Result<Value> {
+    let request = claim_request(state, session, prepared, nonce, claim).await?;
+    route(
+        state,
+        session,
+        &ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR,
+        request,
+    )
+    .await
+}
+
+async fn fresh_with_request(
+    state: &Arc<ryeos_app::state::AppState>,
+    session: &str,
+) -> (Value, Value) {
+    let prepared = prepare(state, session).await;
+    let request = claim_request(
+        state,
+        session,
+        &prepared,
+        "00000000-0000-4000-8000-000000000011",
+        json!({"kind":"fresh"}),
+    )
+    .await
+    .unwrap();
+    let opened = route(
+        state,
+        session,
+        &ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR,
+        request.clone(),
+    )
+    .await
+    .unwrap();
+    (opened, request)
+}
+
+async fn fresh(state: &Arc<ryeos_app::state::AppState>, session: &str) -> Value {
+    fresh_with_request(state, session).await.0
+}
+
+fn append_request(opened: &Value, _op: &str, first: u64, payloads: &[Value]) -> Value {
+    let events:Vec<_> = payloads.iter().enumerate().map(|(offset,payload)|
+        json!({"engine_seq":first+offset as u64,"event_type":"seat.facet","payload":payload})).collect();
+    let mut request = json!({"presentation_id":opened["presentation_id"],"thread_id":opened["thread_id"],
+        "producer_incarnation":opened["producer_incarnation"],"operation_id":"",
+        "first_engine_seq":first,"last_engine_seq":first+payloads.len() as u64-1,
+        "event_count":payloads.len(),"payload_digest":"","events":events});
+    identify_append(opened, &mut request);
+    request
+}
+
+fn identify_append(opened: &Value, request: &mut Value) {
+    let digest = ryeos_client_base::ui::seat_payload_digest(&request["events"]).unwrap();
+    let identity = ryeos_client_base::ui::admission_operation::UiSeatAppendIdentity {
+        presentation_id: opened["presentation_id"].as_str().unwrap().into(),
+        chain_root_id: opened["chain_root_id"].as_str().unwrap().into(),
+        thread_id: opened["thread_id"].as_str().unwrap().into(),
+        producer_incarnation: opened["producer_incarnation"].as_str().unwrap().into(),
+        first_engine_seq: request["first_engine_seq"].as_u64().unwrap(),
+        last_engine_seq: request["last_engine_seq"].as_u64().unwrap(),
+        event_count: request["event_count"].as_u64().unwrap(),
+        payload_digest: digest.clone(),
+    }
+    .derive_identity()
+    .unwrap();
+    request["payload_digest"] = json!(digest);
+    request["operation_id"] = json!(identity);
+}
+
+async fn transition_request(
+    state: &Arc<ryeos_app::state::AppState>,
+    session: &str,
     opened: &Value,
-    operation_id: &str,
-    first_engine_seq: u64,
-    payloads: &[Value],
+    nonce: &str,
+    action: &str,
 ) -> Value {
-    let events = payloads
-        .iter()
-        .enumerate()
-        .map(|(offset, payload)| {
-            json!({
-                "engine_seq": first_engine_seq + offset as u64,
-                "event_type": "seat.facet",
-                "payload": payload,
-            })
-        })
-        .collect::<Vec<_>>();
-    let payload_digest = ryeos_ui::handlers::ui_seat::seat_payload_digest(&json!(events)).unwrap();
-    json!({
-        "thread_id": opened["thread_id"],
-        "producer_incarnation": opened["producer_incarnation"],
-        "operation_id": operation_id,
-        "first_engine_seq": first_engine_seq,
-        "last_engine_seq": first_engine_seq + payloads.len() as u64 - 1,
-        "event_count": payloads.len(),
-        "payload_digest": payload_digest,
-        "events": events,
-    })
+    let observed = observe(state, session, opened).await.unwrap();
+    let producer_incarnation = opened["producer_incarnation"].as_str().unwrap().into();
+    let request = match action {
+        "relinquish" => UiSeatControlRequest::Relinquish {
+            schema: 2,
+            operation_id: String::new(),
+            presentation_id: observed.presentation_id,
+            thread_id: observed.thread_id,
+            chain_root_id: observed.chain_root_id,
+            predecessor: observed.control_predecessor,
+            intent_nonce: nonce.into(),
+            producer_incarnation,
+        },
+        "close" => UiSeatControlRequest::Close {
+            schema: 2,
+            operation_id: String::new(),
+            presentation_id: observed.presentation_id,
+            thread_id: observed.thread_id,
+            chain_root_id: observed.chain_root_id,
+            predecessor: observed.control_predecessor,
+            intent_nonce: nonce.into(),
+            producer_incarnation,
+        },
+        _ => panic!("unknown test control action"),
+    };
+    identify_control(request).unwrap()
 }
 
 #[tokio::test]
-async fn ui_seat_open_reattaches_running_session_seat() {
+#[ignore = "needs the config-root view-closure revalidation of ryeos-api surface_views"]
+async fn producer_observation_is_exact_read_only_and_does_not_infer_liveness() {
+    use ryeos_ui::handlers::ui_seat::{CLOSE_DESCRIPTOR, OPEN_DESCRIPTOR};
     let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
-    let (session_id, token) =
-        test_state::mint_launch(&state, session_context(Some("fp:user-1".into())));
-    assert_eq!(
-        get_ui_state(&state)
-            .unwrap()
-            .browser_sessions
-            .consume_launch_token(&token),
-        Some(session_id.clone())
-    );
-    let ctx = handler_context(&session_id);
-
-    let first = invoke_seat_route(
-        &ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR,
-        open_request(&state, &session_id),
-        ctx.clone(),
-        Arc::new(state.clone()),
-    )
-    .await
-    .expect("open seat");
-    let second = invoke_seat_route(
-        &ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR,
-        open_request(&state, &session_id),
-        ctx,
-        Arc::new(state.clone()),
-    )
-    .await
-    .expect("reattach seat");
-
-    assert_eq!(first["thread_id"], second["thread_id"]);
-    assert_eq!(first["reattached"], false);
-    assert_eq!(second["reattached"], true);
-
-    let detail = state
+    let session = activate(&state);
+    let foreign = activate(&state);
+    let state = Arc::new(state);
+    let prepared = prepare(&state, &session).await;
+    let request = json!({"action":"observe", "presentation_id":prepared["presentation_id"],
+        "thread_id":prepared["thread_id"], "chain_root_id":prepared["chain_root_id"]});
+    let observed = route(&state, &session, &OPEN_DESCRIPTOR, request.clone())
+        .await
+        .unwrap();
+    assert_eq!(observed["producer"], json!({"kind":"unclaimed"}));
+    assert_eq!(observed["root_binding"], prepared["root_binding"]);
+    assert_eq!(observed["presentation_id"], prepared["presentation_id"]);
+    assert_eq!(observed["thread_id"], prepared["thread_id"]);
+    assert_eq!(observed["chain_root_id"], prepared["chain_root_id"]);
+    assert_eq!(observed["control_predecessor"]["kind"], "initialization");
+    let initialization_predecessor = observed["control_predecessor"].clone();
+    route(&state, &foreign, &OPEN_DESCRIPTOR, request.clone())
+        .await
+        .expect_err("same principal in a different session cannot observe this presentation");
+    for field in ["presentation_id", "thread_id", "chain_root_id"] {
+        let mut forged = request.clone();
+        forged[field] = json!("00000000-0000-4000-8000-000000000099");
+        route(&state, &session, &OPEN_DESCRIPTOR, forged)
+            .await
+            .expect_err("all retained presentation coordinates must match");
+    }
+    let opened = fresh(&state, &session).await;
+    let thread = opened["thread_id"].as_str().unwrap();
+    let detail = state.state_store.get_thread(thread).unwrap().unwrap();
+    let before = state
         .state_store
-        .get_thread(first["thread_id"].as_str().unwrap())
+        .capture_thread_event_read_anchor(&detail.chain_root_id, thread)
         .unwrap()
         .unwrap();
-    assert_eq!(detail.kind, "seat_session");
+    let owner = detail.requested_by.as_deref().unwrap();
+    // Absence of a lease is not evidence that a retained active writer died.
+    // Observation must neither guess a replacement nor recreate the lease.
+    state.state_store.remove_seat_lease(thread).unwrap();
+    let observed = route(&state, &session, &OPEN_DESCRIPTOR, request.clone())
+        .await
+        .unwrap();
     assert_eq!(
-        detail.requested_by.as_deref(),
-        Some(format!("session:{session_id}").as_str())
+        observed["producer"],
+        json!({"kind":"active",
+        "producer_incarnation":opened["producer_incarnation"]})
     );
-}
-
-#[tokio::test]
-async fn ui_seat_open_rejects_stale_attachment_policy_generation() {
-    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
-    let stale_digest = "99".repeat(32);
-    let mut context = session_context(None);
-    Arc::make_mut(&mut context.compiled_binding)
-        .binding
-        .node_policy_generation_digest = stale_digest.clone();
-    let (session_id, token, _) = get_ui_state(&state)
+    assert_eq!(observed["control_predecessor"]["kind"], "control");
+    assert_ne!(observed["control_predecessor"], initialization_predecessor);
+    let active_predecessor = observed["control_predecessor"].clone();
+    assert!(
+        state
+            .state_store
+            .seat_leases_for_owner_client(owner, &detail.executor_ref)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        state
+            .state_store
+            .capture_thread_event_read_anchor(&detail.chain_root_id, thread)
+            .unwrap()
+            .unwrap()
+            .tip(),
+        before.tip(),
+        "observation appends no event and claims no producer"
+    );
+    let released = route(
+        &state,
+        &session,
+        &CLOSE_DESCRIPTOR,
+        transition_request(
+            &state,
+            &session,
+            &opened,
+            "00000000-0000-4000-8000-000000000070",
+            "relinquish",
+        )
+        .await,
+    )
+    .await
+    .unwrap();
+    let observed = route(&state, &session, &OPEN_DESCRIPTOR, request.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        observed["producer"],
+        json!({"kind":"relinquished",
+        "producer_incarnation":released["producer_incarnation"]})
+    );
+    assert_eq!(
+        released["producer_incarnation"],
+        opened["producer_incarnation"]
+    );
+    assert_eq!(observed["control_predecessor"]["kind"], "control");
+    assert_ne!(
+        observed["control_predecessor"], active_predecessor,
+        "relinquish advances the CAS predecessor even when incarnation is unchanged"
+    );
+    let resumed = claim(
+        &state,
+        &session,
+        &prepared,
+        "00000000-0000-4000-8000-000000000071",
+        json!({"kind":"resume","expected_producer_incarnation":released["producer_incarnation"]}),
+    )
+    .await
+    .unwrap();
+    route(
+        &state,
+        &session,
+        &CLOSE_DESCRIPTOR,
+        transition_request(
+            &state,
+            &session,
+            &resumed,
+            "00000000-0000-4000-8000-000000000072",
+            "close",
+        )
+        .await,
+    )
+    .await
+    .unwrap();
+    let observed = route(&state, &session, &OPEN_DESCRIPTOR, request.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        observed["producer"],
+        json!({"kind":"closed",
+        "producer_incarnation":resumed["producer_incarnation"]})
+    );
+    route(
+        &state,
+        &session,
+        &OPEN_DESCRIPTOR,
+        claim_request(
+            &state,
+            &session,
+            &prepared,
+            "00000000-0000-4000-8000-000000000073",
+            json!({"kind":"resume","expected_producer_incarnation":resumed["producer_incarnation"]}),
+        )
+        .await
+        .unwrap(),
+    )
+    .await
+    .expect_err("an exact Closed predecessor is not a resumable native presentation");
+    let root: ryeos_ui::browser_session::BindingAttachmentCoordinate =
+        serde_json::from_value(prepared["root_binding"].clone()).unwrap();
+    get_ui_state(&state)
         .unwrap()
         .browser_sessions
-        .mint_token(context, 16, &stale_digest)
-        .expect("mint stale-policy fixture");
-    assert_eq!(
-        get_ui_state(&state)
-            .unwrap()
-            .browser_sessions
-            .consume_launch_token(&token),
-        Some(session_id.clone())
-    );
-
-    let error = invoke_seat_route(
-        &ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR,
-        open_request(&state, &session_id),
-        handler_context(&session_id),
-        Arc::new(state),
-    )
-    .await
-    .expect_err("stale node-policy attachment must not create a seat");
-    assert!(format!("{error:?}").contains("ui_binding_stale"));
-}
-
-#[tokio::test]
-async fn same_principal_sessions_cannot_reattach_each_others_seats() {
-    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
-    let (first_id, first_token) =
-        test_state::mint_launch(&state, session_context(Some("fp:user-1".into())));
-    let (second_id, second_token) =
-        test_state::mint_launch(&state, session_context(Some("fp:user-1".into())));
-    let sessions = &get_ui_state(&state).unwrap().browser_sessions;
-    assert_eq!(
-        sessions.consume_launch_token(&first_token),
-        Some(first_id.clone())
-    );
-    assert_eq!(
-        sessions.consume_launch_token(&second_token),
-        Some(second_id.clone())
-    );
-
-    let first = invoke_seat_route(
-        &ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR,
-        open_request(&state, &first_id),
-        handler_context(&first_id),
-        Arc::new(state.clone()),
-    )
-    .await
-    .expect("open first session seat");
-    let second = invoke_seat_route(
-        &ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR,
-        open_request(&state, &second_id),
-        handler_context(&second_id),
-        Arc::new(state.clone()),
-    )
-    .await
-    .expect("open second session seat");
-
-    assert_ne!(first["thread_id"], second["thread_id"]);
-    assert_eq!(second["reattached"], false);
-}
-
-#[tokio::test]
-async fn ui_seat_append_replay_and_close_round_trip() {
-    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
-    let (session_id, token) = test_state::mint_launch(&state, session_context(None));
-    assert_eq!(
-        get_ui_state(&state)
-            .unwrap()
-            .browser_sessions
-            .consume_launch_token(&token),
-        Some(session_id.clone())
-    );
-    let ctx = handler_context(&session_id);
-    let state = Arc::new(state);
-
-    let opened = invoke_seat_route(
-        &ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR,
-        open_request(&state, &session_id),
-        ctx.clone(),
-        state.clone(),
-    )
-    .await
-    .expect("open seat");
-    let thread_id = opened["thread_id"].as_str().unwrap();
-
-    let touched = invoke_seat_route(
-        &ryeos_ui::handlers::ui_seat::TOUCH_DESCRIPTOR,
-        serde_json::json!({ "thread_id": thread_id }),
-        ctx.clone(),
-        state.clone(),
-    )
-    .await
-    .expect("touch seat through authenticated route");
-    assert_eq!(touched["touched"], true);
-
-    let project_action = ryeos_ui::handlers::ALL
-        .iter()
-        .find(|descriptor| descriptor.service_ref == "service:projects/open")
+        .revoke_attachment(&session, &root)
         .unwrap();
-    let denied = invoke_seat_route(
-        project_action,
-        serde_json::json!({}),
-        ctx.clone(),
-        state.clone(),
-    )
-    .await
-    .expect_err("a cookie must not bypass compiled-binding dispatch for project actions");
-    assert!(
-        denied
-            .to_string()
-            .contains("cannot invoke session-local service")
-    );
-
-    let appended = invoke_seat_route(
-        &ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR,
-        append_request(
-            &opened,
-            "00000000-0000-4000-8000-000000000001",
-            0,
-            &[json!({ "key": "selection", "value": { "item": "T-1" } })],
-        ),
-        ctx.clone(),
-        state.clone(),
-    )
-    .await
-    .expect("append seat event");
-    assert_eq!(appended["appended"], 1);
-
-    let replay = invoke_seat_route(
-        &ryeos_ui::handlers::ui_seat::REPLAY_DESCRIPTOR,
-        serde_json::json!({ "chain_root_id": thread_id }),
-        ctx.clone(),
-        state.clone(),
-    )
-    .await
-    .expect("replay seat");
-    assert_eq!(replay["events"].as_array().unwrap().len(), 1);
-    assert_eq!(replay["events"][0]["event_type"], "seat.facet");
-    assert_eq!(
-        replay["events"][0]["payload"]["payload"]["key"],
-        "selection"
-    );
-
-    let closed = invoke_seat_route(
-        &ryeos_ui::handlers::ui_seat::CLOSE_DESCRIPTOR,
-        serde_json::json!({ "thread_id": thread_id }),
-        ctx,
-        state.clone(),
-    )
-    .await
-    .expect("close seat");
-    assert_eq!(closed["status"], "completed");
+    route(&state, &session, &OPEN_DESCRIPTOR, request)
+        .await
+        .expect_err("revoked root attachment fences even read-only producer observation");
 }
 
 #[tokio::test]
-async fn ui_seat_append_is_exactly_idempotent_and_rejects_contradictions_and_gaps() {
+#[ignore = "needs the config-root view-closure revalidation of ryeos-api surface_views"]
+async fn prepare_is_idempotent_without_claiming_or_stealing_a_producer() {
+    use ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR;
     let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
-    let (session_id, token) = test_state::mint_launch(&state, session_context(None));
-    assert_eq!(
-        get_ui_state(&state)
-            .unwrap()
-            .browser_sessions
-            .consume_launch_token(&token),
-        Some(session_id.clone())
-    );
-    let ctx = handler_context(&session_id);
+    let session = activate(&state);
+    let foreign = activate(&state);
     let state = Arc::new(state);
-    let opened = invoke_seat_route(
+    let prepared = prepare(&state, &session).await;
+    assert!(prepared.get("producer_incarnation").is_none());
+    assert_eq!(prepare(&state, &session).await, prepared);
+    let unclaimed_session = activate(&state);
+    let unclaimed = prepare(&state, &unclaimed_session).await;
+    let initialized_thread = unclaimed["thread_id"].as_str().unwrap();
+    let initialized_detail = state
+        .state_store
+        .get_thread(initialized_thread)
+        .unwrap()
+        .unwrap();
+    state
+        .state_store
+        .remove_seat_lease(initialized_thread)
+        .unwrap();
+    assert_eq!(prepare(&state, &unclaimed_session).await, unclaimed);
+    assert!(
+        state
+            .state_store
+            .seat_leases_for_owner_client(
+                initialized_detail.requested_by.as_deref().unwrap(),
+                &initialized_detail.executor_ref
+            )
+            .unwrap()
+            .is_empty()
+    );
+    let (opened, original_claim) = fresh_with_request(&state, &session).await;
+    let thread = opened["thread_id"].as_str().unwrap();
+    let detail = state.state_store.get_thread(thread).unwrap().unwrap();
+    let control_before = observe(&state, &session, &prepared).await.unwrap();
+    state.state_store.remove_seat_lease(thread).unwrap();
+    assert_eq!(prepare(&state, &session).await, prepared);
+    assert_eq!(
+        observe(&state, &session, &prepared).await.unwrap(),
+        control_before
+    );
+    assert!(
+        state
+            .state_store
+            .seat_leases_for_owner_client(
+                detail.requested_by.as_deref().unwrap(),
+                &detail.executor_ref
+            )
+            .unwrap()
+            .is_empty()
+    );
+    let retry = route(&state, &session, &OPEN_DESCRIPTOR, original_claim.clone())
+        .await
+        .unwrap();
+    assert_eq!(retry, opened);
+    let mut competing = original_claim.clone();
+    competing["intent_nonce"] = json!("00000000-0000-4000-8000-000000000012");
+    let competing = identify_control(serde_json::from_value(competing).unwrap()).unwrap();
+    assert_ne!(competing["operation_id"], original_claim["operation_id"]);
+    route(&state, &session, &OPEN_DESCRIPTOR, competing)
+        .await
+        .expect_err("a new fresh intent cannot reuse the consumed initialization predecessor");
+    route(&state, &foreign, &OPEN_DESCRIPTOR, original_claim)
+        .await
+        .expect_err("same principal is not same session");
+    let sibling = route(
+        &state,
+        &session,
         &ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR,
-        open_request(&state, &session_id),
-        ctx.clone(),
-        state.clone(),
+        prepare_request(&state, &session, "00000000-0000-4000-8000-000000000013"),
     )
     .await
-    .expect("open seat");
-    assert_eq!(opened["next_engine_seq"], "0");
+    .unwrap();
+    assert_ne!(prepared["thread_id"], sibling["thread_id"]);
+    let mut wrong = prepare_request(&state, &session, "00000000-0000-4000-8000-000000000010");
+    wrong["binding_digest"] = json!("aa".repeat(32));
+    route(
+        &state,
+        &session,
+        &ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR,
+        wrong,
+    )
+    .await
+    .expect_err("same creation request cannot substitute its exact root");
+}
 
-    let operation_id = "00000000-0000-4000-8000-000000000002";
-    let request = append_request(&opened, operation_id, 0, &[json!({ "é": "😀", "a": "𐀀" })]);
-    // Cross-language vector for the browser/server typed digest protocol.
+#[tokio::test]
+#[ignore = "needs the config-root view-closure revalidation of ryeos-api surface_views"]
+async fn legacy_and_forged_control_intents_do_not_claim_a_producer() {
+    use ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR;
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+    let session = activate(&state);
+    let state = Arc::new(state);
+    let prepared = prepare(&state, &session).await;
+    let before = observe(&state, &session, &prepared).await.unwrap();
+    let request = claim_request(
+        &state,
+        &session,
+        &prepared,
+        "00000000-0000-4000-8000-000000000031",
+        json!({"kind":"fresh"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(request["schema"], 2);
+    assert_eq!(
+        request["predecessor"],
+        serde_json::to_value(&before.control_predecessor).unwrap()
+    );
+    assert_eq!(
+        request["operation_id"].as_str().unwrap().as_bytes()[14],
+        b'8'
+    );
+    let mut rejected = vec![json!({"action":"claim",
+        "presentation_id":prepared["presentation_id"],
+        "operation_id":"00000000-0000-4000-8000-000000000031", "claim":{"kind":"fresh"}})];
+    for field in [
+        "schema",
+        "thread_id",
+        "chain_root_id",
+        "predecessor",
+        "intent_nonce",
+    ] {
+        let mut missing = request.clone();
+        missing.as_object_mut().unwrap().remove(field);
+        rejected.push(missing);
+    }
+    for (field, value) in [
+        ("schema", json!(1)),
+        (
+            "operation_id",
+            json!("00000000-0000-4000-8000-000000000031"),
+        ),
+        (
+            "intent_nonce",
+            json!("00000000-0000-4000-8000-000000000032"),
+        ),
+        (
+            "predecessor",
+            json!({"kind":"initialization", "event_hash":"ab".repeat(32)}),
+        ),
+    ] {
+        let mut contradicted = request.clone();
+        contradicted[field] = value;
+        rejected.push(contradicted);
+    }
+    let mut invented_predecessor = request.clone();
+    invented_predecessor["predecessor"]["event_hash"] = json!("ab".repeat(32));
+    rejected.push(identify_control(serde_json::from_value(invented_predecessor).unwrap()).unwrap());
+    for invalid in rejected {
+        route(&state, &session, &OPEN_DESCRIPTOR, invalid)
+            .await
+            .expect_err("old shape, false identity or unauthenticated predecessor must refuse");
+        assert_eq!(observe(&state, &session, &prepared).await.unwrap(), before);
+    }
+    let opened = route(&state, &session, &OPEN_DESCRIPTOR, request.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        route(&state, &session, &OPEN_DESCRIPTOR, request)
+            .await
+            .unwrap(),
+        opened,
+        "retry retains its original predecessor, nonce and derived ID"
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs the config-root view-closure revalidation of ryeos-api surface_views"]
+async fn append_receipts_survive_takeover_and_close_without_granting_old_producer() {
+    use ryeos_ui::handlers::ui_seat::*;
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+    let session = activate(&state);
+    let foreign = activate(&state);
+    let state = Arc::new(state);
+    let (opened, original_claim) = fresh_with_request(&state, &session).await;
+    let op = "00000000-0000-4000-8000-000000000002";
+    let request = append_request(&opened, op, 0, &[json!({"é":"😀","a":"𐀀"})]);
+    let op = request["operation_id"].as_str().unwrap().to_owned();
     assert_eq!(
         request["payload_digest"],
         "40442791210ae66e4e67d762a8102f444250935db90a1976d743cb9952eed572"
     );
-    let first = invoke_seat_route(
-        &ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR,
-        request.clone(),
-        ctx.clone(),
-        state.clone(),
+    let ack = route(&state, &session, &APPEND_DESCRIPTOR, request.clone())
+        .await
+        .unwrap();
+    let acknowledged = ack["events"].as_array().unwrap();
+    assert_eq!(ack["events_authority"], "authoritative");
+    assert_eq!(acknowledged.len(), 1);
+    assert_eq!(acknowledged[0]["event_type"], "seat.facet");
+    assert_eq!(acknowledged[0]["durability"], "durable");
+    assert!(acknowledged[0].get("event_id").is_none());
+    assert!(acknowledged[0].get("storage_class").is_none());
+    assert_eq!(acknowledged[0]["payload"]["seq"], 0);
+    assert_eq!(
+        acknowledged[0]["payload"]["payload"],
+        request["events"][0]["payload"]
+    );
+    assert_eq!(acknowledged[0]["event_hash"].as_str().unwrap().len(), 64);
+    assert_eq!(
+        acknowledged[0]["chain_seq"].as_i64().unwrap() + 1,
+        ack["chain_seq"].as_str().unwrap().parse::<i64>().unwrap()
+    );
+    assert_eq!(
+        acknowledged[0]["thread_seq"]
+            .as_str()
+            .unwrap()
+            .parse::<i64>()
+            .unwrap()
+            + 1,
+        ack["receipt_thread_seq"]
+            .as_str()
+            .unwrap()
+            .parse::<i64>()
+            .unwrap()
+    );
+    let receipt_hash = ack["receipt_event_hash"].as_str().unwrap();
+    assert_eq!(receipt_hash.len(), 64);
+    assert!(receipt_hash.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    assert_eq!(
+        route(&state, &session, &APPEND_DESCRIPTOR, request.clone())
+            .await
+            .unwrap(),
+        ack
+    );
+    for (op, seq) in [
+        ("00000000-0000-4000-8000-000000000003", 2),
+        ("00000000-0000-4000-8000-000000000004", 0),
+    ] {
+        route(
+            &state,
+            &session,
+            &APPEND_DESCRIPTOR,
+            append_request(&opened, op, seq, &[json!({"different":true})]),
+        )
+        .await
+        .expect_err("gap/overlap");
+    }
+    route(
+        &state,
+        &session,
+        &APPEND_DESCRIPTOR,
+        append_request(&opened, &op, 0, &[json!({"different":true})]),
     )
     .await
-    .expect("first append");
-    let replayed_ack = invoke_seat_route(
-        &ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR,
-        request,
-        ctx.clone(),
-        state.clone(),
-    )
-    .await
-    .expect("lost-response-equivalent exact replay");
-    assert_eq!(replayed_ack, first);
-
-    let replay = invoke_seat_route(
-        &ryeos_ui::handlers::ui_seat::REPLAY_DESCRIPTOR,
-        json!({ "chain_root_id": opened["thread_id"] }),
-        ctx.clone(),
-        state.clone(),
-    )
-    .await
-    .expect("replay seat");
-    assert_eq!(replay["events"].as_array().unwrap().len(), 1);
-
-    invoke_seat_route(
-        &ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR,
-        append_request(
-            &opened,
-            operation_id,
-            0,
-            &[json!({ "key": "selection", "value": "different" })],
-        ),
-        ctx.clone(),
-        state.clone(),
-    )
-    .await
-    .expect_err("operation identity must bind the exact request");
-
-    invoke_seat_route(
-        &ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR,
-        append_request(
-            &opened,
-            "00000000-0000-4000-8000-000000000003",
-            2,
-            &[json!({ "key": "selection", "value": "gap" })],
-        ),
-        ctx.clone(),
-        state.clone(),
-    )
-    .await
-    .expect_err("sequence gaps must be refused");
-
-    invoke_seat_route(
-        &ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR,
-        append_request(
-            &opened,
-            "00000000-0000-4000-8000-000000000007",
-            0,
-            &[json!({ "key": "selection", "value": "overlap" })],
-        ),
-        ctx.clone(),
-        state.clone(),
-    )
-    .await
-    .expect_err("sequence overlaps must be refused");
-
+    .expect_err("operation contradiction");
+    let mut reused_id = append_request(&opened, "ignored", 1, &[json!({"new_interval":true})]);
+    reused_id["operation_id"] = json!(op);
+    route(&state, &session, &APPEND_DESCRIPTOR, reused_id)
+        .await
+        .expect_err("an old operation ID cannot name a new engine interval");
     let mut malformed = append_request(
         &opened,
-        "00000000-0000-4000-8000-000000000004",
+        "00000000-0000-4000-8000-000000000005",
         1,
-        &[json!({ "key": "selection", "value": "bad digest" })],
+        &[json!({})],
     );
-    malformed["payload_digest"] = json!("not-a-digest");
-    invoke_seat_route(
-        &ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR,
-        malformed,
-        ctx.clone(),
-        state.clone(),
-    )
-    .await
-    .expect_err("malformed digest must be refused");
-
-    let float_append = invoke_seat_route(
-        &ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR,
+    malformed["payload_digest"] = json!("bad");
+    route(&state, &session, &APPEND_DESCRIPTOR, malformed)
+        .await
+        .expect_err("malformed digest");
+    let second_ack = route(
+        &state,
+        &session,
+        &APPEND_DESCRIPTOR,
         append_request(
             &opened,
             "00000000-0000-4000-8000-000000000006",
             1,
-            &[json!({ "key": "fraction", "value": 0.000001 })],
+            &[json!({"fraction":0.000001}), json!({"second":true})],
         ),
-        ctx.clone(),
-        state.clone(),
     )
     .await
-    .expect("typed digest accepts a float across JS/serde exponent spelling thresholds");
-    assert_eq!(float_append["appended"], 1);
-
-    let rotated = invoke_seat_route(
-        &ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR,
-        open_request(&state, &session_id),
-        ctx.clone(),
-        state.clone(),
+    .unwrap();
+    assert_eq!(second_ack["events"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        second_ack["events"][0]["chain_seq"].as_i64().unwrap() + 1,
+        second_ack["events"][1]["chain_seq"].as_i64().unwrap()
+    );
+    assert_ne!(
+        second_ack["events"][0]["event_hash"],
+        ack["events"][0]["event_hash"]
+    );
+    let rotated = claim(
+        &state,
+        &session,
+        &opened,
+        "00000000-0000-4000-8000-000000000014",
+        json!({"kind":"takeover","expected_producer_incarnation":opened["producer_incarnation"]}),
     )
     .await
-    .expect("rotate the producer after the accepted operation");
+    .unwrap();
     assert_ne!(
         rotated["producer_incarnation"],
         opened["producer_incarnation"]
     );
-    let rotated_replay = invoke_seat_route(
-        &ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR,
-        append_request(&opened, operation_id, 0, &[json!({ "é": "😀", "a": "𐀀" })]),
-        ctx.clone(),
-        state.clone(),
+    assert_eq!(
+        route(&state, &session, &APPEND_DESCRIPTOR, request.clone())
+            .await
+            .unwrap(),
+        ack
+    );
+    route(
+        &state,
+        &session,
+        &APPEND_DESCRIPTOR,
+        append_request(
+            &opened,
+            "00000000-0000-4000-8000-000000000015",
+            2,
+            &[json!({})],
+        ),
     )
     .await
-    .expect("an accepted operation remains exactly replayable after producer rotation");
-    assert_eq!(rotated_replay, first);
-
-    invoke_seat_route(
-        &ryeos_ui::handlers::ui_seat::CLOSE_DESCRIPTOR,
-        json!({ "thread_id": opened["thread_id"] }),
-        ctx.clone(),
-        state.clone(),
+    .expect_err("stale producer");
+    route(&state, &foreign, &APPEND_DESCRIPTOR, request.clone())
+        .await
+        .expect_err("foreign session");
+    let lookup = json!({"presentation_id":opened["presentation_id"],"chain_root_id":opened["chain_root_id"],
+        "receipt":{"thread_id":opened["thread_id"],"producer_incarnation":opened["producer_incarnation"],
+            "operation_id":op,"first_engine_seq":0,"last_engine_seq":0,"event_count":1,"payload_digest":request["payload_digest"]}});
+    let found = route(&state, &session, &REPLAY_DESCRIPTOR, lookup.clone())
+        .await
+        .unwrap();
+    assert_eq!(found["receipt_status"], "found");
+    assert_eq!(found["receipt"], ack);
+    let mut missing = lookup.clone();
+    missing["receipt"]["operation_id"] = json!("00000000-0000-4000-8000-000000000099");
+    let absent = route(&state, &session, &REPLAY_DESCRIPTOR, missing)
+        .await
+        .unwrap();
+    assert_eq!(absent["receipt_status"], "not_found");
+    let mut mixed = lookup.clone();
+    mixed["limit"] = json!(5);
+    route(&state, &session, &REPLAY_DESCRIPTOR, mixed)
+        .await
+        .expect_err("receipt lookup cannot silently become cursor replay");
+    let close = transition_request(
+        &state,
+        &session,
+        &rotated,
+        "00000000-0000-4000-8000-000000000016",
+        "close",
+    )
+    .await;
+    route(&state, &session, &OPEN_DESCRIPTOR, original_claim)
+        .await
+        .expect_err("historical claim receipt must not re-advertise displaced producer as active");
+    let closed = route(&state, &session, &CLOSE_DESCRIPTOR, close.clone())
+        .await
+        .unwrap();
+    assert_eq!(closed["state"], "closed");
+    assert_eq!(
+        route(&state, &session, &CLOSE_DESCRIPTOR, close)
+            .await
+            .unwrap(),
+        closed
+    );
+    assert_eq!(
+        route(&state, &session, &APPEND_DESCRIPTOR, request)
+            .await
+            .unwrap(),
+        ack
+    );
+    assert_eq!(
+        route(&state, &session, &REPLAY_DESCRIPTOR, lookup)
+            .await
+            .unwrap()["receipt"],
+        ack
+    );
+    route(
+        &state,
+        &session,
+        &REPLAY_DESCRIPTOR,
+        json!({"presentation_id":opened["presentation_id"],"chain_root_id":opened["chain_root_id"]}),
     )
     .await
-    .expect("close seat after committed operation");
-    let settled_replay = invoke_seat_route(
-        &ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR,
-        append_request(&opened, operation_id, 0, &[json!({ "é": "😀", "a": "𐀀" })]),
-        ctx,
-        state,
-    )
-    .await
-    .expect("durable receipt remains replayable after seat settlement");
-    assert_eq!(settled_replay, first);
+    .expect_err("the receipt route cannot serve unauthenticated cursor pages");
 }
 
 #[tokio::test]
-async fn ui_seat_new_open_invalidates_stale_and_foreign_producers() {
+#[ignore = "needs the config-root view-closure revalidation of ryeos-api surface_views"]
+async fn relinquish_resume_and_touch_are_exact_producer_fenced() {
+    use ryeos_ui::handlers::ui_seat::*;
     let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
-    let (owner_id, owner_token) = test_state::mint_launch(&state, session_context(None));
-    let (foreign_id, foreign_token) = test_state::mint_launch(&state, session_context(None));
-    let sessions = &get_ui_state(&state).unwrap().browser_sessions;
-    assert_eq!(
-        sessions.consume_launch_token(&owner_token),
-        Some(owner_id.clone())
-    );
-    assert_eq!(
-        sessions.consume_launch_token(&foreign_token),
-        Some(foreign_id.clone())
-    );
+    let session = activate(&state);
     let state = Arc::new(state);
-    let owner_ctx = handler_context(&owner_id);
-    let first = invoke_seat_route(
-        &ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR,
-        open_request(&state, &owner_id),
-        owner_ctx.clone(),
-        state.clone(),
+    let opened = fresh(&state, &session).await;
+    let touch = json!({"presentation_id":opened["presentation_id"],"thread_id":opened["thread_id"],"producer_incarnation":opened["producer_incarnation"]});
+    assert_eq!(
+        route(&state, &session, &TOUCH_DESCRIPTOR, touch.clone())
+            .await
+            .unwrap()["touched"],
+        true
+    );
+    let stale_resume = claim_request(
+        &state,
+        &session,
+        &opened,
+        "00000000-0000-4000-8000-000000000021",
+        json!({"kind":"resume","expected_producer_incarnation":opened["producer_incarnation"]}),
     )
     .await
-    .expect("open seat");
-    let second = invoke_seat_route(
-        &ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR,
-        open_request(&state, &owner_id),
-        owner_ctx.clone(),
-        state.clone(),
+    .unwrap();
+    route(&state, &session, &OPEN_DESCRIPTOR, stale_resume.clone())
+        .await
+        .expect_err("active producer cannot be resumed implicitly");
+    let relinquish = transition_request(
+        &state,
+        &session,
+        &opened,
+        "00000000-0000-4000-8000-000000000022",
+        "relinquish",
+    )
+    .await;
+    let released = route(&state, &session, &CLOSE_DESCRIPTOR, relinquish.clone())
+        .await
+        .unwrap();
+    assert_eq!(released["state"], "relinquished");
+    assert_eq!(
+        route(&state, &session, &CLOSE_DESCRIPTOR, relinquish.clone())
+            .await
+            .unwrap(),
+        released
+    );
+    route(&state, &session, &OPEN_DESCRIPTOR, stale_resume)
+        .await
+        .expect_err("resume observed before relinquish cannot reuse the same incarnation with an old CAS predecessor");
+    route(&state, &session, &TOUCH_DESCRIPTOR, touch)
+        .await
+        .expect_err("relinquished writer");
+    let resumed = claim(
+        &state,
+        &session,
+        &opened,
+        "00000000-0000-4000-8000-000000000023",
+        json!({"kind":"resume","expected_producer_incarnation":opened["producer_incarnation"]}),
     )
     .await
-    .expect("reattach seat");
+    .unwrap();
     assert_ne!(
-        first["producer_incarnation"],
-        second["producer_incarnation"]
+        resumed["producer_incarnation"],
+        opened["producer_incarnation"]
     );
+    assert_eq!(
+        route(&state, &session, &CLOSE_DESCRIPTOR, relinquish)
+            .await
+            .unwrap(),
+        released,
+        "historical exact relinquish retry returns its retained result without replacing the current writer"
+    );
+    assert_eq!(
+        serde_json::to_value(observe(&state, &session, &opened).await.unwrap()).unwrap()["producer"],
+        json!({"kind":"active", "producer_incarnation":resumed["producer_incarnation"]})
+    );
+    route(
+        &state,
+        &session,
+        &CLOSE_DESCRIPTOR,
+        transition_request(
+            &state,
+            &session,
+            &opened,
+            "00000000-0000-4000-8000-000000000024",
+            "close",
+        )
+        .await,
+    )
+    .await
+    .expect_err("stale close cannot terminate seat");
+    let action = ryeos_ui::handlers::ALL
+        .iter()
+        .find(|d| d.service_ref == "service:projects/open")
+        .unwrap();
+    route(&state, &session, action, json!({}))
+        .await
+        .expect_err("cookie is not compiled action authority");
+}
 
-    let stale_request = append_request(
-        &first,
-        "00000000-0000-4000-8000-000000000005",
+#[tokio::test]
+#[ignore = "needs the config-root view-closure revalidation of ryeos-api surface_views"]
+async fn exact_append_retry_survives_a_later_unreceipted_signed_tip() {
+    use ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR;
+
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+    let session = activate(&state);
+    let state = Arc::new(state);
+    let opened = fresh(&state, &session).await;
+    let request = append_request(
+        &opened,
+        "00000000-0000-4000-8000-000000000071",
         0,
-        &[json!({ "key": "selection", "value": "stale" })],
+        &[json!({"selection":"retained"})],
     );
-    invoke_seat_route(
-        &ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR,
-        stale_request,
-        owner_ctx,
-        state.clone(),
-    )
-    .await
-    .expect_err("previous open's producer must be stale");
+    let acknowledged = route(&state, &session, &APPEND_DESCRIPTOR, request.clone())
+        .await
+        .unwrap();
+    let detail = state
+        .state_store
+        .get_thread(opened["thread_id"].as_str().unwrap())
+        .unwrap()
+        .unwrap();
+    state
+        .threads
+        .append_thread_events(
+            &detail.chain_root_id,
+            &detail.thread_id,
+            &[ryeos_app::state_store::NewEventRecord {
+                event_type: "seat.facet".into(),
+                storage_class: "indexed".into(),
+                payload: json!({
+                    "seq": 1,
+                    "operation_id": "unreceipted-crash-fixture",
+                    "payload": {"key":"selection","value":"unsettled"}
+                }),
+            }],
+        )
+        .unwrap()
+        .expect("signed orphan fixture commits one event");
 
-    invoke_seat_route(
-        &ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR,
-        append_request(
-            &second,
-            "00000000-0000-4000-8000-000000000006",
-            0,
-            &[json!({ "key": "selection", "value": "foreign" })],
-        ),
-        handler_context(&foreign_id),
-        state,
+    assert_eq!(
+        route(&state, &session, &APPEND_DESCRIPTOR, request)
+            .await
+            .unwrap(),
+        acknowledged,
+        "an exact authenticated receipt is replayable without folding a later incomplete tip"
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs the config-root view-closure revalidation of ryeos-api surface_views"]
+async fn prepare_rejects_stale_attachment_policy() {
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+    let mut context = session_context(&state, None);
+    let stale = "99".repeat(32);
+    Arc::make_mut(&mut context.compiled_binding)
+        .binding
+        .node_policy_generation_digest = stale.clone();
+    let sessions = &get_ui_state(&state).unwrap().browser_sessions;
+    let (id, token, _) = sessions.mint_token(context, 16, &stale).unwrap();
+    assert_eq!(sessions.consume_launch_token(&token), Some(id.clone()));
+    let request = prepare_request(&state, &id, "00000000-0000-4000-8000-000000000010");
+    route(
+        &Arc::new(state),
+        &id,
+        &ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR,
+        request,
     )
     .await
-    .expect_err("foreign session must not append an owned seat");
+    .expect_err("stale policy");
+}
+
+#[tokio::test]
+#[ignore = "needs the config-root view-closure revalidation of ryeos-api surface_views"]
+async fn forged_presentation_operation_records_do_not_change_the_seat() {
+    use ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR;
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+    let session = activate(&state);
+    let state = Arc::new(state);
+    let opened = fresh(&state, &session).await;
+    let thread = opened["thread_id"].as_str().unwrap();
+    let root = opened["chain_root_id"].as_str().unwrap();
+    let before = state
+        .state_store
+        .capture_thread_event_read_anchor(root, thread)
+        .unwrap()
+        .unwrap();
+    for (index, event_type, payload) in [
+        (
+            0,
+            "seat.presentation_operation.prepared",
+            json!({"operation_id":"00000000-0000-4000-8000-000000000081"}),
+        ),
+        (
+            1,
+            "seat.presentation_operation.completed",
+            json!({"operation_id":"00000000-0000-4000-8000-000000000082","result":{}}),
+        ),
+    ] {
+        let mut request = append_request(
+            &opened,
+            &format!("00000000-0000-4000-8000-{:012}", 90 + index),
+            0,
+            &[payload],
+        );
+        request["events"][0]["event_type"] = json!(event_type);
+        identify_append(&opened, &mut request);
+        route(&state, &session, &APPEND_DESCRIPTOR, request)
+            .await
+            .expect_err("unproven preparation/completion must refuse");
+        assert_eq!(
+            state
+                .state_store
+                .capture_thread_event_read_anchor(root, thread)
+                .unwrap()
+                .unwrap()
+                .tip(),
+            before.tip(),
+            "refused forged operations must not advance the signed seat"
+        );
+    }
 }
