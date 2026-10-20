@@ -739,6 +739,12 @@ fn fixture_hash(label: &str) -> String {
     lillux::sha256_hex(format!("handoff-crash-recovery-fixture:{label}").as_bytes())
 }
 
+/// The seeded handoff owner, shaped like every other principal so the
+/// per-principal storage keys derived from it are accepted.
+fn fixture_owner_principal() -> String {
+    format!("fp:{}", fixture_hash("owner"))
+}
+
 fn captured_policy(item_ref: &str) -> ryeos_state::objects::CapturedThreadHistoryPolicy {
     let hash = fixture_hash("captured-policy");
     ryeos_state::objects::CapturedThreadHistoryPolicy {
@@ -2758,7 +2764,7 @@ fn seed_source_exported_handoff_with_kind(
         current_site_id: source_site_id.to_owned(),
         origin_site_id: source_site_id.to_owned(),
         upstream_thread_id: None,
-        requested_by: Some("fp:handoff-fixture-owner".to_owned()),
+        requested_by: Some(fixture_owner_principal()),
         project_root: None,
         project_authority: ryeos_state::objects::ExecutionProjectAuthority::PROJECTLESS,
         base_project_snapshot_hash: None,
@@ -2781,7 +2787,7 @@ fn seed_source_exported_handoff_with_kind(
         operation_id.clone(),
         fixture_hash("preflight"),
         fixture_hash("preflight-attestation"),
-        "fp:handoff-fixture-owner".to_owned(),
+        fixture_owner_principal(),
         source_thread_id.clone(),
         source_site_id.to_owned(),
         source_site_id.to_owned(),
