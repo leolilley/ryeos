@@ -8,7 +8,7 @@
 //! service:scheduler/register` must tell the operator *why* the service
 //! is missing and what is actually installed.
 
-mod common;
+use ryeosd::test_support as common;
 
 use common::DaemonHarness;
 

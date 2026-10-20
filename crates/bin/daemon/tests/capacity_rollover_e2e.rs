@@ -11,7 +11,7 @@
 //! requires, so the fixture uses 150 s windows and runs 21 rollovers in about
 //! an hour. It is ignored unless `RYEOS_LONG_E2E=1`.
 
-mod common;
+use ryeosd::test_support as common;
 
 use std::path::Path;
 

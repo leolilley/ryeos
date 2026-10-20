@@ -59,7 +59,6 @@ pub(crate) fn verifier_command(request: &RestoredVerifierAdapterRequest) -> Resu
 /// The caller has already preflighted the signed qualifier, exact sealed tar
 /// and finite routes. No failure here permits a second invocation. A complete
 /// stream is merely an observation until the daemon joins execution evidence.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn first_contact(
     network: &NetworkContext,
     provider_spec: &ProviderSpec,

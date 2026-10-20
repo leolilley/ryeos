@@ -23,7 +23,7 @@
 //!    mid-flight, restarts, and asserts generic tool resume is not coupled
 //!    to provider auth.
 
-mod common;
+use ryeosd::test_support as common;
 
 use std::collections::HashMap;
 use std::path::Path;

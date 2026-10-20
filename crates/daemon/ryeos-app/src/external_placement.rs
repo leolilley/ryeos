@@ -339,7 +339,6 @@ pub(crate) trait ExternalPlacementBackend: Send + Sync + std::fmt::Debug {
     /// Prepare and locally re-import the exact secret-bearing guest package
     /// before the durable activation/contact claim. No provider contact is
     /// permitted here. The returned commitment is inserted with that claim.
-    #[allow(clippy::too_many_arguments)]
     fn prepare_guest_package(
         &self,
         contract: &ExternalPlacementBackendContract,
@@ -3673,7 +3672,6 @@ pub fn advance_external_session_relay_step(
 /// Inspect only the original bound Q occurrence and its currently installed
 /// signed transport. Relay parameters are returned only after the activation
 /// commitment rejoins the sealed bootstrap; this creates no contact permit.
-#[allow(dead_code)]
 pub fn inspect_external_qualification_controller_transport(
     state: &AppState,
     placement: &str,
@@ -3790,7 +3788,6 @@ pub enum ExternalQualificationRelayStepProgress {
 /// for the guest exchange that this method must transport. An exact 404 only
 /// yields Pending; all other contact errors remain errors. The current signed
 /// Render profile keeps this unreachable from a live Q loop.
-#[allow(dead_code)]
 pub fn advance_external_qualification_relay_step(
     state: &AppState,
     placement: &str,
@@ -3871,7 +3868,6 @@ pub fn advance_external_qualification_relay_step(
 /// operator Q loop calls this yet. An indeterminate application is deliberately
 /// refused: restart fences the Q occurrence and proceeds to cleanup, rather
 /// than reapplying a frame whose first transaction may already have committed.
-#[allow(dead_code)]
 pub(crate) fn apply_and_contact_original_external_relay_request(
     state: &AppState,
     placement: &str,
@@ -4100,7 +4096,6 @@ fn apply_and_contact_external_relay_request(
 /// Contact only an immutable file slot derived from the protected original
 /// bootstrap. This records transport bytes, never Ready, ACK, or settlement.
 /// The outbound reservation itself requires a committed semantic application.
-#[allow(dead_code)]
 pub(crate) fn contact_original_external_relay_transfer(
     state: &AppState,
     placement: &str,
@@ -8423,7 +8418,6 @@ fn supervisor_activation(
     ))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn sign_prepared_guest_import(
     contract: &ExternalPlacementBackendContract,
     reservation: &ExternalAllocationReservation,
@@ -8477,7 +8471,6 @@ fn sign_prepared_guest_import(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn sign_guest_import_ticket(
     contract: &ExternalPlacementBackendContract,
     reservation: &ExternalAllocationReservation,
@@ -8670,7 +8663,6 @@ pub mod test_support {
         PlacementQualificationSelection,
     };
 
-    #[allow(clippy::type_complexity)]
     fn installed_artifact_coordinates(
         state: &AppState,
         provider_declaration_id: &str,
@@ -9166,7 +9158,6 @@ pub mod test_support {
         Ok(launch_metadata)
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn prepare_bound_external_supervisor_inner(
         state: &mut AppState,
         mut capsule: ryeos_state::objects::AdmittedPersistentSessionCapsule,

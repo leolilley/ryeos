@@ -1,6 +1,6 @@
 //! DTO/ownership qualification only: exact signed thread testimony is exposed,
 //! but the returned coordinate is not an import or project-closure receipt.
-mod test_state;
+use ryeos_api::test_support as test_state;
 
 use std::sync::Arc;
 

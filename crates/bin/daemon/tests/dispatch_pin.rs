@@ -18,7 +18,7 @@
 //! so the mapping back to the historical V5.2 inline branches stays
 //! grep-able.
 
-mod common;
+use ryeosd::test_support as common;
 
 use std::path::Path;
 

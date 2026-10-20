@@ -3518,7 +3518,6 @@ impl PersistentSessionPool {
         Ok(outcome)
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn execute<F, C, D>(
         &self,
         pool_key: &str,
@@ -3546,7 +3545,6 @@ impl PersistentSessionPool {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn execute_attributed<F, C, D>(
         &self,
         pool_key: &str,
@@ -3575,7 +3573,6 @@ impl PersistentSessionPool {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn execute_attributed_owned_start<F, C, D>(
         &self,
         pool_key: &str,

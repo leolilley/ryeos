@@ -725,7 +725,6 @@ pub async fn execute_service(
 /// without permitting an identity or capability override.
 // Verified subject, execution mode/context, pre-minted identity, and trusted
 // local handler context remain explicit at the service execution boundary.
-#[allow(clippy::too_many_arguments)]
 pub async fn execute_service_verified(
     verified: ryeos_engine::contracts::VerifiedItem,
     service_ref: &str,

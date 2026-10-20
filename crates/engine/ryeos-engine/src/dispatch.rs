@@ -585,14 +585,11 @@ fn result_reports_failure(parsed: &Value) -> bool {
 /// pending/running execution owner. Private metadata custody only: this is not
 /// an authenticated generation, applied receipt, or native settlement issuer.
 /// No public DTO can construct or replace this context.
-#[allow(dead_code)] // Consumed by later separately guarded same-owner joins.
 struct SelectedOriginalLaunchContext {
     expected_applied_launch: lillux::LinuxSandboxAppliedLaunchCommitments,
     expected_mount_preparation: lillux::LinuxSandboxMountPreparationCommitments,
-    provenance: crate::isolation::IsolationLaunchProvenance,
     original_deadline: lillux::time::MonotonicDeadline,
     backend_capture: std::sync::Arc<crate::isolation::VerifiedIsolationBackendCapture>,
-    command_binding: crate::isolation::CompiledOriginalCommandBinding,
 }
 
 /// A spawned execution whose exact target exists but cannot execute user code
@@ -1380,10 +1377,8 @@ fn isolation_plan_request_awaiting_attachment(
         let selected_launch_context = SelectedOriginalLaunchContext {
             expected_applied_launch,
             expected_mount_preparation,
-            provenance: applied.provenance,
             original_deadline,
             backend_capture,
-            command_binding,
         };
         return Ok((applied.request, Some(selected_launch_context)));
     }

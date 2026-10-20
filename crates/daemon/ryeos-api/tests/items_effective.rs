@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use ryeos_app::handler_context::HandlerContext;
 
-mod test_state;
+use ryeos_api::test_support as test_state;
 use test_state::{build_test_state, build_test_state_with_bundles};
 
 async fn call_effective(

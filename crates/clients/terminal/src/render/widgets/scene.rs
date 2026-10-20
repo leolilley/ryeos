@@ -468,7 +468,6 @@ fn stabilize(color: Color) -> Color {
 /// boost, coverage-based edge anti-aliasing. The orb lesson applied: a
 /// filled mass reads statistically, so shading and texture carry the
 /// form and no cell has to be individually perfect.
-#[allow(clippy::too_many_arguments)]
 fn draw_fill(
     surface: &mut TextSurface,
     rect: Rect,

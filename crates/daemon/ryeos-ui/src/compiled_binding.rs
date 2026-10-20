@@ -492,7 +492,6 @@ fn sanitize_affordances(
     });
 }
 
-#[allow(clippy::too_many_arguments)]
 fn compile_sources(
     owner_ref: &str,
     source_map: &serde_json::Map<String, Value>,
@@ -778,7 +777,6 @@ fn route_parameter_name(
     Ok(Some(value.to_string()))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn compile_affordances(
     view_ref: &str,
     items: &[Value],

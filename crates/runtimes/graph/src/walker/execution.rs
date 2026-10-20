@@ -695,7 +695,6 @@ impl Walker {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn run_follow_fanout(
         &self,
         node: &GraphNode,
@@ -1247,7 +1246,6 @@ impl Walker {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn evaluate_fanout_next(
     compiled: &ryeos_graph_definition::CompiledNode,
     node: &GraphNode,

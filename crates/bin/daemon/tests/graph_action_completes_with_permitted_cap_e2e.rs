@@ -11,7 +11,7 @@
 //! G2 must land first (walker self-check removed) so that this test pins
 //! the daemon-side gate as the single boundary.
 
-mod common;
+use ryeosd::test_support as common;
 
 use std::path::Path;
 

@@ -1,6 +1,6 @@
 use std::fs;
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use lillux::crypto::DecodePrivateKey;
@@ -168,13 +168,6 @@ fn validate_model_name(value: &str) -> Result<()> {
 
 fn yaml_scalar(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
-}
-
-#[allow(dead_code)]
-fn is_managed_route(path: &Path) -> bool {
-    fs::read_to_string(path)
-        .map(|source| source.lines().any(|line| line.trim() == MANAGED_MARKER))
-        .unwrap_or(false)
 }
 
 #[cfg(test)]

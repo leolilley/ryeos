@@ -64,7 +64,6 @@ pub struct PreparedManagedLaunch {
 
 // Runtime/root evidence, hop identity, request context, and node policy remain
 // explicit because each contributes independently to managed launch admission.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn prepare_managed_launch(
     verified_runtime: &VerifiedRuntime,
     root_subject: Option<RootSubject>,

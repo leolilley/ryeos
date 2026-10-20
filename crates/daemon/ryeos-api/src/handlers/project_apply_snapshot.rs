@@ -2387,10 +2387,6 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::TempDir;
 
-    mod shared_test_state {
-        include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/test_state.rs"));
-    }
-
     struct CustodySessionProbe {
         retained: Arc<AtomicUsize>,
         recovered: Arc<AtomicUsize>,
@@ -2513,7 +2509,7 @@ mod tests {
     #[cfg(feature = "scheduling")]
     #[tokio::test]
     async fn retry_loop_skips_active_and_pending_acquisition_before_later_real_sessions() {
-        let (_state_root, store_owner, mut state) = shared_test_state::build_test_state();
+        let (_state_root, store_owner, mut state) = crate::test_support::build_test_state();
         let registry = Arc::new(project_deploy::ProjectScheduleRecoveryOwners::default());
         Arc::get_mut(&mut state.extensions)
             .expect("test state extension owner is unique")

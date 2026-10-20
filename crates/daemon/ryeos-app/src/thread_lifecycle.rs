@@ -548,7 +548,6 @@ pub struct ProjectSummary {
     pub name: String,
 }
 
-#[allow(clippy::trivially_copy_pass_by_ref)]
 fn is_zero_usize(n: &usize) -> bool {
     *n == 0
 }
@@ -764,7 +763,6 @@ pub const MAX_CONTINUATION_CHAIN_DEPTH: u32 = 12;
 /// needs; scopes are sorted so ordering is not significant.
 // Every launch-significant input is deliberately explicit so callers cannot
 // accidentally omit a field from the persisted idempotency identity.
-#[allow(clippy::too_many_arguments)]
 pub fn continuation_request_fingerprint(
     item_ref: &str,
     ref_bindings: &BTreeMap<String, String>,
@@ -5661,7 +5659,6 @@ impl ThreadLifecycleService {
     /// it is skipped. This only stores the canonical envelope and flips the waiter
     /// to `ready`; kicking the parent resume is the follow-resume path's job.
     /// A no-op when no waiter awaits this chain (the common case).
-    #[allow(clippy::too_many_arguments)]
     fn record_follow_child_terminal(
         &self,
         chain_root_id: &str,
@@ -7194,7 +7191,6 @@ fn resolve_thread_history_policy_under_project_authority(
 /// and compose therefore fails instead of producing a mixed admission.
 // Verified subject, node policy, usage attribution, bindings, and thread
 // profile remain explicit at the root admission trust boundary.
-#[allow(clippy::too_many_arguments)]
 pub fn admit_verified_root_execution(
     engine: &Arc<Engine>,
     execution_plan_context: &PlanContext,
@@ -7231,7 +7227,6 @@ pub fn admit_verified_root_execution(
 /// Root admission with request-local timing boundaries. Authority and output
 /// are identical to [`admit_verified_root_execution`]; the optional collector
 /// only observes the deliberate re-verification and composition intervals.
-#[allow(clippy::too_many_arguments)]
 pub fn admit_verified_root_execution_with_timings(
     engine: &Arc<Engine>,
     execution_plan_context: &PlanContext,
@@ -7303,7 +7298,6 @@ impl ValidatedRootResolution {
 /// The opaque item attestation and, for pinned/COW projects, the state-issued
 /// materialization proof are mandatory inputs. Cache hits are revalidated
 /// against both before their closure can be returned.
-#[allow(clippy::too_many_arguments)]
 pub fn validate_verified_root_resolution_with_timings(
     engine: &Arc<Engine>,
     subject_plan_context: &PlanContext,
@@ -7623,7 +7617,6 @@ pub fn validate_verified_root_resolution_with_timings(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 fn admit_verified_root_execution_inner(
     engine: &Arc<Engine>,
     execution_plan_context: &PlanContext,
@@ -7913,7 +7906,6 @@ fn seal_live_non_execution_root(
 /// Admit a daemon-owned root against an already-captured immutable project
 /// generation. This is the pinned counterpart of [`admit_non_execution_root`]
 /// and reuses the same engine/project binding that owns the CoW workspace.
-#[allow(clippy::too_many_arguments)]
 pub fn admit_pinned_non_execution_root(
     engine: &Arc<Engine>,
     node_history_policy: &ResolvedNodeThreadHistoryPolicy,

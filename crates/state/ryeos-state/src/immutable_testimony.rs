@@ -27,7 +27,6 @@ pub fn read_immutable_attestation_head(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn publish_immutable_attestation<T>(
     authority: &PinnedStateAuthority,
     namespace: &str,

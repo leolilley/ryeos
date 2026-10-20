@@ -78,16 +78,8 @@ pub fn compact_projects(
     let refs_directory = runtime
         .open_child_directory(std::ffi::OsStr::new("refs"))?
         .ok_or_else(|| anyhow::anyhow!("refs root is absent"))?;
-    // These bindings preserve the required pinned-handle drop order under Edition 2024.
-    #[allow(clippy::let_and_return)]
-    let outcome = {
-        let cas = lillux::CasStore::from_pinned_root(cas_directory);
-        #[allow(clippy::let_and_return)]
-        let result =
-            compact_projects_pinned(&cas, &refs_directory, trust_store, signer, policy, dry_run);
-        result
-    };
-    outcome
+    let cas = lillux::CasStore::from_pinned_root(cas_directory);
+    compact_projects_pinned(&cas, &refs_directory, trust_store, signer, policy, dry_run)
 }
 
 /// Compact project history from one descriptor-bound refs/CAS authority.
@@ -135,7 +127,6 @@ struct ProjectCompactionResult {
 /// Compact a single project's snapshot DAG.
 // Pinned storage authority, signed-ref authority, identity, and retention
 // policy remain explicit at this maintenance boundary.
-#[allow(clippy::too_many_arguments)]
 fn compact_single_project(
     cas: &lillux::CasStore,
     refs_directory: &lillux::PinnedDirectory,

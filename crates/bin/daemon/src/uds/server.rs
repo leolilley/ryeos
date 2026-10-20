@@ -1823,7 +1823,6 @@ fn handle_claim_commands(
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RuntimeCompleteCommandParams {
-    #[allow(dead_code)]
     thread_id: String,
     command_id: i64,
     status: String,
@@ -2175,7 +2174,6 @@ mod tests {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn generate_test_callback_with_context(
         state: &AppState,
         thread_id: &str,

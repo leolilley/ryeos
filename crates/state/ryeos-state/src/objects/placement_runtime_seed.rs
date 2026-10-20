@@ -30,7 +30,6 @@ pub struct PlacementRuntimeSeed {
 }
 
 impl PlacementRuntimeSeed {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         operation_id: String,
         chain_root_id: String,

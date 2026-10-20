@@ -31,6 +31,15 @@ latency-profiling = ["ryeos-app/latency-profiling", "ryeos-engine/latency-profil
 # production daemon builds.
 crash-qualification-test-support = ["ryeos-app/crash-qualification-test-support", "ryeos-api/crash-qualification-test-support", "ryeos-scheduler-service?/crash-qualification-test-support"]
 handoff-test-support = ["ryeos-api/handoff-test-support", "ryeos-app/test-support"]
+# Exposes `ryeosd::test_support`, the real-process harness shared by the
+# end-to-end tests in `tests/`.
+test-support = [
+  "dep:tempfile",
+  "ryeos-app/test-support",
+  "ryeos-engine/test-support",
+  "ryeos-node/test-support",
+  "ryeos-node-runtime/test-support",
+]
 
 [dependencies]
 ryeos-node-runtime = { workspace = true }
@@ -83,11 +92,13 @@ chrono-tz = { workspace = true }
 cron = { workspace = true }
 reqwest = { workspace = true, features = ["json", "rustls-tls"] }
 url = { workspace = true }
+tempfile = { workspace = true, optional = true }
 
 [dev-dependencies]
+tempfile = { workspace = true }
+ryeosd = { path = ".", features = ["test-support"] }
 ryeos-node-runtime = { workspace = true, features = ["test-support"] }
 ryeos-node = { workspace = true, features = ["test-support"] }
-tempfile = { workspace = true }
 ryeos-api = { workspace = true, features = ["handoff-test-support"] }
 ryeos-app = { workspace = true, features = ["test-support"] }
 ryeos-engine = { workspace = true, features = ["test-support"] }

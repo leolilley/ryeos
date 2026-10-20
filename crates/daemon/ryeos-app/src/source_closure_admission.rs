@@ -567,7 +567,6 @@ struct CapturedSourceClosure {
     binding: ryeos_state::objects::EffectiveSourceBinding,
 }
 
-#[allow(clippy::too_many_arguments)]
 fn capture_source_closure(
     state: &AppState,
     engine: &ryeos_engine::engine::Engine,
@@ -923,7 +922,6 @@ fn capture_source_closure(
     Ok(Some(CapturedSourceClosure { candidate, binding }))
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn preview_source_closure(
     state: &AppState,
     engine: &ryeos_engine::engine::Engine,

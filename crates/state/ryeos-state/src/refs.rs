@@ -1488,7 +1488,6 @@ impl Drop for DeployedProjectHeadLock {
 #[cfg(test)]
 // This test-only CAS adapter deliberately exposes every identity, trust, and
 // held-lock prerequisite independently, matching the production boundary.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn advance_verified_project_head_ref(
     refs_root: &Path,
     principal_key: &str,
@@ -1533,7 +1532,6 @@ pub(crate) fn advance_verified_project_head_ref(
 
 // Signed-ref authority, CAS expectation, trust, and the held lock are explicit
 // so callers cannot conflate verification with publication authority.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn advance_verified_project_head_ref_in_directory(
     refs_directory: &lillux::PinnedDirectory,
     principal_key: &str,
@@ -1979,7 +1977,6 @@ pub(crate) fn remove_generic_head_ref_in_directory(
 #[cfg(test)]
 // Keep namespace identity, CAS expectation, trust, and lock authority explicit
 // in tests so invalid combinations remain directly constructible.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn advance_verified_generic_head_ref(
     refs_root: &Path,
     namespace: &str,
@@ -2008,7 +2005,6 @@ pub(crate) fn advance_verified_generic_head_ref(
 
 // Signed-ref authority, CAS expectation, trust, and the held lock are explicit
 // so callers cannot conflate verification with publication authority.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn advance_verified_generic_head_ref_in_directory(
     refs_directory: &lillux::PinnedDirectory,
     namespace: &str,

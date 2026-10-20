@@ -243,7 +243,6 @@ pub(super) fn validate_selection_batch(selectors: &[ProductSelection]) -> anyhow
 /// Verify a complete selection against the exact request engine's source view.
 /// This is synchronous CPU/CAS work; operator API calls run it on a blocking
 /// worker. It grants no import or binding authority during launch preparation.
-#[allow(clippy::too_many_arguments)]
 pub fn select_products(
     state: &AppState,
     context: &HandlerContext,
@@ -258,7 +257,6 @@ pub fn select_products(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn select_products_with_project_context_resolver(
     state: &AppState,
     context: &HandlerContext,
@@ -284,7 +282,6 @@ pub fn select_products_with_project_context_resolver(
     .map(|(selections, _)| selections)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn select_products_verified(
     state: &AppState,
     context: &HandlerContext,
@@ -485,7 +482,6 @@ fn relationship_resolution_request(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 fn select_verified_product(
     state: &AppState,
     context: &HandlerContext,
@@ -612,7 +608,6 @@ fn select_verified_product(
     Ok(selection)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn admit_selected_qualification(
     state: &AppState,
     context: &HandlerContext,
@@ -740,7 +735,6 @@ pub fn verify_recovered_selections(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn verify_recovered_selections_guarded(
     state: &AppState,
     authority: &ryeos_state::PinnedStateAuthority,

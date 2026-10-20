@@ -2908,7 +2908,6 @@ fn execution_control_snapshot_is_current(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn load_execution_control_snapshot_cached(
     engine: &ryeos_engine::engine::Engine,
     roots: &ryeos_engine::item_resolution::ResolutionRoots,

@@ -7,7 +7,7 @@
 
 #![recursion_limit = "256"]
 
-mod common;
+use ryeosd::test_support as common;
 
 mod host_backed_qualification;
 

@@ -37,7 +37,7 @@
 //!     place;
 //!   * a route whose source names another bundle is refused at startup.
 
-mod common;
+use ryeosd::test_support as common;
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;

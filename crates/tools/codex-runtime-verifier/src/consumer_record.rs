@@ -1093,7 +1093,6 @@ impl ImportedConsumerInputs {
     /// verifier process. The enclosing owner controls pipes and finish delivery.
     /// A create-only private marker refuses repeated execution/reconnection;
     /// it is not a replacement for the controller's retained contact journal.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn run_native_protocol(
         &self,
         record: &ConsumerInputRecord,

@@ -1,4 +1,4 @@
-mod test_state;
+use ryeos_api::test_support as test_state;
 
 use ryeos_app::process::{ExecutionProcessIdentity, PROCESS_IDENTITY_SCHEMA_VERSION};
 use ryeos_app::runtime_db::{

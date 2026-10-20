@@ -15,7 +15,7 @@
 //! The host interpreter path, hash, version and `RYE_PYTHON` are printed so
 //! the evidence record can pin them.
 
-mod common;
+use ryeosd::test_support as common;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

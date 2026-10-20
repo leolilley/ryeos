@@ -1,4 +1,4 @@
-mod test_state;
+use ryeos_api::test_support as test_state;
 
 use std::future::Future;
 use std::pin::Pin;

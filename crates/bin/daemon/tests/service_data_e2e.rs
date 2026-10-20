@@ -6,7 +6,7 @@
 //! Companion file: `service_data_standalone_e2e.rs` covers stopped-node
 //! services that require `run-service` mode.
 
-mod common;
+use ryeosd::test_support as common;
 
 use common::DaemonHarness;
 use serde_json::{Value, json};

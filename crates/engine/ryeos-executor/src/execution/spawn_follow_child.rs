@@ -1062,7 +1062,6 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
     }))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn admit_follow_child_requests(
     state: &AppState,
     children: &[ryeos_runtime::callback::FollowChildSpec],
@@ -1171,7 +1170,6 @@ struct PreparedFollowChildren {
         std::collections::BTreeMap<usize, crate::execution::launch::PreparedFollowChildLaunch>,
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn prepare_follow_children(
     state: &AppState,
     children: &[ryeos_runtime::callback::FollowChildSpec],
@@ -1573,7 +1571,6 @@ fn ensure_follow_product_selections_match(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn commit_follow_child_roots(
     state: &AppState,
     children: &[ryeos_runtime::callback::FollowChildSpec],

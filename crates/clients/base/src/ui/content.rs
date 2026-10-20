@@ -941,7 +941,6 @@ pub fn table_hierarchy_rows(
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn visit(
         index: usize,
         is_last: bool,

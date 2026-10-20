@@ -1,6 +1,6 @@
 // Smoke tests for `ui.graph.topology` with the live workspace bundles.
 
-mod test_state;
+use ryeos_ui::test_support as test_state;
 
 use std::sync::Arc;
 

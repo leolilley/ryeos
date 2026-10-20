@@ -3252,7 +3252,7 @@ mod predecessor_shape_tests {
 
     #[test]
     fn seat_kind_is_the_signed_policy_value_not_a_literal() {
-        let (_directory, _store_owner, state) = crate::test_state::build_test_state();
+        let (_directory, _store_owner, state) = crate::test_support::build_test_state();
         let policy = state
             .node_policy
             .require::<ryeos_node_runtime::node_policy::sections::ui_browser_sessions::UiBrowserSessionPolicy>()

@@ -34,14 +34,14 @@ const MAX_CHAIN_DEPTH: usize = 16;
 /// publisher's v1 document instead of accepting a lenient `name` projection:
 /// generation identity must not be supplied by a replayed or structurally
 /// obsolete trusted document.
-#[allow(dead_code)]
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RuntimeSourceBundleManifest {
     name: String,
-    version: String,
-    #[serde(default)]
-    description: String,
+    #[serde(rename = "version")]
+    _version: String,
+    #[serde(default, rename = "description")]
+    _description: String,
     provides_kinds: Vec<String>,
     #[serde(default)]
     requires_kinds: Vec<String>,
@@ -49,10 +49,10 @@ struct RuntimeSourceBundleManifest {
     uses_kinds: Vec<String>,
     #[serde(default)]
     runtime_authority: RuntimeSourceAuthorityDecls,
-    #[serde(default)]
-    smoke: Vec<RuntimeSourceSmokeDecl>,
-    #[serde(default)]
-    shadows: Vec<String>,
+    #[serde(default, rename = "smoke")]
+    _smoke: Vec<RuntimeSourceSmokeDecl>,
+    #[serde(default, rename = "shadows")]
+    _shadows: Vec<String>,
     #[serde(default)]
     isolation_backends: Vec<ryeos_isolation_protocol::IsolationBackendDeclaration>,
     #[serde(default)]
@@ -62,7 +62,6 @@ struct RuntimeSourceBundleManifest {
         Vec<ryeos_external_execution_contract::ExternalLifecycleAdapterDeclaration>,
 }
 
-#[allow(dead_code)]
 #[derive(Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RuntimeSourceAuthorityDecls {
@@ -72,11 +71,10 @@ struct RuntimeSourceAuthorityDecls {
     runtime_vault: Vec<RuntimeSourceVaultDecl>,
     #[serde(default)]
     item_authoring: Vec<RuntimeSourceItemAuthorDecl>,
-    #[serde(default)]
-    project_snapshots: Vec<RuntimeSourceProjectSnapshotOperation>,
+    #[serde(default, rename = "project_snapshots")]
+    _project_snapshots: Vec<RuntimeSourceProjectSnapshotOperation>,
 }
 
-#[allow(dead_code)]
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RuntimeSourceBundleEventDecl {
@@ -84,7 +82,6 @@ struct RuntimeSourceBundleEventDecl {
     operations: Vec<RuntimeSourceBundleEventOperation>,
 }
 
-#[allow(dead_code)]
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 enum RuntimeSourceBundleEventOperation {
@@ -92,7 +89,6 @@ enum RuntimeSourceBundleEventOperation {
     Scan,
 }
 
-#[allow(dead_code)]
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RuntimeSourceVaultDecl {
@@ -100,7 +96,6 @@ struct RuntimeSourceVaultDecl {
     operations: Vec<RuntimeSourceVaultOperation>,
 }
 
-#[allow(dead_code)]
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 enum RuntimeSourceVaultOperation {
@@ -110,7 +105,6 @@ enum RuntimeSourceVaultOperation {
     List,
 }
 
-#[allow(dead_code)]
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 enum RuntimeSourceProjectSnapshotOperation {
@@ -120,7 +114,6 @@ enum RuntimeSourceProjectSnapshotOperation {
     Create,
 }
 
-#[allow(dead_code)]
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RuntimeSourceItemAuthorDecl {
@@ -128,19 +121,19 @@ struct RuntimeSourceItemAuthorDecl {
     namespace: String,
 }
 
-#[allow(dead_code)]
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RuntimeSourceSmokeDecl {
     #[serde(rename = "ref")]
-    item_ref: String,
-    ref_bindings: std::collections::BTreeMap<String, String>,
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
-    inputs: serde_json::Value,
-    #[serde(default)]
-    timeout_secs: Option<u64>,
+    _item_ref: String,
+    #[serde(rename = "ref_bindings")]
+    _ref_bindings: std::collections::BTreeMap<String, String>,
+    #[serde(default, rename = "name")]
+    _name: Option<String>,
+    #[serde(default, rename = "inputs")]
+    _inputs: serde_json::Value,
+    #[serde(default, rename = "timeout_secs")]
+    _timeout_secs: Option<u64>,
 }
 
 impl RuntimeSourceAuthorityDecls {
@@ -789,7 +782,6 @@ fn resolve_executor_chain(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn resolve_executor_source_policy(
     starting_executor_id: &str,
     root_source_path: &Path,
@@ -917,7 +909,6 @@ pub struct ResolvedTerminalExecutor {
 /// Every resolved terminal MUST declare a `terminal_executor:` block — a
 /// missing or invalid descriptor is a hard error (no silent fallback), so a
 /// mistyped or absent descriptor can never be silently treated as a subprocess.
-#[allow(clippy::too_many_arguments)]
 pub fn resolve_terminal_executor(
     starting_executor_id: &str,
     root_source_path: &Path,
@@ -941,7 +932,6 @@ pub fn resolve_terminal_executor(
 
 /// Resolve an executor terminal with every project hop and precedence probe
 /// sourced from admitted project content.
-#[allow(clippy::too_many_arguments)]
 pub fn resolve_terminal_executor_under_project_authority(
     starting_executor_id: &str,
     root_source_path: &Path,
@@ -965,7 +955,6 @@ pub fn resolve_terminal_executor_under_project_authority(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn resolve_terminal_executor_with_project_authority(
     starting_executor_id: &str,
     root_source_path: &Path,

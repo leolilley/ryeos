@@ -278,7 +278,6 @@ fn require_exact_wire_bytes(bytes: &[u8], count: usize, digest: &str) -> Result<
 }
 
 /// Missing evidence is pending, never success or permission to relaunch.
-#[allow(clippy::too_many_arguments)]
 pub fn read_outer_observation(
     imported: &ImportedConsumerInputs,
     record: &ConsumerInputRecord,
@@ -319,7 +318,6 @@ pub fn read_outer_observation(
 /// Deliver an exact one-way settlement request to the protected owner, never
 /// through a target-writable mount. An existing identical request is observable
 /// delivery, not permission to restart or proof that settlement has completed.
-#[allow(clippy::too_many_arguments)]
 pub fn request_outer_settlement(
     imported: &ImportedConsumerInputs,
     record: &ConsumerInputRecord,
@@ -398,7 +396,6 @@ fn completion_requested(
 /// No thread or peer is started after the namespace transition. EOF, malformed
 /// completion, overflow and deadline failure all take the shared cleanup path
 /// and never produce a successful observation or permission to restart.
-#[allow(clippy::too_many_arguments)]
 pub fn run_outer_protocol(
     imported: &ImportedConsumerInputs,
     record: &ConsumerInputRecord,

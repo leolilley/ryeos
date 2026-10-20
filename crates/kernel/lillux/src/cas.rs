@@ -549,16 +549,14 @@ fn atomic_write_batch_unix(
         }
     }
     let durability = sync_write_batch(first_directory);
-    #[allow(clippy::let_and_return)]
-    let outcome = match (publication_error, durability) {
+    match (publication_error, durability) {
         (None, Ok(())) => Ok(()),
         (Some(error), Ok(())) => Err(error).context("publish immutable CAS batch entries"),
         (None, Err(error)) => Err(error).context("make CAS batch publication durable"),
         (Some(error), Err(durability_error)) => Err(error).context(format!(
             "publish immutable CAS batch entries; publication durability also failed: {durability_error:#}"
         )),
-    };
-    outcome
+    }
 }
 
 #[cfg(unix)]
@@ -1837,8 +1835,7 @@ fn store_exact_entry(
     }
 
     let publication = parent.atomic_write_if_same(&name, None, bytes, 0o644, CAS_TEMP_PURPOSE);
-    #[allow(clippy::let_and_return)]
-    let outcome = match publication {
+    match publication {
         Ok(()) => Ok(true),
         Err(publication_error) => match parent.open_regular(&name, false) {
             Ok(Some(existing)) => {
@@ -1859,8 +1856,7 @@ fn store_exact_entry(
                 )
             }),
         },
-    };
-    outcome
+    }
 }
 
 // ── CLI interface ──────────────────────────────────────────────────

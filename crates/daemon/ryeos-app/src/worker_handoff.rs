@@ -2155,7 +2155,6 @@ pub struct WorkerSessionHandoffJobOperation {
 }
 
 impl WorkerSessionHandoffJobOperation {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         role: WorkerHandoffJobRole,
         operation_id: String,
@@ -2530,7 +2529,6 @@ impl WorkerPlacementPreflightRequest {
 }
 
 impl WorkerPlacementPreflightEvidence {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         request: &WorkerPlacementPreflightRequest,
         outer_exact_program_hash: String,
@@ -3729,7 +3727,6 @@ impl PreparedPlacementTransferManifest {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn prepare_placement_transfer_manifest(
     operation_id: &str,
     owner_principal: &str,
@@ -3769,7 +3766,6 @@ impl PreparedPlacementRuntimeSeed {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn prepare_placement_runtime_seed(
     operation_id: &str,
     chain_root_id: &str,
@@ -4140,7 +4136,6 @@ fn equivalent_remote_environment(
 /// authority and a configured directional project endpoint. Paths and
 /// environment-overlay identities are rebuilt for the target; immutable base,
 /// capabilities, and child policy are copied exactly.
-#[allow(clippy::too_many_arguments)]
 pub fn build_remote_project_rebind(
     source: &ExecutionProjectAuthority,
     target_project_path: &std::path::Path,

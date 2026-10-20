@@ -44,7 +44,6 @@ struct ComposeResolvedAuthority {
 // Execution plumbing: each argument is a distinct leg of the thread's
 // auth/provenance context, threaded verbatim — a struct would rename,
 // not simplify. Restructure with a compiler in the loop, not here.
-#[allow(clippy::too_many_arguments)]
 pub async fn run(
     decl: &LaunchAugmentationDecl,
     resolution: &mut ResolutionOutput,
@@ -1184,7 +1183,6 @@ pub async fn run(
 
 // This blocking boundary keeps every authority input explicit so none can be
 // silently recovered from ambient state inside the worker.
-#[allow(clippy::too_many_arguments)]
 async fn resolve_compose_authority_off_thread(
     engine: &ryeos_engine::engine::Engine,
     resolution_project_root: Option<&Path>,
@@ -1233,7 +1231,6 @@ async fn resolve_compose_authority_off_thread(
     })?
 }
 
-#[allow(clippy::too_many_arguments)]
 fn resolve_compose_authority(
     engine: &ryeos_engine::engine::Engine,
     resolution_project_root: Option<&Path>,
@@ -1514,7 +1511,6 @@ fn runtime_config_snapshot_cache() -> &'static crate::resolved_config_cache::Sna
 
 // The cache key is deliberately parameterized by the complete admitted
 // authority tuple.
-#[allow(clippy::too_many_arguments)]
 async fn load_runtime_config_snapshot_cached(
     kind: &str,
     requirements: &BTreeMap<String, ryeos_engine::kind_registry::MethodRuntimeConfigRequirement>,
@@ -1960,7 +1956,6 @@ async fn verify_augmentation_executor_attestation(
     .map_err(|error| LaunchAugmentationError::RuntimeRegistry(error.to_string()))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn build_cache_key(
     decl: &LaunchAugmentationDecl,
     positions: &BTreeMap<String, Vec<String>>,

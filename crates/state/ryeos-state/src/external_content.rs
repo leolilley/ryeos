@@ -567,7 +567,6 @@ struct LargeCaptureState {
 }
 
 #[cfg(unix)]
-#[allow(clippy::too_many_arguments)]
 fn capture_large_directory(
     directory: &lillux::PinnedDirectory,
     prefix: &str,
@@ -891,7 +890,6 @@ pub fn capture_file_at(
 }
 
 #[cfg(unix)]
-#[allow(clippy::too_many_arguments)]
 fn capture_directory(
     directory: &lillux::PinnedDirectory,
     prefix: &str,

@@ -33,7 +33,7 @@
 //!   `auth: { env_var: ... }` only; defaults take effect →
 //!   `Authorization: Bearer <secret>`.
 
-mod common;
+use ryeosd::test_support as common;
 
 use std::path::Path;
 use std::time::Duration;

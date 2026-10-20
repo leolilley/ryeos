@@ -303,7 +303,6 @@ fn draw_dock_tile(
     super::draw_view(surface, inner, &dock.view, now_ms);
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn draw_tile(
     surface: &mut TextSurface,
     rect: Rect,

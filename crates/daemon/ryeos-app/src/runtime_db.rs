@@ -7189,9 +7189,7 @@ fn validate_current_runtime_store_with(
              SELECT 'runtime_action_intent', operation_id, launch_metadata
                FROM runtime_action_intent WHERE launch_metadata IS NOT NULL",
         )?;
-        // Preserve statement/query temporary drop order under Edition 2024.
-        #[allow(clippy::let_and_return)]
-        let rows = statement
+        statement
             .query_map([], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
@@ -7199,8 +7197,7 @@ fn validate_current_runtime_store_with(
                     row.get::<_, String>(2)?,
                 ))
             })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        rows
+            .collect::<rusqlite::Result<Vec<_>>>()?
     };
     for (owner, owner_id, raw) in rows {
         decode_current_launch_metadata(&raw)
@@ -7227,9 +7224,7 @@ fn validate_current_runtime_store_with(
                  ON runtime.thread_id = reservation.thread_id
               ORDER BY reservation.thread_id",
         )?;
-        // Preserve statement/query temporary drop order under Edition 2024.
-        #[allow(clippy::let_and_return)]
-        let rows = statement
+        statement
             .query_map([], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
@@ -7237,8 +7232,7 @@ fn validate_current_runtime_store_with(
                     row.get::<_, Option<String>>(2)?,
                 ))
             })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        rows
+            .collect::<rusqlite::Result<Vec<_>>>()?
     };
     for (thread_id, phase, raw) in reservations {
         InProcessHandlerReservationPhase::parse(&phase)
@@ -7263,9 +7257,7 @@ fn validate_current_runtime_store_with(
              SELECT 'follow_waiter', follow_key, child_project_authority
                FROM follow_waiter WHERE child_project_authority IS NOT NULL",
         )?;
-        // Preserve statement/query temporary drop order under Edition 2024.
-        #[allow(clippy::let_and_return)]
-        let rows = statement
+        statement
             .query_map([], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
@@ -7273,8 +7265,7 @@ fn validate_current_runtime_store_with(
                     row.get::<_, String>(2)?,
                 ))
             })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        rows
+            .collect::<rusqlite::Result<Vec<_>>>()?
     };
     for (owner, owner_id, raw) in authorities {
         decode_current_project_authority(&raw)
@@ -8794,7 +8785,6 @@ fn decode_completed_hook_response(
     Ok(response)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn decode_completed_hook_dispatch(
     dispatch_key: &str,
     chain_root_id: String,
@@ -13188,7 +13178,6 @@ impl RuntimeDb {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn reserve_dedicated_session_approval_decision(
         &self,
         placement_thread_id: &str,
@@ -16118,7 +16107,6 @@ impl RuntimeDb {
     /// Workspace-aware form of runtime-action reservation. This extends the
     /// existing one-operation/one-child row; callers must not reserve a second
     /// lock row and attempt to couple it after the fact.
-    #[allow(clippy::too_many_arguments)]
     pub fn reserve_runtime_action_intent_with_workspace(
         &self,
         operation_id: &str,
@@ -21575,9 +21563,7 @@ impl RuntimeDb {
                  ORDER BY command_id ASC LIMIT ?5"
                 );
                 let mut stmt = transaction.prepare(&sql)?;
-                // Preserve statement/query temporary drop order under Edition 2024.
-                #[allow(clippy::let_and_return)]
-                let rows = stmt
+                stmt
                     .query_map(
                         params![
                             i64::try_from(MAX_COMMAND_REQUESTED_BY_BYTES).unwrap_or(i64::MAX),
@@ -21588,8 +21574,7 @@ impl RuntimeDb {
                         ],
                         read_bounded_command_row,
                     )?
-                    .collect::<std::result::Result<Vec<_>, _>>()?;
-                rows
+                    .collect::<std::result::Result<Vec<_>, _>>()?
             };
             if open.len() > MAX_OPEN_COMMANDS_PER_THREAD {
                 bail!(
@@ -21951,7 +21936,6 @@ impl RuntimeDb {
     /// child, which would strand the original.
     // Slot identity, item/spec identity, child lineage, and sealed authority
     // stay explicit because each is independently compared before publication.
-    #[allow(clippy::too_many_arguments)]
     pub fn set_follow_child(
         &self,
         follow_key: &str,

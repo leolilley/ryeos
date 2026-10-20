@@ -1,6 +1,6 @@
 // Tests for `ui.session.current` handler.
 
-mod test_state;
+use ryeos_ui::test_support as test_state;
 use test_state::{build_test_state, launch_context, mint_launch};
 
 use ryeos_app::handler_context::HandlerContext;

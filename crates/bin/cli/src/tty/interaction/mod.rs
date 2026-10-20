@@ -5,8 +5,6 @@
 //! always returns control to the invoking shell.
 
 mod event;
-#[allow(dead_code)]
-mod focus;
 mod frame;
 mod list;
 mod pager;

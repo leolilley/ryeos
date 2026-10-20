@@ -1,4 +1,4 @@
-mod test_state;
+use ryeos_api::test_support as test_state;
 
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, Read, Write};

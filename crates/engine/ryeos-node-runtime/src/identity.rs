@@ -533,7 +533,6 @@ fn load_verified_authorized_key_from_directory(
 /// [`WildcardPolicy`] for when each variant is appropriate.
 // One argument per authorized_key TOML field; a dozen call sites
 // (tests included) enumerate them positionally.
-#[allow(clippy::too_many_arguments)]
 pub fn write_authorized_key_toml(
     auth_dir: &Path,
     fingerprint: &str,
@@ -565,7 +564,6 @@ pub fn write_authorized_key_toml(
 /// constraint, scopes, or label of an already-authorized fingerprint. Class
 /// conversion remains an explicit stopped-daemon operation through
 /// `reconcile_authorized_key_toml_scopes`.
-#[allow(clippy::too_many_arguments)]
 pub fn create_authorized_key_toml(
     auth_dir: &Path,
     fingerprint: &str,
@@ -598,7 +596,6 @@ pub fn create_authorized_key_toml(
 /// grant, this binds the admitted signing key to the node's authenticated site
 /// identity. The binding is consumed by remote execution admission; it never
 /// comes from an execute request body or header.
-#[allow(clippy::too_many_arguments)]
 pub fn write_authorized_remote_node_key_toml(
     auth_dir: &Path,
     fingerprint: &str,
@@ -630,7 +627,6 @@ pub fn write_authorized_remote_node_key_toml(
     Ok(auth_dir.join(format!("{fingerprint}.toml")))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn write_authorized_key_toml_for_subject(
     auth_dir: &Path,
     fingerprint: &str,
@@ -660,7 +656,6 @@ fn write_authorized_key_toml_for_subject(
     Ok(auth_dir.join(format!("{fingerprint}.toml")))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_authorized_key_toml_for_subject(
     fingerprint: &str,
     public_key_b64: &str,
@@ -816,7 +811,6 @@ fn publish_authorized_key_bytes(
 /// Remote grants never accept wildcard scopes. The verified incumbent is the exact
 /// compare-and-swap input, so concurrent merge operations cannot silently
 /// lose scopes.
-#[allow(clippy::too_many_arguments)]
 pub fn reconcile_authorized_key_toml_scopes_for_subject(
     auth_dir: &Path,
     fingerprint: &str,
@@ -931,7 +925,6 @@ pub fn reconcile_authorized_key_toml_scopes_for_subject(
 /// Convenience for callers whose contract selects only a local client or a
 /// remote operator. Callers that can maintain a `remote_node` subject use
 /// [`reconcile_authorized_key_toml_scopes_for_subject`] explicitly.
-#[allow(clippy::too_many_arguments)]
 pub fn reconcile_authorized_key_toml_scopes(
     auth_dir: &Path,
     fingerprint: &str,

@@ -184,36 +184,12 @@ impl RyeOsCore {
     /// (most-recent first, as the daemon returns them). The head of a chain
     /// is the thread no other thread continues from (its `thread_id` is not
     /// any sibling's `upstream_thread_id`); a follow-up braids onto it.
-    /// The daemon-authored `execution.supports_continuation` for a thread, read
-    /// from the fetched thread projections (`threads` data carries it per row
-    /// via the thread-view layer). `None` = the thread isn't in the fetched
-    /// data (e.g. a just-launched thread before the list refresh) or carries no
-    /// execution facts — callers treat unknown optimistically, distrusting only
-    /// an explicit `Some(false)`. Symmetric counterpart to
-    /// [`Self::thread_supports_operator_followup`] — the machine-continuation
-    /// fact. Operator surfaces gate on operator-follow-up, so this isn't gated on
-    /// in prod today; kept (and tested) as the substrate accessor for a future
-    /// machine-continuation affordance.
-    #[allow(dead_code)]
-    pub(crate) fn thread_supports_continuation(&self, thread_id: &str) -> Option<bool> {
-        let row = self.data.threads.as_ref()?.threads.iter().find(|row| {
-            row.get("thread_id").and_then(serde_json::Value::as_str) == Some(thread_id)
-        })?;
-        // Typed execution facts (no `supports_continuation` string literal).
-        // `None` = no execution object on the row (unknown), distinct from an
-        // explicit `Some(false)`. A suspended follow-parent is never
-        // continuation-eligible while suspended: the daemon owns its resume via
-        // the followed child, so the instance follow fact vetoes the kind fact.
-        let facts: super::dto::ExecutionFacts =
-            serde_json::from_value(row.get("execution")?.clone()).ok()?;
-        Some(facts.supports_continuation && !row_is_suspended_parent(row))
-    }
-
     /// The daemon-authored `execution.supports_operator_followup` for a thread.
     /// Gates OPERATOR-input targeting/labels: a graph is continuation-capable but
     /// machine-only, so it accepts no operator input even though it continues.
-    /// Same unknown-optimistic semantics as [`Self::thread_supports_continuation`]
-    /// — distrust only an explicit `Some(false)`.
+    /// `None` = the thread isn't in the fetched data or carries no execution
+    /// facts — callers treat unknown optimistically, distrusting only an
+    /// explicit `Some(false)`.
     pub(crate) fn thread_supports_operator_followup(&self, thread_id: &str) -> Option<bool> {
         let row = self.data.threads.as_ref()?.threads.iter().find(|row| {
             row.get("thread_id").and_then(serde_json::Value::as_str) == Some(thread_id)
@@ -1416,22 +1392,14 @@ mod tests {
                 serde_json::json!({ "thread_id": "T-c" }), // no execution facts
             ],
         });
-        assert_eq!(core.thread_supports_continuation("T-a"), Some(true));
         assert_eq!(core.thread_supports_operator_followup("T-a"), Some(true));
-        assert_eq!(core.thread_supports_continuation("T-g"), Some(true));
         assert_eq!(
             core.thread_supports_operator_followup("T-g"),
             Some(false),
             "graph is machine-only"
         );
-        assert_eq!(core.thread_supports_continuation("T-b"), Some(false));
-        assert_eq!(
-            core.thread_supports_continuation("T-c"),
-            None,
-            "missing facts → unknown"
-        );
         assert_eq!(core.thread_supports_operator_followup("T-c"), None);
-        assert_eq!(core.thread_supports_continuation("T-missing"), None);
+        assert_eq!(core.thread_supports_operator_followup("T-missing"), None);
     }
 
     #[test]
@@ -1451,11 +1419,6 @@ mod tests {
             })],
         });
         assert!(core.thread_is_suspended_parent("T-parent"));
-        assert_eq!(
-            core.thread_supports_continuation("T-parent"),
-            Some(false),
-            "a suspended parent is not continuation-eligible while suspended"
-        );
         assert_eq!(
             core.thread_supports_operator_followup("T-parent"),
             Some(false),

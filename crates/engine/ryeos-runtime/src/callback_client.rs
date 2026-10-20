@@ -654,7 +654,6 @@ impl CallbackClient {
     /// derives all trust-bearing state from the validated tokens.
     // Keep graph position, child payload, frontier, and terminal handoff
     // explicit: each field participates independently in resume correctness.
-    #[allow(clippy::too_many_arguments)]
     pub async fn spawn_follow_child(
         &self,
         graph_run_id: &str,
@@ -698,7 +697,6 @@ impl CallbackClient {
 
     // Keep graph position, launch-window policy, frontier, and terminal handoff
     // explicit: each field participates independently in resume correctness.
-    #[allow(clippy::too_many_arguments)]
     pub async fn spawn_follow_children(
         &self,
         graph_run_id: &str,
@@ -1199,7 +1197,6 @@ impl CallbackClient {
     /// so SSE consumers can route results without cross-referencing tool_call_start.
     // Wire-shaped: each argument is one field of the emitted result
     // envelope; eight call sites pass them positionally today.
-    #[allow(clippy::too_many_arguments)]
     pub async fn emit_tool_result(
         &self,
         operation_id: &str,

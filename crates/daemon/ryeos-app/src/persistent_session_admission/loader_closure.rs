@@ -76,11 +76,6 @@ impl SealedGpuLoaderInventory {
         );
         Ok(())
     }
-
-    #[allow(dead_code)]
-    pub(crate) fn retained_identity(&self) -> (&str, usize) {
-        (&self.sha256, self.canonical_bytes.len())
-    }
 }
 
 struct BoundedWriter {

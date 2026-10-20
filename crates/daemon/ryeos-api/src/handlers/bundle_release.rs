@@ -1728,7 +1728,6 @@ async fn run_authority_calibration(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn calibrate_signed_bundle(
     bundle_name: &str,
     manifest_source: ryeos_app::bundle_publication::calibration_manifest::CalibrationManifestSource,
@@ -2599,7 +2598,6 @@ async fn run_release_graph(
     .await
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn run_pinned_release_graph_from_generation(
     graph_ref: &'static str,
     source_generation: Arc<ReleaseSourceGeneration>,
@@ -2639,7 +2637,6 @@ async fn run_pinned_release_graph_from_generation(
     .await
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn run_protected_release_qualifier_from_generation(
     qualifier_ref: &'static str,
     source_generation: Arc<ReleaseSourceGeneration>,

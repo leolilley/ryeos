@@ -673,7 +673,6 @@ fn signed_terminal_process_settlement_digest(events: &[ThreadEvent]) -> anyhow::
 /// those in `prove_participant`, go through state-store readers that take no
 /// caller guard and synchronize internally. Publication re-reads the journal
 /// facts this proof names under its own guard.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn prove(
     state: &AppState,
     authority: &ryeos_state::PinnedStateAuthority,
@@ -868,7 +867,6 @@ pub(super) fn prove(
 /// Historical record authentication, not contact eligibility or semantic
 /// qualification. Journal reads already validate the exact owner-measurement
 /// prerequisite after occurrence termination. Never require an expired bearer.
-#[allow(clippy::too_many_arguments)]
 fn corroborate_remote_consumer_references(
     state: &AppState,
     authority: &ryeos_state::PinnedStateAuthority,
@@ -1307,7 +1305,6 @@ fn require_zero_participant_lane(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn prove_participant(
     state: &AppState,
     authority: &ryeos_state::PinnedStateAuthority,

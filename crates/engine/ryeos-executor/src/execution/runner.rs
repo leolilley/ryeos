@@ -3131,7 +3131,6 @@ fn admitted_root_requires_process_scope(
 // Execution plumbing: each argument is a distinct leg of the thread's
 // auth/provenance context, threaded verbatim — a struct would rename,
 // not simplify. Restructure with a compiler in the loop, not here.
-#[allow(clippy::too_many_arguments)]
 fn build_protocol_launch_env(
     state: &AppState,
     protocol: &ryeos_engine::protocols::VerifiedProtocol,
@@ -6516,7 +6515,6 @@ impl DetachedDispatchKind {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 #[tracing::instrument(
     name = "thread:dispatch",
     skip(

@@ -655,7 +655,6 @@ impl CallbackCapabilityStore {
 
     // One argument per capability field; launch boundaries bind them
     // positionally so every authority-bearing value is explicit at mint time.
-    #[allow(clippy::too_many_arguments)]
     pub fn generate_with_context(
         &self,
         thread_id: &str,

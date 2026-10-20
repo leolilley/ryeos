@@ -243,8 +243,6 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
             observed_effective_digest
         );
     }
-    let project_root = envelope.roots.project_root.clone();
-    let bundle_roots = envelope.roots.bundle_roots.clone();
 
     // The runtime no longer parses the directive body or walks extends.
     // The daemon-side extends-chain composer (handler:ryeos/core/extends-chain)
@@ -302,10 +300,6 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
     }
 
     let bootstrap_output = bootstrap::bootstrap(
-        &bootstrap::BootstrapRoots {
-            project_root: &project_root,
-            bundle_roots: &bundle_roots,
-        },
         &envelope.resolution().composed,
         &envelope.policy.hard_limits,
         &verified_loader,

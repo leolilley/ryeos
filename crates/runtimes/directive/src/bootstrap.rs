@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
 
@@ -34,15 +33,7 @@ pub struct BootstrapOutput {
     pub reasoning: Option<ReasoningConfig>,
 }
 
-/// Filebundle roots needed for bootstrap resolution.
-#[allow(dead_code)] // Used by future bootstrap features (context loading, etc.)
-pub struct BootstrapRoots<'a> {
-    pub project_root: &'a Path,
-    pub bundle_roots: &'a [PathBuf],
-}
-
 pub fn bootstrap(
-    _roots: &BootstrapRoots<'_>,
     composed_view: &KindComposedView,
     _envelope_limits: &ryeos_runtime::envelope::HardLimits,
     loader: &VerifiedLoader,

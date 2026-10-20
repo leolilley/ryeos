@@ -933,7 +933,6 @@ fn publish_provider_call(
     Ok(publication)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn publish_provider_call_observation(
     state: &AppState,
     thread_id: &str,

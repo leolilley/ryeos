@@ -6,7 +6,7 @@
 //! test will prove the fix: signing with the daemon's principal_id
 //! succeeds.
 
-mod common;
+use ryeosd::test_support as common;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 

@@ -4756,7 +4756,6 @@ enum ValidatedTargetAdoptionOutcome {
     FailedBeforeAttachment(ryeos_app::worker_handoff::WorkerPlacementFailureResponse),
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn validate_and_retain_target_adoption_result(
     state: &AppState,
     target_client: &crate::remote::client::RemoteClient,
@@ -4992,7 +4991,6 @@ async fn validate_and_retain_target_adoption_result(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn validate_and_retain_target_abort_result(
     state: &AppState,
     target_client: &crate::remote::client::RemoteClient,
@@ -5890,7 +5888,6 @@ fn settle_worker_handoff_attempt(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn settle_worker_handoff_attempt_with_heads(
     state: &AppState,
     job_id: &str,

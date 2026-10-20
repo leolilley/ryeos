@@ -7,7 +7,7 @@
 //! (per-chunk, timeout-bounded) and stops once it has seen the terminal
 //! event, rather than blocking on a full-body read that would never end.
 
-mod common;
+use ryeosd::test_support as common;
 
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};

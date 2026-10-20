@@ -21,7 +21,6 @@ use std::io::{BufWriter, Write};
 /// across runs of same-styled cells, which keeps resize storms cheap
 /// enough to repaint per event. The caller owns buffer succession (`prev`
 /// is a borrow, not a slot this function fills).
-#[allow(dead_code)]
 pub fn render_text_surface(
     stdout: &mut impl Write,
     new: &TextSurface,

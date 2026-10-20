@@ -1,15 +1,15 @@
-// Shared test state builder for handler tests.
-//
-// Every builder returns the Store owner ahead of the application, so
-// `let (dir, _store_owner, state) = ...` drops the application, and every
-// Store `Arc` it holds, before the owner closes the Store and before the
-// directory is removed. Tasks that hold the application must finish before
-// the owner drops. The owner stays on the thread that built it.
-//
-// Provides two modes:
-// - `build_test_state()`: empty engine (fast, for error-path tests)
-// - `build_test_state_with_bundles()`: full engine with workspace
-//   bundles (slower, for happy-path tests; requires populated bundles)
+//! Shared test state builder for handler tests.
+//!
+//! Every builder returns the Store owner ahead of the application, so
+//! `let (dir, _store_owner, state) = ...` drops the application, and every
+//! Store `Arc` it holds, before the owner closes the Store and before the
+//! directory is removed. Tasks that hold the application must finish before
+//! the owner drops. The owner stays on the thread that built it.
+//!
+//! Provides two modes:
+//! - `build_test_state()`: empty engine (fast, for error-path tests)
+//! - `build_test_state_with_bundles()`: full engine with workspace
+//!   bundles (slower, for happy-path tests; requires populated bundles)
 
 use std::sync::Arc;
 
@@ -41,7 +41,6 @@ fn empty_engine() -> Arc<ryeos_engine::engine::Engine> {
 /// Reopen the complete state-store projection over an existing test root.
 /// This deliberately reconstructs the service owners instead of reusing any
 /// process-local AppState maps, matching the daemon-restart observation gate.
-#[allow(dead_code)]
 pub fn reopen_test_state(tmpdir: &tempfile::TempDir) -> (TestStateStore, AppState) {
     build_test_state_at(tmpdir.path(), empty_engine(), false)
 }
@@ -49,12 +48,10 @@ pub fn reopen_test_state(tmpdir: &tempfile::TempDir) -> (TestStateStore, AppStat
 /// Build an AppState backed by the live workspace bundles.
 /// Suitable for resolution paths that must distinguish a missing item from an
 /// unknown kind using the real kind, parser, and composer registries.
-#[allow(dead_code)]
 pub fn build_test_state_with_bundles() -> (tempfile::TempDir, TestStateStore, AppState) {
     build_test_state_with_engine(Arc::new(build_live_bundle_engine()))
 }
 
-#[allow(dead_code)]
 pub fn build_test_state_with_engine(
     engine: Arc<ryeos_engine::engine::Engine>,
 ) -> (tempfile::TempDir, TestStateStore, AppState) {
@@ -181,14 +178,12 @@ fn build_live_bundle_engine() -> ryeos_engine::engine::Engine {
         .with_composers(composers)
 }
 
-#[allow(dead_code)]
 pub fn build_test_state_with_hosted_policy(
     token_ttl_secs: u64,
 ) -> (tempfile::TempDir, TestStateStore, AppState) {
     build_test_state_with_hosted_policy_choices(true, token_ttl_secs)
 }
 
-#[allow(dead_code)]
 pub fn build_test_state_with_disabled_hosted_admission()
 -> (tempfile::TempDir, TestStateStore, AppState) {
     build_test_state_with_hosted_policy_choices(false, 600)
@@ -217,7 +212,6 @@ fn build_test_state_with_hosted_policy_choices(
 }
 
 // Test fixture: one argument per AppState component under test.
-#[allow(clippy::too_many_arguments)]
 fn build_app_state(
     config: ryeos_node_runtime::config::Config,
     identity: ryeos_node_runtime::identity::NodeIdentity,
@@ -272,8 +266,8 @@ fn build_app_state(
             status: "ok".into(),
             missing_services: vec![],
         },
-        services: Arc::new(ryeos_api::registry::build_service_registry()),
-        service_descriptors: ryeos_api::handlers::ALL,
+        services: Arc::new(crate::registry::build_service_registry()),
+        service_descriptors: crate::handlers::ALL,
         node_config: Arc::new(snapshot),
         external_placement_backends: Arc::new(Default::default()),
         external_candidate_connectors: Arc::new(Default::default()),

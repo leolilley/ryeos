@@ -10,7 +10,7 @@
 //!   6. Read SSE events until terminal
 //!   7. Assert events received correctly
 
-mod common;
+use ryeosd::test_support as common;
 
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};

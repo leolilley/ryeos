@@ -38,7 +38,6 @@ impl Drop for Owners {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn spawn(
     state: AppState,
     thread_id: String,
@@ -152,7 +151,6 @@ fn permits_normal_settlement(
         && !output.termination.stderr.truncated
 }
 
-#[allow(clippy::too_many_arguments)]
 fn run(
     state: &AppState,
     thread_id: &str,

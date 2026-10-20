@@ -4,8 +4,6 @@
 //! tool metadata before spawning the subprocess. Mirrors the existing
 //! `enforce_caps` test pattern.
 
-mod common;
-
 use std::collections::HashMap;
 
 use ryeos_engine::canonical_ref::CanonicalRef;

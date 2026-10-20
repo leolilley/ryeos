@@ -24,7 +24,6 @@ pub enum RetainedWorkspaceOutputContent {
 }
 
 impl RetainedWorkspaceOutputContent {
-    #[allow(clippy::too_many_arguments)]
     pub fn select(
         cas: &lillux::CasStore,
         capture: &WorkspaceOutputCapture,
@@ -240,7 +239,6 @@ fn absent(
     Ok(None)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn select_members(
     members: &[(&str, EntryKind, Option<u64>)],
     relative: &str,

@@ -661,8 +661,6 @@ pub struct BrowserSession {
 struct LaunchToken {
     session: BrowserSession,
     activated: bool,
-    #[allow(dead_code)]
-    created_at: Instant,
     expires_at: Instant,
 }
 
@@ -762,7 +760,6 @@ impl BrowserSessionStore {
         let launch_token = LaunchToken {
             session,
             activated: false,
-            created_at: now,
             expires_at: now + self.launch_token_ttl,
         };
 

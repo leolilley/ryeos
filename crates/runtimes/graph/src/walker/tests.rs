@@ -196,7 +196,6 @@ fn make_walker(graph: GraphDefinition, results: Vec<Value>) -> Walker {
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn strict_resume_params(
     graph: &GraphDefinition,
     current_node: &str,
@@ -235,7 +234,6 @@ fn strict_resume_params(
 /// parser. Only corruption/preflight tests use this seam; normal resume tests
 /// must use `strict_resume_params` so their fixtures prove the accepted
 /// contract.
-#[allow(clippy::too_many_arguments)]
 fn unchecked_resume_params(
     graph: &GraphDefinition,
     current_node: &str,

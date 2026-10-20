@@ -11,6 +11,13 @@ default = []
 scheduling = ["dep:ryeos-scheduler", "dep:ryeos-scheduler-service"]
 model-provider-setup = ["dep:ryeos-directive-definition"]
 handoff-test-support = ["ryeos-app/test-support"]
+# Exposes `ryeos_api::test_support`, the shared application-state builders
+# used by this crate's tests.
+test-support = [
+  "ryeos-app/test-support",
+  "ryeos-engine/test-support",
+  "ryeos-node-runtime/test-support",
+]
 # Exact process-kill qualification for project apply-snapshot durable
 # boundaries. The cut selector does not exist in production builds.
 crash-qualification-test-support = ["ryeos-app/crash-qualification-test-support"]
@@ -72,6 +79,7 @@ tracing = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
+ryeos-api = { workspace = true, features = ["test-support"] }
 futures-util = { workspace = true }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 ryeos-external-candidate-supervisor = { path = "../../tools/external-candidate-supervisor", features = ["test-support"] }

@@ -780,9 +780,8 @@ fn verify_manifest_signature_inner(
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PreflightNodeBundleRecord {
-    #[allow(dead_code)]
-    kind: Option<String>,
-    #[allow(dead_code)]
+    #[serde(rename = "kind")]
+    _kind: Option<String>,
     path: PathBuf,
 }
 
@@ -793,41 +792,40 @@ struct PreflightNodeRouteRecord {
     path: String,
     methods: std::collections::HashSet<String>,
     auth: String,
-    #[allow(dead_code)]
     #[serde(default)]
-    auth_config: Option<serde_json::Value>,
-    #[allow(dead_code)]
+    #[serde(rename = "auth_config")]
+    _auth_config: Option<serde_json::Value>,
     #[serde(default)]
-    limits: PreflightRawLimits,
+    #[serde(rename = "limits")]
+    _limits: PreflightRawLimits,
     response: PreflightRawResponseSpec,
-    #[allow(dead_code)]
     #[serde(default)]
     execute: Option<PreflightRawExecute>,
-    #[allow(dead_code)]
     #[serde(default)]
-    request: PreflightRawRequest,
+    #[serde(rename = "request")]
+    _request: PreflightRawRequest,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PreflightRawLimits {
-    #[allow(dead_code)]
     #[serde(default = "default_body_max")]
-    body_bytes_max: u64,
-    #[allow(dead_code)]
+    #[serde(rename = "body_bytes_max")]
+    _body_bytes_max: u64,
     #[serde(default = "default_timeout")]
-    timeout_ms: u64,
-    #[allow(dead_code)]
+    #[serde(rename = "timeout_ms")]
+    _timeout_ms: u64,
     #[serde(default = "default_concurrent_max")]
-    concurrent_max: u32,
+    #[serde(rename = "concurrent_max")]
+    _concurrent_max: u32,
 }
 
 impl Default for PreflightRawLimits {
     fn default() -> Self {
         Self {
-            body_bytes_max: default_body_max(),
-            timeout_ms: default_timeout(),
-            concurrent_max: default_concurrent_max(),
+            _body_bytes_max: default_body_max(),
+            _timeout_ms: default_timeout(),
+            _concurrent_max: default_concurrent_max(),
         }
     }
 }
@@ -848,38 +846,37 @@ fn default_concurrent_max() -> u32 {
 #[serde(deny_unknown_fields)]
 struct PreflightRawResponseSpec {
     mode: String,
-    #[allow(dead_code)]
     #[serde(default)]
     source: Option<String>,
-    #[allow(dead_code)]
     #[serde(default)]
-    source_config: serde_json::Value,
-    #[allow(dead_code)]
+    #[serde(rename = "source_config")]
+    _source_config: serde_json::Value,
     #[serde(default)]
-    status: Option<u16>,
-    #[allow(dead_code)]
+    #[serde(rename = "status")]
+    _status: Option<u16>,
     #[serde(default)]
-    content_type: Option<String>,
-    #[allow(dead_code)]
+    #[serde(rename = "content_type")]
+    _content_type: Option<String>,
     #[serde(default)]
-    body_b64: Option<String>,
+    #[serde(rename = "body_b64")]
+    _body_b64: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PreflightRawExecute {
     item_ref: String,
-    #[allow(dead_code)]
     #[serde(default)]
-    params: serde_json::Value,
+    #[serde(rename = "params")]
+    _params: serde_json::Value,
 }
 
 #[derive(Debug, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct PreflightRawRequest {
-    #[allow(dead_code)]
     #[serde(default)]
-    body: PreflightRawRequestBody,
+    #[serde(rename = "body")]
+    _body: PreflightRawRequestBody,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -900,100 +897,99 @@ struct PreflightCommandRecord {
     description: String,
     #[serde(default)]
     aliases: Vec<PreflightCommandAliasRecord>,
-    #[allow(dead_code)]
     #[serde(default)]
-    help: Option<PreflightCommandHelp>,
-    #[allow(dead_code)]
+    #[serde(rename = "help")]
+    _help: Option<PreflightCommandHelp>,
     #[serde(default)]
     arguments: Vec<PreflightCommandArgument>,
     #[serde(default)]
     forms: Vec<PreflightCommandForm>,
-    #[allow(dead_code)]
     #[serde(default)]
-    sensitive_fields: Vec<String>,
-    #[allow(dead_code)]
+    #[serde(rename = "sensitive_fields")]
+    _sensitive_fields: Vec<String>,
     #[serde(default)]
-    defaults: std::collections::BTreeMap<String, serde_json::Value>,
-    #[allow(dead_code)]
+    #[serde(rename = "defaults")]
+    _defaults: std::collections::BTreeMap<String, serde_json::Value>,
     #[serde(default)]
-    parameter_binding: Option<PreflightCommandParameterBinding>,
-    #[allow(dead_code)]
+    #[serde(rename = "parameter_binding")]
+    _parameter_binding: Option<PreflightCommandParameterBinding>,
     #[serde(default)]
     // Project selection has one closed wire owner. Do not copy its fields here:
     // a stale preflight mirror can reject descriptors accepted by the actual
     // runtime and prevent the install needed to activate that same contract.
-    project: Option<ryeos_runtime::CommandProjectPolicy>,
-    #[allow(dead_code)]
+    #[serde(rename = "project")]
+    _project: Option<ryeos_runtime::CommandProjectPolicy>,
     #[serde(default)]
-    control_flags: Vec<PreflightCommandControlFlag>,
+    #[serde(rename = "control_flags")]
+    _control_flags: Vec<PreflightCommandControlFlag>,
     dispatch: PreflightCommandDispatch,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PreflightCommandControlFlag {
-    #[allow(dead_code)]
-    flag: String,
-    #[allow(dead_code)]
-    help: String,
+    #[serde(rename = "flag")]
+    _flag: String,
+    #[serde(rename = "help")]
+    _help: String,
     // Routing destination — validated against the real `ControlFlagBinding`
     // enum by the command model at load; preflight only checks structure.
-    #[allow(dead_code)]
-    binding: String,
-    #[allow(dead_code)]
+    #[serde(rename = "binding")]
+    _binding: String,
     #[serde(default)]
-    ref_binding_name: Option<String>,
-    #[allow(dead_code)]
+    #[serde(rename = "ref_binding_name")]
+    _ref_binding_name: Option<String>,
     #[serde(default)]
-    aliases: Vec<String>,
+    #[serde(rename = "aliases")]
+    _aliases: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PreflightCommandAliasRecord {
     tokens: Vec<String>,
-    #[allow(dead_code)]
     #[serde(default)]
-    description: Option<String>,
-    #[allow(dead_code)]
+    #[serde(rename = "description")]
+    _description: Option<String>,
     #[serde(default)]
-    deprecated: Option<bool>,
-    #[allow(dead_code)]
+    #[serde(rename = "deprecated")]
+    _deprecated: Option<bool>,
     #[serde(default)]
-    replacement_tokens: Option<Vec<String>>,
-    #[allow(dead_code)]
+    #[serde(rename = "replacement_tokens")]
+    _replacement_tokens: Option<Vec<String>>,
     #[serde(default)]
-    removed_in: Option<String>,
+    #[serde(rename = "removed_in")]
+    _removed_in: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PreflightCommandHelp {
-    #[allow(dead_code)]
     #[serde(default)]
-    usage: Option<String>,
-    #[allow(dead_code)]
+    #[serde(rename = "usage")]
+    _usage: Option<String>,
     #[serde(default)]
-    examples: Vec<String>,
+    #[serde(rename = "examples")]
+    _examples: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PreflightCommandArgument {
     name: String,
-    #[allow(dead_code)]
     #[serde(default)]
-    kind: PreflightCommandArgumentKind,
+    #[serde(rename = "kind")]
+    _kind: PreflightCommandArgumentKind,
     positional: usize,
-    #[allow(dead_code)]
     #[serde(default)]
-    required: bool,
-    #[allow(dead_code)]
+    #[serde(rename = "required")]
+    _required: bool,
     #[serde(default)]
-    arity: PreflightCommandArgumentArity,
-    #[allow(dead_code)]
+    #[serde(rename = "arity")]
+    _arity: PreflightCommandArgumentArity,
     #[serde(default)]
-    description: Option<String>,
+    #[serde(rename = "description")]
+    _description: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1007,9 +1003,9 @@ struct PreflightCommandForm {
 #[serde(deny_unknown_fields)]
 struct PreflightCommandSlot {
     field: String,
-    #[allow(dead_code)]
     #[serde(default)]
-    matcher: PreflightCommandArgumentKind,
+    #[serde(rename = "matcher")]
+    _matcher: PreflightCommandArgumentKind,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -1034,17 +1030,17 @@ enum PreflightCommandArgumentArity {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PreflightCommandParameterBinding {
-    #[allow(dead_code)]
-    mode: PreflightCommandParameterBindingMode,
-    #[allow(dead_code)]
+    #[serde(rename = "mode")]
+    _mode: PreflightCommandParameterBindingMode,
     #[serde(default)]
-    input_flag: Option<String>,
-    #[allow(dead_code)]
+    #[serde(rename = "input_flag")]
+    _input_flag: Option<String>,
     #[serde(default)]
-    single_json_object_arg: bool,
-    #[allow(dead_code)]
+    #[serde(rename = "single_json_object_arg")]
+    _single_json_object_arg: bool,
     #[serde(default)]
-    flag_key_normalization: PreflightFlagKeyNormalization,
+    #[serde(rename = "flag_key_normalization")]
+    _flag_key_normalization: PreflightFlagKeyNormalization,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -1070,23 +1066,23 @@ enum PreflightCommandDispatch {
     Group,
     LocalHandler {
         handler: String,
-        #[allow(dead_code)]
         #[serde(default)]
-        bootstrap: bool,
+        #[serde(rename = "bootstrap")]
+        _bootstrap: bool,
     },
     DirectExecuteItemRef {
         item_ref_arg: String,
-        #[allow(dead_code)]
-        validate_only: bool,
-        #[allow(dead_code)]
+        #[serde(rename = "validate_only")]
+        _validate_only: bool,
         #[serde(default)]
-        availability: PreflightCommandAvailability,
+        #[serde(rename = "availability")]
+        _availability: PreflightCommandAvailability,
     },
     ExecuteRef {
         execute: String,
-        #[allow(dead_code)]
         #[serde(default)]
-        availability: PreflightCommandAvailability,
+        #[serde(rename = "availability")]
+        _availability: PreflightCommandAvailability,
     },
 }
 
@@ -1485,7 +1481,7 @@ mod tests {
                 serde_yaml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
             validate_node_command_record(&path, &root, &body).unwrap();
             let record: PreflightCommandRecord = serde_json::from_value(body.clone()).unwrap();
-            let policy = record.project.unwrap();
+            let policy = record._project.unwrap();
             assert_eq!(
                 policy.bind_no_project_parameter.as_deref(),
                 (name != "remote-doctor").then_some("no_project")
@@ -1519,9 +1515,9 @@ mod tests {
         let record: PreflightCommandRecord =
             serde_json::from_value(value).expect("preflight command record parse");
         let flags: Vec<&str> = record
-            .control_flags
+            ._control_flags
             .iter()
-            .map(|f| f.flag.as_str())
+            .map(|f| f._flag.as_str())
             .collect();
         assert_eq!(
             flags,
@@ -1565,7 +1561,7 @@ mod tests {
         let value: serde_json::Value = serde_yaml::from_str(&body).expect("yaml parse");
         let record: PreflightCommandRecord =
             serde_json::from_value(value).expect("preflight command record parse");
-        assert_eq!(record.sensitive_fields, ["value"]);
+        assert_eq!(record._sensitive_fields, ["value"]);
     }
 
     struct BundleLayout {

@@ -68,7 +68,6 @@ const GUEST_PACKAGE_REMOTE_PATH: &str = "/ryeos/activation/guest-package";
 /// refuses activation until the installed snapshot and lost-stream behavior
 /// are qualified. It prevents that later transport from choosing paths or a
 /// command independently of the verified handoff.
-#[allow(dead_code)]
 struct ActivationDeliveryPlan {
     signed_import_remote_path: &'static str,
     signed_import_sha256: String,

@@ -640,7 +640,6 @@ pub async fn recover_durable_remote_follow_deliveries(state: &AppState) -> Resul
     Ok(recovered)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn settle_attempt(
     state: &AppState,
     job: &ryeos_state::SyncJobRecord,

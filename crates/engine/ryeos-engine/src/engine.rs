@@ -4123,7 +4123,6 @@ impl Engine {
     /// Compile current captured Bundle source with its retained logical
     /// execution-root coordinate. Program and executor lookup remains
     /// projectless; the logical root only supplies process-path templates.
-    #[allow(clippy::too_many_arguments)]
     pub fn build_bundle_plan_from_captured_root_with_logical_project_root(
         &self,
         ctx: &PlanContext,

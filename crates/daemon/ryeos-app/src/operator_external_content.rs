@@ -1534,7 +1534,6 @@ struct ResolvedConsumer {
     grant_max_total_bytes: Option<u64>,
 }
 
-#[allow(clippy::too_many_arguments)]
 fn capture_content_import(
     request: &FilesystemImportRequest,
     limits: &ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportLimits,
@@ -1611,7 +1610,6 @@ fn capture_content_import(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 fn capture_large_import(
     request: &FilesystemImportRequest,
     limits: &ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportLimits,

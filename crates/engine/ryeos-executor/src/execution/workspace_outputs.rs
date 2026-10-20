@@ -33,7 +33,6 @@ use super::external_content::{
 /// workspace. Intermediate absence/emptiness is not final-product success.
 /// Every new manifest extends the caller's existing source-result stage while
 /// the shared guard protects payload ingest; no independent publication exists.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn capture_native_workspace_outputs(
     authority: &ryeos_state::PinnedStateAuthority,
     guard: &ryeos_state::CasMutationGuard,
@@ -53,7 +52,6 @@ pub(crate) fn capture_native_workspace_outputs(
 /// never changes the source verifier's definition of an exact project tree.
 /// A partial failure leaves an unready workspace for its lifecycle owner to
 /// discard/recover; it cannot be admitted as a source-only successful restore.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn restore_workspace_outputs_before_view(
     authority: &ryeos_state::PinnedStateAuthority,
     guard: &ryeos_state::CasMutationGuard,

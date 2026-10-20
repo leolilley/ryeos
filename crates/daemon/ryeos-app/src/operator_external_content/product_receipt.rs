@@ -99,7 +99,6 @@ pub fn accept_imported_product(
 /// must be the exact admitted acting operator, not a manifest-supplied value.
 /// Retained verification never consults a current head or reapplies import
 /// eligibility. Its caller supplies the retained read/closure safety bounds.
-#[allow(clippy::too_many_arguments)]
 pub fn load_product_source(
     state: &AppState,
     authority: &PinnedStateAuthority,
@@ -206,7 +205,6 @@ pub fn load_product_source(
 /// Fresh source and node-budget admission for a trusted consumer that needs
 /// exact product bytes outside the ordinary composition binding path. The
 /// caller still owns its separate effect and destination authority.
-#[allow(clippy::too_many_arguments)]
 pub fn load_bounded_current_product_source(
     state: &AppState,
     authority: &PinnedStateAuthority,

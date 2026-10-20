@@ -102,7 +102,6 @@ impl CapturedMechanismProbeSource {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn require_original_root_in_generation(
         &self,
         state: &AppState,

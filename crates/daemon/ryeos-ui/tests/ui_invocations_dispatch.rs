@@ -1,6 +1,6 @@
 // Tests for `ui.invocations.dispatch` handler.
 
-mod test_state;
+use ryeos_ui::test_support as test_state;
 use test_state::{
     build_test_state, build_test_state_with_live_bundles, launch_context, mint_launch,
 };

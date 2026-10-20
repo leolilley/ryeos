@@ -265,7 +265,6 @@ pub fn preview_external_content_pins(
 /// Observe already checked declarations through the same bounded capture and
 /// retained-binding readers as ordinary validation. Selection of literal-only
 /// declarations grants no product selection or executable realization authority.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn preview_external_content_declarations(
     state: &AppState,
     engine: &ryeos_engine::engine::Engine,
@@ -881,7 +880,6 @@ pub fn admit_portable_content_dependency_in_publication(
     .ok_or_else(|| anyhow::anyhow!("content dependency produced no external realization"))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn admit_declarations_in_publication(
     state: &AppState,
     engine: Option<&ryeos_engine::engine::Engine>,
@@ -1272,7 +1270,6 @@ mod merge_realization_tests {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn seal_pinned_content_realization(
     declaration: &ExternalContentDeclaration,
     digest: &str,
@@ -1438,7 +1435,6 @@ impl ExternalContentBlobSink for GuardedCasBlobSink<'_> {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn seal_pinned_large_realization(
     declaration: &ExternalContentDeclaration,
     digest: &str,

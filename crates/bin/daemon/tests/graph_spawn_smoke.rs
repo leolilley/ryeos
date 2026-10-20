@@ -8,7 +8,7 @@
 //! The graph is a trivial return-only node — no action dispatches,
 //! so callback cap enforcement is irrelevant.
 
-mod common;
+use ryeosd::test_support as common;
 
 use std::path::Path;
 

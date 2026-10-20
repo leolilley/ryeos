@@ -3,7 +3,7 @@
 //! These services only work via `ryeosd run-service ...` (daemon must be
 //! down). We assert each one actually performs its data work on disk.
 
-mod common;
+use ryeosd::test_support as common;
 
 use common::{StandaloneHarness, run_service_standalone_fresh};
 

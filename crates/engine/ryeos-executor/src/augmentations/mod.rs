@@ -34,7 +34,6 @@ pub struct LaunchAugmentationAudit {
 // Execution plumbing: each argument is a distinct leg of the thread's
 // auth/provenance context, threaded verbatim — a struct would rename,
 // not simplify. Restructure with a compiler in the loop, not here.
-#[allow(clippy::too_many_arguments)]
 pub async fn run_augmentations(
     exec: &ExecutionSchema,
     resolution: &mut ResolutionOutput,

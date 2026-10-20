@@ -1283,7 +1283,6 @@ fn project_corpus(
 /// finalizes the created thread instead of orphaning the returned id.
 // Method declaration, verified hop/root evidence, resolution roots, and request
 // context remain explicit at the projection boundary.
-#[allow(clippy::too_many_arguments)]
 fn project_method_payload(
     method_decl: &MethodDecl,
     canonical_ref: &CanonicalRef,
@@ -1582,7 +1581,6 @@ pub(crate) fn method_runtime_config_snapshot_with_proof(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn method_runtime_config_snapshot_with_proof_under_project_authority(
     kind: &str,
     requirements: &BTreeMap<String, MethodRuntimeConfigRequirement>,
@@ -1604,7 +1602,6 @@ pub(crate) fn method_runtime_config_snapshot_with_proof_under_project_authority(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn method_runtime_config_snapshot_with_proof_from_authority(
     kind: &str,
     requirements: &BTreeMap<String, MethodRuntimeConfigRequirement>,
@@ -1670,7 +1667,6 @@ fn method_runtime_config_snapshot_with_proof_from_authority(
 }
 
 // The blocking loader receives the complete authority tuple explicitly.
-#[allow(clippy::too_many_arguments)]
 async fn method_runtime_config_snapshot_off_thread(
     kind: &str,
     requirements: &BTreeMap<String, MethodRuntimeConfigRequirement>,
@@ -1805,7 +1801,6 @@ fn verified_loader_for_method_runtime_under_authority(
 // Execution plumbing: each argument is a distinct leg of the thread's
 // auth/provenance context, threaded verbatim — a struct would rename,
 // not simplify. Restructure with a compiler in the loop, not here.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn dispatch_method(
     kind: &str,
     method_name: &str,
@@ -4536,7 +4531,6 @@ fn launch_contract_applicability_with_evidence(
 /// caches as live launch. No prepared value crosses the persistence seam:
 /// live launch performs its current dynamic gates and consumes a cache hit
 /// only when every signed authority leg is identical.
-#[allow(clippy::too_many_arguments)]
 pub async fn admit_launch_contract(
     applicability: &LaunchContractApplicability,
     root_admission: &ryeos_app::thread_lifecycle::RootExecutionAdmission,
@@ -4578,7 +4572,6 @@ pub async fn admit_launch_contract(
 /// authority-bound availability check for real admission; static validation
 /// must remain credential-read-free. Callers must not persist or serialize
 /// the opaque prepared runtime payload itself.
-#[allow(clippy::too_many_arguments)]
 pub async fn prepare_admitted_launch_contract(
     applicability: &LaunchContractApplicability,
     root_admission: &ryeos_app::thread_lifecycle::RootExecutionAdmission,
@@ -5077,7 +5070,6 @@ impl RootDispatchPreflight {
 
 // Route class, requested/root evidence, usage attribution, bindings, and daemon
 // policy context remain explicit at this admission boundary.
-#[allow(clippy::too_many_arguments)]
 fn finish_root_dispatch_preflight(
     class: RootDispatchClass,
     applicability: LaunchContractApplicability,
@@ -5708,7 +5700,6 @@ pub fn present_workload_execution(
 /// and the authorizer only — never the executing leaf dispatchers.
 // Caller route identity, payload/bindings, usage attribution, and daemon policy
 // context remain explicit so synchronous admission checks cannot omit them.
-#[allow(clippy::too_many_arguments)]
 pub fn preflight_root_dispatch(
     item_ref: &str,
     original_root_kind: &str,
@@ -6217,7 +6208,6 @@ pub fn preflight_root_dispatch(
 /// exact immutable base binding retained in the candidate-evaluation scope;
 /// only after that admission succeeds is execution rebound to the separately
 /// verified frozen-candidate workspace.
-#[allow(clippy::too_many_arguments)]
 pub fn preflight_root_dispatch_for_provenance(
     item_ref: &str,
     original_root_kind: &str,

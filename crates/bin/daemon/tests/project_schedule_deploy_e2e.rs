@@ -13,7 +13,7 @@
 #![cfg(all(unix, feature = "scheduling"))]
 #![recursion_limit = "256"]
 
-mod common;
+use ryeosd::test_support as common;
 #[path = "common/project_push.rs"]
 mod project_push;
 

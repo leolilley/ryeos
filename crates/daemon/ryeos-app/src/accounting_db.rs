@@ -1803,7 +1803,6 @@ fn decode_resource_claim_outcome(
 
 /// Check one retained immutable budget and its original execution-account birth.
 /// The caller lends its already-held connection; this never locks or creates authority.
-#[allow(clippy::too_many_arguments)]
 fn validate_retained_execution_resource_budget(
     conn: &Connection,
     site_id: &str,
@@ -5864,7 +5863,6 @@ impl AccountingDb {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn create_account_prepared_in_tx(
         &self,
         conn: &Connection,
@@ -6038,9 +6036,7 @@ impl AccountingDb {
                            AND state = 'open'",
                     )
                     .context("prepare superseded gate scan")?;
-                // Preserve statement/query temporary drop order under Edition 2024.
-                #[allow(clippy::let_and_return)]
-                let generations = stmt
+                stmt
                     .query_map(
                         rusqlite::params![
                             self.site_id,
@@ -6052,8 +6048,7 @@ impl AccountingDb {
                     )
                     .context("scan superseded launch gates")?
                     .collect::<std::result::Result<Vec<String>, _>>()
-                    .context("collect superseded launch gates")?;
-                generations
+                    .context("collect superseded launch gates")?
             };
             for generation in &superseded {
                 self.fence_generation_in_tx(
@@ -7117,7 +7112,6 @@ impl AccountingDb {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn mark_provider_attempt_issued_with_credential_binding(
         &self,
         thread_id: &str,
@@ -7500,7 +7494,6 @@ impl AccountingDb {
     /// validity is diagnosed independently and never blocks spend
     /// settlement. Bound violation and unrepresentable actuals are anchored
     /// irreversible transitions.
-    #[allow(clippy::too_many_arguments)]
     pub fn settle_provider_attempt(
         &self,
         thread_id: &str,
@@ -7539,7 +7532,6 @@ impl AccountingDb {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn settle_in_tx(
         &self,
         conn: &Connection,
@@ -7955,7 +7947,6 @@ impl AccountingDb {
     /// authority digest (anchored); an unrepresentable actual retains its
     /// bounded raw text, quarantines the authority, and disables hard
     /// admission (anchored).
-    #[allow(clippy::too_many_arguments)]
     fn late_observation_in_tx(
         &self,
         conn: &Connection,
@@ -9333,7 +9324,6 @@ impl AccountingDb {
     }
 
     /// Journal the target allowance as prepared but not spendable.
-    #[allow(clippy::too_many_arguments)]
     pub fn prepare_handoff_target_scope(
         &self,
         operation_id: &str,
@@ -9681,7 +9671,6 @@ impl AccountingDb {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn validate_handoff_target_import(
         &self,
         operation_id: &str,
@@ -10401,7 +10390,6 @@ impl AccountingDb {
         .context("load reservation by attempt id")
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn insert_reservation(
         &self,
         conn: &Connection,
@@ -11089,7 +11077,6 @@ impl AccountingDb {
         Ok((sequence, digest))
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn insert_fact(
         &self,
         conn: &Connection,
@@ -13252,7 +13239,6 @@ mod tests {
         assert_healthy_verify(&db);
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn reserve(
         db: &AccountingDb,
         thread: &str,
@@ -13278,7 +13264,6 @@ mod tests {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn reserve_with_provider_coordinate(
         db: &AccountingDb,
         thread: &str,
@@ -13306,7 +13291,6 @@ mod tests {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn reserve_with_provider_coordinate_at(
         db: &AccountingDb,
         thread: &str,
