@@ -1,5 +1,5 @@
-# ryeos:signed:2026-10-19T22:29:41Z:8584a4410139f208cdd77fb61107d18534fe1759e370f3fb1702e492a0d0c83e:gW/km/tH394SX6YkriI3dCX/XY14QK6AtVx4OQAiBuvriEESqLZcOb2mfArId+CtO94wMjJva3GkK1Lsd4dSCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: ui
+# ryeos:signed:2026-10-20T02:32:01Z:16a8103417bf9d8c919e1d98cef0a69fd8d413e57fa8ec36f8814b6a470026be:FYfkkYtICNtVq04vSXn/VOrgElqKdARnFqUxBV5EeMf/fJwvUkFHn66i7phelFk7iy5PHF/krH9dxy080hdMAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: ryeos/ui
 version: "1.0.0"
 description: Shared browser presentation whose initial admitted Surface is the namespace atlas.
 shared_presentation:
