@@ -337,7 +337,7 @@ mod tests {
                 let matches = match contract["prim"].as_str().unwrap() {
                     "string" => value.is_string(),
                     "mapping" => value.is_object(),
-                    "array" => value.is_array(),
+                    "sequence" => value.is_array(),
                     primitive => panic!("unhandled current required primitive {primitive}"),
                 };
                 assert!(matches, "{path} required {field} has wrong shape");
