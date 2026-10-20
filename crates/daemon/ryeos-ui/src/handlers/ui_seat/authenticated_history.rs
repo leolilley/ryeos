@@ -11,7 +11,10 @@ use ryeos_client_base::ui::presentation_initialization::{
 use ryeos_state::objects::thread_event::ThreadEvent;
 
 mod fixed_anchor_replay;
-pub(crate) use fixed_anchor_replay::{FixedAnchorReplay, FixedAnchorReplayStep};
+pub(crate) use fixed_anchor_replay::{
+    FixedAnchorReplay, FixedAnchorReplayStep, LiveSeatReplayAdvance, ReplayFrameBounds,
+    replay_frame_bounds,
+};
 
 use super::{
     MAX_SEAT_APPEND_EVENTS, SEAT_APPEND_RECEIPT_EVENT, SEAT_PRODUCER_EVENT, SeatAppendReceipt,

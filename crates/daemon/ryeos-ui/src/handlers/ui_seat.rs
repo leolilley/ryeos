@@ -25,6 +25,7 @@ use ryeos_app::state_store::{CutAppendResult, ExactSeat, NewEventRecord, SeatCut
 use ryeos_executor::executor::ServiceAvailability;
 use ryeos_ui_presentation_contract::seat_control::{SEAT_APPEND_RECEIPT_SCHEMA, SeatAppendReceipt};
 
+use crate::browser_session::transfer_reservation::CompletedPairedCut;
 use crate::browser_session::{BindingAttachmentCoordinate, BrowserSession};
 use crate::state::get_ui_state;
 
@@ -33,8 +34,12 @@ mod authenticated_history;
 mod composition;
 pub(crate) mod initialization;
 pub(crate) mod paired_read;
+mod transfer_ingress;
 
-pub(crate) use authenticated_history::{FixedAnchorReplay, FixedAnchorReplayStep};
+pub(crate) use authenticated_history::{
+    FixedAnchorReplay, FixedAnchorReplayStep, LiveSeatReplayAdvance, ReplayFrameBounds,
+    replay_frame_bounds,
+};
 
 fn initial_surface_seeds(
     definition: &ryeos_client_base::presentation::UiCompositionDefinition,
@@ -243,42 +248,6 @@ fn append_acknowledgement(
         "events_authority": events_authority,
         "events": append_ack::wire_events(events),
     })
-}
-
-fn current_producer(
-    state: &AppState,
-    session: &BrowserSession,
-    presentation_id: &str,
-    detail: &ryeos_app::state_store::ThreadDetail,
-) -> Result<Option<SeatProducer>, HandlerError> {
-    if state
-        .state_store
-        .capture_thread_event_read_anchor(&detail.chain_root_id, &detail.thread_id)
-        .map_err(|error| HandlerError::Internal(error.to_string()))?
-        .is_none()
-    {
-        // A newly reserved seat has not yet written its initialization. This
-        // cannot be treated as absence once a signed history head exists.
-        return Ok(None);
-    }
-    let ui =
-        get_ui_state(state).ok_or_else(|| HandlerError::Internal("UI state is absent".into()))?;
-    let membership = ui
-        .browser_sessions
-        .require_presentation(
-            &session.session_id,
-            presentation_id,
-            Some(&detail.thread_id),
-            None,
-            state.node_policy.generation_digest(),
-        )
-        .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
-    composition::read_history(state, detail, &membership.initialization)
-        .and_then(|verified| {
-            verified.require_ordinary_mutation()?;
-            Ok(verified.control)
-        })
-        .map_err(|error| HandlerError::Conflict(error.to_string()))
 }
 
 fn retained_control(
@@ -490,6 +459,226 @@ fn require_presentation_seat_for_read(
     Ok((detail, membership))
 }
 
+/// Revalidate one exact browser-session seat before disclosing each bounded
+/// historical stream batch. This is read-only: streaming must neither repair
+/// Surface membership nor renew a writer lease. The caller also compares the
+/// returned immutable thread association with the one captured at begin.
+pub(crate) fn authorize_history_stream_batch(
+    state: &AppState,
+    session_id: &str,
+    presentation_id: &str,
+    chain_root_id: &str,
+    thread_id: Option<&str>,
+) -> Result<ryeos_app::state_store::ThreadDetail, HandlerError> {
+    let ui = get_ui_state(state).expect("UiState not set");
+    let _transition = ui
+        .lock_seat_transition()
+        .map_err(|_| HandlerError::Internal("seat transition lock poisoned".into()))?;
+    let session = ui
+        .browser_sessions
+        .get_session(session_id)
+        .ok_or_else(|| HandlerError::Forbidden("session expired or invalid".into()))?;
+    require_presentation_seat_for_read(
+        state,
+        &session,
+        presentation_id,
+        thread_id,
+        Some(chain_root_id),
+    )
+    .map(|(detail, _)| detail)
+}
+
+fn send_or_report_full(
+    sender: &tokio::sync::mpsc::Sender<ryeos_app::stream_envelope::RouteStreamEnvelope>,
+    frame: &ryeos_app::stream_envelope::RouteStreamEnvelope,
+) -> Result<bool, HandlerError> {
+    match sender.try_send(frame.clone()) {
+        Ok(()) => Ok(true),
+        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => Ok(false),
+        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => Err(HandlerError::Conflict(
+            "seat history stream receiver closed".into(),
+        )),
+    }
+}
+
+/// Send a provisional history frame while the same transition guard that
+/// admits seat reads still protects its session association. Never wait for
+/// channel capacity under that guard: a full channel asks the producer to
+/// yield and retry authorization before another attempt.
+pub(crate) fn try_send_authorized_history_frame(
+    state: &AppState,
+    session_id: &str,
+    presentation_id: &str,
+    expected: &ryeos_app::state_store::ThreadDetail,
+    sender: &tokio::sync::mpsc::Sender<ryeos_app::stream_envelope::RouteStreamEnvelope>,
+    frame: &ryeos_app::stream_envelope::RouteStreamEnvelope,
+    expected_tip: Option<(&str, u64)>,
+) -> Result<bool, HandlerError> {
+    let ui = get_ui_state(state).expect("UiState not set");
+    let _transition = ui
+        .lock_seat_transition()
+        .map_err(|_| HandlerError::Internal("seat transition lock poisoned".into()))?;
+    let session = ui
+        .browser_sessions
+        .get_session(session_id)
+        .ok_or_else(|| HandlerError::Forbidden("session expired or invalid".into()))?;
+    let (current, _) = require_presentation_seat_for_read(
+        state,
+        &session,
+        presentation_id,
+        Some(&expected.thread_id),
+        Some(&expected.chain_root_id),
+    )?;
+    if current.item_ref != expected.item_ref
+        || current.executor_ref != expected.executor_ref
+        || current.requested_by != expected.requested_by
+    {
+        return Err(HandlerError::Forbidden(
+            "presentation seat association changed during history stream".into(),
+        ));
+    }
+    if let Some(tip) = expected_tip {
+        let anchor = state
+            .state_store
+            .capture_thread_event_read_anchor(&expected.chain_root_id, &expected.thread_id)
+            .map_err(|error| HandlerError::Internal(error.to_string()))?
+            .ok_or_else(|| {
+                HandlerError::Conflict("seat history signed anchor disappeared".into())
+            })?;
+        if anchor.tip() != Some(tip) {
+            return Err(HandlerError::Conflict(
+                "seat history signed tip changed before completion".into(),
+            ));
+        }
+    }
+    send_or_report_full(sender, frame)
+}
+
+/// Paired disclosure is atomic with every completed cut, not just the root
+/// tip. A full channel releases both exclusions before retrying.
+pub(crate) fn try_send_authorized_transfer_history_frame(
+    state: &AppState,
+    session_id: &str,
+    cut: &paired_read::FixedTransferCut,
+    sender: &tokio::sync::mpsc::Sender<ryeos_app::stream_envelope::RouteStreamEnvelope>,
+    frame: &ryeos_app::stream_envelope::RouteStreamEnvelope,
+) -> Result<bool, HandlerError> {
+    let ui = get_ui_state(state).expect("UiState not set");
+    let _transition = ui
+        .lock_seat_transition()
+        .map_err(|_| HandlerError::Internal("seat transition lock poisoned".into()))?;
+    let session = ui
+        .browser_sessions
+        .get_session(session_id)
+        .ok_or_else(|| HandlerError::Forbidden("session expired or invalid".into()))?;
+    let (anchors, retired) = cut
+        .publication_cut(state, &session)
+        .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
+    let held = |chain_root_id: &str, thread_id: &str| {
+        session
+            .presentations
+            .values()
+            .find(|membership| {
+                membership.thread_id.as_deref() == Some(thread_id)
+                    && membership.chain_root_id.as_deref() == Some(chain_root_id)
+            })
+            .cloned()
+            .ok_or_else(|| HandlerError::Forbidden("paired history membership disappeared".into()))
+    };
+    let memberships = anchors
+        .iter()
+        .map(|anchor| held(anchor.chain_root_id(), anchor.thread_id()))
+        .chain(
+            retired
+                .iter()
+                .map(|fence| held(&fence.chain_root_id, &fence.chain_root_id)),
+        )
+        .collect::<Result<Vec<_>, _>>()?;
+    ui.browser_sessions
+        .with_exact_presentation_read_session(
+            session_id,
+            &memberships,
+            state.node_policy.generation_digest(),
+            || {
+                paired_read::with_publication_cut(state, &anchors, &retired, || {
+                    // The live session owner is already held. No additional locks,
+                    // state/CAS reentry, authorization, or writes inside this callback.
+                    send_or_report_full(sender, frame).map_err(anyhow::Error::from)
+                })
+            },
+        )
+        .map_err(|error| HandlerError::Forbidden(error.to_string()))?
+        .map_err(|error| HandlerError::Conflict(error.to_string()))?
+        .ok_or_else(|| HandlerError::Conflict("paired history signed cut advanced".into()))
+}
+
+/// Complete transport and transient cleanup share one original cut. A full
+/// channel commits neither the candidate session nor a completion frame.
+pub(crate) fn try_send_reconciled_transfer_complete(
+    state: &AppState,
+    session_id: &str,
+    presentation_id: &str,
+    chain_root_id: &str,
+    thread_id: &str,
+    tip: (&str, u64),
+    cut: &paired_read::FixedTransferCut,
+    replay: &ryeos_client_base::ui::composition_replay::UiCompositionReplay,
+    sender: &tokio::sync::mpsc::Sender<ryeos_app::stream_envelope::RouteStreamEnvelope>,
+    frame: &ryeos_app::stream_envelope::RouteStreamEnvelope,
+) -> Result<bool, HandlerError> {
+    let ui = get_ui_state(state).expect("UiState not set");
+    let _transition = ui
+        .lock_seat_transition()
+        .map_err(|_| HandlerError::Internal("seat transition lock poisoned".into()))?;
+    let session = ui
+        .browser_sessions
+        .get_session(session_id)
+        .ok_or_else(|| HandlerError::Forbidden("session expired or invalid".into()))?;
+    let (anchors, retired) = cut
+        .publication_cut(state, &session)
+        .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
+    if !anchors.iter().any(|anchor| {
+        anchor.chain_root_id() == chain_root_id
+            && anchor.thread_id() == thread_id
+            && anchor.tip() == Some(tip)
+    }) {
+        return Err(HandlerError::Conflict(
+            "paired completion root tip differs".into(),
+        ));
+    }
+    let membership = session
+        .presentations
+        .get(presentation_id)
+        .filter(|membership| {
+            membership.chain_root_id.as_deref() == Some(chain_root_id)
+                && membership.thread_id.as_deref() == Some(thread_id)
+        })
+        .ok_or_else(|| {
+            HandlerError::Forbidden("paired completion root membership disappeared".into())
+        })?;
+    let expected = session.presentations.values().cloned().collect::<Vec<_>>();
+    let roots = [(membership, replay, cut as &dyn CompletedPairedCut)];
+    ui.browser_sessions
+        .with_reconciled_paired_roots_at_anchors(
+            &state.state_store,
+            &anchors,
+            &retired,
+            session_id,
+            &expected,
+            state.node_policy.generation_digest(),
+            &roots,
+            |_| match sender.try_send(frame.clone()) {
+                Ok(()) => Ok(Some(true)),
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => Ok(None),
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    anyhow::bail!("seat history stream receiver closed")
+                }
+            },
+        )
+        .map_err(|error| HandlerError::Conflict(error.to_string()))
+        .map(|sent| sent.unwrap_or(false))
+}
+
 /// Repair the transient membership projection from its existing durable seat
 /// owner. This is also used before authorization: a lost response after append
 /// must not leave a closed Surface usable by another document. The caller holds
@@ -654,18 +843,17 @@ pub(crate) fn reconcile_session_surface_closures(
 }
 
 fn require_writer(
-    state: &AppState,
-    session: &BrowserSession,
-    presentation_id: &str,
     detail: &ryeos_app::state_store::ThreadDetail,
     incarnation: &str,
+    control: Option<&SeatProducer>,
 ) -> Result<SeatProducer, HandlerError> {
     if !canonical_digest(incarnation) {
         return Err(HandlerError::BadRequest(
             "producer incarnation must be canonical".into(),
         ));
     }
-    let control = current_producer(state, session, presentation_id, detail)?
+    let control = control
+        .cloned()
         .ok_or_else(|| HandlerError::Conflict("presentation has no producer".into()))?;
     if control.producer_incarnation != incarnation
         || control.state != ProducerState::Active
@@ -721,8 +909,9 @@ fn require_owned_seat(
     Ok(detail)
 }
 
-/// Read-only observation folds the same authenticated history as append. No
-/// session or chain exclusion is held while bounded history pages are read.
+/// Read-only observation folds the same authenticated history as append,
+/// through the completed paired cut when the seat names transfers. No session
+/// or chain exclusion is held while bounded history pages are read.
 async fn observe_completed_seat(
     ctx: &HandlerContext,
     state: Arc<AppState>,
@@ -731,30 +920,21 @@ async fn observe_completed_seat(
     chain_root_id: String,
 ) -> Result<Value> {
     let ui = get_ui_state(&state).expect("UiState not set");
-    let (session, membership, detail) = {
-        let _transition = ui
-            .lock_seat_transition()
-            .map_err(|_| HandlerError::Internal("seat transition lock poisoned".into()))?;
-        let session = browser_session(ctx, &state)?;
-        let (detail, membership) = require_presentation_seat_for_read(
-            &state,
-            &session,
-            &presentation_id,
-            Some(&thread_id),
-            Some(&chain_root_id),
-        )?;
-        (session, membership, detail)
-    };
-    let task_state = state.clone();
-    let task_membership = membership.clone();
-    let (verified, anchor) = tokio::task::spawn_blocking(move || {
-        composition::verified_frontier(&task_state, &detail, &task_membership.initialization)
-    })
-    .await
-    .map_err(|error| {
-        HandlerError::Internal(format!("producer observation reader failed: {error}"))
-    })?
-    .map_err(|error| HandlerError::Conflict(error.to_string()))?;
+    let session = browser_session(ctx, &state)?;
+    let frontier = read_seat_frontier(
+        state.clone(),
+        &session,
+        &presentation_id,
+        &thread_id,
+        Some(&chain_root_id),
+    )
+    .await?;
+    let SeatFrontier {
+        verified,
+        anchor,
+        cut,
+        membership,
+    } = frontier;
     use ryeos_client_base::ui::{
         UiBindingAttachmentCoordinate, UiObservedPresentationProducer,
         UiPresentationProducerObservation,
@@ -814,18 +994,33 @@ async fn observe_completed_seat(
             HandlerError::Conflict("producer observation membership changed".into()).into(),
         );
     }
+    let (anchors, retired) = match &cut {
+        Some(cut) => cut
+            .publication_cut(&state, &current_session)
+            .map_err(|error| HandlerError::Conflict(error.to_string()))?,
+        None => (vec![anchor], Vec::new()),
+    };
+    let expected = current_session
+        .presentations
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
     Ok(ui
         .browser_sessions
-        .with_exact_presentation_read_session(
+        .with_exact_presentation_read_snapshot(
             &session.session_id,
-            std::slice::from_ref(&membership),
+            &expected,
             state.node_policy.generation_digest(),
-            || {
-                state
-                    .state_store
-                    .with_thread_event_read_anchors(std::slice::from_ref(&anchor), || {
-                        serde_json::to_value(observation).map_err(anyhow::Error::from)
-                    })
+            |live| {
+                if cut
+                    .as_ref()
+                    .is_some_and(|cut| !cut.publication_memberships_match(live))
+                {
+                    return Ok(None);
+                }
+                paired_read::with_publication_cut(&state, &anchors, &retired, || {
+                    serde_json::to_value(observation).map_err(anyhow::Error::from)
+                })
             },
         )
         .map_err(|error| HandlerError::Forbidden(error.to_string()))??
@@ -1165,34 +1360,126 @@ pub async fn handle_open(
     }
 }
 
-/// Freeze an append base without holding the transition lock across bounded
-/// history work.
-async fn append_completed_frontier(
+/// One seat's completed signed history at one exact anchor. When the seat
+/// names transfers, `cut` is the completed paired cut its composition was
+/// folded against and every publication that depends on this history must
+/// condition on.
+pub(crate) struct SeatFrontier {
+    pub verified: composition::VerifiedHistory,
+    pub anchor: ryeos_state::AuthoritativeThreadEventReadAnchor,
+    pub cut: Option<Arc<paired_read::FixedTransferCut>>,
+    pub membership: crate::browser_session::PresentationMembership,
+}
+
+/// Replay one live root at `anchor` against its completed paired cut.
+pub(crate) async fn replay_root_with_cut(
+    state: &Arc<AppState>,
+    presentation_id: &str,
+    anchor: ryeos_state::AuthoritativeThreadEventReadAnchor,
+    cut: Arc<paired_read::FixedTransferCut>,
+) -> Result<FixedAnchorReplay> {
+    let mut replay = FixedAnchorReplay::begin_at_anchor(state, presentation_id, anchor, Some(cut))?;
+    loop {
+        let task_state = state.clone();
+        let (returned, step) = tokio::task::spawn_blocking(move || {
+            let step = replay.next_step(&task_state);
+            (replay, step)
+        })
+        .await
+        .map_err(|error| HandlerError::Internal(format!("paired proof reader failed: {error}")))?;
+        replay = returned;
+        match step? {
+            FixedAnchorReplayStep::Batch { .. } => {}
+            FixedAnchorReplayStep::Complete { .. } => return Ok(replay),
+            FixedAnchorReplayStep::ReproofRequired => {
+                return Err(HandlerError::Conflict(
+                    "cold paired replay asked for a reproof".into(),
+                )
+                .into());
+            }
+        }
+    }
+}
+
+/// Freeze a seat's history without holding the transition lock across
+/// bounded history work. The ordinary checkpoint remains the transfer-free
+/// fast path; a seat whose history names transfers is folded only through its
+/// completed paired cut, never through a one-seat fold that cannot apply the
+/// phases.
+pub(crate) async fn read_seat_frontier(
     state: Arc<AppState>,
     session: &BrowserSession,
     presentation_id: &str,
     thread_id: &str,
-) -> Result<(
-    composition::VerifiedHistory,
-    ryeos_state::AuthoritativeThreadEventReadAnchor,
-    crate::browser_session::PresentationMembership,
-)> {
+    chain_root_id: Option<&str>,
+) -> Result<SeatFrontier> {
     let (detail, membership) = {
         let ui = get_ui_state(&state).expect("UiState not set");
         let _transition = ui
             .lock_seat_transition()
             .map_err(|_| HandlerError::Internal("seat transition lock poisoned".into()))?;
-        require_presentation_seat_for_read(&state, session, presentation_id, Some(thread_id), None)?
+        require_presentation_seat_for_read(
+            &state,
+            session,
+            presentation_id,
+            Some(thread_id),
+            chain_root_id,
+        )?
     };
+    let (root_id, seat_thread_id) = (detail.chain_root_id.clone(), detail.thread_id.clone());
     let task_state = state.clone();
-    let task_membership = membership.clone();
-    let (verified, anchor) = tokio::task::spawn_blocking(move || {
-        composition::verified_frontier(&task_state, &detail, &task_membership.initialization)
+    let initialization = membership.initialization.clone();
+    let ordinary = tokio::task::spawn_blocking(move || {
+        composition::verified_frontier(&task_state, &detail, &initialization)
     })
     .await
-    .map_err(|error| HandlerError::Internal(format!("append proof reader failed: {error}")))?
-    .map_err(|error| HandlerError::Conflict(error.to_string()))?;
-    Ok((verified, anchor, membership))
+    .map_err(|error| HandlerError::Internal(format!("seat proof reader failed: {error}")))?;
+    let ordinary_error = match ordinary {
+        Ok((verified, anchor)) if !verified.transfer_testimony_seen => {
+            return Ok(SeatFrontier {
+                verified,
+                anchor,
+                cut: None,
+                membership,
+            });
+        }
+        Ok(_) => None,
+        Err(error) => Some(error),
+    };
+    let anchor = state
+        .state_store
+        .capture_thread_event_read_anchor(&root_id, &seat_thread_id)?
+        .ok_or_else(|| {
+            HandlerError::Conflict("seat history requires a signed initialization".into())
+        })?;
+    if let Some(error) = ordinary_error {
+        // A fold that failed for a seat that names no transfer is a genuine
+        // failure; only a transfer-bearing seat can be read another way.
+        let discovery_state = state.clone();
+        let discovery_anchor = anchor.clone();
+        let named = tokio::task::spawn_blocking(move || {
+            crate::transfer_store::discovery::discover_seat_transfer_identities(
+                &discovery_state.state_store,
+                discovery_anchor.chain_root_id(),
+                &discovery_anchor,
+            )
+        })
+        .await
+        .map_err(|error| HandlerError::Internal(format!("transfer discovery failed: {error}")))??;
+        if named.is_empty() {
+            return Err(error);
+        }
+    }
+    let cut = paired_read::read_live_root_cut(state.clone(), session, &membership, anchor.clone())
+        .await?;
+    let replay = replay_root_with_cut(&state, presentation_id, anchor.clone(), cut.clone()).await?;
+    let verified = replay.completed_history(&membership.initialization)?;
+    Ok(SeatFrontier {
+        verified,
+        anchor,
+        cut: Some(cut),
+        membership,
+    })
 }
 
 /// Completed same-store history, not a grant or an executable dispatch token.
@@ -1202,6 +1489,7 @@ pub(crate) struct CompletedSeatIngressRead {
     session_id: String,
     verified: composition::VerifiedHistory,
     anchor: ryeos_state::AuthoritativeThreadEventReadAnchor,
+    cut: Option<Arc<paired_read::FixedTransferCut>>,
     membership: crate::browser_session::PresentationMembership,
 }
 
@@ -1238,14 +1526,19 @@ pub(crate) async fn read_completed_seat_history(
 ) -> Result<CompletedSeatIngressRead> {
     let state_identity = Arc::as_ptr(&state) as usize;
     let state_owner = state.clone();
-    let (verified, anchor, membership) =
-        append_completed_frontier(state, session, presentation_id, thread_id).await?;
+    let SeatFrontier {
+        verified,
+        anchor,
+        cut,
+        membership,
+    } = read_seat_frontier(state, session, presentation_id, thread_id, None).await?;
     Ok(CompletedSeatIngressRead {
         _state_owner: state_owner,
         state_identity,
         session_id: session.session_id.clone(),
         verified,
         anchor,
+        cut,
         membership,
     })
 }
@@ -1285,8 +1578,15 @@ impl CompletedSeatIngressRead {
                 HandlerError::Conflict("ingress producer or membership changed".into()).into(),
             );
         }
-        let anchors = vec![self.anchor.clone()];
-        let retired = Vec::new();
+        let (anchors, retired) = match &self.cut {
+            Some(cut) => cut
+                .publication_cut(state, session)
+                .map_err(|error| HandlerError::Conflict(error.to_string()))?,
+            None => (vec![self.anchor.clone()], Vec::new()),
+        };
+        if !anchors.contains(&self.anchor) {
+            return Err(HandlerError::Conflict("ingress cut omitted its root".into()).into());
+        }
         Ok(CompletedSeatIngressAdmission {
             action: UiSeatActionAdmission {
                 anchor: self.anchor.clone(),
@@ -1399,11 +1699,12 @@ pub async fn handle_append(
         .into());
     }
 
-    let preflight = append_completed_frontier(
+    let preflight = read_seat_frontier(
         state.clone(),
         &session,
         &req.presentation_id,
         &req.thread_id,
+        None,
     )
     .await;
     let captured_session_id = session.session_id.clone();
@@ -1483,7 +1784,12 @@ pub async fn handle_append(
             "authoritative",
         )))
     };
-    let (verified, append_anchor, captured_membership) = match preflight {
+    let SeatFrontier {
+        verified,
+        anchor: append_anchor,
+        cut: append_cut,
+        membership: captured_membership,
+    } = match preflight {
         Ok(frontier) => frontier,
         Err(reconstruction_error) => {
             return exact_retry()?.ok_or(reconstruction_error);
@@ -1511,20 +1817,18 @@ pub async fn handle_append(
             HandlerError::Conflict("append membership changed during proof read".into()).into(),
         );
     }
-    let append_anchors = vec![append_anchor.clone()];
-    let append_retired: Vec<ryeos_state::RetiredChainDependency> = Vec::new();
+    let (append_anchors, append_retired) = match &append_cut {
+        Some(cut) => cut
+            .publication_cut(&state, &session)
+            .map_err(|error| HandlerError::Conflict(error.to_string()))?,
+        None => (vec![append_anchor.clone()], Vec::new()),
+    };
 
     // A retained receipt is the authoritative outcome of an operation and
     // remains replayable even if a later open rotated producer authority.
     // Only a genuinely new write must prove that it owns the current producer.
     state.engine.with_checked_bundle_generation(|generation| -> Result<Value> {
-    let producer = require_writer(
-        &state,
-        &session,
-        &req.presentation_id,
-        &detail,
-        &req.producer_incarnation,
-    )?;
+    let producer = require_writer(&detail, &req.producer_incarnation, verified.control.as_ref())?;
 
     let mut prepared_ids = std::collections::BTreeSet::new();
     let mut prepared_batch = std::collections::BTreeMap::new();
@@ -2279,6 +2583,16 @@ pub static APPEND_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &[],
     handler: |params, ctx, state| Box::pin(handle_append(params, ctx, state)),
+};
+
+/// Transfer testimony has its own authenticated paired publication owner.
+/// Ordinary append must never become an alternative transfer writer.
+pub static TRANSFER_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
+    service_ref: "service:ui/seat/transfer",
+    endpoint: "ui.seat.transfer",
+    availability: ServiceAvailability::DaemonOnly,
+    required_caps: &[],
+    handler: |params, ctx, state| Box::pin(transfer_ingress::handle_transfer(params, ctx, state)),
 };
 
 pub static REPLAY_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {

@@ -56,6 +56,10 @@ pub fn register_extensions(
         ),
     );
     response_modes.register_event_stream_source(
+        "ui_seat_history",
+        std::sync::Arc::new(invokers::seat_history_invocation::SeatHistorySourceFactory),
+    );
+    response_modes.register_event_stream_source(
         "browser_chain_tail",
         std::sync::Arc::new(
             invokers::browser_chain_tail_invocation::BrowserChainTailSourceFactory {

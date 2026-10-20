@@ -130,39 +130,82 @@ fn evidence_of(record: &PersistedEventRecord) -> TransferEvidence {
 }
 
 fn new_seat(store: &StateStore, id: &str, presentation_id: &str, incarnation: char) -> Seat {
+    seat_with_initialization(
+        store,
+        id,
+        presentation_id,
+        incarnation,
+        json!({
+            "schema": 2,
+            "selection": {"kind": "configured_defaults"},
+            "creation_request_id": "66666666-6666-4666-8666-666666666666",
+            "presentation_id": presentation_id,
+            "root_binding": {
+                "binding_attachment_id": "root",
+                "binding_generation": 1,
+                "binding_digest": "a".repeat(64),
+            },
+            "binding_attachments": [{
+                "binding_attachment_id": "root",
+                "binding_generation": 1,
+                "binding_digest": "a".repeat(64),
+                "binding_request_bounds": {
+                    "max_request_bytes": 4096,
+                    "max_input_bytes": 1024,
+                    "max_seat_append_bytes": 65536,
+                },
+            }],
+        }),
+    )
+}
+
+/// A seat whose signed initialization is exactly the one its session
+/// membership holds, so a live read of it can authenticate the replay.
+fn live_seat(
+    state: &AppState,
+    fixture: &SessionFixture,
+    index: usize,
+    id: &str,
+    incarnation: char,
+) -> Seat {
+    let presentation_id = &fixture.presentations[index];
+    let membership = ryeos_ui::state::get_ui_state(state)
+        .unwrap()
+        .browser_sessions
+        .get_session(&fixture.session_id)
+        .unwrap()
+        .presentations[presentation_id]
+        .clone();
+    seat_with_initialization(
+        &state.state_store,
+        id,
+        presentation_id,
+        incarnation,
+        serde_json::to_value(membership.initialization()).unwrap(),
+    )
+}
+
+fn seat_with_initialization(
+    store: &StateStore,
+    id: &str,
+    presentation_id: &str,
+    incarnation: char,
+    initialization: serde_json::Value,
+) -> Seat {
     store.create_thread_for_test(&thread_record(id)).unwrap();
     store
         .claim_thread_launch(id, &format!("claim-{id}"), "daemon:test")
         .unwrap();
     store.mark_thread_running(id, None).unwrap();
     let incarnation = incarnation.to_string().repeat(64);
+    let creation_request_id = initialization["creation_request_id"].clone();
     let initialized = append(
         store,
         id,
         "ui_seat.presentation_initialized.v1",
         json!({
-            "operation_id": "66666666-6666-4666-8666-666666666666",
-            "initialization": {
-                "schema": 2,
-                "selection": {"kind": "configured_defaults"},
-                "creation_request_id": "66666666-6666-4666-8666-666666666666",
-                "presentation_id": presentation_id,
-                "root_binding": {
-                    "binding_attachment_id": "root",
-                    "binding_generation": 1,
-                    "binding_digest": "a".repeat(64),
-                },
-                "binding_attachments": [{
-                    "binding_attachment_id": "root",
-                    "binding_generation": 1,
-                    "binding_digest": "a".repeat(64),
-                    "binding_request_bounds": {
-                        "max_request_bytes": 4096,
-                        "max_input_bytes": 1024,
-                        "max_seat_append_bytes": 65536,
-                    },
-                }],
-            },
+            "operation_id": creation_request_id,
+            "initialization": initialization,
         }),
     );
     let mut claim = UiSeatControlRequest::Claim {
@@ -259,7 +302,20 @@ struct Pair {
 /// The destination's inbound commitment followed by the source's Prepared
 /// phase linked to it: a copy transfer awaiting the destination's decision.
 fn prepared_pair(store: &StateStore, source: &Seat, destination: &Seat) -> Pair {
-    let export = json!({"mode": "copy", "view_ref": "view:test/one"});
+    prepared_pair_with_export(
+        store,
+        source,
+        destination,
+        json!({"mode": "copy", "view_ref": "view:test/one"}),
+    )
+}
+
+fn prepared_pair_with_export(
+    store: &StateStore,
+    source: &Seat,
+    destination: &Seat,
+    export: serde_json::Value,
+) -> Pair {
     let transfer = TransferIdentity {
         operation_id: "33333333-3333-4333-8333-333333333333".to_string(),
         source: source.identity(),
@@ -822,4 +878,90 @@ async fn session_current_refuses_retired_transfer_evidence_naming_a_presentation
         .await
         .expect_err("the cut names a seat this session does not hold");
     assert!(error.to_string().contains("does not hold"), "{error}");
+}
+
+/// A closed view-set export: one empty set owned by a Surface the source never
+/// mounted. It decodes and validates as an export, which is what a live
+/// reader of the pair asks of Prepared.
+fn closed_export(fixture: &SessionFixture, source: &Seat) -> serde_json::Value {
+    use ryeos_client_base::ids::{PresentationId, SurfaceInstanceId, UiViewMountOwner, ViewSetId};
+    use ryeos_client_base::ui::binding::UiBindingAttachmentCoordinate;
+    use ryeos_client_base::ui::transfer_export::{
+        UI_TRANSFER_EXPORT_SCHEMA, UiTransferExport, UiTransferExportContent, UiTransferExportMode,
+        UiTransferSetExport,
+    };
+    serde_json::to_value(UiTransferExport {
+        schema: UI_TRANSFER_EXPORT_SCHEMA,
+        mode: UiTransferExportMode::Copy,
+        content: UiTransferExportContent::ViewSets {
+            active_set: Some("empty".into()),
+            sets: vec![UiTransferSetExport {
+                handle: "empty".into(),
+                source_view_set_id: ViewSetId::new(1),
+                source_owner: UiViewMountOwner::Surface {
+                    presentation_id: PresentationId::try_new(&source.presentation_id).unwrap(),
+                    surface_instance_id: SurfaceInstanceId::try_new(
+                        "99999999-9999-4999-8999-999999999999",
+                    )
+                    .unwrap(),
+                },
+                binding: UiBindingAttachmentCoordinate {
+                    binding_attachment_id: fixture.root.binding_attachment_id.clone(),
+                    binding_generation: fixture.root.binding_generation,
+                    binding_digest: fixture.root.binding_digest.clone(),
+                },
+                seed: ryeos_client_base::surface::view_sets::ViewSetSeedSpec {
+                    schema: 2,
+                    id: "empty".into(),
+                    title: "Empty".into(),
+                    root: None,
+                },
+                focused_view: None,
+                mounts: vec![],
+            }],
+        },
+    })
+    .unwrap()
+}
+
+#[tokio::test]
+async fn session_current_reads_a_retired_seat_beside_its_live_counterpart() {
+    let (_dir, _owner, state) = build_test_state();
+    install_composition();
+    let fixture = session_with_presentations(&state, 2);
+    let store = Arc::clone(&state.state_store);
+    let source = live_seat(&state, &fixture, 0, "S-source", 'b');
+    let destination = live_seat(&state, &fixture, 1, "S-dest", 'c');
+    let export = closed_export(&fixture, &source);
+    prepared_pair_with_export(&store, &source, &destination, export);
+    bind(&state, &fixture, &fixture.presentations[0], &source);
+    bind(&state, &fixture, &fixture.presentations[1], &destination);
+    let state = Arc::new(state);
+    // Both seats settle; only the source retires, so its Prepared and Aborted
+    // testimony stays as retained evidence toward the destination still on
+    // the chain.
+    settle_and_retire(&state, &[&source, &destination], &[&source]).await;
+    let retired = capture_retired_seat(&store, &source.id).unwrap().unwrap();
+    assert_eq!(retired.owner_events().len(), 2);
+    assert!(
+        store
+            .capture_thread_event_read_anchor(&destination.id, &destination.id)
+            .unwrap()
+            .is_some(),
+        "the counterpart is still a live signed chain"
+    );
+
+    let reported = current(&state, &fixture).await.unwrap();
+    let presentations = reported["presentations"].as_array().unwrap();
+    assert_eq!(presentations.len(), 2);
+    for seat in [&source, &destination] {
+        assert!(
+            presentations.iter().any(|reported| {
+                reported["thread_id"] == seat.id
+                    && reported["presentation_id"] == seat.presentation_id
+            }),
+            "{} is reported through the cut that names both seats",
+            seat.id
+        );
+    }
 }

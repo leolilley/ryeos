@@ -21,6 +21,7 @@ use ryeos_ui_presentation_contract::seat_control::{
 };
 use ryeos_ui_presentation_contract::transfer::TransferEvidence;
 
+use super::super::composition::VerifiedHistory;
 use super::super::paired_read::FixedTransferCut;
 use super::super::{
     MAX_SEAT_APPEND_EVENTS, SEAT_APPEND_RECEIPT_EVENT, SEAT_EVENT_PREFIX, SEAT_PRODUCER_EVENT,
@@ -32,12 +33,12 @@ use crate::browser_session::transfer_reservation::CompletedPairedCut;
 /// One bounded projection/CAS work slice never exceeds the signed replay
 /// frame policy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct ReplayFrameBounds {
-    events: usize,
-    bytes: usize,
+pub(crate) struct ReplayFrameBounds {
+    pub(crate) events: usize,
+    pub(crate) bytes: usize,
 }
 
-fn replay_frame_bounds(state: &AppState) -> Result<ReplayFrameBounds, HandlerError> {
+pub(crate) fn replay_frame_bounds(state: &AppState) -> Result<ReplayFrameBounds, HandlerError> {
     let policy = state
         .node_policy
         .require::<ryeos_node_runtime::node_policy::sections::ui_browser_sessions::UiBrowserSessionPolicy>()
@@ -50,14 +51,48 @@ fn replay_frame_bounds(state: &AppState) -> Result<ReplayFrameBounds, HandlerErr
     })
 }
 
-/// Only `Complete` proves the full interval to the signed tip.
+/// Only `Complete` proves the full interval to the signed tip. A batch is
+/// provisional: it holds the records one bounded slice authenticated and
+/// released, in signed order, and proves nothing by itself.
 pub(crate) enum FixedAnchorReplayStep {
-    /// One bounded slice was folded; the interval is not yet proven.
-    Pending,
+    Batch {
+        events: Vec<PersistedEventRecord>,
+    },
     Complete {
         tip_hash: String,
         thread_seq: u64,
     },
+    /// A live suffix reached transfer testimony, which only a fresh full
+    /// paired proof can authenticate.
+    ReproofRequired,
+}
+
+/// What one live wake found after a completed replay.
+pub(crate) enum LiveSeatReplayAdvance {
+    Current,
+    Stopped,
+    ReproofRequired,
+}
+
+/// A live suffix names transfer testimony only to demand a fresh proof. The
+/// testimony must still be of a family this build writes: an old or unknown
+/// selector is refused rather than treated as a reproof request.
+fn validate_live_transfer_wake(record: &PersistedEventRecord) -> Result<(), HandlerError> {
+    let value = serde_json::to_value(record).map_err(|error| invalid(error.to_string()))?;
+    let result = match record.event_type.as_str() {
+        ryeos_ui_presentation_contract::transfer::TRANSFER_EVENT => {
+            ryeos_ui_presentation_contract::transfer::from_event_value(&value).map(|_| ())
+        }
+        ryeos_ui_presentation_contract::transfer_lifecycle::TRANSFER_LIFECYCLE_EVENT => {
+            ryeos_ui_presentation_contract::transfer_lifecycle::from_event_value(&value).map(|_| ())
+        }
+        ryeos_ui_presentation_contract::move_freeze_lifecycle::MOVE_FREEZE_CANCELLED_EVENT => {
+            ryeos_ui_presentation_contract::move_freeze_lifecycle::from_event_value(&value)
+                .map(|_| ())
+        }
+        _ => Err("live suffix has unsupported transfer testimony".into()),
+    };
+    result.map_err(invalid)
 }
 
 #[derive(Clone)]
@@ -83,6 +118,12 @@ pub(crate) struct FixedAnchorReplay {
     reached_tip: bool,
     paired_cut: Option<Arc<FixedTransferCut>>,
     paired_seen: BTreeMap<String, u64>,
+    /// Records released since the last batch was taken.
+    publishable: Vec<PersistedEventRecord>,
+    /// Folding the suffix after a completed replay: transfer testimony then
+    /// asks for a fresh proof instead of needing an attached cut.
+    live_suffix: bool,
+    reproof_required: bool,
 }
 
 impl FixedAnchorReplay {
@@ -143,6 +184,9 @@ impl FixedAnchorReplay {
             reached_tip: false,
             paired_cut: cut,
             paired_seen: BTreeMap::new(),
+            publishable: Vec::new(),
+            live_suffix: false,
+            reproof_required: false,
         })
     }
 
@@ -223,6 +267,9 @@ impl FixedAnchorReplay {
                 ));
             }
             self.apply_record(record)?;
+            if self.reproof_required {
+                return Ok(FixedAnchorReplayStep::ReproofRequired);
+            }
             self.previous_hash = Some(hash.to_owned());
             self.previous_thread_seq = expected_seq;
             self.after_chain_seq = Some(locator.chain_seq);
@@ -240,7 +287,9 @@ impl FixedAnchorReplay {
         } else if !page.has_more {
             return Err(invalid("seat replay locators end before the signed tip"));
         }
-        Ok(FixedAnchorReplayStep::Pending)
+        Ok(FixedAnchorReplayStep::Batch {
+            events: std::mem::take(&mut self.publishable),
+        })
     }
 
     /// The composition once this exact root consumed every scheduled paired
@@ -273,6 +322,141 @@ impl FixedAnchorReplay {
         self.composition
             .as_ref()
             .ok_or_else(|| invalid("paired projection has no composition"))
+    }
+
+    /// The verified history of this exact root once its replay completed:
+    /// every scheduled paired position consumed (or none scheduled), the
+    /// receipted interval closed, and the fold built from exactly `initial`.
+    pub(crate) fn completed_history(
+        &self,
+        initial: &UiPresentationInitialization,
+    ) -> Result<VerifiedHistory, HandlerError> {
+        if !self.reached_tip
+            || !self.pending_producer_events.is_empty()
+            || self.paired_cut.as_ref().is_some_and(|cut| {
+                !cut.completed_root_positions(
+                    &self.presentation_id,
+                    &self.chain_root_id,
+                    &self.paired_seen,
+                )
+            })
+            || (self.paired_cut.is_none() && !self.paired_seen.is_empty())
+            || self.anchor.tip() != Some((self.tip_hash.as_str(), self.tip_thread_seq))
+            || self.initialization.as_ref() != Some(initial)
+            || self.after_chain_seq != Some(self.tip_chain_seq)
+            || self.previous_hash.as_deref() != Some(self.tip_hash.as_str())
+            || self.previous_thread_seq != self.tip_thread_seq
+        {
+            return Err(invalid("replay did not finish its original signed cut"));
+        }
+        Ok(VerifiedHistory {
+            replay: self
+                .composition
+                .clone()
+                .ok_or_else(|| invalid("completed replay has no composition"))?,
+            chain_seq: u64::try_from(self.tip_chain_seq)
+                .map_err(|_| invalid("replay tip chain sequence is invalid"))?,
+            tip_hash: self.tip_hash.clone(),
+            thread_seq: self.tip_thread_seq,
+            next_engine_seq: self.next_engine_seq,
+            control: self.control.clone(),
+            control_predecessor: self
+                .control_predecessor
+                .clone()
+                .ok_or_else(|| invalid("completed replay has no control predecessor"))?,
+            transfer_testimony_seen: self.paired_cut.is_some(),
+        })
+    }
+
+    /// Fold the signed suffix that followed a completed replay and release
+    /// only its receipts. Anything the browser must decide on before its core
+    /// continues, a control change, ends the wake with an error; transfer
+    /// testimony asks for a fresh proof. Nothing is released until the whole
+    /// suffix authenticated.
+    pub(crate) fn advance_receipts(
+        &mut self,
+        state: &AppState,
+        mut continue_read: impl FnMut() -> bool,
+        mut emit: impl FnMut(PersistedEventRecord) -> bool,
+    ) -> Result<LiveSeatReplayAdvance, HandlerError> {
+        if !self.reached_tip || !self.pending_producer_events.is_empty() {
+            return Err(invalid("seat live replay has no completed predecessor"));
+        }
+        if !continue_read() {
+            return Ok(LiveSeatReplayAdvance::Stopped);
+        }
+        let anchor = state
+            .state_store
+            .capture_thread_event_read_anchor(&self.chain_root_id, &self.thread_id)
+            .map_err(|error| invalid(error.to_string()))?
+            .ok_or_else(|| invalid("seat live replay lost its signed anchor"))?;
+        let (hash, sequence) = anchor
+            .tip()
+            .map(|(hash, sequence)| (hash.to_owned(), sequence))
+            .ok_or_else(|| invalid("seat live replay lost its signed tip"))?;
+        if sequence < self.tip_thread_seq
+            || (sequence == self.tip_thread_seq && hash != self.tip_hash)
+        {
+            return Err(invalid("seat live replay signed tip moved backwards"));
+        }
+        if sequence == self.tip_thread_seq {
+            return Ok(LiveSeatReplayAdvance::Current);
+        }
+        let tip = state
+            .state_store
+            .retained_thread_event_by_hash(&hash)
+            .map_err(|error| invalid(error.to_string()))?
+            .ok_or_else(|| invalid("seat live replay signed tip is absent from CAS"))?;
+        if tip.chain_root_id != self.chain_root_id
+            || tip.thread_id != self.thread_id
+            || tip.thread_seq != sequence
+        {
+            return Err(invalid("seat live replay tip differs from signed anchor"));
+        }
+        self.tip_chain_seq = i64::try_from(tip.chain_seq)
+            .map_err(|_| invalid("seat live replay tip chain sequence overflows"))?;
+        if self
+            .after_chain_seq
+            .is_none_or(|previous| self.tip_chain_seq <= previous)
+        {
+            return Err(invalid(
+                "seat live replay tip does not advance chain sequence",
+            ));
+        }
+        self.tip_hash = hash;
+        self.tip_thread_seq = sequence;
+        self.anchor = anchor;
+        self.reached_tip = false;
+        // A previous paired proof authenticates only its old exact cut. The
+        // first new transfer row requires a fresh full proof.
+        self.paired_cut = None;
+        self.paired_seen.clear();
+        self.live_suffix = true;
+        let mut receipts = Vec::new();
+        loop {
+            if !continue_read() {
+                return Ok(LiveSeatReplayAdvance::Stopped);
+            }
+            match self.next_step(state)? {
+                FixedAnchorReplayStep::Batch { events } => {
+                    for event in events {
+                        if live_receipt(&event)? {
+                            receipts.push(event);
+                        }
+                    }
+                }
+                FixedAnchorReplayStep::Complete { .. } => break,
+                FixedAnchorReplayStep::ReproofRequired => {
+                    return Ok(LiveSeatReplayAdvance::ReproofRequired);
+                }
+            }
+        }
+        for receipt in receipts {
+            if !emit(receipt) {
+                return Ok(LiveSeatReplayAdvance::Stopped);
+            }
+        }
+        Ok(LiveSeatReplayAdvance::Current)
     }
 
     fn apply_record(&mut self, record: PersistedEventRecord) -> Result<(), HandlerError> {
@@ -332,6 +516,7 @@ impl FixedAnchorReplay {
                         .clone()
                         .ok_or_else(|| invalid("initialization has no CAS hash"))?,
                 });
+                self.publishable.push(record);
                 Ok(())
             }
             SEAT_PRODUCER_EVENT
@@ -362,6 +547,7 @@ impl FixedAnchorReplay {
                         .ok_or_else(|| invalid("control has no CAS hash"))?,
                 });
                 self.control = Some(control);
+                self.publishable.push(record);
                 Ok(())
             }
             SEAT_APPEND_RECEIPT_EVENT if self.initialization_seen => self.apply_receipt(record),
@@ -387,34 +573,41 @@ impl FixedAnchorReplay {
     }
 
     /// A finalized seat's terminal lifecycle event is the exact signed tip,
-    /// typed and carrying only the lease-expiry outcome. It is lifecycle
-    /// testimony, not an ordinary seat operation or a producer capability.
+    /// typed by its event type and carrying only the lease-expiry outcome: no
+    /// result, no error, no artifact. It is lifecycle testimony, not an
+    /// ordinary seat operation or a producer capability.
     fn apply_terminal(&mut self, record: &PersistedEventRecord) -> Result<(), HandlerError> {
-        let status: ryeos_state::objects::thread_snapshot::ThreadStatus = serde_json::from_value(
-            record
-                .payload
-                .get("status")
-                .cloned()
-                .ok_or_else(|| invalid("terminal testimony lacks typed status"))?,
-        )
-        .map_err(|error| invalid(error.to_string()))?;
+        let status: ryeos_state::objects::thread_snapshot::ThreadStatus =
+            serde_json::from_value(serde_json::Value::String(
+                record
+                    .event_type
+                    .strip_prefix("thread_")
+                    .ok_or_else(|| invalid("terminal testimony lacks typed status"))?
+                    .to_owned(),
+            ))
+            .map_err(|_| invalid("terminal testimony lacks typed status"))?;
+        let payload = &record.payload;
+        let carries_nothing = |key: &str| payload.get(key).is_none_or(serde_json::Value::is_null);
         if !matches!(
             status,
             ryeos_state::objects::thread_snapshot::ThreadStatus::Completed
                 | ryeos_state::objects::thread_snapshot::ThreadStatus::Cancelled
                 | ryeos_state::objects::thread_snapshot::ThreadStatus::Killed
         ) || record.event_type != format!("thread_{}", status.as_str())
-            || record
-                .payload
-                .as_object()
-                .is_none_or(|payload| payload.len() != 2)
-            || record
-                .payload
+            || payload
                 .get("outcome_code")
                 .and_then(serde_json::Value::as_str)
                 != Some("seat_lease_expired")
+            || payload.get("result_present") != Some(&serde_json::Value::Bool(false))
+            || payload.get("has_error") != Some(&serde_json::Value::Bool(false))
+            || payload.get("artifact_count") != Some(&serde_json::json!(0))
+            || !carries_nothing("result_project_snapshot_hash")
+            || !carries_nothing("result_workspace_output_capture_hash")
+            || ["error", "error_omitted", "error_preview"]
+                .iter()
+                .any(|key| payload.get(key).is_some())
         {
-            return Err(invalid("terminal event type and typed status differ"));
+            return Err(invalid("terminal event type and typed outcome differ"));
         }
         if !self.initialization_seen
             || self.composition.is_none()
@@ -487,13 +680,19 @@ impl FixedAnchorReplay {
             .last_engine_seq
             .checked_add(1)
             .ok_or_else(|| invalid("seat replay engine frontier is exhausted"))?;
-        self.pending_producer_events.clear();
+        self.publishable.append(&mut self.pending_producer_events);
+        self.publishable.push(record);
         Ok(())
     }
 
     fn apply_cancellation(&mut self, record: &PersistedEventRecord) -> Result<(), HandlerError> {
         if !self.pending_producer_events.is_empty() {
             return Err(invalid("cancellation interrupts an unreceipted interval"));
+        }
+        if self.live_suffix && self.paired_cut.is_none() {
+            validate_live_transfer_wake(record)?;
+            self.reproof_required = true;
+            return Ok(());
         }
         let cut = self
             .paired_cut
@@ -531,12 +730,18 @@ impl FixedAnchorReplay {
             .map_err(invalid)?;
         self.paired_seen
             .insert(evidence.event_hash.clone(), evidence.chain_seq);
+        self.publishable.push(record.clone());
         Ok(())
     }
 
     fn apply_transfer(&mut self, record: &PersistedEventRecord) -> Result<(), HandlerError> {
         if !self.pending_producer_events.is_empty() {
             return Err(invalid("transfer interrupts an unreceipted producer batch"));
+        }
+        if self.live_suffix && self.paired_cut.is_none() {
+            validate_live_transfer_wake(record)?;
+            self.reproof_required = true;
+            return Ok(());
         }
         let value = serde_json::to_value(record)
             .map_err(|error| invalid(format!("encode authenticated transfer event: {error}")))?;
@@ -605,7 +810,22 @@ impl FixedAnchorReplay {
             .max_request_bytes;
         composition
             .apply_authenticated_transfer_phase(lifecycle, authenticated, &evidence, bound)
-            .map_err(invalid)
+            .map_err(invalid)?;
+        self.publishable.push(record.clone());
+        Ok(())
+    }
+}
+
+/// Whether a live-suffix record is a receipt (released) or a producer event
+/// that waits for its receipt. A control change is authenticated but needs a
+/// new browser admission before its core can continue.
+fn live_receipt(event: &PersistedEventRecord) -> Result<bool, HandlerError> {
+    if event.event_type == SEAT_APPEND_RECEIPT_EVENT {
+        Ok(true)
+    } else if event.event_type.starts_with(SEAT_EVENT_PREFIX) {
+        Ok(false)
+    } else {
+        Err(invalid("seat live replay encountered a control change"))
     }
 }
 
@@ -832,9 +1052,12 @@ mod tests {
             guard += 1;
             assert!(guard < 8, "replay must terminate");
             match replay.next_step(&state) {
-                Ok(FixedAnchorReplayStep::Pending) => {}
+                Ok(FixedAnchorReplayStep::Batch { .. }) => {}
                 Ok(FixedAnchorReplayStep::Complete { .. }) => {
                     panic!("a thread with no signed initialization cannot be a complete seat")
+                }
+                Ok(FixedAnchorReplayStep::ReproofRequired) => {
+                    panic!("a cold replay never asks for a reproof")
                 }
                 Err(error) => break error,
             }
@@ -875,11 +1098,14 @@ mod tests {
         assert!(replay.completed_paired_projection(&initial).is_err());
         let tip = loop {
             match replay.next_step(&state).unwrap() {
-                FixedAnchorReplayStep::Pending => {}
+                FixedAnchorReplayStep::Batch { .. } => {}
                 FixedAnchorReplayStep::Complete {
                     tip_hash,
                     thread_seq,
                 } => break (tip_hash, thread_seq),
+                FixedAnchorReplayStep::ReproofRequired => {
+                    panic!("a cold replay never asks for a reproof")
+                }
             }
         };
         assert_eq!(tip.0, appended[0].event_hash.clone().unwrap());
@@ -955,6 +1181,48 @@ mod tests {
         event.event_type = "contract.ryeos_ui.presentation_transfer.future".into();
         let error = candidate.apply_record(event).unwrap_err();
         assert!(format!("{error}").contains("unsupported transfer testimony version"));
+    }
+
+    #[test]
+    fn a_live_wake_accepts_only_the_current_transfer_families_as_a_reproof_request() {
+        let (_directory, _owner, _state, replay) = initialized_replay();
+        // The current event shape is a reproof request, never applied.
+        let mut live = replay.clone();
+        live.live_suffix = true;
+        let released = live.publishable.len();
+        live.apply_record(transfer_record(&live)).unwrap();
+        assert!(live.reproof_required);
+        assert_eq!(
+            live.publishable.len(),
+            released,
+            "a reproof request releases nothing"
+        );
+        // A predecessor lifecycle selector or an unknown family is refused
+        // before it can ask for anything.
+        for kind in [
+            "contract.ryeos_ui.presentation_transfer_lifecycle.v2",
+            "contract.ryeos_ui.presentation_transfer_lifecycle.v1",
+            "contract.ryeos_ui.presentation_transfer.future",
+        ] {
+            let mut candidate = replay.clone();
+            candidate.live_suffix = true;
+            let mut event = transfer_record(&candidate);
+            event.event_type = kind.into();
+            assert!(candidate.apply_record(event).is_err(), "{kind}");
+            assert!(!candidate.reproof_required, "{kind}");
+        }
+    }
+
+    #[test]
+    fn a_live_suffix_releases_only_receipts_and_refuses_a_control_change() {
+        let receipt = |event_type: &str| {
+            let mut event = record(&"c".repeat(64), 4, Some(&"b".repeat(64)));
+            event.event_type = event_type.into();
+            event
+        };
+        assert!(live_receipt(&receipt(SEAT_APPEND_RECEIPT_EVENT)).unwrap());
+        assert!(!live_receipt(&receipt(&format!("{SEAT_EVENT_PREFIX}facet"))).unwrap());
+        assert!(live_receipt(&receipt(SEAT_PRODUCER_EVENT)).is_err());
     }
 
     #[test]
@@ -1155,6 +1423,7 @@ mod tests {
     #[test]
     fn terminal_lifecycle_testimony_is_accepted_only_as_the_exact_typed_tip() {
         let (_directory, _owner, _state, replay) = initialized_replay();
+        // The shape the node's own finalizer signs for an expired seat.
         let tip = |replay: &FixedAnchorReplay| {
             let mut event = record(
                 replay.tip_hash.as_str(),
@@ -1164,29 +1433,52 @@ mod tests {
             event.chain_root_id = "T-seat".into();
             event.thread_seq = i64::try_from(replay.tip_thread_seq).unwrap();
             event.event_type = "thread_completed".into();
-            event.payload =
-                serde_json::json!({"status":"completed","outcome_code":"seat_lease_expired"});
+            event.payload = serde_json::json!({
+                "result_project_snapshot_hash": null,
+                "result_workspace_output_capture_hash": null,
+                "outcome_code": "seat_lease_expired",
+                "result_present": false,
+                "result_size_bytes": 0,
+                "result_digest": "d".repeat(64),
+                "has_error": false,
+                "error_size_bytes": 0,
+                "error_digest": "e".repeat(64),
+                "artifact_count": 0,
+            });
             event
         };
         let mut accepted = replay.clone();
         accepted.apply_record(tip(&replay)).unwrap();
+        assert!(
+            accepted.publishable.len() == replay.publishable.len(),
+            "terminal testimony is released to no browser"
+        );
 
         let mut elsewhere = tip(&replay);
         elsewhere.event_hash = Some("f".repeat(64));
         assert!(replay.clone().apply_record(elsewhere).is_err());
         let mut mistyped = tip(&replay);
         mistyped.event_type = "thread_killed".into();
+        mistyped.payload["outcome_code"] = serde_json::json!("operator_stop");
         assert!(replay.clone().apply_record(mistyped).is_err());
         let mut other_outcome = tip(&replay);
         other_outcome.payload["outcome_code"] = serde_json::json!("operator_stop");
         assert!(replay.clone().apply_record(other_outcome).is_err());
-        let mut extra = tip(&replay);
-        extra.payload["note"] = serde_json::json!("x");
-        assert!(replay.clone().apply_record(extra).is_err());
+        let mut with_result = tip(&replay);
+        with_result.payload["result_present"] = serde_json::json!(true);
+        assert!(replay.clone().apply_record(with_result).is_err());
+        let mut with_error = tip(&replay);
+        with_error.payload["has_error"] = serde_json::json!(true);
+        assert!(replay.clone().apply_record(with_error).is_err());
+        let mut with_note = tip(&replay);
+        with_note.payload["error"] = serde_json::json!("x");
+        assert!(replay.clone().apply_record(with_note).is_err());
         let mut failed = tip(&replay);
         failed.event_type = "thread_failed".into();
-        failed.payload["status"] = serde_json::json!("failed");
         assert!(replay.clone().apply_record(failed).is_err());
+        let mut unknown = tip(&replay);
+        unknown.event_type = "thread_vanished".into();
+        assert!(replay.clone().apply_record(unknown).is_err());
     }
 
     #[test]

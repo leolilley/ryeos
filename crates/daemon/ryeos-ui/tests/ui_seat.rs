@@ -1244,7 +1244,6 @@ fn pair_transfer(
 
 #[tokio::test]
 async fn session_current_folds_a_transfer_bearing_seat_through_its_completed_paired_cut() {
-    use ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR;
     let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
     install_transfer_composition();
     let session = activate(&state);
@@ -1297,16 +1296,12 @@ async fn session_current_folds_a_transfer_bearing_seat_through_its_completed_pai
     append_inbound(&state, &destination, next_engine_seq, &transfer);
 
     // One seat's fold cannot judge transfer testimony; only the completed
-    // paired cut reads it.
-    route(
-        &state,
-        &session,
-        &OPEN_DESCRIPTOR,
-        json!({"action":"observe","presentation_id":destination["presentation_id"],
-            "thread_id":destination["thread_id"],"chain_root_id":destination["chain_root_id"]}),
-    )
-    .await
-    .expect_err("transfer testimony needs phase-aware two-seat admission");
+    // paired cut reads it, and observation now reads through that cut.
+    let observed = observe(&state, &session, &destination).await.unwrap();
+    assert_eq!(
+        observed.revision, destination_revision,
+        "an inbound commitment witnesses the frontier without changing composition"
+    );
     let current = ryeos_ui::handlers::ui_session_current::handle(
         json!({}),
         handler_context(&session),
@@ -1384,4 +1379,977 @@ async fn session_current_refuses_a_transfer_whose_witness_is_stale() {
     )
     .await
     .expect_err("a transfer witness must equal the authenticated producer frontier");
+}
+
+#[tokio::test]
+async fn a_transfer_bearing_seat_appends_and_relinquishes_through_its_paired_cut() {
+    use ryeos_ui::handlers::ui_seat::{APPEND_DESCRIPTOR, CLOSE_DESCRIPTOR};
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+    install_transfer_composition();
+    let session = activate(&state);
+    let state = Arc::new(state);
+    let source = fresh_distinct(
+        &state,
+        &session,
+        "00000000-0000-4000-8000-000000000020",
+        "00000000-0000-4000-8000-000000000021",
+    )
+    .await;
+    let destination = fresh_distinct(
+        &state,
+        &session,
+        "00000000-0000-4000-8000-000000000030",
+        "00000000-0000-4000-8000-000000000031",
+    )
+    .await;
+    let source_revision = observe(&state, &session, &source).await.unwrap().revision;
+    let destination_revision = observe(&state, &session, &destination)
+        .await
+        .unwrap()
+        .revision;
+    let transfer = pair_transfer(
+        transfer_seat(&source, source_revision),
+        transfer_seat(&destination, destination_revision),
+    );
+    let next_engine_seq: u64 = destination["next_engine_seq"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    append_inbound(&state, &destination, next_engine_seq, &transfer);
+
+    // The inbound commitment witnesses the frontier without consuming a
+    // producer sequence, so the destination's own next edit still lands at
+    // the sequence it was claimed at. Before the paired cut owned admission
+    // this append was refused outright.
+    let ack = route(
+        &state,
+        &session,
+        &APPEND_DESCRIPTOR,
+        append_request(
+            &destination,
+            "",
+            next_engine_seq,
+            &[json!({"key": "after.inbound", "value": 1})],
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(ack["appended"], 1);
+
+    // The control writer reads through the same cut.
+    let relinquish = transition_request(
+        &state,
+        &session,
+        &destination,
+        "00000000-0000-4000-8000-000000000032",
+        "relinquish",
+    )
+    .await;
+    let released = route(&state, &session, &CLOSE_DESCRIPTOR, relinquish)
+        .await
+        .unwrap();
+    assert_eq!(released["state"], "relinquished");
+    assert_eq!(
+        serde_json::to_value(observe(&state, &session, &destination).await.unwrap()).unwrap()["producer"],
+        json!({"kind": "relinquished", "producer_incarnation": destination["producer_incarnation"]})
+    );
+}
+
+/// Publish the destination InboundCommitment and the source Prepared event
+/// through the typed pair writer, from completed reads of both seats. The
+/// export is the writer's own closed input; the browser ingress would first
+/// bind it to a mounted source composition.
+fn prepare_pair_directly(
+    state: &Arc<ryeos_app::state::AppState>,
+    source: (&str, &Value),
+    destination: (&str, &Value),
+    transfer: &ryeos_ui_presentation_contract::transfer::TransferIdentity,
+    export: &Value,
+) -> anyhow::Result<ryeos_app::state_store::CutPairAppendResult> {
+    use ryeos_ui::transfer_store::appends::{
+        PreparationInputs, TransferCutDependencies, TransferSeatContext, TransferSeatPair,
+        append_transfer_preparation_pair,
+    };
+    use ryeos_ui::transfer_store::reader::{
+        begin_fixed_seat_read, finish_fixed_seat_read, read_fixed_seat_page,
+    };
+
+    let policy = state
+        .node_policy
+        .require::<ryeos_node_runtime::node_policy::sections::ui_browser_sessions::UiBrowserSessionPolicy>()?;
+    let max_append_bytes = state
+        .node_config
+        .routes
+        .iter()
+        .find(|route| {
+            route.response.source.as_deref()
+                == Some(ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR.service_ref)
+        })
+        .unwrap()
+        .limits
+        .body_bytes_max;
+    let anchor_of = |opened: &Value| {
+        state
+            .state_store
+            .capture_thread_event_read_anchor(
+                opened["chain_root_id"].as_str().unwrap(),
+                opened["thread_id"].as_str().unwrap(),
+            )
+            .unwrap()
+            .unwrap()
+    };
+    let detail_of = |opened: &Value| {
+        state
+            .state_store
+            .get_thread(opened["thread_id"].as_str().unwrap())
+            .unwrap()
+            .unwrap()
+    };
+    let (source_anchor, destination_anchor) = (anchor_of(source.1), anchor_of(destination.1));
+    let (source_detail, destination_detail) = (detail_of(source.1), detail_of(destination.1));
+    let (source_owner, destination_owner) = (
+        format!("session:{}", source.0),
+        format!("session:{}", destination.0),
+    );
+    fn context<'a>(
+        anchor: &'a ryeos_state::AuthoritativeThreadEventReadAnchor,
+        owner: &'a str,
+        detail: &'a ryeos_app::state_store::ThreadDetail,
+        opened: &'a Value,
+        max_append_bytes: u64,
+    ) -> TransferSeatContext<'a> {
+        TransferSeatContext {
+            anchor,
+            owner,
+            surface: &detail.item_ref,
+            client_ref: &detail.executor_ref,
+            presentation_id: opened["presentation_id"].as_str().unwrap(),
+            producer_incarnation: opened["producer_incarnation"].as_str().unwrap(),
+            revision: 0,
+            next_engine_seq: 0,
+            max_append_bytes,
+        }
+    }
+    let source_context = context(
+        &source_anchor,
+        &source_owner,
+        &source_detail,
+        source.1,
+        max_append_bytes,
+    );
+    let destination_context = context(
+        &destination_anchor,
+        &destination_owner,
+        &destination_detail,
+        destination.1,
+        max_append_bytes,
+    );
+    let completed = |seat: &ryeos_ui_presentation_contract::transfer::TransferSeat, anchor| {
+        let mut read = begin_fixed_seat_read(
+            state.state_store.clone(),
+            anchor,
+            seat,
+            std::slice::from_ref(transfer),
+        )
+        .unwrap();
+        while !read_fixed_seat_page(&mut read, 64, 2 * 1024 * 1024).unwrap() {}
+        finish_fixed_seat_read(read).unwrap()
+    };
+    let source_proof = completed(&transfer.source, source_anchor.clone());
+    let destination_proof = completed(&transfer.destination, destination_anchor.clone());
+    append_transfer_preparation_pair(
+        &state.state_store,
+        &policy.seat.kind,
+        &PreparationInputs {
+            transfer,
+            export,
+            source_proof: &source_proof,
+            destination_proof: &destination_proof,
+        },
+        TransferSeatPair {
+            target: &destination_context,
+            counterpart: &source_context,
+        },
+        TransferCutDependencies {
+            current_anchors: &[],
+            retired: &[],
+        },
+        || Ok(true),
+    )
+}
+
+#[tokio::test]
+async fn signed_transfer_preparation_does_not_consume_a_producer_sequence() {
+    use ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR;
+
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+    install_transfer_composition();
+    let session = activate(&state);
+    let state = Arc::new(state);
+    let (source, _, destination, _) = two_seats(&state, &session).await;
+    let export = set_export(
+        &state,
+        &session,
+        &source,
+        ryeos_client_base::ui::transfer_export::UiTransferExportMode::Copy,
+    );
+    let transfer = export_transfer(&source, 0, &destination, 0, &export);
+    let outcome = prepare_pair_directly(
+        &state,
+        (&session, &source),
+        (&session, &destination),
+        &transfer,
+        &export,
+    )
+    .unwrap();
+    assert!(
+        matches!(
+            outcome,
+            ryeos_app::state_store::CutPairAppendResult::Committed { .. }
+        ),
+        "{outcome:?}"
+    );
+
+    // The source's first producer sequence is still free after Prepared.
+    let ack = route(
+        &state,
+        &session,
+        &APPEND_DESCRIPTOR,
+        append_request(
+            &source,
+            "",
+            0,
+            &[json!({"key": "after.transfer", "value": true})],
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(ack["first_engine_seq"], "0");
+    assert_eq!(ack["appended"], 1);
+
+    // A second preparation of the same operation is never a second pair: the
+    // completed reads now hold the first one's phases.
+    prepare_pair_directly(
+        &state,
+        (&session, &source),
+        (&session, &destination),
+        &transfer,
+        &export,
+    )
+    .expect_err("a preparation repeats an existing source phase");
+}
+
+/// The compiled route shape the stream source accepts, without the signed
+/// bundle document that deploys it.
+fn history_route() -> ryeos_app::route_raw::RawRouteSpec {
+    serde_yaml::from_str(
+        "id: ui/api/session/seat/history\npath: /ui/api/session/seat/history\nmethods: [POST]\nauth: browser_session\nlimits: { body_bytes_max: 16384, timeout_ms: 0, concurrent_max: 8 }\nrequest: { body: json }\nresponse: { mode: event_stream, source: ui_seat_history }\n",
+    )
+    .unwrap()
+}
+
+async fn open_history_stream(
+    state: &Arc<ryeos_app::state::AppState>,
+    session_id: &str,
+    presentation_id: &str,
+    chain_root_id: &str,
+) -> anyhow::Result<ryeos_api::routes::invocation::RouteEventStream> {
+    use ryeos_api::routes::invocation::{
+        CompiledRouteInvocation, RouteInvocationContext, RouteInvocationResult,
+    };
+    use ryeos_api::routes::response_modes::event_stream_mode::{
+        EventStreamStrategy, StreamSourceCompiler,
+    };
+
+    let raw = history_route();
+    let EventStreamStrategy::BodyJson { invoker } =
+        ryeos_ui::invokers::seat_history_invocation::SeatHistorySourceFactory.compile(&raw)?
+    else {
+        anyhow::bail!("seat history route did not compile to POST JSON");
+    };
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert("cookie", format!("ryeos_session={session_id}").parse()?);
+    let input = json!({"presentation_id": presentation_id, "chain_root_id": chain_root_id});
+    let context = |headers, principal| -> anyhow::Result<RouteInvocationContext> {
+        Ok(RouteInvocationContext {
+            route_id: raw.id.clone().into(),
+            method: axum::http::Method::POST,
+            uri: raw.path.parse()?,
+            captures: Default::default(),
+            headers,
+            body_raw: Vec::new(),
+            input: input.clone(),
+            principal,
+            workspace_lifeline: None,
+            launch_timings: None,
+            publication: None,
+            state: state.as_ref().clone(),
+            webhook_dedupe: Arc::new(Default::default()),
+        })
+    };
+    let auth = ryeos_ui::invokers::browser_session_invocation::CompiledBrowserSessionVerifier {
+        ui: get_ui_state(state).unwrap().clone(),
+    }
+    .invoke(context(headers, None)?)
+    .await?;
+    let RouteInvocationResult::Principal(principal) = auth else {
+        anyhow::bail!("browser session route did not authenticate");
+    };
+    let RouteInvocationResult::Stream(stream) = invoker
+        .invoke(context(Default::default(), Some(principal))?)
+        .await?
+    else {
+        anyhow::bail!("seat history route did not return a stream");
+    };
+    Ok(stream)
+}
+
+async fn collect_history_until_fence_or_eof(
+    mut stream: ryeos_api::routes::invocation::RouteEventStream,
+) -> anyhow::Result<Vec<ryeos_app::stream_envelope::RouteStreamEnvelope>> {
+    use tokio_stream::StreamExt;
+    let mut frames = Vec::new();
+    loop {
+        let Some(frame) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), stream.events.next()).await?
+        else {
+            break;
+        };
+        let frame = frame.map_err(|never| match never {})?;
+        let completed = frame.event_type == "ui_seat.replay.complete.v1";
+        frames.push(frame);
+        if completed {
+            break;
+        }
+        if frames.len() >= 64 {
+            anyhow::bail!("seat history exceeded fixture frame bound before completion or EOF");
+        }
+    }
+    Ok(frames)
+}
+
+/// The stream's tasks hold clones of the state; a test must not end while one
+/// still does, or the host would see a live store at teardown.
+async fn wait_for_stream_release(state: &Arc<ryeos_app::state::AppState>, baseline: usize) {
+    for _ in 0..200 {
+        if Arc::strong_count(&state.state_store) <= baseline {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("the seat history stream never released the state it held");
+}
+
+async fn history_frames_until_fence_or_eof(
+    state: &Arc<ryeos_app::state::AppState>,
+    session_id: &str,
+    presentation_id: &str,
+    chain_root_id: &str,
+) -> anyhow::Result<Vec<ryeos_app::stream_envelope::RouteStreamEnvelope>> {
+    let baseline = Arc::strong_count(&state.state_store);
+    let frames = collect_history_until_fence_or_eof(
+        open_history_stream(state, session_id, presentation_id, chain_root_id).await?,
+    )
+    .await;
+    wait_for_stream_release(state, baseline).await;
+    frames
+}
+
+#[tokio::test]
+async fn signed_fixed_anchor_history_completes_for_current_seat() {
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+    let session = activate(&state);
+    let state = Arc::new(state);
+    let opened = fresh(&state, &session).await;
+    let frames = history_frames_until_fence_or_eof(
+        &state,
+        &session,
+        opened["presentation_id"].as_str().unwrap(),
+        opened["chain_root_id"].as_str().unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        frames.first().unwrap().event_type,
+        "ui_seat.replay.begin.v1"
+    );
+    assert_eq!(
+        frames.last().unwrap().event_type,
+        "ui_seat.replay.complete.v1",
+        "a valid signed seat must reach the fixed-anchor completion fence"
+    );
+}
+
+#[tokio::test]
+async fn fixed_anchor_stream_rechecks_attachment_and_tip_before_completion() {
+    use ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR;
+    use tokio_stream::StreamExt;
+
+    for revoke_root in [true, false] {
+        let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+        let session = activate(&state);
+        let state = Arc::new(state);
+        let opened = fresh(&state, &session).await;
+        let presentation_id = opened["presentation_id"].as_str().unwrap().to_owned();
+        let chain_root_id = opened["chain_root_id"].as_str().unwrap().to_owned();
+        // Four fully receipted intervals cannot fit alongside completion in
+        // the route's two-frame channel. After reading only Begin, the source
+        // cannot have published Complete, regardless of task scheduling.
+        for batch in 0..4_u64 {
+            let payloads = (0..32_u64)
+                .map(|offset| json!({"key": format!("stream.fixture.{}", batch * 32 + offset), "value": offset}))
+                .collect::<Vec<_>>();
+            route(
+                &state,
+                &session,
+                &APPEND_DESCRIPTOR,
+                append_request(&opened, "", batch * 32, &payloads),
+            )
+            .await
+            .unwrap();
+        }
+        let valid =
+            history_frames_until_fence_or_eof(&state, &session, &presentation_id, &chain_root_id)
+                .await
+                .unwrap();
+        assert_eq!(
+            valid.last().unwrap().event_type,
+            "ui_seat.replay.complete.v1",
+            "the unmodified multi-frame history must independently complete"
+        );
+
+        let baseline = Arc::strong_count(&state.state_store);
+        let mut stream = open_history_stream(&state, &session, &presentation_id, &chain_root_id)
+            .await
+            .unwrap();
+        let begin = tokio::time::timeout(std::time::Duration::from_secs(5), stream.events.next())
+            .await
+            .unwrap()
+            .expect("Begin before mutation")
+            .unwrap();
+        assert_eq!(begin.event_type, "ui_seat.replay.begin.v1");
+        if revoke_root {
+            let ui = get_ui_state(&state).unwrap();
+            let held = ui.browser_sessions.get_session(&session).unwrap();
+            let root = held.attachments[&held.root_attachment_id].coordinate();
+            ui.browser_sessions
+                .revoke_attachment(&session, &root)
+                .unwrap();
+        } else {
+            // The anchor was captured before Begin. A subsequent admitted
+            // append must invalidate this provisional cut, not be silently
+            // omitted while its old anchor is advertised as current.
+            route(
+                &state,
+                &session,
+                &APPEND_DESCRIPTOR,
+                append_request(
+                    &opened,
+                    "",
+                    128,
+                    &[json!({"key": "stream.fixture.late", "value": true})],
+                ),
+            )
+            .await
+            .unwrap();
+        }
+        let remaining = collect_history_until_fence_or_eof(stream).await.unwrap();
+        wait_for_stream_release(&state, baseline).await;
+        assert!(
+            remaining
+                .iter()
+                .all(|frame| frame.event_type != "ui_seat.replay.complete.v1"),
+            "revoked attachment or advanced signed tip must end without Complete (revoke_root={revoke_root})"
+        );
+    }
+}
+
+#[tokio::test]
+async fn signed_orphan_producer_event_does_not_complete_fixed_anchor_history() {
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+    let session = activate(&state);
+    let state = Arc::new(state);
+    let opened = fresh(&state, &session).await;
+    state
+        .state_store
+        .append_events(
+            opened["chain_root_id"].as_str().unwrap(),
+            opened["thread_id"].as_str().unwrap(),
+            &[ryeos_app::state_store::NewEventRecord {
+                event_type: "seat.facet".into(),
+                storage_class: "indexed".into(),
+                payload: json!({"seq": 0, "operation_id": "orphan", "payload": {"key": "selection", "value": "unsettled"}}),
+            }],
+        )
+        .expect("signed orphan fixture commits one event");
+    let frames = history_frames_until_fence_or_eof(
+        &state,
+        &session,
+        opened["presentation_id"].as_str().unwrap(),
+        opened["chain_root_id"].as_str().unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        frames.first().unwrap().event_type,
+        "ui_seat.replay.begin.v1"
+    );
+    assert!(
+        frames
+            .iter()
+            .all(|frame| frame.event_type != "ui_seat.replay.complete.v1"),
+        "orphan producer testimony must end without a completion fence"
+    );
+}
+
+#[tokio::test]
+async fn a_transfer_bearing_seat_streams_its_proof_frames_before_completing() {
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+    install_transfer_composition();
+    let session = activate(&state);
+    let state = Arc::new(state);
+    let source = fresh_distinct(
+        &state,
+        &session,
+        "00000000-0000-4000-8000-000000000020",
+        "00000000-0000-4000-8000-000000000021",
+    )
+    .await;
+    let destination = fresh_distinct(
+        &state,
+        &session,
+        "00000000-0000-4000-8000-000000000030",
+        "00000000-0000-4000-8000-000000000031",
+    )
+    .await;
+    let source_revision = observe(&state, &session, &source).await.unwrap().revision;
+    let destination_revision = observe(&state, &session, &destination)
+        .await
+        .unwrap()
+        .revision;
+    let transfer = pair_transfer(
+        transfer_seat(&source, source_revision),
+        transfer_seat(&destination, destination_revision),
+    );
+    let next_engine_seq: u64 = destination["next_engine_seq"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    append_inbound(&state, &destination, next_engine_seq, &transfer);
+    let frames = history_frames_until_fence_or_eof(
+        &state,
+        &session,
+        destination["presentation_id"].as_str().unwrap(),
+        destination["chain_root_id"].as_str().unwrap(),
+    )
+    .await
+    .unwrap();
+    let kinds = frames
+        .iter()
+        .map(|frame| frame.event_type.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(kinds.first(), Some(&"ui_seat.replay.begin.v1"));
+    assert_eq!(kinds.last(), Some(&"ui_seat.replay.complete.v1"));
+    let proof = kinds
+        .iter()
+        .position(|kind| *kind == "ui_seat.replay.transfer_proof.v1")
+        .expect("the destination's inbound commitment is disclosed as a proof frame");
+    let first_events = kinds
+        .iter()
+        .position(|kind| *kind == "ui_seat.replay.events.v1")
+        .expect("the seat's own history is replayed");
+    assert!(proof < first_events, "proofs precede every canonical row");
+}
+
+/// The transfer service is deployed by a signed service document that is not
+/// part of this build's bundle yet, so the handler runs directly under the
+/// session's context rather than through the compiled service route.
+async fn transfer_route(
+    state: &Arc<ryeos_app::state::AppState>,
+    session: &str,
+    input: Value,
+) -> anyhow::Result<Value> {
+    (ryeos_ui::handlers::ui_seat::TRANSFER_DESCRIPTOR.handler)(
+        input,
+        handler_context(session),
+        state.clone(),
+    )
+    .await
+}
+
+/// A closed view-set export holding one empty set owned by a Surface the
+/// source never mounted. It decodes and validates as an export, which is all
+/// the typed pair writer and the paired readers ask of it; binding it to a
+/// mounted source composition is the browser ingress's own, later check.
+fn set_export(
+    state: &Arc<ryeos_app::state::AppState>,
+    session: &str,
+    source: &Value,
+    mode: ryeos_client_base::ui::transfer_export::UiTransferExportMode,
+) -> Value {
+    use ryeos_client_base::ids::{PresentationId, SurfaceInstanceId, UiViewMountOwner, ViewSetId};
+    use ryeos_client_base::ui::binding::UiBindingAttachmentCoordinate;
+    use ryeos_client_base::ui::transfer_export::{
+        UI_TRANSFER_EXPORT_SCHEMA, UiTransferExport, UiTransferExportContent, UiTransferSetExport,
+    };
+    let held = get_ui_state(state)
+        .unwrap()
+        .browser_sessions
+        .get_session(session)
+        .unwrap();
+    let root = held.attachments[&held.root_attachment_id].coordinate();
+    let export = UiTransferExport {
+        schema: UI_TRANSFER_EXPORT_SCHEMA,
+        mode,
+        content: UiTransferExportContent::ViewSets {
+            active_set: Some("empty".into()),
+            sets: vec![UiTransferSetExport {
+                handle: "empty".into(),
+                source_view_set_id: ViewSetId::new(1),
+                source_owner: UiViewMountOwner::Surface {
+                    presentation_id: PresentationId::try_new(
+                        source["presentation_id"].as_str().unwrap(),
+                    )
+                    .unwrap(),
+                    surface_instance_id: SurfaceInstanceId::try_new(
+                        "99999999-9999-4999-8999-999999999999",
+                    )
+                    .unwrap(),
+                },
+                binding: UiBindingAttachmentCoordinate {
+                    binding_attachment_id: root.binding_attachment_id,
+                    binding_generation: root.binding_generation,
+                    binding_digest: root.binding_digest,
+                },
+                seed: ryeos_client_base::surface::view_sets::ViewSetSeedSpec {
+                    schema: 2,
+                    id: "empty".into(),
+                    title: "Empty".into(),
+                    root: None,
+                },
+                focused_view: None,
+                mounts: vec![],
+            }],
+        },
+    };
+    serde_json::to_value(export).unwrap()
+}
+
+fn empty_export(mode: &str) -> Value {
+    json!({"schema": 1, "mode": mode,
+        "content": {"kind": "view_sets", "active_set": null, "sets": []}})
+}
+
+fn export_transfer(
+    source: &Value,
+    source_revision: u64,
+    destination: &Value,
+    destination_revision: u64,
+    export: &Value,
+) -> ryeos_ui_presentation_contract::transfer::TransferIdentity {
+    ryeos_ui_presentation_contract::transfer::TransferIdentity {
+        operation_id: "33333333-3333-4333-8333-333333333333".into(),
+        source: transfer_seat(source, source_revision),
+        destination: transfer_seat(destination, destination_revision),
+        export_digest: ryeos_ui_presentation_contract::payload_digest::seat_payload_digest(export)
+            .unwrap(),
+    }
+}
+
+async fn two_seats(
+    state: &Arc<ryeos_app::state::AppState>,
+    session: &str,
+) -> (Value, u64, Value, u64) {
+    let source = fresh_distinct(
+        state,
+        session,
+        "00000000-0000-4000-8000-000000000020",
+        "00000000-0000-4000-8000-000000000021",
+    )
+    .await;
+    let destination = fresh_distinct(
+        state,
+        session,
+        "00000000-0000-4000-8000-000000000030",
+        "00000000-0000-4000-8000-000000000031",
+    )
+    .await;
+    let source_revision = observe(state, session, &source).await.unwrap().revision;
+    let destination_revision = observe(state, session, &destination)
+        .await
+        .unwrap()
+        .revision;
+    (source, source_revision, destination, destination_revision)
+}
+
+#[tokio::test]
+async fn transfer_requests_refuse_unheld_seats_old_selectors_and_a_single_seat() {
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+    install_transfer_composition();
+    let session = activate(&state);
+    let foreign = activate(&state);
+    let state = Arc::new(state);
+    let (source, source_revision, destination, destination_revision) =
+        two_seats(&state, &session).await;
+    let anchor_of = |opened: &Value| {
+        state
+            .state_store
+            .capture_thread_event_read_anchor(
+                opened["chain_root_id"].as_str().unwrap(),
+                opened["thread_id"].as_str().unwrap(),
+            )
+            .unwrap()
+            .unwrap()
+    };
+    let (before_source, before_destination) = (anchor_of(&source), anchor_of(&destination));
+    let export = empty_export("copy");
+    let transfer = export_transfer(
+        &source,
+        source_revision,
+        &destination,
+        destination_revision,
+        &export,
+    );
+
+    // A session that holds neither seat has no standing to move anything.
+    let error = transfer_route(
+        &state,
+        &foreign,
+        json!({"action": "prepare", "transfer": transfer, "export": export, "freeze": null}),
+    )
+    .await
+    .expect_err("a foreign session holds neither transfer seat");
+    assert!(
+        format!("{error:#}").to_lowercase().contains("presentation")
+            || format!("{error:#}").to_lowercase().contains("forbidden"),
+        "{error:#}"
+    );
+
+    // Predecessor lifecycle selectors and unknown actions are not requests.
+    for action in ["settle", "reap", "transfer_lifecycle_v2"] {
+        transfer_route(
+            &state,
+            &session,
+            json!({"action": action, "transfer": transfer}),
+        )
+        .await
+        .expect_err("an old selector is not a transfer action");
+    }
+
+    // One seat cannot be both ends.
+    let mut single = transfer.clone();
+    single.destination = single.source.clone();
+    transfer_route(
+        &state,
+        &session,
+        json!({"action": "prepare", "transfer": single, "export": export, "freeze": null}),
+    )
+    .await
+    .expect_err("a transfer needs two distinct seats");
+
+    // Neither end advanced: nothing was written by any refusal.
+    for (opened, before) in [
+        (&source, &before_source),
+        (&destination, &before_destination),
+    ] {
+        let anchor = state
+            .state_store
+            .capture_thread_event_read_anchor(
+                opened["chain_root_id"].as_str().unwrap(),
+                opened["thread_id"].as_str().unwrap(),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(&anchor, before);
+    }
+}
+
+#[tokio::test]
+async fn a_move_without_its_receipted_freeze_and_a_copy_with_one_are_both_refused() {
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+    install_transfer_composition();
+    let session = activate(&state);
+    let state = Arc::new(state);
+    let (source, source_revision, destination, destination_revision) =
+        two_seats(&state, &session).await;
+    let before = state
+        .state_store
+        .capture_thread_event_read_anchor(
+            source["chain_root_id"].as_str().unwrap(),
+            source["thread_id"].as_str().unwrap(),
+        )
+        .unwrap()
+        .unwrap();
+
+    let move_export = empty_export("move");
+    let moved = export_transfer(
+        &source,
+        source_revision,
+        &destination,
+        destination_revision,
+        &move_export,
+    );
+    let error = transfer_route(
+        &state,
+        &session,
+        json!({"action": "prepare", "transfer": moved, "export": move_export, "freeze": null}),
+    )
+    .await
+    .expect_err("a MOVE is admitted only through the receipted typed Core freeze");
+    assert!(format!("{error:#}").contains("freeze"), "{error:#}");
+
+    let copy_export = empty_export("copy");
+    let copied = export_transfer(
+        &source,
+        source_revision,
+        &destination,
+        destination_revision,
+        &copy_export,
+    );
+    let links = json!({
+        "preparation": {"event_hash": "a".repeat(64), "chain_seq": 4},
+        "completion": {"event_hash": "b".repeat(64), "chain_seq": 5},
+    });
+    transfer_route(
+        &state,
+        &session,
+        json!({"action": "prepare", "transfer": copied, "export": copy_export, "freeze": links}),
+    )
+    .await
+    .expect_err("a COPY cannot carry MOVE freeze links");
+
+    assert_eq!(
+        state
+            .state_store
+            .capture_thread_event_read_anchor(
+                source["chain_root_id"].as_str().unwrap(),
+                source["thread_id"].as_str().unwrap(),
+            )
+            .unwrap()
+            .unwrap(),
+        before,
+        "a refused preparation writes nothing"
+    );
+}
+
+#[tokio::test]
+async fn an_export_that_snapshots_nothing_is_refused_before_any_write() {
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+    install_transfer_composition();
+    let session = activate(&state);
+    let state = Arc::new(state);
+    let (source, source_revision, destination, destination_revision) =
+        two_seats(&state, &session).await;
+    let export = empty_export("copy");
+    let transfer = export_transfer(
+        &source,
+        source_revision,
+        &destination,
+        destination_revision,
+        &export,
+    );
+    let anchor_of = |opened: &Value| {
+        state
+            .state_store
+            .capture_thread_event_read_anchor(
+                opened["chain_root_id"].as_str().unwrap(),
+                opened["thread_id"].as_str().unwrap(),
+            )
+            .unwrap()
+            .unwrap()
+    };
+    let (before_source, before_destination) = (anchor_of(&source), anchor_of(&destination));
+    let error = transfer_route(
+        &state,
+        &session,
+        json!({"action": "prepare", "transfer": transfer, "export": export, "freeze": null}),
+    )
+    .await
+    .expect_err("an empty export is not a snapshot of the source composition");
+    assert!(
+        format!("{error:#}").contains("inventory is empty"),
+        "{error:#}"
+    );
+    assert_eq!(anchor_of(&source), before_source);
+    assert_eq!(anchor_of(&destination), before_destination);
+}
+
+#[tokio::test]
+async fn a_prepared_pair_is_read_through_its_cut_by_every_seat_service() {
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+    install_transfer_composition();
+    let session = activate(&state);
+    let state = Arc::new(state);
+    let (source, _, destination, _) = two_seats(&state, &session).await;
+    let export = set_export(
+        &state,
+        &session,
+        &source,
+        ryeos_client_base::ui::transfer_export::UiTransferExportMode::Copy,
+    );
+    let transfer = export_transfer(&source, 0, &destination, 0, &export);
+    let outcome = prepare_pair_directly(
+        &state,
+        (&session, &source),
+        (&session, &destination),
+        &transfer,
+        &export,
+    )
+    .unwrap();
+    assert!(
+        matches!(
+            outcome,
+            ryeos_app::state_store::CutPairAppendResult::Committed { .. }
+        ),
+        "{outcome:?}"
+    );
+
+    // The session bootstraps through the completed pair, the destination
+    // observes and appends, and the source streams its proof before completing.
+    let current = ryeos_ui::handlers::ui_session_current::handle(
+        json!({}),
+        handler_context(&session),
+        state.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(current["presentations"].as_array().unwrap().len(), 2);
+    observe(&state, &session, &destination).await.unwrap();
+    let destination_seq: u64 = destination["next_engine_seq"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    route(
+        &state,
+        &session,
+        &ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR,
+        append_request(
+            &destination,
+            "",
+            destination_seq,
+            &[json!({"key": "after.prepared", "value": true})],
+        ),
+    )
+    .await
+    .unwrap();
+    let frames = history_frames_until_fence_or_eof(
+        &state,
+        &session,
+        source["presentation_id"].as_str().unwrap(),
+        source["chain_root_id"].as_str().unwrap(),
+    )
+    .await
+    .unwrap();
+    let kinds = frames
+        .iter()
+        .map(|frame| frame.event_type.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        kinds.contains(&"ui_seat.replay.transfer_proof.v1"),
+        "{kinds:?}"
+    );
+    assert_eq!(kinds.last(), Some(&"ui_seat.replay.complete.v1"));
 }

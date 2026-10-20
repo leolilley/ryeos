@@ -14,10 +14,17 @@ use ryeos_app::handler_error::HandlerError;
 use ryeos_app::state::AppState;
 use ryeos_client_base::ui::binding::UiPresentationInitialization;
 use ryeos_client_base::ui::composition_replay::UiCompositionReplay;
+use ryeos_client_base::ui::{
+    transfer_cancellation_proof_frame::{
+        UiMoveFreezeCancellationProofFrame, UiReceiptedFreezeWitness,
+    },
+    transfer_proof_frame::{UiTransferProofAnchor, UiTransferProofFrame, UiTransferProofPhase},
+};
 use ryeos_state::{AuthoritativeThreadEventReadAnchor, RetiredChainDependency};
 use ryeos_ui_presentation_contract::{
     move_freeze_lifecycle::MoveFreezeCancellation,
     transfer::{TransferEvidence, TransferIdentity, TransferRecord, TransferSeat},
+    transfer_proof::TransferTestimony,
     transfer_state::TransferLifecycleState,
 };
 
@@ -79,6 +86,237 @@ impl FixedTransferCut {
             }
         }
         Ok(Self { proof, memberships })
+    }
+
+    /// Every anchor and fence a publication that depends on this cut must
+    /// condition on, after the session still holds exactly the memberships the
+    /// cut was read for.
+    pub(crate) fn publication_cut(
+        &self,
+        state: &AppState,
+        session: &BrowserSession,
+    ) -> Result<(
+        Vec<AuthoritativeThreadEventReadAnchor>,
+        Vec<RetiredChainDependency>,
+    )> {
+        if !self.proof.is_for_store(state.state_store.as_ref()) {
+            bail!("paired cut belongs to another state owner");
+        }
+        if !self.publication_memberships_match(session) {
+            bail!("paired cut memberships changed");
+        }
+        Ok((self.current_anchors(), self.retired_dependencies()))
+    }
+
+    /// Operations of this cut that touch the seat and carry lifecycle
+    /// testimony, as the stream discloses them.
+    pub(crate) fn seat_operation_ids(
+        &self,
+        presentation_id: &str,
+        chain_root_id: &str,
+    ) -> Vec<String> {
+        self.proof
+            .identities()
+            .iter()
+            .filter(|(id, transfer)| {
+                touches_seat(transfer, presentation_id, chain_root_id)
+                    && self.proof.cancellation(id).is_none()
+                    && self.proof.lifecycle(id).is_some()
+            })
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    /// Operations of this cut that touch the seat and ended in a retained
+    /// freeze cancellation.
+    pub(crate) fn seat_cancellation_ids(
+        &self,
+        presentation_id: &str,
+        chain_root_id: &str,
+    ) -> Vec<String> {
+        self.proof
+            .identities()
+            .iter()
+            .filter(|(id, transfer)| {
+                touches_seat(transfer, presentation_id, chain_root_id)
+                    && self.proof.cancellation(id).is_some()
+            })
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    /// The signed position this cut fixed for one seat of a transfer: the
+    /// anchor of a live seat, the last retained evidence event of a retired
+    /// one.
+    fn proof_anchor(
+        &self,
+        store: &ryeos_app::state_store::StateStore,
+        seat: &TransferSeat,
+    ) -> Result<UiTransferProofAnchor> {
+        let (hash, thread_seq) = match self
+            .proof
+            .endpoint(&seat.chain_root_id)
+            .ok_or_else(|| anyhow!("paired cut has no endpoint for a named seat"))?
+        {
+            HistoryEndpoint::Current(anchor) => {
+                if anchor.chain_root_id() != seat.chain_root_id
+                    || anchor.thread_id() != seat.thread_id
+                {
+                    bail!("paired cut anchor differs from its exact seat");
+                }
+                let (hash, thread_seq) = anchor
+                    .tip()
+                    .ok_or_else(|| anyhow!("paired cut anchor has no signed tip"))?;
+                (hash.to_owned(), thread_seq)
+            }
+            HistoryEndpoint::Retired(dependency) => {
+                let evidence = capture_retired_seat(store, &seat.chain_root_id)?
+                    .filter(|evidence| evidence.dependency() == dependency)
+                    .ok_or_else(|| anyhow!("retired seat fence changed after the cut"))?;
+                let (last, event) = evidence
+                    .owner_events()
+                    .last()
+                    .ok_or_else(|| anyhow!("retired seat retains no evidence"))?;
+                (last.event_hash.clone(), event.thread_seq)
+            }
+        };
+        let event = store
+            .retained_thread_event_by_hash(&hash)?
+            .ok_or_else(|| anyhow!("paired cut tip object is absent"))?;
+        if event.chain_root_id != seat.chain_root_id
+            || event.thread_id != seat.thread_id
+            || event.thread_seq != thread_seq
+            || ryeos_state::objects::thread_event::hash_event(&event)? != hash
+        {
+            bail!("paired cut tip object differs from its exact seat");
+        }
+        Ok(UiTransferProofAnchor {
+            presentation_id: seat.presentation_id.clone(),
+            chain_root_id: seat.chain_root_id.clone(),
+            thread_id: seat.thread_id.clone(),
+            event_hash: hash,
+            thread_seq,
+            chain_seq: event.chain_seq,
+        })
+    }
+
+    /// One operation's authenticated testimony as a bounded data frame. The
+    /// frame discloses nothing the cut did not authenticate and grants no
+    /// access: the stream owner still conditions its delivery on the cut.
+    pub(crate) fn proof_frame(
+        &self,
+        store: &ryeos_app::state_store::StateStore,
+        operation_id: &str,
+        max_bytes: u64,
+    ) -> Result<UiTransferProofFrame> {
+        if !self.proof.is_for_store(store) {
+            bail!("transfer frame has another state owner");
+        }
+        let lifecycle = self
+            .proof
+            .lifecycle(operation_id)
+            .ok_or_else(|| anyhow!("paired cut has no lifecycle for the operation"))?;
+        let transfer = lifecycle.transfer();
+        let phases = [
+            Some(lifecycle.inbound()),
+            lifecycle.orphan_cancelled(),
+            lifecycle.prepared(),
+            lifecycle.accepted(),
+            lifecycle.committed(),
+            lifecycle.aborted(),
+            lifecycle.activated(),
+            lifecycle.retained(),
+            lifecycle.released(),
+            lifecycle.settlement_observed(),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|testimony| UiTransferProofPhase {
+            evidence: testimony.evidence.clone(),
+            record: testimony.record.clone(),
+        })
+        .collect();
+        let frame = UiTransferProofFrame {
+            schema: 1,
+            transfer: transfer.clone(),
+            source_anchor: self.proof_anchor(store, &transfer.source)?,
+            destination_anchor: self.proof_anchor(store, &transfer.destination)?,
+            phases,
+        };
+        frame.validate(max_bytes).map_err(anyhow::Error::msg)?;
+        Ok(frame)
+    }
+
+    /// One retained MOVE freeze cancellation, with the receipted source events
+    /// it cancels and the destination testimony the cut holds.
+    pub(crate) fn cancellation_frame(
+        &self,
+        store: &ryeos_app::state_store::StateStore,
+        operation_id: &str,
+        max_bytes: u64,
+    ) -> Result<UiMoveFreezeCancellationProofFrame> {
+        if !self.proof.is_for_store(store) {
+            bail!("cancellation frame has another state owner");
+        }
+        let (evidence, cancellation) = self
+            .proof
+            .cancellation(operation_id)
+            .ok_or_else(|| anyhow!("paired cut has no retained cancellation"))?;
+        let transfer = &cancellation.transfer;
+        let witness = |link: &TransferEvidence| -> Result<UiReceiptedFreezeWitness> {
+            let found = self
+                .proof
+                .freeze_witness(link)
+                .ok_or_else(|| anyhow!("cancellation lacks its receipted freeze witness"))?;
+            let mut row = found.event.to_value();
+            row["event_hash"] = serde_json::json!(found.evidence.event_hash);
+            let retained = ryeos_client_base::ui::seat::retained_seat_event_with_evidence(&row)
+                .map_err(anyhow::Error::msg)?
+                .ok_or_else(|| anyhow!("freeze witness is not an ordinary typed Core event"))?;
+            if retained.evidence != found.evidence
+                || retained.chain_root_id != transfer.source.chain_root_id
+                || retained.thread_id != transfer.source.thread_id
+            {
+                bail!("freeze witness changes the exact source");
+            }
+            Ok(UiReceiptedFreezeWitness {
+                evidence: found.evidence.clone(),
+                event: retained.event,
+                receipt_evidence: found.receipt_evidence.clone(),
+                receipt_operation_id: found.receipt.operation_id.clone(),
+                receipt_producer_incarnation: found.receipt.producer_incarnation.clone(),
+                receipt_first_engine_seq: found.receipt.first_engine_seq,
+                receipt_last_engine_seq: found.receipt.last_engine_seq,
+            })
+        };
+        let lifecycle = self.proof.lifecycle(operation_id);
+        let phase = |testimony: Option<TransferTestimony<'_>>| {
+            testimony.map(|value| UiTransferProofPhase {
+                evidence: value.evidence.clone(),
+                record: value.record.clone(),
+            })
+        };
+        let frame = UiMoveFreezeCancellationProofFrame {
+            schema: 1,
+            transfer: transfer.clone(),
+            source_anchor: self.proof_anchor(store, &transfer.source)?,
+            destination_anchor: self.proof_anchor(store, &transfer.destination)?,
+            cancellation_evidence: evidence.clone(),
+            cancellation: cancellation.clone(),
+            destination_inbound: phase(lifecycle.map(TransferLifecycleState::inbound)),
+            destination_orphan_cancelled: phase(
+                lifecycle.and_then(TransferLifecycleState::orphan_cancelled),
+            ),
+            preparation: witness(&cancellation.freeze.preparation)?,
+            completion: cancellation
+                .freeze
+                .completion
+                .as_ref()
+                .map(witness)
+                .transpose()?,
+        };
+        frame.validate(max_bytes).map_err(anyhow::Error::msg)?;
+        Ok(frame)
     }
 
     /// Every live frontier the cut depends on.
@@ -304,6 +542,141 @@ impl CompletedPairedCut for FixedTransferCut {
             }
         }
         Ok(())
+    }
+}
+
+/// Several completed cuts held together for one publication. Each keeps the
+/// anchors and fences it was read at; the set is covered only when every one
+/// of them is.
+pub(crate) struct CutSet(Vec<Arc<FixedTransferCut>>);
+
+impl CutSet {
+    pub(crate) fn new(cuts: impl IntoIterator<Item = Arc<FixedTransferCut>>) -> Self {
+        Self(cuts.into_iter().collect())
+    }
+
+    /// The union of every cut's anchors and fences, refusing two cuts that
+    /// disagree about one seat or that read one chain as live and retired.
+    pub(crate) fn publication_cut(
+        &self,
+        state: &AppState,
+        session: &BrowserSession,
+    ) -> Result<(
+        Vec<AuthoritativeThreadEventReadAnchor>,
+        Vec<RetiredChainDependency>,
+    )> {
+        let mut anchors: BTreeMap<(String, String), AuthoritativeThreadEventReadAnchor> =
+            BTreeMap::new();
+        let mut fences: BTreeMap<String, RetiredChainDependency> = BTreeMap::new();
+        for cut in &self.0 {
+            let (cut_anchors, cut_fences) = cut.publication_cut(state, session)?;
+            for anchor in cut_anchors {
+                let key = (
+                    anchor.chain_root_id().to_owned(),
+                    anchor.thread_id().to_owned(),
+                );
+                if anchors
+                    .insert(key, anchor.clone())
+                    .is_some_and(|previous| previous != anchor)
+                {
+                    bail!("paired cuts disagree about one seat's signed head");
+                }
+            }
+            for fence in cut_fences {
+                if fences
+                    .insert(fence.chain_root_id.clone(), fence.clone())
+                    .is_some_and(|previous| previous != fence)
+                {
+                    bail!("paired cuts disagree about one seat's retirement fence");
+                }
+            }
+        }
+        if fences
+            .keys()
+            .any(|root| anchors.keys().any(|(anchor_root, _)| anchor_root == root))
+        {
+            bail!("paired cuts read one chain as both live and retired");
+        }
+        Ok((
+            anchors.into_values().collect(),
+            fences.into_values().collect(),
+        ))
+    }
+}
+
+impl CompletedPairedCut for CutSet {
+    fn publication_cut_covered_by(
+        &self,
+        anchors: &[AuthoritativeThreadEventReadAnchor],
+        retired: &[RetiredChainDependency],
+    ) -> bool {
+        !self.0.is_empty()
+            && self
+                .0
+                .iter()
+                .all(|cut| cut.publication_cut_covered_by(anchors, retired))
+    }
+
+    fn publication_memberships_match(&self, session: &BrowserSession) -> bool {
+        self.0
+            .iter()
+            .all(|cut| cut.publication_memberships_match(session))
+    }
+
+    fn covers_seat_anchor(
+        &self,
+        presentation_id: &str,
+        chain_root_id: &str,
+        thread_id: &str,
+        anchor: &AuthoritativeThreadEventReadAnchor,
+    ) -> bool {
+        self.0
+            .iter()
+            .any(|cut| cut.covers_seat_anchor(presentation_id, chain_root_id, thread_id, anchor))
+    }
+
+    fn covers_retired_seat(
+        &self,
+        presentation_id: &str,
+        chain_root_id: &str,
+        dependency: &RetiredChainDependency,
+    ) -> bool {
+        self.0
+            .iter()
+            .any(|cut| cut.covers_retired_seat(presentation_id, chain_root_id, dependency))
+    }
+
+    fn for_each_authenticated_phase(
+        &self,
+        visit: &mut dyn FnMut(
+            &TransferEvidence,
+            &TransferRecord,
+            &TransferLifecycleState,
+        ) -> Result<()>,
+    ) -> Result<()> {
+        for cut in &self.0 {
+            cut.for_each_authenticated_phase(visit)?;
+        }
+        Ok(())
+    }
+}
+
+/// Run `action` only while every anchor and fence is still current; `None`
+/// means the cut advanced.
+pub(crate) fn with_publication_cut<T>(
+    state: &AppState,
+    anchors: &[AuthoritativeThreadEventReadAnchor],
+    retired: &[RetiredChainDependency],
+    action: impl FnOnce() -> Result<T>,
+) -> Result<Option<T>> {
+    if retired.is_empty() {
+        state
+            .state_store
+            .with_thread_event_read_anchors(anchors, action)
+    } else {
+        state
+            .state_store
+            .with_thread_event_read_mixed_cut(anchors, retired, action)
     }
 }
 

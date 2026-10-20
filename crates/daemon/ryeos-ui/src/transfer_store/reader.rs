@@ -1339,6 +1339,25 @@ impl UiTransferFixedSeatProof {
         )
     }
 
+    /// The exact signed anchor this completed cut was read at.
+    pub fn anchor(&self) -> &ryeos_state::AuthoritativeThreadEventReadAnchor {
+        &self.history.anchor
+    }
+
+    /// The receipted ordinary event this completed source cut authenticated
+    /// for the requested transfer, by its exact evidence.
+    pub fn freeze_witness(
+        &self,
+        transfer: &TransferIdentity,
+        evidence: &TransferEvidence,
+    ) -> anyhow::Result<Option<&UiHistoricalReceiptedFreezeWitness>> {
+        let operation = covered_seat_operation(&self.history.seat, &self.requested, transfer)?;
+        Ok(operation
+            .freeze_witnesses
+            .get(&evidence.event_hash)
+            .filter(|witness| witness.evidence == *evidence))
+    }
+
     pub fn validate_preparation_destination(
         &self,
         store: &StateStore,

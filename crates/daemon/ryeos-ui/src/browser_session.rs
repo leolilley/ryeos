@@ -602,6 +602,12 @@ impl SurfaceMembership {
 }
 
 impl PresentationMembership {
+    /// The initialization this presentation's seat must carry as its first
+    /// signed history: the seat's replay is authentic only against exactly it.
+    pub fn initialization(&self) -> &ryeos_client_base::ui::binding::UiPresentationInitialization {
+        &self.initialization
+    }
+
     pub fn public_descriptor(&self) -> ryeos_client_base::ui::binding::UiPresentationMembership {
         let mut surfaces = self
             .surfaces

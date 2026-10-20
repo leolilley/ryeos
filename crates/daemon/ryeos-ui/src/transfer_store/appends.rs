@@ -13,8 +13,8 @@ use std::cell::Cell;
 
 use anyhow::{Context, anyhow, bail};
 use ryeos_app::state_store::{
-    CutAppendResult, MixedCutAdmission, MixedCutAppend, NewEventRecord, PersistedEventRecord,
-    StateStore,
+    CutAppendResult, CutPairAppendResult, ExactSeat, MixedCutAdmission, MixedCutAppend,
+    NewEventRecord, PersistedEventRecord, SeatCut, SeatPairAppend, StateStore,
 };
 use ryeos_state::objects::ThreadStatus;
 use ryeos_state::objects::thread_event::{MAX_THREAD_EVENT_SERIALIZED_BYTES, ThreadEvent};
@@ -36,7 +36,7 @@ use ryeos_ui_presentation_contract::{
 
 use super::reader::{
     SettlementCounterpart, TransferSettlementCandidate, UiMoveFreezeCancellationProof,
-    UiTransferFixedHistoryProof,
+    UiTransferFixedHistoryProof, UiTransferFixedSeatProof,
 };
 
 /// Authenticated facts about one seat, captured against one exact signed
@@ -1008,4 +1008,277 @@ pub fn append_transfer_settlement(
         },
     )
     .context("publish lifecycle settlement")
+}
+
+/// The inputs of the destination-first preparation pair, all from completed
+/// reads of the two seats at exactly the anchors their contexts name.
+#[derive(Clone, Copy)]
+pub struct PreparationInputs<'a> {
+    pub transfer: &'a TransferIdentity,
+    /// The closed source export, already validated against the source's
+    /// verified composition by the caller.
+    pub export: &'a serde_json::Value,
+    pub source_proof: &'a UiTransferFixedSeatProof,
+    pub destination_proof: &'a UiTransferFixedSeatProof,
+}
+
+fn seat_of<'a>(seat: &'a TransferSeat, context: &'a TransferSeatContext<'a>) -> ExactSeat<'a> {
+    ExactSeat {
+        root_id: &seat.chain_root_id,
+        owner: context.owner,
+        item_ref: context.surface,
+        executor_ref: context.client_ref,
+    }
+}
+
+/// Publish the destination's InboundCommitment and then the source's Prepared
+/// event, which links the committed inbound, under one cut. `seats.target` is
+/// the destination. Both seats must be absent from each other's history for
+/// this operation, and a MOVE carries the freeze links its completed source
+/// cut authenticated. Two signed heads cannot move atomically: every result
+/// other than `Committed`, `Conflict` and `NotRunning` is partial or uncertain
+/// and must be reconciled from signed history before a retry.
+pub fn append_transfer_preparation_pair(
+    store: &StateStore,
+    seat_kind: &str,
+    inputs: &PreparationInputs<'_>,
+    seats: TransferSeatPair<'_>,
+    dependencies: TransferCutDependencies<'_>,
+    admit_session: impl FnOnce() -> anyhow::Result<bool>,
+) -> anyhow::Result<CutPairAppendResult> {
+    let PreparationInputs {
+        transfer,
+        export,
+        source_proof,
+        destination_proof,
+    } = *inputs;
+    let (destination, source) = (seats.target, seats.counterpart);
+    source_proof.validate_preparation_source(store, source.anchor, transfer)?;
+    destination_proof.validate_preparation_destination(store, destination.anchor, transfer)?;
+    require_exact_seat_roots(destination.anchor, &transfer.destination)?;
+    require_exact_seat_roots(source.anchor, &transfer.source)?;
+    if destination.presentation_id != transfer.destination.presentation_id
+        || source.presentation_id != transfer.source.presentation_id
+    {
+        bail!("transfer preparation seat contexts differ from the exact transfer seats");
+    }
+    let inbound = TransferRecord {
+        schema: TRANSFER_SCHEMA,
+        transfer: transfer.clone(),
+        phase: TransferPhase::InboundCommitment,
+    };
+    let inbound_event = wrapped_transfer_event(inbound, destination, &transfer.destination)?;
+    let export_digest = ryeos_ui_presentation_contract::payload_digest::seat_payload_digest(export)
+        .map_err(anyhow::Error::msg)?;
+    if export_digest != transfer.export_digest {
+        bail!("transfer source export differs from exact commitment");
+    }
+    let freeze = match export.get("mode").and_then(serde_json::Value::as_str) {
+        Some("copy") => None,
+        Some("move") => {
+            Some(source_proof.preparation_freeze_links(store, source.anchor, transfer)?)
+        }
+        _ => bail!("transfer preparation has no current export mode"),
+    };
+    let prepared_record = |inbound: TransferEvidence| TransferRecord {
+        schema: TRANSFER_SCHEMA,
+        transfer: transfer.clone(),
+        phase: TransferPhase::Prepared {
+            freeze: freeze.clone(),
+            inbound,
+            export: export.clone(),
+        },
+    };
+    // Deterministic source shape and size failures surface before the
+    // destination becomes visible; only the inbound coordinate is replaced by
+    // the real one after the signed destination write.
+    wrapped_transfer_event(
+        prepared_record(TransferEvidence {
+            event_hash: "f".repeat(64),
+            chain_seq: u64::MAX,
+        }),
+        source,
+        &transfer.source,
+    )?;
+    let destination_seat = seat_of(&transfer.destination, destination);
+    let source_seat = seat_of(&transfer.source, source);
+    let mut anchors = vec![destination.anchor.clone(), source.anchor.clone()];
+    anchors.extend(dependencies.current_anchors.iter().cloned());
+    let cut = SeatCut {
+        expected: destination.anchor,
+        anchors: &anchors,
+        retired: dependencies.retired,
+    };
+    let request = SeatPairAppend {
+        first: &destination_seat,
+        second: &source_seat,
+        second_anchor: source.anchor,
+        first_events: std::slice::from_ref(&inbound_event),
+        cut: &cut,
+    };
+    store.append_seat_pair_if_mixed_cut(
+        &request,
+        |view| {
+            if !snapshot_is_seat(
+                view.first,
+                &transfer.destination,
+                destination.owner,
+                destination.surface,
+                destination.client_ref,
+                seat_kind,
+            ) || !snapshot_is_seat(
+                view.second,
+                &transfer.source,
+                source.owner,
+                source.surface,
+                source.client_ref,
+                seat_kind,
+            ) {
+                return Ok(false);
+            }
+            admit_session()
+        },
+        |committed| {
+            let [record] = committed else {
+                bail!("transfer inbound commitment published another event count");
+            };
+            let event = wrapped_transfer_event(
+                prepared_record(TransferEvidence {
+                    event_hash: record.event_hash.clone().ok_or_else(|| {
+                        anyhow!("committed destination inbound has no signed hash")
+                    })?,
+                    chain_seq: u64::try_from(record.chain_seq)
+                        .context("committed destination inbound position")?,
+                }),
+                source,
+                &transfer.source,
+            )?;
+            Ok(vec![event])
+        },
+    )
+}
+
+/// Observation of the preparation pair after an uncertain attempt. The two
+/// heads are read separately, so an unchanged head is not a simultaneous
+/// absence proof and never permits a retry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransferPreparationReadback {
+    BothUnchanged,
+    DestinationObservedOnly {
+        inbound: TransferEvidence,
+    },
+    LinkedPairObserved {
+        inbound: TransferEvidence,
+        prepared: TransferEvidence,
+    },
+    Ambiguous,
+}
+
+enum PairSeatReadback {
+    Absent,
+    Exact {
+        evidence: TransferEvidence,
+        wrapper: TransferEventPayload,
+    },
+    Ambiguous,
+}
+
+fn read_pair_seat_tip(
+    store: &StateStore,
+    context: &TransferSeatContext<'_>,
+    transfer: &TransferIdentity,
+    destination: bool,
+) -> anyhow::Result<PairSeatReadback> {
+    let original = context.anchor;
+    let Some(current) =
+        store.capture_thread_event_read_anchor(original.chain_root_id(), original.thread_id())?
+    else {
+        return Ok(PairSeatReadback::Ambiguous);
+    };
+    if current == *original {
+        return Ok(PairSeatReadback::Absent);
+    }
+    let (Some((previous_hash, previous_seq)), Some((current_hash, current_seq))) =
+        (original.tip(), current.tip())
+    else {
+        return Ok(PairSeatReadback::Ambiguous);
+    };
+    if previous_seq.checked_add(1) != Some(current_seq) {
+        return Ok(PairSeatReadback::Ambiguous);
+    }
+    let page = store.read_thread_event_page(&current, None, 1, context.max_append_bytes)?;
+    let Some((hash, event)) = page.events.first() else {
+        return Ok(PairSeatReadback::Ambiguous);
+    };
+    if hash != current_hash
+        || event.thread_seq != current_seq
+        || event.prev_thread_event_hash.as_deref() != Some(previous_hash)
+    {
+        return Ok(PairSeatReadback::Ambiguous);
+    }
+    let Ok(wrapper) = from_event_value(&event.to_value()) else {
+        return Ok(PairSeatReadback::Ambiguous);
+    };
+    if wrapper.seq != context.next_engine_seq
+        || wrapper.payload.transfer != *transfer
+        || !matches!(
+            (&wrapper.payload.phase, destination),
+            (TransferPhase::InboundCommitment, true) | (TransferPhase::Prepared { .. }, false)
+        )
+    {
+        return Ok(PairSeatReadback::Ambiguous);
+    }
+    Ok(PairSeatReadback::Exact {
+        evidence: TransferEvidence {
+            event_hash: hash.clone(),
+            chain_seq: event.chain_seq,
+        },
+        wrapper,
+    })
+}
+
+/// Fixed-predecessor observation of an uncertain preparation pair. A linked
+/// pair is reported only when the source's Prepared names the observed
+/// inbound and carries exactly the attempted COPY export.
+pub fn read_transfer_preparation_pair(
+    store: &StateStore,
+    transfer: &TransferIdentity,
+    export: &serde_json::Value,
+    seats: TransferSeatPair<'_>,
+) -> anyhow::Result<TransferPreparationReadback> {
+    let (destination, source) = (seats.target, seats.counterpart);
+    if destination.anchor.chain_root_id() != transfer.destination.chain_root_id
+        || destination.anchor.thread_id() != transfer.destination.thread_id
+        || source.anchor.chain_root_id() != transfer.source.chain_root_id
+        || source.anchor.thread_id() != transfer.source.thread_id
+    {
+        bail!("transfer pair readback names another seat");
+    }
+    let inbound = read_pair_seat_tip(store, destination, transfer, true)?;
+    let prepared = read_pair_seat_tip(store, source, transfer, false)?;
+    Ok(match (inbound, prepared) {
+        (PairSeatReadback::Absent, PairSeatReadback::Absent) => {
+            TransferPreparationReadback::BothUnchanged
+        }
+        (PairSeatReadback::Exact { evidence, .. }, PairSeatReadback::Absent) => {
+            TransferPreparationReadback::DestinationObservedOnly { inbound: evidence }
+        }
+        (
+            PairSeatReadback::Exact {
+                evidence: inbound, ..
+            },
+            PairSeatReadback::Exact {
+                evidence: prepared,
+                wrapper,
+            },
+        ) if matches!(
+            &wrapper.payload.phase,
+            TransferPhase::Prepared { inbound: link, export: actual, .. }
+                if *link == inbound && actual == export
+        ) =>
+        {
+            TransferPreparationReadback::LinkedPairObserved { inbound, prepared }
+        }
+        _ => TransferPreparationReadback::Ambiguous,
+    })
 }
