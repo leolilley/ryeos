@@ -140,7 +140,6 @@ impl<'de> Deserialize<'de> for ValueShape {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ShapeType {
     Mapping,
-    #[serde(alias = "array")]
     Sequence,
     Scalar,
     Any,
@@ -299,7 +298,6 @@ pub enum PrimType {
     Integer,
     Boolean,
     Mapping,
-    #[serde(alias = "array")]
     Sequence,
     Null,
     Any,
@@ -1296,6 +1294,29 @@ mod value_shape_tests {
     // ── Strictness hardening: deserialization rejects nonsense ───────
 
     #[test]
+    fn deserialize_refuses_array_spelling_of_sequence() {
+        let root = "root_type: array\n";
+        let err = serde_yaml::from_str::<ValueShape>(root).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("unknown variant `array`") && msg.contains("sequence"),
+            "root_type `array` must be refused naming `sequence`, got: {msg}"
+        );
+
+        let prim = "\
+root_type: mapping
+optional:
+  items: { type: single, prim: array }
+";
+        let err = serde_yaml::from_str::<ValueShape>(prim).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("unknown variant `array`") && msg.contains("sequence"),
+            "prim `array` must be refused naming `sequence`, got: {msg}"
+        );
+    }
+
+    #[test]
     fn deserialize_rejects_unknown_fields() {
         // `deny_unknown_fields` on the wire form: a typo like
         // `requierd` must blow up loudly instead of silently widening
@@ -1618,8 +1639,8 @@ optional:
   extends: { type: union, prims: [string, \"null\"] }
   input: { type: single, prim: mapping }
   ambient: { type: single, prim: mapping }
-  affordances: { type: single, prim: array }
-  instruments: { type: single, prim: array }
+  affordances: { type: single, prim: sequence }
+  instruments: { type: single, prim: sequence }
   capabilities: { type: single, prim: mapping }
 ",
             // client
