@@ -1,5 +1,5 @@
-# ryeos:signed:2026-10-19T22:29:41Z:6969672f46311605eb650ba743143bd99c520b6303f2fb8ec33578716bcb1373:NsLzRj9xWg1Hi7kgykgmEuW4D+3naVFLMYe+iOuSJG2bvv1NfAOtoitcPT+e6/yPAkNLBGy8k56FauxJLe0GAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: ui
+# ryeos:signed:2026-10-20T02:32:01Z:dc7445a726793f1a24e8e75782f0a630a1623820e1ca1fc9f3bfc02c06769534:lLPQZOTIL1RXvXOXQF9WWSOHN2wZ2gmiFyWjmOjQ7f7vc6M1q9K+D4AjO7WcxpOHnUJ0B/WCuygxISDiM34rCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: ryeos/ui
 version: "1.0.0"
 description: Shared terminal presentation with explicit admitted terminal Surface seeds and no ambient project selection.
 shared_presentation:
