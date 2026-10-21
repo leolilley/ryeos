@@ -1,378 +1,347 @@
 #!/usr/bin/env python3
-"""Unit tests for f5r-s9-evidence.py (python3 -B test-f5r-s9-evidence.py)."""
-import hashlib
+import base64
+import contextlib
 import importlib.util
+import io
 import json
 import tempfile
+import threading
 import unittest
+import urllib.parse
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from types import SimpleNamespace
 
-spec = importlib.util.spec_from_file_location("ev", Path(__file__).with_name("f5r-s9-evidence.py"))
-ev = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(ev)
+SPEC = importlib.util.spec_from_file_location("s9", Path(__file__).with_name("f5r-s9-evidence.py"))
+S9 = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(S9)
 
-RENDER_KEY = "rnd_SECRETKEY123"
-TOKEN = "tok_RUNSTREAMSECRET"
-SBX = "sbx-abc"
-URI = f"https://{SBX}.oregon.sandbox.onrender.com/runs/stream"
-CONCURRENCY = ("lease refused: the node already holds 2 of its 2 concurrent leases; a lease is "
-               "admitted only after one is released, and none is queued")
-
-
-def out(rc, stdout="", stderr=""):
-    return {"rc": rc, "stdout": stdout, "stderr": stderr, "timed_out": False}
+SEED = bytes.fromhex("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60")
+PRINCIPAL = "fp:" + "ab" * 32
+SERVICE = "srv-throwaway1"
+SANDBOX = "sbx-abc123"
+RENDER_KEY = "rnd_SECRETKEYVALUE"
+PKCS8_PREFIX = bytes.fromhex("302e020100300506032b657004220420")
 
 
-def admitted(tid):
-    return out(0, json.dumps({"thread_id": tid}))
+def pem(seed):
+    b64 = base64.b64encode(PKCS8_PREFIX + seed).decode()
+    return f"-----BEGIN PRIVATE KEY-----\n{b64}\n-----END PRIVATE KEY-----\n"
 
 
-REFUSED = out(1, "", "error: " + CONCURRENCY)
+class FakeController:
+    """Fake daemon: verifies x-ryeos-* signatures with the pure-Python verifier and serves the routes."""
+
+    def __init__(self, e3="ok", fail_confirm=False):
+        self.e3, self.fail_confirm = e3, fail_confirm
+        self.started_at = "2026-10-21T00:00:00Z"
+        self.sessions, self.profiles, self.log, self.sig_ok = {}, {}, [], []
+        self.pub = S9.ed25519_public(SEED)
+        fake = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def send(self, status, obj):
+                raw = json.dumps(obj).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+            def verified(self, body):
+                h = self.headers
+                if not h.get("x-ryeos-signature"):
+                    return False
+                parts = ["ryeos-request-v1", self.command, S9.Signer(SEED).canonical_path(self.path),
+                         S9.sha256_hex(body), h["x-ryeos-timestamp"], h["x-ryeos-nonce"], PRINCIPAL]
+                digest = S9.sha256_hex("\n".join(parts).encode())
+                ok = S9.ed25519_verify(fake.pub, digest.encode(), base64.b64decode(h["x-ryeos-signature"]))
+                fake.sig_ok.append(ok)
+                return ok
+
+            def do_GET(self):
+                self.route(b"")
+
+            def do_POST(self):
+                self.route(self.rfile.read(int(self.headers.get("Content-Length") or 0)))
+
+            def route(self, body):
+                p = urllib.parse.urlsplit(self.path).path
+                if p == "/_ryeos/ready":
+                    return self.send(200, {"ready": True, "status": "running", "started_at": fake.started_at})
+                if p == "/public-key":
+                    return self.send(200, {"principal_id": PRINCIPAL})
+                if not self.verified(body):
+                    return self.send(401, {"error": "bad signature"})
+                if p.startswith("/launches/"):
+                    return self.send(200, {"state": "running"})
+                req = json.loads(body)
+                ref, prm = req["item_ref"], req["parameters"]
+                fake.log.append(ref)
+                self.send(*fake.handle(ref, prm))
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.url = f"http://127.0.0.1:{self.server.server_port}"
+
+    def handle(self, ref, prm):
+        if ref == "service:credential-profiles/list":
+            return 200, {"items": []}
+        if ref == "service:credential-profiles/create":
+            self.profiles[prm["profile_id"]] = {"state": "confirming", "credential_generation": 0}
+            return 200, {"profile_id": prm["profile_id"], "state": "confirming"}
+        if ref == "service:credential-profiles/get":
+            p = self.profiles.get(prm["profile_id"])
+            if not p:
+                return 404, {"error": "not found"}
+            return 200, {**p, "login_epoch": 1, "sanitized_account_digest": "d" * 64}
+        if ref == "service:credential-profiles/confirm":
+            if self.fail_confirm:
+                return 400, {"error": "credential confirmation ceremony is absent or expired"}
+            self.profiles[prm["profile_id"]] = {"state": "active", "credential_generation": 1}
+            return 200, {"state": "active", "credential_generation": 1}
+        if ref == "service:credential-profiles/revoke":
+            self.profiles[prm["profile_id"]]["state"] = "revoked"
+            return 200, {"credential_generation": 2}
+        if ref == "service:credential-profiles/delete":
+            if self.profiles[prm["profile_id"]]["state"] != "revoked":
+                return 400, {"error": "not revoked"}
+            del self.profiles[prm["profile_id"]]
+            return 200, {}
+        if ref == "worker_execution:codex/session":
+            live = [s for s in self.sessions.values() if not s["ended"]]
+            if len(live) >= 2:
+                return 500, {"error": "lease refused for workload `codex`: the node already holds 2"}
+            sid = f"T-{len(self.sessions) + 1}"
+            self.sessions[sid] = {"ended": False}
+            return 200, {"chain_root_id": sid, "launch_id": "L" + sid}
+        if ref == "service:worker-executions/status":
+            sid = prm["chain_root_id"]
+            if self.e3 == "refused" and sid == "T-1":
+                return 200, {"state": "failed", "error": "external candidate refused: runtime qualification absent"}
+            return 200, {"state": "admitted", "channel": {"state": "guest_dialed"}}
+        if ref == "service:worker-executions/terminate":
+            self.sessions[prm["chain_root_id"]]["ended"] = True
+            return 200, {}
+        return 404, {"error": ref}
+
+    def close(self):
+        self.server.shutdown()
 
 
-class Fake:
-    def __init__(self):
-        self.calls = []
-        self.session_results = [admitted("t1"), admitted("t2"), REFUSED]
-        self.script = {}          # tid -> list of (status, extra) before restart; last repeats
-        self.restarted = False
-        self.cancelled = set()
-        self.after_restart = lambda tid: ("failed", "controller restarted")
-        self.ready_after_restart = [503, 200]
-        self.ready_seq = None
-        self.old_still_ready = False
-        self.http_override = {}
-        self.probe_result = (410, json.dumps({"error": ev.OCCURRENCE_REFUSED}).encode())
-        self.mint = (200, json.dumps({"token": TOKEN, "uri": URI, "method": "POST"}).encode())
-        self.run_result = (500, b"curl: (6) Could not resolve host")
+class FakeRender:
+    def __init__(self, controller, name="ryeos-f5r-s9-test"):
+        self.controller, self.name, self.calls, self.restarted = controller, name, [], False
+        fake = self
 
-    def run(self, argv, env, timeout):
-        words = argv[1:]
-        self.calls.append(words)
-        assert env["RYEOSD_URL"] and "RENDER_API_KEY" not in env
-        if words[:3] == ["codex", "session", "start"]:
-            return self.session_results.pop(0)
-        if words[:2] == ["thread", "cancel"]:
-            self.cancelled.add(words[2])
-            return out(0, "{}")
-        if words[:2] == ["thread", "get"]:
-            tid = words[2]
-            if tid in self.cancelled:
-                body = {"thread_id": tid, "status": "cancelled"}
-            elif self.restarted:
-                status, note = self.after_restart(tid)
-                body = {"thread_id": tid, "status": status, "error": note}
-            else:
-                seq = self.script.get(tid)
-                if seq:
-                    status = seq.pop(0) if len(seq) > 1 else seq[0]
-                    body = {"thread_id": tid, "status": status}
-                    if status == "failed":
-                        body["error"] = CONCURRENCY
-                else:
-                    body = {"thread_id": tid, "status": "running"}
-            return out(0, json.dumps(body))
-        if words[:2] == ["thread", "list"]:
-            return out(0, "[]")
-        raise AssertionError(words)
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
 
-    def http(self, method, url, headers=None, body=None, timeout=60):
-        self.calls.append((method, url))
-        path = url.split("?")[0]
-        if path.endswith("/_ryeos/ready"):
-            if self.restarted:
-                if self.old_still_ready:
-                    return 200, b""
-                if self.ready_after_restart:
-                    return self.ready_after_restart.pop(0), b""
-            return 200, b""
-        if path.endswith("/public-key"):
-            return 200, json.dumps({"principal_id": "fp:abc"}).encode()
-        if path.endswith("/restart"):
-            self.restarted = True
-            return self.http_override.get("restart", (202, b""))
-        if path.endswith("/runs/stream/token"):
-            return self.mint
-        if path == URI or path.endswith("/runs/stream"):
-            return self.run_result
-        raise AssertionError(url)
+            def send(self, status, obj):
+                raw = json.dumps(obj).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
 
-    def probe(self, base, path):
-        self.calls.append(("probe", path))
-        return self.probe_result
+            def go(self):
+                fake.calls.append((self.command, self.path, self.headers.get("Authorization")))
+                p = urllib.parse.urlsplit(self.path).path
+                if p == f"/services/{SERVICE}" and self.command == "GET":
+                    return self.send(200, {"id": SERVICE, "name": fake.name})
+                if p == f"/services/{SERVICE}/restart":
+                    fake.controller.started_at = "2026-10-21T01:00:00Z"
+                    fake.restarted = True
+                    return self.send(200, {})
+                if p.endswith("/runs/stream/token"):
+                    return self.send(201, {"executionId": "exe-1", "expiresAt": "2099-01-01T00:00:00Z",
+                                           "method": "POST", "token": "tok-SECRET-1",
+                                           "uri": f"https://{SANDBOX}.oregon.sandbox.onrender.com/runs/stream"})
+                self.send(404, {"message": "no"})
+
+            do_GET = do_POST = go
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.url = f"http://127.0.0.1:{self.server.server_port}"
+
+    def close(self):
+        self.server.shutdown()
 
 
-def make(fake, tmp, **over):
-    args = SimpleNamespace(controller_url="https://c.example", credential_profile="p",
-                           render_service_id="srv-abc", render_service_name="ryeos-f5r-s9-x",
-                           out=str(Path(tmp) / "out"), project=".", ryeos_bin="ryeos",
-                           render_owner_id="own-1", sandbox_region="oregon", e7_body_json="",
-                           placement=[f"pt1:{SBX}"], poll_attempts=3, poll_interval=0,
-                           window_polls=2, restart_timeout=5)
-    for k, v in over.items():
-        setattr(args, k, v)
-    logs = []
-    runner = ev.Runner(args, RENDER_KEY, tmp, http=fake.http, run=fake.run, probe=fake.probe,
-                       sleep=lambda s: None, log=logs.append)
-    runner.logs = logs
-    return runner
+class ProxyResp:
+    def __init__(self, status, body):
+        self.status, self._b = status, body
+
+    def read(self, n=-1):
+        return self._b
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
 
 
-class Tests(unittest.TestCase):
+class Harness(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.mkdtemp()
-        self.out = Path(self.tmp) / "out"
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+        self.key = self.dir / "key.pem"
+        self.key.write_text(pem(SEED))
+        self.envfile = self.dir / ".env"
+        self.envfile.write_text(f"RENDER_API_KEY={RENDER_KEY}\n")
+        self.envfile.chmod(0o600)
+        self.out = self.dir / "out"
+        self.lines = []
+        self.proxy_requests = []
 
-    def rec(self, name):
-        return json.loads((self.out / name).read_text())
+    def run_main(self, ctl, render, extra=(), proxy_body=b"E7_EGRESS_BLOCKED\n", service=SERVICE):
+        def proxy(req, timeout):
+            self.proxy_requests.append(req)
+            return ProxyResp(200, proxy_body)
 
-    def go(self, fake=None, **over):
-        fake = fake or Fake()
-        runner = make(fake, self.tmp, **over)
-        return fake, runner, runner.execute()
+        argv = ["--base-url", ctl.url, "--operator-key", str(self.key), "--out", str(self.out),
+                "--project-path", "/proj", "--service-id", service, "--render-base", render.url,
+                "--env-file", str(self.envfile), "--sandbox-id", SANDBOX, "--owner-id", "tea-owner1",
+                "--poll-timeout", "0", "--poll-interval", "0", "--restart-timeout", "5", *extra]
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            code = S9.main(argv, proxy_opener=proxy, sleep=lambda s: None, emit=self.lines.append)
+        return code
 
-    def test_full_run_passes_and_manifest_hashes(self):
-        _, runner, code = self.go()
-        self.assertEqual(code, 0, runner.logs)
+    def evidence(self, name):
+        return json.loads((self.out / f"{name}.json").read_text())
+
+
+class Tests(Harness):
+    def setUp(self):
+        super().setUp()
+        self.ctl, self.render = FakeController(), None
+        self.render = FakeRender(self.ctl)
+        self.addCleanup(self.ctl.close)
+        self.addCleanup(self.render.close)
+
+    def test_rfc8032_vector_and_request_signing(self):
+        self.assertEqual(S9.ed25519_public(SEED).hex(),
+                         "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a")
+        sig = S9.ed25519_sign(SEED, b"")
+        self.assertTrue(sig.hex().startswith("e5564300c360ac729086e2cc806e828a84877f1eb8e5d974"))
+        self.assertTrue(S9.ed25519_verify(S9.ed25519_public(SEED), b"", sig))
+        self.assertFalse(S9.ed25519_verify(S9.ed25519_public(SEED), b"x", sig))
+        h = S9.Signer(SEED).headers("post", "/execute?b=2&a=1", b"{}", PRINCIPAL, ts=1700000000, nonce="n0")
+        canon = "\n".join(["ryeos-request-v1", "POST", "/execute?a=1&b=2", S9.sha256_hex(b"{}"),
+                           "1700000000", "n0", PRINCIPAL])
+        self.assertTrue(S9.ed25519_verify(S9.ed25519_public(SEED), S9.sha256_hex(canon.encode()).encode(),
+                                          base64.b64decode(h["x-ryeos-signature"])))
+
+    def test_happy_path(self):
+        code = self.run_main(self.ctl, self.render)
+        self.assertEqual(code, 0, self.lines[-5:])
+        for name, status in [("preflight", "pass"), ("profile", "pass"), ("e1", "pass"), ("e2", "pass"),
+                             ("e3", "pass"), ("e4", "pass"), ("e6", "pass"), ("e7", "pass"),
+                             ("teardown", "pass")]:
+            self.assertEqual(self.evidence(name)["status"], status, name)
+        e2 = self.evidence("e2")
+        self.assertEqual(e2["refusal_text"], "lease refused for workload `codex`: the node already holds 2")
+        e1 = self.evidence("e1")
+        self.assertTrue(all(s["admitted_observed"] for s in e1["sessions"]))
+        ex = e1["exchanges"][0]
+        self.assertEqual(ex["response"]["body_sha256"], S9.sha256_hex(ex["response"]["body"].encode()))
+        self.assertIn("started_at", ex)
+        self.assertTrue(self.render.restarted)
+        self.assertEqual(self.evidence("e6")["started_at_after"], "2026-10-21T01:00:00Z")
+        self.assertTrue(all(self.ctl.sig_ok) and self.ctl.sig_ok)
+        self.assertTrue(all(s["ended"] for s in self.ctl.sessions.values()))
+        self.assertEqual(self.ctl.profiles, {})
+        self.assertEqual(self.proxy_requests[0].full_url,
+                         f"https://{SANDBOX}.oregon.sandbox.onrender.com/runs/stream")
+        every = "".join(p.read_text() for p in self.out.iterdir()) + "".join(self.lines)
+        self.assertNotIn("tok-SECRET-1", every)
+        self.assertNotIn(RENDER_KEY, every)
+        for line in self.lines:
+            json.loads(line)
+
+    def test_manifest_signature_verifies_with_public_key(self):
+        self.assertEqual(self.run_main(self.ctl, self.render), 0)
+        pub = S9.ed25519_public(SEED)
+        self.assertTrue(S9.verify_manifest(self.out, pub))
         manifest = json.loads((self.out / "manifest.json").read_text())
-        self.assertEqual({e["file"] for e in manifest["files"]},
-                         {"preflight.json", "e1-sessions.json", "e2-refusal.json", "e3-running.json",
-                          "e6-restart.json", "e7-egress.json", "teardown.json"})
-        for entry in manifest["files"]:
-            self.assertEqual(entry["sha256"], hashlib.sha256((self.out / entry["file"]).read_bytes()).hexdigest())
-        self.assertIn("none is queued", self.rec("e2-refusal.json")["refusalText"])
-        self.assertEqual(self.rec("e6-restart.json")["streamVerdict"], "probed")
-        self.assertEqual(self.rec("teardown.json")["sandboxOccurrenceIds"], [SBX])
+        self.assertIn("hosted-floor risk accepted", manifest["risk_acceptance"].lower())
+        ids = [s["id"] for s in manifest["steps"]]
+        self.assertEqual(ids, ["preflight", "profile", "e1", "e2", "e3", "e4", "e6", "e7", "teardown"])
+        for s in manifest["steps"]:
+            self.assertEqual(s["sha256"], S9.sha256_hex((self.out / s["file"]).read_bytes()))
+        # tampering breaks the signature
+        raw = (self.out / "manifest.json").read_bytes()
+        (self.out / "manifest.json").write_bytes(raw.replace(b"pass", b"fail", 1))
+        self.assertFalse(S9.verify_manifest(self.out, pub))
+        other = S9.ed25519_public(bytes(32))
+        (self.out / "manifest.json").write_bytes(raw)
+        self.assertFalse(S9.verify_manifest(self.out, other))
 
-    def test_classification(self):
-        self.assertEqual(ev.classify_session_start(REFUSED), "concurrency-refused")
-        other = out(1, "", "lease refused for workload `codex`: lifetime")
-        self.assertEqual(ev.classify_session_start(other), "lease-refused")
-        self.assertEqual(ev.classify_session_start(out(1, "", "lease refused: no budget")), "lease-refused")
-        self.assertEqual(ev.classify_session_start(admitted("t")), "admitted")
-        self.assertEqual(ev.classify_session_start(out(0, "not json")), "failed")
-        self.assertEqual(ev.classify_session_start(out(1, "", "boom")), "failed")
+    def test_e3_refusal_is_recorded_not_faked(self):
+        self.ctl.e3 = "refused"
+        code = self.run_main(self.ctl, self.render)
+        e3 = self.evidence("e3")
+        self.assertEqual(e3["status"], "refused")
+        self.assertIn("refus", e3["reason"])
+        self.assertIn("no pass is claimed", e3["note"])
+        self.assertEqual(self.evidence("e2")["status"], "pass")
+        self.assertEqual(self.evidence("e7")["status"], "pass")
+        self.assertEqual(code, 0)
 
-    def test_stream_classification(self):
-        occ = json.dumps({"error": ev.OCCURRENCE_REFUSED})
-        nolive = json.dumps({"error": ev.NO_LIVE_CHANNEL})
-        self.assertEqual(ev.classify_stream_probe(410, occ), "lease-refused")
-        self.assertEqual(ev.classify_stream_probe(410, ""), "unknown")
-        self.assertEqual(ev.classify_stream_probe(404, nolive), "no-live-channel")
-        self.assertEqual(ev.classify_stream_probe(400, ""), "probe-bug")
-        self.assertEqual(ev.classify_stream_probe(101, ""), "channel-live")
-
-    def test_status_sets(self):
-        self.assertEqual(ev.LIVE_STATUSES | ev.TERMINAL_STATUSES,
-                         {"created", "running", "completed", "failed", "cancelled", "killed",
-                          "timed_out", "continued"})
-        self.assertFalse(ev.thread_is_live(json.dumps({"status": "failed"})))
-        self.assertTrue(ev.thread_is_live(json.dumps({"status": "running"})))
-        self.assertTrue(ev.thread_is_live(json.dumps({"thread_id": "x"})))
-        self.assertTrue(ev.thread_is_live("not json"))
-
-    def test_third_session_admitted_fails_e2(self):
-        fake = Fake()
-        fake.session_results = [admitted("t1"), admitted("t2"), admitted("t3")]
-        _, runner, code = self.go(fake)
+    def test_teardown_runs_on_midrun_failure(self):
+        self.render.name = "ryeos-f5r-s9-test"
+        code = self.run_main(self.ctl, self.render, service="srv-missing")  # e6 get -> 404 -> Failure
         self.assertEqual(code, 1)
-        self.assertIn("e2-third-refused", runner.failed)
-        self.assertIn("t3", fake.cancelled)
+        self.assertEqual(self.evidence("teardown")["status"], "pass")
+        self.assertTrue(all(s["ended"] for s in self.ctl.sessions.values()))
+        self.assertEqual(self.ctl.profiles, {})
+        self.assertTrue(S9.verify_manifest(self.out, S9.ed25519_public(SEED)))
+        manifest = json.loads((self.out / "manifest.json").read_text())
+        self.assertEqual({s["id"]: s["status"] for s in manifest["steps"]}["e7"], "not-run")
 
-    def test_non_concurrency_refusal_fails_e2(self):
-        fake = Fake()
-        fake.session_results = [admitted("t1"), admitted("t2"),
-                                out(1, "", "lease refused for workload `codex`: lifetime")]
-        _, runner, code = self.go(fake)
-        self.assertIn("e2-third-refused", runner.failed)
-
-    def test_refusal_arrives_on_polled_thread(self):
-        fake = Fake()
-        fake.session_results = [admitted("t1"), admitted("t2"), admitted("t3")]
-        fake.script["t3"] = ["running", "failed"]
-        _, runner, code = self.go(fake)
-        self.assertEqual(code, 0, runner.logs)
-        self.assertEqual(self.rec("e2-refusal.json")["polledStatuses"], ["running", "failed"])
-
-    def test_thread_never_running_fails_e3_and_skips_restart(self):
-        fake = Fake()
-        fake.script["t1"] = ["created"]
-        _, runner, code = self.go(fake)
-        self.assertIn("e3-running", runner.failed)
-        self.assertIn("e4-e6-restart-refusal", runner.failed)
-        self.assertFalse(fake.restarted)
-        self.assertTrue(self.rec("e6-restart.json")["skipped"])
-
-    def test_missing_status_fails_e6_and_teardown(self):
-        fake = Fake()
-        fake.after_restart = lambda tid: (None, "controller restarted")
-        _, runner, code = self.go(fake)
-        self.assertIn("e4-e6-restart-refusal", runner.failed)
-
-    def test_teardown_missing_status_counts_live(self):
-        fake = Fake()
-        real = fake.run
-
-        def run(argv, env, timeout):
-            if argv[1:3] == ["thread", "get"] and argv[3] in fake.cancelled:
-                return out(0, json.dumps({"thread_id": argv[3]}))
-            return real(argv, env, timeout)
-        fake.run = run
-        _, runner, code = self.go(fake)
-        self.assertIn("teardown", runner.failed)
-
-    def test_restart_text_required(self):
-        fake = Fake()
-        fake.after_restart = lambda tid: ("failed", "something else")
-        _, runner, _ = self.go(fake)
-        self.assertIn("e4-e6-restart-refusal", runner.failed)
-
-    def test_probe_101_and_400_fail(self):
-        for result in ((101, b""), (400, b"")):
-            fake = Fake()
-            fake.probe_result = result
-            _, runner, _ = self.go(fake)
-            self.assertIn("e4-e6-restart-refusal", runner.failed, result)
-
-    def test_no_placement_is_unprobed_and_e7_fails(self):
-        _, runner, _ = self.go(placement=[])
-        self.assertEqual(self.rec("e6-restart.json")["streamVerdict"], "unprobed")
-        self.assertIn("e7-unlisted-egress", runner.failed)
-        self.assertNotIn("e4-e6-restart-refusal", runner.failed)
-
-    def test_ready_never_recovers(self):
-        fake = Fake()
-        fake.ready_after_restart = [503] * 50
-        fake.clock_ticks = 0
-        runner = make(fake, self.tmp, restart_timeout=3)
-        ticks = iter(range(0, 1000))
-        runner.clock = lambda: next(ticks)
-        self.assertEqual(runner.execute(), 1)
-        self.assertIn("e4-e6-restart-refusal", runner.failed)
-
-    def test_old_instance_still_ready_fails(self):
-        fake = Fake()
-        fake.old_still_ready = True
-        runner = make(fake, self.tmp, restart_timeout=3)
-        ticks = iter(range(0, 1000))
-        runner.clock = lambda: next(ticks)
-        self.assertEqual(runner.execute(), 1)
-        self.assertIn("never stopped answering", self.rec("e6-restart.json")["error"])
-
-    def test_e7_mint_failure_and_foreign_uri(self):
-        fake = Fake()
-        fake.mint = (403, b"")
-        _, runner, _ = self.go(fake)
-        self.assertEqual(runner.failed, ["e7-unlisted-egress"])
-        fake = Fake()
-        fake.mint = (200, json.dumps({"token": TOKEN, "uri": "https://evil.example/runs/stream"}).encode())
-        _, runner, _ = self.go(fake)
-        self.assertEqual(runner.failed, ["e7-unlisted-egress"])
-        self.assertNotIn(TOKEN, (self.out / "e7-egress.json").read_text())
-
-    def test_e7_inconclusive_and_reachable(self):
-        fake = Fake()
-        fake.run_result = (500, b"internal error")
-        _, runner, _ = self.go(fake)
-        rec = self.rec("e7-egress.json")
-        self.assertFalse(rec["ok"])
-        self.assertIsNone(rec["egressBlocked"])
-        self.assertIn("inconclusive", rec["error"])
-        fake = Fake()
-        fake.run_result = (200, b"<h1>Example Domain</h1>")
-        _, runner, _ = self.go(fake)
-        self.assertIn("reachable", self.rec("e7-egress.json")["error"])
-
-    def test_e7_exit_code_is_proof(self):
-        fake = Fake()
-        fake.run_result = (200, b'{"exit_code": 6}')
-        _, runner, code = self.go(fake)
-        self.assertEqual(code, 0, runner.logs)
-        self.assertTrue(self.rec("e7-egress.json")["egressBlocked"])
-
-    def test_owner_id_restricted(self):
-        _, runner, _ = self.go(render_owner_id="own&x=1")
-        self.assertIn("e7-unlisted-egress", runner.failed)
-
-    def test_teardown_on_failure_and_step_isolation(self):
-        fake = Fake()
-        fake.session_results = [admitted("t1"), out(1, "", "boom")]
-        _, runner, code = self.go(fake)
+    def test_profile_confirm_failure_skips_sessions_and_still_tears_down(self):
+        self.ctl.fail_confirm = True
+        code = self.run_main(self.ctl, self.render)
         self.assertEqual(code, 1)
-        self.assertIn("e2-third-refused", runner.failed)
-        self.assertTrue(self.rec("e2-refusal.json")["skipped"])
-        self.assertIn("t1", fake.cancelled)
-        self.assertTrue((self.out / "manifest.json").exists())
+        self.assertEqual(self.evidence("profile")["status"], "fail")
+        self.assertFalse((self.out / "e1.json").exists())
+        self.assertEqual(self.ctl.profiles, {})
+        self.assertEqual(self.evidence("teardown")["status"], "pass")
 
-    def test_teardown_runs_when_step_raises(self):
-        fake = Fake()
-        fake.http_override["restart"] = None
-        _, runner, code = self.go(fake)
-        self.assertEqual(code, 1)
-        self.assertEqual(fake.cancelled, {"t1", "t2"})
+    def test_idempotent_rerun_skips_done_steps(self):
+        self.assertEqual(self.run_main(self.ctl, self.render), 0)
+        before = list(self.ctl.log)
+        self.lines.clear()
+        self.assertEqual(self.run_main(self.ctl, self.render), 0)
+        new = self.ctl.log[len(before):]
+        self.assertNotIn("worker_execution:codex/session", new)
+        self.assertNotIn("service:credential-profiles/create", new)
+        self.assertTrue(any('"skipped-already-done"' in l for l in self.lines))
+        state = json.loads((self.out / "state.json").read_text())
+        self.assertEqual(state["steps"]["e2"]["status"], "pass")
+        self.assertFalse((self.out / "state.json.tmp").exists())
 
-    def test_no_secret_leak(self):
-        fake = Fake()
-        fake.run_result = (500, f"curl: (6) {TOKEN} {RENDER_KEY}".encode())
-        fake.session_results = [admitted("t1"), admitted("t2"),
-                                out(1, "", f"{CONCURRENCY} Bearer abc.def {RENDER_KEY}")]
-        _, runner, _ = self.go(fake)
-        blob = "".join(p.read_text() for p in self.out.iterdir()) + "".join(runner.logs)
-        for secret in (RENDER_KEY, TOKEN, "abc.def"):
-            self.assertNotIn(secret, blob)
+    def test_refuses_the_farm_service_and_non_prefixed_service(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(self.run_main(self.ctl, self.render, service="srv-datiea7avr4c73dm14fg"), 2)
+        self.assertEqual(self.ctl.log, [])
+        self.render.name = "something-else"
+        self.run_main(self.ctl, self.render)
+        self.assertFalse(self.render.restarted)
+        self.assertFalse((self.out / "e6.json").exists())
 
-    def test_env_file_permission_refusal(self):
-        path = Path(self.tmp) / "env"
-        path.write_text(f"RENDER_API_KEY={RENDER_KEY}\n")
-        path.chmod(0o644)
-        with self.assertRaises(ev.Refusal):
-            ev.read_render_key(path)
-        path.chmod(0o600)
-        self.assertEqual(ev.read_render_key(path), RENDER_KEY)
-
-    def test_main_refuses_loose_env_file_and_bad_names(self):
-        env = Path(self.tmp) / "env"
-        env.write_text(f"RENDER_API_KEY={RENDER_KEY}\n")
-        env.chmod(0o644)
-
-        def argv(name):
-            return ["--controller-url", "https://c", "--app-root-or-key", self.tmp,
-                    "--credential-profile", "p", "--render-env-file", str(env),
-                    "--render-service-id", "srv-abc", "--render-service-name", name,
-                    "--out", str(Path(self.tmp) / "o")]
-        f = Fake()
-        self.assertEqual(ev.main(argv("ryeos-f5r-s9-ok"), http=f.http, run=f.run), 1)
-        self.assertEqual(f.calls, [])
-        # A bad name is refused before the env file is even read: a missing file would be a Failure.
-        env.unlink()
-        for name in ("other-service", "ryeos-f5r-s9-Farm", "ryeos-f5r-s9-SNAP-TRACK"):
-            self.assertEqual(ev.main(argv(name), http=f.http, run=f.run), 1)
-
-    def test_name_guard(self):
-        ev.guard_service_name("ryeos-f5r-s9-a")
-        for bad in ("x", "ryeos-f5r-s9-farm", "ryeos-f5r-s9-Snap-Track", ""):
-            with self.assertRaises(ev.Refusal):
-                ev.guard_service_name(bad)
-        runner = make(Fake(), self.tmp, render_service_name="evil")
-        with self.assertRaises(ev.Refusal):
-            runner.e7()
-        with self.assertRaises(ev.Refusal):
-            runner.e6()
-
-    def test_farm_service_refused(self):
-        with self.assertRaises(ev.Refusal):
-            ev.guard_service_id(ev.FARM_SERVICE_ID)
-
-    def test_key_file_staged_into_app_root(self):
-        key = Path(self.tmp) / "k.pem"
-        key.write_text("pem")
-        key.chmod(0o600)
-        root = ev.prepare_app_root(key, tempfile.mkdtemp())
-        self.assertTrue((root / ".ai/config/keys/signing/private_key.pem").is_file())
-        key.chmod(0o644)
-        with self.assertRaises(ev.Refusal):
-            ev.prepare_app_root(key, tempfile.mkdtemp())
+    def test_e7_open_egress_fails_and_unmarked_is_inconclusive(self):
+        self.assertEqual(self.run_main(self.ctl, self.render, proxy_body=b"E7_EGRESS_OPEN"), 1)
+        self.assertEqual(self.evidence("e7")["status"], "fail")
 
 
 if __name__ == "__main__":
