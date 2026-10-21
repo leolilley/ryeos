@@ -1591,13 +1591,18 @@ pub struct MixedCutAppend<'a> {
 /// `first_events`, then the second takes the batch built from the first
 /// commit. Both seats are chain roots whose signed snapshots must carry their
 /// seat identity; the cut's `expected` anchor is the first seat's, and the
-/// second seat's anchor must also appear in `cut.anchors`.
+/// second seat's anchor must also appear in `cut.anchors`. When
+/// `first_rests_on_second` is set, the first seat's batch is published only
+/// after a durable obligation records that its evidence rests on the second
+/// seat's retained prefix, so the second seat's closure cannot be released
+/// before the first seat is itself fenced.
 #[derive(Debug, Clone, Copy)]
 pub struct SeatPairAppend<'a> {
     pub first: &'a ExactSeat<'a>,
     pub second: &'a ExactSeat<'a>,
     pub second_anchor: &'a ryeos_state::AuthoritativeThreadEventReadAnchor,
     pub first_events: &'a [NewEventRecord],
+    pub first_rests_on_second: bool,
     pub cut: &'a SeatCut<'a>,
 }
 
@@ -15229,6 +15234,7 @@ impl StateStore {
         let dependencies = ryeos_state::MixedCutDependencies {
             current_anchors: request.current_anchors,
             retired: request.retired,
+            obligations: &[],
         };
         let committed = match request.counterpart {
             Some(counterpart) => g
@@ -15387,6 +15393,7 @@ impl StateStore {
         let dependencies = ryeos_state::MixedCutDependencies {
             current_anchors: cut.anchors,
             retired: cut.retired,
+            obligations: &[],
         };
         let committed = match cut
             .anchors
@@ -15498,6 +15505,7 @@ impl StateStore {
             second,
             second_anchor,
             first_events,
+            first_rests_on_second,
             cut,
         } = *request;
         Self::validate_seat_cut(first, cut)?;
@@ -15547,6 +15555,14 @@ impl StateStore {
                 second: view.counterpart,
             })
         };
+        let obligations: Vec<ryeos_state::EvidenceObligationDependency> = if first_rests_on_second {
+            vec![ryeos_state::EvidenceObligationDependency {
+                owner_chain_root_id: second.root_id.to_string(),
+                holder_chain_root_id: first.root_id.to_string(),
+            }]
+        } else {
+            Vec::new()
+        };
         let committed = g.state_db.append_running_event_pair_admitted_if_mixed_cut(
             ryeos_state::OrderedPairThreadAppend {
                 first: cut.expected,
@@ -15560,6 +15576,7 @@ impl StateStore {
             ryeos_state::MixedCutDependencies {
                 current_anchors: cut.anchors,
                 retired: cut.retired,
+                obligations: &obligations,
             },
             permit.cas_guard(),
             admitted,
