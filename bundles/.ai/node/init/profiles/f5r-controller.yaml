@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-21T01:40:00Z:a81b16c37780d4ea0dd60b4c218617c518961c7efb44d104f080589f93b398ab:xR5qdRW74RWztcL15ioF1P/gA+NGHYxgBzSac5TVdbehObiMgJSXR4iwVQhvGyiUcFy/r+rS/644I04Qlp59Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-21T01:58:27Z:25accfa25c979388d8b929fc8e2093b5339d400a717f2ae06bc47c15f71a0bf9:bBfrIhhVpq3h3Ov2CfLOSlrTcAZhuQE1kBGk2E1UnLfm65EoB3I+x1hVucYM77HadUBO1MF9h3XIBmNHzJpdDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Controller of remote Codex authoring leases: runs the Codex app server
 # and the render-sandbox lease adapter, and runs no schedules.
 schema: 1
@@ -298,14 +298,15 @@ policies:
           mode: disabled
           backend: null
           proc_filesystem: empty
-        hosted-enforced:
-          # The `hosted` floor on a provider container that also proves user,
-          # pid and mount namespaces (Render services do), so jobs that
+        hosted_enforced:
+          # The `hosted` floor on a provider container whose kernel allows
+          # user, pid and mount namespaces (Render services do): the enforced
+          # backend proves them when it resolves at boot, and jobs that
           # declare captured filesystem or isolated network authority run in
           # the namespace sandbox. Guest product production needs exactly
           # that lane. The host still has no qualified per-job process scopes,
           # so Codex app servers keep the trusted direct process-group lane.
-          requires_capabilities: [{any_of: [accounting, residency:swap_absent]}, isolation:namespaces, {name: recovery:enclosure_trusted_init, accept: [measured, trusted]}, storage:durable_root, {name: termination:enclosure_trusted_init, accept: [measured, trusted]}, {name: termination:process_group, accept: [trusted]}, time]
+          requires_capabilities: [{any_of: [accounting, residency:swap_absent]}, {name: recovery:enclosure_trusted_init, accept: [measured, trusted]}, storage:durable_root, {name: termination:enclosure_trusted_init, accept: [measured, trusted]}, {name: termination:process_group, accept: [trusted]}, time]
           process_scopes:
             mode: unconfigured
           trusted_process_group_sessions: true
