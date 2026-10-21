@@ -117,10 +117,13 @@ struct Admission<'a> {
     record: Value,
 }
 
-/// Prepare the operation on the seat, dispatch it through the compiled
-/// binding, and retain its authenticated result. Returns the dispatch
-/// response.
-async fn admit(chain: &Chain, seat: &mut Seat, admission: Admission<'_>) -> Value {
+/// Prepare the operation on the seat: build it, derive its identity and retain
+/// it in the seat's own history.
+async fn prepare(
+    chain: &Chain,
+    seat: &mut Seat,
+    admission: &Admission<'_>,
+) -> UiPreparedPresentationOperation {
     let state = &chain.state;
     let presentation_id = PresentationId::try_new(seat.producer.presentation_id.clone()).unwrap();
     let origin = RyeOsViewInstanceKey::shared_dialog(&presentation_id, admission.dialog).unwrap();
@@ -143,8 +146,8 @@ async fn admit(chain: &Chain, seat: &mut Seat, admission: Admission<'_>) -> Valu
         "body": {
             "kind": "admission",
             "purpose": admission.purpose,
-            "surface_open_target": admission.surface_open_target,
-            "particular_selection": admission.particular_selection,
+            "surface_open_target": admission.surface_open_target.clone(),
+            "particular_selection": admission.particular_selection.clone(),
             "invocation_origin": origin,
             "request": {
                 "binding_attachment_id": chain.root.binding_attachment_id,
@@ -155,14 +158,13 @@ async fn admit(chain: &Chain, seat: &mut Seat, admission: Admission<'_>) -> Valu
                     "view_ref": admission.view_ref,
                     "affordance_id": admission.affordance_id,
                 },
-                "payload": {"kind": "selection", "record": admission.record},
+                "payload": {"kind": "selection", "record": admission.record.clone()},
             },
             "success_notice": null,
         },
     }))
     .unwrap();
     prepared.assign_identity().unwrap();
-    let operation_id = prepared.operation_id.clone();
     append(
         chain,
         seat,
@@ -172,9 +174,18 @@ async fn admit(chain: &Chain, seat: &mut Seat, admission: Admission<'_>) -> Valu
         )],
     )
     .await;
-    let dispatched = (ryeos_ui::handlers::ui_invocations_dispatch::DESCRIPTOR.handler)(
+    prepared
+}
+
+/// Dispatch a prepared operation through the compiled binding.
+async fn dispatch_prepared(
+    chain: &Chain,
+    seat: &Seat,
+    prepared: &UiPreparedPresentationOperation,
+) -> anyhow::Result<Value> {
+    (ryeos_ui::handlers::ui_invocations_dispatch::DESCRIPTOR.handler)(
         json!({
-            "presentation_operation_id": operation_id,
+            "presentation_operation_id": prepared.operation_id,
             "producer": seat.producer,
             "binding": prepared.admission().unwrap().request,
         }),
@@ -182,13 +193,23 @@ async fn admit(chain: &Chain, seat: &mut Seat, admission: Admission<'_>) -> Valu
         chain.state.clone(),
     )
     .await
-    .unwrap_or_else(|error| {
-        panic!(
-            "dispatch {}: {:?}",
-            admission.affordance_id,
-            ryeos_app::handler_error::extract_handler_error(&error)
-        )
-    });
+}
+
+/// Prepare the operation on the seat, dispatch it through the compiled
+/// binding, and retain its authenticated result. Returns the dispatch
+/// response.
+async fn admit(chain: &Chain, seat: &mut Seat, admission: Admission<'_>) -> Value {
+    let prepared = prepare(chain, seat, &admission).await;
+    let operation_id = prepared.operation_id.clone();
+    let dispatched = dispatch_prepared(chain, seat, &prepared)
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "dispatch {}: {:?}",
+                admission.affordance_id,
+                ryeos_app::handler_error::extract_handler_error(&error)
+            )
+        });
     // The client holds the response as it arrived over the wire, not as the
     // daemon's in-memory value.
     let dispatched: Value = serde_json::from_str(&serde_json::to_string(&dispatched).unwrap())
@@ -802,4 +823,103 @@ async fn one_session_drives_every_presentation_step_through_the_real_handlers() 
             "the reducer composes every Surface the session reports"
         );
     }
+}
+
+/// A seat bound to `project`, with the shipped dialogs and a claimed producer.
+async fn project_bound_chain(state: &Arc<AppState>, project: &std::path::Path) -> (Chain, Seat) {
+    let (session_id, ctx, producer, root) =
+        test_state::live_shipped_presentation_in_project(state, project).await;
+    (
+        Chain {
+            state: state.clone(),
+            session_id,
+            ctx,
+            root,
+        },
+        Seat {
+            producer,
+            next_engine_seq: 0,
+        },
+    )
+}
+
+fn open_authored_surface() -> Admission<'static> {
+    Admission {
+        dialog: "surfaces",
+        view_ref: "view:ryeos/surfaces/list",
+        affordance_id: "open",
+        purpose: "open_surface",
+        surface_open_target: json!({
+            "selection": {"kind": "authored", "surface_ref": "surface:ryeos/ui/base-observe"},
+            "placement": {"kind": "new_surface"},
+        }),
+        particular_selection: Value::Null,
+        record: json!({"canonical_ref": "surface:ryeos/ui/base-observe"}),
+    }
+}
+
+#[tokio::test]
+async fn a_project_bound_session_runs_a_recorded_dispatch_from_its_retained_directory() {
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+    let state = Arc::new(state);
+    let project = tempfile::TempDir::new().expect("project");
+    std::fs::create_dir(project.path().join(".ai")).expect("project .ai");
+    let (chain, mut seat) = project_bound_chain(&state, project.path()).await;
+    let canonical = project.path().canonicalize().unwrap();
+    let attachment = get_ui_state(&state)
+        .unwrap()
+        .browser_sessions
+        .get_session(&chain.session_id)
+        .unwrap()
+        .attachments[&chain.root.binding_attachment_id]
+        .clone();
+    assert_eq!(
+        attachment.project_query_identity.as_deref(),
+        canonical.to_str(),
+        "the session is bound to the project"
+    );
+
+    let opened = admit(&chain, &mut seat, open_authored_surface()).await;
+    assert_eq!(opened["target"]["ref"], "service:ui/session/surfaces/open");
+    assert_eq!(opened["result"]["ui_transition"]["kind"], "open_surface");
+    assert_eq!(
+        opened["result"]["ui_transition"]["presentation_id"],
+        seat.producer.presentation_id
+    );
+    let (_, session) = current_session(&chain).await;
+    let membership = session
+        .presentations
+        .iter()
+        .find(|membership| membership.presentation_id == seat.producer.presentation_id)
+        .unwrap();
+    assert_eq!(membership.surfaces.len(), 2);
+}
+
+#[tokio::test]
+async fn a_recorded_dispatch_is_refused_when_the_project_path_no_longer_names_the_retained_directory()
+ {
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+    let state = Arc::new(state);
+    let parent = tempfile::TempDir::new().expect("projects");
+    let project = parent.path().join("project");
+    let decoy = parent.path().join("decoy");
+    for root in [&project, &decoy] {
+        std::fs::create_dir_all(root.join(".ai")).expect("project .ai");
+    }
+    let (chain, mut seat) = project_bound_chain(&state, &project).await;
+    let prepared = prepare(&chain, &mut seat, &open_authored_surface()).await;
+
+    lillux::atomic_exchange_paths(&project, &decoy).expect("swap the project path with a decoy");
+
+    let error = dispatch_prepared(&chain, &seat, &prepared)
+        .await
+        .expect_err("a dispatch whose retained directory no longer matches is refused");
+    assert!(
+        matches!(
+            ryeos_app::handler_error::extract_handler_error(&error),
+            Some(ryeos_app::handler_error::HandlerError::Structured { ref code, .. })
+                if code == "ui_binding_stale"
+        ),
+        "{error:#}"
+    );
 }
