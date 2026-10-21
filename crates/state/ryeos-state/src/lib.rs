@@ -150,12 +150,12 @@ pub use state_db::{
     AuthoritativeThreadPairReadback, AuthoritativeThreadSnapshotReadback,
     AuthoritativeThreadSnapshotWithLastEventReadback, CommittedWrite,
     ConditionalThreadEventAppendResult, ConditionalThreadEventPairAppendResult,
-    CreateChainWithEventSuccessorRequest, MixedCutDependencies, OrderedPairThreadAppend,
-    PendingRemoveHeadState, PendingReplayReport, PinnedStateAuthority, PreparedOfflineProjection,
-    ProjectionRecoveryObserver, ProjectionRecoveryProgress, ProjectionRecoveryStage,
-    ProjectionRepairRequest, ProjectionRepairSink, ProjectionStatus, RetiredChainDependency,
-    RuntimeLivenessInspector, SingleAnchorAdmissionView, SingleAnchorThreadAppend, StateDb,
-    TwoAnchorAdmissionView, TwoAnchorThreadAppend,
+    CreateChainWithEventSuccessorRequest, EvidenceObligationDependency, MixedCutDependencies,
+    OrderedPairThreadAppend, PendingRemoveHeadState, PendingReplayReport, PinnedStateAuthority,
+    PreparedOfflineProjection, ProjectionRecoveryObserver, ProjectionRecoveryProgress,
+    ProjectionRecoveryStage, ProjectionRepairRequest, ProjectionRepairSink, ProjectionStatus,
+    RetiredChainDependency, RuntimeLivenessInspector, SingleAnchorAdmissionView,
+    SingleAnchorThreadAppend, StateDb, TwoAnchorAdmissionView, TwoAnchorThreadAppend,
 };
 pub use state_db::{
     ChainRetirement, ChainRetirementReport, FencedRetirementReplay, RetirementEvidenceRef,

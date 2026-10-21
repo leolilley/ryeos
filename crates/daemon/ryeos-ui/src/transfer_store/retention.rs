@@ -53,6 +53,7 @@ use super::reader::{
     READ_PAGE_BYTES, READ_PAGE_EVENTS, SettlementPreparation, TransferSettlementSide, begin_read,
     decode_transfer_phase, prepare_write, read_page,
 };
+use super::retained::is_released_seat;
 
 // ---------------------------------------------------------------------------
 // Event contracts and the evidence validator
@@ -164,7 +165,10 @@ pub fn validate_retained_evidence(event: &ThreadEvent) -> anyhow::Result<()> {
 /// not completely settled, or its history is not exhaustively readable. A
 /// plan always keeps the seat's signed initialization, and lists, for every
 /// transfer whose counterpart seat is still live, each transfer event the seat
-/// holds, with that counterpart.
+/// holds, with that counterpart. Seats whose preparation rests on this seat's
+/// retained prefix are not listed here: the state layer adds every evidence
+/// obligation holder to the retained counterparts, so this seat's closure
+/// stays unreleased until each of them is fenced.
 pub fn qualify_seat_retirement(
     store: &Arc<StateStore>,
     root: &str,
@@ -184,7 +188,14 @@ pub fn qualify_seat_retirement(
         return Ok(Some(plan));
     }
     let requested: Vec<TransferIdentity> = identities.values().cloned().collect();
-    let cut = read_transfer_cut(store, &HistoryEndpoint::Current(anchor), &requested)?;
+    let cut = match read_transfer_cut(store, &HistoryEndpoint::Current(anchor), &requested) {
+        Ok(cut) => cut,
+        Err(error) if is_released_seat(&error) => {
+            tracing::debug!(%root, "seat retirement deferred: a counterpart closure was released");
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
     for transfer in &requested {
         match cut.closure(transfer)? {
             TransferClosure::Closed => {}
@@ -301,11 +312,15 @@ fn settle_one_step(
         let anchor = store
             .capture_thread_event_read_anchor(root, root)?
             .ok_or_else(|| anyhow!("claimed seat lost its signed head"))?;
-        let cut = read_transfer_cut(
+        let cut = match read_transfer_cut(
             store,
             &HistoryEndpoint::Current(anchor),
             std::slice::from_ref(transfer),
-        )?;
+        ) {
+            Ok(cut) => cut,
+            Err(error) if is_released_seat(&error) => return Ok(Step::Later),
+            Err(error) => return Err(error),
+        };
         prepare_settlement_from_cut(&cut, transfer, side)?
     };
     match preparation {

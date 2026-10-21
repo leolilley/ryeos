@@ -13,11 +13,12 @@ use ryeos_app::state_store::{
     ExactSeat, NewEventRecord, NewThreadRecord, PersistedEventRecord, StateStore,
 };
 use ryeos_state::objects::thread_event::ThreadEvent;
+use ryeos_ui::transfer_store::appends::StoreReapingClaims;
 use ryeos_ui::transfer_store::historical::{
     HistoryEndpoint, TransferClosure, read_historical_transfer_cut, read_transfer_cut,
 };
 use ryeos_ui::transfer_store::reader::read_complete_fixed_history;
-use ryeos_ui::transfer_store::retained::capture_retired_seat;
+use ryeos_ui::transfer_store::retained::{capture_retired_seat, is_released_seat};
 use ryeos_ui::transfer_store::retention::{
     event_contracts, qualify_seat_retirement, settle_claimed_seat_transfers, settle_claimed_seats,
     validate_retained_evidence,
@@ -769,6 +770,292 @@ async fn an_orphan_inbound_waits_for_its_source_to_be_claimed_then_cancels() {
     )
     .unwrap();
     assert_eq!(cut.closure(&transfer).unwrap(), TransferClosure::Closed);
+}
+
+/// An orphan destination inbound made the way the preparation pair makes it:
+/// the destination takes its InboundCommitment under the cut with the
+/// obligation that its evidence rests on the source's retained prefix, and
+/// the source batch then fails, so the source never names the transfer.
+fn orphan_inbound_with_obligation(
+    store: &StateStore,
+    source: &Seat,
+    destination: &Seat,
+    transfer: &TransferIdentity,
+) {
+    let ownership = Ownership::detached();
+    let anchor_of = |seat: &Seat| {
+        store
+            .capture_thread_event_read_anchor(&seat.id, &seat.id)
+            .unwrap()
+            .unwrap()
+    };
+    let (destination_anchor, source_anchor) = (anchor_of(destination), anchor_of(source));
+    let anchors = [destination_anchor.clone(), source_anchor.clone()];
+    let cut = ryeos_app::state_store::SeatCut {
+        expected: &destination_anchor,
+        anchors: &anchors,
+        retired: &[],
+    };
+    let inbound = NewEventRecord {
+        event_type: TRANSFER_EVENT.to_string(),
+        storage_class: "indexed".to_string(),
+        payload: phase_event(
+            &transfer.destination,
+            TransferRecord {
+                schema: 1,
+                transfer: transfer.clone(),
+                phase: TransferPhase::InboundCommitment,
+            },
+            0,
+        ),
+    };
+    let first = ExactSeat {
+        root_id: &destination.id,
+        owner: &ownership.owner,
+        item_ref: &ownership.item_ref,
+        executor_ref: &ownership.executor_ref,
+    };
+    let second = ExactSeat {
+        root_id: &source.id,
+        owner: &ownership.owner,
+        item_ref: &ownership.item_ref,
+        executor_ref: &ownership.executor_ref,
+    };
+    let outcome = store
+        .append_seat_pair_if_mixed_cut(
+            &ryeos_app::state_store::SeatPairAppend {
+                first: &first,
+                second: &second,
+                second_anchor: &source_anchor,
+                first_events: std::slice::from_ref(&inbound),
+                first_rests_on_second: true,
+                cut: &cut,
+            },
+            |_| Ok(true),
+            |_| anyhow::bail!("the source preparation was lost"),
+        )
+        .unwrap();
+    assert!(
+        matches!(
+            outcome,
+            ryeos_app::state_store::CutPairAppendResult::FirstCommittedSecondUncertain { .. }
+        ),
+        "{outcome:?}"
+    );
+}
+
+/// One release pass over every unreleased retired chain, as maintenance runs
+/// it: each owner is released or refused, never skipped silently.
+fn release_pass(state: &AppState) -> Vec<(String, anyhow::Result<()>)> {
+    let store = &state.state_store;
+    let guard =
+        ryeos_state::CasMutationGuard::acquire_shared(&state.config.runtime_state_dir()).unwrap();
+    let authority = store.pinned_state_authority().unwrap();
+    let owners: Vec<String> = store
+        .with_state_db(|db| Ok(db.unreleased_retired_chains()?.into_keys().collect()))
+        .unwrap();
+    owners
+        .into_iter()
+        .map(|owner| {
+            let lock = store
+                .with_state_db(|db| db.acquire_existing_chain_lock(&owner))
+                .unwrap();
+            let result = authority.require_recovery().unwrap().release_retired_chain(
+                &authority.cas_store().unwrap(),
+                &guard,
+                &lock,
+                &owner,
+            );
+            (owner, result)
+        })
+        .collect()
+}
+
+fn fence_of(state: &AppState, id: &str) -> ryeos_state::RetiredChainFence {
+    state
+        .state_store
+        .pinned_state_authority()
+        .unwrap()
+        .require_recovery()
+        .unwrap()
+        .retired_chain_fence(id)
+        .unwrap()
+}
+
+fn orphan_fixture(
+    store: &StateStore,
+    source_id: &str,
+    destination_id: &str,
+) -> (Seat, Seat, TransferIdentity) {
+    let source = new_seat(
+        store,
+        source_id,
+        "11111111-1111-4111-8111-111111111111",
+        'b',
+    );
+    let destination = new_seat(
+        store,
+        destination_id,
+        "22222222-2222-4222-8222-222222222222",
+        'c',
+    );
+    let export = json!({"mode": "copy", "view_ref": "view:test/one"});
+    let transfer = TransferIdentity {
+        operation_id: "33333333-3333-4333-8333-333333333333".to_string(),
+        source: source.identity(),
+        destination: destination.identity(),
+        export_digest: seat_payload_digest(&export).unwrap(),
+    };
+    (source, destination, transfer)
+}
+
+#[tokio::test]
+async fn an_orphan_inbound_cancels_against_a_retired_source_the_release_pass_keeps_intact() {
+    let (_dir, _owner, state) = build_test_state();
+    install_composition();
+    let store = &state.state_store;
+    let (source, destination, transfer) = orphan_fixture(store, "S-held-source", "S-held-dest");
+    orphan_inbound_with_obligation(store, &source, &destination, &transfer);
+    close_seat(store, &source);
+    close_seat(store, &destination);
+
+    // The source never named the transfer, so it is reaped and retires with
+    // only its initialization; the destination is still live.
+    claim_for_reaping(store, &source);
+    let held = exclusion(&state).await;
+    assert_eq!(
+        settle_claimed_seats(&state, &held, std::slice::from_ref(&source.id)).unwrap(),
+        1
+    );
+    release_launch_claim(store, &source);
+    assert_eq!(retire_due(&state, &held), 1);
+    let retired = capture_retired_seat(store, &source.id).unwrap().unwrap();
+    let authority = store.pinned_state_authority().unwrap();
+    let closure = ryeos_state::read_retired_chain_closure(
+        &authority.cas_store().unwrap(),
+        &source.id,
+        &retired.dependency().manifest_hash,
+    )
+    .unwrap();
+    assert_eq!(
+        closure.counterpart_roots.iter().collect::<Vec<_>>(),
+        [&destination.id],
+        "the destination holds an obligation on the source's retained prefix"
+    );
+
+    // The release pass waits for the destination: the source stays retired.
+    let released = release_pass(&state);
+    assert_eq!(released.len(), 1);
+    assert!(
+        released[0]
+            .1
+            .as_ref()
+            .unwrap_err()
+            .to_string()
+            .contains("not fenced"),
+        "{:?}",
+        released[0].1
+    );
+    assert!(matches!(
+        fence_of(&state, &source.id),
+        ryeos_state::RetiredChainFence::Retired { .. }
+    ));
+
+    // The orphan still cancels against the intact retired source.
+    claim_for_reaping(store, &destination);
+    assert_eq!(
+        settle_claimed_seats(&state, &held, std::slice::from_ref(&destination.id)).unwrap(),
+        1
+    );
+    let anchor = store
+        .capture_thread_event_read_anchor(&destination.id, &destination.id)
+        .unwrap()
+        .unwrap();
+    let cut = read_transfer_cut(
+        store,
+        &HistoryEndpoint::Current(anchor),
+        std::slice::from_ref(&transfer),
+    )
+    .unwrap();
+    assert_eq!(cut.closure(&transfer).unwrap(), TransferClosure::Closed);
+
+    // The destination then retires, and only afterwards is the source released.
+    release_launch_claim(store, &destination);
+    assert_eq!(retire_due(&state, &held), 1);
+    let released = release_pass(&state);
+    assert!(
+        released.iter().all(|(_, result)| result.is_ok()),
+        "{released:?}"
+    );
+    assert!(matches!(
+        fence_of(&state, &source.id),
+        ryeos_state::RetiredChainFence::Released { .. }
+    ));
+}
+
+#[tokio::test]
+async fn an_orphan_inbound_without_the_obligation_defers_once_its_source_is_released() {
+    let (_dir, _owner, state) = build_test_state();
+    install_composition();
+    let store = &state.state_store;
+    let (source, destination, transfer) = orphan_fixture(store, "S-lost-source", "S-lost-dest");
+    append(
+        store,
+        &destination.id,
+        TRANSFER_EVENT,
+        phase_event(
+            &transfer.destination,
+            TransferRecord {
+                schema: 1,
+                transfer: transfer.clone(),
+                phase: TransferPhase::InboundCommitment,
+            },
+            0,
+        ),
+    );
+    close_seat(store, &source);
+    close_seat(store, &destination);
+    claim_for_reaping(store, &source);
+    let held = exclusion(&state).await;
+    assert_eq!(
+        settle_claimed_seats(&state, &held, std::slice::from_ref(&source.id)).unwrap(),
+        1
+    );
+    release_launch_claim(store, &source);
+    assert_eq!(retire_due(&state, &held), 1);
+    // Nothing waits on the source, so the release pass releases it.
+    let released = release_pass(&state);
+    assert!(released.iter().all(|(_, result)| result.is_ok()));
+    assert!(matches!(
+        fence_of(&state, &source.id),
+        ryeos_state::RetiredChainFence::Released { .. }
+    ));
+
+    // A released source can prove nothing: the read is an explicit deferral,
+    // the destination stays claimed and its orphan is not cancelled.
+    let error = capture_retired_seat(store, &source.id).err().unwrap();
+    assert!(is_released_seat(&error), "{error:#}");
+    use ryeos_ui::transfer_store::appends::ReapingClaims;
+    assert!(
+        !StoreReapingClaims::new(store)
+            .is_claimed_or_terminal(&source.id)
+            .unwrap()
+    );
+    claim_for_reaping(store, &destination);
+    assert!(!settle_claimed_seat_transfers(store, KIND, &destination.id).unwrap());
+    assert!(
+        qualify_seat_retirement(store, &destination.id)
+            .unwrap()
+            .is_none()
+    );
+    let cycle_max = store.max_seat_lease_id().unwrap().unwrap();
+    assert_eq!(
+        store
+            .claimed_seat_leases_slice(None, &cycle_max, 64)
+            .unwrap(),
+        std::slice::from_ref(&destination.id)
+    );
+    assert_eq!(thread_status(store, &destination.id), "running");
 }
 
 /// A launch whose root is a shared-presentation Config: the only root kind a

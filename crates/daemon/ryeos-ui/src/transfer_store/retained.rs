@@ -63,10 +63,35 @@ impl RetiredSeatEvidence {
     }
 }
 
+/// A retired seat whose closure was released: its retained evidence is gone,
+/// so no negative claim about what the seat held can be proved from it.
+/// Callers that can wait treat this as a deferral, never as a proof of absence.
+#[derive(Debug)]
+pub struct RetiredSeatReleased {
+    chain_root_id: String,
+}
+
+impl std::fmt::Display for RetiredSeatReleased {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "retired seat {} had its closure released",
+            self.chain_root_id
+        )
+    }
+}
+
+impl std::error::Error for RetiredSeatReleased {}
+
+/// Whether `error` is a refusal because a retired seat's closure was released.
+pub fn is_released_seat(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<RetiredSeatReleased>().is_some()
+}
+
 /// Capture the fence and retained evidence of a retired seat. `None` means no
 /// fence exists for the root: absence of a fence proves nothing about the
-/// chain. A released closure is refused: its retained evidence can no longer
-/// prove anything.
+/// chain. A released closure is refused with `RetiredSeatReleased`: its
+/// retained evidence can no longer prove anything.
 pub fn capture_retired_seat(
     store: &StateStore,
     chain_root_id: &str,
@@ -79,7 +104,10 @@ pub fn capture_retired_seat(
         RetiredChainFence::Absent => return Ok(None),
         RetiredChainFence::Retired { manifest_hash } => manifest_hash,
         RetiredChainFence::Released { .. } => {
-            bail!("retired seat {chain_root_id} had its closure released")
+            return Err(RetiredSeatReleased {
+                chain_root_id: chain_root_id.to_string(),
+            }
+            .into());
         }
     };
     let closure = ryeos_state::read_retired_chain_closure(

@@ -1359,6 +1359,7 @@ fn seat_pair_publishes_the_second_batch_from_the_first_commit_and_renews_both() 
         second: &seat("S-src"),
         second_anchor: &src,
         first_events: &first_events,
+        first_rests_on_second: false,
         cut: &cut,
     };
     let built_from = std::cell::RefCell::new(None);
@@ -1417,6 +1418,7 @@ fn seat_pair_refuses_without_writing_on_every_unadmitted_shape() {
                     second: &second,
                     second_anchor: &src,
                     first_events: &first_events,
+                    first_rests_on_second: false,
                     cut: &cut,
                 },
                 |_| {
@@ -1478,6 +1480,7 @@ fn seat_pair_refuses_without_writing_on_every_unadmitted_shape() {
                     second: &seat("S-dst"),
                     second_anchor: &dst,
                     first_events: &first_events,
+                    first_rests_on_second: false,
                     cut: &cut,
                 },
                 |_| Ok(true),
@@ -1509,6 +1512,7 @@ fn seat_pair_reports_a_failed_second_batch_as_first_committed() {
                 second: &seat("S-src"),
                 second_anchor: &src,
                 first_events: &first_events,
+                first_rests_on_second: false,
                 cut: &cut,
             },
             |_| Ok(true),

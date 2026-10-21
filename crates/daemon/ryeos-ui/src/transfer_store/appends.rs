@@ -749,8 +749,14 @@ const CLAIM_SLICE: usize = 64;
 impl ReapingClaims for StoreReapingClaims<'_> {
     fn is_claimed_or_terminal(&self, seat_root_id: &str) -> anyhow::Result<bool> {
         let Some(detail) = self.store.get_thread(seat_root_id)? else {
-            // A retired seat has no thread row left and can never append again.
-            return Ok(super::retained::capture_retired_seat(self.store, seat_root_id)?.is_some());
+            // A retired seat has no thread row left and can never append
+            // again. A released closure leaves the settlement undecided: the
+            // caller keeps its claim and offers the transfer again later.
+            return match super::retained::capture_retired_seat(self.store, seat_root_id) {
+                Ok(retired) => Ok(retired.is_some()),
+                Err(error) if super::retained::is_released_seat(&error) => Ok(false),
+                Err(error) => Err(error),
+            };
         };
         if detail.status != "running" {
             return Ok(true);
@@ -1114,6 +1120,7 @@ pub fn append_transfer_preparation_pair(
         second: &source_seat,
         second_anchor: source.anchor,
         first_events: std::slice::from_ref(&inbound_event),
+        first_rests_on_second: true,
         cut: &cut,
     };
     store.append_seat_pair_if_mixed_cut(

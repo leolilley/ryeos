@@ -1998,6 +1998,7 @@ pub enum ConditionalThreadEventPairAppendResult {
 struct ProvedMixedCut<'a> {
     locks: BTreeMap<&'a str, crate::chain::ChainLock>,
     retired_roots: Vec<&'a str>,
+    obligations: &'a [EvidenceObligationDependency],
     target: ThreadSnapshot,
     counterpart: Option<ThreadSnapshot>,
     target_thread_ids: Vec<String>,
@@ -2026,11 +2027,25 @@ pub struct RetiredChainDependency {
     pub manifest_hash: String,
 }
 
+/// The evidence of `holder_chain_root_id` rests on the retained prefix of
+/// `owner_chain_root_id`. Both chains are live members of the cut and the
+/// holder is one of the chains the append publishes to. The obligation is made
+/// durable immediately before the holder's events, so the owner's retained
+/// closure cannot be released until the holder is itself fenced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvidenceObligationDependency {
+    pub owner_chain_root_id: String,
+    pub holder_chain_root_id: String,
+}
+
 /// Every additional chain a mixed-cut append excludes: live chains by exact
 /// frontier and retired chains by fence. A chain appears in only one list.
+/// `obligations` names live owners whose retained prefix a published holder
+/// will rest on.
 pub struct MixedCutDependencies<'a> {
     pub current_anchors: &'a [AuthoritativeThreadEventReadAnchor],
     pub retired: &'a [RetiredChainDependency],
+    pub obligations: &'a [EvidenceObligationDependency],
 }
 
 /// Borrowed signed data captured while both exact chain locks remain held.
@@ -7132,6 +7147,7 @@ impl StateDb {
             MixedCutDependencies {
                 current_anchors: &[],
                 retired: &[],
+                obligations: &[],
             },
             cas_mutation_guard,
             admit,
@@ -7236,6 +7252,7 @@ impl StateDb {
         let MixedCutDependencies {
             current_anchors,
             retired,
+            obligations,
         } = dependencies;
         let mut live = BTreeMap::new();
         for anchor in current_anchors.iter().chain([target]).chain(counterpart) {
@@ -7264,6 +7281,17 @@ impl StateDb {
                     "append dependencies have conflicting retired cuts"
                 );
             }
+        }
+        for obligation in obligations {
+            anyhow::ensure!(
+                obligation.owner_chain_root_id != obligation.holder_chain_root_id
+                    && live.contains_key(obligation.owner_chain_root_id.as_str())
+                    && [Some(target), counterpart]
+                        .into_iter()
+                        .flatten()
+                        .any(|anchor| { anchor.chain_root_id == obligation.holder_chain_root_id }),
+                "evidence obligation must name a live owner and a published holder of the cut"
+            );
         }
         let roots = live
             .keys()
@@ -7397,6 +7425,7 @@ impl StateDb {
         Ok(Some(ProvedMixedCut {
             locks,
             retired_roots,
+            obligations,
             target: target_snapshot,
             counterpart: counterpart_snapshot,
             target_thread_ids,
@@ -7404,12 +7433,33 @@ impl StateDb {
         }))
     }
 
-    /// Record, for every retired chain the cut depends on, that `holder`'s
-    /// evidence rests on that chain's retained prefix, then run `append`
-    /// with every obligation durable. The retired chain can then be released
-    /// only after the holder is itself fenced, so a live seat's testimony
-    /// about a retired seat's absence is never left without its prefix.
+    /// Record, for every retired chain the cut depends on and every live owner
+    /// the cut names for `holder`, that `holder`'s evidence rests on that
+    /// chain's retained prefix, then run `append` with every obligation
+    /// durable. The owner can then be released only after the holder is
+    /// itself fenced, so a live seat's testimony about another seat's absence
+    /// is never left without its prefix.
     fn with_retired_obligations<T>(
+        &self,
+        cas_mutation_guard: &crate::recovery::CasMutationGuard,
+        proved: &ProvedMixedCut<'_>,
+        holder: &str,
+        append: impl FnOnce() -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        let mut owners: Vec<&str> = proved.retired_roots.clone();
+        owners.extend(
+            proved
+                .obligations
+                .iter()
+                .filter(|obligation| obligation.holder_chain_root_id == holder)
+                .map(|obligation| obligation.owner_chain_root_id.as_str()),
+        );
+        owners.sort_unstable();
+        owners.dedup();
+        self.publish_obligations_then(cas_mutation_guard, proved, &owners, holder, append)
+    }
+
+    fn publish_obligations_then<T>(
         &self,
         cas_mutation_guard: &crate::recovery::CasMutationGuard,
         proved: &ProvedMixedCut<'_>,
@@ -7432,7 +7482,7 @@ impl StateDb {
             lock_for(holder)?,
             owner,
             holder,
-            || self.with_retired_obligations(cas_mutation_guard, proved, rest, holder, append),
+            || self.publish_obligations_then(cas_mutation_guard, proved, rest, holder, append),
         )
     }
 
@@ -7486,26 +7536,20 @@ impl StateDb {
             .ok_or_else(|| anyhow::anyhow!("append dependency lock was not acquired"))?;
         // Every dependency lock stays held until this append returns; the
         // helper reuses the held target lock and never reacquires it.
-        self.with_retired_obligations(
-            cas_mutation_guard,
-            &proved,
-            &proved.retired_roots,
-            chain_root_id,
-            || {
-                self.append_events_under_chain_lock(
-                    LockedAppend {
-                        chain_root_id,
-                        thread_id,
-                        events,
-                        snapshot_updates: Vec::new(),
-                        signer,
-                        runtime_liveness: Some(runtime_liveness),
-                        expected: Some(expected),
-                    },
-                    target_lock,
-                )
-            },
-        )
+        self.with_retired_obligations(cas_mutation_guard, &proved, chain_root_id, || {
+            self.append_events_under_chain_lock(
+                LockedAppend {
+                    chain_root_id,
+                    thread_id,
+                    events,
+                    snapshot_updates: Vec::new(),
+                    signer,
+                    runtime_liveness: Some(runtime_liveness),
+                    expected: Some(expected),
+                },
+                target_lock,
+            )
+        })
     }
 
     /// Publish `first_events` to the first chain and then an event built from
@@ -7582,7 +7626,6 @@ impl StateDb {
         let first_committed = match self.with_retired_obligations(
             cas_mutation_guard,
             &proved,
-            &proved.retired_roots,
             &first.chain_root_id,
             || {
                 self.append_events_under_chain_lock(
@@ -7653,7 +7696,6 @@ impl StateDb {
             match self.with_retired_obligations(
                 cas_mutation_guard,
                 &proved,
-                &proved.retired_roots,
                 &second.chain_root_id,
                 || {
                     self.append_events_under_chain_lock(

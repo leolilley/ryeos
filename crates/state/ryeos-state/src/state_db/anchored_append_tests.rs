@@ -450,6 +450,7 @@ fn mixed_cut_excludes_live_and_retired_dependencies() {
             MixedCutDependencies {
                 current_anchors: current,
                 retired,
+                obligations: &[],
             },
             &guard(&db),
             |_| Ok(true),
@@ -679,6 +680,7 @@ fn pending_transition_on_a_live_dependency_is_a_conflict_at_its_exact_frontier()
             MixedCutDependencies {
                 current_anchors: std::slice::from_ref(&extra),
                 retired: &[],
+                obligations: &[],
             },
             &guard(&db),
             |_| Ok(true),
@@ -899,6 +901,7 @@ fn single_anchor_mixed_cut_commits_once_under_the_fence() {
             MixedCutDependencies {
                 current_anchors: current,
                 retired,
+                obligations: &[],
             },
             &guard(&db),
             |view| {
@@ -1001,6 +1004,7 @@ fn ordered_pair_publishes_the_second_event_from_the_first_commit() {
             MixedCutDependencies {
                 current_anchors: &[],
                 retired: &[],
+                obligations: &[],
             },
             &guard(&db),
             |view| {
@@ -1046,6 +1050,7 @@ fn ordered_pair_conflicts_before_any_write_on_a_stale_kind_or_refused_cut() {
     let none = || MixedCutDependencies {
         current_anchors: &[],
         retired: &[],
+        obligations: &[],
     };
     let run = |second_kind: &str,
                deps: MixedCutDependencies<'_>,
@@ -1077,7 +1082,8 @@ fn ordered_pair_conflicts_before_any_write_on_a_stale_kind_or_refused_cut() {
             KIND,
             MixedCutDependencies {
                 current_anchors: std::slice::from_ref(&extra),
-                retired: &[]
+                retired: &[],
+                obligations: &[],
             },
             true,
             &entered
@@ -1120,6 +1126,7 @@ fn ordered_pair_reports_a_failed_second_event_as_first_committed() {
             MixedCutDependencies {
                 current_anchors: &[],
                 retired: &[],
+                obligations: &[],
             },
             &guard(&db),
             |_| Ok(true),
@@ -1168,6 +1175,7 @@ fn a_retired_dependency_records_an_obligation_for_every_chain_that_publishes() {
             MixedCutDependencies {
                 current_anchors: &[],
                 retired: &retired,
+                obligations: &[],
             },
             &guard(&db),
             |_| Ok(true),
@@ -1184,6 +1192,7 @@ fn a_retired_dependency_records_an_obligation_for_every_chain_that_publishes() {
             MixedCutDependencies {
                 current_anchors: &[],
                 retired: &retired,
+                obligations: &[],
             },
             &guard(&db),
             |_| Ok(true),
@@ -1218,6 +1227,7 @@ fn a_cut_with_no_retired_dependency_records_no_obligation() {
             MixedCutDependencies {
                 current_anchors: &[],
                 retired: &[],
+                obligations: &[],
             },
             &guard(&db),
             |_| Ok(true),
@@ -1231,4 +1241,91 @@ fn a_cut_with_no_retired_dependency_records_no_obligation() {
             .unwrap()
             .is_empty()
     );
+}
+
+#[test]
+fn a_live_owner_obligation_is_recorded_for_the_named_holder_only() {
+    let (_dir, db) = open();
+    let signer = TestSigner::default();
+    create(&db, "T-holder", KIND);
+    create(&db, "T-owner", KIND);
+    let first = capture(&db, "T-holder");
+    let second = capture(&db, "T-owner");
+    let obligations = [EvidenceObligationDependency {
+        owner_chain_root_id: "T-owner".into(),
+        holder_chain_root_id: "T-holder".into(),
+    }];
+    let holders_of = |root: &str| {
+        let lock = db.acquire_existing_chain_lock(root).unwrap();
+        db.recovery
+            .evidence_obligation_holders(&lock, root)
+            .unwrap()
+    };
+    let result = db
+        .append_running_event_pair_admitted_if_mixed_cut(
+            pair(&first, &second, &signer, KIND, KIND),
+            MixedCutDependencies {
+                current_anchors: &[],
+                retired: &[],
+                obligations: &obligations,
+            },
+            &guard(&db),
+            |_| Ok(true),
+            |_, _| Ok(vec![event("T-owner", "second")]),
+        )
+        .unwrap();
+    assert!(matches!(
+        result,
+        ConditionalThreadEventPairAppendResult::Committed { .. }
+    ));
+    assert_eq!(
+        holders_of("T-owner"),
+        BTreeSet::from(["T-holder".to_owned()])
+    );
+    assert!(
+        holders_of("T-holder").is_empty(),
+        "the second chain is not a holder"
+    );
+}
+
+#[test]
+fn an_obligation_naming_a_chain_outside_the_cut_or_itself_refuses_before_any_write() {
+    let (_dir, db) = open();
+    let signer = TestSigner::default();
+    create(&db, "T-first", KIND);
+    create(&db, "T-second", KIND);
+    create(&db, "T-extra", KIND);
+    let first = capture(&db, "T-first");
+    let second = capture(&db, "T-second");
+    let bad = |owner: &str, holder: &str| {
+        [EvidenceObligationDependency {
+            owner_chain_root_id: owner.into(),
+            holder_chain_root_id: holder.into(),
+        }]
+    };
+    for obligations in [
+        bad("T-extra", "T-first"),
+        bad("T-second", "T-extra"),
+        bad("T-first", "T-first"),
+    ] {
+        let entered = std::cell::Cell::new(false);
+        let result = db.append_running_event_pair_admitted_if_mixed_cut(
+            pair(&first, &second, &signer, KIND, KIND),
+            MixedCutDependencies {
+                current_anchors: &[],
+                retired: &[],
+                obligations: &obligations,
+            },
+            &guard(&db),
+            |_| {
+                entered.set(true);
+                Ok(true)
+            },
+            |_, _| Ok(vec![event("T-second", "second")]),
+        );
+        assert!(result.is_err());
+        assert!(!entered.get());
+    }
+    assert_eq!(event_rows(&db, "T-first"), START_ROWS);
+    assert_eq!(event_rows(&db, "T-second"), START_ROWS);
 }
