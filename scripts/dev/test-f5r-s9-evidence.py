@@ -32,7 +32,7 @@ class FakeController:
     """Fake daemon: verifies x-ryeos-* signatures with the pure-Python verifier and serves the routes."""
 
     def __init__(self, e3="ok", fail_confirm=False):
-        self.e3, self.fail_confirm = e3, fail_confirm
+        self.e3, self.fail_confirm, self.refuse_sessions = e3, fail_confirm, False
         self.started_at = "2026-10-21T00:00:00Z"
         self.sessions, self.profiles, self.log, self.sig_ok = {}, {}, [], []
         self.pub = S9.ed25519_public(SEED)
@@ -111,6 +111,8 @@ class FakeController:
             del self.profiles[prm["profile_id"]]
             return 200, {}
         if ref == "worker_execution:codex/session":
+            if self.refuse_sessions:
+                return 400, {"error": "credential profile is not active"}
             live = [s for s in self.sessions.values() if not s["ended"]]
             if len(live) >= 2:
                 return 500, {"error": "lease refused for workload `codex`: the node already holds 2"}
@@ -207,9 +209,11 @@ class Harness(unittest.TestCase):
             return ProxyResp(200, proxy_body)
 
         argv = ["--base-url", ctl.url, "--operator-key", str(self.key), "--out", str(self.out),
-                "--project-path", "/proj", "--service-id", service, "--render-base", render.url,
+                "--project-path", "/proj", "--render-base", render.url,
                 "--env-file", str(self.envfile), "--sandbox-id", SANDBOX, "--owner-id", "tea-owner1",
                 "--poll-timeout", "0", "--poll-interval", "0", "--restart-timeout", "5", *extra]
+        if service:
+            argv += ["--service-id", service]
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
             code = S9.main(argv, proxy_opener=proxy, sleep=lambda s: None, emit=self.lines.append)
@@ -307,14 +311,63 @@ class Tests(Harness):
         manifest = json.loads((self.out / "manifest.json").read_text())
         self.assertEqual({s["id"]: s["status"] for s in manifest["steps"]}["e7"], "not-run")
 
-    def test_profile_confirm_failure_skips_sessions_and_still_tears_down(self):
+    def test_confirm_refused_is_inconclusive_and_sessions_still_attempted(self):
         self.ctl.fail_confirm = True
+        self.ctl.refuse_sessions = True
         code = self.run_main(self.ctl, self.render)
-        self.assertEqual(code, 1)
-        self.assertEqual(self.evidence("profile")["status"], "fail")
-        self.assertFalse((self.out / "e1.json").exists())
+        self.assertEqual(code, 0, self.lines[-5:])
+        prof = self.evidence("profile")
+        self.assertEqual(prof["status"], "inconclusive")
+        self.assertIn("ceremony is absent or expired", prof["confirm_refusal"])
+        self.assertIn("ceremony is absent or expired", prof["reason"])
+        e1 = self.evidence("e1")
+        self.assertEqual(e1["status"], "refused")
+        self.assertTrue(e1["reason"])
+        self.assertIn("service:credential-profiles/confirm", self.ctl.log)
+        self.assertIn("worker_execution:codex/session", self.ctl.log)
+        self.assertEqual(self.evidence("e2")["status"], "refused")
+        self.assertEqual(self.evidence("e3")["status"], "inconclusive")
         self.assertEqual(self.ctl.profiles, {})
         self.assertEqual(self.evidence("teardown")["status"], "pass")
+
+    def test_skip_render_records_e6_e7_skipped_and_reads_no_key(self):
+        self.envfile.unlink()  # a read of the key would fail
+        self.render.calls.clear()
+        code = self.run_main(self.ctl, self.render, extra=["--skip-render"], service=None)
+        self.assertEqual(code, 0, self.lines[-5:])
+        for name in ("e6", "e7"):
+            ev = self.evidence(name)
+            self.assertEqual(ev["status"], "skipped")
+            self.assertEqual(ev["reason"], "render api key is not available on the controller")
+        self.assertEqual(self.render.calls, [])
+        self.assertFalse(self.render.restarted)
+        self.assertEqual(self.proxy_requests, [])
+        manifest = json.loads((self.out / "manifest.json").read_text())
+        by = {s["id"]: s for s in manifest["steps"]}
+        self.assertEqual(by["e6"]["status"], "skipped")
+        self.assertEqual(by["e7"]["reason"], "render api key is not available on the controller")
+        self.assertEqual(manifest["summary"]["skipped"], 2)
+        self.assertEqual(manifest["summary"]["pass"], 7)
+
+    def test_manifest_summary_counts_every_status(self):
+        self.ctl.e3 = "refused"
+        self.ctl.fail_confirm = True
+        self.assertEqual(self.run_main(self.ctl, self.render, extra=["--skip-render"]), 0)
+        m = json.loads((self.out / "manifest.json").read_text())
+        counts = {}
+        for s in m["steps"]:
+            self.assertTrue(s["reason"])
+            counts[s["status"]] = counts.get(s["status"], 0) + 1
+        for k, v in counts.items():
+            self.assertEqual(m["summary"][k], v, k)
+        self.assertEqual(sum(m["summary"].values()), len(m["steps"]))
+        self.assertEqual(m["summary"]["skipped"], 2)
+        self.assertEqual(m["summary"]["inconclusive"], 1)
+        self.assertTrue(S9.verify_manifest(self.out, S9.ed25519_public(SEED)))
+
+    def test_service_id_required_without_skip_render(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(self.run_main(self.ctl, self.render, service=None), 2)
 
     def test_idempotent_rerun_skips_done_steps(self):
         self.assertEqual(self.run_main(self.ctl, self.render), 0)
