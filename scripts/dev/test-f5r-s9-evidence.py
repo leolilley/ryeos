@@ -33,6 +33,9 @@ class FakeController:
 
     def __init__(self, e3="ok", fail_confirm=False):
         self.e3, self.fail_confirm, self.refuse_sessions = e3, fail_confirm, False
+        # State a fresh profile lands in. 'confirming' stands for a login Leo completed by hand; a real
+        # create leaves the profile 'unauthenticated'.
+        self.create_state, self.routes = "confirming", []
         self.started_at = "2026-10-21T00:00:00Z"
         self.sessions, self.profiles, self.log, self.sig_ok = {}, {}, [], []
         self.pub = S9.ed25519_public(SEED)
@@ -80,7 +83,13 @@ class FakeController:
                 req = json.loads(body)
                 ref, prm = req["item_ref"], req["parameters"]
                 fake.log.append(ref)
-                self.send(*fake.handle(ref, prm))
+                fake.routes.append((p, ref))
+                accepted = req["execution_policy"]["response"] == "accepted"
+                if accepted != (p == "/execute/launch"):
+                    return self.send(400, {"error": "execution_policy.response=accepted is supported only by "
+                                                    "/execute/launch"})
+                status, out = fake.handle(ref, prm)
+                self.send(status, {"result": out} if status == 200 else out)
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), H)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
@@ -90,8 +99,8 @@ class FakeController:
         if ref == "service:credential-profiles/list":
             return 200, {"items": []}
         if ref == "service:credential-profiles/create":
-            self.profiles[prm["profile_id"]] = {"state": "confirming", "credential_generation": 0}
-            return 200, {"profile_id": prm["profile_id"], "state": "confirming"}
+            self.profiles[prm["profile_id"]] = {"state": self.create_state, "credential_generation": 1}
+            return 200, {"profile_id": prm["profile_id"], "state": self.create_state}
         if ref == "service:credential-profiles/get":
             p = self.profiles.get(prm["profile_id"])
             if not p:
@@ -100,13 +109,24 @@ class FakeController:
         if ref == "service:credential-profiles/confirm":
             if self.fail_confirm:
                 return 400, {"error": "credential confirmation ceremony is absent or expired"}
-            self.profiles[prm["profile_id"]] = {"state": "active", "credential_generation": 1}
-            return 200, {"state": "active", "credential_generation": 1}
+            p = self.profiles[prm["profile_id"]]
+            if p["state"] != "confirming":
+                return 400, {"error": "credential confirmation ceremony is absent or expired"}
+            self.confirm_args = prm
+            self.profiles[prm["profile_id"]] = {"state": "active", "credential_generation": 2}
+            return 200, {"state": "active", "credential_generation": 2}
         if ref == "service:credential-profiles/revoke":
-            self.profiles[prm["profile_id"]]["state"] = "revoked"
-            return 200, {"credential_generation": 2}
+            p = self.profiles[prm["profile_id"]]
+            if not isinstance(prm.get("credential_generation"), int) or prm["credential_generation"] != p["credential_generation"]:
+                return 400, {"error": "invalid type: null, expected u64"}
+            p["state"] = "revoked"
+            p["credential_generation"] += 1
+            return 200, {"credential_generation": p["credential_generation"]}
         if ref == "service:credential-profiles/delete":
-            if self.profiles[prm["profile_id"]]["state"] != "revoked":
+            p = self.profiles[prm["profile_id"]]
+            if not isinstance(prm.get("credential_generation"), int) or prm["credential_generation"] != p["credential_generation"]:
+                return 400, {"error": "invalid type: null, expected u64"}
+            if p["state"] not in ("revoked", "unauthenticated"):
                 return 400, {"error": "not revoked"}
             del self.profiles[prm["profile_id"]]
             return 200, {}
@@ -329,6 +349,62 @@ class Tests(Harness):
         self.assertEqual(self.evidence("e3")["status"], "inconclusive")
         self.assertEqual(self.ctl.profiles, {})
         self.assertEqual(self.evidence("teardown")["status"], "pass")
+
+    def test_sessions_use_launch_route_and_services_use_execute(self):
+        self.assertEqual(self.run_main(self.ctl, self.render), 0, self.lines[-5:])
+        for path, ref in self.ctl.routes:
+            self.assertEqual(path == "/execute/launch", ref == "worker_execution:codex/session", (path, ref))
+        self.assertIn(("/execute/launch", "worker_execution:codex/session"), self.ctl.routes)
+        e1 = self.evidence("e1")
+        body = e1["exchanges"][0]["request"]["body"]
+        self.assertRegex(body["launch_id"], r"^L-[0-9a-f]{32}$")
+        self.assertEqual(e1["exchanges"][0]["request"]["path"], "/execute/launch")
+
+    def test_revoke_and_delete_carry_the_generation(self):
+        self.assertEqual(self.run_main(self.ctl, self.render), 0, self.lines[-5:])
+        td = self.evidence("teardown")
+        by = {e["label"]: e["request"]["body"]["parameters"] for e in td["exchanges"]}
+        self.assertEqual(by["profile-revoke"]["credential_generation"], 2)
+        self.assertEqual(by["profile-delete"]["credential_generation"], 3)
+        self.assertEqual(self.ctl.profiles, {})
+
+    def test_existing_profile_is_reused_and_removed(self):
+        pid = "s9-evidence-existing"
+        self.ctl.profiles[pid] = {"state": "unauthenticated", "credential_generation": 1}
+        code = self.run_main(self.ctl, self.render, extra=["--profile-id", pid, "--skip-render"])
+        self.assertEqual(code, 0, self.lines[-5:])
+        self.assertNotIn("service:credential-profiles/create", self.ctl.log)
+        prof = self.evidence("profile")
+        self.assertTrue(prof["reused_existing"])
+        self.assertEqual(prof["status"], "inconclusive")
+        self.assertEqual(self.evidence("teardown")["status"], "pass")
+        self.assertEqual(self.ctl.profiles, {})
+
+    def test_unauthenticated_profile_records_provider_login_requirement_without_confirm(self):
+        self.ctl.create_state = "unauthenticated"
+        self.assertEqual(self.run_main(self.ctl, self.render, extra=["--skip-render"]), 0, self.lines[-5:])
+        prof = self.evidence("profile")
+        self.assertEqual(prof["status"], "inconclusive")
+        self.assertIn("activation requires a provider login", prof["reason"])
+        self.assertNotIn("service:credential-profiles/confirm", self.ctl.log)
+        self.assertEqual(self.ctl.profiles, {})
+
+    def test_hand_supplied_epoch_and_digest_are_confirmed(self):
+        self.ctl.create_state = "confirming"
+        digest = "ab" * 32
+        extra = ["--skip-render", "--login-epoch", "7", "--account-digest", digest]
+        self.assertEqual(self.run_main(self.ctl, self.render, extra=extra), 0, self.lines[-5:])
+        self.assertEqual(self.ctl.confirm_args, {"profile_id": self.ctl.confirm_args["profile_id"],
+                                                 "login_epoch": 7, "expected_account_digest": digest})
+        self.assertEqual(self.evidence("profile")["status"], "pass")
+
+    def test_existing_active_profile_is_reused_without_confirm(self):
+        pid = "s9-evidence-active"
+        self.ctl.profiles[pid] = {"state": "active", "credential_generation": 2}
+        self.assertEqual(self.run_main(self.ctl, self.render, extra=["--profile-id", pid, "--skip-render"]), 0)
+        self.assertEqual(self.evidence("profile")["status"], "pass")
+        self.assertNotIn("service:credential-profiles/confirm", self.ctl.log)
+        self.assertEqual(self.ctl.profiles, {})
 
     def test_skip_render_records_e6_e7_skipped_and_reads_no_key(self):
         self.envfile.unlink()  # a read of the key would fail
