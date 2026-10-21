@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-"""Produce the F5R guest products on the controller and write a handoff record.
+"""Produce the F5R guest products and write a handoff record (and a ship bundle).
 
-Runs inside the controller container as the `ryeos` user (RYEOSD_URL
-http://127.0.0.1:8000, the controller's own operator key), or against any
-local daemon via --base-url and --key-path. Every step drives the `ryeos` CLI
+Runs on an origin node that proves the enforced isolation lane (for example
+`--base-url http://127.0.0.1:7400`), or inside a controller as the `ryeos`
+user (RYEOSD_URL, default http://127.0.0.1:8000). The `ryeos` CLI discovers its
+own app root; --app-root/--key-path only matter when given. With --export DIR
+each captured product is re-read through the product verb and its tree bytes are
+written with a ship.json for scripts/dev/f5r-product-ship.py. Every step drives the `ryeos` CLI
 through one run() helper that logs the argv and keeps stdout/stderr as
 evidence. A state file records each step as it completes, so a re-run resumes
 and never re-creates a thread, capture or activation the file says exists.
@@ -15,6 +18,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -40,6 +44,14 @@ OWNER_ENTRIES = {
     "guest-owner-profile.json": ("file", 0o644),
 }
 MAX_OWNER_EXECUTABLE_BYTES = 256 * 1024 * 1024
+SHIP_SCHEMA = "ryeos.f5r_guest_product_ship.v1"
+STORAGE_BY_MANIFEST_KIND = {
+    "external_content_manifest": "content",
+    "external_large_content_manifest": "large_content",
+}
+INLINE_BLOB_MAX = 8 * 1024 * 1024  # objects/get inlines blobs up to 16 MiB
+CHUNK_BYTES = 512 * 1024  # objects/get MAX_BLOB_CHUNK_BYTES
+LOCAL_CAPTURE = {"kind": "local_capture"}
 
 
 class Refusal(Exception):
@@ -121,14 +133,35 @@ def key_root_hex(public_key):
     return base64.b64decode(public_key[8:]).hex()
 
 
-def fetch_public_key(base_url, opener, timeout):
+def fetch_public_info(base_url, opener, timeout):
+    """Unsigned GET /public-key: (normalized signing key, node fingerprint or None)."""
     request = urllib.request.Request(base_url.rstrip("/") + "/public-key", method="GET")
     with opener(request, timeout) as response:
         body = json.loads(response.read())
     signing_key = body.get("signing_key")
     if not isinstance(signing_key, str):
         raise Refusal("GET /public-key returned no signing_key")
-    return normalize_public_key(signing_key)
+    fingerprint = body.get("fingerprint")
+    return normalize_public_key(signing_key), fingerprint if isinstance(fingerprint, str) else None
+
+
+def fetch_public_key(base_url, opener, timeout):
+    return fetch_public_info(base_url, opener, timeout)[0]
+
+
+def safe_relative(path):
+    parts = path.split("/") if isinstance(path, str) else []
+    if not parts or any(p in ("", ".", "..") for p in parts) or path.startswith("/"):
+        raise StepFailed(f"manifest path {path!r} is not a canonical relative path")
+    return path
+
+
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 class State:
@@ -159,6 +192,7 @@ class Driver:
         self.evidence = Path(evidence)
         self.opener, self.sleep, self.clock, self.emit = opener, sleep, clock, emit
         self.secrets = [v for k, v in env.items() if SECRET_ENV_RE.search(k) and len(v) >= 6]
+        self.manifests, self.node_fingerprint, self.node_key = {}, None, None
         self.evidence.mkdir(parents=True, exist_ok=True)
         self.log_path = self.evidence / "steps.jsonl"
         self.seq = len(list(self.evidence.glob("*.stdout")))
@@ -182,7 +216,7 @@ class Driver:
         (root / ".ai").mkdir(parents=True, exist_ok=True)
         return root
 
-    def run(self, step, args, timeout=None, **ids):
+    def run(self, step, args, timeout=None, keep_stdout=True, **ids):
         """The single CLI entry point: log argv, keep stdout/stderr, return parsed JSON."""
         timeout = timeout or self.args.timeout
         argv = [self.args.ryeos_bin] + args
@@ -194,7 +228,8 @@ class Driver:
             code, out, err = done.returncode, done.stdout, done.stderr
         except Exception as exc:  # timeout or spawn failure is a failed step
             code, out, err = 124, "", f"{type(exc).__name__}: {exc}"
-        stem.with_name(stem.name + ".stdout").write_text(self.scrub(out))
+        stem.with_name(stem.name + ".stdout").write_text(
+            self.scrub(out) if keep_stdout else f"<{len(out)} bytes of blob payload elided>\n")
         stem.with_name(stem.name + ".stderr").write_text(self.scrub(err))
         record = {"step": step, "argv": argv, "exit": code,
                   "duration_s": round(self.clock() - started, 3), "evidence": stem.name}
@@ -294,14 +329,143 @@ class Driver:
         self.state.set(key, witness_hash=witness, manifest_hash=find_key(captured, "manifest_hash"))
         return self.state.get(key)
 
-    def read_manifest(self, manifest_hash):
-        got = self.run("owner.manifest-read",
+    def read_manifest(self, manifest_hash, step="owner.manifest-read"):
+        cached = self.manifests.get(manifest_hash)
+        if cached is not None:
+            return cached
+        got = self.run(step,
                        ["execute", "service:objects/get", "--no-stream",
                         "--input", json.dumps({"object_hashes": [manifest_hash]})])
         for entry in got.get("entries", []) if isinstance(got, dict) else []:
             if entry.get("hash") == manifest_hash and entry.get("kind") == "object":
+                self.manifests[manifest_hash] = entry.get("value")
                 return entry.get("value")
-        raise StepFailed("owner.manifest-read: manifest object not returned")
+        raise StepFailed(f"{step}: manifest object not returned")
+
+    # ---- export ----------------------------------------------------------
+
+    def iter_blob(self, label, blob_hash, size):
+        """Yield the bytes of one CAS blob through objects/get (inline, else 512 KiB chunks)."""
+        if size is not None and size <= INLINE_BLOB_MAX:
+            got = self.run(label, ["execute", "service:objects/get", "--no-stream", "--input",
+                                   json.dumps({"blob_hashes": [blob_hash]})], keep_stdout=False)
+            for entry in got.get("entries", []) if isinstance(got, dict) else []:
+                if entry.get("hash") == blob_hash and entry.get("kind") == "blob":
+                    yield base64.b64decode(entry["data"])
+                    return
+            raise StepFailed(f"{label}: blob {blob_hash} not returned")
+        offset = 0
+        while True:
+            got = self.run(label, ["execute", "service:objects/get", "--no-stream", "--input",
+                                   json.dumps({"blob_chunk": {"hash": blob_hash, "offset": offset,
+                                                              "length": CHUNK_BYTES}})],
+                           keep_stdout=False)
+            chunk = got.get("blob_chunk") if isinstance(got, dict) else None
+            if not isinstance(chunk, dict) or chunk.get("kind") != "blob_chunk":
+                raise StepFailed(f"{label}: blob {blob_hash} chunk at {offset} not returned")
+            data = base64.b64decode(chunk["data"])
+            if not data and not chunk.get("eof"):
+                raise StepFailed(f"{label}: empty non-final chunk at {offset}")
+            offset += len(data)
+            yield data
+            if chunk.get("eof"):
+                return
+
+    def fetch_file(self, name, entry, dest):
+        """Write one manifest file entry to `dest`, verifying every hash; return (size, sha256)."""
+        label = f"{name}.blob"
+        pieces = entry.get("chunk_hashes") or []
+        total, whole = 0, hashlib.sha256()
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_name(dest.name + ".part")
+        with open(tmp, "wb") as handle:
+            if pieces:
+                sources = [(h, None if entry.get("chunk_size") is None else entry["chunk_size"]) for h in pieces]
+            else:
+                sources = [(entry.get("blob_hash"), entry.get("size"))]
+            for blob_hash, size in sources:
+                part = hashlib.sha256()
+                for data in self.iter_blob(label, blob_hash, size):
+                    part.update(data)
+                    whole.update(data)
+                    total += len(data)
+                    handle.write(data)
+                if pieces and part.hexdigest() != blob_hash:
+                    raise StepFailed(f"{name}: chunk {blob_hash} of {entry['path']} failed its hash")
+            handle.flush()
+            os.fsync(handle.fileno())
+        digest = whole.hexdigest()
+        if digest != entry.get("blob_hash") or total != entry.get("size"):
+            tmp.unlink()
+            raise StepFailed(f"{name}: {entry['path']} fetched {total} bytes sha256 {digest}, "
+                             f"manifest says {entry.get('size')} bytes {entry.get('blob_hash')}")
+        os.replace(tmp, dest)
+        dest.chmod(0o755 if entry.get("mode") == 0o755 else 0o644)
+        return total, digest
+
+    def export_product(self, name):
+        """Read the exact durable capture through the product verb and write its tree bytes."""
+        key = f"{name}.export"
+        done = self.state.get(key)
+        tree = Path(self.args.export) / name / "tree"
+        if done.get("record") and tree.is_dir() and \
+                all((tree / e["path"]).is_file() and file_sha256(tree / e["path"]) == e["sha256"]
+                    for e in done["record"]["entries"] if e["kind"] == "file"):
+            self.note(step=key, skipped="state", manifest_hash=done["record"]["manifest_hash"])
+            return
+        thread, cap = self.state.get(f"{name}.thread"), self.state.get(f"{name}.capture")
+        product = self.run(f"{name}.product", ["external-content", "product", thread["chain_root_id"],
+                                              thread["thread_id"], PRODUCT_NAME],
+                           thread_id=thread["thread_id"])
+        evidence = product.get("evidence") if isinstance(product, dict) else None
+        if not isinstance(product, dict) or product.get("state") != "captured" or not isinstance(evidence, dict):
+            raise StepFailed(f"{name}.product: product verb did not return a captured product")
+        if product.get("witness_hash") != cap.get("witness_hash"):
+            raise StepFailed(f"{name}.product: witness {product.get('witness_hash')} differs from the capture")
+        manifest_hash = evidence.get("manifest_hash")
+        if not isinstance(manifest_hash, str) or not HASH_RE.match(manifest_hash) or \
+                (cap.get("manifest_hash") and cap["manifest_hash"] != manifest_hash):
+            raise StepFailed(f"{name}.product: manifest hash missing or differs from the capture")
+        manifest = self.read_manifest(manifest_hash, f"{name}.export-manifest")
+        storage = STORAGE_BY_MANIFEST_KIND.get(manifest.get("kind") if isinstance(manifest, dict) else None)
+        if storage is None or manifest.get("kind") != evidence.get("manifest_kind", manifest.get("kind")):
+            raise StepFailed(f"{name}.export: unsupported manifest kind")
+        if tree.exists():
+            shutil.rmtree(tree)
+        tree.mkdir(parents=True)
+        records, total = [], 0
+        for entry in manifest.get("entries", []):
+            rel = safe_relative(entry.get("path"))
+            if entry.get("kind") == "dir":
+                (tree / rel).mkdir(parents=True, exist_ok=True)
+                records.append({"path": rel, "kind": "dir"})
+            elif entry.get("kind") == "file":
+                size, digest = self.fetch_file(name, entry, tree / rel)
+                total += size
+                records.append({"path": rel, "kind": "file", "mode": entry.get("mode"), "size": size,
+                                "sha256": digest, "blob_hash": entry.get("blob_hash")})
+            else:
+                raise StepFailed(f"{name}.export: entry {rel} kind {entry.get('kind')!r} cannot be shipped")
+        if evidence.get("total_bytes") is not None and evidence["total_bytes"] != total:
+            raise StepFailed(f"{name}.export: fetched {total} bytes, capture evidence says {evidence['total_bytes']}")
+        record = {"product_name": PRODUCT_NAME, "chain_root_id": thread["chain_root_id"],
+                  "thread_id": thread["thread_id"], "witness_hash": cap["witness_hash"],
+                  "witness_source": dict(LOCAL_CAPTURE), "manifest_hash": manifest_hash,
+                  "manifest_kind": manifest["kind"], "shape": "tree", "storage": storage,
+                  "maximum_bytes": max(total, 1), "entry_count": len(records), "total_bytes": total,
+                  "tree": f"{name}/tree", "entries": records}
+        self.state.set(key, record=record)
+        self.write_ship()
+
+    def write_ship(self):
+        products = {n: self.state.get(f"{n}.export")["record"] for n in ("codex", "owner")
+                    if self.state.get(f"{n}.export").get("record")}
+        files = {f"{rec['tree']}/{e['path']}": e["sha256"]
+                 for rec in products.values() for e in rec["entries"] if e["kind"] == "file"}
+        ship = {"schema": SHIP_SCHEMA, "origin_node_fingerprint": self.node_fingerprint,
+                "origin_public_key": self.node_key, "written_at": utc_now(),
+                "products": products, "files": files}
+        write_atomic(Path(self.args.export) / "ship.json", json.dumps(ship, indent=2, sort_keys=True) + "\n")
 
     def preflight_owner(self, manifest_hash, public_key):
         if self.state.get("owner.preflight").get("ok") and \
@@ -315,12 +479,20 @@ class Driver:
         self.state.set("owner.preflight", ok=True, manifest_hash=manifest_hash)
 
     def produce(self, handoff):
-        key = fetch_public_key(self.args.base_url, self.opener, self.args.timeout)
+        key, fingerprint = fetch_public_info(self.args.base_url, self.opener, self.args.timeout)
         handoff["controller_public_key"] = key
+        handoff["origin_node_fingerprint"] = self.node_fingerprint = fingerprint
+        self.node_key = key
+        if self.args.export:
+            if not fingerprint:
+                raise StepFailed("GET /public-key returned no node fingerprint for the export")
+            Path(self.args.export).mkdir(parents=True, exist_ok=True)
         if not self.args.skip_codex:
             self.activate()
             self.graph("codex", CODEX_GRAPH, None)
             handoff["codex_witness_hash"] = self.capture("codex")["witness_hash"]
+            if self.args.export:
+                self.export_product("codex")
         inputs = {"controller_public_key": key} if self.args.owner_production == "for-controller" else None
         thread = self.graph("owner", OWNER_GRAPHS[self.args.owner_production], inputs)
         captured = self.capture("owner")
@@ -334,6 +506,9 @@ class Driver:
         self.preflight_owner(manifest_hash, key)
         handoff["owner_manifest_hash"] = manifest_hash
         handoff["guest_runtime_manifest_hash"] = manifest_hash
+        if self.args.export:
+            self.export_product("owner")
+            handoff["export"] = str(Path(self.args.export) / "ship.json")
 
 
 def preflight_owner_manifest(manifest, controller_public_key=None):
@@ -394,7 +569,7 @@ def preflight_owner_manifest(manifest, controller_public_key=None):
 
 
 def resolve_identity(args, environ):
-    """Return (app_root, key_path); the CLI loads <app_root>/.ai/config/keys/signing/private_key.pem."""
+    """Return (app_root, key_path), or (None, None) when neither is given; the CLI loads <app_root>/.ai/config/keys/signing/private_key.pem."""
     if args.key_path:
         key_path = Path(args.key_path)
         if key_path.parts[-len(KEY_SUFFIX):] != KEY_SUFFIX:
@@ -406,7 +581,7 @@ def resolve_identity(args, environ):
     else:
         root = args.app_root or environ.get("RYEOS_APP_ROOT")
         if not root:
-            raise Refusal("pass --app-root or --key-path, or set RYEOS_APP_ROOT")
+            return None, None  # the ryeos CLI discovers the app root itself
         app_root = Path(root)
         key_path = app_root.joinpath(*KEY_SUFFIX)
     if not key_path.is_file():
@@ -417,7 +592,8 @@ def resolve_identity(args, environ):
 def parser():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--base-url", default=None, help=f"daemon URL (default RYEOSD_URL or {DEFAULT_BASE_URL})")
-    p.add_argument("--app-root", help="operator app root (default RYEOS_APP_ROOT)")
+    p.add_argument("--app-root", help="operator app root (optional: the ryeos CLI discovers it)")
+    p.add_argument("--export", help="write the shippable product bundle (ship.json plus tree bytes) here")
     p.add_argument("--key-path", help="operator key; must sit at the app root's standard location")
     p.add_argument("--handoff", required=True, help="path of the handoff JSON to write")
     p.add_argument("--state", help="state file (default <evidence-dir>/state.json)")
@@ -445,12 +621,14 @@ def main(argv=None, opener=http_open, sleep=time.sleep, clock=time.monotonic, en
         print("refused: non-loopback --base-url must be https", file=sys.stderr)
         return 2
     env["RYEOSD_URL"] = args.base_url
-    env["RYEOS_APP_ROOT"] = str(app_root)
+    if app_root is not None:
+        env["RYEOS_APP_ROOT"] = str(app_root)
     evidence = Path(args.evidence_dir)
     state = State(args.state or evidence / "state.json")
     driver = Driver(args, env, state, evidence, opener, sleep, clock, emit)
     handoff = {"owner_manifest_hash": None, "owner_witness_hash": None, "codex_witness_hash": None,
-               "guest_runtime_manifest_hash": None, "controller_public_key": None, "produced_at": None}
+               "guest_runtime_manifest_hash": None, "controller_public_key": None,
+               "origin_node_fingerprint": None, "produced_at": None}
     code = 0
     try:
         driver.produce(handoff)

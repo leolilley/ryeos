@@ -21,7 +21,7 @@ SECRET = "tok_SECRETVALUE123"
 
 # The fake `ryeos` binary: a Python shim on PATH. It logs argv and answers from a scenario file.
 SHIM = r'''#!/usr/bin/env python3
-import json, os, sys
+import base64, json, os, sys
 scn = json.load(open(os.environ["FAKE_RYEOS_SCENARIO"]))
 log = os.environ["FAKE_RYEOS_LOG"]
 rest = sys.argv[1:]
@@ -52,13 +52,39 @@ if rest[:2] == ["thread", "get"]:
          "result": {"result": result}})
 if rest[:2] == ["external-content", "capture-product"]:
     w = "d" * 64 if rest[3] == "T-owner" else "e" * 64
+    mh = scn.get("evidence_manifest", scn["manifest_hash"])
+    if rest[3] == "T-codex" and scn.get("codex_manifest_hash"):
+        mh = scn["codex_manifest_hash"]
     out({"state": scn.get("capture_state", "captured"), "witness_hash": w,
-         "evidence": {"manifest_hash": scn.get("evidence_manifest", scn["manifest_hash"])}})
+         "evidence": {"manifest_hash": mh}})
+if rest[:2] == ["external-content", "product"]:
+    codex = rest[3] == "T-codex"
+    mh = scn["codex_manifest_hash"] if codex and scn.get("codex_manifest_hash") else scn["manifest_hash"]
+    m = scn.get("objects", {}).get(mh, scn["manifest"])
+    out({"state": scn.get("product_state", "captured"), "witness_hash": "e" * 64 if codex else "d" * 64,
+         "evidence": {"manifest_hash": mh, "manifest_kind": m["kind"],
+                      "total_bytes": scn.get("product_total", m["total_bytes"])}})
 if rest[:2] == ["external-content", "activate"]:
     n = sum(1 for p in prior if p[:2] == ["external-content", "activate"])
     seq = scn["activation"]
     out(seq[min(n, len(seq) - 1)])
 if rest[:2] == ["execute", "service:objects/get"]:
+    req = json.loads(rest[rest.index("--input") + 1])
+    if "blob_hashes" in req:
+        h = req["blob_hashes"][0]
+        if h not in scn.get("blobs", {}):
+            out({"entries": [{"hash": h, "kind": "missing_blob"}]})
+        out({"entries": [{"hash": h, "kind": "blob", "data": scn["blobs"][h]}]})
+    if "blob_chunk" in req:
+        c = req["blob_chunk"]
+        raw = base64.b64decode(scn["blobs"][c["hash"]])
+        piece = raw[c["offset"]:c["offset"] + min(c["length"], scn.get("chunk_cap", c["length"]))]
+        out({"blob_chunk": {"hash": c["hash"], "kind": "blob_chunk", "offset": c["offset"],
+                            "total_size": len(raw), "eof": c["offset"] + len(piece) == len(raw),
+                            "data": base64.b64encode(piece).decode()}})
+    mh = req["object_hashes"][0]
+    if mh in scn.get("objects", {}):
+        out({"entries": [{"hash": mh, "kind": "object", "value": scn["objects"][mh]}]})
     out({"entries": [{"hash": scn["manifest_hash"], "kind": scn.get("object_kind", "object"),
                       "value": scn["manifest"]}]})
 sys.exit(9)
@@ -120,7 +146,9 @@ class Case(unittest.TestCase):
         environ.update(env or {})
         self.lines = []
         kw = {"clock": clock} if clock else {}
-        code = GP.main(["--app-root", str(self.app), "--evidence-dir", str(self.evidence),
+        ident = [] if "--no-identity" in extra else ["--app-root", str(self.app)]
+        extra = [e for e in extra if e != "--no-identity"]
+        code = GP.main([*ident, "--evidence-dir", str(self.evidence),
                         "--handoff", str(self.handoff), *extra],
                        opener=opener or (lambda req, t: Resp({"signing_key": KEY})),
                        sleep=lambda s: None, environ=environ, emit=self.lines.append, **kw)
@@ -348,6 +376,140 @@ class Tests(Case):
         self.assertEqual(set(self.state()["steps"]),
                          {"codex.activate", "codex.thread", "codex.capture", "owner.thread",
                           "owner.capture", "owner.preflight"})
+
+
+def b64(data):
+    return base64.b64encode(data).decode()
+
+
+def real_scenario(owner_exe=b"\x7fELF-owner", chunked=False):
+    """A scenario whose manifests and blobs are real: owner tree (content) and codex tree."""
+    root_hex = ROOT_BYTES.hex().encode()
+    profile = b'{"profile":1}'
+    owner = {"schema": "ryeos.external_content_manifest.v1", "kind": "external_content_manifest",
+             "entries": [
+                 {"path": "bin", "kind": "dir"},
+                 {"path": "bin/ryeos-external-guest-occurrence-owner", "kind": "file", "mode": 0o755,
+                  "blob_hash": hashlib.sha256(owner_exe).hexdigest(), "size": len(owner_exe)},
+                 {"path": "controller-root.hex", "kind": "file", "mode": 0o644, "size": 64,
+                  "blob_hash": hashlib.sha256(root_hex).hexdigest()},
+                 {"path": "guest-owner-profile.json", "kind": "file", "mode": 0o644, "size": len(profile),
+                  "blob_hash": hashlib.sha256(profile).hexdigest()}],
+             "entry_count": 4, "total_bytes": len(owner_exe) + 64 + len(profile)}
+    blobs = {hashlib.sha256(b).hexdigest(): b64(b) for b in (owner_exe, root_hex, profile)}
+    codex_bytes = b"CODEXBINARY" * 5
+    pieces = [codex_bytes[:20], codex_bytes[20:40], codex_bytes[40:]]
+    entry = {"path": "codex", "kind": "file", "mode": 0o755, "size": len(codex_bytes),
+             "blob_hash": hashlib.sha256(codex_bytes).hexdigest()}
+    if chunked:
+        entry.update(chunk_size=20, chunk_hashes=[hashlib.sha256(x).hexdigest() for x in pieces])
+        blobs.update({hashlib.sha256(x).hexdigest(): b64(x) for x in pieces})
+    else:
+        blobs[entry["blob_hash"]] = b64(codex_bytes)
+    codex = {"schema": "x", "kind": "external_large_content_manifest" if chunked else "external_content_manifest",
+             "entries": [entry], "entry_count": 1, "total_bytes": len(codex_bytes)}
+    return {"manifest": owner, "manifest_hash": H("c"), "codex_manifest_hash": H("4"),
+            "objects": {H("c"): owner, H("4"): codex}, "blobs": blobs,
+            "activation": [{"state": "completed", "receipt_hash": H("9"), "activation_id": "A-1"}]}, codex_bytes
+
+
+class ExportTests(Case):
+    def export_go(self, extra=(), scn=None, chunked=False, **kw):
+        base, self.codex_bytes = real_scenario(chunked=chunked)
+        self.scn = base
+        self.export = self.tmp / "export"
+        return self.go(["--export", str(self.export), *extra], scn=scn,
+                       opener=lambda req, t: Resp({"signing_key": KEY, "fingerprint": H("5")}), **kw)
+
+    def ship(self):
+        return json.loads((self.export / "ship.json").read_text())
+
+    def test_export_bundle_layout_and_digests(self):
+        self.assertEqual(self.export_go(), 0)
+        ship = self.ship()
+        self.assertEqual(ship["schema"], GP.SHIP_SCHEMA)
+        self.assertEqual(ship["origin_node_fingerprint"], H("5"))
+        owner, codex = ship["products"]["owner"], ship["products"]["codex"]
+        self.assertEqual((owner["manifest_hash"], owner["witness_hash"], owner["shape"], owner["storage"]),
+                         (H("c"), H("d"), "tree", "content"))
+        self.assertEqual(owner["witness_source"], {"kind": "local_capture"})
+        self.assertEqual(owner["tree"], "owner/tree")
+        self.assertEqual(owner["maximum_bytes"], owner["total_bytes"])
+        self.assertEqual((codex["manifest_hash"], codex["witness_hash"]), (H("4"), H("e")))
+        exe = self.export / "owner/tree/bin/ryeos-external-guest-occurrence-owner"
+        self.assertEqual(exe.read_bytes(), b"\x7fELF-owner")
+        self.assertTrue(exe.stat().st_mode & 0o100)
+        self.assertEqual((self.export / "codex/tree/codex").read_bytes(), self.codex_bytes)
+        self.assertEqual(len(ship["files"]), 4)
+        for rel, digest in ship["files"].items():
+            self.assertEqual(hashlib.sha256((self.export / rel).read_bytes()).hexdigest(), digest)
+        h = self.handoff_json()
+        self.assertEqual(h["origin_node_fingerprint"], H("5"))
+        self.assertEqual(h["export"], str(self.export / "ship.json"))
+
+    def test_product_verb_argv_and_blob_calls(self):
+        self.assertEqual(self.export_go(["--skip-codex"]), 0)
+        calls = self.calls()
+        self.assertIn(["external-content", "product", "T-owner", "T-owner", "runtime"], calls)
+        self.assertIn(["execute", "service:objects/get", "--no-stream", "--input",
+                       json.dumps({"blob_hashes": [hashlib.sha256(b"\x7fELF-owner").hexdigest()]})], calls)
+
+    def test_chunked_large_content_and_chunk_loop(self):
+        old = GP.INLINE_BLOB_MAX
+        GP.INLINE_BLOB_MAX = 4
+        try:
+            self.assertEqual(self.export_go(chunked=True, scn={"chunk_cap": 7}), 0)
+        finally:
+            GP.INLINE_BLOB_MAX = old
+        codex = self.ship()["products"]["codex"]
+        self.assertEqual(codex["storage"], "large_content")
+        self.assertEqual((self.export / "codex/tree/codex").read_bytes(), self.codex_bytes)
+        self.assertTrue(any("blob_chunk" in " ".join(c) for c in self.calls()))
+
+    def test_export_rerun_issues_no_cli_calls(self):
+        self.export_go()
+        before = len(self.calls())
+        self.assertEqual(self.go(["--export", str(self.export)],
+                                 opener=lambda req, t: Resp({"signing_key": KEY, "fingerprint": H("5")})), 0)
+        self.assertEqual(len(self.calls()), before)
+
+    def test_corrupt_blob_is_refused(self):
+        base, _ = real_scenario()
+        bad = hashlib.sha256(b"\x7fELF-owner").hexdigest()
+        base["blobs"][bad] = b64(b"tampered!!!")
+        self.scn = base
+        self.export = self.tmp / "export"
+        self.assertEqual(self.go(["--skip-codex", "--export", str(self.export)],
+                                 opener=lambda r, t: Resp({"signing_key": KEY, "fingerprint": H("5")})), 1)
+        self.assertIn("fetched", self.text())
+        self.assertFalse((self.export / "ship.json").exists())
+
+    def test_product_verb_must_agree_with_capture(self):
+        self.assertEqual(self.export_go(["--skip-codex"], scn={"product_state": "missing"}), 1)
+        self.assertIn("did not return a captured product", self.text())
+        self.setUp()
+        self.assertEqual(self.export_go(["--skip-codex"], scn={"product_total": 1}), 1)
+        self.assertIn("capture evidence says 1", self.text())
+
+    def test_export_needs_node_fingerprint(self):
+        base, _ = real_scenario()
+        self.scn = base
+        self.assertEqual(self.go(["--skip-codex", "--export", str(self.tmp / "e")]), 1)
+        self.assertIn("no node fingerprint", self.text())
+
+    def test_app_root_is_optional(self):
+        self.assertEqual(self.go(["--no-identity", "--skip-codex"]), 0)
+        self.assertEqual(GP.resolve_identity(GP.parser().parse_args(
+            ["--evidence-dir", "e", "--handoff", "h"]), {}), (None, None))
+
+    def test_base_url_defaults_from_env(self):
+        urls = []
+
+        def opener(req, t):
+            urls.append(req.full_url)
+            return Resp({"signing_key": KEY})
+        self.go(["--skip-codex"], opener=opener, env={"RYEOSD_URL": "http://127.0.0.1:7400"})
+        self.assertEqual(urls, ["http://127.0.0.1:7400/public-key"])
 
 
 if __name__ == "__main__":
