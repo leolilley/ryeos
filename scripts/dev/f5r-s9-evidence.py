@@ -316,7 +316,8 @@ class Runner:
             return json.loads(Path(self.args.session_policy_file).read_text())
         return {"schema_version": 2, "ownership": "daemon_owned", "recovery": "none", "response": "accepted",
                 "target": {"kind": "here"}, "environment": {"kind": "none"},
-                "project": {"kind": "pinned", "source": {"kind": "current_head"},
+                "project": {"kind": "pinned",
+                            "source": {"kind": "capture_live", "scope": "full_project"},
                             "realization": {"kind": "cow", "terminal_publication": {"kind": "discard"}},
                             "child_policy": {"kind": "inherit"}}}
 
