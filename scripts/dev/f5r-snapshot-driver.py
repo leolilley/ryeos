@@ -20,6 +20,7 @@ import urllib.request
 from pathlib import Path
 
 API = "https://api.render.com/v1"
+FORBIDDEN_SERVICE = "srv-datiea7avr4c73dm14fg"
 HEX64 = set("0123456789abcdef")
 RESERVED_MESSAGE = ("snapshot operation is reserved without provider contact; clear the produce "
                     "step in the state file and rerun")
@@ -174,6 +175,8 @@ class Driver:
 
     # ---- Render ----------------------------------------------------------
     def render(self, method, path, body=None):
+        if FORBIDDEN_SERVICE in path or FORBIDDEN_SERVICE in json.dumps(body):
+            raise Refusal(f"refusing to touch protected Render service {FORBIDDEN_SERVICE}")
         data = None if body is None else json.dumps(body).encode()
         headers = {"Accept": "application/json", "Authorization": "Bearer " + self.key}
         if data is not None:
@@ -395,13 +398,43 @@ class Driver:
             raise Failure(f"terminate-runtime-snapshot-qualification failed: {err}")
         self.state.mark("qualification_terminate", "done")
 
+    def qualify_product(self):
+        """The attestation hash is the `qualification_hash` that qualify-product
+        publishes for the owner product; neither the snapshot nor the restored
+        verifier record carries one. Publication is idempotent, so a rerun may
+        repeat it."""
+        a = self.args
+        coords = (a.qualify_relationship, a.qualify_verifier_chain_root_id, a.qualify_verifier_thread_id)
+        if not any(coords):
+            return None
+        if not all(coords):
+            raise Refusal("qualify-product needs --qualify-relationship, "
+                          "--qualify-verifier-chain-root-id and --qualify-verifier-thread-id together")
+        done = self.state.get("qualify_product", "attestation_hash")
+        if self.state.status("qualify_product") == "done" and is_hash(done):
+            return done
+        self.state.mark("qualify_product", "attempted")
+        argv = [a.ryeos_bin, "external-content", "qualify-product", self.handoff["owner_witness_hash"],
+                json.dumps({"kind": "local_capture"}), a.qualify_relationship,
+                a.qualify_verifier_chain_root_id, a.qualify_verifier_thread_id]
+        code, out, err = self.cli(argv, self.env)
+        try:
+            record = unwrap(json.loads(out)) if out.strip() else None
+        except ValueError:
+            record = None
+        self.log(verb="qualify-product", exit=code)
+        hash_ = record.get("qualification_hash") if isinstance(record, dict) else None
+        if code != 0 or not is_hash(hash_):
+            raise Failure(f"qualify-product failed: {self.scrub(err.strip()[:300])}")
+        self.state.mark("qualify_product", "done", attestation_hash=hash_)
+        return hash_
+
     def step_finish(self):
         self.terminate_qualification()
         self.terminate_source()
         sop = self.state.get("produce", "operation_id")
         qop = self.state.get("qualification", "operation_id")
         _, snap, _ = self.ryeos("runtime-snapshot", positional=sop)
-        _, qual, _ = self.ryeos("runtime-snapshot-qualification", positional=qop)
         locator = (snap or {}).get("locator") or {}
         handoff = {
             "snapshot_operation_id": sop,
@@ -410,7 +443,7 @@ class Driver:
             "qualification_operation_id": qop,
             "owner_manifest_hash": self.handoff["owner_manifest_hash"],
         }
-        attestation = find_key(snap, "attestation_hash") or find_key(qual, "attestation_hash")
+        attestation = self.qualify_product()
         if attestation:
             handoff["attestation_hash"] = attestation
         out = Path(self.args.out)
@@ -490,22 +523,6 @@ def ids_of(record):
     return found
 
 
-def find_key(value, key):
-    if isinstance(value, dict):
-        if isinstance(value.get(key), str):
-            return value[key]
-        for item in value.values():
-            hit = find_key(item, key)
-            if hit:
-                return hit
-    elif isinstance(value, list):
-        for item in value:
-            hit = find_key(item, key)
-            if hit:
-                return hit
-    return None
-
-
 def build_parser():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--app-root")
@@ -528,12 +545,18 @@ def build_parser():
     p.add_argument("--snapshot-operation-id")
     p.add_argument("--qualification-operation-id")
     p.add_argument("--verify-resolved", action="store_true")
+    p.add_argument("--qualify-relationship")
+    p.add_argument("--qualify-verifier-chain-root-id")
+    p.add_argument("--qualify-verifier-thread-id")
     return p
 
 
 def main(argv=None, cli=run_cli, opener=http_open, sleep=time.sleep, clock=time.monotonic,
          key_reader=read_key, log=None):
     args = build_parser().parse_args(argv)
+    if any(FORBIDDEN_SERVICE in str(v) for v in vars(args).values()):
+        print(f"refused: protected Render service {FORBIDDEN_SERVICE}", file=sys.stderr)
+        return 2
     if not (args.app_root or args.controller_url):
         print("one of --app-root or --controller-url is required", file=sys.stderr)
         return 2

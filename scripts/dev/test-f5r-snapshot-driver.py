@@ -71,7 +71,9 @@ class Fakes:
         if verb == "terminate-runtime-snapshot-qualification":
             return 0, json.dumps({"phase": "terminal"}), ""
         if verb == "runtime-snapshot-qualification":
-            return 0, json.dumps({"intent": {"operation_id": QUAL}, "attestation_hash": "d" * 64}), ""
+            return 0, json.dumps({"intent": {"operation_id": QUAL}, "phase": "observed"}), ""
+        if verb == "qualify-product":
+            return 0, json.dumps({"result": {"qualification_hash": "d" * 64, "idempotent": False}}), ""
         return 1, "", "unknown"
 
     def opener(self, request, timeout):
@@ -119,13 +121,40 @@ class DriverTest(unittest.TestCase):
     def verbs(self):
         return [c[2] for c in self.fakes.cli_calls]
 
-    def test_happy_path(self):
+    QUALIFY = ("--qualify-relationship", "runtime_to_external_authoring_worker",
+               "--qualify-verifier-chain-root-id", "T-root", "--qualify-verifier-thread-id", "T-1")
+
+    def test_attestation_comes_from_qualify_product(self):
+        self.assertEqual(self.run_main(self.QUALIFY), 0)
+        handoff = json.loads((self.dir / "out" / "snapshot-handoff.json").read_text())
+        self.assertEqual(handoff["attestation_hash"], "d" * 64)
+        call = [c for c in self.fakes.cli_calls if c[2] == "qualify-product"][0]
+        self.assertEqual(call[3:], [H, '{"kind": "local_capture"}',
+                                    "runtime_to_external_authoring_worker", "T-root", "T-1"])
+
+    def test_no_attestation_without_qualify_flags(self):
         self.assertEqual(self.run_main(), 0)
+        handoff = json.loads((self.dir / "out" / "snapshot-handoff.json").read_text())
+        self.assertNotIn("attestation_hash", handoff)
+        self.assertNotIn("qualify-product", self.verbs())
+
+    def test_partial_qualify_flags_refuse(self):
+        self.assertEqual(self.run_main(("--qualify-relationship", "r")), 2)
+
+    def test_qualify_product_failure_is_a_failure(self):
+        self.fakes.fail_on = "qualify-product"
+        self.assertEqual(self.run_main(self.QUALIFY), 1)
+
+    def test_protected_service_id_refused(self):
+        self.assertEqual(self.run_main(("--source-sandbox-id", "srv-datiea7avr4c73dm14fg")), 2)
+        self.assertEqual(self.fakes.http_calls, [])
+
+    def test_happy_path(self):
+        self.assertEqual(self.run_main(self.QUALIFY), 0)
         handoff = json.loads((self.dir / "out" / "snapshot-handoff.json").read_text())
         self.assertEqual(handoff["snapshot_operation_id"], SNAP)
         self.assertEqual(handoff["snapshot_id"], "snp-1")
         self.assertEqual(handoff["qualification_operation_id"], QUAL)
-        self.assertEqual(handoff["attestation_hash"], "d" * 64)
         self.assertEqual(handoff["owner_manifest_hash"], "e" * 64)
         create = self.fakes.http_calls[0]
         self.assertEqual(create[2]["networkPolicy"], {"type": "deny-all"})
