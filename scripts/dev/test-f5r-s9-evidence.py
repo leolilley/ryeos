@@ -397,5 +397,24 @@ class Tests(Harness):
         self.assertEqual(self.evidence("e7")["status"], "fail")
 
 
+class Pkcs8Versions(unittest.TestCase):
+    def test_version_two_key_with_public_key_attached_loads_the_same_seed(self):
+        import tempfile, os
+        seed = bytes(range(32))
+        v1 = PKCS8_PREFIX + seed
+        public = b"\x00" * 32
+        inner = b"\x02\x01\x01" + bytes.fromhex("300506032b6570") + b"\x04\x22\x04\x20" + seed + b"\x81\x21\x00" + public
+        v2 = b"\x30" + bytes([len(inner)]) + inner
+        d = tempfile.mkdtemp()
+        for name, der in (("v1.pem", v1), ("v2.pem", v2)):
+            with open(os.path.join(d, name), "w") as f:
+                f.write("-----BEGIN PRIVATE KEY-----\n" + base64.b64encode(der).decode() + "\n-----END PRIVATE KEY-----\n")
+            self.assertEqual(S9.load_seed(os.path.join(d, name)), seed)
+        with open(os.path.join(d, "bad.pem"), "w") as f:
+            f.write("-----BEGIN PRIVATE KEY-----\n" + base64.b64encode(b"\x30\x05\x02\x01\x00\x00\x00").decode() + "\n-----END PRIVATE KEY-----\n")
+        with self.assertRaises(S9.Failure):
+            S9.load_seed(os.path.join(d, "bad.pem"))
+
+
 if __name__ == "__main__":
     unittest.main()
