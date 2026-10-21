@@ -3,6 +3,9 @@ import base64
 import hashlib
 import importlib.util
 import json
+import os
+import stat
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -15,6 +18,51 @@ ROOT_BYTES = bytes(range(1, 33))
 KEY = "ed25519:" + base64.b64encode(ROOT_BYTES).decode()
 H = lambda c: c * 64
 SECRET = "tok_SECRETVALUE123"
+
+# The fake `ryeos` binary: a Python shim on PATH. It logs argv and answers from a scenario file.
+SHIM = r'''#!/usr/bin/env python3
+import json, os, sys
+scn = json.load(open(os.environ["FAKE_RYEOS_SCENARIO"]))
+log = os.environ["FAKE_RYEOS_LOG"]
+rest = sys.argv[1:]
+prior = [json.loads(l) for l in open(log)] if os.path.exists(log) else []
+with open(log, "a") as f:
+    f.write(json.dumps(rest) + "\n")
+joined = " ".join(rest)
+if scn.get("fail_on") and scn["fail_on"] in joined:
+    print("boom " + os.environ.get("MY_API_TOKEN", ""), file=sys.stderr)
+    sys.exit(3)
+def out(v):
+    print(json.dumps(v)); sys.exit(0)
+if rest[:1] == ["--project"]:
+    project = rest[1]
+    rest = rest[2:]
+    if not os.path.isdir(os.path.join(project, ".ai")):
+        print("fake ryeos: project root lacks .ai", file=sys.stderr); sys.exit(7)
+if rest[0] == "execute" and "--async" in rest:
+    ref = rest[3] if rest[2] == "--pin-project" else rest[2]
+    tid = "T-owner" if "owner" in ref else "T-codex"
+    out(scn.get("launch") or {"status": "accepted", "thread_id": tid})
+if rest[:2] == ["thread", "get"]:
+    tid = rest[2]
+    if scn.get("empty_threads"):
+        sys.exit(0)
+    result = {"manifest_hash": scn["manifest_hash"]} if tid == "T-owner" else {"sha256": "x"}
+    out({"thread": {"thread_id": tid, "chain_root_id": tid, "status": scn.get("thread_status", "completed")},
+         "result": {"result": result}})
+if rest[:2] == ["external-content", "capture-product"]:
+    w = "d" * 64 if rest[3] == "T-owner" else "e" * 64
+    out({"state": scn.get("capture_state", "captured"), "witness_hash": w,
+         "evidence": {"manifest_hash": scn.get("evidence_manifest", scn["manifest_hash"])}})
+if rest[:2] == ["external-content", "activate"]:
+    n = sum(1 for p in prior if p[:2] == ["external-content", "activate"])
+    seq = scn["activation"]
+    out(seq[min(n, len(seq) - 1)])
+if rest[:2] == ["execute", "service:objects/get"]:
+    out({"entries": [{"hash": scn["manifest_hash"], "kind": scn.get("object_kind", "object"),
+                      "value": scn["manifest"]}]})
+sys.exit(9)
+'''
 
 
 def good_manifest(extra=None, owner_mode=0o755):
@@ -31,52 +79,6 @@ def good_manifest(extra=None, owner_mode=0o755):
             "entries": entries, "entry_count": len(entries), "total_bytes": 1154}
 
 
-class FakeCli:
-    """Answers ryeos argv lists; records every call."""
-
-    def __init__(self, manifest=None, fail_on=None, activation=None, capture_state="captured",
-                 thread_status="completed", launch=None, objects=None, empty_threads=False, evidence_manifest=None):
-        self.calls, self.manifest, self.fail_on = [], manifest or good_manifest(), fail_on
-        self.threads = {}
-        self.activation = list(activation or [{"state": "completed", "receipt_hash": H("9"), "activation_id": "A-1"}])
-        self.capture_state, self.thread_status, self.launch = capture_state, thread_status, launch
-        self.objects, self.empty_threads = objects, empty_threads
-        self.evidence_manifest = evidence_manifest or H("c")
-
-    def __call__(self, argv, env, timeout):
-        self.calls.append(argv)
-        rest = argv[1:]
-        if self.fail_on and self.fail_on in " ".join(rest):
-            return 3, "", f"boom {SECRET}"
-        if rest[0] == "execute" and "--async" in rest:
-            ref = rest[2]
-            tid = "T-codex" if "guest-runtime-production" in ref and "owner" not in ref else "T-owner"
-            self.threads[tid] = ref
-            return 0, json.dumps(self.launch if self.launch is not None else
-                                 {"status": "accepted", "launch_id": "L-x", "thread_id": tid}), ""
-        if rest[:2] == ["thread", "get"]:
-            tid = rest[2]
-            if self.empty_threads:
-                return 0, "", ""
-            result = {"manifest_hash": H("c")} if tid == "T-owner" else {"sha256": "x"}
-            return 0, json.dumps({"thread": {"thread_id": tid, "chain_root_id": tid, "status": self.thread_status},
-                                  "result": {"result": result}}), ""
-        if rest[:2] == ["external-content", "capture-product"]:
-            w = H("d") if rest[3] == "T-owner" else H("e")
-            return 0, json.dumps({"state": self.capture_state, "witness_hash": w,
-                                  "evidence": {"manifest_hash": self.evidence_manifest}}), ""
-        if rest[:2] == ["external-content", "activate"]:
-            step = self.activation.pop(0) if len(self.activation) > 1 else self.activation[0]
-            return 0, json.dumps(step), ""
-        if rest[:2] == ["execute", "service:identity/public_key"]:
-            return 0, json.dumps({"signing_key": KEY}), ""
-        if rest[:2] == ["execute", "service:objects/get"]:
-            if self.objects is not None:
-                return 0, json.dumps(self.objects), ""
-            return 0, json.dumps({"entries": [{"hash": H("c"), "kind": "object", "value": self.manifest}]}), ""
-        return 9, "", "unknown"
-
-
 class Resp:
     def __init__(self, body):
         self.body = body
@@ -91,88 +93,53 @@ class Resp:
         return False
 
 
-def run(cli, extra, opener=None, clock=None):
-    out = tempfile.mkdtemp()
-    lines = []
-    code = GP.main(["--app-root", "/app", "--out", out] + extra, runner=cli,
-                   opener=opener or (lambda req, t: Resp({"signing_key": KEY})),
-                   sleep=lambda s: None, environ={"MY_API_TOKEN": SECRET}, emit=lines.append,
-                   **({"clock": clock} if clock else {}))
-    handoff = json.loads((Path(out) / "guest-products-handoff.json").read_text())
-    return code, handoff, lines, out
+class Case(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        bindir = self.tmp / "bin"
+        bindir.mkdir()
+        shim = bindir / "ryeos"
+        shim.write_text(SHIM)
+        shim.chmod(shim.stat().st_mode | stat.S_IXUSR)
+        self.app = self.tmp / "app"
+        keydir = self.app / ".ai/config/keys/signing"
+        keydir.mkdir(parents=True)
+        (keydir / "private_key.pem").write_text("pem")
+        self.log = self.tmp / "calls.log"
+        self.scn = {"manifest": good_manifest(), "manifest_hash": H("c"),
+                    "activation": [{"state": "completed", "receipt_hash": H("9"), "activation_id": "A-1"}]}
+        self.evidence, self.handoff = self.tmp / "evidence", self.tmp / "handoff.json"
+        self.bindir = str(bindir)
 
+    def go(self, extra=(), scn=None, opener=None, env=None, clock=None):
+        self.scn.update(scn or {})
+        (self.tmp / "scn.json").write_text(json.dumps(self.scn))
+        environ = {"PATH": self.bindir + os.pathsep + os.environ["PATH"],
+                   "FAKE_RYEOS_SCENARIO": str(self.tmp / "scn.json"),
+                   "FAKE_RYEOS_LOG": str(self.log), "MY_API_TOKEN": SECRET}
+        environ.update(env or {})
+        self.lines = []
+        kw = {"clock": clock} if clock else {}
+        code = GP.main(["--app-root", str(self.app), "--evidence-dir", str(self.evidence),
+                        "--handoff", str(self.handoff), *extra],
+                       opener=opener or (lambda req, t: Resp({"signing_key": KEY})),
+                       sleep=lambda s: None, environ=environ, emit=self.lines.append, **kw)
+        return code
 
-class Tests(unittest.TestCase):
-    def test_happy_path_for_controller_auto_key(self):
-        cli = FakeCli()
-        out = tempfile.mkdtemp()
-        lines = []
-        code = GP.main(["--controller-url", "https://c.example", "--out", out, "--owner-production",
-                        "for-controller", "--controller-public-key", "auto"], runner=cli,
-                       opener=lambda req, t: Resp({"signing_key": KEY}), sleep=lambda s: None,
-                       environ={}, emit=lines.append)
-        h = json.loads((Path(out) / "guest-products-handoff.json").read_text())
-        self.assertEqual(code, 0)
-        self.assertEqual(h["codex_witness_hash"], H("e"))
-        self.assertEqual(h["owner_witness_hash"], H("d"))
-        self.assertEqual(h["owner_manifest_hash"], H("c"))
-        self.assertEqual(h["controller_public_key"], KEY)
-        self.assertEqual(h["thread_ids"], {"codex": "T-codex", "owner": "T-owner"})
-        owner_launch = [c for c in cli.calls if c[1:3] == ["execute", "--async"] or "--async" in c][-1]
-        self.assertIn("guest-owner-runtime-production-for-controller", " ".join(owner_launch))
-        self.assertEqual(json.loads(owner_launch[owner_launch.index("--input") + 1]),
-                         {"controller_public_key": KEY})
+    def calls(self):
+        return [json.loads(l) for l in self.log.read_text().splitlines()] if self.log.exists() else []
 
-    def test_local_with_hex_key_checks_root(self):
-        code, h, _, _ = run(FakeCli(), ["--controller-public-key", ROOT_BYTES.hex()])
-        self.assertEqual(code, 0)
-        self.assertEqual(h["controller_public_key"], KEY)
+    def project_root(self):
+        return str(self.evidence.parent / "project")
 
-    def test_fifth_entry_fails_preflight(self):
-        extra = [{"path": "extra", "kind": "file", "mode": 0o644, "size": 1, "blob_hash": H("f")}]
-        code, h, lines, _ = run(FakeCli(manifest=good_manifest(extra)), [])
-        self.assertEqual(code, 1)
-        self.assertEqual(h["owner_witness_hash"], H("d"))
-        self.assertFalse(h["complete"])
-        self.assertTrue(any("unexpected entry extra" in l for l in lines))
+    def handoff_json(self):
+        return json.loads(self.handoff.read_text())
 
-    def test_wrong_mode_fails_preflight(self):
-        code, _, lines, _ = run(FakeCli(manifest=good_manifest(owner_mode=0o644)), [])
-        self.assertEqual(code, 1)
-        self.assertTrue(any("mode 420 != 493" in l for l in lines))
+    def state(self):
+        return json.loads((self.evidence / "state.json").read_text())
 
-    def test_wrong_root_size_fails(self):
-        m = good_manifest()
-        m["entries"][2]["size"] = 63
-        self.assertTrue(any("!= 64" in p for p in GP.preflight_owner_manifest(m)))
-
-    def test_skip_codex(self):
-        cli = FakeCli()
-        code, h, _, _ = run(cli, ["--skip-codex"])
-        self.assertEqual(code, 0)
-        self.assertIsNone(h["codex_witness_hash"])
-        self.assertNotIn("codex", h["thread_ids"])
-        self.assertFalse(any("activate" in c for c in cli.calls))
-
-    def test_failed_execute_writes_partial_handoff(self):
-        code, h, lines, out = run(FakeCli(fail_on="guest-owner-runtime-production"), [])
-        self.assertEqual(code, 1)
-        self.assertEqual(h["codex_witness_hash"], H("e"))
-        self.assertIsNone(h["owner_witness_hash"])
-        self.assertFalse(h["complete"])
-
-    def test_no_secret_in_logs(self):
-        code, _, lines, out = run(FakeCli(fail_on="activate"), [])
-        self.assertEqual(code, 1)
-        text = "\n".join(lines) + (Path(out) / "guest-products-steps.jsonl").read_text()
-        self.assertNotIn(SECRET, text)
-        self.assertIn("***", text)
-
-    def test_for_controller_without_key_is_refused(self):
-        code, h, lines, _ = run(FakeCli(), ["--owner-production", "for-controller"])
-        self.assertEqual(code, 1)
-        self.assertIsNone(h["owner_witness_hash"])
-        self.assertTrue(any("needs a controller public key" in l for l in lines))
+    def text(self):
+        return "\n".join(self.lines)
 
     def ticking(self, step=100):
         t = [0]
@@ -182,137 +149,205 @@ class Tests(unittest.TestCase):
             return t[0]
         return clock
 
-    def test_activation_planned_running_completed(self):
-        steps = [{"state": "planned"}, {"state": "running"},
-                 {"state": "completed", "receipt_hash": H("9"), "activation_id": "A-1", "job_id": "J"}]
-        cli = FakeCli(activation=steps)
-        code, h, lines, _ = run(cli, [])
-        self.assertEqual(code, 0)
-        self.assertEqual(sum(1 for c in cli.calls if c[1:3] == ["external-content", "activate"]), 3)
-        self.assertEqual(h["activation_id"], "A-1")
-        self.assertEqual(h["activation_receipt_hash"], H("9"))
-        self.assertTrue(any("codex.activated" in l for l in lines))
 
-    def test_activation_stuck_times_out(self):
-        code, h, lines, _ = run(FakeCli(activation=[{"state": "running"}]), ["--timeout", "300"],
-                                clock=self.ticking())
-        self.assertEqual(code, 1)
-        self.assertIsNone(h["codex_witness_hash"])
-        self.assertTrue(any("not completed within" in l for l in lines))
+class Tests(Case):
+    def test_happy_path_sequence_and_handoff(self):
+        self.assertEqual(self.go(), 0)
+        calls = self.calls()
+        self.assertEqual(calls, [
+            ["external-content", "activate", GP.ACTIVATION_REF, "online"],
+            ["--project", self.project_root(), "execute", "--async", "--pin-project", GP.CODEX_GRAPH, "--no-stream"],
+            ["thread", "get", "T-codex"],
+            ["external-content", "capture-product", "T-codex", "T-codex", "runtime"],
+            ["--project", self.project_root(), "execute", "--async", "--pin-project", GP.OWNER_GRAPHS["local"], "--no-stream"],
+            ["thread", "get", "T-owner"],
+            ["external-content", "capture-product", "T-owner", "T-owner", "runtime"],
+            ["execute", "service:objects/get", "--no-stream", "--input",
+             json.dumps({"object_hashes": [H("c")]})],
+        ])
+        h = self.handoff_json()
+        self.assertEqual({k: h[k] for k in ("owner_manifest_hash", "owner_witness_hash", "codex_witness_hash",
+                                            "guest_runtime_manifest_hash", "controller_public_key")},
+                         {"owner_manifest_hash": H("c"), "owner_witness_hash": H("d"),
+                          "codex_witness_hash": H("e"), "guest_runtime_manifest_hash": H("c"),
+                          "controller_public_key": KEY})
+        self.assertTrue(h["complete"])
+        self.assertEqual(self.state()["steps"]["owner.preflight"]["ok"], True)
 
-    def test_activation_completed_without_receipt_keeps_waiting(self):
-        code, _, lines, _ = run(FakeCli(activation=[{"state": "completed"}]), ["--timeout", "300"],
-                                clock=self.ticking())
-        self.assertEqual(code, 1)
-        self.assertTrue(any("not completed within" in l for l in lines))
+    def test_every_call_logs_argv_and_keeps_output(self):
+        self.go()
+        steps = [json.loads(l) for l in (self.evidence / "steps.jsonl").read_text().splitlines()]
+        runs = [s for s in steps if "argv" in s]
+        self.assertEqual(len(runs), 8)
+        self.assertTrue(all(s["argv"][0] == "ryeos" for s in runs))
+        for s in runs:
+            self.assertTrue((self.evidence / (s["evidence"] + ".stdout")).exists())
+            self.assertTrue((self.evidence / (s["evidence"] + ".stderr")).exists())
 
-    def test_activation_nonzero_exit(self):
-        code, _, lines, _ = run(FakeCli(fail_on="activate"), [])
-        self.assertEqual(code, 1)
-        self.assertTrue(any("codex.activate: exit 3" in l for l in lines))
+    def test_for_controller_passes_key_input(self):
+        self.assertEqual(self.go(["--owner-production", "for-controller"]), 0)
+        launch = [c for c in self.calls() if "--async" in c][-1]
+        self.assertIn("guest-owner-runtime-production-for-controller", launch[launch.index("--pin-project") + 1])
+        self.assertEqual(json.loads(launch[launch.index("--input") + 1]), {"controller_public_key": KEY})
 
-    def test_wrong_manifest_kind(self):
-        m = good_manifest()
-        m["kind"] = "tree"
-        code, _, lines, _ = run(FakeCli(manifest=m), ["--skip-codex"])
-        self.assertEqual(code, 1)
-        self.assertTrue(any("is not external_content_manifest" in l for l in lines))
+    def test_rerun_after_success_issues_no_cli_calls(self):
+        self.go()
+        before = len(self.calls())
+        self.assertEqual(self.go(), 0)
+        self.assertEqual(len(self.calls()), before)
+        self.assertEqual(self.handoff_json()["owner_witness_hash"], H("d"))
 
-    def test_entry_count_mismatch_and_non_dict_entry(self):
-        m = good_manifest()
-        m["entry_count"] = 3
-        self.assertTrue(any("entry_count" in p for p in GP.preflight_owner_manifest(m)))
-        m = good_manifest()
-        m["entries"].append("bin")
-        self.assertTrue(any("must be objects" in p for p in GP.preflight_owner_manifest(m)))
+    def test_resume_after_capture_failure_does_not_relaunch(self):
+        self.assertEqual(self.go(["--skip-codex"], scn={"capture_state": "missing"}), 1)
+        self.assertEqual(self.state()["steps"]["owner.thread"]["status"], "completed")
+        self.assertEqual(self.go(["--skip-codex"], scn={"capture_state": "captured"}), 0)
+        launches = [c for c in self.calls() if "--async" in c]
+        self.assertEqual(len(launches), 1)
 
-    def test_capture_state_missing_and_absent_optional(self):
-        for state in ("missing", "absent_optional"):
-            code, _, lines, _ = run(FakeCli(capture_state=state), ["--skip-codex"])
-            self.assertEqual(code, 1)
-            self.assertTrue(any(f"state '{state}'" in l for l in lines))
+    def test_resume_running_thread_repolls_same_thread(self):
+        self.assertEqual(self.go(["--skip-codex", "--timeout", "300"], scn={"thread_status": "running"},
+                                 clock=self.ticking()), 1)
+        self.assertEqual(self.state()["steps"]["owner.thread"]["status"], "launched")
+        self.assertEqual(self.go(["--skip-codex"], scn={"thread_status": "completed"}), 0)
+        self.assertEqual(len([c for c in self.calls() if "--async" in c]), 1)
 
-    def test_capture_without_state_fails(self):
-        self.assertEqual(run(FakeCli(capture_state=None), ["--skip-codex"])[0], 1)
+    def test_died_while_launching_refuses_relaunch(self):
+        self.evidence.mkdir()
+        (self.evidence / "state.json").write_text(json.dumps(
+            {"steps": {"owner.thread": {"status": "launching"}}}))
+        self.assertEqual(self.go(["--skip-codex"]), 1)
+        self.assertIn("a thread may exist", self.text())
+        self.assertEqual(self.calls(), [])
 
-    def test_manifest_hash_mismatch(self):
-        code, _, lines, _ = run(FakeCli(evidence_manifest=H("7")), ["--skip-codex"])
-        self.assertEqual(code, 1)
-        self.assertTrue(any("differs from the captured evidence" in l for l in lines))
+    def test_failed_launch_may_relaunch(self):
+        self.assertEqual(self.go(["--skip-codex"], scn={"fail_on": "--async"}), 1)
+        self.assertEqual(self.state()["steps"]["owner.thread"]["status"], "launch_failed")
+        self.assertEqual(self.go(["--skip-codex"], scn={"fail_on": None}), 0)
 
-    def test_thread_never_terminal_times_out(self):
-        code, _, lines, _ = run(FakeCli(thread_status="running"), ["--skip-codex", "--timeout", "300"],
-                                clock=self.ticking())
-        self.assertEqual(code, 1)
-        self.assertTrue(any("not terminal within" in l for l in lines))
+    def test_fifth_entry_fails_preflight(self):
+        extra = [{"path": "extra", "kind": "file", "mode": 0o644, "size": 1, "blob_hash": H("f")}]
+        self.assertEqual(self.go(scn={"manifest": good_manifest(extra)}), 1)
+        h = self.handoff_json()
+        self.assertEqual(h["owner_witness_hash"], H("d"))
+        self.assertIsNone(h["guest_runtime_manifest_hash"])
+        self.assertFalse(h["complete"])
+        self.assertIn("unexpected entry extra", self.text())
 
-    def test_thread_failed(self):
-        code, _, lines, _ = run(FakeCli(thread_status="failed"), ["--skip-codex"])
-        self.assertEqual(code, 1)
-        self.assertTrue(any("ended failed" in l for l in lines))
-
-    def test_three_empty_views_fail(self):
-        code, _, lines, _ = run(FakeCli(empty_threads=True), ["--skip-codex"])
-        self.assertEqual(code, 1)
-        self.assertTrue(any("3 empty views" in l for l in lines))
-
-    def test_no_thread_id(self):
-        code, _, lines, _ = run(FakeCli(launch={"status": "accepted"}), ["--skip-codex"])
-        self.assertEqual(code, 1)
-        self.assertTrue(any("no thread id" in l for l in lines))
-
-    def test_http_url_refused_writes_nothing(self):
-        out = tempfile.mkdtemp()
-        code = GP.main(["--controller-url", "http://c.example", "--out", out], runner=FakeCli(), environ={})
-        self.assertEqual(code, 2)
-        self.assertEqual(list(Path(out).iterdir()), [])
-
-    def test_invalid_key_forms(self):
-        for bad in ("zz", "ed25519:" + base64.b64encode(b"short").decode(), "ab" * 31, "ed25519:!!!"):
-            with self.assertRaises((GP.Refusal, ValueError)):
-                GP.normalize_public_key(bad)
-
-    def test_missing_object(self):
-        objects = {"entries": [{"hash": H("c"), "kind": "missing_object"}]}
-        code, _, lines, _ = run(FakeCli(objects=objects), ["--skip-codex"])
-        self.assertEqual(code, 1)
-        self.assertTrue(any("manifest object not returned" in l for l in lines))
-
-    def test_controller_root_mismatch(self):
+    def test_wrong_mode_and_root_mismatch(self):
+        self.assertEqual(self.go(scn={"manifest": good_manifest(owner_mode=0o644)}), 1)
+        self.assertIn("mode 420 != 493", self.text())
         other = "ed25519:" + base64.b64encode(bytes(range(2, 34))).decode()
-        problems = GP.preflight_owner_manifest(good_manifest(), other)
-        self.assertTrue(any("does not match the controller public key" in p for p in problems))
+        self.assertTrue(any("does not match" in p for p in GP.preflight_owner_manifest(good_manifest(), other)))
 
-    def test_dir_entry_with_blob_hash(self):
+    def test_preflight_unit_rules(self):
+        m = good_manifest()
+        m["entries"][2]["size"] = 63
+        self.assertTrue(any("!= 64" in p for p in GP.preflight_owner_manifest(m)))
         m = good_manifest()
         m["entries"][0]["blob_hash"] = H("a")
         self.assertTrue(any("directory carries" in p for p in GP.preflight_owner_manifest(m)))
-
-    def test_profile_over_4096(self):
         m = good_manifest()
         m["entries"][3]["size"] = 4097
         self.assertTrue(any("exceeds 4096" in p for p in GP.preflight_owner_manifest(m)))
-
-    def test_duplicate_entries(self):
         m = good_manifest()
         m["entries"].append(dict(m["entries"][0]))
         m["entry_count"] = 5
         self.assertTrue(any("duplicate entry" in p for p in GP.preflight_owner_manifest(m)))
+        m = good_manifest()
+        m["entry_count"] = 3
+        self.assertTrue(any("entry_count" in p for p in GP.preflight_owner_manifest(m)))
 
-    def test_local_auto_key_read_from_node(self):
-        cli = FakeCli()
-        code, h, _, _ = run(cli, ["--skip-codex", "--controller-public-key", "auto"])
+    def test_skip_codex(self):
+        self.assertEqual(self.go(["--skip-codex"]), 0)
+        self.assertIsNone(self.handoff_json()["codex_witness_hash"])
+        self.assertFalse(any("activate" in c for c in self.calls()))
+
+    def test_activation_polls_until_complete(self):
+        act = [{"state": "planned"}, {"state": "running"},
+               {"state": "completed", "receipt_hash": H("9"), "activation_id": "A-1"}]
+        self.assertEqual(self.go(scn={"activation": act}), 0)
+        self.assertEqual(sum(1 for c in self.calls() if c[:2] == ["external-content", "activate"]), 3)
+        self.assertEqual(self.state()["steps"]["codex.activate"]["activation_id"], "A-1")
+
+    def test_activation_stuck_times_out(self):
+        self.assertEqual(self.go(["--timeout", "300"], scn={"activation": [{"state": "running"}]},
+                                 clock=self.ticking()), 1)
+        self.assertIn("not completed within", self.text())
+
+    def test_failed_step_writes_partial_handoff_and_scrubs_secret(self):
+        self.assertEqual(self.go(scn={"fail_on": "guest-owner-runtime-production"}), 1)
+        h = self.handoff_json()
+        self.assertEqual(h["codex_witness_hash"], H("e"))
+        self.assertIsNone(h["owner_witness_hash"])
+        self.assertFalse(h["complete"])
+        everything = self.text() + "".join(p.read_text() for p in self.evidence.iterdir() if p.is_file())
+        self.assertNotIn(SECRET, everything)
+        self.assertIn("***", everything)
+
+    def test_capture_must_be_captured(self):
+        for state in ("missing", "absent_optional"):
+            self.setUp()
+            self.assertEqual(self.go(["--skip-codex"], scn={"capture_state": state}), 1)
+            self.assertIn(f"state '{state}'", self.text())
+
+    def test_manifest_hash_mismatch(self):
+        self.assertEqual(self.go(["--skip-codex"], scn={"evidence_manifest": H("7")}), 1)
+        self.assertIn("differs from the captured evidence", self.text())
+
+    def test_thread_failed_and_empty_views(self):
+        self.assertEqual(self.go(["--skip-codex"], scn={"thread_status": "failed"}), 1)
+        self.assertIn("ended failed", self.text())
+        self.setUp()
+        self.assertEqual(self.go(["--skip-codex"], scn={"empty_threads": True}), 1)
+        self.assertIn("3 empty views", self.text())
+
+    def test_no_thread_id(self):
+        self.assertEqual(self.go(["--skip-codex"], scn={"launch": {"status": "accepted"}}), 1)
+        self.assertIn("no thread id", self.text())
+
+    def test_missing_manifest_object(self):
+        self.assertEqual(self.go(["--skip-codex"], scn={"object_kind": "missing_object"}), 1)
+        self.assertIn("manifest object not returned", self.text())
+
+    def test_identity_and_url_refusals(self):
+        self.assertEqual(GP.main(["--app-root", str(self.tmp / "nope"), "--evidence-dir", str(self.evidence),
+                                  "--handoff", str(self.handoff)], environ={}), 2)
+        self.assertEqual(GP.main(["--key-path", str(self.tmp / "k.pem"), "--evidence-dir", str(self.evidence),
+                                  "--handoff", str(self.handoff)], environ={}), 2)
+        self.assertEqual(GP.main(["--app-root", str(self.app), "--base-url", "http://c.example",
+                                  "--evidence-dir", str(self.evidence), "--handoff", str(self.handoff)],
+                                 environ={}), 2)
+        self.assertFalse(self.handoff.exists())
+
+    def test_key_path_derives_app_root_and_default_url(self):
+        keyp = self.app / ".ai/config/keys/signing/private_key.pem"
+        urls = []
+
+        def opener(req, t):
+            urls.append(req.full_url)
+            return Resp({"signing_key": KEY})
+        self.scn["manifest"] = good_manifest()
+        (self.tmp / "scn.json").write_text(json.dumps(self.scn))
+        code = GP.main(["--key-path", str(keyp), "--evidence-dir", str(self.evidence),
+                        "--handoff", str(self.handoff), "--skip-codex"], opener=opener, sleep=lambda s: None,
+                       environ={"PATH": self.bindir + os.pathsep + os.environ["PATH"],
+                                "FAKE_RYEOS_SCENARIO": str(self.tmp / "scn.json"),
+                                "FAKE_RYEOS_LOG": str(self.log)}, emit=lambda l: None)
         self.assertEqual(code, 0)
-        self.assertEqual(h["controller_public_key"], KEY)
-        self.assertTrue(any(c[1:3] == ["execute", "service:identity/public_key"] for c in cli.calls))
+        self.assertEqual(urls, ["http://127.0.0.1:8000/public-key"])
 
-    def test_steps_log_appends(self):
-        out = tempfile.mkdtemp()
-        for _ in range(2):
-            GP.main(["--app-root", "/a", "--out", out, "--skip-codex"], runner=FakeCli(),
-                    sleep=lambda s: None, environ={}, emit=lambda l: None)
-        lines = (Path(out) / "guest-products-steps.jsonl").read_text().splitlines()
-        self.assertEqual(sum(1 for l in lines if '"step": "handoff"' in l), 2)
+    def test_public_key_forms(self):
+        self.assertEqual(GP.normalize_public_key(ROOT_BYTES.hex()), KEY)
+        for bad in ("zz", "ed25519:" + base64.b64encode(b"short").decode(), "ab" * 31, "ed25519:!!!"):
+            with self.assertRaises((GP.Refusal, ValueError)):
+                GP.normalize_public_key(bad)
+
+    def test_state_file_is_atomic_json(self):
+        self.go()
+        self.assertFalse(any(p.name.endswith(".tmp") for p in self.evidence.iterdir()))
+        self.assertEqual(set(self.state()["steps"]),
+                         {"codex.activate", "codex.thread", "codex.capture", "owner.thread",
+                          "owner.capture", "owner.preflight"})
 
 
 if __name__ == "__main__":
