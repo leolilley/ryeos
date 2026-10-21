@@ -34,8 +34,13 @@ if scn.get("fail_on") and scn["fail_on"] in joined:
     sys.exit(3)
 def out(v):
     print(json.dumps(v)); sys.exit(0)
+if rest[:1] == ["--project"]:
+    project = rest[1]
+    rest = rest[2:]
+    if not os.path.isdir(os.path.join(project, ".ai")):
+        print("fake ryeos: project root lacks .ai", file=sys.stderr); sys.exit(7)
 if rest[0] == "execute" and "--async" in rest:
-    ref = rest[2]
+    ref = rest[3] if rest[2] == "--pin-project" else rest[2]
     tid = "T-owner" if "owner" in ref else "T-codex"
     out(scn.get("launch") or {"status": "accepted", "thread_id": tid})
 if rest[:2] == ["thread", "get"]:
@@ -124,6 +129,9 @@ class Case(unittest.TestCase):
     def calls(self):
         return [json.loads(l) for l in self.log.read_text().splitlines()] if self.log.exists() else []
 
+    def project_root(self):
+        return str(self.evidence.parent / "project")
+
     def handoff_json(self):
         return json.loads(self.handoff.read_text())
 
@@ -148,10 +156,10 @@ class Tests(Case):
         calls = self.calls()
         self.assertEqual(calls, [
             ["external-content", "activate", GP.ACTIVATION_REF, "online"],
-            ["execute", "--async", GP.CODEX_GRAPH, "--no-stream"],
+            ["--project", self.project_root(), "execute", "--async", "--pin-project", GP.CODEX_GRAPH, "--no-stream"],
             ["thread", "get", "T-codex"],
             ["external-content", "capture-product", "T-codex", "T-codex", "runtime"],
-            ["execute", "--async", GP.OWNER_GRAPHS["local"], "--no-stream"],
+            ["--project", self.project_root(), "execute", "--async", "--pin-project", GP.OWNER_GRAPHS["local"], "--no-stream"],
             ["thread", "get", "T-owner"],
             ["external-content", "capture-product", "T-owner", "T-owner", "runtime"],
             ["execute", "service:objects/get", "--no-stream", "--input",
@@ -179,7 +187,7 @@ class Tests(Case):
     def test_for_controller_passes_key_input(self):
         self.assertEqual(self.go(["--owner-production", "for-controller"]), 0)
         launch = [c for c in self.calls() if "--async" in c][-1]
-        self.assertIn("guest-owner-runtime-production-for-controller", launch[2])
+        self.assertIn("guest-owner-runtime-production-for-controller", launch[launch.index("--pin-project") + 1])
         self.assertEqual(json.loads(launch[launch.index("--input") + 1]), {"controller_public_key": KEY})
 
     def test_rerun_after_success_issues_no_cli_calls(self):

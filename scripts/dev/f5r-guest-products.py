@@ -174,6 +174,14 @@ class Driver:
             handle.write(line + "\n")
         self.emit(line)
 
+    def project_root(self):
+        """The pinned project the production graphs run against: a product
+        recipe's workspace outputs need an admitted pinned generation, which the
+        daemon captures from a project root that contains `.ai`."""
+        root = Path(self.args.project) if self.args.project else self.evidence.parent / "project"
+        (root / ".ai").mkdir(parents=True, exist_ok=True)
+        return root
+
     def run(self, step, args, timeout=None, **ids):
         """The single CLI entry point: log argv, keep stdout/stderr, return parsed JSON."""
         timeout = timeout or self.args.timeout
@@ -229,7 +237,8 @@ class Driver:
                           "or delete the entry")
         if not entry.get("thread_id"):
             self.state.set(key, status="launching", ref=ref)
-            argv = ["execute", "--async", ref, "--no-stream"]
+            argv = ["--project", str(self.project_root()), "execute", "--async",
+                    "--pin-project", ref, "--no-stream"]
             if inputs:
                 argv += ["--input", json.dumps(inputs, sort_keys=True)]
             try:
@@ -413,6 +422,8 @@ def parser():
     p.add_argument("--handoff", required=True, help="path of the handoff JSON to write")
     p.add_argument("--state", help="state file (default <evidence-dir>/state.json)")
     p.add_argument("--evidence-dir", required=True)
+    p.add_argument("--project", help="pinned project root for the production graphs "
+                   "(default <evidence-dir>/../project; its .ai directory is created)")
     p.add_argument("--owner-production", choices=sorted(OWNER_GRAPHS), default="local")
     p.add_argument("--skip-codex", action="store_true")
     p.add_argument("--timeout", type=int, default=900)
