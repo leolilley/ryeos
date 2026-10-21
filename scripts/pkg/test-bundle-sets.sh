@@ -282,8 +282,10 @@ for profile_name in "${node_init_profiles[@]}"; do
       | sed -nE 's/^        ([a-z][a-z0-9_]*):$/\1/p' | tr '\n' ' '
   )"
   case "$profile_name" in
-    core|core-scheduling|core-workflow|core-knowledge|standard|f5r-controller)
+    core|core-scheduling|core-workflow|core-knowledge|standard)
       [[ "$declared_host_classes" == "hosted local " ]] ;;
+    f5r-controller)
+      [[ "$declared_host_classes" == "hosted local hosted_enforced " ]] ;;
     hosted-node|hosted-workflow)
       [[ "$declared_host_classes" == "hosted " ]] ;;
     *)
