@@ -77,6 +77,25 @@ async fn live_presentation_in_project(
         lillux::signature::sign_content(&body, &key, "#", None),
     )
     .unwrap();
+    let principal = register_fixture_project(state, project_root).await;
+    let minted = crate::handlers::ui_launch_mint::handle(
+        crate::handlers::ui_launch_mint::Request {
+            ui_binding_contract_revision: crate::UI_BINDING_CONTRACT_REVISION.into(),
+            surface_ref: "config:test/presentation".into(),
+            project_path: Some(spelling.display().to_string()),
+            user_principal_id: Some(principal.clone()),
+        },
+        ryeos_app::handler_context::HandlerContext::new(principal, vec!["*".into()], true),
+        Arc::new(state.clone()),
+    )
+    .await
+    .expect("compile real signed shared Config fixture");
+    claim_minted_presentation(state, &minted).await
+}
+
+/// Register `project_root` as the one project of the verified non-operator
+/// fixture principal, returning that principal.
+async fn register_fixture_project(state: &AppState, project_root: &std::path::Path) -> String {
     let principal = format!("fp:{}", "ab".repeat(32));
     let project_root = project_root.canonicalize().unwrap();
     // This verified non-operator principal selects only its private, explicitly
@@ -103,18 +122,35 @@ async fn live_presentation_in_project(
             )
             .unwrap();
     }
+    principal
+}
+
+/// A presentation under the shipped shared Config bound to `project_root`,
+/// registered for a verified non-operator principal. Its dialogs carry the
+/// real project registry and Surface affordances, and the session retains the
+/// pinned project directory.
+pub async fn live_shipped_presentation_in_project(
+    state: &AppState,
+    project_root: &std::path::Path,
+) -> (
+    String,
+    ryeos_app::handler_context::HandlerContext,
+    ryeos_client_base::ui::UiPresentationProducer,
+    crate::browser_session::BindingAttachmentCoordinate,
+) {
+    let principal = register_fixture_project(state, project_root).await;
     let minted = crate::handlers::ui_launch_mint::handle(
         crate::handlers::ui_launch_mint::Request {
             ui_binding_contract_revision: crate::UI_BINDING_CONTRACT_REVISION.into(),
-            surface_ref: "config:test/presentation".into(),
-            project_path: Some(spelling.display().to_string()),
+            surface_ref: "config:ryeos/ui/presentation".into(),
+            project_path: Some(project_root.display().to_string()),
             user_principal_id: Some(principal.clone()),
         },
         ryeos_app::handler_context::HandlerContext::new(principal, vec!["*".into()], true),
         Arc::new(state.clone()),
     )
     .await
-    .expect("compile real signed shared Config fixture");
+    .expect("compile the shipped shared Config in a project");
     claim_minted_presentation(state, &minted).await
 }
 

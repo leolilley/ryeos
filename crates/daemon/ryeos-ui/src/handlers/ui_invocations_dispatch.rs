@@ -1647,15 +1647,51 @@ async fn execute_prepared_item_ref(
     let root_canonical = CanonicalRef::parse(item_ref)
         .map_err(|e| HandlerError::BadRequest(format!("invalid item ref: {e}")))?;
 
+    // A recorded dispatch executes against the live project. When the session
+    // is project-bound, the project is the retained pinned directory: its
+    // bound identity is the execution root, the held descriptor must still be
+    // what that identity names, and the subject is re-resolved and verified
+    // through the descriptor at that same root. The descriptor-rooted
+    // resolution coordinate never becomes provenance.
+    let (project_root, verified, exec_ctx) = match prepared.project_content.as_ref() {
+        Some(directory) => {
+            directory.ensure_path_binding().map_err(|error| {
+                HandlerError::Forbidden(format!(
+                    "the session project no longer names its retained directory: {error}"
+                ))
+            })?;
+            let project_root = directory.path().to_path_buf();
+            let mut exec_ctx = prepared.exec_ctx.clone();
+            exec_ctx.plan_ctx.project_context =
+                ryeos_engine::contracts::ProjectContext::LocalPath {
+                    path: project_root.clone(),
+                };
+            let verified = exec_ctx
+                .engine
+                .resolve_verified_under_project_authority(
+                    &exec_ctx.plan_ctx,
+                    &root_canonical,
+                    &project_root,
+                    directory,
+                )
+                .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+            (project_root, verified, exec_ctx)
+        }
+        None => (
+            prepared.project.effective_path.clone(),
+            verified,
+            prepared.exec_ctx.clone(),
+        ),
+    };
     let resolved_authority = ryeos_app::execution_policy::resolve_standard_local_live_authority(
-        &prepared.project.effective_path,
+        &project_root,
         authority_scopes.to_vec(),
         &state.isolation,
     )
     .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
     let provenance = ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
-        prepared.project.effective_path.clone(),
-        prepared.exec_ctx.engine.clone(),
+        project_root.clone(),
+        exec_ctx.engine.clone(),
         resolved_authority.project,
     )
     .map_err(|error| HandlerError::Internal(error.to_string()))?;
@@ -1673,8 +1709,8 @@ async fn execute_prepared_item_ref(
         params,
         ref_bindings: Default::default(),
         product_selections: Vec::new(),
-        acting_principal: prepared.exec_ctx.principal_fingerprint.as_str(),
-        project_path: &prepared.project.effective_path,
+        acting_principal: exec_ctx.principal_fingerprint.as_str(),
+        project_path: &project_root,
         provenance,
         lifecycle_authority: resolved_authority.lifecycle,
         launch_timings: None,
@@ -1694,7 +1730,7 @@ async fn execute_prepared_item_ref(
         verified,
         local_handler_context,
         &dispatch_req,
-        &prepared.exec_ctx,
+        &exec_ctx,
         state,
     )
     .await
