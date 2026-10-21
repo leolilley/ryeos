@@ -293,6 +293,19 @@ fn railway() -> Host {
     }
 }
 
+/// A Render web service: the railway shape plus user, pid and mount
+/// namespaces, which Render containers allow and the node proves by probe.
+fn render_service() -> Host {
+    let mut base = facts(volume());
+    base.unshare_user_pid_mount = ProbeOutcome::Allowed;
+    base.unshare_user = ProbeOutcome::Allowed;
+    Host {
+        name: "render-service",
+        facts: base,
+        scopes: false,
+    }
+}
+
 fn railway_no_volume() -> Host {
     Host {
         name: "railway-no-volume",
@@ -394,13 +407,14 @@ fn every_shipped_profile_declares_the_host_classes_its_composition_runs_on() {
     let both = ["hosted", "local"];
     let local_only = ["local"];
     let hosted_only = ["hosted"];
+    let controller = ["hosted", "hosted-enforced", "local"];
     let expected: [(&str, &[&str]); 16] = [
         ("core", &both),
         ("core-scheduling", &both),
         ("core-workflow", &both),
         ("core-knowledge", &both),
         ("standard", &both),
-        ("f5r-controller", &both),
+        ("f5r-controller", &controller),
         ("standard-central-auth", &local_only),
         ("central-host", &local_only),
         ("bundle-source", &local_only),
@@ -553,6 +567,14 @@ fn the_f5r_controller_node_follows_the_host_class_matrix() {
         ("local", local_docker_no_volume(), Expect::Refuse(NO_DISK)),
         ("local", runit(), Expect::Refuse(NO_LOCAL_ENCLOSURE)),
         ("hosted", runit(), Expect::Refuse(NO_HOSTED_ENCLOSURE)),
+        ("hosted-enforced", render_service(), Expect::Admit),
+        ("hosted-enforced", railway(), Expect::Refuse(NO_NAMESPACES)),
+        ("hosted-enforced", render_sandbox(), Expect::Refuse(NO_DISK)),
+        (
+            "hosted-enforced",
+            runit(),
+            Expect::Refuse(NO_HOSTED_ENCLOSURE),
+        ),
     ];
     for (class, host, expect) in &cases {
         check("f5r-controller", class, host, expect);
