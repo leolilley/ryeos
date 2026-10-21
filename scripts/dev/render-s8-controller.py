@@ -177,7 +177,7 @@ def build_payload(args, owner_id, credential_id):
         raise Refusal("--substrate-digest must be sha256:<64hex>")
     image_path = match.group("path")
     env = [
-        ("RYEOS_INIT_HOST_CLASS", "hosted"),
+        ("RYEOS_INIT_HOST_CLASS", args.host_class),
         ("RYEOS_SUBSTRATE_IMAGE", f"{image_path}@{args.substrate_digest}"),
         ("RYEOS_SUBSTRATE_PROTOCOL", str(args.substrate_protocol)),
         ("RYEOS_TRUST_BAKED_PUBLISHERS", "1"),
@@ -427,6 +427,8 @@ def parser():
     d.add_argument("--region", default="oregon")
     d.add_argument("--plan", default="starter")
     d.add_argument("--disk-gb", type=int, default=1)
+    d.add_argument("--host-class", default="hosted",
+                   help="host class the node initializes under (a class the profile declares)")
     d.add_argument("--owner-email")
     d.add_argument("--owner-id")
     d.add_argument("--registry-credential-id")
