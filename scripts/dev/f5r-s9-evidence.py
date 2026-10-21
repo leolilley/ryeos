@@ -152,9 +152,17 @@ def load_seed(path):
     text = Path(path).read_text()
     body = "".join(l for l in text.splitlines() if l and not l.startswith("-----"))
     der = base64.b64decode(body)
-    if len(der) != 48 or der[:16] != bytes.fromhex("302e020100300506032b657004220420"):
+    # PKCS#8 v1 (48 bytes) or v2 (the public key attached): the Ed25519
+    # algorithm identifier, then the seed as an OCTET STRING wrapping a
+    # 32-byte OCTET STRING.
+    algorithm = bytes.fromhex("300506032b6570")
+    seed_tag = bytes.fromhex("04220420")
+    if der[:1] != b"\x30" or algorithm not in der:
         raise Failure(f"{path}: not a PKCS#8 Ed25519 private key")
-    return der[16:]
+    at = der.find(seed_tag, der.index(algorithm) + len(algorithm))
+    if at < 0 or len(der) < at + 4 + 32:
+        raise Failure(f"{path}: not a PKCS#8 Ed25519 private key")
+    return der[at + 4:at + 36]
 
 
 class Signer:
