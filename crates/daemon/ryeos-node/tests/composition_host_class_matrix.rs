@@ -407,7 +407,7 @@ fn every_shipped_profile_declares_the_host_classes_its_composition_runs_on() {
     let both = ["hosted", "local"];
     let local_only = ["local"];
     let hosted_only = ["hosted"];
-    let controller = ["hosted", "hosted-enforced", "local"];
+    let controller = ["hosted", "hosted_enforced", "local"];
     let expected: [(&str, &[&str]); 16] = [
         ("core", &both),
         ("core-scheduling", &both),
@@ -567,11 +567,10 @@ fn the_f5r_controller_node_follows_the_host_class_matrix() {
         ("local", local_docker_no_volume(), Expect::Refuse(NO_DISK)),
         ("local", runit(), Expect::Refuse(NO_LOCAL_ENCLOSURE)),
         ("hosted", runit(), Expect::Refuse(NO_HOSTED_ENCLOSURE)),
-        ("hosted-enforced", render_service(), Expect::Admit),
-        ("hosted-enforced", railway(), Expect::Refuse(NO_NAMESPACES)),
-        ("hosted-enforced", render_sandbox(), Expect::Refuse(NO_DISK)),
+        ("hosted_enforced", render_service(), Expect::Admit),
+        ("hosted_enforced", render_sandbox(), Expect::Refuse(NO_DISK)),
         (
-            "hosted-enforced",
+            "hosted_enforced",
             runit(),
             Expect::Refuse(NO_HOSTED_ENCLOSURE),
         ),

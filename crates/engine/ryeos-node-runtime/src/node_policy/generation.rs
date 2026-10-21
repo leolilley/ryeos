@@ -745,13 +745,16 @@ mod tests {
     fn composition_profiles_declare_a_local_and_a_hosted_class_and_init_selects_one() {
         let table = NodePolicyTable::new();
         let path = Path::new("profile.yaml");
-        for name in ["core", "core-scheduling", "f5r-controller", "standard"] {
+        let declared: [(&str, &[&str]); 4] = [
+            ("core", &["hosted", "local"]),
+            ("core-scheduling", &["hosted", "local"]),
+            ("f5r-controller", &["hosted", "hosted_enforced", "local"]),
+            ("standard", &["hosted", "local"]),
+        ];
+        for (name, classes) in declared {
             let profile = authored_profile(name);
-            assert_eq!(
-                profile.host_classes().unwrap(),
-                ["hosted", "local"],
-                "{name}"
-            );
+            assert_eq!(profile.host_classes().unwrap(), classes, "{name}");
+            let listed = classes.join(", ");
             // The unselected profile is not a node generation.
             let error = format!(
                 "{:#}",
@@ -760,11 +763,10 @@ mod tests {
             assert!(error.contains("exactly one host class"), "{name}: {error}");
             let refused = format!("{:#}", profile.for_host_class("edge").unwrap_err());
             assert!(
-                refused.contains("does not declare host class `edge`")
-                    && refused.contains("hosted, local"),
+                refused.contains("does not declare host class `edge`") && refused.contains(&listed),
                 "{name}: {refused}"
             );
-            for host_class in ["hosted", "local"] {
+            for host_class in classes.iter().copied() {
                 let selected = profile.for_host_class(host_class).unwrap();
                 assert_eq!(selected.host_classes().unwrap(), [host_class]);
                 let policy: ryeos_engine::isolation::IsolationPolicy =
