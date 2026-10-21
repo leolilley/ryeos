@@ -240,6 +240,13 @@ def find_key(obj, names):
     return None
 
 
+def unwrap(body):
+    """The daemon wraps a service reply as {"result": {...}}; returns the inner object."""
+    if isinstance(body, dict) and isinstance(body.get("result"), dict):
+        return body["result"]
+    return body if isinstance(body, dict) else {}
+
+
 def collect_states(obj, out=None):
     out = [] if out is None else out
     if isinstance(obj, dict):
@@ -315,6 +322,7 @@ class Runner:
 
     def session_body(self):
         return {"item_ref": "worker_execution:codex/session",
+                "launch_id": "L-" + secrets.token_hex(16),
                 "ref_bindings": {"environment": self.args.environment},
                 "project_path": self.args.project_path,
                 "parameters": {"credential_profile_id": self.state["profile"]["id"]},
@@ -360,24 +368,50 @@ class Runner:
         self.state["principal_id"] = self.principal
         self.finish(ev, "pass", principal_id=self.principal, operator_fingerprint=self.signer.fingerprint)
 
+    LOGIN_NOTE = ("activation requires a provider login: credential-profiles/confirm accepts only a profile in "
+                  "the 'confirming' state, which is reached only when a codex login worker (worker_execution:"
+                  "codex/login or codex/trusted-login, opened by the ryeos codex login open[-trusted] node "
+                  "commands) observes the provider account; no provider-free activation path exists")
+
     def profile(self):
-        ev = self.new_ev("profile", "dummy credential profile via profile-create + profile-confirm")
+        ev = self.new_ev("profile", "dummy credential profile via profile-get/create + profile-confirm")
         pid = self.args.profile_id
         self.state["profile"] = {"id": pid, "created": False}
         self.save_state()
-        st, body = self.execute(ev, "profile-create", "service:credential-profiles/create", {"profile_id": pid})
-        if st != 200:
-            return self.finish(ev, "fail", reason=f"profile-create returned {st}")
-        self.state["profile"]["created"] = True
-        self.save_state()
-        epoch, digest = self.args.login_epoch, self.args.account_digest
-        if epoch is None or digest is None:
-            st, got = self.execute(ev, "profile-get", "service:credential-profiles/get", {"profile_id": pid})
-            got = got if isinstance(got, dict) else {}
-            epoch = got.get("login_epoch") if epoch is None else epoch
-            digest = got.get("sanitized_account_digest") if digest is None else digest
-        missing = epoch is None or not digest
-        # With no ceremony values the confirm is still attempted so the daemon's exact refusal is recorded.
+        st, got = self.execute(ev, "profile-get", "service:credential-profiles/get", {"profile_id": pid})
+        if st == 404:
+            st, _ = self.execute(ev, "profile-create", "service:credential-profiles/create", {"profile_id": pid})
+            if st != 200:
+                return self.finish(ev, "fail", reason=f"profile-create returned {st}")
+            self.state["profile"]["created"] = True
+            self.save_state()
+            st, got = self.execute(ev, "profile-get-after-create", "service:credential-profiles/get",
+                                   {"profile_id": pid})
+            reused = False
+        elif st == 200:
+            # An earlier run left this profile; it is reused and torn down by this run.
+            self.state["profile"]["created"] = True
+            self.save_state()
+            reused = True
+        else:
+            return self.finish(ev, "fail", reason=f"profile-get returned {st}")
+        got = unwrap(got)
+        pstate = got.get("state")
+        self.state["profile"]["generation"] = got.get("credential_generation")
+        if pstate == "active":
+            return self.finish(ev, "pass", profile_id=pid, reused_existing=reused,
+                               credential_generation=got.get("credential_generation"),
+                               reason="existing active profile reused")
+        epoch = self.args.login_epoch if self.args.login_epoch is not None else got.get("login_epoch")
+        digest = self.args.account_digest or got.get("sanitized_account_digest")
+        supplied = self.args.login_epoch is not None and bool(self.args.account_digest)
+        if pstate != "confirming" and not supplied:
+            self.state["profile"]["confirm_refusal"] = self.LOGIN_NOTE
+            return self.finish(ev, "inconclusive", profile_id=pid, reused_existing=reused, profile_state=pstate,
+                               confirm_refusal=self.LOGIN_NOTE,
+                               reason=f"profile is '{pstate}': {self.LOGIN_NOTE}; pass --login-epoch and "
+                               "--account-digest for a profile activated by hand; session steps are "
+                               "attempted to capture their refusals")
         st, body = self.execute(ev, "profile-confirm", "service:credential-profiles/confirm",
                                 {"profile_id": pid, "login_epoch": int(epoch or 0),
                                  "expected_account_digest": digest or ""})
@@ -385,17 +419,16 @@ class Runner:
             refusal = json.dumps(body, sort_keys=True)[:1000]
             self.state["profile"]["confirm_refusal"] = refusal
             return self.finish(ev, "inconclusive", confirm_refusal=refusal, confirm_http_status=st,
-                               ceremony_values_supplied=not missing,
-                               reason=f"profile-confirm refused ({st}): {refusal}; the profile is not in the "
-                               "confirming state (login-open contacts the provider); session steps are "
-                               "attempted to capture their refusals")
+                               profile_state=pstate, reused_existing=reused,
+                               reason=f"profile-confirm refused ({st}): {refusal}; {self.LOGIN_NOTE}; session "
+                               "steps are attempted to capture their refusals")
         if st != 200:
             return self.finish(ev, "fail", reason=f"profile-confirm returned {st}")
-        self.state["profile"]["generation"] = (body or {}).get("credential_generation")
-        self.finish(ev, "pass", profile_id=pid)
+        self.state["profile"]["generation"] = unwrap(body).get("credential_generation")
+        self.finish(ev, "pass", profile_id=pid, reused_existing=reused)
 
     def start_session(self, ev, n):
-        st, body = self.call(ev, f"session-{n}-start", "POST", "/execute", self.session_body())
+        st, body = self.call(ev, f"session-{n}-start", "POST", "/execute/launch", self.session_body())
         text = json.dumps(body)
         sess = {"n": n, "http_status": st,
                 "chain_root_id": find_key(body, ("chain_root_id", "thread_id")),
@@ -637,18 +670,19 @@ class Runner:
             if st == 404:
                 prof["removed"] = True
             elif st == 200:
-                gen = (got or {}).get("credential_generation")
-                if (got or {}).get("state") not in ("revoked", "unauthenticated"):
+                got = unwrap(got)
+                gen = got.get("credential_generation")
+                if got.get("state") not in ("revoked", "unauthenticated"):
                     r, rb = attempt("profile-revoke", lambda: self.execute(
                         ev, "profile-revoke", "service:credential-profiles/revoke",
                         {"profile_id": pid, "credential_generation": gen})) or (0, None)
                     if r != 200:
                         errors.append(f"profile-revoke returned {r}")
                     else:
-                        gen = (rb or {}).get("credential_generation", gen)
+                        gen = unwrap(rb).get("credential_generation", gen)
                         _, again = self.execute(ev, "profile-get-after-revoke",
                                                 "service:credential-profiles/get", {"profile_id": pid})
-                        gen = (again or {}).get("credential_generation", gen)
+                        gen = unwrap(again).get("credential_generation", gen)
                 d, _ = attempt("profile-delete", lambda: self.execute(
                     ev, "profile-delete", "service:credential-profiles/delete",
                     {"profile_id": pid, "credential_generation": gen})) or (0, None)
