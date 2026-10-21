@@ -33,6 +33,8 @@ SCHEMA = "ryeos.f5r-s9-evidence.v1"
 RISK_ACCEPTANCE = ("Hosted-floor risk accepted for S9 evidence only (Leo D8, 2026-10-21): the controller host "
                    "class is 'hosted' on Render (enclosure_trusted_init, no memlock). This evidence does not "
                    "establish a stronger enclosure guarantee.")
+SKIP_RENDER_REASON = "render api key is not available on the controller"
+DEFAULT_REASON = {"pass": "completed as expected", "fail": "step failed", "skipped": "step not run"}
 STEP_ORDER = ["preflight", "profile", "e1", "e2", "e3", "e4", "e6", "e7"]
 REFUSAL_RE = re.compile(r"lease refused for workload[^\n\"\\]*")
 SERVICE_ID_RE = re.compile(r"^srv-[a-z0-9]+$")
@@ -316,13 +318,19 @@ class Runner:
 
     def finish(self, ev, status, **kw):
         ev.update(kw)
+        if not ev.get("reason"):
+            ev["reason"] = DEFAULT_REASON.get(status, status)
         ev["status"], ev["finished_at"] = status, now()
         name = f"{ev['step']}.json"
         self.out.mkdir(parents=True, exist_ok=True)
         (self.out / name).write_text(json.dumps(ev, indent=2, sort_keys=True) + "\n")
-        self.state["steps"][ev["step"]] = {"status": status, "file": name}
+        self.state["steps"][ev["step"]] = {"status": status, "file": name, "reason": ev["reason"]}
         self.save_state()
         self.log(ev["step"], "done", status=status)
+
+    def new_skip(self, step, reason):
+        ev = self.new_ev(step, "not run")
+        self.finish(ev, "skipped", reason=reason)
 
     def done(self, step):
         return self.state["steps"].get(step, {}).get("status") in ("pass", "refused", "inconclusive")
@@ -360,12 +368,19 @@ class Runner:
             got = got if isinstance(got, dict) else {}
             epoch = got.get("login_epoch") if epoch is None else epoch
             digest = got.get("sanitized_account_digest") if digest is None else digest
-        if epoch is None or not digest:
-            return self.finish(ev, "fail", reason="no login_epoch/account digest: the profile is not in the "
-                               "confirming state (login-open contacts the provider); supply --login-epoch and "
-                               "--account-digest from a prepared confirming profile")
+        missing = epoch is None or not digest
+        # With no ceremony values the confirm is still attempted so the daemon's exact refusal is recorded.
         st, body = self.execute(ev, "profile-confirm", "service:credential-profiles/confirm",
-                                {"profile_id": pid, "login_epoch": int(epoch), "expected_account_digest": digest})
+                                {"profile_id": pid, "login_epoch": int(epoch or 0),
+                                 "expected_account_digest": digest or ""})
+        if 400 <= st < 500:
+            refusal = json.dumps(body, sort_keys=True)[:1000]
+            self.state["profile"]["confirm_refusal"] = refusal
+            return self.finish(ev, "inconclusive", confirm_refusal=refusal, confirm_http_status=st,
+                               ceremony_values_supplied=not missing,
+                               reason=f"profile-confirm refused ({st}): {refusal}; the profile is not in the "
+                               "confirming state (login-open contacts the provider); session steps are "
+                               "attempted to capture their refusals")
         if st != 200:
             return self.finish(ev, "fail", reason=f"profile-confirm returned {st}")
         self.state["profile"]["generation"] = (body or {}).get("credential_generation")
@@ -379,6 +394,7 @@ class Runner:
                 "launch_id": find_key(body, ("launch_id",))}
         refusal = REFUSAL_RE.search(text)
         sess["refusal"] = refusal.group(0) if refusal else None
+        sess["error_text"] = text[:1000] if (st >= 400 or sess["refusal"]) else None
         if st < 400 and not sess["refusal"]:
             self.state["sessions"].append(sess)
             self.save_state()
@@ -405,13 +421,22 @@ class Runner:
     def admitted(text, states):
         return any(s.endswith("=admitted") or s.endswith("=ready") for s in states)
 
+    def profile_unconfirmed(self):
+        return self.state["steps"].get("profile", {}).get("status") == "inconclusive"
+
     def e1(self):
         ev = self.new_ev("e1", "sessions 1 and 2 admitted within the budget")
         result = []
         for n in (1, 2):
             sess, _ = self.start_session(ev, n)
             if sess["http_status"] >= 400 or sess["refusal"]:
-                result.append({"n": n, "started": False, "refusal": sess["refusal"], "http_status": sess["http_status"]})
+                result.append({"n": n, "started": False, "refusal": sess["refusal"], "http_status": sess["http_status"],
+                               "error_text": sess["error_text"]})
+                if self.profile_unconfirmed():
+                    return self.finish(ev, "refused", sessions=result,
+                                       reason=f"session {n} refused ({sess['http_status']}): {sess['error_text']}",
+                                       note="the credential profile was not confirmed; the refusal is recorded "
+                                       "as evidence, no pass is claimed")
                 return self.finish(ev, "fail", sessions=result, reason=f"session {n} was not accepted")
             text, states = self.observe(ev, sess, f"session-{n}-status", self.args.poll_timeout, self.admitted)
             result.append({"n": n, "started": True, "chain_root_id": sess["chain_root_id"],
@@ -430,12 +455,20 @@ class Runner:
             refusal = m.group(0) if m else None
         if refusal:
             return self.finish(ev, "pass", refusal_text=refusal, budget=self.args.budget)
+        if sess["http_status"] >= 400 and self.profile_unconfirmed():
+            return self.finish(ev, "refused", http_status=sess["http_status"], refusal_text=sess["error_text"],
+                               reason=f"session 3 refused ({sess['http_status']}): {sess['error_text']}",
+                               note="the credential profile was not confirmed, so this refusal is not "
+                               "attributed to the budget; no pass is claimed")
         self.finish(ev, "fail", reason="third session was not refused", http_status=sess["http_status"])
 
     def e3(self):
         ev = self.new_ev("e3", "sandbox create and guest dial of the channel stream")
         target = (self.state["sessions"] or [None])[0]
         if not target:
+            if self.profile_unconfirmed():
+                return self.finish(ev, "inconclusive", reason="no live session exists: session start was "
+                                   "refused because the credential profile was not confirmed")
             return self.finish(ev, "fail", reason="no live session to observe")
         text, states = self.observe(ev, target, "session-1-status", self.args.poll_timeout,
                                     lambda t, s: bool(REFUSAL_RE.search(t)) or "refus" in t.lower()
@@ -466,6 +499,8 @@ class Runner:
 
     def e6(self):
         ev = self.new_ev("e6", "controller restart through the Render REST API; earlier leases refused")
+        if self.args.skip_render:
+            return self.finish(ev, "skipped", reason=SKIP_RENDER_REASON)
         sid = self.args.service_id
         S8.guard_id(sid)
         if not sid or not SERVICE_ID_RE.match(sid):
@@ -508,6 +543,8 @@ class Runner:
 
     def e7(self):
         ev = self.new_ev("e7", "unlisted egress through the Render run-proxy token route")
+        if self.args.skip_render:
+            return self.finish(ev, "skipped", reason=SKIP_RENDER_REASON)
         a = self.args
         if not (a.sandbox_id and SANDBOX_RE.match(a.sandbox_id) and a.owner_id and a.region):
             return self.finish(ev, "fail", reason="--sandbox-id, --owner-id and --region are required for E7")
@@ -627,7 +664,7 @@ class Runner:
                     self.log(step, "skipped-already-done")
                     continue
                 if failed:
-                    self.state["steps"][step] = {"status": "skipped"}
+                    self.new_skip(step, "an earlier step failed")
                     continue
                 if self.daemon.audience is None and self.state.get("principal_id"):
                     self.daemon.audience = self.state["principal_id"]
@@ -647,11 +684,17 @@ class Runner:
         for step in STEP_ORDER + ["teardown"]:
             rec = self.state["steps"].get(step, {"status": "not-run"})
             entry = {"id": step, "status": rec["status"]}
+            if rec.get("reason"):
+                entry["reason"] = rec["reason"]
             if rec.get("file") and (self.out / rec["file"]).exists():
                 entry["file"] = rec["file"]
                 entry["sha256"] = sha256_hex((self.out / rec["file"]).read_bytes())
             steps.append(entry)
+        summary = {k: 0 for k in ("pass", "refused", "inconclusive", "skipped", "fail", "not-run")}
+        for entry in steps:
+            summary[entry["status"]] = summary.get(entry["status"], 0) + 1
         manifest = {"schema": SCHEMA + ".manifest", "created_at": now(), "base_url": self.args.base_url,
+                    "summary": summary,
                     "controller_principal_id": self.state.get("principal_id"),
                     "operator_fingerprint": self.signer.fingerprint,
                     "risk_acceptance": RISK_ACCEPTANCE, "steps": steps}
@@ -692,7 +735,10 @@ def parser():
     p.add_argument("--account-digest")
     p.add_argument("--budget", type=int, default=2)
     p.add_argument("--session-policy-file")
-    p.add_argument("--service-id", required=True, help="the throwaway controller service (never the farm)")
+    p.add_argument("--service-id", help="the throwaway controller service (never the farm); required "
+                   "unless --skip-render")
+    p.add_argument("--skip-render", action="store_true",
+                   help="record e6/e7 as skipped and never read the Render api key")
     p.add_argument("--render-base", default=S8.API)
     p.add_argument("--env-file", default=str(S8.DEFAULT_ENV_FILE))
     p.add_argument("--api-key-file")
@@ -710,7 +756,13 @@ def parser():
 def main(argv=None, **seams):
     args = parser().parse_args(argv)
     try:
-        S8.guard_id(args.service_id)
+        if args.skip_render:
+            if args.service_id:
+                S8.guard_id(args.service_id)
+        else:
+            if not args.service_id:
+                raise Refusal("--service-id is required unless --skip-render")
+            S8.guard_id(args.service_id)
         key_path = args.operator_key
         if not key_path:
             root = os.environ.get("RYEOS_APP_ROOT")
@@ -718,7 +770,7 @@ def main(argv=None, **seams):
                 raise Refusal("pass --operator-key or set RYEOS_APP_ROOT")
             key_path = str(Path(root) / ".ai/config/keys/signing/private_key.pem")
         signer = Signer(load_seed(key_path))
-        api = S8.Api(read_render_key(args), opener=seams.get("render_opener", S8.http_open))
+        api = None if args.skip_render else S8.Api(read_render_key(args), opener=seams.get("render_opener", S8.http_open))
         runner = Runner(args, Daemon(args.base_url, signer), signer, render=api,
                         **{k: v for k, v in seams.items() if k in ("proxy_opener", "sleep", "clock", "emit")})
         return runner.run()
