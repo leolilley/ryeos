@@ -51,6 +51,9 @@ STORAGE_BY_MANIFEST_KIND = {
 }
 INLINE_BLOB_MAX = 8 * 1024 * 1024  # objects/get inlines blobs up to 16 MiB
 CHUNK_BYTES = 512 * 1024  # objects/get MAX_BLOB_CHUNK_BYTES
+# Large-content files are retained whole under the operator app root, keyed by
+# file sha256; no service reads them back, so the export copies them from here.
+LARGE_OBJECTS = (".ai", "state", "large-objects", "objects")
 LOCAL_CAPTURE = {"kind": "local_capture"}
 
 
@@ -193,6 +196,7 @@ class Driver:
         self.opener, self.sleep, self.clock, self.emit = opener, sleep, clock, emit
         self.secrets = [v for k, v in env.items() if SECRET_ENV_RE.search(k) and len(v) >= 6]
         self.manifests, self.node_fingerprint, self.node_key = {}, None, None
+        self.app_root = Path(env["RYEOS_APP_ROOT"]) if env.get("RYEOS_APP_ROOT") else None
         self.evidence.mkdir(parents=True, exist_ok=True)
         self.log_path = self.evidence / "steps.jsonl"
         self.seq = len(list(self.evidence.glob("*.stdout")))
@@ -373,35 +377,67 @@ class Driver:
 
     def fetch_file(self, name, entry, dest):
         """Write one manifest file entry to `dest`, verifying every hash; return (size, sha256)."""
-        label = f"{name}.blob"
-        pieces = entry.get("chunk_hashes") or []
+        expected = entry.get("file_sha256") or entry.get("blob_hash")
         total, whole = 0, hashlib.sha256()
         dest.parent.mkdir(parents=True, exist_ok=True)
         tmp = dest.with_name(dest.name + ".part")
         with open(tmp, "wb") as handle:
-            if pieces:
-                sources = [(h, None if entry.get("chunk_size") is None else entry["chunk_size"]) for h in pieces]
+            if entry.get("file_sha256"):
+                total = self.copy_large_object(name, entry, handle, whole)
             else:
-                sources = [(entry.get("blob_hash"), entry.get("size"))]
-            for blob_hash, size in sources:
-                part = hashlib.sha256()
-                for data in self.iter_blob(label, blob_hash, size):
-                    part.update(data)
+                for data in self.iter_blob(f"{name}.blob", entry.get("blob_hash"), entry.get("size")):
                     whole.update(data)
                     total += len(data)
                     handle.write(data)
-                if pieces and part.hexdigest() != blob_hash:
-                    raise StepFailed(f"{name}: chunk {blob_hash} of {entry['path']} failed its hash")
             handle.flush()
             os.fsync(handle.fileno())
         digest = whole.hexdigest()
-        if digest != entry.get("blob_hash") or total != entry.get("size"):
+        if digest != expected or total != entry.get("size"):
             tmp.unlink()
             raise StepFailed(f"{name}: {entry['path']} fetched {total} bytes sha256 {digest}, "
-                             f"manifest says {entry.get('size')} bytes {entry.get('blob_hash')}")
+                             f"manifest says {entry.get('size')} bytes {expected}")
         os.replace(tmp, dest)
         dest.chmod(0o755 if entry.get("mode") == 0o755 else 0o644)
         return total, digest
+
+    def copy_large_object(self, name, entry, handle, whole):
+        """Stream one retained large object out of the operator store, checking each chunk hash."""
+        path, file_sha256 = entry.get("path"), entry["file_sha256"]
+        if self.app_root is None:
+            raise StepFailed(f"{name}: {path} is a large object retained whole in the operator store "
+                             f"and no service reads it back, so the export needs --app-root")
+        chunk_size, hashes = entry.get("chunk_size"), list(entry.get("chunk_hashes") or [])
+        if not isinstance(chunk_size, int) or chunk_size <= 0 or not hashes or \
+                not all(isinstance(h, str) and HASH_RE.match(h) for h in hashes):
+            raise StepFailed(f"{name}: {path} large entry lacks a usable chunk layout")
+        source = self.app_root.joinpath(*LARGE_OBJECTS, file_sha256)
+        if source.is_symlink() or not source.is_file():
+            raise StepFailed(f"{name}: large object {file_sha256} is not retained at {source}")
+        total, index, part, filled = 0, 0, hashlib.sha256(), 0
+        with open(source, "rb") as src:
+            while True:
+                data = src.read(min(CHUNK_BYTES, chunk_size - filled))
+                if not data:
+                    break
+                part.update(data)
+                whole.update(data)
+                handle.write(data)
+                total += len(data)
+                filled += len(data)
+                if filled == chunk_size:
+                    self.check_chunk(name, path, hashes, index, part)
+                    index, part, filled = index + 1, hashlib.sha256(), 0
+        if filled:
+            self.check_chunk(name, path, hashes, index, part)
+            index += 1
+        if index != len(hashes):
+            raise StepFailed(f"{name}: {path} has {index} chunks, manifest lists {len(hashes)}")
+        return total
+
+    @staticmethod
+    def check_chunk(name, path, hashes, index, part):
+        if index >= len(hashes) or part.hexdigest() != hashes[index]:
+            raise StepFailed(f"{name}: chunk {index} of {path} failed its hash")
 
     def export_product(self, name):
         """Read the exact durable capture through the product verb and write its tree bytes."""
@@ -443,7 +479,7 @@ class Driver:
                 size, digest = self.fetch_file(name, entry, tree / rel)
                 total += size
                 records.append({"path": rel, "kind": "file", "mode": entry.get("mode"), "size": size,
-                                "sha256": digest, "blob_hash": entry.get("blob_hash")})
+                                "sha256": digest, "blob_hash": digest})
             else:
                 raise StepFailed(f"{name}.export: entry {rel} kind {entry.get('kind')!r} cannot be shipped")
         if evidence.get("total_bytes") is not None and evidence["total_bytes"] != total:

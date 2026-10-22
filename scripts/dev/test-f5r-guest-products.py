@@ -402,8 +402,9 @@ def real_scenario(owner_exe=b"\x7fELF-owner", chunked=False):
     entry = {"path": "codex", "kind": "file", "mode": 0o755, "size": len(codex_bytes),
              "blob_hash": hashlib.sha256(codex_bytes).hexdigest()}
     if chunked:
-        entry.update(chunk_size=20, chunk_hashes=[hashlib.sha256(x).hexdigest() for x in pieces])
-        blobs.update({hashlib.sha256(x).hexdigest(): b64(x) for x in pieces})
+        del entry["blob_hash"]
+        entry.update(file_sha256=hashlib.sha256(codex_bytes).hexdigest(), chunk_size=20,
+                     chunk_hashes=[hashlib.sha256(x).hexdigest() for x in pieces])
     else:
         blobs[entry["blob_hash"]] = b64(codex_bytes)
     codex = {"schema": "x", "kind": "external_large_content_manifest" if chunked else "external_content_manifest",
@@ -414,9 +415,14 @@ def real_scenario(owner_exe=b"\x7fELF-owner", chunked=False):
 
 
 class ExportTests(Case):
-    def export_go(self, extra=(), scn=None, chunked=False, **kw):
+    def export_go(self, extra=(), scn=None, chunked=False, retained=None, **kw):
         base, self.codex_bytes = real_scenario(chunked=chunked)
         self.scn = base
+        if chunked:
+            store = self.app.joinpath(*GP.LARGE_OBJECTS)
+            store.mkdir(parents=True, exist_ok=True)
+            (store / hashlib.sha256(self.codex_bytes).hexdigest()).write_bytes(
+                self.codex_bytes if retained is None else retained)
         self.export = self.tmp / "export"
         return self.go(["--export", str(self.export), *extra], scn=scn,
                        opener=lambda req, t: Resp({"signing_key": KEY, "fingerprint": H("5")}), **kw)
@@ -454,17 +460,22 @@ class ExportTests(Case):
         self.assertIn(["execute", "service:objects/get", "--no-stream", "--input",
                        json.dumps({"blob_hashes": [hashlib.sha256(b"\x7fELF-owner").hexdigest()]})], calls)
 
-    def test_chunked_large_content_and_chunk_loop(self):
-        old = GP.INLINE_BLOB_MAX
-        GP.INLINE_BLOB_MAX = 4
-        try:
-            self.assertEqual(self.export_go(chunked=True, scn={"chunk_cap": 7}), 0)
-        finally:
-            GP.INLINE_BLOB_MAX = old
+    def test_large_content_is_copied_from_the_operator_store_with_chunk_hashes_checked(self):
+        self.assertEqual(self.export_go(chunked=True), 0)
         codex = self.ship()["products"]["codex"]
         self.assertEqual(codex["storage"], "large_content")
         self.assertEqual((self.export / "codex/tree/codex").read_bytes(), self.codex_bytes)
-        self.assertTrue(any("blob_chunk" in " ".join(c) for c in self.calls()))
+        self.assertEqual(codex["entries"][0]["blob_hash"], hashlib.sha256(self.codex_bytes).hexdigest())
+        self.assertFalse(any("blob_chunk" in " ".join(c) for c in self.calls()))
+
+    def test_large_content_refuses_a_corrupt_retained_object(self):
+        self.assertNotEqual(self.export_go(chunked=True, retained=b"CODEXBINARY" * 4 + b"CODEXBINARX"), 0)
+        self.assertIn("failed its hash", self.text())
+        self.assertFalse((self.export / "codex/tree/codex").exists())
+
+    def test_large_content_refuses_without_an_app_root(self):
+        self.assertNotEqual(self.export_go(["--no-identity"], chunked=True, env={"RYEOS_APP_ROOT": ""}), 0)
+        self.assertIn("needs --app-root", self.text())
 
     def test_export_rerun_issues_no_cli_calls(self):
         self.export_go()
