@@ -244,10 +244,11 @@ jobs:
   test:
     name: Workspace tests
     runs-on: ubuntu-latest
-    # The full two-thread gate now runs more than 11,500 tests and was still
-    # making progress near the end of the suite when the 120-minute ceiling
-    # cancelled it.
-    timeout-minutes: 150
+    # The full two-thread gate runs more than 11,800 tests in about 130
+    # minutes, and the scheduler-composition check that follows it rebuilds
+    # the feature variants for up to 30 more; a 150-minute ceiling cancelled
+    # a green run during that check.
+    timeout-minutes: 200
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_tests }}
     steps:
       - name: Check out repository
