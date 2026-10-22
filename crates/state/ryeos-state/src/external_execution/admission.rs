@@ -657,19 +657,56 @@ impl ExternalCandidateRequirement {
         content: &crate::objects::RetainedExternalRuntimeContentQualification,
         qualification_use: &ExternalCandidateQualificationUse,
     ) -> Result<AdmittedExternalCandidateProgram> {
+        content.validate()?;
+        self.resolve_for_content_evidence(
+            &content.activation_ref,
+            &content.coordinate_id,
+            &content.attestation_hash,
+            &content.evidence,
+            qualification_use,
+        )
+    }
+
+    /// Resolve the admitted program from published content qualification
+    /// evidence alone. No retained session record is needed, so a caller that
+    /// holds only the activation coordinate and the evidence derives exactly
+    /// the program a launch derives from the retained record.
+    pub fn resolve_for_content_evidence(
+        &self,
+        activation_ref: &str,
+        coordinate_id: &str,
+        attestation_hash: &str,
+        evidence: &crate::external_content::qualification_evidence::ContentQualificationEvidence,
+        qualification_use: &ExternalCandidateQualificationUse,
+    ) -> Result<AdmittedExternalCandidateProgram> {
         self.validate()?;
         ensure!(
             self.runtime_authority == ExternalCandidateRuntimeAuthority::ActivatedContent,
             "product runtime requirement cannot resolve from acquired content"
         );
-        content.validate()?;
+        super::hash(coordinate_id)?;
+        super::hash(attestation_hash)?;
+        crate::external_content::products::validate_canonical_unsuffixed_ref(
+            "content runtime activation ref",
+            activation_ref,
+        )?;
+        ensure!(
+            activation_ref.starts_with("config:"),
+            "content runtime requires an activation config ref"
+        );
+        evidence.validate()?;
+        ensure!(
+            crate::external_content::qualification_publication::coordinate_id(evidence)?
+                == coordinate_id,
+            "content runtime coordinate differs from its exact testimony"
+        );
         qualification_use.validate()?;
         ensure!(
             qualification_use.requirement_digest == self.qualification_requirement_digest()?,
             "content-backed qualification use differs from its requirement"
         );
         let crate::external_content::qualification_purpose::QualificationSubject::ActivatedContent { content: subject } =
-            &content.evidence.purpose.subject else {
+            &evidence.purpose.subject else {
                 anyhow::bail!("content-backed runtime requires an activated source");
             };
         ensure!(
@@ -684,18 +721,18 @@ impl ExternalCandidateRequirement {
             runtime_manifest_hash: subject.manifest_hash.clone(),
             runtime_source: ExternalCandidateRuntimeSource::ActivatedContent {
                 subject: subject.clone(),
-                qualification_coordinate_id: content.coordinate_id.clone(),
+                qualification_coordinate_id: coordinate_id.to_owned(),
             },
-            qualification_attestation_hash: content.attestation_hash.clone(),
+            qualification_attestation_hash: attestation_hash.to_owned(),
             selection_identity_digest: canonical_value_digest(&serde_json::json!({
                 "domain": "ryeos.external_candidate.content_selection.v1",
-                "activation_ref": content.activation_ref,
-                "purpose": content.evidence.purpose,
-                "coordinate": content.coordinate_id,
+                "activation_ref": activation_ref,
+                "purpose": evidence.purpose,
+                "coordinate": coordinate_id,
             }))?,
             runtime_recipe_digest: self.runtime_recipe.digest()?,
         };
-        program.require_content_qualification(&content.evidence)?;
+        program.require_content_qualification(evidence)?;
         Ok(program)
     }
 }
@@ -3341,6 +3378,53 @@ mod tests {
                 .to_string()
                 .contains("external candidate program")
         );
+    }
+
+    #[test]
+    fn content_evidence_resolution_matches_the_retained_resolution() {
+        let capsule = test_support::content_candidate_capsule(&"a".repeat(64)).unwrap();
+        let program = capsule.external_candidate.as_ref().unwrap();
+        let retained = capsule
+            .retained_external_runtime_content_qualification
+            .as_ref()
+            .unwrap();
+        let direct = program
+            .requirement
+            .resolve_for_content_evidence(
+                &retained.activation_ref,
+                &retained.coordinate_id,
+                &retained.attestation_hash,
+                &retained.evidence,
+                &program.qualification_use,
+            )
+            .unwrap();
+        let through_retained = program
+            .requirement
+            .resolve_for_content(retained, &program.qualification_use)
+            .unwrap();
+        assert_eq!(direct, through_retained);
+        assert_eq!(&direct, program);
+    }
+
+    #[test]
+    fn content_evidence_resolution_refuses_a_different_coordinate() {
+        let capsule = test_support::content_candidate_capsule(&"a".repeat(64)).unwrap();
+        let program = capsule.external_candidate.as_ref().unwrap();
+        let retained = capsule
+            .retained_external_runtime_content_qualification
+            .as_ref()
+            .unwrap();
+        let error = program
+            .requirement
+            .resolve_for_content_evidence(
+                &retained.activation_ref,
+                &"9".repeat(64),
+                &retained.attestation_hash,
+                &retained.evidence,
+                &program.qualification_use,
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("coordinate differs"));
     }
 
     #[test]

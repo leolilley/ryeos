@@ -927,7 +927,7 @@ impl RetainedExternalExecutionBinding {
         qualification: &PlacementQualificationSelection,
     ) -> Result<Self> {
         let provider_network_inputs = controller_transport.network_inputs.clone();
-        let mut document = compose::compose_binding_document(compose::ComposeInputs {
+        let document = compose::compose_binding_document(compose::ComposeInputs {
             program,
             controller_transport: controller_transport.into(),
             provider_network_inputs,
@@ -947,6 +947,15 @@ impl RetainedExternalExecutionBinding {
                             policy_ref: Some(guest.policy_ref.clone()),
                             required_claims: guest.required_claims.clone(),
                         },
+                }
+            }),
+            runtime_content_qualification: qualification.content.as_ref().map(|content| {
+                ExternalRuntimeContentQualificationBinding {
+                    activation_ref: content.activation_ref.clone(),
+                    coordinate_id: content.coordinate_id.clone(),
+                    attestation_hash: content.attestation_hash.clone(),
+                    owner_principal: content.owner_principal.clone(),
+                    required_claims: content.required_claims.clone(),
                 }
             }),
             artifacts: compose::BundleArtifactFacts {
@@ -984,16 +993,6 @@ impl RetainedExternalExecutionBinding {
                 max_guest_package_framed_bytes: 1024 * 1024 * 1024,
             },
         })?;
-        document.runtime_content_qualification = qualification.content.as_ref().map(|content| {
-            ExternalRuntimeContentQualificationBinding {
-                activation_ref: content.activation_ref.clone(),
-                coordinate_id: content.coordinate_id.clone(),
-                attestation_hash: content.attestation_hash.clone(),
-                owner_principal: content.owner_principal.clone(),
-                required_claims: content.required_claims.clone(),
-            }
-        });
-        document.validate()?;
         let id = "composed-test".to_owned();
         let key = lillux::crypto::SigningKey::from_bytes(&[37; 32]);
         let signer_verifying_key = key.verifying_key().to_bytes();

@@ -68,7 +68,9 @@ struct ExternalComposeArgs {
     #[arg(long)]
     settings: PathBuf,
 
-    /// JSON file with the admitted candidate program this binding selects.
+    /// An admitted candidate program JSON document for the runtime this
+    /// binding selects, derived on the node from the same qualification the
+    /// launch will re-check.
     #[arg(long)]
     program: PathBuf,
 
@@ -79,6 +81,11 @@ struct ExternalComposeArgs {
     /// JSON file selecting a published runtime qualification, or `none`.
     #[arg(long)]
     runtime_qualification: Option<String>,
+
+    /// JSON file selecting a published runtime content qualification, or
+    /// `none`. Required for an activated-content program, refused otherwise.
+    #[arg(long)]
+    runtime_content_qualification: Option<String>,
 
     /// Expected independently qualified guest-owner runtime manifest hash.
     #[arg(long)]
@@ -163,6 +170,15 @@ fn read_json_document<T: serde::de::DeserializeOwned>(path: &Path, what: &str) -
     serde_json::from_str(&text).with_context(|| format!("parse {what} {}", path.display()))
 }
 
+/// A JSON document named by a flag value, where absent or `none` selects
+/// nothing.
+fn read_optional_document(value: Option<&str>, what: &str) -> Result<Option<Value>> {
+    match value {
+        None | Some("none") => Ok(None),
+        Some(path) => read_json_document(Path::new(path), what).map(Some),
+    }
+}
+
 /// Entry point for the registered verb. `argv` excludes the verb words.
 pub fn run_external_compose(argv: &[String], console: &crate::tty::Console) -> Result<()> {
     use clap::error::ErrorKind;
@@ -196,13 +212,14 @@ pub fn run_external_compose(argv: &[String], console: &crate::tty::Console) -> R
         Some(path) => read_json_document(path, "limits")?,
         None => ComposeLimits::default(),
     };
-    let runtime_qualification: Option<Value> = match args.runtime_qualification.as_deref() {
-        None | Some("none") => None,
-        Some(path) => Some(read_json_document(
-            Path::new(path),
-            "runtime qualification",
-        )?),
-    };
+    let runtime_qualification = read_optional_document(
+        args.runtime_qualification.as_deref(),
+        "runtime qualification",
+    )?;
+    let runtime_content_qualification = read_optional_document(
+        args.runtime_content_qualification.as_deref(),
+        "runtime content qualification",
+    )?;
     let transport = match choice {
         TransportChoice::Https { origin, roots } => ComposeTransportRequest::Https {
             origin,
@@ -231,6 +248,7 @@ pub fn run_external_compose(argv: &[String], console: &crate::tty::Console) -> R
         settings,
         guest_runtime_manifest_hash,
         runtime_qualification,
+        runtime_content_qualification,
         limits,
     })?;
     if args.json {
@@ -330,6 +348,58 @@ mod tests {
         );
         assert!(!root.path().join(".ai/node/external_execution").exists());
         drop(held);
+    }
+
+    #[test]
+    fn runtime_content_qualification_flag_reads_a_document_or_none() {
+        let parsed = ExternalComposeArgs::try_parse_from(argv(&[
+            "--id",
+            "x",
+            "--backend",
+            "render",
+            "--transport",
+            "file-relay",
+            "--account",
+            "a",
+            "--settings",
+            "s",
+            "--program",
+            "p",
+            "--runtime-content-qualification",
+            "none",
+        ]))
+        .unwrap();
+        assert_eq!(
+            read_optional_document(
+                parsed.runtime_content_qualification.as_deref(),
+                "runtime content qualification"
+            )
+            .unwrap(),
+            None
+        );
+        assert_eq!(
+            read_optional_document(None, "runtime content qualification").unwrap(),
+            None
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("content.json");
+        std::fs::write(&path, r#"{"activation_ref":"config:x/y"}"#).unwrap();
+        let document = read_optional_document(path.to_str(), "runtime content qualification")
+            .unwrap()
+            .unwrap();
+        assert_eq!(document["activation_ref"], "config:x/y");
+    }
+
+    #[test]
+    fn runtime_content_qualification_flag_refuses_a_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("absent.json");
+        let error =
+            read_optional_document(missing.to_str(), "runtime content qualification").unwrap_err();
+        assert!(
+            format!("{error:#}").contains("runtime content qualification"),
+            "{error:#}"
+        );
     }
 
     #[test]

@@ -2,8 +2,8 @@
 //!
 //! `compose_binding_document` is the only constructor of a binding document
 //! outside the loader. Test fixtures and the offline operator command both
-//! call it, so a fixture can never drift from what an operator composes. The
-//! operator path adds the facts only an installed node can supply (artifact
+//! call it, with the same runtime qualification inputs, so a fixture can never
+//! drift from what an operator composes. The operator path adds the facts only an installed node can supply (artifact
 //! identities from the verified bundles), a fresh credential generation, the
 //! node-identity signature and an exact round trip through the section parse
 //! before anything is published.
@@ -12,7 +12,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram;
+use ryeos_state::external_execution::admission::{
+    AdmittedExternalCandidateProgram, ExternalCandidateRuntimeAuthority,
+    ExternalCandidateRuntimeSource,
+};
 use ryeos_state::external_execution::transport::{
     EXTERNAL_CHANNEL_RELAY_CONTRACT, EXTERNAL_CHANNEL_ROUTE_CONTRACT,
     ExternalControllerFileRelayContract, ExternalControllerTransportContract,
@@ -23,9 +26,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{
-    BindingDocument, ExternalExecutionSection, ExternalRuntimeQualificationBinding,
-    ExternalStructuredSessionBinding, ExternalWorkloadBinding, InstalledExternalExecutionBinding,
-    SECTION_NAME, adapter_settings_digest, binding_digest, capacity_owner,
+    BindingDocument, ExternalExecutionSection, ExternalRuntimeContentQualificationBinding,
+    ExternalRuntimeQualificationBinding, ExternalStructuredSessionBinding, ExternalWorkloadBinding,
+    InstalledExternalExecutionBinding, SECTION_NAME, adapter_settings_digest, binding_digest,
+    capacity_owner,
 };
 use crate::node_config::NodeConfigSection as _;
 
@@ -112,8 +116,47 @@ pub(crate) struct ComposeInputs<'a> {
     pub(crate) settings: Value,
     pub(crate) guest_runtime_manifest_hash: String,
     pub(crate) runtime_qualification: Option<ExternalRuntimeQualificationBinding>,
+    pub(crate) runtime_content_qualification: Option<ExternalRuntimeContentQualificationBinding>,
     pub(crate) artifacts: BundleArtifactFacts,
     pub(crate) limits: ComposeLimits,
+}
+
+/// A content qualification is admitted only beside the activated-content
+/// program it testifies for: the lane must match, and the qualification must
+/// name the exact coordinate and attestation the program was derived from, so
+/// a binding that launch would reject on its selection identity is never
+/// signed in the first place.
+fn require_content_qualification_pairing(
+    program: &AdmittedExternalCandidateProgram,
+    qualification: Option<&ExternalRuntimeContentQualificationBinding>,
+) -> Result<()> {
+    match (program.requirement.runtime_authority, qualification) {
+        (ExternalCandidateRuntimeAuthority::ActivatedContent, None) => {
+            bail!("an activated-content program requires a runtime content qualification")
+        }
+        (ExternalCandidateRuntimeAuthority::CapturedProduct, Some(_)) => {
+            bail!("a runtime content qualification requires an activated-content program")
+        }
+        (ExternalCandidateRuntimeAuthority::CapturedProduct, None) => Ok(()),
+        (ExternalCandidateRuntimeAuthority::ActivatedContent, Some(qualification)) => {
+            let ExternalCandidateRuntimeSource::ActivatedContent {
+                qualification_coordinate_id,
+                ..
+            } = &program.runtime_source
+            else {
+                bail!("an activated-content program carries an activated-content runtime source");
+            };
+            ensure!(
+                qualification.coordinate_id == *qualification_coordinate_id,
+                "runtime content qualification names a coordinate the program was not derived from"
+            );
+            ensure!(
+                qualification.attestation_hash == program.qualification_attestation_hash,
+                "runtime content qualification names an attestation the program was not derived from"
+            );
+            Ok(())
+        }
+    }
 }
 
 /// The single non-test constructor of a placement binding document. The
@@ -132,10 +175,12 @@ pub(super) fn compose_binding_document(inputs: ComposeInputs<'_>) -> Result<Bind
         settings,
         guest_runtime_manifest_hash,
         runtime_qualification,
+        runtime_content_qualification,
         artifacts,
         limits,
     } = inputs;
     program.validate()?;
+    require_content_qualification_pairing(program, runtime_content_qualification.as_ref())?;
     controller_transport.validate()?;
     provider_network_inputs.validate()?;
     let (schema, network_policy) = match &controller_transport {
@@ -186,7 +231,7 @@ pub(super) fn compose_binding_document(inputs: ComposeInputs<'_>) -> Result<Bind
         supervisor_artifact_bytes: artifacts.supervisor_artifact_bytes,
         guest_runtime_manifest_hash,
         runtime_qualification,
-        runtime_content_qualification: None,
+        runtime_content_qualification,
         launcher_artifact_hash: artifacts.launcher_artifact_hash,
         launcher_artifact_bytes: artifacts.launcher_artifact_bytes,
         network_policy: network_policy.into(),
@@ -476,6 +521,7 @@ pub struct ComposeRequest<'a> {
     pub settings: Value,
     pub guest_runtime_manifest_hash: String,
     pub runtime_qualification: Option<Value>,
+    pub runtime_content_qualification: Option<Value>,
     pub limits: ComposeLimits,
 }
 
@@ -521,6 +567,13 @@ pub(crate) fn compose_with_resolver(
                 .context("invalid runtime qualification")
         })
         .transpose()?;
+    let runtime_content_qualification = request
+        .runtime_content_qualification
+        .map(|value| {
+            serde_json::from_value::<ExternalRuntimeContentQualificationBinding>(value)
+                .context("invalid runtime content qualification")
+        })
+        .transpose()?;
     let resolved = resolve(request.app_root)?;
     let artifacts = bundle_artifact_facts(
         &resolved,
@@ -539,6 +592,7 @@ pub(crate) fn compose_with_resolver(
         settings: request.settings,
         guest_runtime_manifest_hash: request.guest_runtime_manifest_hash,
         runtime_qualification,
+        runtime_content_qualification,
         artifacts,
         limits: request.limits,
     })?;
@@ -951,6 +1005,7 @@ mod tests {
             settings,
             guest_runtime_manifest_hash: "4".repeat(64),
             runtime_qualification: None,
+            runtime_content_qualification: None,
             artifacts: facts(),
             limits: ComposeLimits::default(),
         })
@@ -965,6 +1020,149 @@ mod tests {
 
     fn relay_settings() -> Value {
         serde_json::json!({"owner_id": "render-owner"})
+    }
+
+    fn content_program() -> AdmittedExternalCandidateProgram {
+        ryeos_state::external_execution::admission::test_support::content_candidate_capsule(
+            &"b".repeat(64),
+        )
+        .unwrap()
+        .external_candidate
+        .unwrap()
+    }
+
+    fn content_qualification_value() -> Value {
+        let program = content_program();
+        let ExternalCandidateRuntimeSource::ActivatedContent {
+            qualification_coordinate_id,
+            ..
+        } = &program.runtime_source
+        else {
+            panic!("content fixture program is activated content");
+        };
+        serde_json::json!({
+            "activation_ref": "config:fixtures/runtime-activation",
+            "coordinate_id": qualification_coordinate_id,
+            "attestation_hash": program.qualification_attestation_hash,
+            "owner_principal": format!("fp:{}", "7".repeat(64)),
+            "required_claims": ["compatible"],
+        })
+    }
+
+    fn content_qualification() -> ExternalRuntimeContentQualificationBinding {
+        serde_json::from_value(content_qualification_value()).unwrap()
+    }
+
+    fn compose_with_content(
+        program: &AdmittedExternalCandidateProgram,
+        content: Option<ExternalRuntimeContentQualificationBinding>,
+    ) -> Result<BindingDocument> {
+        let selected = select_transport(&relay(), &relay_settings())?;
+        compose_binding_document(ComposeInputs {
+            program,
+            controller_transport: selected.selection,
+            provider_network_inputs: selected.network_inputs,
+            tls_roots_der_base64: selected.tls_roots,
+            backend: RENDER_BACKEND_ID.into(),
+            account: "operator-account".into(),
+            capacity_group: DEFAULT_CAPACITY_GROUP.into(),
+            credential_generation: "a".repeat(64),
+            settings: relay_settings(),
+            guest_runtime_manifest_hash: "4".repeat(64),
+            runtime_qualification: None,
+            runtime_content_qualification: content,
+            artifacts: facts(),
+            limits: ComposeLimits::default(),
+        })
+    }
+
+    #[test]
+    fn content_qualification_lands_in_the_document_and_changes_its_digest() {
+        let program = content_program();
+        let with = compose_with_content(&program, Some(content_qualification())).unwrap();
+        let mut narrower = content_qualification();
+        narrower.required_claims = vec!["compatible".into(), "licensed".into()];
+        let other = compose_with_content(&program, Some(narrower.clone())).unwrap();
+        assert_eq!(
+            with.runtime_content_qualification,
+            Some(content_qualification())
+        );
+        assert_eq!(other.runtime_content_qualification, Some(narrower));
+        let digest = |document: &BindingDocument| {
+            binding_digest(
+                "operator",
+                "signer",
+                &serde_yaml::to_string(document).unwrap(),
+            )
+            .unwrap()
+        };
+        assert_ne!(digest(&with), digest(&other));
+    }
+
+    #[test]
+    fn a_content_qualification_for_another_coordinate_is_refused() {
+        let program = content_program();
+        let mut other = content_qualification();
+        other.coordinate_id = "5".repeat(64);
+        let error = refusal(compose_with_content(&program, Some(other)));
+        assert!(
+            format!("{error:#}").contains("coordinate the program was not derived from"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn a_content_qualification_for_another_attestation_is_refused() {
+        let program = content_program();
+        let mut other = content_qualification();
+        other.attestation_hash = "6".repeat(64);
+        let error = refusal(compose_with_content(&program, Some(other)));
+        assert!(
+            format!("{error:#}").contains("attestation the program was not derived from"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn content_qualification_is_refused_for_a_captured_product_program() {
+        let node = stopped_node();
+        let mut request = compose_request(&node, "render");
+        request.runtime_content_qualification = Some(content_qualification_value());
+        let resolved =
+            installed_artifacts(&node, Some(PROVIDER_ID), vec![lifecycle(&"d".repeat(64))]);
+        let error = refusal(compose_with_resolver(request, |_| Ok(resolved)));
+        assert!(
+            format!("{error:#}").contains("requires an activated-content program"),
+            "{error:#}"
+        );
+        assert!(!binding_path(&node).exists());
+    }
+
+    #[test]
+    fn an_activated_content_program_is_refused_without_a_content_qualification() {
+        let node = stopped_node();
+        let mut request = compose_request(&node, "render");
+        request.program = content_program();
+        let resolved =
+            installed_artifacts(&node, Some(PROVIDER_ID), vec![lifecycle(&"d".repeat(64))]);
+        let error = refusal(compose_with_resolver(request, |_| Ok(resolved)));
+        assert!(
+            format!("{error:#}").contains("requires a runtime content qualification"),
+            "{error:#}"
+        );
+        assert!(!binding_path(&node).exists());
+    }
+
+    #[test]
+    fn a_content_qualification_with_a_bad_activation_ref_is_refused() {
+        let program = content_program();
+        let mut bad = content_qualification();
+        bad.activation_ref = "tool:fixtures/runtime-activation".into();
+        let error = refusal(compose_with_content(&program, Some(bad)));
+        assert!(
+            format!("{error:#}").contains("exact activation config ref"),
+            "{error:#}"
+        );
     }
 
     #[test]
@@ -1100,6 +1298,7 @@ mod tests {
             settings: serde_json::json!({}),
             guest_runtime_manifest_hash: "4".repeat(64),
             runtime_qualification: None,
+            runtime_content_qualification: None,
             limits: ComposeLimits::default(),
         }));
         assert!(
@@ -1195,6 +1394,7 @@ mod tests {
             settings: relay_settings(),
             guest_runtime_manifest_hash: "4".repeat(64),
             runtime_qualification: None,
+            runtime_content_qualification: None,
             artifacts: facts(),
             limits: ComposeLimits::default(),
         }));
@@ -1400,6 +1600,7 @@ mod tests {
             settings: serde_json::json!({}),
             guest_runtime_manifest_hash: "4".repeat(64),
             runtime_qualification: None,
+            runtime_content_qualification: None,
             limits: ComposeLimits::default(),
         }
     }
