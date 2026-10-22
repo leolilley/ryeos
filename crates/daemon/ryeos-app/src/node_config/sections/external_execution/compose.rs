@@ -13,8 +13,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use ryeos_state::external_execution::admission::{
-    AdmittedExternalCandidateProgram, ExternalCandidateRuntimeAuthority,
-    ExternalCandidateRuntimeSource,
+    AdmittedExternalCandidateProgram, ExternalCandidateRuntimeSource,
 };
 use ryeos_state::external_execution::transport::{
     EXTERNAL_CHANNEL_RELAY_CONTRACT, EXTERNAL_CHANNEL_ROUTE_CONTRACT,
@@ -121,42 +120,36 @@ pub(crate) struct ComposeInputs<'a> {
     pub(crate) limits: ComposeLimits,
 }
 
-/// A content qualification is admitted only beside the activated-content
-/// program it testifies for: the lane must match, and the qualification must
-/// name the exact coordinate and attestation the program was derived from, so
-/// a binding that launch would reject on its selection identity is never
-/// signed in the first place.
+/// A runtime content qualification is the structured session's testimony
+/// that its runtime content is compatible; launch loads it by activation,
+/// coordinate and attestation and checks it against the session's runtime
+/// manifest, whichever lane the program's runtime came from. A program
+/// derived from activated content was itself derived from that testimony, so
+/// it must be present and must name the exact coordinate and attestation the
+/// program carries; otherwise a binding that launch would reject on its
+/// selection identity would be signed.
 fn require_content_qualification_pairing(
     program: &AdmittedExternalCandidateProgram,
     qualification: Option<&ExternalRuntimeContentQualificationBinding>,
 ) -> Result<()> {
-    match (program.requirement.runtime_authority, qualification) {
-        (ExternalCandidateRuntimeAuthority::ActivatedContent, None) => {
-            bail!("an activated-content program requires a runtime content qualification")
-        }
-        (ExternalCandidateRuntimeAuthority::CapturedProduct, Some(_)) => {
-            bail!("a runtime content qualification requires an activated-content program")
-        }
-        (ExternalCandidateRuntimeAuthority::CapturedProduct, None) => Ok(()),
-        (ExternalCandidateRuntimeAuthority::ActivatedContent, Some(qualification)) => {
-            let ExternalCandidateRuntimeSource::ActivatedContent {
-                qualification_coordinate_id,
-                ..
-            } = &program.runtime_source
-            else {
-                bail!("an activated-content program carries an activated-content runtime source");
-            };
-            ensure!(
-                qualification.coordinate_id == *qualification_coordinate_id,
-                "runtime content qualification names a coordinate the program was not derived from"
-            );
-            ensure!(
-                qualification.attestation_hash == program.qualification_attestation_hash,
-                "runtime content qualification names an attestation the program was not derived from"
-            );
-            Ok(())
-        }
-    }
+    let ExternalCandidateRuntimeSource::ActivatedContent {
+        qualification_coordinate_id,
+        ..
+    } = &program.runtime_source
+    else {
+        return Ok(());
+    };
+    let qualification = qualification
+        .context("an activated-content program requires a runtime content qualification")?;
+    ensure!(
+        qualification.coordinate_id == *qualification_coordinate_id,
+        "runtime content qualification names a coordinate the program was not derived from"
+    );
+    ensure!(
+        qualification.attestation_hash == program.qualification_attestation_hash,
+        "runtime content qualification names an attestation the program was not derived from"
+    );
+    Ok(())
 }
 
 /// The single non-test constructor of a placement binding document. The
@@ -1124,18 +1117,24 @@ mod tests {
     }
 
     #[test]
-    fn content_qualification_is_refused_for_a_captured_product_program() {
+    fn a_captured_product_program_carries_a_content_qualification_as_session_testimony() {
         let node = stopped_node();
         let mut request = compose_request(&node, "render");
         request.runtime_content_qualification = Some(content_qualification_value());
         let resolved =
             installed_artifacts(&node, Some(PROVIDER_ID), vec![lifecycle(&"d".repeat(64))]);
-        let error = refusal(compose_with_resolver(request, |_| Ok(resolved)));
-        assert!(
-            format!("{error:#}").contains("requires an activated-content program"),
-            "{error:#}"
+        let report = compose_with_resolver(request, |_| Ok(resolved)).unwrap();
+        let identity = ryeos_node_runtime::identity::NodeIdentity::load(
+            &node.root.path().join(".ai/node/identity/private_key.pem"),
+        )
+        .unwrap();
+        let signed = std::fs::read_to_string(&report.path).unwrap();
+        let loaded =
+            admit_signed_binding(node.root.path(), BINDING_ID, &signed, &identity).unwrap();
+        assert_eq!(
+            loaded.document.runtime_content_qualification,
+            Some(content_qualification())
         );
-        assert!(!binding_path(&node).exists());
     }
 
     #[test]
