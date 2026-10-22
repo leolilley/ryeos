@@ -448,6 +448,11 @@ jobs:
           findmnt --target /mnt/ryeos-tmp
           echo "TMPDIR=/mnt/ryeos-tmp" >> "$GITHUB_ENV"
 
+      - name: Allow unprivileged user namespaces on the runner
+        # The crash cuts start enforce-mode nodes whose sandbox probes map a
+        # user namespace, the same test-host baseline the workspace gate selects.
+        run: sudo -n sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
       - name: Run crash recovery qualification
         env:
           GATE_BUNDLE_TARGET_DIR: ${{ runner.temp }}/ryeos-bundle-target
