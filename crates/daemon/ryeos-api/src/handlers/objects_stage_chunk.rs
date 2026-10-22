@@ -197,7 +197,7 @@ fn stage_chunk_blocking(
             // in-flight staging already on disk is counted as stored.
             let already_held = store.staged_bytes(&req.hash)?;
             let resident = already_held == req.total_size;
-            if !resident && req.offset % expectation.chunk_size == 0 {
+            if !resident && req.offset.is_multiple_of(expectation.chunk_size) {
                 let policy = state
                     .node_policy
                     .require::<ExternalContentImportPolicyRecord>()?;

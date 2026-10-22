@@ -785,7 +785,7 @@ fn require_admission_record<'a>(
         .iter()
         .find(|record| record.attestation_hash == admission_hash)
     else {
-        return match stored_subject {
+        match stored_subject {
             Some(subject) if subject != witness_hash => bail!(
                 "origin admission {admission_hash} names witness {subject}, not {witness_hash}"
             ),
