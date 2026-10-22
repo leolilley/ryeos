@@ -1,0 +1,21 @@
+# ryeos:signed:2026-10-22T21:53:09Z:c4537e944d0d8176bf4e313268c82bbb45f8608f9194bab764e11005a08579fd:0Y/FWOuoMh8uDKebMd14vl9VwygXzY6Lo/7FH//cg0fuL1ILP29MuqL4b7Cd3n8tKvjN4ZT6ypzuhsFNZSSICA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [external-execution, admit-candidate-program]
+description: Derive the admitted candidate program and runtime content qualification binding for a published content qualification without writing state
+arguments:
+  - name: required_claims
+    kind: json
+    positional: 5
+    required: false
+    arity: optional
+    description: Sorted unique claim names the binding will require of the published testimony
+forms:
+  - slots:
+      - field: activation_ref
+      - field: coordinate_id
+      - field: attestation_hash
+      - field: runtime_manifest_hash
+help:
+  usage: ryeos external-execution admit-candidate-program <activation-ref> <coordinate-id> <attestation-hash> <runtime-manifest-hash> <required-claims-json>
+dispatch:
+  kind: execute_ref
+  execute: service:external-execution/admit-candidate-program
