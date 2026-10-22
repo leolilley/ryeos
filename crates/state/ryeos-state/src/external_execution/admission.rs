@@ -3475,4 +3475,41 @@ mod tests {
             assert!(serde_json::from_value::<ExternalCandidateRequirement>(wire).is_err());
         }
     }
+    #[test]
+    fn external_program_requires_each_of_the_five_relationship_claims() {
+        assert_eq!(REQUIRED_CLAIMS.len(), 5);
+        assert!(REQUIRED_CLAIMS.windows(2).all(|pair| pair[0] < pair[1]));
+        let requirement = requirement();
+        let qualification_use = test_support::fixture_qualification_use(&requirement).unwrap();
+        let exact = selections();
+        let carried: Vec<String> = exact
+            .get(&requirement.runtime_product_declaration_id)
+            .unwrap()
+            .relationship
+            .qualification
+            .required_claims
+            .clone();
+        assert_eq!(carried, REQUIRED_CLAIMS);
+        requirement
+            .resolve_for_use(Some(&exact), &qualification_use)
+            .unwrap();
+        for omitted in 0..REQUIRED_CLAIMS.len() {
+            let mut fewer = exact.clone().into_inner();
+            fewer
+                .get_mut(&requirement.runtime_product_declaration_id)
+                .unwrap()
+                .relationship
+                .qualification
+                .required_claims
+                .remove(omitted);
+            let fewer = ResolvedExternalProductSelections::new(fewer).unwrap();
+            assert!(
+                requirement
+                    .resolve_for_use(Some(&fewer), &qualification_use)
+                    .is_err(),
+                "relationship without {} was admitted",
+                REQUIRED_CLAIMS[omitted]
+            );
+        }
+    }
 }

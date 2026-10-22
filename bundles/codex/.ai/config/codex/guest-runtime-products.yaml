@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-12T07:01:53Z:934def0065c52d6cfd58c753fb8534ff37678f87aa775d157a28229feb97592e:iDiRITyIBGFnggCXvhrFvJIW4V6yG5urkBYbbsCzzfFGf2K15WfStyEZOMuvGkn6T0AUONLTToPflkB4sy7jAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-22T22:00:32Z:67e1c9fd3d98264cdf2f202d648003485f325263cfb2ce6240484207b77830d2:VAAmX5SquO/jVA85JgRZT0OhQyg7tsvqbvhuLSwgCidyuVuTgWTf0xsKTfdsXeHE2RX7vcYh1rs0WB9ARfG5BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: codex
 version: "1.0.0"
 description: Retained exact Codex guest executable product
@@ -67,9 +67,13 @@ product_relationships:
           maximum_depth: 3
           maximum_file_bytes: 268435456
           maximum_total_bytes: 268435456
-      # This relationship intentionally cannot admit external execution yet.
-      # An independent runtime qualification must establish the five required
-      # candidate/lifecycle claims before a worker can select it.
+      # External execution is admitted only through an independent runtime
+      # qualification under this policy that establishes all five claims.
       qualification:
-        policy_ref: null
-        required_claims: []
+        policy_ref: config:codex/consumer-qualification-policy
+        required_claims:
+          - bounded_candidate_capture
+          - candidate_only_execution
+          - controller_credential_exclusion
+          - native_writer_exclusion
+          - no_local_execution_fallback

@@ -1,0 +1,64 @@
+# ryeos:signed:2026-10-22T22:00:32Z:7d586ede1950d8cbe9499acac786c280efa4816dd1530c3d83199f9490c484dd:uRI3evW2cvHzKF2oYYeVpdG39oXcQLIA9KfwspXYcSMHzwa7r+FGLTGB270xytHvxEYyPWZn9hzoEDY8KY2RDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: codex
+version: 1.0.0
+description: Exact bounded daemon-owned direct Codex target for the independent consumer qualification of the Codex guest runtime
+# The three all-zero digests below are build-derived and are replaced before
+# signing: the runtime product manifest hash and the Codex executable digest
+# come from the built guest runtime product, and the environments.toml digest
+# comes from the verifier crate's prepared-file digest test.
+product_producer_recipe:
+  schema: ryeos.product_producer_recipe.v6
+  executable_source:
+    kind: admitted_realization_member
+    realization_id: subject
+    manifest_hash: '0000000000000000000000000000000000000000000000000000000000000000'
+    relative_path: bin/codex
+    executable_sha256: '0000000000000000000000000000000000000000000000000000000000000000'
+  argv:
+  - --strict-config
+  - -c
+  - check_for_update_on_startup=false
+  - app-server
+  stdin_source:
+    kind: interactive_verifier_channel
+    maximum_frame_bytes: 65536
+    maximum_total_bytes: 1048576
+    maximum_frames: 128
+  cwd_source:
+    kind: prepared_directory
+    id: codex-occurrence
+  environment_sources:
+  - admitted_realizations
+  environment_bindings:
+    CODEX_HOME:
+      kind: prepared_directory
+      id: codex-home
+    HOME:
+      kind: prepared_directory
+      id: codex-home
+    PATH:
+      kind: literal
+      value: ''
+    LANG:
+      kind: literal
+      value: C
+    LC_ALL:
+      kind: literal
+      value: C
+  prepared_immutable_files:
+  - prepared_directory_id: codex-home
+    leaf_name: config.toml
+    maximum_bytes: 65536
+    expected_sha256: '15790855e5b4c2e145dd63db8690962ff1737e690c05e1f5812d84472c0b1c56'
+  - prepared_directory_id: codex-home
+    leaf_name: environments.toml
+    maximum_bytes: 65536
+    expected_sha256: '0000000000000000000000000000000000000000000000000000000000000000'
+  loopback_ingress:
+    address: 127.0.0.1:18765
+  bounds:
+    maximum_wall_time_ms: 170000
+    maximum_stdout_bytes: 6291456
+    maximum_stderr_bytes: 1048576
+    maximum_memory_bytes: 2147483648
+    maximum_processes: 64

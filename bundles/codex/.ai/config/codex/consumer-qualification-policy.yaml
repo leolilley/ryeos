@@ -1,7 +1,7 @@
-# ryeos:signed:2026-10-19T06:12:34Z:5a84a23d3f352cd9f2ca8186642bf24486f53b2fca1110b9fd1ad186f652c145:AwkwtEn5DUr3CVAwcwXyXBCZwoksIW7oYJb8nmBycVZ0+4N84pWNiz6jYn2dd7vwBDa+1GMjqycjbWJ6acqwDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-22T22:00:32Z:16c96c5e8361ee7b025de4874417718d0d7ec92e46e01e2db42e690e8eed33e5:jUspqa/v7GTMs+rNOnoPdtjhVf9yDcykff2B0HrbUhL20DHHRJ4pnZmS7gRYkpEzieyt2IN7Y4Qc5FPfyymMAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: codex
 version: 1.0.0
-description: Template for the independent consumer qualification of the exact Codex guest runtime; the derived context is merged in before signing
+description: Independent consumer qualification of the exact Codex guest runtime; the node-derived external candidate context is merged into verifier_parameters before signing
 product_qualification_policy:
   schema: ryeos.product_qualification_policy.v4
   verifier_ref: tool:codex/qualification/consumer-runtime-verifier
