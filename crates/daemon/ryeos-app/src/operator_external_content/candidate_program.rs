@@ -11,6 +11,7 @@
 use std::sync::Arc;
 
 use anyhow::{Context as _, bail, ensure};
+use ryeos_state::external_content::products::qualification::MAX_PRODUCT_QUALIFICATION_CLAIMS;
 use ryeos_state::external_content::qualification_evidence::ContentQualificationEvidence;
 use ryeos_state::external_content::qualification_purpose::QualificationSubject;
 use ryeos_state::external_execution::admission::{
@@ -40,9 +41,14 @@ pub struct CandidateProgramRequest {
 
 impl CandidateProgramRequest {
     fn validate(&self) -> anyhow::Result<()> {
-        if self.activation_ref.is_empty() {
-            bail!("activation_ref must not be empty");
-        }
+        let reference = ryeos_engine::canonical_ref::CanonicalRef::parse(&self.activation_ref)?;
+        ensure!(
+            reference.kind == "config"
+                && reference.to_string() == self.activation_ref
+                && !self.activation_ref.contains('@')
+                && self.activation_ref.len() <= 2048,
+            "activation_ref must be an exact activation config ref"
+        );
         for (field, value) in [
             ("coordinate_id", &self.coordinate_id),
             ("attestation_hash", &self.attestation_hash),
@@ -54,11 +60,12 @@ impl CandidateProgramRequest {
         }
         ensure!(
             !self.required_claims.is_empty()
+                && self.required_claims.len() <= MAX_PRODUCT_QUALIFICATION_CLAIMS
                 && self
                     .required_claims
                     .windows(2)
                     .all(|pair| pair[0] < pair[1]),
-            "required_claims must be non-empty, sorted and unique"
+            "required_claims must be non-empty, bounded, sorted and unique"
         );
         for claim in &self.required_claims {
             ryeos_state::external_content::products::validate_name(claim)?;
