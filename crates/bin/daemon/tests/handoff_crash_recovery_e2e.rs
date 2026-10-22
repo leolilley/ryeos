@@ -5498,7 +5498,15 @@ async fn explicit_handoff_acceptance_matrix_emits_retained_report() -> Result<()
 /// The retained report of a host that could not run the matrix: it names the
 /// refusal and carries no measurements, so the gate retains a report that says
 /// exactly what this host proved.
-fn retain_unqualified_host_report(refusal: String) -> Result<()> {
+fn retain_unqualified_host_report(mut refusal: String) -> Result<()> {
+    let bound = HandoffMeasurementReport::MAX_REFUSAL_BYTES;
+    if refusal.len() > bound {
+        let mut cut = bound;
+        while !refusal.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        refusal.truncate(cut);
+    }
     let report = HandoffMeasurementReport {
         schema: "ryeos.worker_handoff_qualification_report.v1".to_owned(),
         host: HandoffReportHost::Unqualified { refusal },

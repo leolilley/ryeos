@@ -2014,6 +2014,7 @@ pub mod test_support {
 
     impl HandoffMeasurementReport {
         pub const MAX_RECORDS: usize = 128;
+        pub const MAX_REFUSAL_BYTES: usize = 8 * 1024;
         pub const MAX_ENCODED_BYTES: usize = 256 * 1024;
 
         pub fn validate(&self) -> Result<()> {
@@ -2029,7 +2030,7 @@ pub mod test_support {
                     }
                 }
                 HandoffReportHost::Unqualified { refusal } => {
-                    if refusal.is_empty() || refusal.len() > 1024 {
+                    if refusal.is_empty() || refusal.len() > Self::MAX_REFUSAL_BYTES {
                         anyhow::bail!(
                             "unqualified-host handoff report refusal is empty or unbounded"
                         );
