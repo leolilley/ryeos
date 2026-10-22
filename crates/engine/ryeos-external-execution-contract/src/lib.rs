@@ -42,9 +42,11 @@ pub const MAX_LIFECYCLE_REQUEST_BYTES: usize = 256 * 1024;
 pub const MAX_LIFECYCLE_PROVIDER_SPEC_BYTES: u64 = 256 * 1024;
 pub const MAX_GUEST_INPUT_PROJECTION_BYTES: usize = 192 * 1024;
 pub const EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA: u32 = 5;
-/// Core mechanism claims selected in a signed guest product relationship and
-/// verified through its existing qualification witness and offline probe.
-/// These identifiers alone are not admission or runtime evidence.
+/// Core mechanism claims a signed guest product relationship may require. The
+/// controller refuses ordinary external execution unless the selected
+/// qualification names them and a current attestation carries them. These
+/// identifiers alone are not admission or runtime evidence, and no shipped
+/// qualification verifier emits any of them yet.
 pub const GUEST_WIRE_SUPPORT_CLAIM: &str = "external_guest_inputs_v5_launcher_v4";
 pub const DIRECT_PROGRAM_SUPPORT_CLAIM: &str = "external_direct_program_v3";
 pub const CAPTURED_INPUTS_SUPPORT_CLAIM: &str = "external_direct_captured_inputs_v1";
