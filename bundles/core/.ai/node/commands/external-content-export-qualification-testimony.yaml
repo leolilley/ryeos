@@ -1,0 +1,15 @@
+# ryeos:signed:2026-10-22T22:14:21Z:51901dae369db8272dd88819db408b68e768f5185b4f17397115ca0fc2a60136:+8gNSfdQtHLvlrzHoXeRjOjjpuURkcL7CKy6FEomViDgMkBwzb7h7v5gl+vzJHaie+0v34xjkzq02TCoFMkmDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [external-content, export-qualification-testimony]
+description: Export a local qualification as a signed testimony and submit it to a configured pinned remote
+forms:
+  - slots:
+      - field: remote
+      - field: qualification_hash
+      - field: acceptance_policy_ref
+help:
+  usage: "ryeos external-content export-qualification-testimony <remote> <qualification-hash> <acceptance-policy-ref>"
+  examples:
+    - "ryeos external-content export-qualification-testimony hosted <qualification-hash> config:render/snapshot-acceptance-policy"
+dispatch:
+  kind: execute_ref
+  execute: service:external-content/export-qualification-testimony

@@ -33,6 +33,8 @@ pub mod qualification;
 
 pub mod qualification_publication;
 
+pub mod qualification_testimony;
+
 pub mod transfer;
 
 pub const PRODUCT_DECLARATIONS_SCHEMA: &str = "ryeos.build_products.v1";

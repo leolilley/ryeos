@@ -1137,6 +1137,66 @@ mod tests {
         );
     }
 
+    fn guest_qualification_value(remote: Value) -> Value {
+        serde_json::json!({
+            "attestation_hash": "6".repeat(64),
+            "owner_principal": format!("fp:{}", "7".repeat(64)),
+            "qualification": {
+                "policy_ref": "config:fixtures/guest-qualification",
+                "required_claims": ["render_snapshot_v1"],
+            },
+            "remote_testimony": remote,
+        })
+    }
+
+    #[test]
+    fn a_guest_qualification_selection_states_its_remote_testimony_explicitly() {
+        let local = guest_qualification_value(Value::Null);
+        let parsed: ExternalRuntimeQualificationBinding =
+            serde_json::from_value(local.clone()).unwrap();
+        assert!(parsed.remote_testimony.is_none());
+
+        let remote = guest_qualification_value(serde_json::json!({
+            "acceptance_hash": "8".repeat(64),
+            "acceptance_policy_ref": "config:fixtures/guest-acceptance",
+        }));
+        let parsed: ExternalRuntimeQualificationBinding = serde_json::from_value(remote).unwrap();
+        parsed.validate().unwrap();
+        assert_eq!(
+            parsed.remote_testimony.unwrap().acceptance_policy_ref,
+            "config:fixtures/guest-acceptance"
+        );
+
+        let mut missing = local;
+        missing.as_object_mut().unwrap().remove("remote_testimony");
+        assert!(serde_json::from_value::<ExternalRuntimeQualificationBinding>(missing).is_err());
+    }
+
+    #[test]
+    fn a_remote_testimony_selection_is_signed_through_composition() {
+        let node = stopped_node();
+        let mut request = compose_request(&node, "render");
+        request.runtime_qualification = Some(guest_qualification_value(serde_json::json!({
+            "acceptance_hash": "8".repeat(64),
+            "acceptance_policy_ref": "config:fixtures/guest-acceptance",
+        })));
+        let resolved =
+            installed_artifacts(&node, Some(PROVIDER_ID), vec![lifecycle(&"d".repeat(64))]);
+        let report = compose_with_resolver(request, |_| Ok(resolved)).unwrap();
+        let identity = ryeos_node_runtime::identity::NodeIdentity::load(
+            &node.root.path().join(".ai/node/identity/private_key.pem"),
+        )
+        .unwrap();
+        let signed = std::fs::read_to_string(&report.path).unwrap();
+        let loaded =
+            admit_signed_binding(node.root.path(), BINDING_ID, &signed, &identity).unwrap();
+        let selected = loaded.document.runtime_qualification.unwrap();
+        assert_eq!(
+            selected.remote_testimony.unwrap().acceptance_hash,
+            "8".repeat(64)
+        );
+    }
+
     #[test]
     fn an_activated_content_program_is_refused_without_a_content_qualification() {
         let node = stopped_node();

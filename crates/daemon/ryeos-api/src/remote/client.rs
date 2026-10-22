@@ -1053,6 +1053,29 @@ impl RemoteClient {
         Ok(parsed)
     }
 
+    /// POST /external-content/accept-qualification-testimony (authenticated).
+    /// One signed request carries the whole testimony; the answer is checked
+    /// against the testimony hash and coordinate the caller already holds.
+    pub async fn qualification_testimony_accept(
+        &self,
+        request: &QualificationTestimonyAcceptRequest,
+        expected_testimony_hash: &str,
+        expected_coordinate_id: &str,
+    ) -> Result<QualificationTestimonyAcceptResponse> {
+        let body = serde_json::to_value(request)?;
+        let response = self
+            .signed_post_with_response_limit(
+                "/external-content/accept-qualification-testimony",
+                &body,
+                DEFAULT_SERVICE_RESPONSE_MAX_BYTES,
+            )
+            .await?;
+        let parsed: QualificationTestimonyAcceptResponse = serde_json::from_value(response)
+            .context("accept-qualification-testimony returned an invalid response shape")?;
+        parsed.validate(expected_testimony_hash, expected_coordinate_id)?;
+        Ok(parsed)
+    }
+
     /// Fetch CAS entries while bounding each HTTP response body. Callers that
     /// know the declared object sizes should batch requests and choose a limit
     /// that includes base64/JSON overhead without allowing unbounded buffering.
@@ -2688,6 +2711,45 @@ impl ProductAcceptResponse {
         for hash in [&self.acceptance_hash, &self.manifest_hash] {
             if !is_canonical_hash(hash) {
                 anyhow::bail!("product-accept returned an invalid hash");
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct QualificationTestimonyAcceptRequest {
+    pub testimony: Value,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QualificationTestimonyAcceptResponse {
+    pub testimony_hash: String,
+    pub acceptance_hash: String,
+    pub coordinate_id: String,
+    pub reused_existing: bool,
+}
+
+impl QualificationTestimonyAcceptResponse {
+    pub fn validate(
+        &self,
+        expected_testimony_hash: &str,
+        expected_coordinate_id: &str,
+    ) -> Result<()> {
+        if self.testimony_hash != expected_testimony_hash {
+            anyhow::bail!("accept-qualification-testimony answered for a different testimony");
+        }
+        if self.coordinate_id != expected_coordinate_id {
+            anyhow::bail!("accept-qualification-testimony answered for a different coordinate");
+        }
+        for hash in [
+            &self.testimony_hash,
+            &self.acceptance_hash,
+            &self.coordinate_id,
+        ] {
+            if !is_canonical_hash(hash) {
+                anyhow::bail!("accept-qualification-testimony returned an invalid hash");
             }
         }
         Ok(())
@@ -4586,6 +4648,40 @@ mod tests {
         let mut bad_hash = response;
         bad_hash.acceptance_hash = "nope".to_owned();
         assert!(bad_hash.validate(&request).is_err());
+    }
+
+    #[test]
+    fn testimony_accept_response_must_echo_the_exported_testimony() {
+        let testimony_hash = "ab".repeat(32);
+        let coordinate_id = "cd".repeat(32);
+        let response = QualificationTestimonyAcceptResponse {
+            testimony_hash: testimony_hash.clone(),
+            acceptance_hash: "ef".repeat(32),
+            coordinate_id: coordinate_id.clone(),
+            reused_existing: false,
+        };
+        response.validate(&testimony_hash, &coordinate_id).unwrap();
+        assert!(response.validate(&"00".repeat(32), &coordinate_id).is_err());
+        assert!(
+            response
+                .validate(&testimony_hash, &"00".repeat(32))
+                .is_err()
+        );
+        let mut bad_acceptance = response.clone();
+        bad_acceptance.acceptance_hash = "nope".to_owned();
+        assert!(
+            bad_acceptance
+                .validate(&testimony_hash, &coordinate_id)
+                .is_err()
+        );
+        let extra = serde_json::json!({
+            "testimony_hash": testimony_hash,
+            "acceptance_hash": "ef".repeat(32),
+            "coordinate_id": coordinate_id,
+            "reused_existing": false,
+            "unexpected": 1,
+        });
+        assert!(serde_json::from_value::<QualificationTestimonyAcceptResponse>(extra).is_err());
     }
 
     #[tokio::test]

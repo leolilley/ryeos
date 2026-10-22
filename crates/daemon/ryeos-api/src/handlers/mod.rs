@@ -40,8 +40,10 @@ pub mod credential_profiles;
 pub mod dedicated_sessions;
 pub mod events_chain_replay;
 pub mod events_replay;
+pub mod external_content_accept_qualification_testimony;
 pub mod external_content_activate;
 pub mod external_content_bind;
+pub mod external_content_export_qualification_testimony;
 pub mod external_content_import;
 pub mod external_content_product_accept;
 pub mod external_content_product_offer;
@@ -195,6 +197,8 @@ pub const ALL: &[ServiceDescriptor] = &[
     external_content_product_offer::DESCRIPTOR,
     external_content_product_accept::DESCRIPTOR,
     external_content_product_push::DESCRIPTOR,
+    external_content_export_qualification_testimony::DESCRIPTOR,
+    external_content_accept_qualification_testimony::DESCRIPTOR,
     external_content_products::CAPTURE_DESCRIPTOR,
     external_content_products::PRODUCE_RUNTIME_SNAPSHOT_DESCRIPTOR,
     external_content_products::CONTINUE_RUNTIME_SNAPSHOT_CREATE_DESCRIPTOR,

@@ -1,0 +1,7 @@
+# ryeos:signed:2026-10-22T22:14:21Z:fb6792d830fd155f0941d52b0a190575c869ac81ee3e13384922c7d64c6e0cfb:BvlW9iWVbq9ccGJJSQI8z1ouwNWNVQNcQWHa8nb6dsbrbVIo3geQDHibXJdA2IflgOc2k0o9elaASUTYx4cLDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: external-content.accept-qualification-testimony
+required_caps: ["ryeos.execute.service.external-content/accept-qualification-testimony"]
+schema:
+  testimony: object
+description: "Verify a signed qualification testimony from the authenticated origin operator under this node's acceptance policy and publish this node's own acceptance, never a local qualification; idempotent; returns {testimony_hash, acceptance_hash, coordinate_id, reused_existing}"

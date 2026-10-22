@@ -12,3 +12,4 @@ pub mod import;
 pub mod product_push;
 pub mod pull;
 pub mod push;
+pub mod qualification_testimony_push;
