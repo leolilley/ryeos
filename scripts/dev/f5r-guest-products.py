@@ -516,7 +516,14 @@ class Driver:
 
     def produce(self, handoff):
         key, fingerprint = fetch_public_info(self.args.base_url, self.opener, self.args.timeout)
-        handoff["controller_public_key"] = key
+        # The owner product names the root of the node that will consume it: this
+        # node by default, or the explicit controller when producing for one.
+        controller_key = key
+        if self.args.controller_public_key:
+            if self.args.owner_production != "for-controller":
+                raise StepFailed("--controller-public-key needs --owner-production for-controller")
+            controller_key = normalize_public_key(self.args.controller_public_key)
+        handoff["controller_public_key"] = controller_key
         handoff["origin_node_fingerprint"] = self.node_fingerprint = fingerprint
         self.node_key = key
         if self.args.export:
@@ -529,7 +536,8 @@ class Driver:
             handoff["codex_witness_hash"] = self.capture("codex")["witness_hash"]
             if self.args.export:
                 self.export_product("codex")
-        inputs = {"controller_public_key": key} if self.args.owner_production == "for-controller" else None
+        inputs = {"controller_public_key": controller_key} \
+            if self.args.owner_production == "for-controller" else None
         thread = self.graph("owner", OWNER_GRAPHS[self.args.owner_production], inputs)
         captured = self.capture("owner")
         handoff["owner_witness_hash"] = captured["witness_hash"]
@@ -539,7 +547,7 @@ class Driver:
         manifest_hash = produced or evidence
         if not manifest_hash:
             raise StepFailed("owner: no manifest hash in the producer output or capture evidence")
-        self.preflight_owner(manifest_hash, key)
+        self.preflight_owner(manifest_hash, controller_key)
         handoff["owner_manifest_hash"] = manifest_hash
         handoff["guest_runtime_manifest_hash"] = manifest_hash
         if self.args.export:
@@ -637,6 +645,8 @@ def parser():
     p.add_argument("--project", help="pinned project root for the production graphs "
                    "(default <evidence-dir>/../project; its .ai directory is created)")
     p.add_argument("--owner-production", choices=sorted(OWNER_GRAPHS), default="local")
+    p.add_argument("--controller-public-key", help="root the owner product names, with "
+                   "--owner-production for-controller (default: the node this driver talks to)")
     p.add_argument("--skip-codex", action="store_true")
     p.add_argument("--timeout", type=int, default=900)
     p.add_argument("--ryeos-bin", default="ryeos")

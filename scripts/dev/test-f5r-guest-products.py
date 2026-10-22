@@ -218,6 +218,21 @@ class Tests(Case):
         self.assertIn("guest-owner-runtime-production-for-controller", launch[launch.index("--pin-project") + 1])
         self.assertEqual(json.loads(launch[launch.index("--input") + 1]), {"controller_public_key": KEY})
 
+    def test_for_controller_takes_an_explicit_controller_root(self):
+        other_bytes = bytes(range(32))
+        other = "ed25519:" + base64.b64encode(other_bytes).decode()
+        manifest = good_manifest()
+        manifest["entries"][2]["blob_hash"] = hashlib.sha256(other_bytes.hex().encode()).hexdigest()
+        self.assertEqual(self.go(["--owner-production", "for-controller", "--controller-public-key", other],
+                                 scn={"manifest": manifest}), 0)
+        launch = [c for c in self.calls() if "--async" in c][-1]
+        self.assertEqual(json.loads(launch[launch.index("--input") + 1]), {"controller_public_key": other})
+        self.assertEqual(self.handoff_json()["controller_public_key"], other)
+
+    def test_explicit_controller_root_refuses_local_owner_production(self):
+        self.assertNotEqual(self.go(["--controller-public-key", KEY]), 0)
+        self.assertIn("needs --owner-production for-controller", self.text())
+
     def test_rerun_after_success_issues_no_cli_calls(self):
         self.go()
         before = len(self.calls())
