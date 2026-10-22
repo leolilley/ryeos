@@ -64,6 +64,16 @@ const PUSH_SCOPES: &[&str] = &[
     "ryeos.execute.service.objects/stage-chunk",
 ];
 
+/// What the origin NODE's grant on HOSTED carries: the push capabilities plus
+/// the authority to co-sign forwarded operator requests, without which the
+/// hosted node refuses the operator's forwarding proof.
+const ORIGIN_NODE_SCOPES: &[&str] = &[
+    "ryeos.execute.service.external-content/product-offer",
+    "ryeos.execute.service.external-content/product-accept",
+    "ryeos.execute.service.objects/stage-chunk",
+    ryeos_node_runtime::identity::FORWARDED_OPERATOR_ATTESTATION_SCOPE,
+];
+
 /// Capabilities a pulling node needs on ORIGIN to read a closure, its
 /// admission and the large-object chunks.
 const PULL_SCOPES: &[&str] = &[
@@ -463,7 +473,13 @@ async fn start_pair() -> Result<Pair> {
         hosted_node_key(),
         hosted_operator_key(),
         |state_path, _, fixture| {
-            authorize_remote_node(state_path, fixture, &origin_node, &origin_site, PUSH_SCOPES)?;
+            authorize_remote_node(
+                state_path,
+                fixture,
+                &origin_node,
+                &origin_site,
+                ORIGIN_NODE_SCOPES,
+            )?;
             for operator in [&origin_operator, &second] {
                 authorize_remote_operator(
                     state_path,
