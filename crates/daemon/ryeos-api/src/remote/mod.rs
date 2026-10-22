@@ -9,5 +9,6 @@ pub mod client;
 pub mod config;
 pub mod forward;
 pub mod import;
+pub mod product_push;
 pub mod pull;
 pub mod push;
