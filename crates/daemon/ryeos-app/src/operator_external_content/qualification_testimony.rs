@@ -309,12 +309,15 @@ pub(crate) fn verify_current_remote_runtime_testimony(
         loaded.evidence.acceptance_policy_ref == remote.acceptance_policy_ref,
         "remote qualification acceptance was made under a different policy"
     );
-    // The live grant key re-verifies the testimony: a rotated or revoked key
-    // stops launches here even though the retained key still verifies.
+    // The live grant keys re-verify the testimony: a rotated or revoked
+    // attester or origin node key stops launches here even though the
+    // retained keys still verify.
+    let origin_node_key = loaded.evidence.origin_node_key()?;
+    require_current_origin_node_grant(state, &origin_node_key, &grant.origin_site_id)?;
     let live = verify_remote_qualification_testimony(
         &loaded.evidence.testimony,
         &grant.key,
-        &loaded.evidence.origin_node_key()?,
+        &origin_node_key,
     )?;
     ensure!(
         live.body.qualification_attestation_hash == binding.attestation_hash
@@ -433,6 +436,28 @@ fn current_attester_grant(state: &AppState, principal: &str) -> anyhow::Result<A
     })
 }
 
+/// The origin node key retained at acceptance must still hold a current
+/// node-signed `remote_node` grant for the attester's site.
+fn require_current_origin_node_grant(
+    state: &AppState,
+    origin_node_key: &lillux::crypto::VerifyingKey,
+    origin_site_id: &str,
+) -> anyhow::Result<()> {
+    let grant = ryeos_node_runtime::identity::load_verified_authorized_key(
+        &lillux::crypto::fingerprint(origin_node_key),
+        &state.config.authorized_keys_dir,
+        &state.identity,
+    )?
+    .context("remote qualification origin node grant was revoked")?;
+    ensure!(
+        grant.principal_class == AuthorizedKeyPrincipalClass::RemoteNode
+            && grant.public_key == *origin_node_key
+            && grant.configured_origin_site_id.as_deref() == Some(origin_site_id),
+        "remote qualification origin node grant does not name the attester's site"
+    );
+    Ok(())
+}
+
 /// Resolve the receiver's signed acceptance policy from the trusted bundle
 /// generation. Runs handler processes, so it must be called unguarded.
 fn resolve_acceptance_policy(
@@ -544,9 +569,12 @@ fn find_received_acceptance(
             matching.push(head.target_hash);
         }
     }
+    ensure!(
+        matching.len() <= 1,
+        "the qualified product was received more than once from this origin by this operator"
+    );
     matching
-        .into_iter()
-        .min()
+        .pop()
         .context("the qualified product was not received from this origin by this operator")
 }
 
