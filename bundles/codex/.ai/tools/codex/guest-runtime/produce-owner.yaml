@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-27T10:47:04Z:5821597a5c90ee8394f4e7979f8d20abb12a7aaa21a588f2e6842d061068fe09:MwkFf7yJF3Y/Y+LQMHL7UET9EaiJQu8Y3xMi6fmJOSJKN/uROpYLptBYhK4E9ixoYMURsR2L8w0doMB1BuhmCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-22T00:21:06Z:718aac61f797f074d1cbdfa4bfdd38ea3c5e3fb31d4eb6f8049a09d6940c0662:kf2x41EUTf98CfOGbDz7/JVKsAJAnelc9Lrm8xUDGgm15v14zFk9qEjWtQXP6LVCvrxJhvXPI0SlhSKSzD7GAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: codex/guest-runtime
 version: "1.0.0"
 description: Produce a credential-free guest occurrence owner from this bundle's signed executable
@@ -20,7 +20,7 @@ config:
     - --project-path
     - "${project_path}"
     - --profile-json
-    - '{"owner_timeout_seconds":600,"private_source_max_bytes":33554432,"private_source_max_inodes":1024,"schema":1}'
+    - '{"account":{"gid":65534,"implementation":"unix","uid":65534},"owner_timeout_seconds":600,"private_source_max_bytes":33554432,"private_source_max_inodes":1024,"schema":2}'
   input_data: "${params_json}"
   timeout_secs: 300
 config_schema:
