@@ -89,6 +89,22 @@ fn accept_blocking(
                 &authority.owner_principal,
             )?;
         stage.ensure_publication_contract(&publication_key, None)?;
+        // Every large object the offer protected must already be resident
+        // with its sidecar: the acceptance core verifies the payload later,
+        // but a missing object is refused here by name rather than from
+        // inside the payload verification.
+        let store = ryeos_state::LargeObjectStore::open_under(pinned.runtime_directory())?;
+        for hash in stage.protected_large_object_hashes() {
+            let resident = match store.as_ref() {
+                Some(store) => store.object_size(hash)?.is_some() && store.sidecar(hash)?.is_some(),
+                None => false,
+            };
+            if !resident {
+                bail!(
+                    "large object {hash} is absent from this node's store; stage its chunks first"
+                );
+            }
+        }
         stage.admitted_target_hash().map(str::to_owned)
     };
 
