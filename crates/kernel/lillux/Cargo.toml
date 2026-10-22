@@ -59,6 +59,11 @@ name = "private_source_owner"
 path = "tests/private_source_owner.rs"
 harness = false
 
+[[test]]
+name = "root_overlay_native"
+path = "tests/root_overlay_native.rs"
+harness = false
+
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
 

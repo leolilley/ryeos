@@ -293,6 +293,133 @@ pub fn enter_linux_private_source_filesystem(
     })
 }
 
+/// Largest tmpfs byte bound a root overlay may request.
+pub const MAX_ROOT_OVERLAY_TMPFS_BYTES: u64 = 1 << 36;
+/// Largest tmpfs inode bound a root overlay may request.
+pub const MAX_ROOT_OVERLAY_TMPFS_INODES: u64 = 1 << 24;
+/// Largest number of overlays one call may place.
+pub const MAX_ROOT_OVERLAYS: usize = 64;
+
+/// Explicit capacity bounds for a tmpfs root overlay. Both must be non-zero
+/// and within the published maxima.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TmpfsLimits {
+    pub size_bytes: u64,
+    pub inodes: u64,
+}
+
+impl TmpfsLimits {
+    fn validate(&self) -> Result<(), String> {
+        if self.size_bytes == 0 || self.size_bytes > MAX_ROOT_OVERLAY_TMPFS_BYTES {
+            return Err("root overlay tmpfs size must be non-zero and bounded".into());
+        }
+        if self.inodes == 0 || self.inodes > MAX_ROOT_OVERLAY_TMPFS_INODES {
+            return Err("root overlay tmpfs inode count must be non-zero and bounded".into());
+        }
+        Ok(())
+    }
+}
+
+/// One mount placed over an absolute directory of the root filesystem view.
+#[derive(Debug)]
+pub enum RootOverlay<'a> {
+    /// Recursive detached clone of the pinned source directory's mount.
+    Bind {
+        source: &'a crate::secure_fs::PinnedDirectory,
+        target: &'a Path,
+        read_only: bool,
+    },
+    /// Fresh size- and inode-bounded tmpfs.
+    Tmpfs {
+        target: &'a Path,
+        limits: TmpfsLimits,
+    },
+}
+
+impl RootOverlay<'_> {
+    fn target(&self) -> &Path {
+        match self {
+            Self::Bind {
+                source: _,
+                target,
+                read_only: _,
+            }
+            | Self::Tmpfs { target, limits: _ } => target,
+        }
+    }
+}
+
+fn validate_root_overlays(overlays: &[RootOverlay<'_>]) -> Result<(), String> {
+    use std::path::Component;
+    if overlays.is_empty() || overlays.len() > MAX_ROOT_OVERLAYS {
+        return Err("root overlay count must be between one and the published maximum".into());
+    }
+    let mut normal: Vec<Vec<&std::ffi::OsStr>> = Vec::with_capacity(overlays.len());
+    for overlay in overlays {
+        let target = overlay.target();
+        if !target.is_absolute() {
+            return Err(format!(
+                "root overlay target {} is not absolute",
+                target.display()
+            ));
+        }
+        // Path components elide `.` segments and trailing separators, so the
+        // raw bytes are checked first: every segment between separators must
+        // be a plain name.
+        let raw = target.as_os_str().as_encoded_bytes();
+        let segments = raw.strip_prefix(b"/").unwrap_or(raw);
+        if raw.ends_with(b"/")
+            || segments
+                .split(|byte| *byte == b'/')
+                .any(|segment| segment.is_empty() || segment == b"." || segment == b"..")
+        {
+            return Err(format!(
+                "root overlay target {} is not normalized",
+                target.display()
+            ));
+        }
+        let mut parts = Vec::new();
+        for component in target.components() {
+            match component {
+                Component::RootDir => {}
+                Component::Normal(part) => parts.push(part),
+                _ => {
+                    return Err(format!(
+                        "root overlay target {} is not normalized",
+                        target.display()
+                    ));
+                }
+            }
+        }
+        if parts.is_empty() {
+            return Err("root overlay may not target the filesystem root".into());
+        }
+        normal.push(parts);
+        if let RootOverlay::Tmpfs { target: _, limits } = overlay {
+            limits.validate()?;
+        }
+    }
+    for (index, left) in normal.iter().enumerate() {
+        for right in &normal[index + 1..] {
+            if left.starts_with(right) || right.starts_with(left) {
+                return Err("root overlay targets may not be shared or nested".into());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Enter a private mount namespace as root and place each overlay over its
+/// absolute target. Keeps euid 0, creates no user namespace, and is not
+/// one-shot. Refuses a non-root caller, a multi-threaded process, a target
+/// that is not an existing absolute directory, shared or nested targets, and
+/// any mount failure. The namespace is private, so a failure leaves nothing
+/// mounted in the former view; the error names the exact failing step.
+pub fn enter_root_overlay_namespace(overlays: &[RootOverlay<'_>]) -> Result<(), String> {
+    validate_root_overlays(overlays)?;
+    imp::enter_root_overlay_namespace(overlays)
+}
+
 impl LinuxSandboxInspection {
     /// Capabilities implemented by this Lillux backend when its runtime probe
     /// succeeds. This does not probe the current host; admission must use
@@ -2132,6 +2259,10 @@ mod imp {
         Err("private source filesystem ownership is unavailable on this platform".into())
     }
 
+    pub fn enter_root_overlay_namespace(_overlays: &[RootOverlay<'_>]) -> Result<(), String> {
+        Err("root overlay namespaces are unavailable on this platform".into())
+    }
+
     pub fn take_overlay_template(_fd: u32) -> Result<LinuxOverlayTemplate, String> {
         Err("detached Linux overlay templates are unavailable on this platform".to_string())
     }
@@ -3026,6 +3157,160 @@ mod imp {
         let root = transition().unwrap_or_else(|error| fatal_private_source_transition(&error));
         drop(former);
         Ok(root)
+    }
+
+    pub(super) fn enter_root_overlay_namespace(overlays: &[RootOverlay<'_>]) -> Result<(), String> {
+        if unsafe { libc::geteuid() } != 0 {
+            return Err("root overlay namespace requires effective uid 0".into());
+        }
+        let task_count = std::fs::read_dir("/proc/self/task")
+            .map_err(|error| format!("inspect root overlay caller threads: {error}"))?
+            .count();
+        if task_count != 1 {
+            return Err("root overlay namespace requires a single-threaded process".into());
+        }
+        // Source clones are detached before the namespace changes so no
+        // descriptor-relative mount operation crosses namespaces.
+        let mut clones: Vec<Option<File>> = Vec::with_capacity(overlays.len());
+        for overlay in overlays {
+            match overlay {
+                RootOverlay::Bind {
+                    source,
+                    target,
+                    read_only,
+                } => {
+                    let descriptor = source.try_clone_descriptor().map_err(|error| {
+                        format!(
+                            "retain root overlay source for {}: {error}",
+                            target.display()
+                        )
+                    })?;
+                    let mount_fd = unsafe {
+                        libc::syscall(
+                            libc::SYS_open_tree,
+                            descriptor.as_raw_fd(),
+                            c"".as_ptr(),
+                            OPEN_TREE_CLONE
+                                | OPEN_TREE_CLOEXEC
+                                | libc::AT_EMPTY_PATH as libc::c_uint
+                                | AT_RECURSIVE,
+                        )
+                    } as RawFd;
+                    if mount_fd < 0 {
+                        return Err(format!(
+                            "clone root overlay source for {}: {}",
+                            target.display(),
+                            std::io::Error::last_os_error()
+                        ));
+                    }
+                    let mount = unsafe { File::from_raw_fd(mount_fd) };
+                    set_mount_attributes_fd(mount.as_raw_fd(), *read_only, true, true).map_err(
+                        |error| {
+                            format!(
+                                "set root overlay attributes for {}: {error}",
+                                target.display()
+                            )
+                        },
+                    )?;
+                    clones.push(Some(mount));
+                }
+                RootOverlay::Tmpfs { .. } => clones.push(None),
+            }
+        }
+        syscall_zero(
+            unsafe { libc::unshare(libc::CLONE_NEWNS) },
+            "create root overlay mount namespace",
+        )?;
+        mount_raw(None, "/", None, libc::MS_REC | libc::MS_PRIVATE, None)
+            .map_err(|error| format!("make root overlay mounts non-propagating: {error}"))?;
+        for (overlay, clone) in overlays.iter().zip(clones.iter()) {
+            let target = overlay.target();
+            let pinned = crate::secure_fs::PinnedDirectory::open(target)
+                .map_err(|error| format!("pin root overlay target {}: {error}", target.display()))?
+                .ok_or_else(|| format!("root overlay target {} is absent", target.display()))?;
+            let before = pinned.identity().map_err(|error| {
+                format!("identify root overlay target {}: {error}", target.display())
+            })?;
+            let target_fd = pinned.try_clone_descriptor().map_err(|error| {
+                format!("retain root overlay target {}: {error}", target.display())
+            })?;
+            match (overlay, clone) {
+                (
+                    RootOverlay::Bind {
+                        source: _,
+                        target: _,
+                        read_only: _,
+                    },
+                    Some(mount),
+                ) => {
+                    move_detached_mount_to_target(mount.as_raw_fd(), target_fd.as_raw_fd())
+                        .map_err(|error| {
+                            format!("place root overlay at {}: {error}", target.display())
+                        })?;
+                }
+                (RootOverlay::Tmpfs { target: _, limits }, None) => {
+                    let options = format!(
+                        "mode=0755,size={},nr_inodes={}",
+                        limits.size_bytes, limits.inodes
+                    );
+                    let through_descriptor = format!("/proc/self/fd/{}", target_fd.as_raw_fd());
+                    mount_raw(
+                        Some("tmpfs"),
+                        &through_descriptor,
+                        Some("tmpfs"),
+                        libc::MS_NOSUID | libc::MS_NODEV,
+                        Some(&options),
+                    )
+                    .map_err(|error| {
+                        format!("mount root overlay tmpfs at {}: {error}", target.display())
+                    })?;
+                }
+                _ => return Err("root overlay preparation does not match its request".into()),
+            }
+            let after = crate::secure_fs::PinnedDirectory::open(target)
+                .map_err(|error| {
+                    format!("reopen root overlay target {}: {error}", target.display())
+                })?
+                .ok_or_else(|| {
+                    format!(
+                        "root overlay target {} disappeared after mount",
+                        target.display()
+                    )
+                })?
+                .identity()
+                .map_err(|error| {
+                    format!(
+                        "identify mounted root overlay {}: {error}",
+                        target.display()
+                    )
+                })?;
+            if after == before {
+                return Err(format!(
+                    "root overlay mount did not replace {}",
+                    target.display()
+                ));
+            }
+            if let RootOverlay::Bind {
+                source,
+                target: _,
+                read_only: _,
+            } = overlay
+            {
+                let expected = source.identity().map_err(|error| {
+                    format!(
+                        "identify root overlay source for {}: {error}",
+                        target.display()
+                    )
+                })?;
+                if after != expected {
+                    return Err(format!(
+                        "root overlay at {} is not the pinned source",
+                        target.display()
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     pub(super) fn seal_private_source_filesystem(
@@ -9356,6 +9641,59 @@ mod imp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tmpfs(target: &Path, size_bytes: u64, inodes: u64) -> RootOverlay<'_> {
+        RootOverlay::Tmpfs {
+            target,
+            limits: TmpfsLimits { size_bytes, inodes },
+        }
+    }
+
+    #[test]
+    fn root_overlay_rejects_relative_and_unnormalized_targets() {
+        for bad in ["relative", "/a/../b", "/a/./b", "/"] {
+            let path = Path::new(bad);
+            assert!(
+                validate_root_overlays(&[tmpfs(path, 4096, 8)]).is_err(),
+                "{bad}"
+            );
+        }
+        assert!(validate_root_overlays(&[]).is_err());
+    }
+
+    #[test]
+    fn root_overlay_rejects_shared_and_nested_targets() {
+        let (a, b, inner) = (Path::new("/a"), Path::new("/ab"), Path::new("/a/inner"));
+        assert!(validate_root_overlays(&[tmpfs(a, 4096, 8), tmpfs(a, 4096, 8)]).is_err());
+        assert!(validate_root_overlays(&[tmpfs(a, 4096, 8), tmpfs(inner, 4096, 8)]).is_err());
+        assert!(validate_root_overlays(&[tmpfs(inner, 4096, 8), tmpfs(a, 4096, 8)]).is_err());
+        assert!(validate_root_overlays(&[tmpfs(a, 4096, 8), tmpfs(b, 4096, 8)]).is_ok());
+    }
+
+    #[test]
+    fn root_overlay_rejects_zero_or_unbounded_tmpfs_limits() {
+        let target = Path::new("/a");
+        assert!(validate_root_overlays(&[tmpfs(target, 0, 8)]).is_err());
+        assert!(validate_root_overlays(&[tmpfs(target, 4096, 0)]).is_err());
+        assert!(
+            validate_root_overlays(&[tmpfs(target, MAX_ROOT_OVERLAY_TMPFS_BYTES + 1, 8)]).is_err()
+        );
+        assert!(
+            validate_root_overlays(&[tmpfs(target, 4096, MAX_ROOT_OVERLAY_TMPFS_INODES + 1)])
+                .is_err()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn root_overlay_refuses_a_non_root_caller_before_any_namespace_change() {
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let error = enter_root_overlay_namespace(&[tmpfs(Path::new("/tmp"), 4096, 8)])
+            .expect_err("non-root caller must be refused");
+        assert!(error.contains("effective uid 0"), "{error}");
+    }
 
     #[test]
     fn private_source_selections_require_bounded_request_cardinality() {
