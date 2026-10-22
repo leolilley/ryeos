@@ -1,0 +1,15 @@
+# ryeos:signed:2026-10-22T05:18:13Z:04ed81c90e9b4ec3be057ea458a8bc205b25191ad72985fddd4a190ed28c7cb3:vlJWjhd/egP31uQhrh4pNWWUK7q0oByccC5nMTdIuiCP6PZlxw9mb6nUcKirU2bMDRr3YkgOPiYhCqbxtaGGCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+id: external-content/product-offer
+path: /external-content/product-offer
+methods:
+  - POST
+auth: ryeos_signed
+request:
+  body: json
+limits:
+  body_bytes_max: 104857600
+  timeout_ms: 60000
+  concurrent_max: 16
+response:
+  mode: json
+  source: service:external-content/product-offer

@@ -1,0 +1,12 @@
+# ryeos:signed:2026-10-22T05:18:13Z:e9fe9c8c6fbc2ffa2ba3053b4e71968dbd9cc9051a2df85cfbb948fe5d30fae6:9EW10rZcNiibkcxvfadCjaWXvbPiaz4GJwu115F8i4pLywGHmJL1+LtImdXXVtI3vu8W+M8PEG+k7970FMX2Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: external-content.product-offer
+required_caps: ["ryeos.execute.service.external-content/product-offer"]
+schema:
+  witness_hash: string
+  origin_admission_hash: string
+  maximum_bytes: integer
+  origin_admission: object
+  objects: object[]
+  staging_id: string?
+description: "The origin offers a product's witness, admission and closure objects for staging; the hosted node verifies the admission against the pinned remote key before storing anything, then reports {staging_id, missing_objects, missing_blobs, large_objects, ready}"
