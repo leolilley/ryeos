@@ -68,6 +68,7 @@ fn fixture_with_remote_owner(
             Arc::new(closure),
             Arc::new(ExternalContentImportPolicyRecord {
                 schema: 1,
+                declared_roots: std::collections::BTreeMap::new(),
                 roots: Default::default(),
                 limits: ExternalContentImportLimits {
                     max_depth: 4,

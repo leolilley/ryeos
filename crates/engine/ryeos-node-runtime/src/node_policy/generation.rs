@@ -80,6 +80,20 @@ impl NodeInitProfile {
         Ok(selected)
     }
 
+    /// This profile with the declared external-content import roots measured
+    /// against `app_root` and recorded with their filesystem identities. A
+    /// profile without that section is returned unchanged.
+    pub fn admit_import_roots(&self, app_root: &Path) -> Result<Self> {
+        let mut admitted = self.clone();
+        if let Some(body) = admitted
+            .policies
+            .get_mut(super::sections::external_content::SECTION_NAME)
+        {
+            *body = super::sections::external_content::admit_declared_roots(body, app_root)?;
+        }
+        Ok(admitted)
+    }
+
     pub fn exact_bundles(&self) -> &[String] {
         &self.exact_bundles
     }
@@ -739,6 +753,61 @@ mod tests {
         )
         .unwrap();
         serde_yaml::from_str(&lillux::signature::strip_signature_lines(&raw)).unwrap()
+    }
+
+    #[test]
+    fn declared_import_roots_are_admitted_into_the_generation() {
+        let table = NodePolicyTable::new();
+        let app_root = tempfile::tempdir().unwrap();
+        let mut profile = authored_profile("core").for_host_class("local").unwrap();
+        let mut body = serde_json::json!({
+            "schema": 1,
+            "roots": {},
+            "declared_roots": {"inline": {"path": "{app_root}/imports/inline"}},
+            "limits": {
+                "max_depth": 8,
+                "max_entries": 8,
+                "max_file_bytes": 1024,
+                "max_total_bytes": 1024,
+                "store_budget_bytes": 2048,
+                "minimum_free_bytes": 1024
+            },
+            "managed_activation": {"enabled": false, "limits": null}
+        });
+        profile.policies.insert(
+            super::super::sections::external_content::SECTION_NAME.to_owned(),
+            body.take(),
+        );
+        let admitted = profile.admit_import_roots(app_root.path()).unwrap();
+        let generation = admitted
+            .validated_generation(&table, Path::new("inline.yaml"))
+            .unwrap();
+        let roots = &generation.policies()["external_content"]["roots"];
+        assert_eq!(
+            roots["inline"]["path"],
+            serde_json::json!(app_root.path().join("imports/inline").to_string_lossy())
+        );
+        assert!(roots["inline"]["root_inode"].as_u64().unwrap() != 0);
+    }
+
+    #[test]
+    fn f5r_controller_declares_products_root_admitted_at_init() {
+        let table = NodePolicyTable::new();
+        let app_root = tempfile::tempdir().unwrap();
+        let selected = authored_profile("f5r-controller")
+            .for_host_class("hosted")
+            .unwrap();
+        let admitted = selected.admit_import_roots(app_root.path()).unwrap();
+        let generation = admitted
+            .validated_generation(&table, Path::new("f5r-controller.yaml"))
+            .unwrap();
+        let roots = &generation.policies()["external_content"]["roots"];
+        assert_eq!(
+            roots["products"]["path"],
+            serde_json::json!(app_root.path().join("imports/products").to_string_lossy())
+        );
+        assert!(roots["products"]["containing_device"].as_u64().unwrap() != 0);
+        assert!(roots["products"]["root_inode"].as_u64().unwrap() != 0);
     }
 
     #[test]

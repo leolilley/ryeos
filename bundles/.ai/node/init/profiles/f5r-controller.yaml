@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-21T01:58:27Z:25accfa25c979388d8b929fc8e2093b5339d400a717f2ae06bc47c15f71a0bf9:bBfrIhhVpq3h3Ov2CfLOSlrTcAZhuQE1kBGk2E1UnLfm65EoB3I+x1hVucYM77HadUBO1MF9h3XIBmNHzJpdDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-22T00:42:15Z:e29eafc5b467dc33ca264ad49585df0a3acf45939d3fe651eb1be86eb1d1d6c6:DitIBMRUkMZYX/eFlhL6SuZr7hKKXD22h7+T5K+kx47nxkY+x+W5IDtAAQ3KQvHd6W58VrcoFGBkJSdj0GpdDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Controller of remote Codex authoring leases: runs the Codex app server
 # and the render-sandbox lease adapter, and runs no schedules.
 schema: 1
@@ -365,6 +365,13 @@ policies:
   external_content:
     schema: 1
     roots: {}
+    # A product root the operator stages guest products into. The profile
+    # names where it is; init proves what it is (device and inode) and writes
+    # that identity into the generation, so an import admits exactly this
+    # directory and nothing that later takes its place.
+    declared_roots:
+      products:
+        path: "{app_root}/imports/products"
     limits:
       max_depth: 8
       max_entries: 64

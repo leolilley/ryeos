@@ -586,7 +586,11 @@ fn the_development_direct_class_admits_an_operator_host_without_a_scope_associat
     let cases: Vec<(&str, Host, Expect)> = vec![
         ("local_direct", runit(), Expect::Admit),
         ("local_direct", local_docker(), Expect::Admit),
-        ("local_direct", local_docker_no_volume(), Expect::Refuse(NO_DISK)),
+        (
+            "local_direct",
+            local_docker_no_volume(),
+            Expect::Refuse(NO_DISK),
+        ),
         ("local_direct", railway(), Expect::Refuse(NO_ACCOUNTING)),
     ];
     for (class, host, expect) in &cases {
