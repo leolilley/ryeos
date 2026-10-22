@@ -651,10 +651,14 @@ impl LargeObjectStore {
                 let take = (overlap - compared).min(retained.len());
                 staged.seek(SeekFrom::Start(offset + compared as u64))?;
                 read_exact_len(&mut staged, &mut retained[..take])?;
-                if retained[..take] != bytes[compared..compared + take] {
+                if let Some(differs) = retained[..take]
+                    .iter()
+                    .zip(&bytes[compared..compared + take])
+                    .position(|(staged_byte, retried_byte)| staged_byte != retried_byte)
+                {
                     bail!(
                         "retried bytes differ from the staged bytes at offset {}",
-                        offset + compared as u64
+                        offset + (compared + differs) as u64
                     );
                 }
                 compared += take;
