@@ -408,6 +408,7 @@ fn every_shipped_profile_declares_the_host_classes_its_composition_runs_on() {
     let local_only = ["local"];
     let hosted_only = ["hosted"];
     let controller = ["hosted", "hosted_enforced", "local"];
+    let development = ["local", "local_direct"];
     let expected: [(&str, &[&str]); 16] = [
         ("core", &both),
         ("core-scheduling", &both),
@@ -421,7 +422,7 @@ fn every_shipped_profile_declares_the_host_classes_its_composition_runs_on() {
         ("local-inference", &local_only),
         ("contained-workflow", &local_only),
         ("release-authority", &local_only),
-        ("development", &local_only),
+        ("development", &development),
         ("full", &local_only),
         ("hosted-workflow", &hosted_only),
         ("hosted-node", &hosted_only),
@@ -577,6 +578,19 @@ fn the_f5r_controller_node_follows_the_host_class_matrix() {
     ];
     for (class, host, expect) in &cases {
         check("f5r-controller", class, host, expect);
+    }
+}
+
+#[test]
+fn the_development_direct_class_admits_an_operator_host_without_a_scope_association() {
+    let cases: Vec<(&str, Host, Expect)> = vec![
+        ("local_direct", runit(), Expect::Admit),
+        ("local_direct", local_docker(), Expect::Admit),
+        ("local_direct", local_docker_no_volume(), Expect::Refuse(NO_DISK)),
+        ("local_direct", railway(), Expect::Refuse(NO_ACCOUNTING)),
+    ];
+    for (class, host, expect) in &cases {
+        check("development", class, host, expect);
     }
 }
 

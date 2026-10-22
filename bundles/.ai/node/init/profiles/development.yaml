@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-20T18:29:03Z:4d2a451ccaab63ac262e30d4f49120bb2a152e61456bc011e1af0d341929babc:8mzBPua9eN8xF3K4jEBfE4TbgTU56N+jfWSF3J+Nq0qPP42/9ZhAL0HRljLS1cJnP8DN68uypajz31yeR/EMCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-22T00:00:39Z:cfe120372e59e4110f7fedaa04a71d90b7fe74ac7e4454a7c2bf6744e1deff94:lqzMd+qkDrcWcKpawZFcSBs6QCQBTsCAi3ILOl84wXdHAdTdER6MqEdyM1XUN0YsWJWyC1GdTMWL4nb/Ek7DDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - browser
@@ -326,6 +326,21 @@ policies:
             bundle: core
             implementation: linux-lillux
           proc_filesystem: pid_namespace_nested
+        local_direct:
+          # A host the operator runs where the daemon is spawned directly,
+          # without an administrator-owned host association. No delegated
+          # cgroup subtree exists, so no per-scope capability can qualify
+          # and the floor carries none; the sandbox lane still enforces.
+          # Per-scope containment is a property of `local`, not of this class.
+          requires_capabilities: [accounting, storage:durable_root, time]
+          process_scopes:
+            mode: unconfigured
+          trusted_process_group_sessions: false
+          mode: enforce
+          backend:
+            bundle: core
+            implementation: linux-lillux
+          proc_filesystem: pid_namespace
       # Inits trusted to exit when their only child exits. When the node's
       # parent is pid 1 and pid 1 is one of these, the node's exit is trusted
       # to end its container, so a new container on the same boot proves
