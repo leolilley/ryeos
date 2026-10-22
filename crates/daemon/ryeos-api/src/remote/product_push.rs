@@ -916,7 +916,7 @@ mod tests {
     fn chunk_plan_resumes_at_a_nonzero_offset() {
         let plan = plan_chunks(WIRE_CHUNK_BYTES * 2 + 10, 100).unwrap();
         assert_eq!(plan[0], (100, WIRE_CHUNK_BYTES));
-        assert_eq!(plan[1], (100 + WIRE_CHUNK_BYTES, WIRE_CHUNK_BYTES));
+        assert_eq!(plan[1], (100 + WIRE_CHUNK_BYTES, WIRE_CHUNK_BYTES - 90));
         let (last_offset, last_length) = *plan.last().unwrap();
         assert_eq!(last_offset + last_length, WIRE_CHUNK_BYTES * 2 + 10);
     }
