@@ -37,10 +37,10 @@ impl Request {
             bail!("qualification testimony export requires an exact canonical qualification hash");
         }
         if self.acceptance_policy_ref.len() > 512
-            || !self
+            || self
                 .acceptance_policy_ref
                 .strip_prefix("config:")
-                .is_some_and(|rest| !rest.is_empty())
+                .is_none_or(str::is_empty)
         {
             bail!("qualification testimony export requires an exact config: acceptance policy ref");
         }

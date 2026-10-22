@@ -78,20 +78,15 @@ fn shipped_codex_consumer_qualification_configs_agree_and_parse() {
     ))
     .unwrap();
 
+    // The worker edge ships unqualified: it names the policy only once the
+    // derived consumer context has been merged into that policy on a node
+    // holding the captured runtime. The policy must already allow every
+    // claim program admission will require of that edge.
     let worker = relationships
         .select("runtime_to_external_authoring_worker")
         .unwrap();
-    assert_eq!(
-        worker.qualification.policy_ref.as_deref(),
-        Some("config:codex/consumer-qualification-policy")
-    );
-    let required: Vec<&str> = worker
-        .qualification
-        .required_claims
-        .iter()
-        .map(String::as_str)
-        .collect();
-    assert_eq!(required, REQUIRED_CLAIMS);
+    assert!(worker.qualification.policy_ref.is_none());
+    assert!(worker.qualification.required_claims.is_empty());
     for claim in REQUIRED_CLAIMS {
         assert!(policy.allowed_claims.iter().any(|allowed| allowed == claim));
     }

@@ -3493,7 +3493,7 @@ mod tests {
         requirement
             .resolve_for_use(Some(&exact), &qualification_use)
             .unwrap();
-        for omitted in 0..REQUIRED_CLAIMS.len() {
+        for (omitted, omitted_claim) in REQUIRED_CLAIMS.iter().enumerate() {
             let mut fewer = exact.clone().into_inner();
             fewer
                 .get_mut(&requirement.runtime_product_declaration_id)
@@ -3507,8 +3507,7 @@ mod tests {
                 requirement
                     .resolve_for_use(Some(&fewer), &qualification_use)
                     .is_err(),
-                "relationship without {} was admitted",
-                REQUIRED_CLAIMS[omitted]
+                "relationship without {omitted_claim} was admitted"
             );
         }
     }
