@@ -19,6 +19,7 @@ ryeos-project-capture = { workspace = true }
 ryeos-state = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+tar = { workspace = true }
 toml = { workspace = true }
 
 [dev-dependencies]
