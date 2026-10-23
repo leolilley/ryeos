@@ -581,8 +581,10 @@ pub(crate) mod tests {
             second_policy.minimum_verifier_process_settlement
         );
         assert_eq!(
-            second_policy.producer_scenarios[&second.profile.producer_scenario_id].recipe_ref,
-            second.expected_producer_recipe_ref
+            second_policy.producer_scenarios[&second.profile.producer_scenario_id]
+                .recipe_ref
+                .as_deref(),
+            Some(second.expected_producer_recipe_ref.as_str())
         );
         assert_eq!(second_recipe["name"], "direct-codex-empty-candidate");
         assert_ne!(
