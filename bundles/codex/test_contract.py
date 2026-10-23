@@ -11,10 +11,13 @@ import json
 from pathlib import Path
 import re
 import stat
+import sys
 import tomllib
 import unittest
 
 import yaml
+
+sys.dont_write_bytecode = True
 
 
 BUNDLE = Path(__file__).resolve().parent
@@ -22,6 +25,7 @@ SOURCE = BUNDLE / ".ai/workers/codex/lib/hosted"
 PROFILE_PATH = SOURCE / "structured-session.profile.json"
 WORKER_PATH = BUNDLE / ".ai/workers/codex/hosted.yaml"
 TRUSTED_WORKER_PATH = BUNDLE / ".ai/workers/codex/trusted-hosted.yaml"
+PRODUCT_CONTRACT_DIR = BUNDLE / ".ai/tools/codex/qualification/lib/product-contract"
 MERGE_DIR = BUNDLE / ".ai/tools/codex/qualification/lib/consumer-context-merge"
 ACTIVATION_PATH = BUNDLE / ".ai/config/codex/activation.yaml"
 TRUSTED_ACTIVATION_PATH = BUNDLE / ".ai/config/codex/trusted-activation.yaml"
@@ -209,6 +213,130 @@ class CodexContractTests(unittest.TestCase):
             fixtures.EMITTED["consumer_execution_context"],
         )
         self.assertIn(parameters["controller"]["scenario_id"], section["producer_scenarios"])
+
+    def test_checker_runtime_and_code_are_declared_and_selected(self) -> None:
+        verifier = yaml.safe_load(
+            (BUNDLE / ".ai/tools/codex/qualification/consumer-runtime-verifier.yaml").read_text()
+        )
+        runtime = next(item for item in verifier["external_content"] if item["id"] == "checker-runtime")
+        self.assertEqual(runtime, {
+            "id": "checker-runtime",
+            "kind": "tree",
+            "mode": "pinned",
+            "digest": "800d4969489634cc3bbc5774bd9e99a330cdc23bbc1fd0fd231ec6a88ca9acdf",
+            "mount_root": "execution_runtime",
+            "mount": "checker-runtime",
+        })
+        slot = next(item for item in verifier["external_product_slots"] if item["id"] == "checker-code")
+        self.assertEqual(slot, {
+            "id": "checker-code",
+            "relationship_ref": "config:codex/semantic-checker-code-products",
+            "relationship": "checker_code_to_consumer_verifier",
+            "kind": "tree",
+            "mount_root": "execution_runtime",
+            "mount": "checker-code",
+        })
+        products = yaml.safe_load(
+            (BUNDLE / ".ai/config/codex/semantic-checker-code-products.yaml").read_text()
+        )
+        edge = next(
+            item for item in products["product_relationships"]["relationships"]
+            if item["name"] == slot["relationship"]
+        )
+        self.assertEqual(edge["consumer"], {
+            "canonical_ref": "tool:codex/qualification/consumer-runtime-verifier",
+            "declaration_id": slot["id"],
+        })
+        self.assertEqual(edge["producer"]["product_name"], "semantic_checker_code")
+        self.assertEqual(edge["qualification"], {"policy_ref": None, "required_claims": []})
+        activation = yaml.safe_load(
+            (BUNDLE / ".ai/config/codex/checker-runtime-activation.yaml").read_text()
+        )
+        self.assertEqual(activation["consumer_ref"], "tool:codex/qualification/consumer-runtime-verifier")
+        self.assertEqual([c["id"] for c in activation["components"]], ["checker-runtime"])
+
+        args = verifier["config"]["args"]
+        self.assertEqual(args[:2], ["--consumer-controller", "--product-contract"])
+        self.assertEqual(len(args), 3)
+        literal = args[2]
+        self.assertLessEqual(len(literal.encode()), 8192)
+        contract = json.loads(literal)
+        self.assertEqual(literal, json.dumps(contract, sort_keys=True, separators=(",", ":")))
+        checker = contract["semantic_checker"]
+        self.assertEqual(checker["runtime"]["id"], "checker-runtime")
+        self.assertEqual(checker["runtime"]["manifest_hash"], runtime["digest"])
+        self.assertEqual(checker["code"]["id"], slot["id"])
+        expected = products["build_products"]["products"][0]["expected_manifest_hash"]
+        placeholder = checker["code"]["manifest_hash"] == "@@CODE_MANIFEST_HASH@@"
+        if expected is None:
+            self.assertTrue(placeholder)
+        else:
+            self.assertEqual(checker["code"]["manifest_hash"], expected)
+        script = (BUNDLE / ".ai/tools/codex/qualification/lib/semantic-checker/checker.py").read_bytes()
+        self.assertEqual(checker["code"]["script"], {
+            "path": "checker.py",
+            "bytes": len(script),
+            "sha256": hashlib.sha256(script).hexdigest(),
+        })
+        for name in ("profile_hash", "source_binding_hash", "source_content_manifest_hash"):
+            value = contract["target"][name]
+            self.assertTrue(value == "@@%s@@" % name.upper() or re.fullmatch(r"[0-9a-f]{64}", value), name)
+        worker = yaml.safe_load(
+            (BUNDLE / ".ai/workers/codex/external-hosted-authoring.yaml").read_text()
+        )
+        self.assertEqual(
+            contract["helpers"],
+            {item["id"]: item["digest"] for item in worker["external_content"]},
+        )
+
+    def test_product_contract_builder_refuses_and_round_trips(self) -> None:
+        import tempfile
+
+        build = load_path("product_contract_build", PRODUCT_CONTRACT_DIR / "build.py")
+        good = {
+            "code_manifest_hash": "a" * 64,
+            "profile_hash": "b" * 64,
+            "source_binding_hash": "c" * 64,
+            "source_content_manifest_hash": "d" * 64,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            captured = Path(directory) / "captured.json"
+
+            def refused(values: dict) -> None:
+                captured.write_text(json.dumps(values))
+                with self.assertRaises(build.Refusal):
+                    build.load_captured(captured)
+
+            for name in good:
+                refused({k: v for k, v in good.items() if k != name})
+                refused({**good, name: "A" * 64})
+                refused({**good, name: "a" * 63})
+            refused({**good, "extra": "a" * 64})
+            captured.write_text(json.dumps(good))
+            literal = build.generate(build.load_captured(captured), False)
+            contract = json.loads(literal)
+            self.assertEqual(contract["semantic_checker"]["code"]["manifest_hash"], "a" * 64)
+            self.assertEqual(contract["target"]["profile_hash"], "b" * 64)
+            self.assertEqual(literal, build.canonical(contract))
+            oversized = json.loads(literal)
+            oversized["padding"] = "x" * 8192
+            with self.assertRaises(build.Refusal):
+                build.canonical(oversized)
+
+            source = BUNDLE / ".ai/tools/codex/qualification/consumer-runtime-verifier.yaml"
+            tool = Path(directory) / "tool.yaml"
+            tool.write_text(source.read_text())
+            header = tool.read_text().splitlines()[0]
+            build.write_tool(tool, literal)
+            self.assertEqual(tool.read_text().splitlines()[0], header)
+            self.assertEqual(yaml.safe_load(build.strip_header(tool.read_text()))["config"]["args"][2], literal)
+            placeholders = build.generate(None, True, tool=tool)
+            self.assertIn("@@PROFILE_HASH@@", placeholders)
+            self.assertEqual(source.read_text().splitlines()[0], header)
+            live = yaml.safe_load(build.strip_header(source.read_text()))["config"]["args"][2]
+            self.assertEqual(live, build.canonical(json.loads(live)))
+            if "@@" in live:
+                self.assertEqual(live, build.generate(None, True))
 
     def test_external_authoring_profile_is_distinct_and_fail_closed(self) -> None:
         worker = yaml.safe_load(

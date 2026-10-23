@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-12T23:47:00Z:8c6839ea123f1ad28ba1c28366ff62bbc53d76091da8660f92772affb3c07986:09ldq4WhjJ0qKG94+sO8rG1N8SU+bnKhIUKnDXbavYzhVKeo1KyK27VVogMctCxRgLv895aNpvYZqQxRYHm5Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-23T06:55:09Z:20465d02929fb026c6822af56270fa8826c4fd9447ffecce471bac0910cc35ae:c7W8Oqa2gKYkI+IpHEAJTr/zLP2rHJOrA1rWlPE9bTWEYqWWn2WbnkTxzObEo6TaOnnHp1FF3nX4MDEmvim0BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: codex/qualification
 version: "1.0.0"
 description: Check the actual Q command and independent diagnostic through restricted daemon callbacks; propose finite claims for issuer corroboration.
@@ -7,6 +7,15 @@ execution_protocol: protocol:ryeos/core/qualification_consumer_callback
 effects: live
 filesystem_authority: captured_execution
 required_caps: []
+external_content:
+  # Pinned musl CPython tree that runs the semantic checker; its members are
+  # selected by the finite product contract passed in `args`.
+  - id: checker-runtime
+    kind: tree
+    mode: pinned
+    digest: 800d4969489634cc3bbc5774bd9e99a330cdc23bbc1fd0fd231ec6a88ca9acdf
+    mount_root: execution_runtime
+    mount: checker-runtime
 external_product_slots:
   # The verifier inspects the unqualified witness through its own existing
   # composition edge. This does not admit the ordinary authoring Worker.
@@ -16,9 +25,22 @@ external_product_slots:
     kind: tree
     mount_root: execution_runtime
     mount: codex-guest-runtime
+  # The retained semantic checker source, selected by manifest hash in the
+  # finite product contract.
+  - id: checker-code
+    relationship_ref: config:codex/semantic-checker-code-products
+    relationship: checker_code_to_consumer_verifier
+    kind: tree
+    mount_root: execution_runtime
+    mount: checker-code
 config:
   command: bin:codex-runtime-verifier
-  args: [--consumer-controller]
+  # Immutable signed product data, separate from policy stdin. Regenerate the
+  # third argument with lib/product-contract/build.py; never edit it by hand.
+  args:
+    - --consumer-controller
+    - --product-contract
+    - '{"audit_edition":"codex-0.147.0-interpreted-remote-environment-v3","families":{"code_mode":"bounded-compute-no-imports-same-nested-router","deferred_tools":"presentation-only-no-added-authority","delegation":"original-checked-agents-disabled","exec_and_stdin":"selected-remote-connector-no-local-fallback","file_and_image_reads":"selected-environment-filesystem","guardian":"guardian-context-only-and-request-permissions-empty-under-never-approval","mcp_apps_plugins_skills":"original-checked-disabled-or-empty","memories_and_goals":"original-checked-disabled","session_utilities":"bounded-session-bookkeeping-and-existing-environment-wait-only","shell_patch_interception":"selected-environment-filesystem","web_and_image_generation":"original-checked-disabled"},"helpers":{"codex":"713c3d1985ca438d8c309631d665c14f8fa0afedfce8b73dc93d0646edfe11ff","codex-bwrap":"5f2c25277b1a2150937372ade46eef46aa2227b749f984bea208b5467540b86f","codex-code-mode-host":"984168b4c3f0efcbee4d1707fda8f8320bdb08a75cb704a8205f853e79e4dc2d","codex-rg":"a7a1a4fdb45e9231b80a9840c22728b05625ed1e21cc155d3995697eeeec22c0","codex-zsh":"bda40827700404df0317f0e83951a4f6b6fb0933b3eec3af29c1a903c39aa008"},"inputs":{"cwd":"/workspace","environment":"sole-default-command-connector","include_local":false,"ordinary_request_language":"closed-start-resume-and-owner-bound-plain-text-turns-v1","request_language":"closed-session-start-and-input-only-canary-turn","session_setup":"raw-events-true-and-optional-canonical-model-only"},"permitted_controller_services":["auth-model-config","git-attribution-provider-metadata","rollout-history","telemetry-cache","bounded-compute-timers-session-store"],"schema":"ryeos.codex.finite_product_contract.v2","semantic_checker":{"code":{"id":"checker-code","manifest_hash":"@@CODE_MANIFEST_HASH@@","script":{"bytes":29534,"path":"checker.py","sha256":"7817bcd3937a3661ec8cff90e0fb7d2569ce04ba05af42047be3d4708837e56b"}},"max_header_bytes":2097152,"max_response_bytes":65536,"required_root_settlement":"scope_empty","runtime":{"id":"checker-runtime","interpreter":{"bytes":22166488,"path":"python/bin/python3.14","sha256":"2d8886b2bad1105014ce23e2439b20d47a78416281b906e21ac0e37085d19e9d"},"library_path":"lib","loader":{"bytes":662120,"path":"lib/ld-musl-x86_64.so.1","sha256":"1cc5c3f502179e2a4befae29658fb109102effefc75742893aa4a449fd3fbb03"},"manifest_hash":"800d4969489634cc3bbc5774bd9e99a330cdc23bbc1fd0fd231ec6a88ca9acdf","prefix_path":"python"},"schema":"ryeos.codex.semantic_checker_program.v1","wire_schema":"ryeos.codex.semantic_input.v2"},"setup":{"approval_policy":"never","approvals_reviewer":"user","model_provider":"openai","model_selection":"compare-only-explicit-signed-selection","permission_profile":"danger-full-access","sandbox":"dangerFullAccess"},"target":{"profile_hash":"@@PROFILE_HASH@@","source_binding_hash":"@@SOURCE_BINDING_HASH@@","source_content_manifest_hash":"@@SOURCE_CONTENT_MANIFEST_HASH@@","worker_ref":"worker:codex/external-hosted-authoring"}}'
   input_data: "${params_json}"
   timeout_secs: 300
 config_schema:

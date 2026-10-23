@@ -457,15 +457,16 @@ mod tests {
         {
           "schema": "ryeos.codex.finite_product_contract.v2",
           "audit_edition": "codex-0.147.0-interpreted-remote-environment-v3",
-          // Synthetic source-test pins ONLY, never enabled Tool content.
+          // Runtime members mirror the pinned musl CPython tree and the shipped
+          // checker script; the code manifest hash is a synthetic stand-in.
           "semantic_checker": {
             "schema":"ryeos.codex.semantic_checker_program.v1", "wire_schema":"ryeos.codex.semantic_input.v2",
-            "runtime": {"id":"checker-python", "manifest_hash":"a".repeat(64),
-              "loader":{"path":"lib/loader", "sha256":"b".repeat(64), "bytes":1},
-              "interpreter":{"path":"python/bin/python", "sha256":"c".repeat(64), "bytes":1},
+            "runtime": {"id":"checker-runtime", "manifest_hash":"800d4969489634cc3bbc5774bd9e99a330cdc23bbc1fd0fd231ec6a88ca9acdf",
+              "loader":{"path":"lib/ld-musl-x86_64.so.1", "sha256":"1cc5c3f502179e2a4befae29658fb109102effefc75742893aa4a449fd3fbb03", "bytes":662120},
+              "interpreter":{"path":"python/bin/python3.14", "sha256":"2d8886b2bad1105014ce23e2439b20d47a78416281b906e21ac0e37085d19e9d", "bytes":22166488},
               "library_path":"lib", "prefix_path":"python"},
-            "code":{"id":"checker-code", "manifest_hash":"d".repeat(64),
-              "script":{"path":"checker.py", "sha256":"e".repeat(64), "bytes":1}},
+            "code":{"id":"checker-code", "manifest_hash":"c".repeat(64),
+              "script":{"path":"checker.py", "sha256":"7817bcd3937a3661ec8cff90e0fb7d2569ce04ba05af42047be3d4708837e56b", "bytes":29534}},
             "max_header_bytes":2097152, "max_response_bytes":65536, "required_root_settlement":"scope_empty"
           },
           "permitted_controller_services": [
@@ -565,7 +566,7 @@ mod tests {
                     changed.as_object_mut().unwrap().remove("semantic_checker");
                 }
                 "alias" => {
-                    changed["semantic_checker"]["code"]["id"] = json!("checker-python");
+                    changed["semantic_checker"]["code"]["id"] = json!("checker-runtime");
                 }
                 "oversize" => {
                     changed["semantic_checker"]["code"]["script"]["bytes"] =
@@ -591,6 +592,20 @@ mod tests {
         }
     }
 
+    #[test]
+    fn shipped_shape_contract_round_trips_canonically_within_the_args_bound() {
+        let contract = FiniteProductContract::parse(&bytes(&value())).unwrap();
+        let canonical = contract.canonical_bytes().unwrap();
+        assert!(canonical.len() < MAX_FINITE_PRODUCT_CONTRACT_BYTES);
+        let parsed = FiniteProductContract::parse(&canonical).unwrap();
+        assert_eq!(parsed, contract);
+        assert_eq!(parsed.canonical_bytes().unwrap(), canonical);
+        let selector = parsed.semantic_checker();
+        assert_eq!(selector.runtime.id, "checker-runtime");
+        assert_eq!(selector.code.id, "checker-code");
+        assert_eq!(selector.runtime.loader.bytes, 662120);
+        assert_eq!(selector.code.script.bytes, 29534);
+    }
     #[test]
     fn finite_product_data_requires_canonical_closed_complete_rules() {
         let original = value();
