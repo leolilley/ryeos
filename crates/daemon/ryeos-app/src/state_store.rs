@@ -18991,14 +18991,14 @@ impl StateStore {
     pub(crate) fn reserve_consumer_verifier_attempt(
         &self,
         intent: &ryeos_external_execution_contract::restored_runtime_measurement::RestoredVerifierAttemptIntent,
-        input: &ryeos_state::external_content::qualification_consumer_record::ConsumerInputRecord,
+        input: crate::qualification_consumer_input::ConsumerInputRef<'_>,
         admission: crate::operator_external_content::product_qualification::AuthenticatedConsumerRoot,
     ) -> Result<runtime_db::restored_verifier_attempt::RestoredVerifierAttemptRecord> {
         input.validate_attempt(intent)?;
         anyhow::ensure!(
-            input.purpose == *admission.purpose()
-                && input.coordinate == *admission.coordinate()
-                && input.selection == *admission.selection(),
+            input.purpose() == admission.purpose()
+                && input.coordinate() == admission.coordinate()
+                && input.selection() == admission.selection(),
             "consumer input differs from authenticated accepted root"
         );
         let bytes = input.canonical_bytes()?;

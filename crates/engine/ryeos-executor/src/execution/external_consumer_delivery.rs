@@ -5,16 +5,21 @@
 use std::{collections::BTreeMap, path::Path};
 
 use anyhow::{Context as _, Result, ensure};
-use ryeos_app::operator_external_content::product_qualification::PreparedRetainedConsumerVerifier;
+use ryeos_app::operator_external_content::product_qualification::{
+    PreparedConsumerLane, PreparedRetainedConsumerVerifier,
+};
 use ryeos_external_execution::restoration_verifier_delivery::{
-    ConsumerProductInventory, PreparedConsumerArchive,
+    ConsumerProductInventory, PreparedConsumerArchive, prepare_private_consumer_archive,
+    prepare_probe_delivery_records,
 };
 use ryeos_external_execution_contract::restored_runtime_measurement::{
     CONSUMER_INPUT_RECORD_NAME, CONSUMER_VERIFIER_REMOTE_NAME, MAX_CONSUMER_INPUT_RECORD_BYTES,
     MAX_RESTORATION_VERIFIER_BYTES,
 };
 use ryeos_external_execution_contract::staging_package::GuestStagingEntry;
-use ryeos_state::external_content::qualification_consumer_record::ConsumerInputRecord;
+use ryeos_state::external_content::qualification_consumer_record::{
+    ConsumerInputRecord, RemoteProbeInputRecord,
+};
 use ryeos_state::objects::ExternalContentRealizationSet;
 
 /// No caller-selected filenames, modes, executables or supplementary entries.
@@ -43,7 +48,7 @@ pub fn prepare_retained_consumer_archive(
         input.purpose == *prepared.purpose()
             && input.coordinate == *prepared.coordinate()
             && input.selection == *prepared.selection()
-            && input.requirement == *prepared.requirement(),
+            && input.requirement == *prepared.requirement()?,
         "consumer delivery input differs from its authenticated retained authority"
     );
     let source = prepared
@@ -84,10 +89,10 @@ pub fn prepare_retained_consumer_archive(
     )?;
     parent.require_owner_private_directory()?;
     let runtime = super::external_guest_inputs::RuntimeDestinationOverride {
-        realization_id: &prepared.requirement().runtime_product_declaration_id,
+        realization_id: &prepared.requirement()?.runtime_product_declaration_id,
         destination: Path::new(
             &prepared
-                .requirement()
+                .requirement()?
                 .runtime_recipe
                 .runtime_mount_destination,
         ),
@@ -142,6 +147,63 @@ pub fn prepare_retained_consumer_archive(
     )?;
     archive.require_verifier_selection(prepared.selection())?;
     archive.require_consumer_input_record(input)?;
+    Ok(archive)
+}
+
+/// Delivery for a Worker-less probe: the accepted probe record, the exact
+/// retained verifier, and the signed extra executables, with no product
+/// inventory because the subject already exists inside the restored guest.
+/// `prepared` can only be constructed by accepted-root authentication in app.
+pub fn prepare_retained_probe_archive(
+    prepared: &PreparedRetainedConsumerVerifier,
+    input: &RemoteProbeInputRecord,
+    parent: &lillux::PinnedDirectory,
+    deadline: lillux::time::MonotonicDeadline,
+) -> Result<PreparedConsumerArchive> {
+    let PreparedConsumerLane::Probe { archive_members } = prepared.lane() else {
+        anyhow::bail!("probe delivery cannot be prepared for a Worker consumer root");
+    };
+    ensure!(
+        !deadline.has_elapsed(),
+        "probe delivery preparation deadline expired"
+    );
+    prepared
+        .purpose()
+        .validate_remote_consumer_coordinate(prepared.coordinate(), prepared.selection())?;
+    ensure!(
+        input.purpose == *prepared.purpose()
+            && input.coordinate == *prepared.coordinate()
+            && input.selection == *prepared.selection(),
+        "probe delivery input differs from its authenticated retained authority"
+    );
+    parent.require_owner_private_directory()?;
+    let records = prepare_probe_delivery_records(input, prepared.payload(), archive_members)?;
+    ensure!(
+        !deadline.has_elapsed(),
+        "probe delivery preparation deadline expired"
+    );
+    let descriptors = records
+        .descriptors
+        .iter()
+        .map(|(path, authority)| (path.as_str(), authority))
+        .collect();
+    let archive = prepare_private_consumer_archive(
+        parent,
+        &records.entries,
+        &descriptors,
+        &prepared.selection().archive_budget,
+        deadline,
+    )?;
+    archive.require_verifier_selection(prepared.selection())?;
+    archive.require_probe_input_record(input)?;
+    archive.require_archive_members(
+        &prepared
+            .purpose()
+            .remote_verifier_sources
+            .get(&prepared.coordinate().scenario_id)
+            .context("probe delivery has no retained verifier source")?
+            .archive_member_digests,
+    )?;
     Ok(archive)
 }
 

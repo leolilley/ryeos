@@ -724,27 +724,32 @@ pub(super) fn recheck_execution_proof_journal_guarded(
                     ryeos_state::external_content::qualification_consumer_record::MAX_CONSUMER_INPUT_RECORD_BYTES as u64,
                 )?
                 .context("remote qualification retained input disappeared before publication")?;
-            let input = ryeos_state::external_content::qualification_consumer_record::ConsumerInputRecord::parse(
-                &input_bytes,
-            )?;
-            let transport = state
-                .state_store
-                .qualification_historical_transport_evidence_admitted(
-                    guard,
-                    &input.coordinate,
-                    &proof.intent.qualification_operation_id,
-                    &input.purpose.owner_fingerprint,
-                )?;
-            let local = state
-                .state_store
-                .qualification_local_start(&transport.placement_thread_id)?
-                .context("Q credential custody disappeared before publication")?;
-            if local
-                .credential_custody
-                .as_ref()
-                .is_none_or(|custody| custody.released_at_ms.is_none())
+            let input =
+                crate::qualification_consumer_input::RetainedConsumerInput::parse(&input_bytes)?;
+            // Only a Worker consumer ran a Q transport with credential
+            // custody; a probe has no Worker and so none to release.
+            if let crate::qualification_consumer_input::ConsumerInputRef::Worker(record) =
+                input.input_ref()
             {
-                bail!("Q credential custody changed between proof and publication");
+                let transport = state
+                    .state_store
+                    .qualification_historical_transport_evidence_admitted(
+                        guard,
+                        &record.coordinate,
+                        &proof.intent.qualification_operation_id,
+                        &record.purpose.owner_fingerprint,
+                    )?;
+                let local = state
+                    .state_store
+                    .qualification_local_start(&transport.placement_thread_id)?
+                    .context("Q credential custody disappeared before publication")?;
+                if local
+                    .credential_custody
+                    .as_ref()
+                    .is_none_or(|custody| custody.released_at_ms.is_none())
+                {
+                    bail!("Q credential custody changed between proof and publication");
+                }
             }
         }
     }
@@ -1756,8 +1761,11 @@ impl PreparedBundleConsumerContentInputs {
                 bail!("external runtime alignment changed Bundle generation");
             }
             for scenario in self.policy_source.policy.producer_scenarios.values() {
-                let recipe =
-                    resolve_bundle_producer_recipe_in_generation(generation, &scenario.recipe_ref)?;
+                let recipe_ref = scenario
+                    .recipe_ref
+                    .as_deref()
+                    .context("consumer runtime scenario has no producer recipe")?;
+                let recipe = resolve_bundle_producer_recipe_in_generation(generation, recipe_ref)?;
                 require_direct_consumer_target(
                     &self.policy_source,
                     &recipe,
@@ -2560,7 +2568,11 @@ fn resolve_current_bundle_producer_recipe_for_purpose_in_generation(
         .producer_scenarios
         .get(scenario_id)
         .context("qualification producer scenario is not signed in the admitted policy")?;
-    let current = resolve_bundle_producer_recipe_in_generation(generation, &scenario.recipe_ref)?;
+    let recipe_ref = scenario
+        .recipe_ref
+        .as_deref()
+        .context("qualification scenario has no producer recipe")?;
+    let current = resolve_bundle_producer_recipe_in_generation(generation, recipe_ref)?;
     require_direct_consumer_target(&current_policy, &current, purpose.subject_manifest_hash())?;
     if let Some(content) = purpose.consumer_content() {
         if generation.request_engine_generation_identity()
@@ -2929,15 +2941,42 @@ pub struct PreparedRetainedConsumerVerifier {
     purpose: ryeos_state::external_content::qualification_purpose::QualificationLaunchPurpose,
     coordinate: ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate,
     selection: ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerifierSelection,
-    requirement: ryeos_state::external_execution::admission::ExternalCandidateRequirement,
+    lane: PreparedConsumerLane,
     payload: lillux::InheritedDescriptorAuthority,
 }
 
+/// What the retained delivery carries beyond the verifier executable. A Worker
+/// consumer needs the reproduced Worker requirement; a probe needs only the
+/// signed archive members, captured and digest-checked against the retained
+/// source.
+pub enum PreparedConsumerLane {
+    Worker {
+        requirement: Box<ryeos_state::external_execution::admission::ExternalCandidateRequirement>,
+    },
+    Probe {
+        archive_members: BTreeMap<
+            String,
+            ryeos_external_execution::restoration_verifier_delivery::ConsumerArchiveMember,
+        >,
+    },
+}
+
 impl PreparedRetainedConsumerVerifier {
+    pub fn lane(&self) -> &PreparedConsumerLane {
+        &self.lane
+    }
+
+    /// The Worker requirement; a probe delivery has none.
     pub fn requirement(
         &self,
-    ) -> &ryeos_state::external_execution::admission::ExternalCandidateRequirement {
-        &self.requirement
+    ) -> anyhow::Result<&ryeos_state::external_execution::admission::ExternalCandidateRequirement>
+    {
+        match &self.lane {
+            PreparedConsumerLane::Worker { requirement } => Ok(requirement.as_ref()),
+            PreparedConsumerLane::Probe { .. } => {
+                bail!("probe delivery has no Worker requirement")
+            }
+        }
     }
     pub fn purpose(
         &self,
@@ -2979,7 +3018,7 @@ pub fn prepare_retained_consumer_verifier(
         coordinate,
         qualification_operation_id,
     )?;
-    restore_admitted_consumer_verifier(&authority, &guard, admitted)
+    restore_admitted_consumer_verifier(state, &authority, &guard, admitted)
 }
 
 /// Prepare inert delivery custody for the actual invoking verifier. This does
@@ -3004,7 +3043,7 @@ pub fn prepare_retained_consumer_verifier_for_callback(
         coordinate,
         qualification_operation_id,
     )?;
-    restore_admitted_consumer_verifier(&authority, &guard, admitted)
+    restore_admitted_consumer_verifier(state, &authority, &guard, admitted)
 }
 
 /// Read-only record inputs for the admitted product-edge verifier. Executable
@@ -3017,13 +3056,110 @@ pub struct ConsumerVerificationInputs {
     pub requirement: ryeos_state::external_execution::admission::ExternalCandidateRequirement,
 }
 
+/// The inputs callback answers in the lane the signed policy selects. A probe
+/// answer is the exact daemon-authored probe record the guest verifier is
+/// delivered; it carries no Worker requirement.
+#[derive(Serialize)]
+#[serde(untagged)]
+pub enum ConsumerVerificationInputsResponse {
+    Worker(Box<ConsumerVerificationInputs>),
+    Probe(
+        Box<ryeos_state::external_content::qualification_consumer_record::RemoteProbeInputRecord>,
+    ),
+}
+
+/// Refuse a Worker-lane read of a probe use. The Worker requirement is
+/// reproduced from retained Worker bytes that a probe purpose does not have.
+fn require_worker_use(
+    remote_use: &ryeos_state::external_content::qualification_purpose::QualificationRemoteUse<'_>,
+) -> anyhow::Result<()> {
+    use ryeos_state::external_content::qualification_purpose::QualificationRemoteUse;
+    match remote_use {
+        QualificationRemoteUse::Worker { .. } => Ok(()),
+        QualificationRemoteUse::Probe { .. } => {
+            bail!("Worker consumer inputs refuse a remote probe purpose")
+        }
+    }
+}
+
+/// Refuse a probe-lane read of a Worker use, and return the signed probe
+/// input a probe use is bound to.
+fn require_probe_use<'a>(
+    remote_use: ryeos_state::external_content::qualification_purpose::QualificationRemoteUse<'a>,
+) -> anyhow::Result<&'a serde_json::Value> {
+    use ryeos_state::external_content::qualification_purpose::QualificationRemoteUse;
+    match remote_use {
+        QualificationRemoteUse::Probe { input } => Ok(input),
+        QualificationRemoteUse::Worker { .. } => {
+            bail!("remote probe inputs refuse a Worker consumer purpose")
+        }
+    }
+}
+
+/// Build the probe record from the admitted purpose and the daemon-retained
+/// owner measurement. The prerequisite is never read from the verifier.
+fn probe_input_record(
+    purpose: &ryeos_state::external_content::qualification_purpose::QualificationLaunchPurpose,
+    coordinate: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate,
+    selection: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerifierSelection,
+    prerequisite: &ryeos_external_execution_contract::restored_runtime_measurement::RestoredOwnerMeasurement,
+) -> anyhow::Result<
+    ryeos_state::external_content::qualification_consumer_record::RemoteProbeInputRecord,
+> {
+    use ryeos_state::external_content::qualification_consumer_record::{
+        REMOTE_PROBE_INPUT_RECORD_SCHEMA, RemoteProbeInputRecord,
+    };
+    let input = require_probe_use(purpose.remote_use(&coordinate.scenario_id)?)?;
+    let record = RemoteProbeInputRecord {
+        schema: REMOTE_PROBE_INPUT_RECORD_SCHEMA.into(),
+        purpose: purpose.clone(),
+        coordinate: coordinate.clone(),
+        selection: selection.clone(),
+        prerequisite: prerequisite.clone(),
+        scenario_input: input.clone(),
+    };
+    record.validate()?;
+    Ok(record)
+}
+
+/// The exact probe record the daemon would deliver for a retained root, used by
+/// the start callback to compare against what the verifier submitted.
+pub fn derive_probe_input_for_callback(
+    state: &AppState,
+    prepared: &PreparedRetainedConsumerVerifier,
+) -> anyhow::Result<
+    ryeos_state::external_content::qualification_consumer_record::RemoteProbeInputRecord,
+> {
+    let coordinate = prepared.coordinate();
+    let prerequisite = state
+        .state_store
+        .restored_verifier_attempt(&coordinate.prerequisite_measurement_attempt_id)?
+        .context("probe prerequisite measurement attempt is absent")?;
+    let measurement = prerequisite
+        .observation
+        .as_ref()
+        .context("probe prerequisite measurement observation is absent")?
+        .owner_measurement()?;
+    if measurement.digest()? != coordinate.prerequisite_measurement_observation_digest
+        || measurement.contact_deadline_exceeded
+    {
+        bail!("probe prerequisite differs from the coordinate's timely owner measurement");
+    }
+    probe_input_record(
+        prepared.purpose(),
+        coordinate,
+        prepared.selection(),
+        &measurement.measurement,
+    )
+}
+
 pub fn consumer_verification_inputs_for_callback(
     state: &AppState,
     token: &str,
     thread_id: &str,
     requested: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerVerificationScenarioSelection,
     limits: ryeos_state::object_closure::ObjectClosureLimits,
-) -> anyhow::Result<ConsumerVerificationInputs> {
+) -> anyhow::Result<ConsumerVerificationInputsResponse> {
     use crate::runtime_db::restored_verifier_attempt::RestoredVerifierAttemptPhase;
     use ryeos_external_execution_contract::restored_runtime_measurement::{
         ConsumerRuntimeVerificationCoordinate, RemoteVerificationPurpose,
@@ -3052,11 +3188,7 @@ pub fn consumer_verification_inputs_for_callback(
         .remote_verifier_sources
         .get(&requested.scenario_id)
         .context("consumer inputs select no admitted signed scenario")?;
-    let qualified_use = purpose
-        .consumer_content
-        .as_ref()
-        .and_then(|content| content.qualification_use.as_ref())
-        .context("consumer inputs have no admitted use")?;
+    let use_digest = purpose.remote_use(&requested.scenario_id)?.use_digest()?;
     let prerequisite = state
         .state_store
         .restored_verifier_attempt(&requested.prerequisite_measurement_attempt_id)?
@@ -3091,7 +3223,7 @@ pub fn consumer_verification_inputs_for_callback(
         scenario_id: requested.scenario_id.clone(),
         scenario_source_digest: source.scenario_source_digest.clone(),
         subject_digest: canonical_value_digest(&serde_json::to_value(&purpose.subject)?)?,
-        use_digest: canonical_value_digest(&serde_json::to_value(qualified_use)?)?,
+        use_digest,
         prerequisite_measurement_attempt_id: prerequisite.intent.operation_id.clone(),
         prerequisite_measurement_observation_digest: measurement.digest()?,
     };
@@ -3108,12 +3240,31 @@ pub fn consumer_verification_inputs_for_callback(
         &coordinate,
         &requested.qualification_operation_id,
     )?;
-    let requirement = retained_consumer_requirement(&authority, &guard, admitted.purpose())?;
-    let inputs = ConsumerVerificationInputs {
-        purpose: admitted.purpose().clone(),
-        coordinate: admitted.coordinate().clone(),
-        selection: admitted.selection().clone(),
-        requirement,
+    let inputs = match purpose.remote_use(&requested.scenario_id)? {
+        ryeos_state::external_content::qualification_purpose::QualificationRemoteUse::Worker {
+            ..
+        } => {
+            let requirement = retained_consumer_requirement(
+                &authority,
+                &guard,
+                admitted.purpose(),
+                &requested.scenario_id,
+            )?;
+            ConsumerVerificationInputsResponse::Worker(Box::new(ConsumerVerificationInputs {
+                purpose: admitted.purpose().clone(),
+                coordinate: admitted.coordinate().clone(),
+                selection: admitted.selection().clone(),
+                requirement,
+            }))
+        }
+        ryeos_state::external_content::qualification_purpose::QualificationRemoteUse::Probe {
+            ..
+        } => ConsumerVerificationInputsResponse::Probe(Box::new(probe_input_record(
+            admitted.purpose(),
+            admitted.coordinate(),
+            admitted.selection(),
+            &measurement.measurement,
+        )?)),
     };
     // Transport ceiling, not the product-edge record's semantic allowance.
     if ryeos_external_execution_contract::canonical_json(&inputs)?.len() > 128 * 1024 {
@@ -3126,12 +3277,68 @@ pub fn consumer_verification_inputs_for_callback(
         .disclose_to_current_consumer_callback(&admitted, inputs)
 }
 
+/// Capture the signed archive members from the installed Bundle and require
+/// each to be exactly the bytes the retained source recorded. Members are not
+/// retained in CAS: delivery needs the installed Bundle to still match.
+fn capture_probe_archive_members(
+    state: &AppState,
+    source: &ryeos_state::external_content::products::qualification::remote_verifier_source::QualificationRemoteVerifierSource,
+) -> anyhow::Result<
+    BTreeMap<
+        String,
+        ryeos_external_execution::restoration_verifier_delivery::ConsumerArchiveMember,
+    >,
+> {
+    let selection = &source.selection;
+    let bundle_name = selection
+        .binary_ref
+        .strip_prefix("bin:")
+        .and_then(|path| path.split_once('/'))
+        .map(|(bundle, _)| bundle)
+        .context("retained probe verifier has no Bundle selection")?;
+    let bundle_root = state
+        .engine
+        .registered_bundle_root(bundle_name)
+        .context("retained probe verifier Bundle has no admitted root")?;
+    let mut members = BTreeMap::new();
+    for name in selection.archive_members.keys() {
+        let member_ref = selection.archive_member_payload_ref(name)?;
+        let captured = ryeos_engine::binary_resolver::capture_bundle_payload_for_target(
+            &member_ref, &selection.guest_target_triple, bundle_root,
+            &state.engine.node_trust_store,
+            ryeos_external_execution_contract::restored_runtime_measurement::MAX_RESTORATION_VERIFIER_BYTES,
+        )?;
+        let retained = source
+            .archive_member_digests
+            .get(name)
+            .context("retained probe verifier has no digest for an archive member")?;
+        if &captured.identity.content_hash != retained
+            || captured.identity.signer_fingerprint != source.executor.signer_fingerprint
+            || captured.identity.target_triple != selection.guest_target_triple
+            || captured.source_proof.selected_item_ref != member_ref
+            || captured.bytes == 0
+        {
+            bail!("installed archive member differs from the retained signed source");
+        }
+        members.insert(
+            name.clone(),
+            ryeos_external_execution::restoration_verifier_delivery::ConsumerArchiveMember {
+                bytes: captured.bytes,
+                sha256: captured.identity.content_hash.clone(),
+                descriptor: captured.authority().clone(),
+            },
+        );
+    }
+    Ok(members)
+}
+
 fn restore_admitted_consumer_verifier(
+    state: &AppState,
     authority: &ryeos_state::PinnedStateAuthority,
     guard: &ryeos_state::CasMutationGuard,
     admitted: AuthenticatedConsumerRoot,
 ) -> anyhow::Result<PreparedRetainedConsumerVerifier> {
-    let requirement = retained_consumer_requirement(authority, guard, admitted.purpose())?;
+    use ryeos_state::external_content::qualification_purpose::QualificationRemoteUse;
     let coordinate = admitted.coordinate();
     let view = admitted.purpose().execution_view()?;
     let source = view
@@ -3152,11 +3359,24 @@ fn restore_admitted_consumer_verifier(
     // No local execution capability or mutable path is introduced.
     let payload =
         lillux::sealed_memfd(c"retained-consumer-verifier", &bytes).map_err(anyhow::Error::msg)?;
+    let lane = match admitted.purpose().remote_use(&coordinate.scenario_id)? {
+        QualificationRemoteUse::Worker { .. } => PreparedConsumerLane::Worker {
+            requirement: Box::new(retained_consumer_requirement(
+                authority,
+                guard,
+                admitted.purpose(),
+                &coordinate.scenario_id,
+            )?),
+        },
+        QualificationRemoteUse::Probe { .. } => PreparedConsumerLane::Probe {
+            archive_members: capture_probe_archive_members(state, source)?,
+        },
+    };
     Ok(PreparedRetainedConsumerVerifier {
         purpose: admitted.purpose().clone(),
         coordinate: admitted.coordinate().clone(),
         selection: admitted.selection().clone(),
-        requirement,
+        lane,
         payload,
     })
 }
@@ -3168,7 +3388,9 @@ fn retained_consumer_requirement(
     authority: &ryeos_state::PinnedStateAuthority,
     guard: &ryeos_state::CasMutationGuard,
     purpose: &ryeos_state::external_content::qualification_purpose::QualificationLaunchPurpose,
+    scenario_id: &str,
 ) -> anyhow::Result<ryeos_state::external_execution::admission::ExternalCandidateRequirement> {
+    require_worker_use(&purpose.remote_use(scenario_id)?)?;
     let content = purpose
         .consumer_content
         .as_ref()
@@ -3235,8 +3457,12 @@ fn retained_consumer_requirement(
 pub struct PreparedRemoteConsumerVerifier {
     source_resolutions: BTreeMap<String, ryeos_engine::resolution::RetainedResolutionOutput>,
     pub scenario_source_digest: String,
-    pub producer_source: ProductProducerRecipeSourceIdentity,
+    /// Absent for a Worker-less probe scenario, which re-runs no producer.
+    pub producer_source: Option<ProductProducerRecipeSourceIdentity>,
     pub payload: ryeos_engine::binary_resolver::CapturedBundlePayload,
+    /// Extra executables the signed selection ships beside the verifier,
+    /// captured from the same signed Bundle in the same checked generation.
+    pub archive_members: BTreeMap<String, ryeos_engine::binary_resolver::CapturedBundlePayload>,
     /// Verified envelopes captured with the payload, never reopened from
     /// diagnostic source paths during later publication or recovery.
     pub signed_sources: Vec<ryeos_engine::engine::CapturedSignedBundleItemSource>,
@@ -3273,7 +3499,11 @@ impl PreparedRemoteConsumerVerifier {
     ) -> anyhow::Result<ryeos_state::external_content::products::qualification::remote_verifier_source::QualificationRemoteVerifierSource>{
         state.engine.with_checked_bundle_generation(|generation| {
             let source = self.retained_identity(policy, scenario_id)?;
-            let admitted_sources = BTreeMap::from([(scenario_id.to_owned(), self.producer_source.clone())]);
+            let admitted_sources: BTreeMap<_, _> = self
+                .producer_source
+                .iter()
+                .map(|source| (scenario_id.to_owned(), source.clone()))
+                .collect();
             let current = prepare_remote_consumer_verifier_from_admitted_sources_in_generation(
                 state, generation, policy, &admitted_sources, subject_manifest_hash, scenario_id,
             )?;
@@ -3298,7 +3528,10 @@ impl PreparedRemoteConsumerVerifier {
             }
             let manifest_bytes = lillux::canonical_json(&proof.manifest_object)?;
             let policy_resolution = self.resolution_bytes(&policy.canonical_ref)?;
-            let recipe_resolution = self.resolution_bytes(&self.producer_source.canonical_ref)?;
+            let recipe_resolution = match &self.producer_source {
+                Some(source) => self.resolution_bytes(&source.canonical_ref)?,
+                None => policy_resolution.clone(),
+            };
             let mut blobs: Vec<(&[u8], String)> = self.signed_sources.iter()
                 .map(|item| (item.signed_bytes.as_slice(), lillux::sha256_hex(&item.signed_bytes)))
                 .chain(self.signed_bundle_manifests.iter()
@@ -3340,11 +3573,14 @@ impl PreparedRemoteConsumerVerifier {
             RetainedBundleExecutorSource, RetainedBundleSignerKey, RetainedSignatureEnvelope,
             RetainedSignedBundleItem, RetainedSignedBundleManifest,
         };
-        let selection = policy
+        let scenario = policy
             .policy
             .producer_scenarios
             .get(scenario_id)
-            .and_then(|scenario| scenario.remote_verifier.as_ref())
+            .context("captured remote verifier has no signed scenario")?;
+        let selection = scenario
+            .remote_verifier
+            .as_ref()
             .context("captured remote verifier has no signed scenario selection")?;
         let bundle_name = selection
             .binary_ref
@@ -3404,10 +3640,34 @@ impl PreparedRemoteConsumerVerifier {
             })
             .collect();
         signed_bundle_manifests.sort_by(|left, right| left.bundle_name.cmp(&right.bundle_name));
+        let policy_resolution_blob_hash =
+            lillux::sha256_hex(self.resolution_bytes(&policy.canonical_ref)?.as_bytes());
+        // A probe scenario names no recipe; its slot repeats the policy
+        // resolution so the retained address set stays closed and non-null.
+        let recipe_resolution_blob_hash = match &self.producer_source {
+            Some(source) => {
+                lillux::sha256_hex(self.resolution_bytes(&source.canonical_ref)?.as_bytes())
+            }
+            None => policy_resolution_blob_hash.clone(),
+        };
+        let mut archive_member_digests = BTreeMap::new();
+        for (name, member) in &self.archive_members {
+            if member.identity.signer_fingerprint != self.payload.identity.signer_fingerprint
+                || member.identity.target_triple != self.payload.identity.target_triple
+                || member.source_proof.selected_item_ref
+                    != selection.archive_member_payload_ref(name)?
+                || member.bytes == 0
+            {
+                bail!("captured archive member differs from its signed selection");
+            }
+            archive_member_digests.insert(name.clone(), member.identity.content_hash.clone());
+        }
         let source = ryeos_state::external_content::products::qualification::remote_verifier_source::QualificationRemoteVerifierSource {
-            policy_resolution_blob_hash: lillux::sha256_hex(self.resolution_bytes(&policy.canonical_ref)?.as_bytes()),
-            recipe_resolution_blob_hash: lillux::sha256_hex(self.resolution_bytes(&self.producer_source.canonical_ref)?.as_bytes()),
+            policy_resolution_blob_hash,
+            recipe_resolution_blob_hash,
             scenario_source_digest: self.scenario_source_digest.clone(), producer_source: self.producer_source.clone(),
+            remote_probe_input: scenario.remote_probe_input.clone(),
+            archive_member_digests,
             selection: selection.clone(), payload_bytes: self.payload.bytes, payload_mode,
             signed_items, signed_bundle_manifests,
             signer_keys: self.historical_verifying_keys.iter().map(|(fingerprint, key)| RetainedBundleSignerKey {
@@ -3452,12 +3712,21 @@ pub fn prepare_remote_consumer_verifier_for_purpose(
     protected_selection: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerifierSelection,
 ) -> anyhow::Result<PreparedRemoteConsumerVerifier> {
     state.engine.with_checked_bundle_generation(|generation| {
-        resolve_current_bundle_producer_recipe_for_purpose_in_generation(
-            state,
-            generation,
-            purpose,
-            scenario_id,
-        )?;
+        // A probe scenario pins no producer, so there is no recipe to recheck.
+        if purpose
+            .policy_source()
+            .policy
+            .producer_scenarios
+            .get(scenario_id)
+            .is_some_and(|scenario| scenario.recipe_ref.is_some())
+        {
+            resolve_current_bundle_producer_recipe_for_purpose_in_generation(
+                state,
+                generation,
+                purpose,
+                scenario_id,
+            )?;
+        }
         let prepared = prepare_remote_consumer_verifier_from_admitted_sources_in_generation(
             state,
             generation,
@@ -3521,13 +3790,30 @@ fn prepare_remote_consumer_verifier_from_admitted_sources_in_generation(
         .producer_scenarios
         .get(scenario_id)
         .context("remote consumer verifier scenario was not admitted")?;
-    let current = resolve_bundle_producer_recipe_in_generation(generation, &scenario.recipe_ref)?;
-    require_direct_consumer_target(policy_source, &current, subject_manifest_hash)?;
-    let producer_source = current.source_identity()?;
-    if producer_sources.get(scenario_id) != Some(&producer_source) {
-        bail!("remote verifier producer source changed before capture");
-    }
-    let scenario_source_digest = scenario.remote_verifier_source_digest(&producer_source)?;
+    let producer_source = match scenario.recipe_ref.as_deref() {
+        Some(recipe_ref) => {
+            let current = resolve_bundle_producer_recipe_in_generation(generation, recipe_ref)?;
+            require_direct_consumer_target(policy_source, &current, subject_manifest_hash)?;
+            let producer_source = current.source_identity()?;
+            if producer_sources.get(scenario_id) != Some(&producer_source) {
+                bail!("remote verifier producer source changed before capture");
+            }
+            Some(producer_source)
+        }
+        None => {
+            if producer_sources.contains_key(scenario_id) {
+                bail!("remote probe scenario cannot pin a producer source");
+            }
+            None
+        }
+    };
+    let scenario_source_digest =
+        scenario.remote_verifier_source_digest(producer_source.as_ref())?;
+    // A probe's executor is published by the signed policy's own publisher.
+    let expected_publisher = producer_source
+        .as_ref()
+        .map(|source| source.publisher_fingerprint.as_str())
+        .unwrap_or(policy_source.publisher_fingerprint.as_str());
     let selection = scenario
         .remote_verifier
         .as_ref()
@@ -3548,33 +3834,50 @@ fn prepare_remote_consumer_verifier_from_admitted_sources_in_generation(
         &state.engine.node_trust_store,
         ryeos_external_execution_contract::restored_runtime_measurement::MAX_RESTORATION_VERIFIER_BYTES,
     )?;
-    if payload.identity.signer_fingerprint != producer_source.publisher_fingerprint
+    if payload.identity.signer_fingerprint != expected_publisher
         || payload.identity.target_triple != selection.guest_target_triple
         || payload.source_proof.selected_item_ref != payload_ref
         || payload.bytes == 0
     {
         bail!("remote verifier payload differs from signed source selection");
     }
+    let mut archive_members = BTreeMap::new();
+    for name in selection.archive_members.keys() {
+        let member_ref = selection.archive_member_payload_ref(name)?;
+        let member = ryeos_engine::binary_resolver::capture_bundle_payload_for_target(
+            &member_ref, &selection.guest_target_triple, bundle_root,
+            &state.engine.node_trust_store,
+            ryeos_external_execution_contract::restored_runtime_measurement::MAX_RESTORATION_VERIFIER_BYTES,
+        )?;
+        if member.identity.signer_fingerprint != payload.identity.signer_fingerprint
+            || member.identity.target_triple != selection.guest_target_triple
+            || member.source_proof.selected_item_ref != member_ref
+            || member.bytes == 0
+        {
+            bail!("remote verifier archive member differs from signed source selection");
+        }
+        archive_members.insert(name.clone(), member);
+    }
     let mut signed_sources = BTreeMap::new();
     let mut source_resolutions = BTreeMap::new();
-    for reference in [&policy_source.canonical_ref, &producer_source.canonical_ref] {
+    let mut definitions = vec![(
+        &policy_source.canonical_ref,
+        &policy_source.raw_content_digest,
+        &policy_source.effective_definition_digest,
+        &policy_source.publisher_fingerprint,
+    )];
+    if let Some(source) = &producer_source {
+        definitions.push((
+            &source.canonical_ref,
+            &source.raw_content_digest,
+            &source.effective_definition_digest,
+            &source.publisher_fingerprint,
+        ));
+    }
+    for (reference, raw, effective, publisher) in definitions {
         let resolution =
             resolve_consumer_definition_in_generation(generation, reference, "config")?;
         let identity = consumer_definition_identity(&resolution)?;
-        let (raw, effective, publisher) = if reference == &producer_source.canonical_ref {
-            (
-                &producer_source.raw_content_digest,
-                &producer_source.effective_definition_digest,
-                &producer_source.publisher_fingerprint,
-            )
-        } else {
-            let policy = policy_source;
-            (
-                &policy.raw_content_digest,
-                &policy.effective_definition_digest,
-                &policy.publisher_fingerprint,
-            )
-        };
         if identity.raw_content_digest != *raw
             || identity.effective_definition_digest != *effective
             || identity.publisher_fingerprint != *publisher
@@ -3651,6 +3954,7 @@ fn prepare_remote_consumer_verifier_from_admitted_sources_in_generation(
         scenario_source_digest,
         producer_source,
         payload,
+        archive_members,
         signed_sources,
         signed_bundle_manifests,
         historical_verifying_keys,
@@ -3698,8 +4002,11 @@ pub fn resolve_current_bundle_producer_recipes_for_policy(
         }
         let mut sources = BTreeMap::new();
         for (scenario_id, scenario) in &current.policy.producer_scenarios {
-            let recipe =
-                resolve_bundle_producer_recipe_in_generation(generation, &scenario.recipe_ref)?;
+            // A probe scenario re-runs no producer, so it pins no recipe.
+            let Some(recipe_ref) = scenario.recipe_ref.as_deref() else {
+                continue;
+            };
+            let recipe = resolve_bundle_producer_recipe_in_generation(generation, recipe_ref)?;
             require_direct_consumer_target(&current, &recipe, subject_manifest_hash)?;
             state
                 .node_policy
@@ -5526,5 +5833,54 @@ mod tests {
             match_retained_verifier_root_selections(&mismatched, Some(retained), "subject")
                 .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod probe_lane_tests {
+    use super::*;
+    use ryeos_state::external_content::qualification_purpose::QualificationRemoteUse;
+    use ryeos_state::external_execution::admission::ExternalCandidateQualificationUse;
+
+    fn worker_use() -> ExternalCandidateQualificationUse {
+        ExternalCandidateQualificationUse {
+            schema: "fixture".into(),
+            requirement_digest: "a".repeat(64),
+            profile_hash: "b".repeat(64),
+            source_binding_hash: "c".repeat(64),
+            source_content_manifest_hash: "d".repeat(64),
+            provider_executable_manifest_hash: "e".repeat(64),
+            execution_environment_digest: "f".repeat(64),
+        }
+    }
+
+    #[test]
+    fn probe_inputs_refuse_a_worker_use_and_worker_inputs_refuse_a_probe_use() {
+        let qualified = worker_use();
+        let input = serde_json::json!({"probe": "a"});
+        let worker = QualificationRemoteUse::Worker {
+            qualified_use: &qualified,
+        };
+        let probe = QualificationRemoteUse::Probe { input: &input };
+        require_worker_use(&worker).unwrap();
+        assert!(require_worker_use(&probe).is_err());
+        assert_eq!(require_probe_use(probe).unwrap(), &input);
+        assert!(require_probe_use(worker).is_err());
+    }
+
+    #[test]
+    fn the_two_lanes_bind_different_use_digests() {
+        let qualified = worker_use();
+        let input = serde_json::json!({"probe": "a"});
+        let worker = QualificationRemoteUse::Worker {
+            qualified_use: &qualified,
+        }
+        .use_digest()
+        .unwrap();
+        let probe = QualificationRemoteUse::Probe { input: &input }
+            .use_digest()
+            .unwrap();
+        assert_ne!(worker, probe);
+        assert_eq!(probe, canonical_value_digest(&input).unwrap());
     }
 }

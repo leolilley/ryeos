@@ -376,22 +376,37 @@ fn authenticate_consumer_root_for_owner(
     }
     purpose.require_consumer_invocation(qualification_operation_id, coordinate)?;
     purpose.validate_remote_consumer_coordinate(coordinate, selection)?;
-    let content = purpose
-        .consumer_content
-        .as_ref()
-        .context("consumer verification has no accepted consumer content")?;
-    super::require_retained_consumer_content_closure(authority, guard, limits, content)?;
-    let manifest = ryeos_state::object_closure::load_exact_cas_object_with_cas(
-        &cas,
-        &content.runtime_realization.manifest_hash,
-        limits
-            .max_object_bytes
-            .min(ryeos_state::objects::MAX_LARGE_CONTENT_MANIFEST_BYTES as u64),
-    )?;
-    if exact_runtime_member_hash(&manifest, &content.runtime_member.relative_path)?
-        != content.runtime_member.executable_sha256
-    {
-        bail!("consumer verification runtime member differs from accepted exact bytes");
+    match purpose.remote_use(&coordinate.scenario_id)? {
+        ryeos_state::external_content::qualification_purpose::QualificationRemoteUse::Worker {
+            ..
+        } => {
+            let content = purpose
+                .consumer_content
+                .as_ref()
+                .context("consumer verification has no accepted consumer content")?;
+            super::require_retained_consumer_content_closure(authority, guard, limits, content)?;
+            let manifest = ryeos_state::object_closure::load_exact_cas_object_with_cas(
+                &cas,
+                &content.runtime_realization.manifest_hash,
+                limits
+                    .max_object_bytes
+                    .min(ryeos_state::objects::MAX_LARGE_CONTENT_MANIFEST_BYTES as u64),
+            )?;
+            if exact_runtime_member_hash(&manifest, &content.runtime_member.relative_path)?
+                != content.runtime_member.executable_sha256
+            {
+                bail!("consumer verification runtime member differs from accepted exact bytes");
+            }
+        }
+        ryeos_state::external_content::qualification_purpose::QualificationRemoteUse::Probe {
+            ..
+        } => {
+            // A probe has no Worker, runtime realization or retained
+            // consumer content; its subject is the restored product itself.
+            if purpose.consumer_content.is_some() || purpose.consumer_definitions.is_some() {
+                bail!("remote probe purpose carries consumer content");
+            }
+        }
     }
     authority.ensure_guard(guard)?;
     Ok(AuthenticatedConsumerRoot {
@@ -922,19 +937,18 @@ fn corroborate_remote_consumer_references(
     if lillux::sha256_hex(&input_bytes) != consumer_input_blob_hash {
         bail!("remote proof retained input bytes differ from their journal hash");
     }
-    let input =
-        ryeos_state::external_content::qualification_consumer_record::ConsumerInputRecord::parse(
-            &input_bytes,
-        )?;
+    let retained_input =
+        crate::qualification_consumer_input::RetainedConsumerInput::parse(&input_bytes)?;
+    let input = retained_input.input_ref();
     input.validate_attempt(&attempt.intent)?;
     input
-        .purpose
+        .purpose()
         .require_consumer_invocation(&attempt.intent.qualification_operation_id, coordinate)?;
     if !input
-        .purpose
+        .purpose()
         .execution_view()?
         .has_same_enclosing_purpose(purpose)
-        || input.selection != selection
+        || *input.selection() != selection
     {
         bail!("remote proof input differs from the exact accepted purpose or selection");
     }
@@ -989,19 +1003,97 @@ fn corroborate_remote_consumer_references(
             .context("remote proof evidence blob is absent")
     })?;
     let evidence = observation.verify_evidence_bytes(&bytes)?;
-    corroborate_qualification_worker_transcript(
-        state,
-        authority,
-        &input,
-        &attempt.intent.qualification_operation_id,
-        projected_result,
-    )?;
+    match input {
+        crate::qualification_consumer_input::ConsumerInputRef::Worker(record) => {
+            corroborate_qualification_worker_transcript(
+                state,
+                authority,
+                record,
+                &attempt.intent.qualification_operation_id,
+                projected_result,
+            )?;
+        }
+        crate::qualification_consumer_input::ConsumerInputRef::Probe(record) => {
+            corroborate_remote_probe(state, record, &evidence, projected_result)?;
+        }
+    }
     Ok((ryeos_state::external_content::products::qualification::ProductQualificationRemoteConsumerProof {
         launch_owner_digest: canonical_value_digest(&serde_json::to_value(&settlement.launch_owner)?)?,
         consumer_input_blob_hash,
         intent: attempt.intent, selection, observation,
         termination_intent: termination.intent, terminal_observation,
     }, evidence))
+}
+
+/// Mechanical agreement the daemon can prove for a Worker-less probe: the
+/// retained input is the signed scenario's own, its prerequisite is still the
+/// retained owner measurement, the result names the same subject, and the
+/// guest's reported archive-member digests are the retained ones. The probe's
+/// language stays with the signed verifier.
+fn corroborate_remote_probe(
+    state: &AppState,
+    input: &ryeos_state::external_content::qualification_consumer_record::RemoteProbeInputRecord,
+    evidence: &Value,
+    projected_result: &Value,
+) -> anyhow::Result<()> {
+    use ryeos_state::external_content::products::qualification::ProductQualificationResult;
+    input.validate()?;
+    let result = ProductQualificationResult::from_value(projected_result)?;
+    if result.subject_manifest_hash != input.purpose.subject_manifest_hash {
+        bail!("probe result changed the authenticated input subject");
+    }
+    let scenario = input
+        .purpose
+        .policy_source
+        .policy
+        .producer_scenarios
+        .get(&input.coordinate.scenario_id)
+        .context("probe proof has no signed scenario")?;
+    if !input.matches_scenario(scenario) {
+        bail!("probe proof input differs from the signed scenario");
+    }
+    let prerequisite = state
+        .state_store
+        .restored_verifier_attempt(&input.coordinate.prerequisite_measurement_attempt_id)?
+        .context("probe prerequisite measurement attempt is absent")?;
+    let measurement = prerequisite
+        .observation
+        .as_ref()
+        .context("probe prerequisite measurement observation is absent")?
+        .owner_measurement()?;
+    if measurement.contact_deadline_exceeded
+        || measurement.digest()? != input.coordinate.prerequisite_measurement_observation_digest
+        || measurement.measurement != input.prerequisite
+    {
+        bail!("probe prerequisite differs from the retained owner measurement");
+    }
+    let source = input
+        .purpose
+        .remote_verifier_sources
+        .get(&input.coordinate.scenario_id)
+        .context("probe proof has no retained verifier source")?;
+    require_evidence_member_digests(evidence, &source.archive_member_digests)
+}
+
+/// The guest reports, under the delivery's closed field, the sha256 of each
+/// extra executable it was handed. They must equal the digests the retained
+/// signed source recorded: the claim then names the exact member bytes.
+fn require_evidence_member_digests(
+    evidence: &Value,
+    retained: &std::collections::BTreeMap<String, String>,
+) -> anyhow::Result<()> {
+    let reported: std::collections::BTreeMap<String, String> =
+        match evidence.get(
+            ryeos_external_execution::restoration_verifier_delivery::CONSUMER_EVIDENCE_ARCHIVE_MEMBERS_FIELD,
+        ) {
+            None => std::collections::BTreeMap::new(),
+            Some(value) => serde_json::from_value(value.clone())
+                .context("probe evidence archive member digests are malformed")?,
+        };
+    if reported.values().any(|digest| !lillux::valid_hash(digest)) || &reported != retained {
+        bail!("probe evidence archive member digests differ from the retained signed source");
+    }
+    Ok(())
 }
 
 /// Join the independent verifier's Q reference to the daemon-owned completed
@@ -1276,12 +1368,26 @@ fn verify_retained_remote_consumer(
     if &reconstructed != remote {
         bail!("remote retained proof differs from full historical corroboration");
     }
-    if evidence
-        .qualification_worker_transcript_manifest_hash
-        .as_deref()
-        != Some(evidence.result.q_transcript_manifest_hash()?)
+    // Only a Worker consumer ran a Q conversation, so only it owns a
+    // transcript manifest; a probe's evidence must carry none.
+    if purpose
+        .policy_source()
+        .policy
+        .consumer_execution_context
+        .is_some()
     {
-        bail!("remote retained proof changed its qualification Worker transcript");
+        if evidence
+            .qualification_worker_transcript_manifest_hash
+            .as_deref()
+            != Some(evidence.result.q_transcript_manifest_hash()?)
+        {
+            bail!("remote retained proof changed its qualification Worker transcript");
+        }
+    } else if evidence
+        .qualification_worker_transcript_manifest_hash
+        .is_some()
+    {
+        bail!("remote probe proof carries a qualification Worker transcript");
     }
     Ok(())
 }
@@ -1595,8 +1701,12 @@ pub(in crate::operator_external_content) fn verify_current(
             .producer_scenarios
             .get(&scoped.scenario_id)
             .context("current scoped qualification scenario disappeared")?;
+        let scenario_recipe_ref = scenario
+            .recipe_ref
+            .as_deref()
+            .context("current scoped qualification scenario has no producer recipe")?;
         let current_recipe = state.engine.with_checked_bundle_generation(|generation| {
-            super::resolve_bundle_producer_recipe_in_generation(generation, &scenario.recipe_ref)
+            super::resolve_bundle_producer_recipe_in_generation(generation, scenario_recipe_ref)
         })?;
         if current_recipe.source_identity()? != scoped.producer_source {
             bail!("current scoped qualification recipe source changed");

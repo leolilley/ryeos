@@ -734,7 +734,7 @@ pub(crate) fn qualification_scoped_attempt_proof(
         .get(&candidate.scenario_id)
         .context("projected scoped attempt has no pinned recipe source")?;
     ensure!(
-        scenario.recipe_ref == source.canonical_ref,
+        scenario.recipe_ref.as_deref() == Some(source.canonical_ref.as_str()),
         "projected scoped scenario recipe differs from pinned source"
     );
     let current = crate::operator_external_content::product_qualification::resolve_current_bundle_producer_recipe_for_purpose(
