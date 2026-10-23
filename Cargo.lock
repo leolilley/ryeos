@@ -3414,6 +3414,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryeos-guest-wire-verifier"
+version = "0.5.102"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "hex",
+ "lillux",
+ "rustls",
+ "ryeos-external-candidate-supervisor",
+ "ryeos-external-execution",
+ "ryeos-external-execution-contract",
+ "ryeos-project-capture",
+ "ryeos-runtime",
+ "ryeos-state",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "ryeos-handler-bins"
 version = "0.1.0"
 dependencies = [

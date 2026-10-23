@@ -1,0 +1,43 @@
+[package]
+name = "ryeos-guest-wire-verifier"
+version = "0.5.102"
+edition = "2024"
+description = "Restored-guest qualification of the guest owner wire: origin controller role and in-guest probe role"
+license.workspace = true
+repository = "https://github.com/leolilley/ryeos"
+
+[lib]
+name = "ryeos_guest_wire_verifier"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ryeos-guest-wire-verifier"
+path = "src/main.rs"
+
+[[test]]
+name = "native"
+path = "tests/native.rs"
+harness = false
+
+[dependencies]
+anyhow = { workspace = true }
+base64 = { workspace = true }
+hex = { workspace = true }
+lillux = { workspace = true }
+ryeos-external-execution = { workspace = true }
+ryeos-external-execution-contract = { workspace = true }
+ryeos-project-capture = { workspace = true }
+ryeos-runtime = { workspace = true }
+ryeos-state = { workspace = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["rt", "time"] }
+
+[dev-dependencies]
+ryeos-state = { workspace = true, features = ["test-support"] }
+ryeos-external-candidate-supervisor = { path = "../external-candidate-supervisor" }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true
