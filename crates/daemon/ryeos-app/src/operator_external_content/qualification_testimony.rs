@@ -331,10 +331,7 @@ pub fn accept_testimony_for_owner(
             require_received_product_join(&product, product_evidence)?;
             Some(source)
         }
-        QualificationLane::Content => {
-            verified.evidence.content()?;
-            None
-        }
+        QualificationLane::Content => None,
     };
     let accepted = admit(
         &policy,
@@ -357,6 +354,7 @@ pub fn accept_testimony_for_owner(
         origin_node_verifying_key: origin_node_key.to_bytes(),
         accepted_claims: accepted.claims.clone(),
         rederived: verified.lane().rederived(),
+        asserted: verified.lane().asserted(),
     };
     evidence.validate()?;
     let signer = crate::state_store::NodeIdentitySigner::from_identity(&state.identity);
@@ -1120,6 +1118,7 @@ mod tests {
             origin_node_verifying_key: origin_node.verifying_key().to_bytes(),
             accepted_claims: body.asserted_claims.clone(),
             rederived: QualificationLane::Product.rederived(),
+            asserted: QualificationLane::Product.asserted(),
         };
         Fixture {
             attester,

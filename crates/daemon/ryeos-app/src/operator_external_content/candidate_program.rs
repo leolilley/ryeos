@@ -60,7 +60,10 @@ pub struct CandidateProgramRequest {
     pub attestation_hash: String,
     pub runtime_manifest_hash: String,
     pub required_claims: Vec<String>,
-    #[serde(default)]
+    /// Required nullable: `null` selects the local qualification.
+    #[serde(
+        deserialize_with = "crate::node_config::sections::external_execution::deserialize_required_nullable"
+    )]
     pub remote_testimony: Option<CandidateRemoteTestimony>,
 }
 
@@ -158,6 +161,12 @@ fn admit_blocking(
             (published.evidence, owner_principal, None)
         }
         Some(remote) => {
+            // The emitter runs the source preparation under the caller's own
+            // context, so only the attesting operator may emit its testimony.
+            ensure!(
+                remote.owner_principal == owner_principal,
+                "the remote testimony names another operator"
+            );
             let attester = crate::operator_authority::admitted_operator_authority_for_principal(
                 state,
                 &remote.owner_principal,
@@ -492,6 +501,53 @@ mod tests {
             mutate(&mut bad);
             ensure!(bad.validate().is_err(), "a malformed request was admitted");
         }
+        Ok(())
+    }
+
+    #[test]
+    fn request_requires_the_remote_testimony_field_even_when_null() -> Result<()> {
+        let fixture = fixture()?;
+        let mut value = serde_json::json!({
+            "activation_ref": fixture.retained.activation_ref,
+            "coordinate_id": fixture.retained.coordinate_id,
+            "attestation_hash": fixture.retained.attestation_hash,
+            "runtime_manifest_hash": fixture.retained.runtime_manifest_hash,
+            "required_claims": ["alpha"],
+        });
+        ensure!(
+            serde_json::from_value::<CandidateProgramRequest>(value.clone()).is_err(),
+            "a request without remote_testimony was accepted"
+        );
+        value["remote_testimony"] = serde_json::Value::Null;
+        let parsed: CandidateProgramRequest = serde_json::from_value(value)?;
+        ensure!(
+            parsed.remote_testimony.is_none(),
+            "null did not select local"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn remote_branch_refuses_a_caller_that_is_not_the_attester() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let (_state_owner, state) = crate::state::test_support::build(root.path())?;
+        let fixture = fixture()?;
+        let context = HandlerContext::new(owner(), vec![], true);
+        let mut remote = request(&fixture, fixture.retained.evidence.result.claims.clone());
+        remote.remote_testimony = Some(CandidateRemoteTestimony {
+            acceptance_hash: "a".repeat(64),
+            acceptance_policy_ref: "config:policy/remote".into(),
+            owner_principal: format!("fp:{}", "8".repeat(64)),
+        });
+        let refusal = admit_blocking(&state, &context, &remote, owner())
+            .err()
+            .context("a caller other than the attester emitted the testimony")?;
+        ensure!(
+            refusal
+                .to_string()
+                .contains("the remote testimony names another operator"),
+            "unexpected refusal: {refusal}"
+        );
         Ok(())
     }
 

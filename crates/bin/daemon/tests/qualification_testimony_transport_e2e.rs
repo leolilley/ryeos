@@ -1344,7 +1344,9 @@ fn utc_after(seconds: i64) -> String {
 async fn content_testimony_is_accepted_only_when_the_policy_lists_the_content_lane() -> Result<()> {
     let mut pair = start_pair().await?;
     let origination = Origination::new_content(&pair, utc_after(-60))?;
-    let honest = origination.content_testimony(CONTENT_POLICY_REF, utc_after(-30))?;
+    // Issued inside the policy's clock skew (300 s): a testimony that leads
+    // this node's clock slightly is still accepted.
+    let honest = origination.content_testimony(CONTENT_POLICY_REF, utc_after(60))?;
     let honest_value = honest.to_value();
     let testimony_hash = canonical_value_digest(&honest_value)?;
 
@@ -1383,9 +1385,26 @@ async fn content_testimony_is_accepted_only_when_the_policy_lists_the_content_la
     let (status, text) = pair
         .accept(&origination.forged(swapped)?.to_value())
         .await?;
-    assert!(
-        !status.is_success(),
-        "a content attestation declared as the product lane was accepted: {text}"
+    assert_refused(
+        status,
+        &text,
+        "attestation is not product qualification testimony",
+        "a content attestation declared as the product lane",
+    );
+
+    // The same swap in the other direction: a product attestation declared as
+    // the content lane.
+    let mut swapped_up = product_origination.honest_body(CONTENT_POLICY_REF)?;
+    swapped_up["lane"] = json!("content");
+    swapped_up["activation_ref"] = json!(ACTIVATION_REF);
+    let (status, text) = pair
+        .accept(&product_origination.forged(swapped_up)?.to_value())
+        .await?;
+    assert_refused(
+        status,
+        &text,
+        "attestation is not activated-content qualification testimony",
+        "a product attestation declared as the content lane",
     );
 
     // A testimony issued beyond the policy's clock skew is refused.
@@ -1473,8 +1492,11 @@ async fn content_testimony_is_accepted_only_when_the_policy_lists_the_content_la
         )
         .await?;
     assert!(
-        !status.is_success(),
-        "export of an unheld content qualification succeeded: {body}"
+        !status.is_success()
+            && body
+                .to_string()
+                .contains("content qualification is not published at the exact coordinate"),
+        "export of an unheld content qualification did not name the absence: {status} {body}"
     );
 
     // The acceptance is HOSTED's published head in the shared testimony

@@ -38,7 +38,7 @@ pub const REMOTE_QUALIFICATION_TESTIMONY_BODY_SCHEMA: &str =
 pub const REMOTE_QUALIFICATION_ACCEPTANCE_CLAIM: &str = "qualification_testimony_accepted";
 pub const REMOTE_QUALIFICATION_ACCEPTANCE_POLICY: &str = "ryeos.remote_qualification_acceptance.v1";
 pub const REMOTE_QUALIFICATION_ACCEPTANCE_EVIDENCE_SCHEMA: &str =
-    "ryeos.remote_qualification_acceptance_evidence.v2";
+    "ryeos.remote_qualification_acceptance_evidence.v3";
 pub const REMOTE_QUALIFICATION_ACCEPTANCE_POLICY_SCHEMA: &str =
     "ryeos.remote_qualification_acceptance_policy.v2";
 pub const REMOTE_QUALIFICATION_TESTIMONY_HEAD_NAMESPACE: &str = "remote-qualification-testimonies";
@@ -71,6 +71,14 @@ pub const CONTENT_LANE_REDERIVATIONS: &[&str] = &[
     "subject_manifest",
 ];
 
+/// Facts the receiver takes on the attester's word, recorded in the acceptance
+/// so it never reads as re-derived. The product lane asserts nothing.
+pub const PRODUCT_LANE_ASSERTIONS: &[&str] = &[];
+/// The content lane's activation name cannot be derived from the evidence; the
+/// receiver joins it to its own binding and re-prepares against its own
+/// activation at every use.
+pub const CONTENT_LANE_ASSERTIONS: &[&str] = &["activation_ref"];
+
 /// Which qualification a testimony speaks to. Selects the evidence type the
 /// embedded attestation must decode as; it carries no policy of its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -91,6 +99,21 @@ impl QualificationLane {
     /// The owned form of [`Self::rederivations`], as recorded in an acceptance.
     pub fn rederived(self) -> Vec<String> {
         self.rederivations()
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect()
+    }
+
+    pub fn assertions(self) -> &'static [&'static str] {
+        match self {
+            Self::Product => PRODUCT_LANE_ASSERTIONS,
+            Self::Content => CONTENT_LANE_ASSERTIONS,
+        }
+    }
+
+    /// The owned form of [`Self::assertions`], as recorded in an acceptance.
+    pub fn asserted(self) -> Vec<String> {
+        self.assertions()
             .iter()
             .map(|name| (*name).to_owned())
             .collect()
@@ -488,6 +511,8 @@ pub struct RemoteQualificationAcceptanceEvidence {
     pub accepted_claims: Vec<String>,
     /// Exactly the offline re-derivations acceptance performed for the lane.
     pub rederived: Vec<String>,
+    /// Exactly the facts the lane takes on the attester's word, not re-derived.
+    pub asserted: Vec<String>,
 }
 
 impl RemoteQualificationAcceptanceEvidence {
@@ -525,6 +550,9 @@ impl RemoteQualificationAcceptanceEvidence {
             bail!(
                 "remote qualification acceptance records re-derivations the lane does not define"
             );
+        }
+        if self.asserted != self.lane.assertions() {
+            bail!("remote qualification acceptance records assertions the lane does not define");
         }
         validate_config_ref(
             "remote qualification acceptance policy",
@@ -1214,6 +1242,7 @@ mod tests {
             origin_node_verifying_key: f.node.verifying_key().to_bytes(),
             accepted_claims: f.body.asserted_claims.clone(),
             rederived: QualificationLane::Product.rederived(),
+            asserted: QualificationLane::Product.asserted(),
         };
         let round_trip = RemoteQualificationAcceptanceEvidence::from_value(
             &serde_json::to_value(&evidence).unwrap(),
@@ -1230,6 +1259,9 @@ mod tests {
         let mut overclaiming = evidence.clone();
         overclaiming.rederived.push("source_preparation".into());
         assert!(overclaiming.validate().is_err());
+        let mut over_asserting = evidence.clone();
+        over_asserting.asserted.push("activation_ref".into());
+        assert!(over_asserting.validate().is_err());
         let mut wrong_lane = evidence.clone();
         wrong_lane.lane = QualificationLane::Content;
         assert!(wrong_lane.validate().is_err());
@@ -1458,6 +1490,7 @@ mod tests {
             origin_node_verifying_key: f.node.verifying_key().to_bytes(),
             accepted_claims: f.body.asserted_claims.clone(),
             rederived: QualificationLane::Content.rederived(),
+            asserted: QualificationLane::Content.asserted(),
         };
         let round_trip = RemoteQualificationAcceptanceEvidence::from_value(
             &serde_json::to_value(&evidence).unwrap(),
@@ -1478,6 +1511,10 @@ mod tests {
             acceptance_hash: "a".repeat(64),
         });
         assert!(with_product.validate().is_err());
+        assert_eq!(evidence.asserted, vec!["activation_ref".to_owned()]);
+        let mut unasserted = evidence.clone();
+        unasserted.asserted.clear();
+        assert!(unasserted.validate().is_err());
         let mut product_rederivations = evidence;
         product_rederivations.rederived = QualificationLane::Product.rederived();
         assert!(product_rederivations.validate().is_err());
