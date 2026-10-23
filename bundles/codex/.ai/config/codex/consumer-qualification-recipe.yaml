@@ -1,19 +1,19 @@
-# ryeos:signed:2026-10-22T22:00:32Z:7d586ede1950d8cbe9499acac786c280efa4816dd1530c3d83199f9490c484dd:uRI3evW2cvHzKF2oYYeVpdG39oXcQLIA9KfwspXYcSMHzwa7r+FGLTGB270xytHvxEYyPWZn9hzoEDY8KY2RDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-23T05:38:01Z:5659a68b8ac9bb9c9623bab53b4922ab8ed1e6114ee60f3212e9dbb67804f0ef:IqmImPfsbPDOc6d0HsTcXxCkvN5yC9UZnI/Jf6aLLM/s6CXegBoZAUjNzRG/0wyOLQbS8s58lYK7RLuTfSaDDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: codex
 version: 1.0.0
 description: Exact bounded daemon-owned direct Codex target for the independent consumer qualification of the Codex guest runtime
-# The three all-zero digests below are build-derived and are replaced before
-# signing: the runtime product manifest hash and the Codex executable digest
-# come from the built guest runtime product, and the environments.toml digest
-# comes from the verifier crate's prepared-file digest test.
+# The three digests below are build-derived: the runtime product manifest
+# hash and the Codex executable digest come from the captured guest runtime
+# product, and the environments.toml digest from the verifier crate's
+# prepared-file digest test; they are refreshed and re-signed together.
 product_producer_recipe:
   schema: ryeos.product_producer_recipe.v6
   executable_source:
     kind: admitted_realization_member
     realization_id: subject
-    manifest_hash: '0000000000000000000000000000000000000000000000000000000000000000'
+    manifest_hash: '82415171bc7d06d0410b8d8c007e78107030242507ffe9e3f0b1828dbb555c4b'
     relative_path: bin/codex
-    executable_sha256: '0000000000000000000000000000000000000000000000000000000000000000'
+    executable_sha256: 'cb0a15567e9a60a5820d54b0f6ae86d504dc3805c1eab21a47f70e3eb7b73a40'
   argv:
   - --strict-config
   - -c
@@ -53,7 +53,7 @@ product_producer_recipe:
   - prepared_directory_id: codex-home
     leaf_name: environments.toml
     maximum_bytes: 65536
-    expected_sha256: '0000000000000000000000000000000000000000000000000000000000000000'
+    expected_sha256: 'c70ddf008f0a80955ac52087a86586eb1bb337767ef4516d5e4a915f8bdd744c'
   loopback_ingress:
     address: 127.0.0.1:18765
   bounds:
