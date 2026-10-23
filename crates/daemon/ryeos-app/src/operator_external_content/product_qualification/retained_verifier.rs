@@ -31,9 +31,11 @@ pub(super) fn authenticate_retained_verifier_bytes(
         &purpose.policy_source().effective_definition_digest,
     )];
     // A probe scenario pins no producer recipe, so retains no recipe source.
-    if let Some(producer) = &source.producer_source {
+    if let (Some(producer), Some(recipe_hash)) =
+        (&source.producer_source, &source.recipe_resolution_blob_hash)
+    {
         resolutions.push((
-            &source.recipe_resolution_blob_hash,
+            recipe_hash,
             &producer.canonical_ref,
             &producer.effective_definition_digest,
         ));
@@ -90,13 +92,11 @@ pub(super) fn authenticate_retained_verifier_bytes(
         parsed_policy == policy.policy,
         "retained composed policy differs from accepted policy"
     );
-    if let Some(producer) = &source.producer_source {
-        let recipe_resolution = verify_resolution_contributors(
-            cas,
-            &source.recipe_resolution_blob_hash,
-            source,
-            &authenticated_bodies,
-        )?;
+    if let (Some(producer), Some(recipe_hash)) =
+        (&source.producer_source, &source.recipe_resolution_blob_hash)
+    {
+        let recipe_resolution =
+            verify_resolution_contributors(cas, recipe_hash, source, &authenticated_bodies)?;
         ensure!(
             recipe_resolution.root.raw_content_digest == producer.raw_content_digest
                 && recipe_resolution.root.signer_fingerprint.as_deref()

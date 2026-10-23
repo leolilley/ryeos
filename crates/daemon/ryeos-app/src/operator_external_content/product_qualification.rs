@@ -3529,8 +3529,8 @@ impl PreparedRemoteConsumerVerifier {
             let manifest_bytes = lillux::canonical_json(&proof.manifest_object)?;
             let policy_resolution = self.resolution_bytes(&policy.canonical_ref)?;
             let recipe_resolution = match &self.producer_source {
-                Some(source) => self.resolution_bytes(&source.canonical_ref)?,
-                None => policy_resolution.clone(),
+                Some(source) => Some(self.resolution_bytes(&source.canonical_ref)?),
+                None => None,
             };
             let mut blobs: Vec<(&[u8], String)> = self.signed_sources.iter()
                 .map(|item| (item.signed_bytes.as_slice(), lillux::sha256_hex(&item.signed_bytes)))
@@ -3539,12 +3539,16 @@ impl PreparedRemoteConsumerVerifier {
                 .collect();
             blobs.extend([
                 (policy_resolution.as_bytes(), source.policy_resolution_blob_hash.clone()),
-                (recipe_resolution.as_bytes(), source.recipe_resolution_blob_hash.clone()),
                 (payload.as_slice(), source.executor.payload_blob_hash.clone()),
                 (proof.signed_manifest_ref.as_slice(), source.executor.signed_manifest_ref_blob_hash.clone()),
                 (manifest_bytes.as_bytes(), source.executor.manifest_object_blob_hash.clone()),
                 (proof.signed_sidecar.as_slice(), source.executor.signed_sidecar_blob_hash.clone()),
             ]);
+            if let (Some(recipe_resolution), Some(expected)) =
+                (&recipe_resolution, &source.recipe_resolution_blob_hash)
+            {
+                blobs.push((recipe_resolution.as_bytes(), expected.clone()));
+            }
             for (bytes, expected) in blobs {
                 if stage.store_blob_admitted(&guard, &cas, bytes)? != expected {
                     bail!("remote verifier CAS blob differs from retained identity");
@@ -3642,13 +3646,12 @@ impl PreparedRemoteConsumerVerifier {
         signed_bundle_manifests.sort_by(|left, right| left.bundle_name.cmp(&right.bundle_name));
         let policy_resolution_blob_hash =
             lillux::sha256_hex(self.resolution_bytes(&policy.canonical_ref)?.as_bytes());
-        // A probe scenario names no recipe; its slot repeats the policy
-        // resolution so the retained address set stays closed and non-null.
+        // A probe scenario names no recipe and so retains no recipe resolution.
         let recipe_resolution_blob_hash = match &self.producer_source {
-            Some(source) => {
-                lillux::sha256_hex(self.resolution_bytes(&source.canonical_ref)?.as_bytes())
-            }
-            None => policy_resolution_blob_hash.clone(),
+            Some(source) => Some(lillux::sha256_hex(
+                self.resolution_bytes(&source.canonical_ref)?.as_bytes(),
+            )),
+            None => None,
         };
         let mut archive_member_digests = BTreeMap::new();
         for (name, member) in &self.archive_members {

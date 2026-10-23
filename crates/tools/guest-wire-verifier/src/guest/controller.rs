@@ -31,6 +31,7 @@ pub struct ExchangeOutcome {
     pub applied_launch_receipt_digest: Option<String>,
     pub candidate_program_digest: Option<String>,
     pub launcher_spec_digest: Option<String>,
+    pub launcher_occurrence_digest: Option<String>,
     pub command_terminated: bool,
 }
 
@@ -49,6 +50,7 @@ pub struct Controller {
     receipt_digest: Option<String>,
     candidate_program_digest: Option<String>,
     launcher_spec_digest: Option<String>,
+    launcher_occurrence_digest: Option<String>,
     command_terminated: bool,
 }
 
@@ -89,6 +91,7 @@ impl Controller {
             receipt_digest: None,
             candidate_program_digest: None,
             launcher_spec_digest: None,
+            launcher_occurrence_digest: None,
             command_terminated: false,
         })
     }
@@ -103,6 +106,7 @@ impl Controller {
             applied_launch_receipt_digest: self.receipt_digest.clone(),
             candidate_program_digest: self.candidate_program_digest.clone(),
             launcher_spec_digest: self.launcher_spec_digest.clone(),
+            launcher_occurrence_digest: self.launcher_occurrence_digest.clone(),
             command_terminated: self.command_terminated,
         })
     }
@@ -167,7 +171,8 @@ impl Controller {
         self.bootstrap
             .validate_attached_binding(&binding, &request.supervisor_public_key)?;
         // The controller derives the launcher specification it expects the
-        // launcher to accept from its own binding, program and inputs.
+        // launcher to accept; the launcher never echoes a specification
+        // digest, so this is an expectation, not an observation from its own binding, program and inputs.
         let spec = ExternalCandidateLauncherSpec::from_admitted_program(
             binding.clone(),
             &self.bootstrap.candidate_program,
@@ -305,6 +310,7 @@ impl Controller {
                     lillux::canonical_json(&serde_json::to_value(receipt)?)?.as_bytes(),
                 ));
                 self.candidate_program_digest = Some(candidate_program_digest.clone());
+                self.launcher_occurrence_digest = Some(launcher_occurrence_digest.clone());
             }
             ExecutionChannelPayload::CommandOutput { .. } => {
                 ensure!(
@@ -619,6 +625,7 @@ mod tests {
         assert!(observed.applied_launch_receipt_digest.is_none());
         assert!(!observed.command_terminated);
         assert!(observed.launcher_spec_digest.is_some());
+        assert!(observed.launcher_occurrence_digest.is_none());
     }
 
     #[test]

@@ -76,7 +76,7 @@ pub use cas::{
     atomic_write_batch_in_pinned_root, canonical_json, canonical_json_bounded,
     canonical_json_bytes_bounded, sha256_hex, shard_path, valid_hash,
 };
-pub use guest_account::GuestRuntimeAccount;
+pub use guest_account::{GuestRuntimeAccount, effective_uid};
 pub use host_service::{
     HostServiceController, HostServiceInstallation, HostServiceLaunch, discover_host_service,
     exec_install_transaction, provision_host_service, run_as_administrator,

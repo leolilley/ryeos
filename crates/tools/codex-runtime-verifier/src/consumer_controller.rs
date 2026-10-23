@@ -684,7 +684,7 @@ pub(crate) mod tests {
         };
         let source = QualificationRemoteVerifierSource {
             policy_resolution_blob_hash: "1".repeat(64),
-            recipe_resolution_blob_hash: "2".repeat(64),
+            recipe_resolution_blob_hash: Some("2".repeat(64)),
             scenario_source_digest: scenario
                 .remote_verifier_source_digest(Some(&producer_source))
                 .unwrap(),

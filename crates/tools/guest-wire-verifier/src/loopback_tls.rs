@@ -261,14 +261,29 @@ fn find_head_end(buf: &[u8]) -> Option<usize> {
     buf.windows(4).position(|w| w == b"\r\n\r\n")
 }
 
-/// Read and validate one request. `Err` means the connection failed mid-request.
-fn read_request<S: Read>(stream: &mut S, max_body_bytes: usize) -> std::io::Result<ReadOutcome> {
+fn interrupted(deadline: Instant, stop: &AtomicBool) -> std::io::Result<()> {
+    if stop.load(Ordering::Acquire) || Instant::now() >= deadline {
+        return Err(std::io::ErrorKind::TimedOut.into());
+    }
+    Ok(())
+}
+
+/// Read and validate one request. `Err` means the connection failed mid-request,
+/// including the overall deadline elapsing or the stop flag being raised
+/// between bounded reads.
+fn read_request<S: Read>(
+    stream: &mut S,
+    max_body_bytes: usize,
+    deadline: Instant,
+    stop: &AtomicBool,
+) -> std::io::Result<ReadOutcome> {
     let mut acc: Vec<u8> = Vec::new();
     let mut chunk = [0u8; 4096];
     let head_end = loop {
         if let Some(pos) = find_head_end(&acc) {
             break pos;
         }
+        interrupted(deadline, stop)?;
         if acc.len() > HEAD_LIMIT {
             return Ok(ReadOutcome::Reject(400, "request head too large"));
         }
@@ -354,9 +369,16 @@ fn read_request<S: Read>(stream: &mut S, max_body_bytes: usize) -> std::io::Resu
     if body.len() > need {
         return Ok(ReadOutcome::Reject(400, "unexpected bytes after body"));
     }
-    let have = body.len();
+    let mut have = body.len();
     body.resize(need, 0);
-    stream.read_exact(&mut body[have..])?;
+    while have < need {
+        interrupted(deadline, stop)?;
+        let n = stream.read(&mut body[have..])?;
+        if n == 0 {
+            return Err(std::io::ErrorKind::UnexpectedEof.into());
+        }
+        have += n;
+    }
 
     Ok(ReadOutcome::Request(HttpsRequest {
         method: method.to_string(),
@@ -464,7 +486,7 @@ impl LoopbackHttpsServer {
                 continue;
             };
             let mut stream = rustls::StreamOwned::new(conn, tcp);
-            match read_request(&mut stream, max_body_bytes) {
+            match read_request(&mut stream, max_body_bytes, deadline, stop) {
                 Err(_) => continue,
                 Ok(ReadOutcome::Reject(status, message)) => {
                     if write_reply(&mut stream, status, &reject_body(message)).is_ok() {

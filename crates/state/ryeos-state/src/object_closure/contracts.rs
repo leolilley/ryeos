@@ -885,9 +885,11 @@ fn push_qualification_purpose_edges(
                     .map(|manifest| manifest.signed_blob_hash.clone()),
             );
             let executor = &source.executor;
+            links
+                .blob_hashes
+                .extend(source.recipe_resolution_blob_hash.clone());
             links.blob_hashes.extend([
                 source.policy_resolution_blob_hash.clone(),
-                source.recipe_resolution_blob_hash.clone(),
                 executor.payload_blob_hash.clone(),
                 executor.signed_manifest_ref_blob_hash.clone(),
                 executor.manifest_object_blob_hash.clone(),
@@ -1825,7 +1827,7 @@ mod tests {
             )
             .chain([
                 &source.policy_resolution_blob_hash,
-                &source.recipe_resolution_blob_hash,
+                source.recipe_resolution_blob_hash.as_ref().unwrap(),
                 &source.executor.payload_blob_hash,
                 &source.executor.signed_manifest_ref_blob_hash,
                 &source.executor.manifest_object_blob_hash,

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-22T23:38:01Z:28ba929a92c2febf2b969d1322356bdd1936f996890df8997ae959c1323fa5a3:/d+NVjBVGi4A7RCo+uFBwqsARZExgwMj+jlhYflPWpd6rdIkvnYcXZPusyoZPuY6tFp9hNMcHqZeZ0NRJC+CAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-23T00:49:35Z:99e03ee0cbef4b4d064c7d1f18ef6c5523b2e2fdf3922bce17b9e32c42087cfd:FxhjN9etxgOIOjJLnnDBeXll7kuCM7esPoIM/hbCzAlIP+1LYZWl0DAkRAr1weG/b5pdf+ntn7De0bVCXYTeCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: codex
 version: "1.0.0"
 description: Retained credential-free node-rooted guest occurrence owner runtime
@@ -30,7 +30,8 @@ product_relationships:
   relationships:
     # The controller root below is the published development controller key
     # (RFC 8032 test vector 1): structurally valid, and replaced per hosted
-    # controller before signing a production bundle.
+    # controller before signing a production bundle. The wire verifier refuses
+    # a subject rooted at this key, so a bundle that ships it cannot qualify.
     - name: owner_to_guest_wire_verifier
       producer:
         canonical_ref: graph:codex/guest-owner-runtime-production-for-controller

@@ -1,6 +1,19 @@
 //! Guest evidence schema and its independent verification by the origin role.
 //! The guest reports what it observed; this module decides whether those
 //! observations agree with everything the origin measured or was handed.
+//!
+//! What the launcher fields prove and do not prove. `launcher_spec.expected_digest`
+//! is the digest of the launcher specification the controller itself derived
+//! from its binding, admitted program and guest inputs; it is the controller's
+//! expectation, not a value the launcher reported. The launcher's applied
+//! report carries an occurrence digest computed from the held launcher process
+//! identity, the launcher artifact digest and the launch challenge; it is not
+//! derivable from the specification, so it is recorded as
+//! `applied_launch.occurrence_digest` and checked only for form. The claim that
+//! the launcher accepted the specification therefore rests on a signed,
+//! sequence-checked applied-launch frame naming the expected candidate program
+//! arriving after Ready, and on the owner exiting successfully; it does not rest
+//! on the launcher echoing a specification digest, because it never does.
 
 use std::collections::BTreeMap;
 
@@ -34,6 +47,19 @@ pub struct SchemaDigest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct LauncherSpecEvidence {
+    pub schema: u32,
+    pub expected_digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppliedLaunchEvidence {
+    pub occurrence_digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OwnerExit {
     pub success: bool,
     pub detail: String,
@@ -55,7 +81,8 @@ pub struct GuestWireEvidence {
     pub subject: SubjectEvidence,
     pub probe: ProbeEvidence,
     pub projection: SchemaDigest,
-    pub launcher_spec: SchemaDigest,
+    pub launcher_spec: LauncherSpecEvidence,
+    pub applied_launch: AppliedLaunchEvidence,
     pub exchange_transcript_digest: String,
     pub exchange_frame_count: u64,
     pub applied_launch_receipt_digest: String,
@@ -77,7 +104,7 @@ pub struct Expected {
 
 impl GuestWireEvidence {
     pub fn canonical_bytes(&self) -> Result<Vec<u8>> {
-        Ok(ryeos_external_execution_contract::canonical_json(self)?)
+        ryeos_external_execution_contract::canonical_json(self)
     }
 
     /// Strict, canonical parse followed by every cross-check.
@@ -123,7 +150,8 @@ impl GuestWireEvidence {
         for digest in [
             &self.probe.manifest_hash,
             &self.projection.digest,
-            &self.launcher_spec.digest,
+            &self.launcher_spec.expected_digest,
+            &self.applied_launch.occurrence_digest,
             &self.exchange_transcript_digest,
             &self.applied_launch_receipt_digest,
             &self.candidate_program_digest,
@@ -190,9 +218,12 @@ pub(crate) mod tests {
                 schema: 5,
                 digest: "7".repeat(64),
             },
-            launcher_spec: SchemaDigest {
+            launcher_spec: LauncherSpecEvidence {
                 schema: 4,
-                digest: "8".repeat(64),
+                expected_digest: "8".repeat(64),
+            },
+            applied_launch: AppliedLaunchEvidence {
+                occurrence_digest: "c".repeat(64),
             },
             exchange_transcript_digest: "9".repeat(64),
             exchange_frame_count: 4,
@@ -245,6 +276,10 @@ pub(crate) mod tests {
             (
                 "launcher pin",
                 Box::new(|e| e.schema_pins.launcher_spec = 5),
+            ),
+            (
+                "occurrence digest",
+                Box::new(|e| e.applied_launch.occurrence_digest = "zz".into()),
             ),
             ("projection schema", Box::new(|e| e.projection.schema = 4)),
             ("euid", Box::new(|e| e.euid = 1000)),

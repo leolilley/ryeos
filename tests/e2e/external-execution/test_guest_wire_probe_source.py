@@ -102,6 +102,13 @@ class GuestWireProbeSourceTests(unittest.TestCase):
         self.assertEqual(set(relationship["producer"]["parameters"]), {"controller_public_key"})
         self.assertRegex(relationship["producer"]["parameters"]["controller_public_key"],
                          r"^ed25519:[A-Za-z0-9+/]{43}=$")
+        # The shipped file carries the RFC 8032 placeholder and says it must be
+        # replaced per controller before signing; the verifier refuses it.
+        self.assertEqual(relationship["producer"]["parameters"]["controller_public_key"],
+                         "ed25519:11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=")
+        text = (CODEX / "config/codex/guest-owner-runtime-products.yaml").read_text()
+        self.assertIn("replaced per hosted", text)
+        self.assertIn("controller before signing", text)
         self.assertEqual(relationship["consumer"], {
             "canonical_ref": "tool:codex/qualification/guest-wire-verifier",
             "declaration_id": "subject",

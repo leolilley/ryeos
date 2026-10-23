@@ -1,7 +1,7 @@
-# ryeos:signed:2026-10-22T23:38:01Z:d953a5925c87e890031741381f03043daed28d27b9fc0d09913a1eacfca76ae8:CmxQb271fJmXK/fiUhEPdI3aLv2ZP9Ox6hea7OB8MfTiIA5VH4+rBKr77HTr0pK2+FZ67i5dQdMyy4nULhIBBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-23T00:49:35Z:ce36a794223a6af3badfa11438c36d49a9b80408c99f0e48b7f445295e2e3532:AD3uM3iRBcZcXm7foKPHvo+WyuUQ2yriBkYcxCbD4l+8z/lmi/ysGxPmMdqdvhs+WbFUxPpTvHcyx21prBt7AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: codex
 version: 1.0.0
-description: Restored-guest qualification of the guest owner wire; the claim binds the subject's owner executable digest and manifest hash, proved under an ephemeral key in a restored guest
+description: Restored-guest qualification of the guest owner wire; the claim binds the subject's owner executable digest and manifest hash, proved under an ephemeral key in a restored guest. The measured owner, supervisor and launcher executables performed the exchange under an ephemeral controller key and test configuration; operation under the real controller key, connection and credentials is proved by a live session, not by this claim.
 product_qualification_policy:
   schema: ryeos.product_qualification_policy.v5
   verifier_ref: tool:codex/qualification/guest-wire-verifier

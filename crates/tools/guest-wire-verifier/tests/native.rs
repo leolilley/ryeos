@@ -53,6 +53,9 @@ fn main() {
         member_digests: member_digests.clone(),
         supervisor,
         launcher,
+        attempt_deadline: lillux::time::MonotonicDeadline::after(
+            lillux::time::Duration::from_secs(300),
+        ),
     })
     .unwrap();
     let expected = Expected {

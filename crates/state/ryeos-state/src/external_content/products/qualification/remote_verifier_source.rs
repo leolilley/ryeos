@@ -26,7 +26,9 @@ use crate::objects::{
 pub struct QualificationRemoteVerifierSource {
     pub scenario_source_digest: String,
     pub policy_resolution_blob_hash: String,
-    pub recipe_resolution_blob_hash: String,
+    /// Present exactly when `producer_source` is; a probe has no recipe.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipe_resolution_blob_hash: Option<String>,
     /// Present exactly when the signed scenario names a producer recipe; a
     /// probe scenario has none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -55,10 +57,13 @@ impl QualificationRemoteVerifierSource {
             "retained policy resolution",
             &self.policy_resolution_blob_hash,
         )?;
-        validate_hash(
-            "retained recipe resolution",
-            &self.recipe_resolution_blob_hash,
-        )?;
+        ensure!(
+            self.recipe_resolution_blob_hash.is_some() == self.producer_source.is_some(),
+            "retained recipe resolution is present exactly when a producer recipe is"
+        );
+        if let Some(hash) = &self.recipe_resolution_blob_hash {
+            validate_hash("retained recipe resolution", hash)?;
+        }
         if let Some(source) = &self.producer_source {
             source.validate()?;
         }
@@ -318,7 +323,7 @@ pub(crate) mod tests {
         };
         let source = QualificationRemoteVerifierSource {
             policy_resolution_blob_hash: "1".repeat(64),
-            recipe_resolution_blob_hash: "2".repeat(64),
+            recipe_resolution_blob_hash: Some("2".repeat(64)),
             scenario_source_digest: scenario
                 .remote_verifier_source_digest(Some(&producer_source))
                 .unwrap(),
@@ -405,7 +410,10 @@ pub(crate) mod tests {
         changed.policy_resolution_blob_hash.clear();
         assert!(changed.validate().is_err());
         changed = source.clone();
-        changed.recipe_resolution_blob_hash.clear();
+        changed.recipe_resolution_blob_hash = Some(String::new());
+        assert!(changed.validate().is_err());
+        changed = source.clone();
+        changed.recipe_resolution_blob_hash = None;
         assert!(changed.validate().is_err());
         changed = source.clone();
         changed.signed_items[0].signer_fingerprint = "a".repeat(64);
@@ -453,6 +461,7 @@ pub(crate) mod tests {
             .producer_scenarios
             .insert("probe".into(), scenario.clone());
         source.producer_source = None;
+        source.recipe_resolution_blob_hash = None;
         source.remote_probe_input = scenario.remote_probe_input.clone();
         source.scenario_source_digest = scenario.remote_verifier_source_digest(None).unwrap();
         source

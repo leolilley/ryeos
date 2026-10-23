@@ -8,7 +8,6 @@ pub mod fixture;
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
-use std::os::unix::fs::MetadataExt as _;
 use std::path::Path;
 
 use anyhow::{Context as _, Result, bail, ensure};
@@ -25,8 +24,8 @@ use ryeos_external_execution_contract::{
 use ryeos_state::external_content::qualification_consumer_record::RemoteProbeInputRecord;
 
 use crate::evidence::{
-    EVIDENCE_SCHEMA, GuestWireEvidence, OwnerExit, ProbeEvidence, SchemaDigest, SchemaPins,
-    SubjectEvidence,
+    AppliedLaunchEvidence, EVIDENCE_SCHEMA, GuestWireEvidence, LauncherSpecEvidence, OwnerExit,
+    ProbeEvidence, SchemaDigest, SchemaPins, SubjectEvidence,
 };
 use crate::loopback_tls::{EphemeralPki, LoopbackHttpsServer};
 
@@ -128,10 +127,16 @@ pub struct ProbeRequest {
     pub member_digests: BTreeMap<String, String>,
     pub supervisor: Vec<u8>,
     pub launcher: Vec<u8>,
+    /// The challenge's attempt deadline; the owner run never outlives it.
+    pub attempt_deadline: lillux::time::MonotonicDeadline,
 }
 
 /// Read the delivered record and members, then execute.
-pub fn run_probe(challenge: &ConsumerRuntimeChallenge, archive: &Path) -> Result<Vec<u8>> {
+pub fn run_probe(
+    challenge: &ConsumerRuntimeChallenge,
+    archive: &Path,
+    attempt_deadline: lillux::time::MonotonicDeadline,
+) -> Result<Vec<u8>> {
     let record = read_record(archive, challenge)?;
     let (member_digests, supervisor, launcher) = read_members(archive, &record)?;
     execute(&ProbeRequest {
@@ -144,6 +149,7 @@ pub fn run_probe(challenge: &ConsumerRuntimeChallenge, archive: &Path) -> Result
         member_digests,
         supervisor,
         launcher,
+        attempt_deadline,
     })
 }
 
@@ -169,7 +175,7 @@ pub fn execute(request: &ProbeRequest) -> Result<Vec<u8>> {
     // 2. Private work area; its owner is the effective user.
     let ryeos = lillux::PinnedDirectory::open(Path::new("/ryeos"))?.context("/ryeos is absent")?;
     let (_, work) = ryeos.create_unique_child("guest-wire-probe", 0o700)?;
-    let euid = std::fs::metadata(work.path())?.uid();
+    let euid = lillux::effective_uid()?;
     ensure!(
         euid == 0,
         "the guest probe requires the administrator account"
@@ -284,10 +290,17 @@ pub fn execute(request: &ProbeRequest) -> Result<Vec<u8>> {
         prepared.expected_ready_inputs.clone(),
     )?;
     let assignment = URL_SAFE_NO_PAD.encode(&prepared.signed_assignment);
-    let owner_timeout = f64::from(profile.owner_timeout_seconds).min(240.0);
+    let remaining = request.attempt_deadline.remaining();
+    ensure!(
+        !remaining.is_zero(),
+        "consumer attempt deadline elapsed before the owner could run"
+    );
+    let owner_timeout = f64::from(profile.owner_timeout_seconds)
+        .min(240.0)
+        .min(remaining.as_secs_f64());
     let stop = std::sync::atomic::AtomicBool::new(false);
-    let deadline =
-        std::time::Instant::now() + std::time::Duration::from_secs_f64(owner_timeout + 30.0);
+    let deadline = std::time::Instant::now()
+        + std::time::Duration::from_secs_f64(owner_timeout + 30.0).min(remaining);
     let mut controller = controller;
     let (owner_result, served) = std::thread::scope(|scope| {
         let served = scope.spawn(|| {
@@ -348,11 +361,16 @@ pub fn execute(request: &ProbeRequest) -> Result<Vec<u8>> {
             schema: EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA,
             digest: prepared.projection.identity_digest()?,
         },
-        launcher_spec: SchemaDigest {
+        launcher_spec: LauncherSpecEvidence {
             schema: EXTERNAL_CANDIDATE_LAUNCHER_SPEC_SCHEMA,
-            digest: outcome
+            expected_digest: outcome
                 .launcher_spec_digest
                 .context("launcher specification digest absent")?,
+        },
+        applied_launch: AppliedLaunchEvidence {
+            occurrence_digest: outcome
+                .launcher_occurrence_digest
+                .context("applied launch carried no launcher occurrence digest")?,
         },
         exchange_transcript_digest: outcome.transcript_digest,
         exchange_frame_count: outcome.frame_count,
@@ -390,7 +408,7 @@ pub fn run(encoded: &str) -> Result<()> {
         .parent()
         .context("verifier executable has no directory")?
         .to_path_buf();
-    let bytes = run_probe(&challenge, &archive)?;
+    let bytes = run_probe(&challenge, &archive, deadline)?;
     for chunk in bytes.chunks(4096) {
         output
             .write_all(chunk, deadline)
