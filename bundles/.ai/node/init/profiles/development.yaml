@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-22T00:00:39Z:cfe120372e59e4110f7fedaa04a71d90b7fe74ac7e4454a7c2bf6744e1deff94:lqzMd+qkDrcWcKpawZFcSBs6QCQBTsCAi3ILOl84wXdHAdTdER6MqEdyM1XUN0YsWJWyC1GdTMWL4nb/Ek7DDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-23T07:06:45Z:6ab5688d5c89fcb7c1de20d5aafa47a71dd2b4eaf372eda4063c6eae863c012d:7WCfN3YXkuMW9Uwl6UX7XtKhDxXX6rgvQ8KwUGA8kfhWUOicckhVa0KEdc+ItVycnmmRjTa4dPCpT7h6ejXjBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - browser
@@ -403,6 +403,14 @@ policies:
   external_content:
     schema: 1
     roots: {}
+    # Operator-staged trees the retained platform chain imports: the pinned
+    # development platform and the authoring build-support inputs. Init
+    # creates each directory under the app root and records its identity.
+    declared_roots:
+      platform:
+        path: "{app_root}/imports/platform"
+      build-support:
+        path: "{app_root}/imports/build-support"
     limits:
       max_depth: 11
       # The retained development platform contains about 19,500 entries. Cargo

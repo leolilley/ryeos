@@ -483,7 +483,8 @@ class DevelopmentEnvironmentTests(unittest.TestCase):
     def test_recorded_wrappers_forward_only_explicit_authenticated_root_selections(self):
         cases = {
             "authoring-built-utilities-production": [
-                ("build_support_selection", "authoring-build-support")],
+                ("build_support_selection", "authoring-build-support"),
+                ("platform_selection", "platform")],
             "authoring-environment-production": [
                 ("assembly_inputs_selection", "assembly-inputs"),
                 ("built_utilities_selection", "built-utilities")],
@@ -503,8 +504,12 @@ class DevelopmentEnvironmentTests(unittest.TestCase):
                         "witness_source"])
                     self.assertEqual(value["properties"]["declaration_id"]["enum"],
                                      [declaration])
-                    self.assertEqual(value["properties"]["qualification_hash"]["type"],
-                                     "null")
+                    if declaration == "platform":
+                        self.assertEqual(value["properties"]["qualification_hash"], {
+                            "type": "string", "pattern": "^[0-9a-f]{64}$"})
+                    else:
+                        self.assertEqual(
+                            value["properties"]["qualification_hash"]["type"], "null")
                     source_schema = value["properties"]["witness_source"]
                     self.assertEqual(source_schema, {"oneOf": [
                         {
