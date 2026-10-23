@@ -1,4 +1,7 @@
-# Exact v0.5.102 hosted-workflow image, verified by the release workflow.
+# Controller image built from the officially signed release bundles. Replace
+# <DIGEST> in both places below with the digest printed in the summary of the
+# controller-from-release workflow run; the image is pinned by digest, never
+# by tag.
 # The controller keeps its operator identity and runtime journal on /data.
 # Render restarts a web service after every exit and has no restart-policy
 # field, which is the always-restart behaviour the node needs: it exits 75 at
@@ -9,7 +12,7 @@ services:
     name: ryeos-farm-controller
     runtime: image
     image:
-      url: ghcr.io/leolilley/ryeos-hosted-workflow@sha256:76845035deeefd312011f0792adbe85b0d23aac72307524284a5acb7586dd952
+      url: ghcr.io/leolilley/ryeos-f5r-controller@sha256:<DIGEST>
     plan: 1c-2g
     region: singapore
     numInstances: 1
@@ -20,6 +23,6 @@ services:
       sizeGB: 10
     envVars:
       - key: RYEOS_SUBSTRATE_IMAGE
-        value: ghcr.io/leolilley/ryeos-hosted-workflow@sha256:76845035deeefd312011f0792adbe85b0d23aac72307524284a5acb7586dd952
+        value: ghcr.io/leolilley/ryeos-f5r-controller@sha256:<DIGEST>
       - key: RYEOS_SUBSTRATE_PROTOCOL
         value: "1"

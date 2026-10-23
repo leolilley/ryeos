@@ -1,0 +1,170 @@
+name: Build controller from release
+
+# Builds the remote-authoring controller image from the officially signed
+# bundle archive attached to a published release, not from a fresh
+# publication. The node binaries are compiled from the release tag's source
+# and lockfile; the bundles are the released bytes, verified against the
+# official publisher before they enter the build. No publisher key is used and
+# the development key never reaches the build. A dry run builds and checks
+# everything but pushes nothing.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Released SemVer whose tag v<version> carries the bundle archive"
+        required: true
+        type: string
+      dry_run:
+        description: "Build and verify without pushing the image"
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ryeos-controller-from-release-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out release tag
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: refs/tags/v${{ inputs.version }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve release coordinates
+        id: release
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          VERSION="$(scripts/release/resolve-version.sh workflow_dispatch '' "$REQUESTED_VERSION")"
+          SOURCE_SHA="$(git rev-parse --verify HEAD)"
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$(git rev-parse --verify "refs/tags/v${VERSION}^{commit}")" == "$SOURCE_SHA" ]]
+          SOURCE_DATE_EPOCH="$(git show -s --format=%ct "$SOURCE_SHA")"
+          BUILD_DATE="$(date --utc --date="@${SOURCE_DATE_EPOCH}" '+%Y-%m-%dT%H:%M:%SZ')"
+          {
+            echo "version=$VERSION"
+            echo "sha=$SOURCE_SHA"
+            echo "epoch=$SOURCE_DATE_EPOCH"
+            echo "build_date=$BUILD_DATE"
+            echo "prefix=ghcr.io/${OWNER,,}/ryeos"
+            echo "official_fp=$(scripts/release/official-publisher-fingerprint.sh)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Download released bundle archive
+        id: archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          DOWNLOAD_DIR="$RUNNER_TEMP/released-archive"
+          [[ ! -e "$DOWNLOAD_DIR" ]]
+          mkdir "$DOWNLOAD_DIR"
+          gh release download "v$VERSION" --repo "$GITHUB_REPOSITORY" --dir "$DOWNLOAD_DIR" \
+            --pattern "ryeos-bundles-$VERSION-x86_64.tar.gz" \
+            --pattern "ryeos-bundles-$VERSION-x86_64.tar.gz.sha256"
+          echo "dir=$DOWNLOAD_DIR" >> "$GITHUB_OUTPUT"
+
+      - name: Materialize released controller bundles
+        id: bundles
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          ARCHIVE_DIR: ${{ steps.archive.outputs.dir }}
+        run: |
+          OUT="$RUNNER_TEMP/released-bundles"
+          scripts/release/materialize-release-bundles.sh \
+            --version "$VERSION" \
+            --archive "$ARCHIVE_DIR/ryeos-bundles-$VERSION-x86_64.tar.gz" \
+            --checksum "$ARCHIVE_DIR/ryeos-bundles-$VERSION-x86_64.tar.gz.sha256" \
+            --set f5r-controller \
+            --output "$OUT"
+          echo "dir=$OUT" >> "$GITHUB_OUTPUT"
+
+      - name: Refuse development signer material
+        env:
+          BUNDLES_DIR: ${{ steps.bundles.outputs.dir }}
+        run: |
+          # The committed development key signs candidates only. If its
+          # fingerprint appears anywhere in the materialized bundles, they
+          # are not the official release bytes.
+          KEY_FILE=.dev-keys/PUBLISHER_DEV.pem
+          test -s "$KEY_FILE"
+          DEV_FP="$(openssl pkey -in "$KEY_FILE" -pubout -outform DER 2>/dev/null \
+            | tail -c 32 | sha256sum | cut -d' ' -f1)"
+          [[ "$DEV_FP" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$DEV_FP" != "$(scripts/release/official-publisher-fingerprint.sh)" ]]
+          if grep -IRliF -- "$DEV_FP" "$BUNDLES_DIR"; then
+            echo "development publisher fingerprint present in released bundles" >&2
+            exit 1
+          fi
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GHCR
+        if: ${{ !inputs.dry_run }}
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build controller image
+        id: bake
+        uses: docker/bake-action@d3418bd7d0e9324001bca92fa8ba175ea7e6dc9b # v7.3.0
+        with:
+          source: .
+          files: ./docker-bake.composition.hcl
+          targets: f5r-controller-released
+          push: ${{ !inputs.dry_run }}
+          vars: |
+            RELEASED_BUNDLES_DIR=${{ steps.bundles.outputs.dir }}
+            OFFICIAL_PUBLISHER_FP=${{ steps.release.outputs.official_fp }}
+            VERSION=${{ steps.release.outputs.version }}
+            SOURCE_DATE_EPOCH=${{ steps.release.outputs.epoch }}
+            VCS_REF=${{ steps.release.outputs.sha }}
+            BUILD_DATE=${{ steps.release.outputs.build_date }}
+            IMAGE_PREFIX=${{ steps.release.outputs.prefix }}
+
+      - name: Print controller image digest
+        env:
+          BAKE_METADATA: ${{ steps.bake.outputs.metadata }}
+          PREFIX: ${{ steps.release.outputs.prefix }}
+          VERSION: ${{ steps.release.outputs.version }}
+          SOURCE_SHA: ${{ steps.release.outputs.sha }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          {
+            echo "### Controller from release v$VERSION"
+            echo
+            echo "Source: \`$SOURCE_SHA\`; bundles: officially signed release assets"
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$DRY_RUN" == true ]]; then
+            echo "Dry run: image built and verified, nothing pushed." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          DIGEST="$(jq -r '.["f5r-controller-released"]["containerimage.digest"] // empty' <<<"$BAKE_METADATA")"
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+            echo "no pushed digest for the controller image" >&2
+            exit 1
+          }
+          IMAGE="${PREFIX}-f5r-controller"
+          docker buildx imagetools inspect "${IMAGE}@${DIGEST}" >/dev/null
+          echo "${IMAGE}:release-v${VERSION} -> ${IMAGE}@${DIGEST}"
+          {
+            echo "| image | digest reference |"
+            echo "|---|---|"
+            echo "| f5r-controller | \`${IMAGE}@${DIGEST}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"

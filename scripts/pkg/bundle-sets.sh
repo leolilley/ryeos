@@ -59,6 +59,14 @@ ryeos_bundle_set_names() {
   esac
 }
 
+# Bundles carried by the released bundle archive: the sorted unique union of
+# the `full` distribution and the `f5r-controller` distribution. The archive
+# must hold every exact bundle each of those distributions' init profiles
+# names; `full` itself is unchanged.
+ryeos_release_archive_bundle_names() {
+  { ryeos_bundle_set_names full; ryeos_bundle_set_names f5r-controller; } | LC_ALL=C sort -u
+}
+
 # Select native capabilities from the same explicit distribution
 # membership used for publication and installation. Cargo defaults remain empty;
 # focused node/CLI rebuilds must carry the selected distribution's features too.

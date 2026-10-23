@@ -26,6 +26,8 @@ PATH="$tool_dir:$PATH" "$actionlint" -color
     scripts/release/package-bundle-artifact.sh \
     scripts/release/test-package-bundle-artifact.sh \
     scripts/release/verify-bundle-artifact.sh \
+    scripts/release/materialize-release-bundles.sh \
+    scripts/release/test-materialize-release-bundles.sh \
     scripts/release/prepare-aur.sh \
     scripts/release/test-prepare-aur.sh \
     tests/e2e/container-image/qualify.sh \
