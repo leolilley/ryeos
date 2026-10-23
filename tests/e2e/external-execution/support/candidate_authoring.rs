@@ -92,7 +92,7 @@ pub fn qualification_policy_source(
         .map(|claim| format!("    - {claim}\n"))
         .collect::<String>();
     format!(
-        "category: fixtures\nversion: \"1.0.0\"\ndescription: {description}\nproduct_qualification_policy:\n  schema: ryeos.product_qualification_policy.v4\n  verifier_ref: {verifier_ref}\n  subject_declaration_id: subject\n  allowed_claims:\n{claims}  minimum_verifier_process_settlement: trusted_process_group_absent\n  verifier_parameters: {parameters}\n"
+        "category: fixtures\nversion: \"1.0.0\"\ndescription: {description}\nproduct_qualification_policy:\n  schema: ryeos.product_qualification_policy.v5\n  verifier_ref: {verifier_ref}\n  subject_declaration_id: subject\n  allowed_claims:\n{claims}  minimum_verifier_process_settlement: trusted_process_group_absent\n  verifier_parameters: {parameters}\n"
     )
 }
 
