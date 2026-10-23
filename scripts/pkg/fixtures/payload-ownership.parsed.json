@@ -54,6 +54,18 @@
       "cargo_package": "ryeos-external-candidate-connector"
      },
      {
+      "binary": "ryeos-external-candidate-launcher",
+      "build_class": "static",
+      "cargo_features": [],
+      "cargo_package": "ryeos-external-candidate-launcher"
+     },
+     {
+      "binary": "ryeos-external-candidate-supervisor",
+      "build_class": "static",
+      "cargo_features": [],
+      "cargo_package": "ryeos-external-candidate-supervisor"
+     },
+     {
       "binary": "ryeos-external-guest-occurrence-owner",
       "build_class": "static",
       "cargo_features": [],
@@ -64,6 +76,12 @@
       "build_class": "static",
       "cargo_features": [],
       "cargo_package": "ryeos-external-guest-runtime-producer"
+     },
+     {
+      "binary": "ryeos-guest-wire-verifier",
+      "build_class": "static",
+      "cargo_features": [],
+      "cargo_package": "ryeos-guest-wire-verifier"
      }
     ]
    },
@@ -306,18 +324,6 @@
     ],
     "host_features": [],
     "payloads": [
-     {
-      "binary": "ryeos-external-candidate-launcher",
-      "build_class": "static",
-      "cargo_features": [],
-      "cargo_package": "ryeos-external-candidate-launcher"
-     },
-     {
-      "binary": "ryeos-external-candidate-supervisor",
-      "build_class": "static",
-      "cargo_features": [],
-      "cargo_package": "ryeos-external-candidate-supervisor"
-     },
      {
       "binary": "ryeos-external-guest-restoration-verifier",
       "build_class": "static",

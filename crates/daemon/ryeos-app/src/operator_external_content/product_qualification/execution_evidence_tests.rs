@@ -459,3 +459,33 @@ fn projector_refusal_is_not_an_empty_successful_description() {
         .is_empty()
     );
 }
+
+#[test]
+fn probe_evidence_must_report_exactly_the_retained_member_digests() {
+    let supervisor = lillux::sha256_hex(b"supervisor");
+    let launcher = lillux::sha256_hex(b"launcher");
+    let retained = std::collections::BTreeMap::from([
+        ("launcher".to_owned(), launcher.clone()),
+        ("supervisor".to_owned(), supervisor.clone()),
+    ]);
+    let field = ryeos_external_execution::restoration_verifier_delivery::CONSUMER_EVIDENCE_ARCHIVE_MEMBERS_FIELD;
+    let matching = json!({ field: { "launcher": launcher, "supervisor": supervisor } });
+    require_evidence_member_digests(&matching, &retained).unwrap();
+
+    let swapped =
+        json!({ field: { "launcher": lillux::sha256_hex(b"other"), "supervisor": supervisor } });
+    assert!(require_evidence_member_digests(&swapped, &retained).is_err());
+    let missing = json!({ field: { "supervisor": supervisor } });
+    assert!(require_evidence_member_digests(&missing, &retained).is_err());
+    let extra = json!({ field: { "launcher": launcher, "supervisor": supervisor, "planted": lillux::sha256_hex(b"planted") } });
+    assert!(require_evidence_member_digests(&extra, &retained).is_err());
+    assert!(require_evidence_member_digests(&json!({}), &retained).is_err());
+    let malformed = json!({ field: { "launcher": "not-a-digest", "supervisor": supervisor } });
+    assert!(require_evidence_member_digests(&malformed, &retained).is_err());
+    assert!(require_evidence_member_digests(&json!({ field: [] }), &retained).is_err());
+    // No members retained: evidence naming none, or an empty map, is exact.
+    let none = std::collections::BTreeMap::new();
+    require_evidence_member_digests(&json!({}), &none).unwrap();
+    require_evidence_member_digests(&json!({ field: {} }), &none).unwrap();
+    assert!(require_evidence_member_digests(&matching, &none).is_err());
+}

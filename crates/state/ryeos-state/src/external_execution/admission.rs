@@ -657,19 +657,56 @@ impl ExternalCandidateRequirement {
         content: &crate::objects::RetainedExternalRuntimeContentQualification,
         qualification_use: &ExternalCandidateQualificationUse,
     ) -> Result<AdmittedExternalCandidateProgram> {
+        content.validate()?;
+        self.resolve_for_content_evidence(
+            &content.activation_ref,
+            &content.coordinate_id,
+            &content.attestation_hash,
+            &content.evidence,
+            qualification_use,
+        )
+    }
+
+    /// Resolve the admitted program from published content qualification
+    /// evidence alone. No retained session record is needed, so a caller that
+    /// holds only the activation coordinate and the evidence derives exactly
+    /// the program a launch derives from the retained record.
+    pub fn resolve_for_content_evidence(
+        &self,
+        activation_ref: &str,
+        coordinate_id: &str,
+        attestation_hash: &str,
+        evidence: &crate::external_content::qualification_evidence::ContentQualificationEvidence,
+        qualification_use: &ExternalCandidateQualificationUse,
+    ) -> Result<AdmittedExternalCandidateProgram> {
         self.validate()?;
         ensure!(
             self.runtime_authority == ExternalCandidateRuntimeAuthority::ActivatedContent,
             "product runtime requirement cannot resolve from acquired content"
         );
-        content.validate()?;
+        super::hash(coordinate_id)?;
+        super::hash(attestation_hash)?;
+        crate::external_content::products::validate_canonical_unsuffixed_ref(
+            "content runtime activation ref",
+            activation_ref,
+        )?;
+        ensure!(
+            activation_ref.starts_with("config:"),
+            "content runtime requires an activation config ref"
+        );
+        evidence.validate()?;
+        ensure!(
+            crate::external_content::qualification_publication::coordinate_id(evidence)?
+                == coordinate_id,
+            "content runtime coordinate differs from its exact testimony"
+        );
         qualification_use.validate()?;
         ensure!(
             qualification_use.requirement_digest == self.qualification_requirement_digest()?,
             "content-backed qualification use differs from its requirement"
         );
         let crate::external_content::qualification_purpose::QualificationSubject::ActivatedContent { content: subject } =
-            &content.evidence.purpose.subject else {
+            &evidence.purpose.subject else {
                 anyhow::bail!("content-backed runtime requires an activated source");
             };
         ensure!(
@@ -684,18 +721,18 @@ impl ExternalCandidateRequirement {
             runtime_manifest_hash: subject.manifest_hash.clone(),
             runtime_source: ExternalCandidateRuntimeSource::ActivatedContent {
                 subject: subject.clone(),
-                qualification_coordinate_id: content.coordinate_id.clone(),
+                qualification_coordinate_id: coordinate_id.to_owned(),
             },
-            qualification_attestation_hash: content.attestation_hash.clone(),
+            qualification_attestation_hash: attestation_hash.to_owned(),
             selection_identity_digest: canonical_value_digest(&serde_json::json!({
                 "domain": "ryeos.external_candidate.content_selection.v1",
-                "activation_ref": content.activation_ref,
-                "purpose": content.evidence.purpose,
-                "coordinate": content.coordinate_id,
+                "activation_ref": activation_ref,
+                "purpose": evidence.purpose,
+                "coordinate": coordinate_id,
             }))?,
             runtime_recipe_digest: self.runtime_recipe.digest()?,
         };
-        program.require_content_qualification(&content.evidence)?;
+        program.require_content_qualification(evidence)?;
         Ok(program)
     }
 }
@@ -1831,6 +1868,7 @@ pub mod test_support {
             )?,
             attestation_hash: "7".repeat(64),
             evidence,
+            remote_testimony: None,
         };
         capsule.external_candidate =
             Some(requirement.resolve_for_content(&retained, &use_context)?);
@@ -3344,6 +3382,53 @@ mod tests {
     }
 
     #[test]
+    fn content_evidence_resolution_matches_the_retained_resolution() {
+        let capsule = test_support::content_candidate_capsule(&"a".repeat(64)).unwrap();
+        let program = capsule.external_candidate.as_ref().unwrap();
+        let retained = capsule
+            .retained_external_runtime_content_qualification
+            .as_ref()
+            .unwrap();
+        let direct = program
+            .requirement
+            .resolve_for_content_evidence(
+                &retained.activation_ref,
+                &retained.coordinate_id,
+                &retained.attestation_hash,
+                &retained.evidence,
+                &program.qualification_use,
+            )
+            .unwrap();
+        let through_retained = program
+            .requirement
+            .resolve_for_content(retained, &program.qualification_use)
+            .unwrap();
+        assert_eq!(direct, through_retained);
+        assert_eq!(&direct, program);
+    }
+
+    #[test]
+    fn content_evidence_resolution_refuses_a_different_coordinate() {
+        let capsule = test_support::content_candidate_capsule(&"a".repeat(64)).unwrap();
+        let program = capsule.external_candidate.as_ref().unwrap();
+        let retained = capsule
+            .retained_external_runtime_content_qualification
+            .as_ref()
+            .unwrap();
+        let error = program
+            .requirement
+            .resolve_for_content_evidence(
+                &retained.activation_ref,
+                &"9".repeat(64),
+                &retained.attestation_hash,
+                &retained.evidence,
+                &program.qualification_use,
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("coordinate differs"));
+    }
+
+    #[test]
     fn composed_test_support_builds_a_valid_qualified_capsule() {
         let capsule =
             test_support::qualified_external_candidate_capsule(requirement(), &"a".repeat(64))
@@ -3389,6 +3474,42 @@ mod tests {
             let mut wire = serde_json::to_value(requirement()).unwrap();
             wire[field] = serde_json::json!("unexpected");
             assert!(serde_json::from_value::<ExternalCandidateRequirement>(wire).is_err());
+        }
+    }
+    #[test]
+    fn external_program_requires_each_of_the_five_relationship_claims() {
+        assert_eq!(REQUIRED_CLAIMS.len(), 5);
+        assert!(REQUIRED_CLAIMS.windows(2).all(|pair| pair[0] < pair[1]));
+        let requirement = requirement();
+        let qualification_use = test_support::fixture_qualification_use(&requirement).unwrap();
+        let exact = selections();
+        let carried: Vec<String> = exact
+            .get(&requirement.runtime_product_declaration_id)
+            .unwrap()
+            .relationship
+            .qualification
+            .required_claims
+            .clone();
+        assert_eq!(carried, REQUIRED_CLAIMS);
+        requirement
+            .resolve_for_use(Some(&exact), &qualification_use)
+            .unwrap();
+        for (omitted, omitted_claim) in REQUIRED_CLAIMS.iter().enumerate() {
+            let mut fewer = exact.clone().into_inner();
+            fewer
+                .get_mut(&requirement.runtime_product_declaration_id)
+                .unwrap()
+                .relationship
+                .qualification
+                .required_claims
+                .remove(omitted);
+            let fewer = ResolvedExternalProductSelections::new(fewer).unwrap();
+            assert!(
+                requirement
+                    .resolve_for_use(Some(&fewer), &qualification_use)
+                    .is_err(),
+                "relationship without {omitted_claim} was admitted"
+            );
         }
     }
 }

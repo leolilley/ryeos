@@ -357,6 +357,7 @@ fn install_bundle_engine(
     let import_policy = ExternalContentImportPolicyRecord {
         schema: 1,
         roots,
+        declared_roots: std::collections::BTreeMap::new(),
         limits: ExternalContentImportLimits {
             max_depth: 8,
             max_entries: 16,

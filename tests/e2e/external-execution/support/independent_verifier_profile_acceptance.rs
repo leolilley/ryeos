@@ -243,8 +243,10 @@ fn two_signed_profiles_share_the_observation_pipeline_and_refuse_substitution() 
         let policy =
             ProductQualificationPolicy::from_value(&policy_wire["product_qualification_policy"])
                 .unwrap();
-        let recipe_ref =
-            &policy.producer_scenarios[&authored.profile.producer_scenario_id].recipe_ref;
+        let recipe_ref = policy.producer_scenarios[&authored.profile.producer_scenario_id]
+            .recipe_ref
+            .as_deref()
+            .expect("a recipe-backed scenario names its recipe");
         let recipe_path = format!(
             ".ai/config/{}.yaml",
             recipe_ref.strip_prefix("config:").unwrap()

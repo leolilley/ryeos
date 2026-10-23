@@ -3,7 +3,7 @@ category: ryeos-runtime
 version: 1.0.0
 description: Static GNU-first closure and selected GNU Python ABI policy for a projected user driver.
 product_qualification_policy:
-  schema: ryeos.product_qualification_policy.v4
+  schema: ryeos.product_qualification_policy.v5
   verifier_ref: tool:local-inference/gnu-cuda-driver-qualification/verify
   subject_declaration_id: subject
   allowed_claims: [gnu_user_driver_static_closure_v1]

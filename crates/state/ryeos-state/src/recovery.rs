@@ -1062,6 +1062,12 @@ pub struct DurableCasUploadStage {
 }
 
 impl DurableCasUploadStage {
+    /// The publication the stage was begun for. A caller that admits bytes
+    /// into a tier only for one kind of publication reads the kind here.
+    pub fn publication_key(&self) -> &DurableCasPublicationKey {
+        &self.record.publication_key
+    }
+
     fn persist_record(&self, record: &DurableCasUploadRecord) -> Result<()> {
         ensure_staging_publication_certain(&self.publication_uncertain)?;
         let bytes = encode_durable_upload(record)?;
@@ -1255,6 +1261,30 @@ impl DurableCasUploadStage {
         self.protect_blob_hash_admitted(expected_hash)?;
         parts.remove_if_same(std::ffi::OsStr::new(expected_hash), &completed_part)?;
         Ok(true)
+    }
+
+    /// Append one write to a principal-bound durable large-object upload. The
+    /// large-object store verifies every byte against the declared trail; the
+    /// object's hash becomes a protected publication root from the first
+    /// accepted write, and again when the object completes or is already
+    /// resident.
+    pub fn store_large_object_chunk(
+        &mut self,
+        cas_mutation_guard: &CasMutationGuard,
+        store: &crate::large_object_store::LargeObjectStore,
+        file_sha256: &str,
+        expect: &crate::large_object_store::LargeObjectExpectation,
+        offset: u64,
+        bytes: &[u8],
+    ) -> Result<crate::large_object_store::StageProgress> {
+        self.ensure_active()?;
+        validate_hash("durable staged large object", file_sha256)?;
+        self.recovery.ensure_guard(cas_mutation_guard)?;
+        let progress = store.stage_chunk(file_sha256, expect, offset, bytes)?;
+        if offset == 0 || progress.complete {
+            self.protect_large_object_hash(cas_mutation_guard, file_sha256)?;
+        }
+        Ok(progress)
     }
 
     pub fn ensure_protects_object(&self, hash: &str) -> Result<()> {
@@ -5490,5 +5520,82 @@ mod tests {
 
         let exclusive = CasMutationGuard::acquire_exclusive(temp.path()).unwrap();
         drop(exclusive);
+    }
+
+    #[test]
+    fn durable_stage_protects_a_large_object_from_its_first_chunk() {
+        let temp = tempfile::tempdir().unwrap();
+        let recovery = RecoveryStore::from_runtime_state_dir(temp.path()).unwrap();
+        CasMutationGuard::ensure_anchor(temp.path()).unwrap();
+        let large_root = temp.path().join("large-root");
+        fs::create_dir_all(&large_root).unwrap();
+        let runtime = lillux::PinnedDirectory::open_or_create(&large_root).unwrap();
+        let mib = 1024_u64 * 1024;
+        let large =
+            crate::large_object_store::LargeObjectStore::open_with_chunk_bytes(&runtime, mib)
+                .unwrap();
+
+        let bytes: Vec<u8> = (0..(2 * mib as usize + 99))
+            .map(|i| (i.wrapping_mul(17) ^ (i >> 11)) as u8)
+            .collect();
+        let file_sha256 = lillux::sha256_hex(&bytes);
+        let chunk_hashes = bytes
+            .chunks(mib as usize)
+            .map(lillux::sha256_hex)
+            .collect::<Vec<_>>();
+        let expect = crate::large_object_store::LargeObjectExpectation {
+            size: bytes.len() as u64,
+            chunk_size: mib,
+            chunk_hashes,
+        };
+
+        let guard = CasMutationGuard::acquire_existing_shared_in_pinned_runtime(
+            recovery.runtime_directory(),
+        )
+        .unwrap();
+        let key = DurableCasPublicationKey::external_content_import(&hash("a")).unwrap();
+        let mut stage = recovery
+            .begin_durable_cas_upload_admitted(&guard, &hash("c"), "large-import", &key, None)
+            .unwrap();
+        let staging_id = stage.staging_id().to_owned();
+        let first = mib as usize;
+        let progress = stage
+            .store_large_object_chunk(&guard, &large, &file_sha256, &expect, 0, &bytes[..first])
+            .unwrap();
+        assert!(!progress.complete);
+        assert!(stage.protected_large_object_hashes().contains(&file_sha256));
+        drop(stage);
+
+        let mut reopened = recovery
+            .open_durable_cas_upload_admitted(&guard, &staging_id, &hash("c"))
+            .unwrap();
+        assert!(
+            reopened
+                .protected_large_object_hashes()
+                .contains(&file_sha256)
+        );
+        let progress = reopened
+            .store_large_object_chunk(
+                &guard,
+                &large,
+                &file_sha256,
+                &expect,
+                first as u64,
+                &bytes[first..],
+            )
+            .unwrap();
+        assert!(progress.complete);
+        assert!(
+            reopened
+                .protected_large_object_hashes()
+                .contains(&file_sha256)
+        );
+        drop(reopened);
+
+        let roots = recovery.inspect_staged_cas_root_hashes_read_only().unwrap();
+        assert_eq!(roots.large_object_hashes, vec![file_sha256.clone()]);
+        large
+            .verify_resident_object(&file_sha256, bytes.len() as u64)
+            .unwrap();
     }
 }

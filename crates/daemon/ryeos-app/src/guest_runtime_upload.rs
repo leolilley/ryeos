@@ -76,16 +76,38 @@ impl GuestRuntimeUploadBinding {
         let product = match basis {
             GuestRuntimeBasis::Ordinary => {
                 let qualification = ordinary_runtime_qualification(contract)?;
-                let witness =
-                    crate::operator_external_content::product_qualification::verify_current_external_runtime_qualification(
-                        &self.state,
-                        qualification,
-                        &contract.guest_runtime_manifest_hash,
-                    )?;
+                // A remote testimony names the receiver's own received-product
+                // source; the origin's evidence names its local capture.
+                let (witness_hash, witness_source) = if qualification.remote_testimony.is_some() {
+                    let remote =
+                        crate::operator_external_content::qualification_testimony::verify_current_remote_runtime_testimony(
+                            &self.state,
+                            qualification,
+                            &contract.guest_runtime_manifest_hash,
+                        )?;
+                    (
+                        remote.evidence.product_witness_hash,
+                        remote
+                            .acceptance
+                            .product_source
+                            .context("remote product acceptance has no received product source")?,
+                    )
+                } else {
+                    let witness =
+                        crate::operator_external_content::product_qualification::verify_current_external_runtime_qualification(
+                            &self.state,
+                            qualification,
+                            &contract.guest_runtime_manifest_hash,
+                        )?;
+                    (
+                        witness.evidence.product_witness_hash,
+                        witness.evidence.witness_source,
+                    )
+                };
                 RuntimeProduct {
                     owner_principal: qualification.owner_principal.clone(),
-                    witness_hash: witness.evidence.product_witness_hash.clone(),
-                    witness_source: witness.evidence.witness_source.clone(),
+                    witness_hash,
+                    witness_source,
                 }
             }
             GuestRuntimeBasis::QualificationCandidate(root) => {

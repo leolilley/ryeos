@@ -42,9 +42,16 @@ pub const MAX_LIFECYCLE_REQUEST_BYTES: usize = 256 * 1024;
 pub const MAX_LIFECYCLE_PROVIDER_SPEC_BYTES: u64 = 256 * 1024;
 pub const MAX_GUEST_INPUT_PROJECTION_BYTES: usize = 192 * 1024;
 pub const EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA: u32 = 5;
-/// Core mechanism claims selected in a signed guest product relationship and
-/// verified through its existing qualification witness and offline probe.
-/// These identifiers alone are not admission or runtime evidence.
+/// Schema version of the candidate launcher spec the launcher accepts and the
+/// supervisor-to-launcher exchange speaks. Writers and checkers of the spec
+/// both use this one constant, so a pinned claim about launcher version four
+/// cannot drift from the bytes actually produced.
+pub const EXTERNAL_CANDIDATE_LAUNCHER_SPEC_SCHEMA: u32 = 4;
+/// Core mechanism claims a signed guest product relationship may require. The
+/// controller refuses ordinary external execution unless the selected
+/// qualification names them and a current attestation carries them. These
+/// identifiers alone are not admission or runtime evidence, and no shipped
+/// qualification verifier emits any of them yet.
 pub const GUEST_WIRE_SUPPORT_CLAIM: &str = "external_guest_inputs_v5_launcher_v4";
 pub const DIRECT_PROGRAM_SUPPORT_CLAIM: &str = "external_direct_program_v3";
 pub const CAPTURED_INPUTS_SUPPORT_CLAIM: &str = "external_direct_captured_inputs_v1";

@@ -10,6 +10,102 @@ use std::io::{Read, Write};
 pub const CONSUMER_INPUT_RECORD_NAME: &str = "consumer-input.json";
 pub const CONSUMER_INPUT_RECORD_MODE: u32 = 0o400;
 pub const CONSUMER_VERIFIER_MODE: u32 = 0o500;
+/// Mode of every extra executable shipped beside the verifier.
+pub const CONSUMER_ARCHIVE_MEMBER_MODE: u32 = 0o500;
+
+/// Field of a probe verifier's evidence that maps each extra archive member
+/// name to the sha256 of the bytes the guest was handed. The controller
+/// compares it with the digests the retained signed source recorded.
+pub const CONSUMER_EVIDENCE_ARCHIVE_MEMBERS_FIELD: &str = "archive_member_digests";
+
+/// One extra executable a probe delivery ships beside the verifier. The
+/// descriptor is sealed data on the controller; `sha256` is the digest the
+/// signed source retained for this member, checked against the bytes here.
+#[derive(Clone)]
+pub struct ConsumerArchiveMember {
+    pub bytes: u64,
+    pub sha256: String,
+    pub descriptor: lillux::InheritedDescriptorAuthority,
+}
+
+/// Render the accepted probe input, the selected verifier executable and the
+/// signed archive members as exact archive entries. A probe has no retained
+/// product inventory: the subject is already present in the restored guest.
+/// Member names and digests come only from the retained signed source, never
+/// from the caller; every packed member's sha256 is recorded in its entry.
+pub fn prepare_probe_delivery_records(
+    record: &ryeos_state::external_content::qualification_consumer_record::RemoteProbeInputRecord,
+    verifier: &lillux::InheritedDescriptorAuthority,
+    members: &std::collections::BTreeMap<String, ConsumerArchiveMember>,
+) -> Result<ConsumerProductInventory> {
+    use ryeos_external_execution_contract::restored_runtime_measurement::{
+        CONSUMER_VERIFIER_REMOTE_NAME, MAX_RESTORATION_VERIFIER_BYTES,
+    };
+    let bytes = record.canonical_bytes()?;
+    let selected = record
+        .purpose
+        .remote_verifier_sources
+        .get(&record.coordinate.scenario_id)
+        .ok_or_else(|| anyhow::anyhow!("probe delivery has no retained verifier source"))?;
+    let observation = verifier.regular_file_observation()?;
+    ensure!(
+        observation.size() > 0
+            && observation.size() == selected.payload_bytes
+            && observation.size() <= MAX_RESTORATION_VERIFIER_BYTES
+            && verifier.digest_regular_file_stable_exact(&observation)?
+                == record.selection.verifier_artifact_hash,
+        "probe verifier payload differs from accepted selection"
+    );
+    ensure!(
+        members.keys().eq(selected.selection.archive_members.keys()),
+        "probe delivery members differ from the signed archive member set"
+    );
+    let member_bytes = require_probe_members(&selected.archive_member_digests, members)?;
+    let total = observation
+        .size()
+        .checked_add(bytes.len() as u64)
+        .and_then(|total| total.checked_add(member_bytes))
+        .ok_or_else(|| anyhow::anyhow!("probe delivery byte total overflow"))?;
+    ensure!(
+        record.selection.archive_budget.maximum_entries >= 2 + members.len()
+            && total <= record.selection.archive_budget.maximum_regular_bytes,
+        "probe delivery records exceed protected archive budget"
+    );
+    let record_hash = lillux::sha256_hex(&bytes);
+    let sealed =
+        lillux::sealed_memfd(c"probe-accepted-input", &bytes).map_err(anyhow::Error::msg)?;
+    let mut entries = vec![
+        GuestStagingEntry::RegularFile {
+            path: CONSUMER_INPUT_RECORD_NAME.into(),
+            mode: CONSUMER_INPUT_RECORD_MODE,
+            bytes: bytes.len() as u64,
+            sha256: record_hash,
+        },
+        GuestStagingEntry::RegularFile {
+            path: CONSUMER_VERIFIER_REMOTE_NAME.into(),
+            mode: CONSUMER_VERIFIER_MODE,
+            bytes: observation.size(),
+            sha256: record.selection.verifier_artifact_hash.clone(),
+        },
+    ];
+    let mut descriptors = std::collections::BTreeMap::from([
+        (CONSUMER_INPUT_RECORD_NAME.to_owned(), sealed),
+        (CONSUMER_VERIFIER_REMOTE_NAME.to_owned(), verifier.clone()),
+    ]);
+    for (name, member) in members {
+        entries.push(GuestStagingEntry::RegularFile {
+            path: name.clone(),
+            mode: CONSUMER_ARCHIVE_MEMBER_MODE,
+            bytes: member.bytes,
+            sha256: member.sha256.clone(),
+        });
+        descriptors.insert(name.clone(), member.descriptor.clone());
+    }
+    Ok(ConsumerProductInventory {
+        entries,
+        descriptors,
+    })
+}
 
 /// Render the protocol-neutral accepted input and selected executable as two
 /// exact archive members. The caller adds the retained product inventory and
@@ -67,6 +163,38 @@ pub fn prepare_consumer_delivery_records(
             (CONSUMER_VERIFIER_REMOTE_NAME.into(), verifier.clone()),
         ]),
     })
+}
+
+/// Every member must be present exactly as the retained source recorded it:
+/// same names, same bytes, same digest. Returns the members' byte total.
+fn require_probe_members(
+    retained: &std::collections::BTreeMap<String, String>,
+    members: &std::collections::BTreeMap<String, ConsumerArchiveMember>,
+) -> Result<u64> {
+    ensure!(
+        members.keys().eq(retained.keys()),
+        "probe delivery members differ from the retained member digests"
+    );
+    let mut total = 0u64;
+    for (name, member) in members {
+        let digest = &retained[name];
+        let observation = member.descriptor.regular_file_observation()?;
+        ensure!(
+            member.bytes > 0
+                && member.bytes == observation.size()
+                && member.bytes <= MAX_RESTORATION_VERIFIER_BYTES
+                && &member.sha256 == digest
+                && member
+                    .descriptor
+                    .digest_regular_file_stable_exact(&observation)?
+                    == *digest,
+            "probe archive member differs from its retained digest"
+        );
+        total = total
+            .checked_add(member.bytes)
+            .ok_or_else(|| anyhow::anyhow!("probe delivery byte total overflow"))?;
+    }
+    Ok(total)
 }
 
 /// Point-verified product bytes and manifests for consumer packaging. Source
@@ -281,6 +409,8 @@ pub struct PreparedConsumerArchive {
     // Captured only after the archive writer has verified member bytes.
     verifier_member: Option<GuestStagingEntry>,
     input_record_member: Option<GuestStagingEntry>,
+    // Top-level extra executables with the sha256 recorded as each was packed.
+    archive_members: std::collections::BTreeMap<String, String>,
     discarded: bool,
 }
 
@@ -291,8 +421,19 @@ impl PreparedConsumerArchive {
         &self,
         record: &ryeos_state::external_content::qualification_consumer_record::ConsumerInputRecord,
     ) -> Result<()> {
-        let bytes = record.canonical_bytes()?;
-        let hash = lillux::sha256_hex(&bytes);
+        self.require_input_record_bytes(&record.canonical_bytes()?)
+    }
+
+    /// Probe variant of `require_consumer_input_record`.
+    pub fn require_probe_input_record(
+        &self,
+        record: &ryeos_state::external_content::qualification_consumer_record::RemoteProbeInputRecord,
+    ) -> Result<()> {
+        self.require_input_record_bytes(&record.canonical_bytes()?)
+    }
+
+    fn require_input_record_bytes(&self, bytes: &[u8]) -> Result<()> {
+        let hash = lillux::sha256_hex(bytes);
         ensure!(
             matches!(&self.input_record_member,
                 Some(GuestStagingEntry::RegularFile { path, mode, bytes: member_bytes, sha256 })
@@ -302,6 +443,19 @@ impl PreparedConsumerArchive {
         );
         Ok(())
     }
+    /// Bind the extra packed executables to the digests the retained signed
+    /// source recorded: same names, same bytes, nothing added or missing.
+    pub fn require_archive_members(
+        &self,
+        expected: &std::collections::BTreeMap<String, String>,
+    ) -> Result<()> {
+        ensure!(
+            &self.archive_members == expected,
+            "consumer archive members differ from the retained member digests"
+        );
+        Ok(())
+    }
+
     /// Bind transported executable bytes to the authenticated product-edge
     /// selection. A matching whole-archive digest alone cannot establish this.
     pub fn require_verifier_selection(
@@ -450,6 +604,20 @@ pub fn prepare_private_consumer_archive(
                 .iter()
                 .find(|entry| entry.path() == CONSUMER_INPUT_RECORD_NAME)
                 .cloned(),
+            archive_members: entries
+                .iter()
+                .filter_map(|entry| match entry {
+                    GuestStagingEntry::RegularFile {
+                        path, mode, sha256, ..
+                    } if *mode == CONSUMER_ARCHIVE_MEMBER_MODE
+                        && !path.contains('/')
+                        && path != CONSUMER_VERIFIER_REMOTE_NAME =>
+                    {
+                        Some((path.clone(), sha256.clone()))
+                    }
+                    _ => None,
+                })
+                .collect(),
             discarded: false,
         }),
         Err(error) => {
@@ -904,6 +1072,96 @@ mod tests {
             archive.discard().unwrap();
         }
         assert!(parent.entries_no_follow_bounded(1).unwrap().is_empty());
+    }
+
+    #[test]
+    fn consumer_archive_records_each_packed_member_digest_and_refuses_drift() {
+        use ryeos_external_execution_contract::restored_runtime_measurement::ConsumerArchiveBudget;
+        let temporary = tempfile::tempdir().unwrap();
+        let parent = lillux::PinnedDirectory::open(temporary.path())
+            .unwrap()
+            .unwrap();
+        let (_, parent) = parent
+            .create_unique_child("archive-member-fixture", 0o700)
+            .unwrap();
+        let verifier = lillux::sealed_memfd(c"member-verifier", b"verifier").unwrap();
+        let supervisor = lillux::sealed_memfd(c"member-supervisor", b"supervisor").unwrap();
+        let launcher = lillux::sealed_memfd(c"member-launcher", b"launcher").unwrap();
+        let entry = |path: &str, bytes: &[u8]| GuestStagingEntry::RegularFile {
+            path: path.into(),
+            mode: 0o500,
+            bytes: bytes.len() as u64,
+            sha256: lillux::sha256_hex(bytes),
+        };
+        let entries = [
+            entry(CONSUMER_VERIFIER_REMOTE_NAME, b"verifier"),
+            entry("supervisor", b"supervisor"),
+            entry("launcher", b"launcher"),
+        ];
+        let descriptors = std::collections::BTreeMap::from([
+            (CONSUMER_VERIFIER_REMOTE_NAME, &verifier),
+            ("supervisor", &supervisor),
+            ("launcher", &launcher),
+        ]);
+        let archive = prepare_private_consumer_archive(
+            &parent,
+            &entries,
+            &descriptors,
+            &ConsumerArchiveBudget::new(8, 64, 65536).unwrap(),
+            lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(10)),
+        )
+        .unwrap();
+        let expected = std::collections::BTreeMap::from([
+            ("supervisor".to_owned(), lillux::sha256_hex(b"supervisor")),
+            ("launcher".to_owned(), lillux::sha256_hex(b"launcher")),
+        ]);
+        archive.require_archive_members(&expected).unwrap();
+        let mut changed = expected.clone();
+        changed.insert("launcher".into(), lillux::sha256_hex(b"other"));
+        assert!(archive.require_archive_members(&changed).is_err());
+        let mut missing = expected.clone();
+        missing.remove("supervisor");
+        assert!(archive.require_archive_members(&missing).is_err());
+        let mut extra = expected;
+        extra.insert("planted".into(), lillux::sha256_hex(b"planted"));
+        assert!(archive.require_archive_members(&extra).is_err());
+        archive.discard().unwrap();
+    }
+
+    #[test]
+    fn probe_members_must_match_their_retained_digests() {
+        let member = |bytes: &[u8]| ConsumerArchiveMember {
+            bytes: bytes.len() as u64,
+            sha256: lillux::sha256_hex(bytes),
+            descriptor: lillux::sealed_memfd(c"probe-member-fixture", bytes).unwrap(),
+        };
+        let retained = std::collections::BTreeMap::from([
+            ("launcher".to_owned(), lillux::sha256_hex(b"launcher")),
+            ("supervisor".to_owned(), lillux::sha256_hex(b"supervisor")),
+        ]);
+        let members = std::collections::BTreeMap::from([
+            ("launcher".to_owned(), member(b"launcher")),
+            ("supervisor".to_owned(), member(b"supervisor")),
+        ]);
+        assert_eq!(require_probe_members(&retained, &members).unwrap(), 8 + 10);
+        // Bytes that differ from the retained digest are refused even when the
+        // member's own claimed digest is consistent with them.
+        let mut substituted = members.clone();
+        substituted.insert("launcher".into(), member(b"other-launcher"));
+        assert!(require_probe_members(&retained, &substituted).is_err());
+        // A member whose claimed digest disagrees with its descriptor.
+        let mut lying = members.clone();
+        lying.get_mut("launcher").unwrap().sha256 = lillux::sha256_hex(b"launcher");
+        lying.get_mut("launcher").unwrap().descriptor =
+            lillux::sealed_memfd(c"probe-member-fixture", b"swapped!").unwrap();
+        lying.get_mut("launcher").unwrap().bytes = 8;
+        assert!(require_probe_members(&retained, &lying).is_err());
+        let mut missing = members.clone();
+        missing.remove("supervisor");
+        assert!(require_probe_members(&retained, &missing).is_err());
+        let mut extra = members;
+        extra.insert("planted".into(), member(b"planted"));
+        assert!(require_probe_members(&retained, &extra).is_err());
     }
 
     #[test]

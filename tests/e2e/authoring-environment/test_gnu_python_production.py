@@ -530,7 +530,7 @@ class GnuPythonProductionTests(unittest.TestCase):
         })
         policy = yaml.safe_load(POLICY_PATH.read_text())["product_qualification_policy"]
         self.assertEqual(policy, {
-            "schema": "ryeos.product_qualification_policy.v4",
+            "schema": "ryeos.product_qualification_policy.v5",
             "verifier_ref": "tool:ryeos/environments/qualification/gnu-python",
             "subject_declaration_id": "subject",
             "allowed_claims": ["gnu_python_extension_startup_providers_v1",

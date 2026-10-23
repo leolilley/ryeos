@@ -540,7 +540,8 @@ pub(crate) mod tests {
         purpose.policy_source.policy.producer_scenarios.insert(
             "direct_codex".into(),
             ProductQualificationProducerScenario {
-                recipe_ref: "config:codex/direct-probe".into(),
+                recipe_ref: Some("config:codex/direct-probe".into()),
+                remote_probe_input: None,
                 remote_verifier: None,
                 consumer_worker_request: None,
             },
@@ -665,6 +666,7 @@ pub(crate) mod tests {
         let selection = ProductQualificationRemoteVerifierSelection {
             binary_ref: "bin:fixtures/consumer-verifier".into(),
             guest_target_triple: "x86_64-unknown-linux-musl".into(),
+            archive_members: BTreeMap::new(),
         };
         let producer_source = ProductProducerRecipeSourceIdentity {
             bundle_generation_identity: "generation-1".into(),
@@ -675,18 +677,20 @@ pub(crate) mod tests {
             recipe_digest: "c".repeat(64),
         };
         let scenario = ProductQualificationProducerScenario {
-            recipe_ref: producer_source.canonical_ref.clone(),
+            recipe_ref: Some(producer_source.canonical_ref.clone()),
+            remote_probe_input: None,
             remote_verifier: Some(selection.clone()),
             consumer_worker_request: None,
         };
         let source = QualificationRemoteVerifierSource {
             policy_resolution_blob_hash: "1".repeat(64),
-            recipe_resolution_blob_hash: "2".repeat(64),
+            recipe_resolution_blob_hash: Some("2".repeat(64)),
             scenario_source_digest: scenario
-                .remote_verifier_source_digest(&producer_source)
+                .remote_verifier_source_digest(Some(&producer_source))
                 .unwrap(),
             selection,
-            producer_source: producer_source.clone(),
+            producer_source: Some(producer_source.clone()),
+            remote_probe_input: None,
             payload_bytes: 1024,
             payload_mode: 0o755,
             signed_items: vec![
@@ -739,6 +743,7 @@ pub(crate) mod tests {
                 signed_sidecar_blob_hash: "5".repeat(64),
                 payload_blob_hash: "6".repeat(64),
             },
+            archive_member_digests: BTreeMap::new(),
         };
         policy
             .policy
@@ -831,8 +836,13 @@ pub(crate) mod tests {
             });
         purpose.policy_source = policy;
         purpose.required_claims = vec!["qualification_worker_command".into()];
-        purpose.producer_recipe_sources =
-            BTreeMap::from([("remote_codex".into(), source.producer_source.clone())]);
+        purpose.producer_recipe_sources = BTreeMap::from([(
+            "remote_codex".into(),
+            source
+                .producer_source
+                .clone()
+                .expect("fixture source names its producer"),
+        )]);
         purpose.remote_verifier_sources = BTreeMap::from([("remote_codex".into(), source)]);
         purpose.consumer_invocation = Some(ConsumerVerificationInputSelection {
             scenario_id: "remote_codex".into(),

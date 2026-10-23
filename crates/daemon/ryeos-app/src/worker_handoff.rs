@@ -1993,23 +1993,52 @@ pub mod test_support {
         pub total_handoff_recovery_ms: Option<u64>,
     }
 
+    /// What the host that ran the acceptance matrix could prove. A host
+    /// without qualified process scopes refuses every portable-worker launch,
+    /// so its report records that refusal and no measurements rather than
+    /// standing for a measurement it never made.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+    pub enum HandoffReportHost {
+        Qualified,
+        Unqualified { refusal: String },
+    }
+
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
     pub struct HandoffMeasurementReport {
         pub schema: String,
+        pub host: HandoffReportHost,
         pub records: Vec<HandoffMeasurementRecord>,
     }
 
     impl HandoffMeasurementReport {
         pub const MAX_RECORDS: usize = 128;
+        pub const MAX_REFUSAL_BYTES: usize = 8 * 1024;
         pub const MAX_ENCODED_BYTES: usize = 256 * 1024;
 
         pub fn validate(&self) -> Result<()> {
             if self.schema != "ryeos.worker_handoff_qualification_report.v1" {
                 anyhow::bail!("unknown worker handoff qualification report schema");
             }
-            if self.records.is_empty() || self.records.len() > Self::MAX_RECORDS {
-                anyhow::bail!("worker handoff qualification report has an invalid record count");
+            match &self.host {
+                HandoffReportHost::Qualified => {
+                    if self.records.is_empty() || self.records.len() > Self::MAX_RECORDS {
+                        anyhow::bail!(
+                            "worker handoff qualification report has an invalid record count"
+                        );
+                    }
+                }
+                HandoffReportHost::Unqualified { refusal } => {
+                    if refusal.is_empty() || refusal.len() > Self::MAX_REFUSAL_BYTES {
+                        anyhow::bail!(
+                            "unqualified-host handoff report refusal is empty or unbounded"
+                        );
+                    }
+                    if !self.records.is_empty() {
+                        anyhow::bail!("unqualified-host handoff report cannot carry measurements");
+                    }
+                }
             }
             for record in &self.records {
                 if record.schema != "ryeos.worker_handoff_qualification_record.v1" {
@@ -5257,10 +5286,12 @@ mod tests {
     fn qualification_measurement_report_is_bounded_and_canonical() {
         use crate::worker_handoff::test_support::{
             HandoffMeasurementRecord, HandoffMeasurementReport, HandoffObservedMeasurements,
+            HandoffReportHost,
         };
 
         let report = HandoffMeasurementReport {
             schema: "ryeos.worker_handoff_qualification_report.v1".into(),
+            host: HandoffReportHost::Qualified,
             records: vec![HandoffMeasurementRecord {
                 schema: "ryeos.worker_handoff_qualification_record.v1".into(),
                 case_id: "portable_success".into(),

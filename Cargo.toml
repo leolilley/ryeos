@@ -52,6 +52,7 @@ members = [
     "crates/tools/external-guest-occurrence-owner",
     "crates/tools/external-guest-runtime-producer",
     "crates/tools/external-guest-restoration-verifier",
+    "crates/tools/guest-wire-verifier",
     "crates/tools/codex-external-configuration",
     "crates/tools/codex-guest-runtime-producer",
     "crates/tools/codex-runtime-verifier",

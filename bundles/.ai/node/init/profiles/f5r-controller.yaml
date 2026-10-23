@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-21T01:58:27Z:25accfa25c979388d8b929fc8e2093b5339d400a717f2ae06bc47c15f71a0bf9:bBfrIhhVpq3h3Ov2CfLOSlrTcAZhuQE1kBGk2E1UnLfm65EoB3I+x1hVucYM77HadUBO1MF9h3XIBmNHzJpdDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-22T07:04:36Z:636813417439f36fc0a2eb7c951c498188d3ab6381ee5c1f00a264b78e71443f:+iJg/Lpl3XecxgtGGSBhU4o7FWx9vAHMdMfidaojy6+cxhn38fkbnfZvhWo3t81lk2CrGsNWiBxxOz60XVYhBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Controller of remote Codex authoring leases: runs the Codex app server
 # and the render-sandbox lease adapter, and runs no schedules.
 schema: 1
@@ -300,12 +300,14 @@ policies:
           proc_filesystem: empty
         hosted_enforced:
           # The `hosted` floor on a provider container whose kernel allows
-          # user, pid and mount namespaces (Render services do): the enforced
-          # backend proves them when it resolves at boot, and jobs that
-          # declare captured filesystem or isolated network authority run in
-          # the namespace sandbox. Guest product production needs exactly
-          # that lane. The host still has no qualified per-job process scopes,
-          # so Codex app servers keep the trusted direct process-group lane.
+          # user, pid and mount namespaces: the enforced backend proves them
+          # when it resolves at boot, and jobs that declare captured
+          # filesystem or isolated network authority run in the namespace
+          # sandbox. Render services refuse the backend's mount-propagation
+          # probe at boot, so this class admits there as policy but never
+          # resolves; guest product production stays on an operator node.
+          # The host still has no qualified per-job process scopes, so Codex
+          # app servers keep the trusted direct process-group lane.
           requires_capabilities: [{any_of: [accounting, residency:swap_absent]}, {name: recovery:enclosure_trusted_init, accept: [measured, trusted]}, storage:durable_root, {name: termination:enclosure_trusted_init, accept: [measured, trusted]}, {name: termination:process_group, accept: [trusted]}, time]
           process_scopes:
             mode: unconfigured
@@ -365,6 +367,13 @@ policies:
   external_content:
     schema: 1
     roots: {}
+    # A product root the operator stages guest products into. The profile
+    # names where it is; init proves what it is (device and inode) and writes
+    # that identity into the generation, so an import admits exactly this
+    # directory and nothing that later takes its place.
+    declared_roots:
+      products:
+        path: "{app_root}/imports/products"
     limits:
       max_depth: 8
       max_entries: 64

@@ -1,0 +1,29 @@
+# ryeos:signed:2026-10-23T01:20:17Z:fcc0dc45da9051352d44735d4f269f261b8e9b5a932b0e2b23d056b9483d01cf:Pjm1wDFj4TWTPfduUffl5x0fa+/gmr1GBDGfJDmsGKc0Ws65nnwBnhNPCNAanVhjI6VQyd9JFrpR43o12cEjBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [external-execution, admit-candidate-program]
+description: Derive the admitted candidate program and runtime content qualification binding for a published content qualification without writing state
+arguments:
+  - name: required_claims
+    kind: json
+    positional: 5
+    required: true
+    arity: one
+    description: Sorted unique claim names the binding will require of the published testimony; passed as --required-claims <json>
+  - name: remote_testimony
+    kind: json
+    positional: 6
+    required: false
+    arity: optional
+    description: JSON object naming the local acceptance (acceptance_hash, acceptance_policy_ref) of a remote content testimony; omit for a local content qualification. Passed as --remote-testimony <json>
+forms:
+  - slots:
+      - field: activation_ref
+      - field: coordinate_id
+      - field: attestation_hash
+      - field: runtime_manifest_hash
+help:
+  usage: ryeos external-execution admit-candidate-program <activation-ref> <coordinate-id> <attestation-hash> <runtime-manifest-hash> --required-claims <json> [--remote-testimony <json>]
+  examples:
+    - ryeos external-execution admit-candidate-program config:codex/external-authoring-activation <coordinate-id> <attestation-hash> <runtime-manifest-hash> --required-claims '["bounded_candidate_capture","candidate_only_execution"]'
+dispatch:
+  kind: execute_ref
+  execute: service:external-execution/admit-candidate-program

@@ -4,7 +4,7 @@
 //! host path, loosen capture exclusions, or increase a node storage budget.
 
 use std::collections::BTreeMap;
-use std::path::{Component, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context as _, bail};
@@ -15,13 +15,28 @@ use crate::node_policy::{ErasedNodePolicy, NodePolicyContext, NodePolicySection,
 
 pub const SECTION_NAME: &str = "external_content";
 
+/// Prefix a declared root path may start with to name a directory under the
+/// node's app root. It must be followed by `/` and a relative normalized path.
+pub const APP_ROOT_PLACEHOLDER: &str = "{app_root}";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExternalContentImportPolicyRecord {
     pub schema: u32,
     pub roots: BTreeMap<String, ExternalContentImportRoot>,
+    /// Roots a publisher names by path. Initialization measures each one and
+    /// moves it into `roots` with its filesystem identity.
+    #[serde(default)]
+    pub declared_roots: BTreeMap<String, ExternalContentImportRootDeclaration>,
     pub limits: ExternalContentImportLimits,
     pub managed_activation: ManagedExternalContentPolicy,
+}
+
+/// An import root named by path before its filesystem identity is measured.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalContentImportRootDeclaration {
+    pub path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -135,10 +150,140 @@ impl ExternalContentImportPolicyRecord {
                 bail!("external-content import root `{name}` has an invalid filesystem identity");
             }
         }
+        for (name, declaration) in &self.declared_roots {
+            validate_root_name(name)?;
+            declaration.validate(name)?;
+        }
         self.limits.validate()?;
         self.managed_activation.validate()?;
         Ok(())
     }
+}
+
+impl ExternalContentImportRootDeclaration {
+    fn validate(&self, name: &str) -> anyhow::Result<()> {
+        match self.app_root_relative() {
+            Some(relative) => {
+                if relative.is_empty()
+                    || relative
+                        .split('/')
+                        .any(|part| part.is_empty() || part == "." || part == "..")
+                {
+                    bail!(
+                        "declared external-content import root `{name}` must name a relative \
+                         normalized path after `{APP_ROOT_PLACEHOLDER}/`"
+                    );
+                }
+                Ok(())
+            }
+            None => {
+                let path = Path::new(&self.path);
+                if !path.is_absolute()
+                    || self.path.contains("//")
+                    || path.components().any(|component| {
+                        matches!(
+                            component,
+                            Component::ParentDir | Component::CurDir | Component::Prefix(_)
+                        )
+                    })
+                {
+                    bail!(
+                        "declared external-content import root `{name}` must be an absolute \
+                         normalized path or start with `{APP_ROOT_PLACEHOLDER}/`"
+                    );
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// The part after `{app_root}/`, when the declaration uses the placeholder.
+    fn app_root_relative(&self) -> Option<&str> {
+        self.path
+            .strip_prefix(APP_ROOT_PLACEHOLDER)
+            .and_then(|rest| rest.strip_prefix('/'))
+    }
+
+    fn resolve(&self, app_root: &Path) -> PathBuf {
+        match self.app_root_relative() {
+            Some(relative) => app_root.join(relative),
+            None => PathBuf::from(&self.path),
+        }
+    }
+}
+
+/// Measure every declared import root that is not yet admitted and return the
+/// policy body with the measured identities recorded in `roots`.
+///
+/// A placeholder path is created under `app_root` with private permissions,
+/// one pinned component at a time. An absolute path must already exist. A name
+/// already admitted for the same path is left alone; a different path is
+/// refused.
+pub fn admit_declared_roots(body: &Value, app_root: &Path) -> anyhow::Result<Value> {
+    if !app_root.is_absolute() {
+        bail!("external-content import roots are admitted against an absolute app root");
+    }
+    let mut record: ExternalContentImportPolicyRecord = serde_json::from_value(body.clone())
+        .context("parse external-content import policy for root admission")?;
+    record.validate()?;
+    let declarations = record.declared_roots.clone();
+    for (name, declaration) in &declarations {
+        let resolved = declaration.resolve(app_root);
+        if let Some(admitted) = record.roots.get(name) {
+            if admitted.path != resolved {
+                bail!(
+                    "external-content import root `{name}` is admitted at {} but declared at {}",
+                    admitted.path.display(),
+                    resolved.display()
+                );
+            }
+            continue;
+        }
+        let directory = match declaration.app_root_relative() {
+            Some(relative) => {
+                let mut directory = lillux::PinnedDirectory::open(app_root)
+                    .with_context(|| format!("open app root {}", app_root.display()))?
+                    .with_context(|| format!("app root {} is absent", app_root.display()))?;
+                for component in Path::new(relative).components() {
+                    directory = directory
+                        .open_or_create_child(component.as_os_str(), 0o700)
+                        .with_context(|| {
+                            format!(
+                                "create external-content import root `{name}` at {}",
+                                resolved.display()
+                            )
+                        })?;
+                }
+                directory
+            }
+            None => lillux::PinnedDirectory::open(&resolved)
+                .with_context(|| {
+                    format!(
+                        "open external-content import root `{name}` at {}",
+                        resolved.display()
+                    )
+                })?
+                .with_context(|| {
+                    format!(
+                        "external-content import root `{name}` names an absent directory {}",
+                        resolved.display()
+                    )
+                })?,
+        };
+        let (containing_device, root_inode) = directory
+            .device_inode()
+            .with_context(|| format!("measure external-content import root `{name}`"))?;
+        record.roots.insert(
+            name.clone(),
+            ExternalContentImportRoot {
+                path: resolved,
+                containing_device,
+                root_inode,
+            },
+        );
+    }
+    record.validate()?;
+    serde_json::to_value(&record).context("serialize admitted external-content import policy")
 }
 
 impl ExternalContentImportLimits {
@@ -265,6 +410,7 @@ mod tests {
                     root_inode: 1,
                 },
             )]),
+            declared_roots: BTreeMap::new(),
             limits: ExternalContentImportLimits {
                 max_depth: 8,
                 max_entries: 8,
@@ -324,5 +470,112 @@ mod tests {
         admitted.validate().unwrap();
         admitted.max_concurrent_activations = 2;
         assert!(admitted.validate().is_err());
+    }
+
+    fn declared_body(declared: serde_json::Value) -> Value {
+        serde_json::json!({
+            "schema": 1,
+            "roots": {},
+            "declared_roots": declared,
+            "limits": {
+                "max_depth": 8,
+                "max_entries": 8,
+                "max_file_bytes": 1024,
+                "max_total_bytes": 1024,
+                "store_budget_bytes": 2048,
+                "minimum_free_bytes": 1024
+            },
+            "managed_activation": {"enabled": false, "limits": null}
+        })
+    }
+
+    fn admitted_root(value: &Value, name: &str) -> ExternalContentImportRoot {
+        let record: ExternalContentImportPolicyRecord =
+            serde_json::from_value(value.clone()).unwrap();
+        record.roots.get(name).unwrap().clone()
+    }
+
+    #[test]
+    fn placeholder_declaration_is_created_and_admitted_with_measured_identity() {
+        let app_root = tempfile::tempdir().unwrap();
+        let body =
+            declared_body(serde_json::json!({"products": {"path": "{app_root}/imports/products"}}));
+        let admitted = admit_declared_roots(&body, app_root.path()).unwrap();
+        let root = admitted_root(&admitted, "products");
+        let expected = app_root.path().join("imports/products");
+        assert_eq!(root.path, expected);
+        let pinned = lillux::PinnedDirectory::open(&expected).unwrap().unwrap();
+        let (device, inode) = pinned.device_inode().unwrap();
+        assert_eq!((root.containing_device, root.root_inode), (device, inode));
+        assert!(root.containing_device != 0 && root.root_inode != 0);
+    }
+
+    #[test]
+    fn declarations_with_parent_components_or_no_anchor_are_refused() {
+        let app_root = tempfile::tempdir().unwrap();
+        for path in [
+            "{app_root}/../escape",
+            "{app_root}/a/./b",
+            "{app_root}/",
+            "{app_root}",
+            "{app_root}/a//b",
+            "imports/products",
+            "/srv/../etc",
+        ] {
+            let body = declared_body(serde_json::json!({"products": {"path": path}}));
+            assert!(
+                admit_declared_roots(&body, app_root.path()).is_err(),
+                "{path} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn absolute_declaration_naming_an_absent_directory_is_refused() {
+        let app_root = tempfile::tempdir().unwrap();
+        let absent = app_root.path().join("absent");
+        let body =
+            declared_body(serde_json::json!({"products": {"path": absent.to_string_lossy()}}));
+        let error = format!(
+            "{:#}",
+            admit_declared_roots(&body, app_root.path()).unwrap_err()
+        );
+        assert!(error.contains("absent directory"), "{error}");
+    }
+
+    #[test]
+    fn absolute_declaration_naming_an_existing_directory_is_admitted() {
+        let app_root = tempfile::tempdir().unwrap();
+        let existing = app_root.path().join("existing");
+        std::fs::create_dir(&existing).unwrap();
+        let body =
+            declared_body(serde_json::json!({"source": {"path": existing.to_string_lossy()}}));
+        let admitted = admit_declared_roots(&body, app_root.path()).unwrap();
+        assert_eq!(admitted_root(&admitted, "source").path, existing);
+    }
+
+    #[test]
+    fn admitting_declared_roots_twice_is_idempotent() {
+        let app_root = tempfile::tempdir().unwrap();
+        let body =
+            declared_body(serde_json::json!({"products": {"path": "{app_root}/imports/products"}}));
+        let once = admit_declared_roots(&body, app_root.path()).unwrap();
+        let twice = admit_declared_roots(&once, app_root.path()).unwrap();
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn declared_name_admitted_at_a_different_path_is_refused() {
+        let app_root = tempfile::tempdir().unwrap();
+        let body =
+            declared_body(serde_json::json!({"products": {"path": "{app_root}/imports/products"}}));
+        let mut admitted = admit_declared_roots(&body, app_root.path()).unwrap();
+        admitted["roots"]["products"]["path"] =
+            serde_json::json!(app_root.path().join("elsewhere").to_string_lossy());
+        let error = format!(
+            "{:#}",
+            admit_declared_roots(&admitted, app_root.path()).unwrap_err()
+        );
+        assert!(error.contains("admitted at"), "{error}");
     }
 }

@@ -57,6 +57,91 @@ fn fixture_with_remote_owner(
     publish: bool,
     remote_owner: bool,
 ) -> Fixture {
+    build_fixture(
+        large_tier,
+        import_ceiling,
+        publish,
+        remote_owner,
+        LargeObjectState::None,
+    )
+}
+
+/// How the fixture's large-content manifest relates to the large-object
+/// store. `None` keeps the ordinary single-blob entry.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LargeObjectState {
+    None,
+    /// The manifest names a large object that is resident with its sidecar.
+    Resident,
+    /// The manifest names a large object that was never stored locally.
+    Absent,
+    /// The object is resident but the manifest commits to a different chunk
+    /// trail than the stored sidecar.
+    SidecarMismatch,
+}
+
+const LARGE_OBJECT_BYTES: &[u8] = b"0123456789abcdefXYZ";
+/// The smallest chunk size a large-content manifest admits; the payload is a
+/// few bytes, so the chunk trail has exactly one hash.
+const LARGE_OBJECT_CHUNK_BYTES: u64 = ryeos_state::objects::MIN_LARGE_CONTENT_CHUNK_BYTES;
+
+/// Ingest `LARGE_OBJECT_BYTES` into the large-object store under `runtime`
+/// with the smallest admitted chunk size and return its manifest entry.
+fn ingest_large_object(
+    runtime: &lillux::PinnedDirectory,
+    scratch: &std::path::Path,
+) -> ryeos_state::objects::ExternalLargeContentManifestEntry {
+    let store = ryeos_state::large_object_store::LargeObjectStore::open_with_chunk_bytes(
+        runtime,
+        LARGE_OBJECT_CHUNK_BYTES,
+    )
+    .unwrap();
+    std::fs::create_dir_all(scratch).unwrap();
+    std::fs::write(scratch.join("payload.bin"), LARGE_OBJECT_BYTES).unwrap();
+    let directory = lillux::PinnedDirectory::open(scratch).unwrap().unwrap();
+    let entry = directory
+        .entries_no_follow()
+        .unwrap()
+        .into_iter()
+        .find(|entry| entry.name == "payload.bin")
+        .unwrap();
+    let file = directory
+        .open_regular(std::ffi::OsStr::new("payload.bin"), false)
+        .unwrap()
+        .unwrap();
+    let ingested = store
+        .ingest_open_regular(
+            file,
+            ryeos_state::PinnedLargeObjectSourceIdentity {
+                containing_device: entry.containing_device,
+                inode: entry.inode,
+                size: LARGE_OBJECT_BYTES.len() as u64,
+            },
+            "payload.bin",
+            None,
+        )
+        .unwrap();
+    ryeos_state::objects::ExternalLargeContentManifestEntry {
+        path: "content".to_owned(),
+        kind: ryeos_state::objects::ExternalContentManifestEntryKind::File,
+        mode: Some(493),
+        blob_hash: None,
+        file_sha256: Some(ingested.file_sha256),
+        size: Some(ingested.size),
+        chunk_size: Some(ingested.chunk_size),
+        chunk_hashes: ingested.chunk_hashes,
+        target: None,
+    }
+}
+
+fn build_fixture(
+    large_tier: bool,
+    import_ceiling: u64,
+    publish: bool,
+    remote_owner: bool,
+    large_object: LargeObjectState,
+) -> Fixture {
+    assert!(large_tier || large_object == LargeObjectState::None);
     let (directory, store_owner, mut state) = test_state::build_test_state();
     let closure = state
         .node_policy
@@ -68,6 +153,7 @@ fn fixture_with_remote_owner(
             Arc::new(closure),
             Arc::new(ExternalContentImportPolicyRecord {
                 schema: 1,
+                declared_roots: std::collections::BTreeMap::new(),
                 roots: Default::default(),
                 limits: ExternalContentImportLimits {
                     max_depth: 4,
@@ -143,16 +229,40 @@ fn fixture_with_remote_owner(
             ProductStorage::Content,
         )
     };
+    let (entry, payload_len) = if large_object == LargeObjectState::None {
+        (
+            json!({
+                "path": "content", "kind": "file", "mode": 493,
+                "blob_hash": blob, "size": PRODUCT_BYTES.len(),
+            }),
+            PRODUCT_BYTES.len(),
+        )
+    } else {
+        // An absent object is ingested into a scratch runtime so the manifest
+        // names a real digest that this node's store never received.
+        let scratch = directory.path().join("large-source");
+        let mut entry = if large_object == LargeObjectState::Absent {
+            let other =
+                lillux::PinnedDirectory::open_or_create(&directory.path().join("other")).unwrap();
+            ingest_large_object(&other, &scratch)
+        } else {
+            ingest_large_object(authority.runtime_directory(), &scratch)
+        };
+        if large_object == LargeObjectState::SidecarMismatch {
+            entry.chunk_hashes[0] = "e".repeat(64);
+        }
+        (
+            serde_json::to_value(&entry).unwrap(),
+            LARGE_OBJECT_BYTES.len(),
+        )
+    };
     let manifest_hash = cas
         .store_object(&json!({
             "kind": kind,
             "schema": schema,
-            "entries": [{
-                "path": "content", "kind": "file", "mode": 493,
-                "blob_hash": blob, "size": PRODUCT_BYTES.len(),
-            }],
+            "entries": [entry],
             "entry_count": 1,
-            "total_bytes": PRODUCT_BYTES.len(),
+            "total_bytes": payload_len,
         }))
         .unwrap();
     let declaration = ProductDeclaration {
@@ -216,7 +326,7 @@ fn fixture_with_remote_owner(
         manifest_hash,
         manifest_kind: kind.to_owned(),
         entry_count: 1,
-        total_bytes: PRODUCT_BYTES.len() as u64,
+        total_bytes: payload_len as u64,
     };
     let signer = NodeIdentitySigner::from_identity(&state.identity);
     let attestation = evidence
@@ -1110,4 +1220,112 @@ async fn published_retry_survives_abandoned_upload_retirement() {
         import(&fixture, &fixture.witness_hash, 11).await.unwrap()["manifest_hash"],
         fixture.evidence.manifest_hash,
     );
+}
+
+/// Publish the generic origin admission of `witness_hash` signed by this
+/// node, standing in for an admission imported from the origin.
+fn origin_admission(fixture: &Fixture) -> String {
+    let state = &fixture.state;
+    let limits = state
+        .node_policy
+        .require::<NodeObjectClosurePolicy>()
+        .unwrap()
+        .closure_limits()
+        .unwrap();
+    let authority = state.state_store.pinned_state_authority().unwrap();
+    let guard = authority.acquire_shared_guard().unwrap();
+    let signer = NodeIdentitySigner::from_identity(&state.identity);
+    let mut request = ryeos_state::AdmissionRequest::accepted(
+        fixture.witness_hash.clone(),
+        ryeos_state::admission::LOCAL_ADMISSION_POLICY,
+    );
+    request.limits = limits;
+    state
+        .state_store
+        .with_state_db(|db| {
+            ryeos_state::admit_root(
+                db,
+                &request,
+                &signer,
+                state.identity.verifying_key(),
+                &guard,
+            )
+        })
+        .unwrap()
+        .attestation_hash
+}
+
+fn accept_for(
+    fixture: &Fixture,
+    owner: &str,
+    admission_hash: &str,
+) -> anyhow::Result<(
+    ryeos_state::AdmissionResult,
+    ryeos_state::external_content::products::publication::VerifiedProductWitness,
+)> {
+    ryeos_app::operator_external_content::product_receipt::accept_product_for_owner(
+        &fixture.state,
+        owner,
+        admission_hash,
+        &fixture.witness_hash,
+        fixture.state.identity.verifying_key(),
+        4096,
+    )
+}
+
+#[test]
+fn acceptance_core_accepts_for_an_explicit_remote_owner_and_is_idempotent() {
+    let fixture = fixture_with_remote_owner(false, 4096, true, true);
+    let local_operator =
+        NodeIdentity::load(&fixture.state.config.operator_signing_key_path).unwrap();
+    assert_ne!(fixture.context.fingerprint, local_operator.principal_id());
+    let admission = origin_admission(&fixture);
+    let (first, witness) = accept_for(&fixture, &fixture.context.fingerprint, &admission).unwrap();
+    assert!(!first.reused_existing);
+    assert_eq!(witness.attestation_hash, fixture.witness_hash);
+    assert_eq!(
+        witness.evidence.owner_principal,
+        fixture.context.fingerprint
+    );
+    let (second, _) = accept_for(&fixture, &fixture.context.fingerprint, &admission).unwrap();
+    assert!(second.reused_existing);
+    assert_eq!(second.attestation_hash, first.attestation_hash);
+}
+
+#[test]
+fn acceptance_core_refuses_a_principal_that_does_not_own_the_witness() {
+    let fixture = fixture_with_remote_owner(false, 4096, true, true);
+    let admission = origin_admission(&fixture);
+    let stranger = format!("fp:{}", "f".repeat(64));
+    let error = accept_for(&fixture, &stranger, &admission).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("same configured operator"),
+        "{error:#}"
+    );
+}
+
+#[test]
+fn acceptance_core_accepts_a_large_content_product_whose_object_is_resident() {
+    let fixture = build_fixture(true, 4096, true, true, LargeObjectState::Resident);
+    let admission = origin_admission(&fixture);
+    let (accepted, witness) =
+        accept_for(&fixture, &fixture.context.fingerprint, &admission).unwrap();
+    assert!(!accepted.reused_existing);
+    assert_eq!(witness.attestation_hash, fixture.witness_hash);
+}
+
+#[test]
+fn acceptance_core_refuses_a_large_content_product_without_its_object_or_sidecar_match() {
+    for (state, expected) in [
+        (LargeObjectState::Absent, "is absent"),
+        (
+            LargeObjectState::SidecarMismatch,
+            "contradicts its admitted manifest",
+        ),
+    ] {
+        let fixture = build_fixture(true, 4096, false, true, state);
+        let admission = origin_admission(&fixture);
+        let error = accept_for(&fixture, &fixture.context.fingerprint, &admission).unwrap_err();
+        assert!(format!("{error:#}").contains(expected), "{error:#}");
+    }
 }

@@ -39,6 +39,32 @@ pub fn accept_imported_product(
     maximum_bytes: u64,
 ) -> anyhow::Result<(ryeos_state::AdmissionResult, VerifiedProductWitness)> {
     crate::operator_authority::require_local_configured_operator(state, context)?;
+    accept_product_for_owner(
+        state,
+        &context.fingerprint,
+        origin_admission_hash,
+        witness_hash,
+        pinned_origin_key,
+        maximum_bytes,
+    )
+}
+
+/// CAS-guarded acceptance core. The caller has already authenticated
+/// `owner_principal`: the local configured operator on the pull path, an
+/// admitted remote operator on the push path. This function does not check
+/// that authority; it requires the witness to be owned by that exact principal
+/// and publishes the acceptance under the node identity.
+///
+/// Acceptance is idempotent: a repeat for the same origin admission reuses the
+/// existing acceptance head (`reused_existing`).
+pub fn accept_product_for_owner(
+    state: &AppState,
+    owner_principal: &str,
+    origin_admission_hash: &str,
+    witness_hash: &str,
+    pinned_origin_key: &lillux::crypto::VerifyingKey,
+    maximum_bytes: u64,
+) -> anyhow::Result<(ryeos_state::AdmissionResult, VerifiedProductWitness)> {
     require_hash(origin_admission_hash)?;
     require_hash(witness_hash)?;
     let policy = state
@@ -55,24 +81,25 @@ pub fn accept_imported_product(
     let guard = authority.acquire_shared_guard()?;
     let evidence = ReceivedProductEvidence {
         schema: RECEIVED_PRODUCT_SCHEMA.into(),
-        owner_principal: context.fingerprint.clone(),
+        owner_principal: owner_principal.to_owned(),
         origin_verifying_key: *pinned_origin_key.as_bytes(),
     };
     let signer = crate::state_store::NodeIdentitySigner::from_identity(&state.identity);
     let candidate =
         evidence.sign_attestation(origin_admission_hash, &signer, lillux::time::iso8601_now())?;
     // This proves both exact signatures, same operator, full ordinary CAS
-    // bytes, and absence of sidecar dependencies before any publication.
+    // bytes, and the large-object payload against the local store before any
+    // publication.
     let verified = verify_received_product_guarded(
         &authority,
         &guard,
         limits,
         &candidate,
         state.identity.verifying_key(),
-        &context.fingerprint,
+        owner_principal,
     )?;
     let witness = verified.admitted_product.product;
-    require_witness(&witness, witness_hash, &context.fingerprint)?;
+    require_witness(&witness, witness_hash, owner_principal)?;
     super::retained_product::validate_import_bounds(
         &authority,
         &guard,

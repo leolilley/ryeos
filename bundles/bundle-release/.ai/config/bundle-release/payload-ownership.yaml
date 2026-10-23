@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-19T08:51:55Z:02adfe0e5768751b7732ab0efe4b4badf2c6557254ebfa38c16ef20adde262b5:FT8AG7T5zf9Q0oEm2kv3UqtPOG7vP8ZEtTBA/ZvuSWKsA4YbJ6ZL38FoSAIyd9QAfzK3/S4gYvjX94v7fbM9BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-22T23:38:01Z:f9f2d85152c01766ade9c025a0e457c19deb12a4413ff71a4497daa7a3a2a81b:Rd0ffbyMpPKvy3r+wXc3BqZoh/ioejFBvzti+CCvNSDgDI78GA11rBvPPaQPYqgs9BYDjTnDlf71J3qhdYYMCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: bundle-release
 version: "2.0.0"
 description: Exact publisher-authored ownership of native payloads, Cargo feature compositions and daemon-linked host features by RyeOS bundle.
@@ -52,12 +52,24 @@ payload_ownership:
           cargo_package: ryeos-external-candidate-connector
           build_class: static
           cargo_features: []
+        - binary: ryeos-external-candidate-launcher
+          cargo_package: ryeos-external-candidate-launcher
+          build_class: static
+          cargo_features: []
+        - binary: ryeos-external-candidate-supervisor
+          cargo_package: ryeos-external-candidate-supervisor
+          build_class: static
+          cargo_features: []
         - binary: ryeos-external-guest-occurrence-owner
           cargo_package: ryeos-external-guest-occurrence-owner
           build_class: static
           cargo_features: []
         - binary: ryeos-external-guest-runtime-producer
           cargo_package: ryeos-external-guest-runtime-producer
+          build_class: static
+          cargo_features: []
+        - binary: ryeos-guest-wire-verifier
+          cargo_package: ryeos-guest-wire-verifier
           build_class: static
           cargo_features: []
     - bundle_name: core
@@ -172,14 +184,6 @@ payload_ownership:
       bundle_sets: [f5r-controller, release-artifacts]
       host_features: []
       payloads:
-        - binary: ryeos-external-candidate-launcher
-          cargo_package: ryeos-external-candidate-launcher
-          build_class: static
-          cargo_features: []
-        - binary: ryeos-external-candidate-supervisor
-          cargo_package: ryeos-external-candidate-supervisor
-          build_class: static
-          cargo_features: []
         - binary: ryeos-external-guest-restoration-verifier
           cargo_package: ryeos-external-guest-restoration-verifier
           build_class: static

@@ -1,9 +1,9 @@
-# ryeos:signed:2026-09-30T20:05:49Z:3192dcf2630bc33ba42685c5385bd5aea8e02be9384c2a1a7edda8116504541e:9dln8roop5uiEiM2Q3rLHQi2Wepktgw9ysjxbtop9QfIztgN7D7yiWK6Y6POzkZuq5ybpcJHaCjUNVHDZX9zCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-22T23:38:20Z:0f580ef788d9340285bd5d93110b6bb0a2d74fb75b156d59f6b56f19bf0c766f:6KcYnI8RGg0wUJSQnw8jqnL/Fa0YaZEGs8tHkAhUAFutAYWNrPBcS/Szcynw7Im7tWGmePOPgjfTsIbjbzjDDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: ryeos/environments/qualification
 version: "2.0.0"
 description: Independent x86-64 GNU platform conformance to the admitted version profile
 product_qualification_policy:
-  schema: ryeos.product_qualification_policy.v4
+  schema: ryeos.product_qualification_policy.v5
   verifier_ref: tool:ryeos/environments/qualification/development-platform
   subject_declaration_id: subject
   allowed_claims:

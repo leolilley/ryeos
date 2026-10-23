@@ -1,9 +1,9 @@
-# ryeos:signed:2026-09-30T20:05:49Z:26404d9057769fad9651973a176315180a19de45b17dbcef9415391588200242:Wn0x04zzRVCc4LiokrTwORy0Y5HSwNpTIn/468p6vsInlFc0mq9+qn5zk16vRqu7CXFgt3JxaRMUPWBqsahCBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-22T23:38:20Z:a7c081c3008f9baa41e034fdcc8e04fe33577f72ca9a4ccc479258951035fdae:b5UmpKwDkPVuP1euuI9lOhWAUoQxiGw9AclQZbEe50l8Ff1ZwAHh7yXSlUBrbvnFhEfS3/5YDsfkbidXTvDyCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: ryeos/environments/qualification
 version: "1.0.0"
 description: Independent policy for the selected GNU CPython runtime
 product_qualification_policy:
-  schema: ryeos.product_qualification_policy.v4
+  schema: ryeos.product_qualification_policy.v5
   verifier_ref: tool:ryeos/environments/qualification/gnu-python
   subject_declaration_id: subject
   allowed_claims: [gnu_python_extension_startup_providers_v1, gnu_python_zlib_1_3_2]

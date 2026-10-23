@@ -5,7 +5,8 @@ use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context as _, Result, ensure};
 use ryeos_external_execution_contract::{
-    ExternalGuestInputProjection, GuestMountAccess, MAX_GUEST_INPUTS,
+    EXTERNAL_CANDIDATE_LAUNCHER_SPEC_SCHEMA, ExternalGuestInputProjection, GuestMountAccess,
+    MAX_GUEST_INPUTS,
 };
 use ryeos_state::external_execution::ExecutionChannelBinding;
 use ryeos_state::external_execution::admission::{
@@ -192,7 +193,7 @@ impl ExternalCandidateLauncherSpec {
         }
         let command = command_fields(program)?;
         let spec = Self {
-            schema: 4,
+            schema: EXTERNAL_CANDIDATE_LAUNCHER_SPEC_SCHEMA,
             binding,
             candidate_program: program.clone(),
             guest_inputs: guest_inputs.clone(),
@@ -223,7 +224,10 @@ impl ExternalCandidateLauncherSpec {
     }
 
     pub fn validate(&self) -> Result<()> {
-        ensure!(self.schema == 4, "unsupported external launcher schema");
+        ensure!(
+            self.schema == EXTERNAL_CANDIDATE_LAUNCHER_SPEC_SCHEMA,
+            "unsupported external launcher schema"
+        );
         self.binding.validate()?;
         ensure!(
             self.binding.execution_mode == self.candidate_program.execution_mode(),
@@ -845,7 +849,7 @@ mod tests {
     fn spec() -> ExternalCandidateLauncherSpec {
         ExternalCandidateLauncherSpec {
             target_limits: None,
-            schema: 4,
+            schema: EXTERNAL_CANDIDATE_LAUNCHER_SPEC_SCHEMA,
             binding: binding(),
             candidate_program: program().into(),
             guest_inputs: guest_inputs(),

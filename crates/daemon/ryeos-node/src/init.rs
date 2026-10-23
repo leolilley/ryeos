@@ -736,9 +736,15 @@ fn run_init_on_storage(
         .node_profile
         .as_deref()
         .map(|name| {
-            load_trusted_init_node_profile(&opts.source_dir, name, &seed_trust_store).and_then(
-                |profile| select_profile_host_class(name, &profile, opts.host_class.as_deref()),
-            )
+            load_trusted_init_node_profile(&opts.source_dir, name, &seed_trust_store)
+                .and_then(|profile| {
+                    select_profile_host_class(name, &profile, opts.host_class.as_deref())
+                })
+                .and_then(|profile| {
+                    profile
+                        .admit_import_roots(&opts.app_root)
+                        .context("admit declared external-content import roots")
+                })
         })
         .transpose()?;
     if let Some(profile) = selected_node_profile.as_ref() {

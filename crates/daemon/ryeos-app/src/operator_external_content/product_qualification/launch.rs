@@ -122,16 +122,21 @@ pub struct PreparedProductQualificationLaunch {
     pub verifier_parameters: Value,
     pub product_selections: ProductSelectionInputs,
     consumer_content: Option<super::PreparedBundleConsumerContentInputs>,
+    /// Staged-root lease of a Worker-less remote probe. Present exactly when
+    /// the signed policy has no consumer context and names a probe scenario,
+    /// so its lifetime never depends on consumer content.
+    probe_publication: Option<ryeos_state::PendingCasPublication>,
 }
 
 impl PreparedProductQualificationLaunch {
     pub(in crate::operator_external_content) fn consumer_publication_mut(
         &mut self,
     ) -> Result<&mut ryeos_state::PendingCasPublication> {
-        self.consumer_content
-            .as_mut()
-            .context("remote verifier requires admitted consumer content")?
-            .publication_mut()
+        match (&mut self.consumer_content, &mut self.probe_publication) {
+            (Some(content), None) => content.publication_mut(),
+            (None, Some(publication)) => Ok(publication),
+            _ => bail!("remote verifier requires exactly one staged publication"),
+        }
     }
 
     pub fn consumer_content_identity(
@@ -148,6 +153,13 @@ impl PreparedProductQualificationLaunch {
     pub fn take_consumer_content_publication(
         &mut self,
     ) -> Result<Option<ryeos_state::PendingCasPublication>> {
+        ensure!(
+            self.consumer_content.is_none() || self.probe_publication.is_none(),
+            "qualification launch holds two verifier publications"
+        );
+        if let Some(publication) = self.probe_publication.take() {
+            return Ok(Some(publication));
+        }
         self.consumer_content
             .take()
             .map(super::PreparedBundleConsumerContentInputs::into_publication)
@@ -230,8 +242,19 @@ fn require_invocation_lane(
     policy: &ProductQualificationPolicySource,
     invocation: Option<&ConsumerVerificationInputSelection>,
 ) -> Result<()> {
+    let probe_scenarios = policy
+        .policy
+        .producer_scenarios
+        .values()
+        .any(|scenario| scenario.remote_probe_input.is_some());
     match (&policy.policy.consumer_execution_context, invocation) {
-        (None, None) => Ok(()),
+        (None, None) => {
+            ensure!(
+                !probe_scenarios,
+                "remote probe qualification requires an explicit invocation"
+            );
+            Ok(())
+        }
         (Some(_), Some(selection)) => {
             selection.validate()?;
             let scenario = policy
@@ -240,13 +263,29 @@ fn require_invocation_lane(
                 .get(&selection.scenario_id)
                 .context("consumer invocation scenario is not signed in policy")?;
             ensure!(
-                scenario.remote_verifier.is_some() && scenario.consumer_worker_request.is_some(),
+                scenario.remote_verifier.is_some()
+                    && scenario.consumer_worker_request.is_some()
+                    && scenario.remote_probe_input.is_none(),
                 "consumer invocation requires the implemented remote Worker scenario"
             );
             Ok(())
         }
+        (None, Some(selection)) => {
+            selection.validate()?;
+            let scenario = policy
+                .policy
+                .producer_scenarios
+                .get(&selection.scenario_id)
+                .context("probe invocation scenario is not signed in policy")?;
+            ensure!(
+                scenario.remote_verifier.is_some()
+                    && scenario.remote_probe_input.is_some()
+                    && scenario.consumer_worker_request.is_none(),
+                "probe invocation requires a remote probe scenario"
+            );
+            Ok(())
+        }
         (Some(_), None) => bail!("consumer qualification requires an explicit invocation"),
-        (None, Some(_)) => bail!("nonconsumer qualification refuses consumer invocation"),
     }
 }
 
@@ -306,12 +345,15 @@ fn require_current_consumer_invocation(
             "consumer invocation changed its exact current occurrence authority"
         );
         let scenario = &policy.policy.producer_scenarios[&invocation.scenario_id];
-        let recipe =
-            super::resolve_bundle_producer_recipe_in_generation(generation, &scenario.recipe_ref)?;
-        let sources = std::collections::BTreeMap::from([(
-            invocation.scenario_id.clone(),
-            recipe.source_identity()?,
-        )]);
+        // A probe scenario has no producer recipe, so nothing is pinned for it.
+        let sources = match scenario.recipe_ref.as_deref() {
+            Some(recipe_ref) => std::collections::BTreeMap::from([(
+                invocation.scenario_id.clone(),
+                super::resolve_bundle_producer_recipe_in_generation(generation, recipe_ref)?
+                    .source_identity()?,
+            )]),
+            None => std::collections::BTreeMap::new(),
+        };
         let verifier = super::prepare_remote_consumer_verifier_from_admitted_sources_in_generation(
             state,
             generation,
@@ -469,6 +511,24 @@ pub fn prepare_after_reservation(
             Vec::new(),
         )
     };
+    let probe_publication = if policy_source.policy.consumer_execution_context.is_none()
+        && policy_source
+            .policy
+            .producer_scenarios
+            .values()
+            .any(|scenario| scenario.remote_probe_input.is_some())
+    {
+        Some(super::with_state_guard(&authority, |guard| {
+            Ok(ryeos_state::PendingCasPublication::new(
+                authority.try_clone()?,
+                authority
+                    .require_recovery()?
+                    .begin_staged_cas_roots_admitted(guard, "qualification-probe-verifier")?,
+            ))
+        })?)
+    } else {
+        None
+    };
     Ok(PreparedProductQualificationLaunch {
         launch_id: request.launch_id.clone(),
         owner_fingerprint: context.fingerprint.clone(),
@@ -493,6 +553,7 @@ pub fn prepare_after_reservation(
             .as_ref()
             .map(|project| project.snapshot_hash.clone()),
         consumer_content,
+        probe_publication,
     })
 }
 
@@ -500,7 +561,120 @@ pub fn prepare_after_reservation(
 mod tests {
     use super::*;
     use ryeos_state::external_content::products::composition::ProductSelectionTarget;
+    use ryeos_state::external_content::products::qualification::{
+        PRODUCT_QUALIFICATION_POLICY_SCHEMA, ProductQualificationPolicy,
+        ProductQualificationProducerScenario, ProductQualificationRemoteVerifierSelection,
+        VerifierProcessSettlementAuthority,
+    };
     use serde_json::json;
+
+    fn lane_policy(
+        scenarios: Vec<(&str, ProductQualificationProducerScenario)>,
+    ) -> ProductQualificationPolicySource {
+        ProductQualificationPolicySource {
+            canonical_ref: "config:fixtures/policy".into(),
+            raw_content_digest: "a".repeat(64),
+            effective_definition_digest: "b".repeat(64),
+            publisher_fingerprint: "c".repeat(64),
+            policy: ProductQualificationPolicy {
+                schema: PRODUCT_QUALIFICATION_POLICY_SCHEMA.into(),
+                verifier_ref: "tool:fixtures/verify".into(),
+                subject_declaration_id: "subject".into(),
+                allowed_claims: vec!["claim".into()],
+                minimum_verifier_process_settlement: VerifierProcessSettlementAuthority::ScopeEmpty,
+                verifier_parameters: json!({}),
+                consumer_execution_context: None,
+                producer_scenarios: scenarios
+                    .into_iter()
+                    .map(|(name, scenario)| (name.to_owned(), scenario))
+                    .collect(),
+            },
+        }
+    }
+
+    fn remote_selection() -> ProductQualificationRemoteVerifierSelection {
+        ProductQualificationRemoteVerifierSelection {
+            binary_ref: "bin:fixtures/verifier".into(),
+            guest_target_triple: "x86_64-unknown-linux-musl".into(),
+            archive_members: Default::default(),
+        }
+    }
+
+    fn probe_scenario() -> ProductQualificationProducerScenario {
+        ProductQualificationProducerScenario {
+            recipe_ref: None,
+            remote_verifier: Some(remote_selection()),
+            consumer_worker_request: None,
+            remote_probe_input: Some(json!({"probe": "a"})),
+        }
+    }
+
+    fn producer_scenario() -> ProductQualificationProducerScenario {
+        ProductQualificationProducerScenario {
+            recipe_ref: Some("config:fixtures/recipe".into()),
+            remote_verifier: None,
+            consumer_worker_request: None,
+            remote_probe_input: None,
+        }
+    }
+
+    fn invocation(scenario_id: &str) -> ConsumerVerificationInputSelection {
+        ConsumerVerificationInputSelection {
+            scenario_id: scenario_id.into(),
+            qualification_operation_id: "a".repeat(64),
+            prerequisite_measurement_attempt_id: "b".repeat(64),
+        }
+    }
+
+    #[test]
+    fn invocation_lane_admits_a_probe_invocation_of_a_probe_scenario_only() {
+        let policy = lane_policy(vec![
+            ("probe", probe_scenario()),
+            ("producer", producer_scenario()),
+        ]);
+        require_invocation_lane(&policy, Some(&invocation("probe"))).unwrap();
+        // A probe policy cannot be launched without naming its attempt.
+        assert!(require_invocation_lane(&policy, None).is_err());
+        // The invocation must name a probe scenario, never a plain producer
+        // scenario or an unsigned one.
+        assert!(require_invocation_lane(&policy, Some(&invocation("producer"))).is_err());
+        assert!(require_invocation_lane(&policy, Some(&invocation("absent"))).is_err());
+        // A probe scenario that also carries a Worker request is not a probe.
+        let mut hybrid = probe_scenario();
+        hybrid.consumer_worker_request = Some(
+            ryeos_state::external_content::products::qualification::ProductQualificationConsumerWorkerRequest {
+                schema: ryeos_state::external_content::products::qualification::PRODUCT_QUALIFICATION_CONSUMER_WORKER_REQUEST_SCHEMA.into(),
+                controller_canary: None,
+                credential_profile_id: None,
+                fixture: None,
+                session_setup: json!({}),
+                body: json!({}),
+            },
+        );
+        let hybrid = lane_policy(vec![("probe", hybrid)]);
+        assert!(require_invocation_lane(&hybrid, Some(&invocation("probe"))).is_err());
+    }
+
+    #[test]
+    fn invocation_lane_keeps_nonprobe_policies_invocation_free_and_workers_explicit() {
+        let plain = lane_policy(vec![("producer", producer_scenario())]);
+        require_invocation_lane(&plain, None).unwrap();
+        assert!(require_invocation_lane(&plain, Some(&invocation("producer"))).is_err());
+        // A Worker consumer policy still requires an explicit invocation and
+        // refuses a probe scenario as its target.
+        let mut worker = lane_policy(vec![("probe", probe_scenario())]);
+        worker.policy.consumer_execution_context = Some(
+            ryeos_state::external_content::products::qualification::ProductQualificationConsumerExecutionContext {
+                worker_ref: "worker:fixtures/w".into(),
+                product_declaration_id: "runtime".into(),
+                environment_ref: "config:fixtures/env".into(),
+                worker_execution_ref: "worker_execution:fixtures/x".into(),
+                environment_binding: "environment".into(),
+            },
+        );
+        assert!(require_invocation_lane(&worker, None).is_err());
+        assert!(require_invocation_lane(&worker, Some(&invocation("probe"))).is_err());
+    }
 
     #[test]
     fn auxiliary_coordinates_preserve_exact_proof_and_cannot_replace_subject() {

@@ -116,46 +116,77 @@ pub(super) async fn start(
         let prepared = ryeos_app::operator_external_content::product_qualification::prepare_retained_consumer_verifier_for_callback(
             &state, &token, &request.coordinate, &request.qualification_operation_id, limits,
         )?;
-        // The shared envelope validates exact accepted coordinates. Its
-        // scenario_input remains opaque product-owned data throughout delivery.
-        let input = ryeos_state::external_content::qualification_consumer_record::ConsumerInputRecord::parse(
-            request.record.as_bytes(),
-        )?;
-        ensure!(
-            input.purpose == *prepared.purpose()
-                && input.coordinate == *prepared.coordinate()
-                && input.selection == *prepared.selection()
-                && input.requirement == *prepared.requirement(),
-            "consumer START input differs from its authenticated retained authority"
-        );
-        // Actual Q owns a separate allocation, with the restored owner
-        // measurement as provenance. Complete its signed Worker/native/local/
-        // provider lifecycle before the independent diagnostic can be observed.
-        // A lost START acknowledgement permits observation, never a second Q.
-        ryeos_executor::execution::external_qualification_start::run_consumer_runtime_verification_transport_for_callback(
-            &state, &token, &request.coordinate, &request.qualification_operation_id,
-        )?;
-        // Q does not consume or renew the later diagnostic contact timeout.
-        // The same live callback/root is rechecked after Q; its enclosing
-        // signed lifetime has continued to run throughout this blocking owner.
-        let prepared = ryeos_app::operator_external_content::product_qualification::prepare_retained_consumer_verifier_for_callback(
-            &state, &token, &request.coordinate, &request.qualification_operation_id, limits,
-        )?;
-        let attempt = ryeos_app::operator_runtime_snapshot::prepare_consumer_verifier_attempt_for_callback(
-            &state, &token, &prepared, &request.qualification_operation_id, limits,
-        )?;
-        let deadline = attempt.deadline();
+        use ryeos_app::operator_external_content::product_qualification::PreparedConsumerLane;
         let scratch_name = format!("consumer-delivery-{}", lillux::sha256_hex(&lillux::crypto::generate_random_bytes::<32>()));
-        let (_, scratch) = ryeos_app::temp_dir_guard::create_projectless_workspace(
-            &state.config.runtime_root().cache(), &scratch_name,
-        )?;
-        let archive = ryeos_executor::execution::external_consumer_delivery::prepare_retained_consumer_archive(
-            &state, &prepared, &input, scratch.owned_scratch_root()?, deadline,
-        )?;
-        let intent = attempt.bind_archive(&archive)?;
-        serde_json::to_value(ryeos_app::operator_runtime_snapshot::verify_consumer_qualification_occurrence_for_callback(
-            &state, &token, &intent, &input, &archive, limits, deadline,
-        )?).map_err(Into::into)
+        match prepared.lane() {
+            PreparedConsumerLane::Worker { requirement } => {
+                // The shared envelope validates exact accepted coordinates. Its
+                // scenario_input remains opaque product-owned data throughout delivery.
+                let input = ryeos_state::external_content::qualification_consumer_record::ConsumerInputRecord::parse(
+                    request.record.as_bytes(),
+                )?;
+                ensure!(
+                    input.purpose == *prepared.purpose()
+                        && input.coordinate == *prepared.coordinate()
+                        && input.selection == *prepared.selection()
+                        && input.requirement == **requirement,
+                    "consumer START input differs from its authenticated retained authority"
+                );
+                // Actual Q owns a separate allocation, with the restored owner
+                // measurement as provenance. Complete its signed Worker/native/local/
+                // provider lifecycle before the independent diagnostic can be observed.
+                // A lost START acknowledgement permits observation, never a second Q.
+                ryeos_executor::execution::external_qualification_start::run_consumer_runtime_verification_transport_for_callback(
+                    &state, &token, &request.coordinate, &request.qualification_operation_id,
+                )?;
+                // Q does not consume or renew the later diagnostic contact timeout.
+                // The same live callback/root is rechecked after Q; its enclosing
+                // signed lifetime has continued to run throughout this blocking owner.
+                let prepared = ryeos_app::operator_external_content::product_qualification::prepare_retained_consumer_verifier_for_callback(
+                    &state, &token, &request.coordinate, &request.qualification_operation_id, limits,
+                )?;
+                let attempt = ryeos_app::operator_runtime_snapshot::prepare_consumer_verifier_attempt_for_callback(
+                    &state, &token, &prepared, &request.qualification_operation_id, limits,
+                )?;
+                let deadline = attempt.deadline();
+                let (_, scratch) = ryeos_app::temp_dir_guard::create_projectless_workspace(
+                    &state.config.runtime_root().cache(), &scratch_name,
+                )?;
+                let archive = ryeos_executor::execution::external_consumer_delivery::prepare_retained_consumer_archive(
+                    &state, &prepared, &input, scratch.owned_scratch_root()?, deadline,
+                )?;
+                let intent = attempt.bind_archive(&archive)?;
+                serde_json::to_value(ryeos_app::operator_runtime_snapshot::verify_consumer_qualification_occurrence_for_callback(
+                    &state, &token, &intent, (&input).into(), &archive, limits, deadline,
+                )?).map_err(Into::into)
+            }
+            PreparedConsumerLane::Probe { .. } => {
+                // A probe has no Worker and so no Q conversation to complete
+                // first. The verifier's record must be byte-for-byte the record
+                // the daemon derives itself, prerequisite included.
+                let input = ryeos_app::qualification_consumer_input::parse_probe_record(
+                    request.record.as_bytes(),
+                )?;
+                ensure!(
+                    input == ryeos_app::operator_external_content::product_qualification::derive_probe_input_for_callback(&state, &prepared)?,
+                    "probe START input differs from the daemon-derived record"
+                );
+                let attempt = ryeos_app::operator_runtime_snapshot::prepare_consumer_verifier_attempt_for_callback(
+                    &state, &token, &prepared, &request.qualification_operation_id, limits,
+                )?;
+                let deadline = attempt.deadline();
+                let (_, scratch) = ryeos_app::temp_dir_guard::create_projectless_workspace(
+                    &state.config.runtime_root().cache(), &scratch_name,
+                )?;
+                let archive = ryeos_executor::execution::external_consumer_delivery::prepare_retained_probe_archive(
+                    &prepared, &input, scratch.owned_scratch_root()?, deadline,
+                )?;
+                let intent = attempt.bind_archive(&archive)?;
+                serde_json::to_value(ryeos_app::operator_runtime_snapshot::verify_consumer_qualification_occurrence_for_callback(
+                    &state, &token, &intent, (&input).into(), &archive, limits, deadline,
+                )?).map_err(Into::into)
+            }
+        }
     }).await.map_err(|error| anyhow::anyhow!("consumer start owner did not settle: {error}"))?
 }
 

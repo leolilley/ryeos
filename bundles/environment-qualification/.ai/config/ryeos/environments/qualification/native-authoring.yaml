@@ -1,9 +1,9 @@
-# ryeos:signed:2026-09-30T20:05:49Z:54758e451f914f86adc8530acd6fc150dd1ad1609719d8cd6a1db65d8d9254df:A+3rZ7O5KxzFSgZ9PNzrnVjS/gTS6f/jXASnO6I5jCL0OdUcfaJqxQD1KCDgqu+YvJTLwjwte/bmAcsCKJ9MBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-22T23:38:20Z:6c28b2e73b943dc029b7e77206d11eb561e268312ba012eab2fcf7e91e7f0178:GMErjhtpFUhMnzVSE49Gg24TrWFAqLOWkXYD/jVZCIPVv+AWIY1b/xcDTcviSC2+GT2wdeMosvPPPxuzfJRHAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: ryeos/environments/qualification
 version: "1.0.0"
 description: Independent policy for the exact selected native authoring runtime
 product_qualification_policy:
-  schema: ryeos.product_qualification_policy.v4
+  schema: ryeos.product_qualification_policy.v5
   verifier_ref: tool:ryeos/environments/qualification/native-authoring/verify
   subject_declaration_id: authoring-runtime
   allowed_claims: [authoring_runtime_closed]

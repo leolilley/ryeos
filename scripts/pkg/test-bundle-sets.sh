@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# ryeos:signed:2026-10-22T00:00:39Z:7a3110e078735bec12de960b282912860ae9ab72b85af2405ece666532f60779:XU1JhYotKMNUzOpc6qoAAR9NEDm7PhNdetOQlE7jQMxKLNiSgeqv7R+7swlrYpLaPkomrzxQtrfVEigkTQv1Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -288,6 +289,8 @@ for profile_name in "${node_init_profiles[@]}"; do
       [[ "$declared_host_classes" == "hosted local hosted_enforced " ]] ;;
     hosted-node|hosted-workflow)
       [[ "$declared_host_classes" == "hosted " ]] ;;
+    development)
+      [[ "$declared_host_classes" == "local local_direct " ]] ;;
     *)
       [[ "$declared_host_classes" == "local " ]] ;;
   esac
@@ -450,6 +453,7 @@ static_package_cases=(
   'ryeos-codex-external-configuration|ryeos-codex-external-configuration'
   'ryeos-codex-guest-runtime-producer|ryeos-codex-guest-runtime-producer'
   'ryeos-codex-runtime-verifier|codex-runtime-verifier'
+  'ryeos-guest-wire-verifier|ryeos-guest-wire-verifier'
 )
 for package_case in "${static_package_cases[@]}"; do
   selected_package="${package_case%%|*}"

@@ -1,0 +1,16 @@
+# ryeos:signed:2026-10-22T05:34:02Z:f3dbc761d35b97ccee7149a4dae9e2d9bac2af254bbfabad01a856dce289fd81:+FVutrd8SsiL5toX3k7ttOAI0Rvol4raFFV8GpFybtuNedk6AbUasfrVf9NBcHvFCPS/Taw3p+ZPdhhBVXbODg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+id: external-content/product-accept
+path: /external-content/product-accept
+methods:
+  - POST
+auth: ryeos_signed
+request:
+  body: json
+limits:
+  body_bytes_max: 1048576
+  # Acceptance scrubs every large object, so the budget covers a full-store hash.
+  timeout_ms: 900000
+  concurrent_max: 16
+response:
+  mode: json
+  source: service:external-content/product-accept

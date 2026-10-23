@@ -79,6 +79,7 @@ pub mod process;
 pub mod projection_health;
 pub mod projection_repair;
 pub mod prospective_admission;
+pub mod qualification_consumer_input;
 mod qualification_consumer_observation;
 pub mod qualification_workspace_custody;
 pub mod recovery_execution_gate;

@@ -51,6 +51,13 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # Every rustc invocation goes through sccache backed by the Actions cache, so
+  # compilation units are shared across jobs, build profiles and lockfile
+  # changes instead of being rebuilt whenever the artifact cache key moves.
+  # Incremental compilation is off because its artifacts cannot be shared.
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: sccache
+  CARGO_INCREMENTAL: "0"
   # Keep CI resource usage predictable. Override in workflow YAML if the runner
   # class changes; local gate defaults remain machine-sensitive.
   GATE_BUILD_JOBS: 2
@@ -167,6 +174,9 @@ jobs:
       - name: Install cargo-deny
         uses: taiki-e/install-action@1725d1806acf0cd664ecc8dd0fcff6d896453dcf # cargo-deny
 
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
@@ -189,30 +199,23 @@ jobs:
     name: Secret scan
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    if: ${{ github.event_name != 'workflow_dispatch' }}
     steps:
       - name: Check out repository history
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
 
+      # Pushes and pull requests scan the whole history through the action.
       - name: Scan repository history
+        if: ${{ github.event_name != 'workflow_dispatch' }}
         uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  secrets-manual:
-    name: Secret scan
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    if: ${{ github.event_name == 'workflow_dispatch' }}
-    steps:
-      - name: Check out repository history
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-        with:
-          fetch-depth: 0
-
+      # Manual dispatches run on work branches; they scan only the commits
+      # introduced since next with a pinned gitleaks binary.
       - name: Install gitleaks
+        if: ${{ github.event_name == 'workflow_dispatch' }}
         run: |
           archive="$RUNNER_TEMP/gitleaks_8.24.3_linux_x64.tar.gz"
           install_dir="$RUNNER_TEMP/gitleaks-8.24.3"
@@ -227,6 +230,7 @@ jobs:
           printf '%s\n' "$install_dir" >> "$GITHUB_PATH"
 
       - name: Scan commits introduced from next
+        if: ${{ github.event_name == 'workflow_dispatch' }}
         run: |
           base="$(git merge-base HEAD origin/next)"
           gitleaks git --redact --verbose --exit-code=2 --config .gitleaks.toml --log-opts="$base..HEAD"
@@ -234,10 +238,11 @@ jobs:
   test:
     name: Workspace tests
     runs-on: ubuntu-latest
-    # The full two-thread gate now runs more than 11,500 tests and was still
-    # making progress near the end of the suite when the 120-minute ceiling
-    # cancelled it.
-    timeout-minutes: 150
+    # The full two-thread gate runs more than 11,800 tests in about 130
+    # minutes, and the scheduler-composition check that follows it rebuilds
+    # the feature variants for up to 30 more; a 150-minute ceiling cancelled
+    # a green run during that check.
+    timeout-minutes: 200
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_tests }}
     steps:
       - name: Check out repository
@@ -255,6 +260,9 @@ jobs:
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@e658debeddbabf20b2b866d9235eb08a2375b1ad # nextest
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
@@ -397,6 +405,9 @@ jobs:
       - name: Install cargo-nextest
         uses: taiki-e/install-action@e658debeddbabf20b2b866d9235eb08a2375b1ad # nextest
 
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
@@ -432,6 +443,11 @@ jobs:
           findmnt --target /mnt/ryeos-tmp
           echo "TMPDIR=/mnt/ryeos-tmp" >> "$GITHUB_ENV"
 
+      - name: Allow unprivileged user namespaces on the runner
+        # The crash cuts start enforce-mode nodes whose sandbox probes map a
+        # user namespace, the same test-host baseline the workspace gate selects.
+        run: sudo -n sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
       - name: Run crash recovery qualification
         env:
           GATE_BUNDLE_TARGET_DIR: ${{ runner.temp }}/ryeos-bundle-target
@@ -465,6 +481,9 @@ jobs:
         with:
           toolchain: 1.95.0
 
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
@@ -497,6 +516,9 @@ jobs:
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
         with:
           toolchain: 1.95.0
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2

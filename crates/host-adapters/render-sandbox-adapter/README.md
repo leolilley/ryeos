@@ -424,7 +424,10 @@ also ran a bounded fail-closed argument probe in a disposable Render Sandbox.
 These are source-production and native-execution observations, not an installed
 Render snapshot or runtime qualification. The product witness must be carried
 through an admitted product-to-provider staging path; the artifact-blob export
-command does not export external-content manifests. The existing
+command does not export external-content manifests, so the path is
+`service:external-content/push-product`, which offers the origin-admitted
+closure to the pinned remote and streams blobs and large objects in bounded
+chunks before the remote publishes its own acceptance. The existing
 producer app root remains at `/tmp/ryeos-owner-node.7nCdlW/app-root`, but this
 particular witness is rooted in that node's public key
 `ed25519:jVDJyGjQ2xYH57FLBUHFzYXZYkxnZQ1lh6966CHWLO8=` and operator

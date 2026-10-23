@@ -40,7 +40,9 @@ pub const PERSISTENT_SESSION_CAPSULE_KIND: &str = "persistent_session_capsule";
 // Missing predecessor inventory is never interpreted as an empty policy.
 // v22 requires the same byte-bounded BundleExecutor member-source proof as
 // admitted launch capsules; signed init-v2 remains an independent wire contract.
-pub const PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION: u32 = 23;
+// v24 makes the remote-testimony lane of the guest-runtime proof an explicit
+// required-nullable field; a local qualification is never inferred from absence.
+pub const PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION: u32 = 24;
 pub const MAX_PERSISTENT_SESSION_CAPSULE_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_EXECUTABLE_SEARCH_PATH_ENTRIES: usize = 32;
 pub const MAX_SESSION_PROCESS_ENVIRONMENT_ENTRIES: usize = 32;
@@ -722,6 +724,28 @@ pub struct RetainedExternalRuntimeQualification {
     pub guest_runtime_manifest_hash: String,
     pub owner_principal: String,
     pub proof: crate::external_content::products::composition::AdmittedProductQualification,
+    /// Required nullable: `Some` marks the proof as a remote testimony accepted
+    /// under local policy; `proof.evidence` stays the origin's evidence.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub remote_testimony: Option<RetainedRemoteQualificationTestimony>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetainedRemoteQualificationTestimony {
+    pub acceptance_hash: String,
+    pub acceptance:
+        crate::external_content::products::qualification_testimony::RemoteQualificationAcceptanceEvidence,
+}
+
+impl RetainedRemoteQualificationTestimony {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        super::thread_snapshot::validate_canonical_hash(
+            "remote qualification acceptance",
+            &self.acceptance_hash,
+        )?;
+        self.acceptance.validate()
+    }
 }
 
 impl RetainedExternalRuntimeQualification {
@@ -746,6 +770,16 @@ impl RetainedExternalRuntimeQualification {
         if self.proof.evidence.result.subject_manifest_hash != self.guest_runtime_manifest_hash {
             anyhow::bail!("retained external runtime proof differs from guest manifest");
         }
+        if let Some(testimony) = &self.remote_testimony {
+            testimony.validate()?;
+            let verified = testimony.acceptance.verify()?;
+            if verified.evidence.product()? != &self.proof.evidence
+                || verified.body.qualification_attestation_hash != self.proof.attestation_hash
+                || verified.testimony.issuer != self.owner_principal
+            {
+                anyhow::bail!("retained remote testimony differs from the retained runtime proof");
+            }
+        }
         Ok(())
     }
 }
@@ -761,6 +795,12 @@ pub struct RetainedExternalRuntimeContentQualification {
     pub coordinate_id: String,
     pub attestation_hash: String,
     pub evidence: crate::external_content::qualification_evidence::ContentQualificationEvidence,
+    /// Required nullable: `Some` marks the content as a remote testimony
+    /// accepted under local policy; `attestation_hash`, `coordinate_id` and
+    /// `evidence` then stay the origin's, and the testimony's activation ref
+    /// is this ref.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub remote_testimony: Option<RetainedRemoteQualificationTestimony>,
 }
 
 impl RetainedExternalRuntimeContentQualification {
@@ -786,6 +826,20 @@ impl RetainedExternalRuntimeContentQualification {
                 != self.coordinate_id
         {
             anyhow::bail!("retained session-runtime content differs from its exact testimony");
+        }
+        if let Some(testimony) = &self.remote_testimony {
+            testimony.validate()?;
+            let verified = testimony.acceptance.verify()?;
+            if verified.evidence.content()? != &self.evidence
+                || verified.body.qualification_attestation_hash != self.attestation_hash
+                || verified.coordinate_id != self.coordinate_id
+                || verified.body.activation_ref.as_deref() != Some(self.activation_ref.as_str())
+                || verified.testimony.issuer != self.evidence.purpose.owner_fingerprint
+            {
+                anyhow::bail!(
+                    "retained remote testimony differs from the retained runtime content"
+                );
+            }
         }
         Ok(())
     }

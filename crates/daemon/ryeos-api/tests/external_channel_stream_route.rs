@@ -65,7 +65,16 @@ async fn signed_stream_route_keeps_the_upgrade_through_the_dispatcher_and_refuse
         .with_state(api_state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move { axum::serve(listener, app).await });
+    // The store owner must outlive every connection task's clone of the state,
+    // so the server shuts down gracefully and is awaited before the test ends.
+    let (shutdown, shutdown_signal) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                let _ = shutdown_signal.await;
+            })
+            .await
+    });
 
     // A complete upgrade request reaches occurrence admission, which needs the
     // connection's upgrade handle: had the dispatcher dropped it, the refusal
@@ -112,5 +121,10 @@ async fn signed_stream_route_keeps_the_upgrade_through_the_dispatcher_and_refuse
         !response.starts_with("HTTP/1.1 101") && !response.starts_with("HTTP/1.1 2"),
         "{response}"
     );
-    server.abort();
+    shutdown.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(10), server)
+        .await
+        .expect("dispatcher shut down within the window")
+        .unwrap()
+        .unwrap();
 }

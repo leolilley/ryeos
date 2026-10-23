@@ -1103,6 +1103,9 @@ pub struct PreparedConsumerAttempt {
     intent: RestoredVerifierAttemptIntent,
     retained: Option<RestoredVerifierAttemptRecord>,
     selection: ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerifierSelection,
+    /// Retained digests of the extra archive members a probe delivery packs;
+    /// absent for a Worker delivery, whose archive carries product files.
+    archive_member_digests: Option<std::collections::BTreeMap<String, String>>,
     deadline: lillux::time::MonotonicDeadline,
 }
 
@@ -1122,6 +1125,9 @@ impl PreparedConsumerAttempt {
             "consumer delivery exceeded original preparation deadline"
         );
         archive.require_verifier_selection(&self.selection)?;
+        if let Some(digests) = &self.archive_member_digests {
+            archive.require_archive_members(digests)?;
+        }
         self.intent.upload_sha256 = archive.sha256().into();
         self.intent.upload_bytes = archive.bytes();
         if let Some(retained) = self.retained {
@@ -1254,10 +1260,27 @@ pub fn prepare_consumer_verifier_attempt_for_callback(
         "consumer preparation exhausted signed timeout"
     );
     let deadline = lillux::time::MonotonicDeadline::after(remaining);
+    let archive_member_digests = match prepared.lane() {
+        crate::operator_external_content::product_qualification::PreparedConsumerLane::Worker {
+            ..
+        } => None,
+        crate::operator_external_content::product_qualification::PreparedConsumerLane::Probe {
+            ..
+        } => Some(
+            admitted
+                .purpose()
+                .remote_verifier_sources
+                .get(&admitted.coordinate().scenario_id)
+                .context("probe challenge has no retained verifier source")?
+                .archive_member_digests
+                .clone(),
+        ),
+    };
     Ok(PreparedConsumerAttempt {
         intent,
         retained,
         selection: admitted.selection().clone(),
+        archive_member_digests,
         deadline,
     })
 }
@@ -1268,7 +1291,7 @@ pub fn verify_consumer_qualification_occurrence_for_callback(
     state: &AppState,
     token: &str,
     intent: &RestoredVerifierAttemptIntent,
-    input: &ryeos_state::external_content::qualification_consumer_record::ConsumerInputRecord,
+    input: crate::qualification_consumer_input::ConsumerInputRef<'_>,
     archive: &ryeos_external_execution::restoration_verifier_delivery::PreparedConsumerArchive,
     limits: ryeos_state::object_closure::ObjectClosureLimits,
     deadline: lillux::time::MonotonicDeadline,
@@ -1373,7 +1396,14 @@ pub fn observe_consumer_verifier_attempt_for_callback(
         "runtime.consumer_verification_observe", coordinate, qualification_operation_id,
     )?;
     final_admission.require_attempt(&attempt.intent, &qualified.intent)?;
-    let qualification_worker = if evidence.is_some() {
+    // Only a Worker consumer ran a Q conversation; a probe has none to expose.
+    let worker_lane = matches!(
+        final_admission
+            .purpose()
+            .remote_use(&coordinate.scenario_id)?,
+        ryeos_state::external_content::qualification_purpose::QualificationRemoteUse::Worker { .. }
+    );
+    let qualification_worker = if evidence.is_some() && worker_lane {
         Some(
             crate::qualification_consumer_observation::read_retained_reference(
                 state,
@@ -1421,6 +1451,13 @@ pub fn observe_consumer_worker_transcript_chunk_for_callback(
         state, &authority, &guard, limits, token,
         "runtime.consumer_verification_observe", coordinate, qualification_operation_id,
     )?;
+    ensure!(
+        matches!(
+            admission.purpose().remote_use(&coordinate.scenario_id)?,
+            ryeos_state::external_content::qualification_purpose::QualificationRemoteUse::Worker { .. }
+        ),
+        "a remote probe has no Worker transcript to read"
+    );
     let reference = crate::qualification_consumer_observation::read_retained_reference(
         state,
         &authority,
@@ -1446,7 +1483,7 @@ fn verify_consumer_occurrence_with_callback(
     state: &AppState,
     token: &str,
     intent: &RestoredVerifierAttemptIntent,
-    input: &ryeos_state::external_content::qualification_consumer_record::ConsumerInputRecord,
+    input: crate::qualification_consumer_input::ConsumerInputRef<'_>,
     archive: &ryeos_external_execution::restoration_verifier_delivery::PreparedConsumerArchive,
     limits: ryeos_state::object_closure::ObjectClosureLimits,
     deadline: lillux::time::MonotonicDeadline,
@@ -1482,12 +1519,27 @@ fn verify_consumer_occurrence_with_callback(
             let selection = admission.selection().clone();
             input.validate_attempt(intent)?;
             ensure!(
-                input.purpose == *admission.purpose()
-                    && input.coordinate == *admission.coordinate()
-                    && input.selection == selection,
+                input.purpose() == admission.purpose()
+                    && input.coordinate() == admission.coordinate()
+                    && *input.selection() == selection,
                 "consumer contact input differs from authenticated accepted root"
             );
-            archive.require_consumer_input_record(input)?;
+            match input {
+                crate::qualification_consumer_input::ConsumerInputRef::Worker(record) => {
+                    archive.require_consumer_input_record(record)?;
+                }
+                crate::qualification_consumer_input::ConsumerInputRef::Probe(record) => {
+                    archive.require_probe_input_record(record)?;
+                    archive.require_archive_members(
+                        &admission
+                            .purpose()
+                            .remote_verifier_sources
+                            .get(&admission.coordinate().scenario_id)
+                            .context("probe contact has no retained verifier source")?
+                            .archive_member_digests,
+                    )?;
+                }
+            }
             archive.require_verifier_selection(&selection)?;
             let qualified = state
                 .state_store

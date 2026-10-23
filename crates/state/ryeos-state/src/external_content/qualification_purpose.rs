@@ -10,6 +10,8 @@ use crate::objects::canonical_value_digest;
 use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
 
+use crate::external_execution::admission::ExternalCandidateQualificationUse;
+
 use super::products::qualification::remote_verifier_source::QualificationRemoteVerifierSource;
 use super::products::qualification::{
     MAX_PRODUCT_QUALIFICATION_EVIDENCE_BYTES, ProductProducerRecipeSourceIdentity,
@@ -70,6 +72,31 @@ impl QualificationSubject {
     }
 }
 
+/// What a remote consumer attempt is bound to. The split is derived from the
+/// signed policy (a consumer context selects the Worker lane, its absence the
+/// probe lane), never from separately stored nullable fields.
+#[derive(Debug, Clone, PartialEq)]
+pub enum QualificationRemoteUse<'a> {
+    /// A Worker consumer with an admitted use of the restored runtime.
+    Worker {
+        qualified_use: &'a ExternalCandidateQualificationUse,
+    },
+    /// A Worker-less probe: the signed scenario's opaque input.
+    Probe { input: &'a serde_json::Value },
+}
+
+impl QualificationRemoteUse<'_> {
+    /// Digest the consumer coordinate binds as its `use_digest`.
+    pub fn use_digest(&self) -> Result<String> {
+        match self {
+            Self::Worker { qualified_use } => {
+                canonical_value_digest(&serde_json::to_value(qualified_use)?)
+            }
+            Self::Probe { input } => canonical_value_digest(input),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct QualificationLaunchPurpose {
@@ -126,13 +153,8 @@ impl QualificationLaunchPurpose {
             .remote_verifier_sources
             .get(&coordinate.scenario_id)
             .context("sealed qualification purpose has no selected remote verifier")?;
-        let qualified_use = self
-            .consumer_content
-            .as_ref()
-            .and_then(|content| content.qualification_use.as_ref())
-            .context("accepted consumer purpose has no admitted use")?;
-        if canonical_value_digest(&serde_json::to_value(qualified_use)?)? != coordinate.use_digest {
-            bail!("consumer coordinate differs from accepted admitted use");
+        if self.remote_use(&coordinate.scenario_id)?.use_digest()? != coordinate.use_digest {
+            bail!("consumer coordinate differs from accepted consumer use");
         }
         if source.scenario_source_digest != selection.scenario_source_digest
             || source.executor.payload_blob_hash != selection.verifier_artifact_hash
@@ -140,6 +162,34 @@ impl QualificationLaunchPurpose {
             bail!("consumer verifier differs from accepted signed source artifact");
         }
         Ok(())
+    }
+
+    /// The typed use a remote scenario's attempts are bound to: the admitted
+    /// Worker use when the signed policy has a consumer context, otherwise the
+    /// scenario's signed probe input.
+    pub fn remote_use(&self, scenario_id: &str) -> Result<QualificationRemoteUse<'_>> {
+        let policy = &self.policy_source.policy;
+        let scenario = policy
+            .producer_scenarios
+            .get(scenario_id)
+            .context("remote qualification scenario is absent from signed policy")?;
+        if scenario.remote_verifier.is_none() {
+            bail!("qualification scenario is not remote");
+        }
+        match (
+            &policy.consumer_execution_context,
+            &scenario.remote_probe_input,
+        ) {
+            (Some(_), None) => Ok(QualificationRemoteUse::Worker {
+                qualified_use: self
+                    .consumer_content
+                    .as_ref()
+                    .and_then(|content| content.qualification_use.as_ref())
+                    .context("accepted consumer purpose has no admitted use")?,
+            }),
+            (None, Some(input)) => Ok(QualificationRemoteUse::Probe { input }),
+            _ => bail!("remote scenario use differs from signed consumer context"),
+        }
     }
 
     /// Join the operation separately: it is intentionally absent from the
@@ -225,17 +275,19 @@ impl QualificationLaunchPurpose {
             (None, None, None) => {}
             _ => bail!("qualification purpose consumer definitions differ from signed policy"),
         }
-        if self.producer_recipe_sources.len() != self.policy_source.policy.producer_scenarios.len()
-        {
-            bail!("qualification purpose does not pin every signed producer scenario");
-        }
         for (name, scenario) in &self.policy_source.policy.producer_scenarios {
+            let Some(recipe_ref) = &scenario.recipe_ref else {
+                if self.producer_recipe_sources.contains_key(name) {
+                    bail!("qualification purpose pins a producer for a probe scenario");
+                }
+                continue;
+            };
             let source = self
                 .producer_recipe_sources
                 .get(name)
                 .context("qualification purpose has no producer source for signed scenario")?;
             source.validate()?;
-            if source.canonical_ref != scenario.recipe_ref {
+            if &source.canonical_ref != recipe_ref {
                 bail!("qualification purpose producer source differs from signed scenario");
             }
             if let Some(definitions) = &self.consumer_definitions
@@ -243,6 +295,16 @@ impl QualificationLaunchPurpose {
             {
                 bail!("qualification producer and consumer use different Bundle generations");
             }
+        }
+        let producer_scenarios = self
+            .policy_source
+            .policy
+            .producer_scenarios
+            .values()
+            .filter(|scenario| scenario.recipe_ref.is_some())
+            .count();
+        if self.producer_recipe_sources.len() != producer_scenarios {
+            bail!("qualification purpose does not pin every signed producer scenario");
         }
         let remote_scenarios = self
             .policy_source
@@ -255,12 +317,15 @@ impl QualificationLaunchPurpose {
             bail!("qualification purpose does not retain every signed remote verifier");
         }
         if remote_scenarios > 0 {
-            let qualified_use = self
-                .consumer_content
-                .as_ref()
-                .and_then(|content| content.qualification_use.as_ref())
-                .context("remote qualification purpose has no admitted consumer use")?;
-            qualified_use.require_qualified_use(&self.policy_source.policy.verifier_parameters)?;
+            for (name, scenario) in &self.policy_source.policy.producer_scenarios {
+                if scenario.remote_verifier.is_none() {
+                    continue;
+                }
+                if let QualificationRemoteUse::Worker { qualified_use } = self.remote_use(name)? {
+                    qualified_use
+                        .require_qualified_use(&self.policy_source.policy.verifier_parameters)?;
+                }
+            }
             let invocation = self
                 .consumer_invocation
                 .as_ref()
@@ -280,7 +345,7 @@ impl QualificationLaunchPurpose {
         }
         for (name, verifier) in &self.remote_verifier_sources {
             verifier.validate_for(&self.policy_source, name)?;
-            if self.producer_recipe_sources.get(name) != Some(&verifier.producer_source) {
+            if self.producer_recipe_sources.get(name) != verifier.producer_source.as_ref() {
                 bail!("retained remote verifier differs from admitted producer source");
             }
         }

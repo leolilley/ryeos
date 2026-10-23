@@ -17,6 +17,7 @@ use crate::handler_context::HandlerContext;
 use crate::state::AppState;
 use ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy;
 
+pub mod candidate_program;
 pub mod consumer_qualification_context;
 pub mod content_qualification;
 pub mod product_build;
@@ -25,6 +26,7 @@ pub mod product_qualification;
 pub mod product_receipt;
 pub mod products;
 pub mod qualification_launch;
+pub mod qualification_testimony;
 mod retained_binding;
 mod retained_product;
 mod retained_result;

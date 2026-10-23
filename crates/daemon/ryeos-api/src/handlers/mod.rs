@@ -40,13 +40,19 @@ pub mod credential_profiles;
 pub mod dedicated_sessions;
 pub mod events_chain_replay;
 pub mod events_replay;
+pub mod external_content_accept_qualification_testimony;
 pub mod external_content_activate;
 pub mod external_content_bind;
+pub mod external_content_export_qualification_testimony;
 pub mod external_content_import;
+pub mod external_content_product_accept;
+pub mod external_content_product_offer;
+pub mod external_content_product_push;
 pub mod external_content_product_receive;
 pub mod external_content_products;
 pub mod external_content_release;
 pub mod external_content_scrub;
+pub mod external_execution_candidate_program;
 pub mod external_execution_channel;
 pub mod federated_follow;
 pub mod federation_capabilities;
@@ -66,6 +72,7 @@ pub mod objects_closure_get;
 pub mod objects_get;
 pub mod objects_has;
 pub mod objects_put;
+pub mod objects_stage_chunk;
 pub mod product_qualification_launch;
 pub mod project_apply_snapshot;
 pub mod project_snapshot_status;
@@ -160,6 +167,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     objects_has::DESCRIPTOR,
     objects_put::DESCRIPTOR,
     objects_get::DESCRIPTOR,
+    objects_stage_chunk::DESCRIPTOR,
     objects_closure_describe::DESCRIPTOR,
     objects_closure_get::DESCRIPTOR,
     push_head::DESCRIPTOR,
@@ -186,6 +194,11 @@ pub const ALL: &[ServiceDescriptor] = &[
     events_chain_replay::DESCRIPTOR,
     external_content_import::DESCRIPTOR,
     external_content_product_receive::DESCRIPTOR,
+    external_content_product_offer::DESCRIPTOR,
+    external_content_product_accept::DESCRIPTOR,
+    external_content_product_push::DESCRIPTOR,
+    external_content_export_qualification_testimony::DESCRIPTOR,
+    external_content_accept_qualification_testimony::DESCRIPTOR,
     external_content_products::CAPTURE_DESCRIPTOR,
     external_content_products::PRODUCE_RUNTIME_SNAPSHOT_DESCRIPTOR,
     external_content_products::CONTINUE_RUNTIME_SNAPSHOT_CREATE_DESCRIPTOR,
@@ -213,6 +226,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     external_content_bind::DESCRIPTOR,
     external_content_release::DESCRIPTOR,
     external_content_scrub::DESCRIPTOR,
+    external_execution_candidate_program::DESCRIPTOR,
     external_execution_channel::DESCRIPTOR,
     external_execution_channel::EXCHANGE_DESCRIPTOR,
     trace_branch::DESCRIPTOR,

@@ -8,6 +8,8 @@
 /// Owner token carried by the secure temporaries this adapter publishes.
 const SYNTHETIC_TEMP_PURPOSE: lillux::TempPurpose = lillux::TempPurpose::new("synthetic");
 
+mod snapshot_lane;
+
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
@@ -328,6 +330,18 @@ fn run() -> Result<()> {
         "inspect" => inspect(&adapter),
         "verify-runtime-probe" => verify_runtime_probe(&adapter),
         "operate" => operate(&adapter),
+        "produce-snapshot" => snapshot_lane::produce_snapshot(&adapter),
+        "produce-snapshot-upload" => snapshot_lane::produce_snapshot_upload(&adapter),
+        "produce-snapshot-create" => snapshot_lane::produce_snapshot_create(&adapter),
+        "observe-snapshot-readiness" => snapshot_lane::observe_snapshot_readiness(&adapter),
+        "qualify-snapshot-create" => snapshot_lane::qualify_snapshot_create(&adapter),
+        "qualify-snapshot-verify" => snapshot_lane::qualify_snapshot_verify(&adapter),
+        "qualify-snapshot-terminate" => {
+            snapshot_lane::terminate_snapshot_qualification(&adapter, true)
+        }
+        "observe-snapshot-termination" => {
+            snapshot_lane::terminate_snapshot_qualification(&adapter, false)
+        }
         "serve-occurrence" => {
             let occurrence = PathBuf::from(
                 arguments
@@ -398,6 +412,32 @@ fn inspect(adapter: &lillux::InheritedDescriptorAuthority) -> Result<()> {
             },
         )?;
     }
+    let observed_snapshot_spec = request
+        .snapshot_production_spec
+        .as_ref()
+        .map(|inspection| -> Result<String> {
+            // SAFETY: the lifecycle runner transferred this exact descriptor
+            // once into this single-threaded inspection process.
+            let authority =
+                unsafe { lillux::take_inherited_descriptor_authority(inspection.descriptor) }
+                    .map_err(anyhow::Error::msg)?;
+            let bytes = lillux::read_sealed_inherited_descriptor(
+                authority
+                    .inherited_descriptor()
+                    .map_err(anyhow::Error::msg)?,
+                usize::try_from(
+                    ryeos_external_execution_contract::MAX_LIFECYCLE_PROVIDER_SPEC_BYTES,
+                )?,
+            )
+            .map_err(anyhow::Error::msg)?;
+            ensure!(
+                u64::try_from(bytes.len())? == inspection.bytes
+                    && lillux::sha256_hex(&bytes) == inspection.digest,
+                "snapshot production spec differs from its signed inspection identity"
+            );
+            Ok(inspection.digest.clone())
+        })
+        .transpose()?;
     let response = LifecycleAdapterInspectionResponse {
         schema: 1,
         protocol: LIFECYCLE_ADAPTER_PROTOCOL.into(),
@@ -408,7 +448,7 @@ fn inspect(adapter: &lillux::InheritedDescriptorAuthority) -> Result<()> {
         target: request.target.clone(),
         effective_capabilities: request.declared_capabilities.clone(),
         observed_provider_spec_sha256: request.provider_spec.digest.clone(),
-        observed_snapshot_production_spec_sha256: None,
+        observed_snapshot_production_spec_sha256: observed_snapshot_spec,
         // This adapter has no materialized-source bootstrap path, so it
         // observes no bootstrap profile and cannot authorize one.
         observed_bootstrap_profile_digest: None,

@@ -346,7 +346,7 @@ mod tests {
         let policy = r#"category: test
 version: "1.0.0"
 product_qualification_policy:
-  schema: ryeos.product_qualification_policy.v4
+  schema: ryeos.product_qualification_policy.v5
   verifier_ref: tool:fixtures/qualify_runtime
   subject_declaration_id: guest-runtime
   allowed_claims: [runtime_qualified]

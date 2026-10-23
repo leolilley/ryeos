@@ -2655,6 +2655,18 @@ mod tests {
         assert!(edges.iter().any(|edge| {
             edge.hash == h("ab") && edge.expected == ExpectedObject::Kind("attestation")
         }));
+        // A remote content testimony reaches this node's own acceptance, not
+        // the origin's attestation, which is not in this store.
+        let mut remote_content = persistent.clone();
+        remote_content["retained_external_runtime_content_qualification"] = json!({
+            "attestation_hash": h("ab"),
+            "remote_testimony": {"acceptance_hash": h("ac")}
+        });
+        let edges = typed_object_edges(&remote_content).unwrap();
+        assert!(edges.iter().any(|edge| {
+            edge.hash == h("ac") && edge.expected == ExpectedObject::Kind("attestation")
+        }));
+        assert!(!edges.iter().any(|edge| edge.hash == h("ab")));
         // The two owning slots cannot borrow one another's field shape.
         content_qualified["retained_external_runtime_content_qualification"] =
             json!({"proof": {"attestation_hash": h("aa")}});

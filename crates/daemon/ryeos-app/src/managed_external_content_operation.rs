@@ -831,6 +831,7 @@ mod tests {
     fn offline_root_authority_digest_binds_only_the_selected_node_root() {
         let mut policy = ExternalContentImportPolicyRecord {
             schema: 1,
+            declared_roots: std::collections::BTreeMap::new(),
             roots: std::collections::BTreeMap::from([
                 (
                     "archives".to_owned(),

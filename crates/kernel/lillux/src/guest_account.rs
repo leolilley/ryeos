@@ -85,6 +85,17 @@ impl GuestRuntimeAccount {
     }
 }
 
+/// Effective user id of the calling process.
+pub fn effective_uid() -> Result<u32> {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: geteuid has no pointer arguments or caller-owned memory.
+        Ok(unsafe { libc::geteuid() })
+    }
+    #[cfg(not(target_os = "linux"))]
+    anyhow::bail!("effective user id is unavailable on this OS")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

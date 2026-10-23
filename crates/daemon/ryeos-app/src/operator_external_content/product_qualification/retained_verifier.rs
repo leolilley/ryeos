@@ -25,18 +25,22 @@ pub(super) fn authenticate_retained_verifier_bytes(
     // These are accepted-purpose-owned blobs, not caller-supplied resolution
     // documents. Restoring reproduces identity; contributor authentication
     // remains a separate required join before execution authority is issued.
-    for (hash, reference, digest) in [
-        (
-            &source.policy_resolution_blob_hash,
-            &purpose.policy_source().canonical_ref,
-            &purpose.policy_source().effective_definition_digest,
-        ),
-        (
-            &source.recipe_resolution_blob_hash,
-            &source.producer_source.canonical_ref,
-            &source.producer_source.effective_definition_digest,
-        ),
-    ] {
+    let mut resolutions = vec![(
+        &source.policy_resolution_blob_hash,
+        &purpose.policy_source().canonical_ref,
+        &purpose.policy_source().effective_definition_digest,
+    )];
+    // A probe scenario pins no producer recipe, so retains no recipe source.
+    if let (Some(producer), Some(recipe_hash)) =
+        (&source.producer_source, &source.recipe_resolution_blob_hash)
+    {
+        resolutions.push((
+            recipe_hash,
+            &producer.canonical_ref,
+            &producer.effective_definition_digest,
+        ));
+    }
+    for (hash, reference, digest) in resolutions {
         let retained: ryeos_engine::resolution::RetainedResolutionOutput =
             serde_json::from_value(canonical_blob(cas, hash, 4 * 1024 * 1024)?)?;
         ensure!(
@@ -88,26 +92,26 @@ pub(super) fn authenticate_retained_verifier_bytes(
         parsed_policy == policy.policy,
         "retained composed policy differs from accepted policy"
     );
-    let recipe_resolution = verify_resolution_contributors(
-        cas,
-        &source.recipe_resolution_blob_hash,
-        source,
-        &authenticated_bodies,
-    )?;
-    ensure!(
-        recipe_resolution.root.raw_content_digest == source.producer_source.raw_content_digest
-            && recipe_resolution.root.signer_fingerprint.as_deref()
-                == Some(source.producer_source.publisher_fingerprint.as_str()),
-        "retained recipe root differs from accepted source"
-    );
-    let recipe = ryeos_state::external_content::products::producer_recipe::ProductProducerRecipe::from_value(
-        recipe_resolution.composed.composed.get(super::PRODUCER_RECIPE_FIELD)
-            .context("retained resolution has no producer recipe")?.clone(),
-    )?;
-    ensure!(
-        recipe.digest()? == source.producer_source.recipe_digest,
-        "retained composed recipe differs from accepted source"
-    );
+    if let (Some(producer), Some(recipe_hash)) =
+        (&source.producer_source, &source.recipe_resolution_blob_hash)
+    {
+        let recipe_resolution =
+            verify_resolution_contributors(cas, recipe_hash, source, &authenticated_bodies)?;
+        ensure!(
+            recipe_resolution.root.raw_content_digest == producer.raw_content_digest
+                && recipe_resolution.root.signer_fingerprint.as_deref()
+                    == Some(producer.publisher_fingerprint.as_str()),
+            "retained recipe root differs from accepted source"
+        );
+        let recipe = ryeos_state::external_content::products::producer_recipe::ProductProducerRecipe::from_value(
+            recipe_resolution.composed.composed.get(super::PRODUCER_RECIPE_FIELD)
+                .context("retained resolution has no producer recipe")?.clone(),
+        )?;
+        ensure!(
+            recipe.digest()? == producer.recipe_digest,
+            "retained composed recipe differs from accepted source"
+        );
+    }
     for manifest in &source.signed_bundle_manifests {
         let bytes = blob(cas, &manifest.signed_blob_hash, 4 * 1024 * 1024)?;
         verify_retained_signed_bundle_manifest(

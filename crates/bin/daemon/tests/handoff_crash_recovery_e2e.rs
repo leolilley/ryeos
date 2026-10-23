@@ -33,9 +33,9 @@ use ryeos_app::worker_handoff::test_support::{
     DurableJobResult, DurableJobState, ExpectedHeadSigner, HANDOFF_ACCEPTANCE_MATRIX,
     HandoffAcceptanceCase, HandoffCrashBoundary, HandoffDurableSnapshot, HandoffMeasurementRecord,
     HandoffMeasurementReport, HandoffNode, HandoffObservedMeasurements, HandoffPhaseCutEvidence,
-    OperatorOutcome, PortableStateDisposition, ProcessDisposition, RecoveryTrigger,
-    RequestOutcomeAtCut, RetryDisposition, SourcePlacementState, StagingRootDisposition,
-    SuccessorPlacementState, WorkspaceDisposition,
+    HandoffReportHost, OperatorOutcome, PortableStateDisposition, ProcessDisposition,
+    RecoveryTrigger, RequestOutcomeAtCut, RetryDisposition, SourcePlacementState,
+    StagingRootDisposition, SuccessorPlacementState, WorkspaceDisposition,
 };
 use ryeos_app::worker_handoff::{
     WORKER_PLACEMENT_ABORT_SERVICE, WORKER_PLACEMENT_ADOPT_SERVICE,
@@ -5075,6 +5075,7 @@ async fn real_portable_worker_completes_cross_site_handoff_on_qualified_host() -
     )?;
     let report = HandoffMeasurementReport {
         schema: "ryeos.worker_handoff_qualification_report.v1".to_owned(),
+        host: HandoffReportHost::Qualified,
         records: vec![record],
     };
     let canonical = report.canonical_bytes()?;
@@ -5481,9 +5482,52 @@ async fn failed_terminal_fetch_retries_in_the_same_source_process_on_qualified_h
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn explicit_handoff_acceptance_matrix_emits_retained_report() -> Result<()> {
-    settled_or_host_unqualified(
-        explicit_handoff_acceptance_matrix_emits_retained_report_on_qualified_host().await,
-    )
+    match explicit_handoff_acceptance_matrix_emits_retained_report_on_qualified_host().await {
+        Err(error)
+            if error
+                .downcast_ref::<HostCannotQualifyProcessScopes>()
+                .is_some() =>
+        {
+            eprintln!("handoff crash suite skipped: {error}");
+            retain_unqualified_host_report(error.to_string())
+        }
+        other => other,
+    }
+}
+
+/// The retained report of a host that could not run the matrix: it names the
+/// refusal and carries no measurements, so the gate retains a report that says
+/// exactly what this host proved.
+fn retain_unqualified_host_report(mut refusal: String) -> Result<()> {
+    let bound = HandoffMeasurementReport::MAX_REFUSAL_BYTES;
+    if refusal.len() > bound {
+        let mut cut = bound;
+        while !refusal.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        refusal.truncate(cut);
+    }
+    let report = HandoffMeasurementReport {
+        schema: "ryeos.worker_handoff_qualification_report.v1".to_owned(),
+        host: HandoffReportHost::Unqualified { refusal },
+        records: Vec::new(),
+    };
+    let bytes = report.canonical_bytes()?;
+    if let Some(path) = std::env::var_os("RYEOS_HANDOFF_QUALIFICATION_REPORT") {
+        let path = std::path::PathBuf::from(path);
+        anyhow::ensure!(
+            path.is_absolute() && path.parent().is_some_and(Path::exists),
+            "handoff qualification report path must have an existing absolute parent"
+        );
+        lillux::atomic_write_with_mode(&path, &bytes, 0o644)
+            .map_err(anyhow::Error::msg)
+            .with_context(|| format!("retain handoff qualification report {}", path.display()))?;
+    }
+    println!(
+        "RYEOS_HANDOFF_QUALIFICATION_REPORT_JSON={}",
+        String::from_utf8(bytes).context("canonical qualification report is not UTF-8")?
+    );
+    Ok(())
 }
 
 async fn explicit_handoff_acceptance_matrix_emits_retained_report_on_qualified_host() -> Result<()>
@@ -5527,6 +5571,7 @@ async fn explicit_handoff_acceptance_matrix_emits_retained_report_on_qualified_h
     }
     let report = HandoffMeasurementReport {
         schema: "ryeos.worker_handoff_qualification_report.v1".to_owned(),
+        host: HandoffReportHost::Qualified,
         records,
     };
     let bytes = report.canonical_bytes()?;
@@ -5579,6 +5624,7 @@ async fn target_abort_receipt_survives_terminal_job_retention_on_qualified_host(
     .await?;
     let report = HandoffMeasurementReport {
         schema: "ryeos.worker_handoff_qualification_report.v1".to_owned(),
+        host: HandoffReportHost::Qualified,
         records: vec![build_abort_payload_measurement_record(
             "target_abort_retention",
             boundary,

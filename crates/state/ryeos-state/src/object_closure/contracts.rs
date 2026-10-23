@@ -885,9 +885,11 @@ fn push_qualification_purpose_edges(
                     .map(|manifest| manifest.signed_blob_hash.clone()),
             );
             let executor = &source.executor;
+            links
+                .blob_hashes
+                .extend(source.recipe_resolution_blob_hash.clone());
             links.blob_hashes.extend([
                 source.policy_resolution_blob_hash.clone(),
-                source.recipe_resolution_blob_hash.clone(),
                 executor.payload_blob_hash.clone(),
                 executor.signed_manifest_ref_blob_hash.clone(),
                 executor.manifest_object_blob_hash.clone(),
@@ -1248,13 +1250,25 @@ fn links_persistent_session_capsule(value: &Value) -> Result<ContractLinks, Stri
     }
     match value.get("retained_external_runtime_content_qualification") {
         Some(Value::Null) => {}
-        Some(proof) => super::push_required_object_edge(
-            proof,
-            "attestation_hash",
-            ExpectedObject::Kind("attestation"),
-            None,
-            &mut links.object_edges,
-        )?,
+        // A remote testimony's qualification attestation lives in the
+        // origin's store; this node owns, and the capsule reaches, only its
+        // own acceptance of it.
+        Some(proof) => match proof.get("remote_testimony") {
+            Some(remote) if !remote.is_null() => super::push_required_object_edge(
+                remote,
+                "acceptance_hash",
+                ExpectedObject::Kind("attestation"),
+                None,
+                &mut links.object_edges,
+            )?,
+            _ => super::push_required_object_edge(
+                proof,
+                "attestation_hash",
+                ExpectedObject::Kind("attestation"),
+                None,
+                &mut links.object_edges,
+            )?,
+        },
         None => {
             return Err("persistent-session capsule missing runtime content qualification".into());
         }
@@ -1825,7 +1839,7 @@ mod tests {
             )
             .chain([
                 &source.policy_resolution_blob_hash,
-                &source.recipe_resolution_blob_hash,
+                source.recipe_resolution_blob_hash.as_ref().unwrap(),
                 &source.executor.payload_blob_hash,
                 &source.executor.signed_manifest_ref_blob_hash,
                 &source.executor.manifest_object_blob_hash,

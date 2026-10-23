@@ -38,6 +38,7 @@ fn fixture(
             Arc::new(closure),
             Arc::new(ExternalContentImportPolicyRecord {
                 schema: 1,
+                declared_roots: std::collections::BTreeMap::new(),
                 roots: Default::default(),
                 limits: ExternalContentImportLimits {
                     max_depth: 4,
@@ -395,6 +396,7 @@ async fn bind_through_managed_activation_owner(
             Arc::new(closure),
             Arc::new(ExternalContentImportPolicyRecord {
                 schema: 1,
+                declared_roots: std::collections::BTreeMap::new(),
                 roots: Default::default(),
                 limits: ExternalContentImportLimits {
                     max_depth: 4,

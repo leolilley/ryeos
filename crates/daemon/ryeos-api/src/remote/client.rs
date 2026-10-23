@@ -85,6 +85,8 @@ pub fn map_remote_call_error(
 /// keep enough to diagnose without bloating logs and error chains.
 const ERROR_BODY_EXCERPT_MAX: usize = 16 * 1024;
 const DEFAULT_JSON_RESPONSE_MAX_BYTES: usize = 64 * 1024 * 1024;
+/// Product-transport service responses carry hash lists, not payload bytes.
+const DEFAULT_SERVICE_RESPONSE_MAX_BYTES: usize = 8 * 1024 * 1024;
 
 fn truncate_error_body(body: &str) -> String {
     if body.len() <= ERROR_BODY_EXCERPT_MAX {
@@ -888,6 +890,190 @@ impl RemoteClient {
             anyhow::bail!("remote blob hash mismatch: expected {hash}, got {actual}");
         }
         Ok(offset)
+    }
+
+    /// Read one bounded range of a large object from the remote's
+    /// large-object store. The response is validated against the exact
+    /// requested range before it is returned.
+    pub async fn objects_get_large_object_chunk(
+        &self,
+        hash: &str,
+        offset: u64,
+        length: usize,
+    ) -> Result<BlobChunkResponse> {
+        let body = serde_json::json!({
+            "object_hashes": [],
+            "blob_hashes": [],
+            "large_object_chunk": {"hash": hash, "offset": offset, "length": length},
+        });
+        let response = self
+            .signed_post_with_response_limit(
+                "/objects/get",
+                &body,
+                length.saturating_mul(2).saturating_add(4096),
+            )
+            .await?;
+        let chunk: BlobChunkResponse = serde_json::from_value(
+            response
+                .get("large_object_chunk")
+                .cloned()
+                .context("objects/get response missing large_object_chunk")?,
+        )?;
+        chunk.validate_kind("large_object_chunk", hash, offset, length)?;
+        Ok(chunk)
+    }
+
+    /// Stream one large object from byte zero through bounded authenticated
+    /// responses into `sink`. The sink receives each verified-in-order slice;
+    /// the whole-file digest is checked once the final chunk arrives, so a
+    /// sink must treat its output as provisional until this returns `Ok`.
+    /// Returns the byte count.
+    pub async fn stream_large_object<F>(&self, hash: &str, mut sink: F) -> Result<u64>
+    where
+        F: FnMut(&[u8]) -> Result<()>,
+    {
+        use sha2::{Digest as _, Sha256};
+
+        if !is_canonical_hash(hash) {
+            anyhow::bail!("cannot stream an invalid large-object hash");
+        }
+        let mut offset = 0_u64;
+        let mut declared_total = None;
+        let mut digest = Sha256::new();
+        loop {
+            let chunk = self
+                .objects_get_large_object_chunk(
+                    hash,
+                    offset,
+                    crate::handlers::objects_get::MAX_BLOB_CHUNK_BYTES,
+                )
+                .await?;
+            if chunk.kind == "missing" {
+                anyhow::bail!("remote large object {hash} is absent");
+            }
+            let total = chunk
+                .total_size
+                .context("remote large-object chunk omitted total size")?;
+            if declared_total
+                .replace(total)
+                .is_some_and(|prior| prior != total)
+            {
+                anyhow::bail!("remote large object changed size during transfer");
+            }
+            let bytes = chunk.decoded_data()?;
+            sink(&bytes)?;
+            digest.update(&bytes);
+            offset = offset
+                .checked_add(u64::try_from(bytes.len())?)
+                .context("remote large-object transfer size overflow")?;
+            if chunk.eof == Some(true) {
+                if offset != total {
+                    anyhow::bail!("remote large-object EOF contradicts its total size");
+                }
+                break;
+            }
+        }
+        let actual = format!("{:x}", digest.finalize());
+        if actual != hash {
+            anyhow::bail!("remote large-object hash mismatch: expected {hash}, got {actual}");
+        }
+        Ok(offset)
+    }
+
+    /// POST /objects/stage-chunk (authenticated). Appends one bounded chunk
+    /// to a durable staging area on the remote, either a CAS blob or a
+    /// large object described by an already-staged manifest.
+    pub async fn objects_stage_chunk(
+        &self,
+        request: &StageChunkRequest<'_>,
+    ) -> Result<StageChunkResponse> {
+        if request.data.len() > crate::handlers::objects_get::MAX_BLOB_CHUNK_BYTES {
+            anyhow::bail!("stage chunk exceeds the bounded chunk length");
+        }
+        let body = serde_json::json!({
+            "staging_id": request.staging_id,
+            "namespace": request.namespace.as_str(),
+            "hash": request.hash,
+            "total_size": request.total_size,
+            "offset": request.offset,
+            "data": base64::engine::general_purpose::STANDARD.encode(request.data),
+            "manifest_hash": request.manifest_hash,
+        });
+        let response = self
+            .signed_post_with_response_limit(
+                "/objects/stage-chunk",
+                &body,
+                DEFAULT_SERVICE_RESPONSE_MAX_BYTES,
+            )
+            .await?;
+        let parsed: StageChunkResponse = serde_json::from_value(response)
+            .context("objects/stage-chunk returned an invalid response shape")?;
+        parsed.validate(request)?;
+        Ok(parsed)
+    }
+
+    /// POST /external-content/product-offer (authenticated). Offers one
+    /// product witness closure to the remote; the response names exactly what
+    /// the remote still lacks.
+    pub async fn product_offer(
+        &self,
+        request: &ProductOfferRequest,
+    ) -> Result<ProductOfferResponse> {
+        let body = serde_json::to_value(request)?;
+        let response = self
+            .signed_post_with_response_limit(
+                "/external-content/product-offer",
+                &body,
+                DEFAULT_SERVICE_RESPONSE_MAX_BYTES,
+            )
+            .await?;
+        let parsed: ProductOfferResponse = serde_json::from_value(response)
+            .context("product-offer returned an invalid response shape")?;
+        parsed.validate(request.staging_id.as_deref())?;
+        Ok(parsed)
+    }
+
+    /// POST /external-content/product-accept (authenticated). Asks the remote
+    /// to verify and accept the staged product; idempotent.
+    pub async fn product_accept(
+        &self,
+        request: &ProductAcceptRequest,
+    ) -> Result<ProductAcceptResponse> {
+        let body = serde_json::to_value(request)?;
+        let response = self
+            .signed_post_with_response_limit(
+                "/external-content/product-accept",
+                &body,
+                DEFAULT_SERVICE_RESPONSE_MAX_BYTES,
+            )
+            .await?;
+        let parsed: ProductAcceptResponse = serde_json::from_value(response)
+            .context("product-accept returned an invalid response shape")?;
+        parsed.validate(request)?;
+        Ok(parsed)
+    }
+
+    /// POST /external-content/accept-qualification-testimony (authenticated).
+    /// One signed request carries the whole testimony; the answer is checked
+    /// against the testimony hash and coordinate the caller already holds.
+    pub async fn qualification_testimony_accept(
+        &self,
+        request: &QualificationTestimonyAcceptRequest,
+        expected_testimony_hash: &str,
+        expected_coordinate_id: &str,
+    ) -> Result<QualificationTestimonyAcceptResponse> {
+        let body = serde_json::to_value(request)?;
+        let response = self
+            .signed_post_with_response_limit(
+                "/external-content/accept-qualification-testimony",
+                &body,
+                DEFAULT_SERVICE_RESPONSE_MAX_BYTES,
+            )
+            .await?;
+        let parsed: QualificationTestimonyAcceptResponse = serde_json::from_value(response)
+            .context("accept-qualification-testimony returned an invalid response shape")?;
+        parsed.validate(expected_testimony_hash, expected_coordinate_id)?;
+        Ok(parsed)
     }
 
     /// Fetch CAS entries while bounding each HTTP response body. Callers that
@@ -2299,46 +2485,59 @@ pub struct BlobChunkResponse {
 
 impl BlobChunkResponse {
     fn validate(&self, expected_hash: &str, expected_offset: u64, max_length: usize) -> Result<()> {
+        self.validate_kind("blob_chunk", expected_hash, expected_offset, max_length)
+    }
+
+    /// Validate one chunk response whose present-data kind is `data_kind`
+    /// (`blob_chunk` or `large_object_chunk`). A `missing` answer carries no
+    /// range metadata; a data answer must match the requested range exactly.
+    fn validate_kind(
+        &self,
+        data_kind: &str,
+        expected_hash: &str,
+        expected_offset: u64,
+        max_length: usize,
+    ) -> Result<()> {
         if self.hash != expected_hash {
-            anyhow::bail!("objects/get blob chunk changed the requested hash");
+            anyhow::bail!("objects/get {data_kind} changed the requested hash");
         }
-        match self.kind.as_str() {
-            "missing"
-                if self.offset.is_none()
-                    && self.total_size.is_none()
-                    && self.eof.is_none()
-                    && self.data.is_none() => {}
-            "blob_chunk" => {
-                if self.offset != Some(expected_offset)
-                    || self.total_size.is_none()
-                    || self.eof.is_none()
-                {
-                    anyhow::bail!("objects/get returned incomplete blob chunk metadata");
-                }
-                let encoded = self
-                    .data
-                    .as_deref()
-                    .context("objects/get blob chunk has no data")?;
-                let decoded = base64::engine::general_purpose::STANDARD
-                    .decode(encoded)
-                    .context("objects/get blob chunk is not valid base64")?;
-                if decoded.len() > max_length {
-                    anyhow::bail!("objects/get blob chunk exceeds requested length");
-                }
-                let total_size = self.total_size.expect("checked above");
-                if decoded.is_empty()
-                    && !(expected_offset == 0 && total_size == 0 && self.eof == Some(true))
-                {
-                    anyhow::bail!("objects/get blob chunk made no progress");
-                }
-                let end = expected_offset
-                    .checked_add(u64::try_from(decoded.len())?)
-                    .context("objects/get blob chunk range overflow")?;
-                if end > total_size || self.eof != Some(end == total_size) {
-                    anyhow::bail!("objects/get blob chunk has contradictory range/EOF metadata");
-                }
+        if self.kind == "missing" {
+            if self.offset.is_none()
+                && self.total_size.is_none()
+                && self.eof.is_none()
+                && self.data.is_none()
+            {
+                return Ok(());
             }
-            _ => anyhow::bail!("objects/get returned an invalid blob chunk shape"),
+            anyhow::bail!("objects/get returned an invalid {data_kind} shape");
+        }
+        if self.kind != data_kind {
+            anyhow::bail!("objects/get returned an invalid {data_kind} shape");
+        }
+        if self.offset != Some(expected_offset) || self.total_size.is_none() || self.eof.is_none() {
+            anyhow::bail!("objects/get returned incomplete {data_kind} metadata");
+        }
+        let encoded = self
+            .data
+            .as_deref()
+            .with_context(|| format!("objects/get {data_kind} has no data"))?;
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .with_context(|| format!("objects/get {data_kind} is not valid base64"))?;
+        if decoded.len() > max_length {
+            anyhow::bail!("objects/get {data_kind} exceeds requested length");
+        }
+        let total_size = self.total_size.expect("checked above");
+        if decoded.is_empty()
+            && !(expected_offset == 0 && total_size == 0 && self.eof == Some(true))
+        {
+            anyhow::bail!("objects/get {data_kind} made no progress");
+        }
+        let end = expected_offset
+            .checked_add(u64::try_from(decoded.len())?)
+            .with_context(|| format!("objects/get {data_kind} range overflow"))?;
+        if end > total_size || self.eof != Some(end == total_size) {
+            anyhow::bail!("objects/get {data_kind} has contradictory range/EOF metadata");
         }
         Ok(())
     }
@@ -2348,6 +2547,212 @@ impl BlobChunkResponse {
         base64::engine::general_purpose::STANDARD
             .decode(encoded)
             .context("blob chunk is not valid base64")
+    }
+}
+
+/// Which durable staging namespace a `objects/stage-chunk` chunk targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StageNamespace {
+    Blob,
+    LargeObject,
+}
+
+impl StageNamespace {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Blob => "blob",
+            Self::LargeObject => "large_object",
+        }
+    }
+}
+
+/// One bounded sequential chunk for `objects/stage-chunk`. A large-object
+/// chunk names the staged manifest that declares its sidecar commitments.
+#[derive(Debug, Clone)]
+pub struct StageChunkRequest<'a> {
+    pub staging_id: &'a str,
+    pub namespace: StageNamespace,
+    pub hash: &'a str,
+    pub total_size: u64,
+    pub offset: u64,
+    pub data: &'a [u8],
+    pub manifest_hash: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StageChunkResponse {
+    pub staging_id: String,
+    pub namespace: String,
+    pub hash: String,
+    pub staged_bytes: u64,
+    pub complete: bool,
+}
+
+impl StageChunkResponse {
+    fn validate(&self, request: &StageChunkRequest<'_>) -> Result<()> {
+        if self.staging_id != request.staging_id
+            || self.namespace != request.namespace.as_str()
+            || self.hash != request.hash
+        {
+            anyhow::bail!("objects/stage-chunk answered for a different staged object");
+        }
+        let accepted_through = request
+            .offset
+            .checked_add(u64::try_from(request.data.len())?)
+            .context("objects/stage-chunk range overflow")?;
+        if self.staged_bytes > request.total_size || self.staged_bytes < accepted_through {
+            anyhow::bail!(
+                "objects/stage-chunk reported {} staged bytes for a chunk ending at {accepted_through} of {}",
+                self.staged_bytes,
+                request.total_size
+            );
+        }
+        if self.complete != (self.staged_bytes == request.total_size) {
+            anyhow::bail!("objects/stage-chunk completion contradicts its staged byte count");
+        }
+        Ok(())
+    }
+}
+
+/// `external-content/product-offer` request. `origin_admission` is the
+/// origin node's complete admission attestation record for the witness, as
+/// served by its admission-attestations route.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ProductOfferRequest {
+    pub witness_hash: String,
+    pub origin_admission_hash: String,
+    pub maximum_bytes: u64,
+    pub origin_admission: Value,
+    pub objects: Vec<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub staging_id: Option<String>,
+}
+
+/// One large object the offered closure depends on, with the receiver's
+/// current residency and resumable staging progress.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProductLargeObjectOffer {
+    pub file_sha256: String,
+    pub size: u64,
+    pub chunk_size: u64,
+    pub staged_bytes: u64,
+    pub resident: bool,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProductOfferResponse {
+    pub staging_id: String,
+    pub missing_objects: Vec<String>,
+    pub missing_blobs: Vec<String>,
+    pub large_objects: Vec<ProductLargeObjectOffer>,
+    pub ready: bool,
+}
+
+impl ProductOfferResponse {
+    fn validate(&self, requested_staging_id: Option<&str>) -> Result<()> {
+        if self.staging_id.is_empty()
+            || requested_staging_id.is_some_and(|requested| requested != self.staging_id)
+        {
+            anyhow::bail!("product-offer answered with a different staging capability");
+        }
+        for hash in self.missing_objects.iter().chain(&self.missing_blobs) {
+            if !is_canonical_hash(hash) {
+                anyhow::bail!("product-offer listed an invalid missing hash");
+            }
+        }
+        let mut pending_large = false;
+        for large in &self.large_objects {
+            if !is_canonical_hash(&large.file_sha256)
+                || large.size == 0
+                || large.chunk_size == 0
+                || large.staged_bytes > large.size
+            {
+                anyhow::bail!("product-offer listed an invalid large-object entry");
+            }
+            pending_large |= !large.resident;
+        }
+        let complete =
+            self.missing_objects.is_empty() && self.missing_blobs.is_empty() && !pending_large;
+        if self.ready != complete {
+            anyhow::bail!("product-offer readiness contradicts its missing lists");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ProductAcceptRequest {
+    pub staging_id: String,
+    pub witness_hash: String,
+    pub origin_admission_hash: String,
+    pub maximum_bytes: u64,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProductAcceptResponse {
+    pub witness_hash: String,
+    pub origin_admission_hash: String,
+    pub acceptance_hash: String,
+    pub reused_existing: bool,
+    pub manifest_hash: String,
+}
+
+impl ProductAcceptResponse {
+    fn validate(&self, request: &ProductAcceptRequest) -> Result<()> {
+        if self.witness_hash != request.witness_hash
+            || self.origin_admission_hash != request.origin_admission_hash
+        {
+            anyhow::bail!("product-accept answered for a different product");
+        }
+        for hash in [&self.acceptance_hash, &self.manifest_hash] {
+            if !is_canonical_hash(hash) {
+                anyhow::bail!("product-accept returned an invalid hash");
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct QualificationTestimonyAcceptRequest {
+    pub testimony: Value,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QualificationTestimonyAcceptResponse {
+    pub testimony_hash: String,
+    pub acceptance_hash: String,
+    pub coordinate_id: String,
+    pub reused_existing: bool,
+}
+
+impl QualificationTestimonyAcceptResponse {
+    pub fn validate(
+        &self,
+        expected_testimony_hash: &str,
+        expected_coordinate_id: &str,
+    ) -> Result<()> {
+        if self.testimony_hash != expected_testimony_hash {
+            anyhow::bail!("accept-qualification-testimony answered for a different testimony");
+        }
+        if self.coordinate_id != expected_coordinate_id {
+            anyhow::bail!("accept-qualification-testimony answered for a different coordinate");
+        }
+        for hash in [
+            &self.testimony_hash,
+            &self.acceptance_hash,
+            &self.coordinate_id,
+        ] {
+            if !is_canonical_hash(hash) {
+                anyhow::bail!("accept-qualification-testimony returned an invalid hash");
+            }
+        }
+        Ok(())
     }
 }
 
@@ -4017,6 +4422,267 @@ impl RawObjectUpload {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn chunk_response(
+        kind: &str,
+        offset: u64,
+        total: u64,
+        eof: bool,
+        bytes: &[u8],
+    ) -> BlobChunkResponse {
+        BlobChunkResponse {
+            hash: "ab".repeat(32),
+            kind: kind.to_owned(),
+            offset: Some(offset),
+            total_size: Some(total),
+            eof: Some(eof),
+            data: Some(base64::engine::general_purpose::STANDARD.encode(bytes)),
+        }
+    }
+
+    #[test]
+    fn large_object_chunk_validates_only_its_own_kind() {
+        let hash = "ab".repeat(32);
+        let ok = chunk_response("large_object_chunk", 4, 8, true, b"wxyz");
+        ok.validate_kind("large_object_chunk", &hash, 4, 16)
+            .unwrap();
+        assert!(ok.validate_kind("blob_chunk", &hash, 4, 16).is_err());
+        let blob = chunk_response("blob_chunk", 4, 8, true, b"wxyz");
+        assert!(
+            blob.validate_kind("large_object_chunk", &hash, 4, 16)
+                .is_err()
+        );
+        blob.validate(&hash, 4, 16).unwrap();
+    }
+
+    #[test]
+    fn large_object_chunk_refuses_contradictory_ranges() {
+        let hash = "ab".repeat(32);
+        let wrong_offset = chunk_response("large_object_chunk", 0, 8, true, b"wxyz");
+        assert!(
+            wrong_offset
+                .validate_kind("large_object_chunk", &hash, 4, 16)
+                .is_err()
+        );
+        let false_eof = chunk_response("large_object_chunk", 4, 8, false, b"wxyz");
+        assert!(
+            false_eof
+                .validate_kind("large_object_chunk", &hash, 4, 16)
+                .is_err()
+        );
+        let past_total = chunk_response("large_object_chunk", 4, 6, true, b"wxyz");
+        assert!(
+            past_total
+                .validate_kind("large_object_chunk", &hash, 4, 16)
+                .is_err()
+        );
+        let oversized = chunk_response("large_object_chunk", 4, 8, true, b"wxyz");
+        assert!(
+            oversized
+                .validate_kind("large_object_chunk", &hash, 4, 3)
+                .is_err()
+        );
+        let no_progress = chunk_response("large_object_chunk", 4, 8, false, b"");
+        assert!(
+            no_progress
+                .validate_kind("large_object_chunk", &hash, 4, 16)
+                .is_err()
+        );
+        let mut other_hash = chunk_response("large_object_chunk", 4, 8, true, b"wxyz");
+        other_hash.hash = "cd".repeat(32);
+        assert!(
+            other_hash
+                .validate_kind("large_object_chunk", &hash, 4, 16)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn large_object_missing_answer_carries_no_range() {
+        let hash = "ab".repeat(32);
+        let missing = BlobChunkResponse {
+            hash: hash.clone(),
+            kind: "missing".to_owned(),
+            offset: None,
+            total_size: None,
+            eof: None,
+            data: None,
+        };
+        missing
+            .validate_kind("large_object_chunk", &hash, 0, 16)
+            .unwrap();
+        let mut with_data = missing.clone();
+        with_data.data = Some(String::new());
+        assert!(
+            with_data
+                .validate_kind("large_object_chunk", &hash, 0, 16)
+                .is_err()
+        );
+    }
+
+    fn stage_request<'a>(data: &'a [u8], hash: &'a str) -> StageChunkRequest<'a> {
+        StageChunkRequest {
+            staging_id: "upload-1",
+            namespace: StageNamespace::LargeObject,
+            hash,
+            total_size: 10,
+            offset: 4,
+            data,
+            manifest_hash: Some(hash),
+        }
+    }
+
+    #[test]
+    fn stage_chunk_response_must_match_the_request_and_progress() {
+        let hash = "ab".repeat(32);
+        let request = stage_request(b"wxyz", &hash);
+        let response = |staged: u64, complete: bool, namespace: &str| StageChunkResponse {
+            staging_id: "upload-1".to_owned(),
+            namespace: namespace.to_owned(),
+            hash: hash.clone(),
+            staged_bytes: staged,
+            complete,
+        };
+        response(8, false, "large_object")
+            .validate(&request)
+            .unwrap();
+        response(10, true, "large_object")
+            .validate(&request)
+            .unwrap();
+        assert!(response(8, false, "blob").validate(&request).is_err());
+        assert!(
+            response(7, false, "large_object")
+                .validate(&request)
+                .is_err()
+        );
+        assert!(
+            response(11, false, "large_object")
+                .validate(&request)
+                .is_err()
+        );
+        assert!(
+            response(8, true, "large_object")
+                .validate(&request)
+                .is_err()
+        );
+        assert!(
+            response(10, false, "large_object")
+                .validate(&request)
+                .is_err()
+        );
+        assert!(
+            serde_json::from_value::<StageChunkResponse>(serde_json::json!({
+                "staging_id": "upload-1", "namespace": "blob", "hash": hash,
+                "staged_bytes": 1, "complete": false, "extra": true
+            }))
+            .is_err()
+        );
+    }
+
+    fn offer(ready: bool, missing: Vec<String>, resident: bool) -> ProductOfferResponse {
+        ProductOfferResponse {
+            staging_id: "upload-1".to_owned(),
+            missing_objects: missing,
+            missing_blobs: Vec::new(),
+            large_objects: vec![ProductLargeObjectOffer {
+                file_sha256: "cd".repeat(32),
+                size: 100,
+                chunk_size: 32,
+                staged_bytes: if resident { 100 } else { 64 },
+                resident,
+            }],
+            ready,
+        }
+    }
+
+    #[test]
+    fn product_offer_response_readiness_follows_the_missing_lists() {
+        offer(true, Vec::new(), true)
+            .validate(Some("upload-1"))
+            .unwrap();
+        offer(false, Vec::new(), false).validate(None).unwrap();
+        offer(false, vec!["ab".repeat(32)], true)
+            .validate(None)
+            .unwrap();
+        assert!(offer(true, Vec::new(), false).validate(None).is_err());
+        assert!(
+            offer(true, vec!["ab".repeat(32)], true)
+                .validate(None)
+                .is_err()
+        );
+        assert!(offer(false, Vec::new(), true).validate(None).is_err());
+        assert!(
+            offer(true, Vec::new(), true)
+                .validate(Some("upload-2"))
+                .is_err()
+        );
+        assert!(
+            offer(false, vec!["BAD".to_owned()], true)
+                .validate(None)
+                .is_err()
+        );
+        let mut oversized = offer(false, Vec::new(), false);
+        oversized.large_objects[0].staged_bytes = 101;
+        assert!(oversized.validate(None).is_err());
+    }
+
+    #[test]
+    fn product_accept_response_must_echo_the_requested_product() {
+        let request = ProductAcceptRequest {
+            staging_id: "upload-1".to_owned(),
+            witness_hash: "ab".repeat(32),
+            origin_admission_hash: "cd".repeat(32),
+            maximum_bytes: 1024,
+        };
+        let response = ProductAcceptResponse {
+            witness_hash: request.witness_hash.clone(),
+            origin_admission_hash: request.origin_admission_hash.clone(),
+            acceptance_hash: "ef".repeat(32),
+            reused_existing: false,
+            manifest_hash: "12".repeat(32),
+        };
+        response.validate(&request).unwrap();
+        let mut other = response.clone();
+        other.witness_hash = "00".repeat(32);
+        assert!(other.validate(&request).is_err());
+        let mut bad_hash = response;
+        bad_hash.acceptance_hash = "nope".to_owned();
+        assert!(bad_hash.validate(&request).is_err());
+    }
+
+    #[test]
+    fn testimony_accept_response_must_echo_the_exported_testimony() {
+        let testimony_hash = "ab".repeat(32);
+        let coordinate_id = "cd".repeat(32);
+        let response = QualificationTestimonyAcceptResponse {
+            testimony_hash: testimony_hash.clone(),
+            acceptance_hash: "ef".repeat(32),
+            coordinate_id: coordinate_id.clone(),
+            reused_existing: false,
+        };
+        response.validate(&testimony_hash, &coordinate_id).unwrap();
+        assert!(response.validate(&"00".repeat(32), &coordinate_id).is_err());
+        assert!(
+            response
+                .validate(&testimony_hash, &"00".repeat(32))
+                .is_err()
+        );
+        let mut bad_acceptance = response.clone();
+        bad_acceptance.acceptance_hash = "nope".to_owned();
+        assert!(
+            bad_acceptance
+                .validate(&testimony_hash, &coordinate_id)
+                .is_err()
+        );
+        let extra = serde_json::json!({
+            "testimony_hash": testimony_hash,
+            "acceptance_hash": "ef".repeat(32),
+            "coordinate_id": coordinate_id,
+            "reused_existing": false,
+            "unexpected": 1,
+        });
+        assert!(serde_json::from_value::<QualificationTestimonyAcceptResponse>(extra).is_err());
+    }
 
     #[tokio::test]
     async fn destination_product_selectors_reach_both_execute_wire_modes() {

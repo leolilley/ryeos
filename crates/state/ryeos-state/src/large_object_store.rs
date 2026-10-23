@@ -93,6 +93,26 @@ pub struct IngestedLargeObject {
     pub resumed_bytes: u64,
 }
 
+/// What a remote-fed upload promises about one large object, taken from the
+/// manifest entry that names it. Every accepted byte is checked against it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LargeObjectExpectation {
+    pub size: u64,
+    pub chunk_size: u64,
+    pub chunk_hashes: Vec<String>,
+}
+
+/// Where a resumable upload stands after one accepted write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StageProgress {
+    /// Bytes now retained for the object (the full size once published).
+    pub staged_bytes: u64,
+    /// The object is published and resident with its sidecar.
+    pub complete: bool,
+    /// The object was already resident; nothing was written.
+    pub deduplicated: bool,
+}
+
 /// Identity selected by the descriptor-owning traversal before ingest.
 ///
 /// The store receives the already-open regular file as the read authority and
@@ -262,6 +282,27 @@ impl LargeObjectStore {
             total = total
                 .checked_add(file.metadata()?.len())
                 .ok_or_else(|| anyhow::anyhow!("large-object store byte count overflow"))?;
+        }
+        Ok(total)
+    }
+
+    /// Bytes held by in-flight upload staging files. Budget admission counts
+    /// these together with `total_stored_bytes`.
+    pub fn staging_bytes(&self) -> anyhow::Result<u64> {
+        let mut total = 0_u64;
+        for entry in self.staging.entries_no_follow()? {
+            if entry.entry_type != lillux::PinnedEntryType::Regular {
+                anyhow::bail!("large-object staging namespace contains a non-regular entry");
+            }
+            if !entry.name.to_string_lossy().starts_with("upload-") {
+                continue;
+            }
+            let Some(file) = self.staging.open_regular(&entry.name, false)? else {
+                continue;
+            };
+            total = total
+                .checked_add(file.metadata()?.len())
+                .ok_or_else(|| anyhow::anyhow!("large-object staging byte count overflow"))?;
         }
         Ok(total)
     }
@@ -505,6 +546,244 @@ impl LargeObjectStore {
         })
     }
 
+    /// Bytes retained toward an object: the resident size when it is already
+    /// published with its sidecar, otherwise the length of its upload staging
+    /// file (0 when none exists). An object that is present without its
+    /// sidecar (stopped between publishing the object and its sidecar) is not
+    /// resident, so the upload resends and `stage_chunk` repairs it.
+    pub fn staged_bytes(&self, file_sha256: &str) -> anyhow::Result<u64> {
+        require_store_hash(file_sha256)?;
+        if let Some(size) = self.object_size(file_sha256)?
+            && self.sidecar(file_sha256)?.is_some()
+        {
+            return Ok(size);
+        }
+        let name = format!("upload-{file_sha256}");
+        match self.staging.open_regular(OsStr::new(&name), false)? {
+            Some(file) => Ok(file.metadata()?.len()),
+            None => Ok(0),
+        }
+    }
+
+    /// Accept one write of a remote-fed, resumable upload of the object whose
+    /// whole-file hash is `file_sha256`. Writes are sequential and
+    /// retry-idempotent: a write that starts inside the retained range must
+    /// byte-match it, and only its non-overlapping tail is appended. Each
+    /// sidecar chunk is verified when it completes; the whole-file hash and
+    /// the chunk trail are verified once more before the object is published
+    /// through the same path as a local ingest.
+    pub fn stage_chunk(
+        &self,
+        file_sha256: &str,
+        expect: &LargeObjectExpectation,
+        offset: u64,
+        bytes: &[u8],
+    ) -> anyhow::Result<StageProgress> {
+        require_store_hash(file_sha256)?;
+        self.validate_expectation(expect)?;
+        let name = format!("upload-{file_sha256}");
+        let lock = self
+            .locks
+            .open_regular_create(OsStr::new(&name), true, false, 0o600)?;
+        flock_exclusive_blocking(&lock)?;
+
+        if let Some(resident) = self.object_size(file_sha256)?
+            && let Some(sidecar) = self.sidecar(file_sha256)?
+        {
+            if resident != expect.size
+                || sidecar.size != expect.size
+                || sidecar.chunk_size != expect.chunk_size
+                || sidecar.chunk_hashes != expect.chunk_hashes
+            {
+                bail!(
+                    "resident large object {file_sha256} contradicts the declared size and chunk trail"
+                );
+            }
+            return Ok(StageProgress {
+                staged_bytes: expect.size,
+                complete: true,
+                deduplicated: true,
+            });
+        }
+
+        if bytes.is_empty() {
+            bail!("large-object chunk at offset {offset} is empty");
+        }
+        let length = u64::try_from(bytes.len())?;
+        let end = offset
+            .checked_add(length)
+            .ok_or_else(|| anyhow::anyhow!("large-object chunk range overflow"))?;
+        if end > expect.size {
+            bail!(
+                "large-object chunk of {length} bytes at offset {offset} extends past the declared size {}",
+                expect.size
+            );
+        }
+
+        let staging_name = OsString::from(&name);
+        // The staging file is created only once the write is admitted, so an
+        // out-of-order first write leaves no empty file behind.
+        let mut staged = match self.staging.open_regular(&staging_name, true)? {
+            Some(file) => file,
+            None => {
+                if offset > 0 {
+                    bail!("large-object chunk is out of order: expected offset 0, got {offset}");
+                }
+                self.staging
+                    .open_regular_create(&staging_name, true, false, 0o600)?
+            }
+        };
+        let mut staged_len = staged.metadata()?.len();
+        if staged_len > expect.size {
+            staged.set_len(0)?;
+            staged_len = 0;
+        }
+        if offset > staged_len {
+            bail!("large-object chunk is out of order: expected offset {staged_len}, got {offset}");
+        }
+
+        let original_len = staged_len;
+        let tail = if offset < staged_len {
+            let overlap = usize::try_from(staged_len.min(end) - offset)?;
+            let mut retained = vec![0u8; overlap.min(INGEST_IO_BUFFER_BYTES)];
+            let mut compared = 0usize;
+            while compared < overlap {
+                let take = (overlap - compared).min(retained.len());
+                staged.seek(SeekFrom::Start(offset + compared as u64))?;
+                read_exact_len(&mut staged, &mut retained[..take])?;
+                if let Some(differs) = retained[..take]
+                    .iter()
+                    .zip(&bytes[compared..compared + take])
+                    .position(|(staged_byte, retried_byte)| staged_byte != retried_byte)
+                {
+                    bail!(
+                        "retried bytes differ from the staged bytes at offset {}",
+                        offset + (compared + differs) as u64
+                    );
+                }
+                compared += take;
+            }
+            &bytes[overlap..]
+        } else {
+            bytes
+        };
+
+        if !tail.is_empty() {
+            staged.seek(SeekFrom::Start(staged_len))?;
+            staged.write_all(tail)?;
+            staged.sync_data()?;
+            if original_len == 0 {
+                // The first acknowledged write must include the new directory
+                // entry, not only its data.
+                self.staging.sync()?;
+            }
+            staged_len += u64::try_from(tail.len())?;
+            Self::verify_completed_chunks(&mut staged, expect, original_len, staged_len)?;
+        }
+
+        if staged_len < expect.size {
+            return Ok(StageProgress {
+                staged_bytes: staged_len,
+                complete: false,
+                deduplicated: false,
+            });
+        }
+
+        let mut hasher = ChunkedHasher::new(self.chunk_bytes);
+        staged.seek(SeekFrom::Start(0))?;
+        let mut buffer = vec![0u8; INGEST_IO_BUFFER_BYTES];
+        let mut remaining = expect.size;
+        while remaining > 0 {
+            let want = usize::try_from(remaining.min(INGEST_IO_BUFFER_BYTES as u64))?;
+            read_exact_len(&mut staged, &mut buffer[..want])?;
+            hasher.update(&buffer[..want]);
+            remaining -= want as u64;
+        }
+        let (actual_sha256, actual_chunks) = hasher.finish();
+        if actual_sha256 != file_sha256 {
+            self.staging.remove_if_same(&staging_name, &staged)?;
+            bail!(
+                "staged large object hashed to {actual_sha256}, expected {file_sha256}; staging discarded"
+            );
+        }
+        if actual_chunks != expect.chunk_hashes {
+            self.staging.remove_if_same(&staging_name, &staged)?;
+            bail!(
+                "staged large object {file_sha256} contradicts its declared chunk trail; staging discarded"
+            );
+        }
+
+        let published = self.publish_staged(&staging_name, &staged, file_sha256, expect.size)?;
+        self.publish_sidecar(&LargeObjectSidecar {
+            schema: LARGE_OBJECT_SIDECAR_SCHEMA.to_string(),
+            file_sha256: file_sha256.to_string(),
+            size: expect.size,
+            chunk_size: expect.chunk_size,
+            chunk_hashes: expect.chunk_hashes.clone(),
+        })?;
+        self.touch_recency(file_sha256)?;
+        drop(lock);
+        Ok(StageProgress {
+            staged_bytes: expect.size,
+            complete: true,
+            deduplicated: !published,
+        })
+    }
+
+    fn validate_expectation(&self, expect: &LargeObjectExpectation) -> anyhow::Result<()> {
+        if expect.size == 0 || expect.size > MAX_LARGE_CONTENT_FILE_BYTES {
+            bail!(
+                "declared large-object size {} is outside the admitted bounds",
+                expect.size
+            );
+        }
+        if expect.chunk_size != self.chunk_bytes {
+            bail!(
+                "declared large-object chunk size {} differs from this store's chunk size {}",
+                expect.chunk_size,
+                self.chunk_bytes
+            );
+        }
+        if expect.chunk_hashes.len() as u64 != expect.size.div_ceil(expect.chunk_size) {
+            bail!("declared large-object chunk count contradicts its size");
+        }
+        for hash in &expect.chunk_hashes {
+            require_store_hash(hash)?;
+        }
+        Ok(())
+    }
+
+    /// Hash every sidecar chunk that an append from `from` to `to` finished
+    /// and compare it with the declared trail. A failing chunk is cut off the
+    /// staging file so the sender restarts at that chunk's first byte.
+    fn verify_completed_chunks(
+        staged: &mut fs::File,
+        expect: &LargeObjectExpectation,
+        from: u64,
+        to: u64,
+    ) -> anyhow::Result<()> {
+        let mut index = from / expect.chunk_size;
+        loop {
+            let start = index * expect.chunk_size;
+            let end = (start + expect.chunk_size).min(expect.size);
+            if start >= expect.size || end > to {
+                return Ok(());
+            }
+            if end > from {
+                let actual = hash_file_range(staged, start, end - start)?;
+                let declared = usize::try_from(index)
+                    .ok()
+                    .and_then(|position| expect.chunk_hashes.get(position));
+                if declared != Some(&actual) {
+                    staged.set_len(start)?;
+                    staged.sync_data()?;
+                    bail!("chunk {index} of the large object failed its hash");
+                }
+            }
+            index += 1;
+        }
+    }
+
     /// Move the staged file into the immutable namespace. Returns false when
     /// an identical object was already published (dedup — the staged copy is
     /// discarded).
@@ -595,21 +874,31 @@ impl LargeObjectStore {
         file_sha256: &str,
         expected_size: u64,
     ) -> anyhow::Result<LeasedLargeObject> {
+        self.try_lease_object(file_sha256, expected_size)?
+            .ok_or_else(|| anyhow::anyhow!("large object {file_sha256} is not in the store"))
+    }
+
+    /// Like `lease_object`, but an object that is absent, or evicted while the
+    /// lease binds, yields `None` instead of an error.
+    pub fn try_lease_object(
+        &self,
+        file_sha256: &str,
+        expected_size: u64,
+    ) -> anyhow::Result<Option<LeasedLargeObject>> {
         require_store_hash(file_sha256)?;
         let name = OsStr::new(file_sha256);
-        let first = self
-            .objects
-            .open_regular(name, false)?
-            .ok_or_else(|| anyhow::anyhow!("large object {file_sha256} is not in the store"))?;
+        let Some(first) = self.objects.open_regular(name, false)? else {
+            return Ok(None);
+        };
         let lease = self.leases.open_regular_create(name, true, false, 0o600)?;
         flock_shared_blocking(&lease)?;
         let _ = lease.set_modified(std::time::SystemTime::now());
         // The lease was acquired after opening; re-open and require the same
         // inode so an eviction that raced the acquisition is detected rather
         // than serving a deleted (or republished) file.
-        let second = self.objects.open_regular(name, false)?.ok_or_else(|| {
-            anyhow::anyhow!("large object {file_sha256} was evicted while binding")
-        })?;
+        let Some(second) = self.objects.open_regular(name, false)? else {
+            return Ok(None);
+        };
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt as _;
@@ -626,11 +915,11 @@ impl LargeObjectStore {
             );
         }
         let path = self.objects.descriptor_child_path(name)?;
-        Ok(LeasedLargeObject {
+        Ok(Some(LeasedLargeObject {
             path,
             file: second,
             _lease: lease,
-        })
+        }))
     }
 
     /// Hard-link a stored object into a caller-owned directory (same
@@ -1014,6 +1303,21 @@ fn verify_staged_prefix(
     Ok(true)
 }
 
+/// sha256 of `len` bytes starting at `start`, streamed.
+fn hash_file_range(file: &mut fs::File, start: u64, len: u64) -> anyhow::Result<String> {
+    file.seek(SeekFrom::Start(start))?;
+    let mut digest = Sha256::new();
+    let mut buffer = vec![0u8; INGEST_IO_BUFFER_BYTES];
+    let mut remaining = len;
+    while remaining > 0 {
+        let want = usize::try_from(remaining.min(INGEST_IO_BUFFER_BYTES as u64))?;
+        read_exact_len(file, &mut buffer[..want])?;
+        digest.update(&buffer[..want]);
+        remaining -= want as u64;
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
+
 fn read_exact_len(file: &mut fs::File, buffer: &mut [u8]) -> anyhow::Result<()> {
     file.read_exact(buffer)
         .map_err(|error| anyhow::anyhow!("short read while verifying staged ingest: {error}"))
@@ -1334,5 +1638,323 @@ mod tests {
         .unwrap();
         assert_eq!(store.sweep_abandoned_staging().unwrap(), 1);
         assert_eq!(store.sweep_abandoned_staging().unwrap(), 0);
+    }
+
+    const MIB: u64 = 1024 * 1024;
+
+    fn pseudo_bytes(len: usize) -> Vec<u8> {
+        (0..len)
+            .map(|i| (i.wrapping_mul(31) ^ (i >> 9)) as u8)
+            .collect()
+    }
+
+    fn expectation_for(bytes: &[u8], chunk: u64) -> (String, LargeObjectExpectation) {
+        let mut hasher = ChunkedHasher::new(chunk);
+        hasher.update(bytes);
+        let (file_sha256, chunk_hashes) = hasher.finish();
+        (
+            file_sha256,
+            LargeObjectExpectation {
+                size: bytes.len() as u64,
+                chunk_size: chunk,
+                chunk_hashes,
+            },
+        )
+    }
+
+    fn staging_path(dir: &tempfile::TempDir, file_sha256: &str) -> PathBuf {
+        dir.path()
+            .join("large-objects/.staging")
+            .join(format!("upload-{file_sha256}"))
+    }
+
+    /// Feed `bytes` in `piece`-sized writes; returns the last progress.
+    fn feed(
+        store: &LargeObjectStore,
+        file_sha256: &str,
+        expect: &LargeObjectExpectation,
+        bytes: &[u8],
+        piece: usize,
+    ) -> anyhow::Result<StageProgress> {
+        let mut offset = 0usize;
+        let mut last = None;
+        while offset < bytes.len() {
+            let end = (offset + piece).min(bytes.len());
+            last =
+                Some(store.stage_chunk(file_sha256, expect, offset as u64, &bytes[offset..end])?);
+            offset = end;
+        }
+        Ok(last.unwrap())
+    }
+
+    #[test]
+    fn staged_upload_publishes_the_same_sidecar_as_a_local_ingest() {
+        let bytes = pseudo_bytes(3 * MIB as usize + 12_345);
+        let (file_sha256, expect) = expectation_for(&bytes, MIB);
+
+        let (_dir, staged_store) = store(MIB);
+        let progress = feed(&staged_store, &file_sha256, &expect, &bytes, 700 * 1024).unwrap();
+        assert_eq!(
+            progress,
+            StageProgress {
+                staged_bytes: bytes.len() as u64,
+                complete: true,
+                deduplicated: false,
+            }
+        );
+
+        let (ingest_dir, ingest_store) = store(MIB);
+        let source = write_source(&ingest_dir, "payload.bin", &bytes);
+        let ingested = ingest(&ingest_store, &source, None).unwrap();
+        assert_eq!(ingested.file_sha256, file_sha256);
+        assert_eq!(ingested.chunk_hashes, expect.chunk_hashes);
+
+        assert_eq!(
+            staged_store.sidecar(&file_sha256).unwrap(),
+            ingest_store.sidecar(&file_sha256).unwrap()
+        );
+        assert!(staged_store.sidecar(&file_sha256).unwrap().is_some());
+        assert_eq!(
+            staged_store.object_size(&file_sha256).unwrap(),
+            Some(bytes.len() as u64)
+        );
+        staged_store
+            .verify_resident_object(&file_sha256, bytes.len() as u64)
+            .unwrap();
+        assert_eq!(
+            staged_store.staged_bytes(&file_sha256).unwrap(),
+            bytes.len() as u64
+        );
+    }
+
+    #[test]
+    fn the_same_chunk_twice_is_idempotent() {
+        let bytes = pseudo_bytes(2 * MIB as usize);
+        let (file_sha256, expect) = expectation_for(&bytes, MIB);
+        let (_dir, store) = store(MIB);
+        let first = store
+            .stage_chunk(&file_sha256, &expect, 0, &bytes[..512 * 1024])
+            .unwrap();
+        let again = store
+            .stage_chunk(&file_sha256, &expect, 0, &bytes[..512 * 1024])
+            .unwrap();
+        assert_eq!(first, again);
+        assert_eq!(first.staged_bytes, 512 * 1024);
+        assert!(!first.complete);
+        assert_eq!(store.staged_bytes(&file_sha256).unwrap(), 512 * 1024);
+    }
+
+    #[test]
+    fn an_out_of_order_offset_is_refused_naming_the_expected_offset() {
+        let bytes = pseudo_bytes(2 * MIB as usize);
+        let (file_sha256, expect) = expectation_for(&bytes, MIB);
+        let (_dir, store) = store(MIB);
+        let error = store
+            .stage_chunk(&file_sha256, &expect, 4096, &bytes[4096..8192])
+            .unwrap_err();
+        assert!(error.to_string().contains("expected offset 0"), "{error}");
+        store
+            .stage_chunk(&file_sha256, &expect, 0, &bytes[..8192])
+            .unwrap();
+        let error = store
+            .stage_chunk(&file_sha256, &expect, 16_384, &bytes[16_384..20_480])
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("expected offset 8192"),
+            "{error}"
+        );
+        let error = store
+            .stage_chunk(&file_sha256, &expect, 2 * MIB - 4, &bytes[..16])
+            .unwrap_err();
+        assert!(error.to_string().contains("extends past"), "{error}");
+    }
+
+    #[test]
+    fn a_retried_write_extends_the_stage_but_a_differing_prefix_is_refused() {
+        let bytes = pseudo_bytes(2 * MIB as usize);
+        let (file_sha256, expect) = expectation_for(&bytes, MIB);
+        let (_dir, store) = store(MIB);
+        store
+            .stage_chunk(&file_sha256, &expect, 0, &bytes[..512 * 1024])
+            .unwrap();
+
+        let overlapping = store
+            .stage_chunk(
+                &file_sha256,
+                &expect,
+                256 * 1024,
+                &bytes[256 * 1024..768 * 1024],
+            )
+            .unwrap();
+        assert_eq!(overlapping.staged_bytes, 768 * 1024);
+
+        let mut altered = bytes[100..200].to_vec();
+        altered[50] ^= 0xff;
+        let error = store
+            .stage_chunk(&file_sha256, &expect, 100, &altered)
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("retried bytes differ from the staged bytes at offset 150"),
+            "{error}"
+        );
+        assert_eq!(store.staged_bytes(&file_sha256).unwrap(), 768 * 1024);
+    }
+
+    #[test]
+    fn a_wrong_sidecar_chunk_hash_is_refused_and_the_chunk_is_cut_off() {
+        let bytes = pseudo_bytes(3 * MIB as usize);
+        let (file_sha256, mut expect) = expectation_for(&bytes, MIB);
+        expect.chunk_hashes[1] = lillux::cas::sha256_hex(b"not the second chunk");
+        let (dir, store) = store(MIB);
+        store
+            .stage_chunk(&file_sha256, &expect, 0, &bytes[..MIB as usize])
+            .unwrap();
+        store
+            .stage_chunk(
+                &file_sha256,
+                &expect,
+                MIB,
+                &bytes[MIB as usize..MIB as usize + 4096],
+            )
+            .unwrap();
+        let error = store
+            .stage_chunk(
+                &file_sha256,
+                &expect,
+                MIB + 4096,
+                &bytes[MIB as usize + 4096..2 * MIB as usize],
+            )
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("chunk 1 of the large object failed its hash"),
+            "{error}"
+        );
+        assert_eq!(store.staged_bytes(&file_sha256).unwrap(), MIB);
+        assert_eq!(
+            fs::metadata(staging_path(&dir, &file_sha256))
+                .unwrap()
+                .len(),
+            MIB
+        );
+        assert_eq!(store.object_size(&file_sha256).unwrap(), None);
+    }
+
+    #[test]
+    fn a_wrong_whole_file_hash_is_refused_and_the_staging_removed() {
+        let bytes = pseudo_bytes(2 * MIB as usize);
+        let (_real_sha256, expect) = expectation_for(&bytes, MIB);
+        let wrong_sha256 = lillux::cas::sha256_hex(b"some other file");
+        let (dir, store) = store(MIB);
+        let error = feed(&store, &wrong_sha256, &expect, &bytes, MIB as usize).unwrap_err();
+        assert!(error.to_string().contains("expected"), "{error}");
+        assert!(!staging_path(&dir, &wrong_sha256).exists());
+        assert_eq!(store.staged_bytes(&wrong_sha256).unwrap(), 0);
+        assert_eq!(store.object_size(&wrong_sha256).unwrap(), None);
+    }
+
+    #[test]
+    fn a_resident_object_short_circuits_without_writing() {
+        let bytes = pseudo_bytes(MIB as usize + 77);
+        let (file_sha256, expect) = expectation_for(&bytes, MIB);
+        let (dir, store) = store(MIB);
+        let source = write_source(&dir, "payload.bin", &bytes);
+        ingest(&store, &source, None).unwrap();
+
+        let progress = store
+            .stage_chunk(&file_sha256, &expect, 0, &bytes[..4096])
+            .unwrap();
+        assert_eq!(
+            progress,
+            StageProgress {
+                staged_bytes: bytes.len() as u64,
+                complete: true,
+                deduplicated: true,
+            }
+        );
+        assert!(!staging_path(&dir, &file_sha256).exists());
+        assert_eq!(
+            store.staged_bytes(&file_sha256).unwrap(),
+            bytes.len() as u64
+        );
+    }
+
+    #[test]
+    fn an_upload_resumes_after_the_store_is_reopened() {
+        let bytes = pseudo_bytes(3 * MIB as usize + 5);
+        let (file_sha256, expect) = expectation_for(&bytes, MIB);
+        let (dir, first) = store(MIB);
+        let half = 1_500_000usize;
+        first
+            .stage_chunk(&file_sha256, &expect, 0, &bytes[..half])
+            .unwrap();
+        drop(first);
+
+        let runtime = lillux::PinnedDirectory::open_or_create(dir.path()).unwrap();
+        let reopened = LargeObjectStore::open_with_chunk_bytes(&runtime, MIB).unwrap();
+        assert_eq!(reopened.staged_bytes(&file_sha256).unwrap(), half as u64);
+        let progress = reopened
+            .stage_chunk(&file_sha256, &expect, half as u64, &bytes[half..])
+            .unwrap();
+        assert!(progress.complete);
+        assert!(!progress.deduplicated);
+        reopened
+            .verify_resident_object(&file_sha256, bytes.len() as u64)
+            .unwrap();
+    }
+
+    #[test]
+    fn a_swept_abandoned_upload_restarts_at_zero() {
+        let bytes = pseudo_bytes(2 * MIB as usize);
+        let (file_sha256, expect) = expectation_for(&bytes, MIB);
+        let (_dir, store) = store(MIB);
+        store
+            .stage_chunk(&file_sha256, &expect, 0, &bytes[..MIB as usize])
+            .unwrap();
+        assert_eq!(store.sweep_abandoned_staging().unwrap(), 1);
+        assert_eq!(store.staged_bytes(&file_sha256).unwrap(), 0);
+        let error = store
+            .stage_chunk(&file_sha256, &expect, MIB, &bytes[MIB as usize..])
+            .unwrap_err();
+        assert!(error.to_string().contains("expected offset 0"), "{error}");
+        let progress = feed(&store, &file_sha256, &expect, &bytes, MIB as usize).unwrap();
+        assert!(progress.complete);
+    }
+
+    #[test]
+    fn a_contradictory_expectation_is_refused_before_any_write() {
+        let bytes = pseudo_bytes(2 * MIB as usize);
+        let (file_sha256, expect) = expectation_for(&bytes, MIB);
+        let (dir, store) = store(MIB);
+        let mut wrong_chunk = expect.clone();
+        wrong_chunk.chunk_size = 2 * MIB;
+        assert!(
+            store
+                .stage_chunk(&file_sha256, &wrong_chunk, 0, &bytes[..16])
+                .is_err()
+        );
+        let mut wrong_count = expect.clone();
+        wrong_count.chunk_hashes.pop();
+        assert!(
+            store
+                .stage_chunk(&file_sha256, &wrong_count, 0, &bytes[..16])
+                .is_err()
+        );
+        let mut empty = expect.clone();
+        empty.size = 0;
+        assert!(
+            store
+                .stage_chunk(&file_sha256, &empty, 0, &bytes[..16])
+                .is_err()
+        );
+        assert!(
+            store
+                .stage_chunk("not-a-hash", &expect, 0, &bytes[..16])
+                .is_err()
+        );
+        assert!(!staging_path(&dir, &file_sha256).exists());
     }
 }

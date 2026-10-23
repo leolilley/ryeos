@@ -34,11 +34,21 @@ pub struct Request {
     pub blob_hashes: Vec<String>,
     #[serde(default)]
     pub blob_chunk: Option<BlobChunkRequest>,
+    #[serde(default)]
+    pub large_object_chunk: Option<LargeObjectChunkRequest>,
 }
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BlobChunkRequest {
+    pub hash: String,
+    pub offset: u64,
+    pub length: usize,
+}
+
+#[derive(Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LargeObjectChunkRequest {
     pub hash: String,
     pub offset: u64,
     pub length: usize,
@@ -50,13 +60,18 @@ pub const MAX_INLINE_OBJECT_BYTES: u64 = 32 * 1024 * 1024;
 
 pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     validate_typed_hash_request(&req.object_hashes, &req.blob_hashes)?;
+    validate_request_modes(&req)?;
+    if let Some(chunk) = &req.large_object_chunk {
+        validate_large_object_chunk(chunk)?;
+        let chunk = chunk.clone();
+        return tokio::task::spawn_blocking(move || serve_large_object_chunk(&chunk, &state))
+            .await
+            .context("large-object chunk read task stopped")?;
+    }
     let cas_read = state.acquire_cas_read()?;
     let cas = cas_read.cas();
 
     if let Some(chunk) = req.blob_chunk {
-        if !req.object_hashes.is_empty() || !req.blob_hashes.is_empty() {
-            anyhow::bail!("objects/get cannot mix hash batches with a blob chunk request");
-        }
         if chunk.length == 0 || chunk.length > MAX_BLOB_CHUNK_BYTES {
             anyhow::bail!("objects/get blob chunk length is outside the bounded range");
         }
@@ -92,7 +107,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     }
     if req.object_hashes.is_empty() && req.blob_hashes.is_empty() {
         anyhow::bail!(
-            "objects/get requires typed object_hashes/blob_hashes or one blob chunk request"
+            "objects/get requires typed object_hashes/blob_hashes, one blob chunk request, or one large-object chunk request"
         );
     }
 
@@ -156,6 +171,77 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     }))
 }
 
+/// A request is exactly one of: typed hash batches, one blob chunk, or one
+/// large-object chunk. Mixing is refused before any store is opened.
+fn validate_request_modes(req: &Request) -> Result<()> {
+    let batches = !req.object_hashes.is_empty() || !req.blob_hashes.is_empty();
+    if req.blob_chunk.is_some() && req.large_object_chunk.is_some() {
+        anyhow::bail!("objects/get cannot mix a blob chunk with a large-object chunk request");
+    }
+    if batches && req.blob_chunk.is_some() {
+        anyhow::bail!("objects/get cannot mix hash batches with a blob chunk request");
+    }
+    if batches && req.large_object_chunk.is_some() {
+        anyhow::bail!("objects/get cannot mix hash batches with a large-object chunk request");
+    }
+    Ok(())
+}
+
+fn validate_large_object_chunk(chunk: &LargeObjectChunkRequest) -> Result<()> {
+    if chunk.length == 0 || chunk.length > MAX_BLOB_CHUNK_BYTES {
+        anyhow::bail!("objects/get large-object chunk length is outside the bounded range");
+    }
+    if !is_canonical_sha256(&chunk.hash) {
+        anyhow::bail!("objects/get large-object chunk hash is not canonical SHA-256");
+    }
+    Ok(())
+}
+
+/// Serve one bounded range of a resident large object. The shared lease is
+/// held for the whole read so a budget sweep cannot evict the file mid-range.
+fn serve_large_object_chunk(chunk: &LargeObjectChunkRequest, state: &AppState) -> Result<Value> {
+    let missing = || {
+        serde_json::json!({
+            "large_object_chunk": {
+                "hash": chunk.hash,
+                "kind": "missing"
+            }
+        })
+    };
+    let authority = state.state_store.pinned_state_authority()?;
+    let Some(store) = ryeos_state::LargeObjectStore::open_under(authority.runtime_directory())?
+    else {
+        return Ok(missing());
+    };
+    let Some(total_size) = store.object_size(&chunk.hash)? else {
+        return Ok(missing());
+    };
+    // The object can be evicted between the size probe and the lease; that is
+    // an absent object, not a fault.
+    let Some(leased) = store.try_lease_object(&chunk.hash, total_size)? else {
+        return Ok(missing());
+    };
+    if chunk.offset > total_size {
+        anyhow::bail!("objects/get large-object chunk offset exceeds object size");
+    }
+    let mut file = leased.file();
+    file.seek(std::io::SeekFrom::Start(chunk.offset))?;
+    let remaining = total_size - chunk.offset;
+    let requested = u64::try_from(chunk.length)?.min(remaining);
+    let mut bytes = vec![0_u8; usize::try_from(requested)?];
+    file.read_exact(&mut bytes)?;
+    Ok(serde_json::json!({
+        "large_object_chunk": {
+            "hash": chunk.hash,
+            "kind": "large_object_chunk",
+            "offset": chunk.offset,
+            "total_size": total_size,
+            "eof": chunk.offset + requested == total_size,
+            "data": base64::engine::general_purpose::STANDARD.encode(bytes),
+        }
+    }))
+}
+
 fn validate_typed_hash_request(object_hashes: &[String], blob_hashes: &[String]) -> Result<()> {
     for (namespace, hashes) in [("object", object_hashes), ("blob", blob_hashes)] {
         let mut seen = std::collections::BTreeSet::new();
@@ -210,6 +296,7 @@ mod tests {
                 "object_hashes": "string[]?",
                 "blob_hashes": "string[]?",
                 "blob_chunk": "object?",
+                "large_object_chunk": "object?",
             })
         );
         let hash = "ab".repeat(32);
@@ -226,6 +313,90 @@ mod tests {
         .unwrap();
         assert!(chunk.object_hashes.is_empty() && chunk.blob_hashes.is_empty());
         assert_eq!(chunk.blob_chunk.unwrap().length, 64);
+        assert!(chunk.large_object_chunk.is_none());
+        let large: Request = serde_json::from_value(serde_json::json!({
+            "large_object_chunk": {"hash": hash, "offset": 4096, "length": 128}
+        }))
+        .unwrap();
+        let large = large.large_object_chunk.unwrap();
+        assert_eq!((large.offset, large.length), (4096, 128));
+    }
+
+    fn parse(value: Value) -> Request {
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn large_object_chunk_rejects_unknown_fields_and_missing_coordinates() {
+        let hash = "ab".repeat(32);
+        assert!(
+            serde_json::from_value::<Request>(serde_json::json!({
+                "large_object_chunk": {"hash": hash, "offset": 0, "length": 1, "extra": 1}
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<Request>(serde_json::json!({
+                "large_object_chunk": {"hash": hash, "offset": 0}
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn large_object_chunk_is_exclusive_of_batches_and_blob_chunks() {
+        let hash = "ab".repeat(32);
+        let large = serde_json::json!({"hash": hash, "offset": 0, "length": 64});
+        validate_request_modes(&parse(serde_json::json!({"large_object_chunk": large}))).unwrap();
+        let with_batch = parse(serde_json::json!({
+            "object_hashes": [hash.clone()], "large_object_chunk": large
+        }));
+        assert!(
+            validate_request_modes(&with_batch)
+                .unwrap_err()
+                .to_string()
+                .contains("hash batches with a large-object chunk")
+        );
+        let with_blob_batch = parse(serde_json::json!({
+            "blob_hashes": [hash.clone()], "large_object_chunk": large
+        }));
+        assert!(validate_request_modes(&with_blob_batch).is_err());
+        let with_blob_chunk = parse(serde_json::json!({
+            "blob_chunk": large, "large_object_chunk": large
+        }));
+        assert!(
+            validate_request_modes(&with_blob_chunk)
+                .unwrap_err()
+                .to_string()
+                .contains("blob chunk with a large-object chunk")
+        );
+        let blob_with_batch = parse(serde_json::json!({
+            "object_hashes": [hash], "blob_chunk": large
+        }));
+        assert!(
+            validate_request_modes(&blob_with_batch)
+                .unwrap_err()
+                .to_string()
+                .contains("hash batches with a blob chunk")
+        );
+    }
+
+    #[test]
+    fn large_object_chunk_validates_hash_and_length_bounds() {
+        let chunk = |hash: String, length: usize| LargeObjectChunkRequest {
+            hash,
+            offset: 0,
+            length,
+        };
+        let hash = "ab".repeat(32);
+        assert!(validate_large_object_chunk(&chunk(hash.clone(), 1)).is_ok());
+        assert!(validate_large_object_chunk(&chunk(hash.clone(), MAX_BLOB_CHUNK_BYTES)).is_ok());
+        assert!(validate_large_object_chunk(&chunk(hash.clone(), 0)).is_err());
+        assert!(
+            validate_large_object_chunk(&chunk(hash.clone(), MAX_BLOB_CHUNK_BYTES + 1)).is_err()
+        );
+        assert!(validate_large_object_chunk(&chunk(hash.to_ascii_uppercase(), 8)).is_err());
+        assert!(validate_large_object_chunk(&chunk("short".to_owned(), 8)).is_err());
     }
 
     #[test]

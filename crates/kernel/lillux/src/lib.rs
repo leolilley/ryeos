@@ -76,7 +76,7 @@ pub use cas::{
     atomic_write_batch_in_pinned_root, canonical_json, canonical_json_bounded,
     canonical_json_bytes_bounded, sha256_hex, shard_path, valid_hash,
 };
-pub use guest_account::GuestRuntimeAccount;
+pub use guest_account::{GuestRuntimeAccount, effective_uid};
 pub use host_service::{
     HostServiceController, HostServiceInstallation, HostServiceLaunch, discover_host_service,
     exec_install_transaction, provision_host_service, run_as_administrator,
@@ -166,12 +166,14 @@ pub use sandbox::{
     LinuxSandboxMountPreparationReceipt, LinuxSandboxNativeTerminalObservation,
     LinuxSandboxNetwork, LinuxSandboxOverlay, LinuxSandboxOverlayDescendantMount,
     LinuxSandboxProcFilesystem, LinuxSandboxProcess, LinuxSandboxRequest, LinuxSandboxTermination,
-    MAX_CURRENT_EXECUTABLE_BYTES, create_linux_overlay_template, current_executable_digest,
-    exit_with_linux_sandbox_status, inspect_linux_sandbox, launch_linux_sandbox,
-    launch_linux_sandbox_with_loopback_ingress, linux_sandbox_mount_overlaps_managed_namespace,
-    operate_linux_overlay_workspace, read_sealed_inherited_descriptor,
-    read_sealed_inherited_descriptor_from_env, validate_connected_unix_stream_descriptor,
-    validate_current_executable_descriptor, write_inherited_descriptor,
+    MAX_CURRENT_EXECUTABLE_BYTES, MAX_ROOT_OVERLAY_TMPFS_BYTES, MAX_ROOT_OVERLAY_TMPFS_INODES,
+    MAX_ROOT_OVERLAYS, RootOverlay, TmpfsLimits, create_linux_overlay_template,
+    current_executable_digest, enter_root_overlay_namespace, exit_with_linux_sandbox_status,
+    inspect_linux_sandbox, launch_linux_sandbox, launch_linux_sandbox_with_loopback_ingress,
+    linux_sandbox_mount_overlaps_managed_namespace, operate_linux_overlay_workspace,
+    read_sealed_inherited_descriptor, read_sealed_inherited_descriptor_from_env,
+    validate_connected_unix_stream_descriptor, validate_current_executable_descriptor,
+    write_inherited_descriptor,
 };
 
 pub use identity::envelope::{

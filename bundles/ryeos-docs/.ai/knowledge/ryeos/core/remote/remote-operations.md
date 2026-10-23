@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-10-17T05:23:22Z:0a3afa7363fca6bc0217514ae4bc043a05da8d861fb856fc1090f18bbb77c7eb:IWuuU44E6iElAgbIg0lNJWiYLFqnJ5ZQDkYznBEmWXAjn/6dat4/e7FfytAf7qNmfUcVst3wQ3cnvcXIkW4PCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-22T05:18:30Z:c9facce46c2322fef77081b27eb3582594766d5179a082ca9ec0ff3b29aa5fde:HQbHoH8HoRO0HGhZxYI7COZ0dJqgGwudYMvU9Yv2/Buw6I5YehgIaiNIUjNkNUcSsTEQFWmyWxadgrQuMMb6AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
@@ -192,10 +192,13 @@ forwarded `remote_operator` principal.
    | `remote bundle-install` | `ryeos.execute.service.bundle/export`, `ryeos.execute.service.objects/get` |
    | `remote vault-set/list/delete` | matching `ryeos.execute.service.vault.*` cap |
    | `remote threads/thread-status` | signed auth; no additional thread service cap in v1 |
+   | `external-content push-product` | `ryeos.execute.service.objects/stage-chunk`, `ryeos.execute.service.external-content/product-offer`, `ryeos.execute.service.external-content/product-accept` (forwarded `remote_operator` principal) |
 
    Short-form scopes like `bundle.install` will never authorize a
    handler — the matcher does not auto-prefix and the daemon's auth
    loader refuses to load TOMLs that contain them.
+
+   `ryeos external-content push-product <remote> <witness-hash> <origin-admission-hash> <maximum-bytes>` is the origin-side counterpart of `receive-product`. It offers the product's witness, admission and closure objects (`product-offer`); the hosted node verifies the admission against the pinned remote key before storing anything. Missing blobs and large objects then go up in bounded chunks (`objects/stage-chunk`, at most 512 KiB each, resumable) into an owned durable stage, and `product-accept` publishes the acceptance under the node identity once the closure and every large object are resident. Large objects live in a separate large-object tier and are read back in bounded chunks through `objects/get` `large_object_chunk`.
 
 ### On the caller node
 

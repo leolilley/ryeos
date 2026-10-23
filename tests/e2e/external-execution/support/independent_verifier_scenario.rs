@@ -265,7 +265,7 @@ impl IndependentVerifierScenario {
         });
         let policy = json!({"category":"fixtures/codex-runtime","version":"3.0.0",
             "description":"Finite fixture verifier allowance; no runtime qualification is asserted by authoring",
-            "product_qualification_policy":{"schema":"ryeos.product_qualification_policy.v4",
+            "product_qualification_policy":{"schema":"ryeos.product_qualification_policy.v5",
                 "verifier_ref":TOOL_REF,"subject_declaration_id":"subject",
                 "allowed_claims":CLAIMS,
                 "minimum_verifier_process_settlement":"scope_empty",
@@ -581,8 +581,10 @@ pub(crate) mod tests {
             second_policy.minimum_verifier_process_settlement
         );
         assert_eq!(
-            second_policy.producer_scenarios[&second.profile.producer_scenario_id].recipe_ref,
-            second.expected_producer_recipe_ref
+            second_policy.producer_scenarios[&second.profile.producer_scenario_id]
+                .recipe_ref
+                .as_deref(),
+            Some(second.expected_producer_recipe_ref.as_str())
         );
         assert_eq!(second_recipe["name"], "direct-codex-empty-candidate");
         assert_ne!(

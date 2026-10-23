@@ -1771,14 +1771,46 @@ fn require_current_runtime_qualification_for_start(
     Ok(())
 }
 
+/// The current runtime content qualification a launch or admission rests on.
+/// A remote testimony is never returned as a published content qualification:
+/// it keeps the origin's evidence and attestation hash beside the explicit
+/// marker of the local acceptance that admitted it.
+#[derive(Debug, Clone)]
+struct CurrentRuntimeContentQualification {
+    coordinate_id: String,
+    attestation_hash: String,
+    evidence: ryeos_state::external_content::qualification_evidence::ContentQualificationEvidence,
+    remote_testimony: Option<ryeos_state::objects::RetainedRemoteQualificationTestimony>,
+}
+
+impl CurrentRuntimeContentQualification {
+    fn into_retained(
+        self,
+        binding_hash: String,
+        runtime_manifest_hash: String,
+        activation_ref: String,
+    ) -> ryeos_state::objects::RetainedExternalRuntimeContentQualification {
+        ryeos_state::objects::RetainedExternalRuntimeContentQualification {
+            binding_hash,
+            runtime_manifest_hash,
+            activation_ref,
+            coordinate_id: self.coordinate_id,
+            attestation_hash: self.attestation_hash,
+            evidence: self.evidence,
+            remote_testimony: self.remote_testimony,
+        }
+    }
+}
+
 /// Acquired session-runtime compatibility does not substitute for the separate
 /// guest-owner snapshot proof. Missing testimony is not an activation permit.
+/// A binding that selects a remote testimony is checked against the local
+/// acceptance of it; it never falls back to, or is mistaken for, a local
+/// published qualification.
 fn require_current_runtime_content_qualification(
     state: &AppState,
     contract: &ExternalPlacementBackendContract,
-) -> Result<
-    Option<ryeos_state::external_content::qualification_publication::PublishedContentQualification>,
-> {
+) -> Result<Option<CurrentRuntimeContentQualification>> {
     let session = match &contract.workload {
         crate::node_config::sections::external_execution::ExternalWorkloadBinding::StructuredSession(session) => session,
         crate::node_config::sections::external_execution::ExternalWorkloadBinding::QualificationStructuredSession(_) => {
@@ -1801,20 +1833,49 @@ fn require_current_runtime_content_qualification(
         &selected.owner_principal,
     )?;
     let context = operator.handler_context();
-    let qualified =
-        crate::operator_external_content::content_qualification::load_current_qualified_content(
-            state,
-            &context,
-            &selected.activation_ref,
-            &selected.coordinate_id,
-            &selected.attestation_hash,
-            &session.runtime_manifest_hash,
-        )?;
-    qualified.evidence.result.validate_claims_for(
-        &qualified.evidence.purpose.policy_source.policy,
+    let current = match selected.remote_testimony.as_ref() {
+        None => {
+            let published =
+                crate::operator_external_content::content_qualification::load_current_qualified_content(
+                    state,
+                    &context,
+                    &selected.activation_ref,
+                    &selected.coordinate_id,
+                    &selected.attestation_hash,
+                    &session.runtime_manifest_hash,
+                )?;
+            CurrentRuntimeContentQualification {
+                coordinate_id: published.coordinate_id,
+                attestation_hash: published.attestation_hash,
+                evidence: published.evidence,
+                remote_testimony: None,
+            }
+        }
+        Some(_) => {
+            let remote = crate::operator_external_content::qualification_testimony::verify_current_remote_runtime_content_testimony(
+                state,
+                &context,
+                selected,
+                &session.runtime_manifest_hash,
+            )?;
+            CurrentRuntimeContentQualification {
+                coordinate_id: remote.coordinate_id,
+                attestation_hash: remote.qualification_attestation_hash,
+                evidence: remote.evidence,
+                remote_testimony: Some(
+                    ryeos_state::objects::RetainedRemoteQualificationTestimony {
+                        acceptance_hash: remote.acceptance_hash,
+                        acceptance: remote.acceptance,
+                    },
+                ),
+            }
+        }
+    };
+    current.evidence.result.validate_claims_for(
+        &current.evidence.purpose.policy_source.policy,
         &selected.required_claims,
     )?;
-    Ok(Some(qualified))
+    Ok(Some(current))
 }
 
 /// A signed selection must demand the mechanisms this controller will send.
@@ -1889,19 +1950,50 @@ fn admit_current_runtime_qualification(
         .runtime_qualification
         .as_ref()
         .context("ordinary external execution lost its selected guest qualification")?;
-    let witness = crate::operator_external_content::product_qualification::verify_current_external_runtime_qualification(
-        state,
-        qualification,
-        &contract.guest_runtime_manifest_hash,
-    )?;
+    let (attestation_hash, evidence, remote_testimony) = if qualification.remote_testimony.is_some()
+    {
+        let remote = crate::operator_external_content::qualification_testimony::verify_current_remote_runtime_testimony(
+            state,
+            qualification,
+            &contract.guest_runtime_manifest_hash,
+        )?;
+        // The probe snapshot locator is rejoined to this node's own provider
+        // journal, which a remote testimony cannot satisfy. Refuse rather
+        // than skip the rejoin.
+        ensure!(
+            remote
+                .evidence
+                .result
+                .probe_evidence
+                .get("runtime_snapshot_locator")
+                .is_none(),
+            "remote qualification testimony cannot carry a runtime snapshot locator"
+        );
+        (
+            remote.qualification_attestation_hash,
+            remote.evidence,
+            Some(ryeos_state::objects::RetainedRemoteQualificationTestimony {
+                acceptance_hash: remote.acceptance_hash,
+                acceptance: remote.acceptance,
+            }),
+        )
+    } else {
+        let witness = crate::operator_external_content::product_qualification::verify_current_external_runtime_qualification(
+            state,
+            qualification,
+            &contract.guest_runtime_manifest_hash,
+        )?;
+        (witness.attestation_hash, witness.evidence, None)
+    };
     let retained = ryeos_state::objects::RetainedExternalRuntimeQualification {
         binding_hash: binding_hash.to_owned(),
         guest_runtime_manifest_hash: contract.guest_runtime_manifest_hash.clone(),
         owner_principal: qualification.owner_principal.clone(),
         proof: ryeos_state::external_content::products::composition::AdmittedProductQualification {
-            attestation_hash: witness.attestation_hash,
-            evidence: witness.evidence,
+            attestation_hash,
+            evidence,
         },
+        remote_testimony,
     };
     retained.validate()?;
     let source = verify_retained_runtime_proof(state, &retained)?;
@@ -1945,7 +2037,14 @@ fn require_retained_session_runtime_qualification(
             && content.coordinate_id == selected.coordinate_id
             && content.attestation_hash == selected.attestation_hash
             && content.runtime_manifest_hash == session.runtime_manifest_hash
-            && content.evidence.purpose.owner_fingerprint == selected.owner_principal,
+            && content.evidence.purpose.owner_fingerprint == selected.owner_principal
+            && content.remote_testimony.as_ref().map(|remote| (
+                &remote.acceptance_hash,
+                &remote.acceptance.acceptance_policy_ref
+            )) == selected
+                .remote_testimony
+                .as_ref()
+                .map(|remote| { (&remote.acceptance_hash, &remote.acceptance_policy_ref) }),
         "retained content testimony differs from signed session binding"
     );
     content.evidence.result.validate_claims_for(
@@ -2020,6 +2119,15 @@ fn verify_retained_runtime_content(
         .node_policy
         .require::<ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
         .closure_limits()?;
+    if retained.remote_testimony.is_some() {
+        return crate::operator_external_content::qualification_testimony::verify_retained_remote_content_testimony_guarded(
+            state,
+            &authority,
+            &guard,
+            limits,
+            retained,
+        );
+    }
     let value = ryeos_state::object_closure::load_exact_cas_object_with_cas(
         &authority.cas_store()?,
         &retained.attestation_hash,
@@ -2054,24 +2162,39 @@ fn verify_retained_runtime_proof(
         .closure_limits()?;
     let authority = state.state_store.pinned_state_authority()?;
     let guard = authority.acquire_shared_guard()?;
-    crate::operator_external_content::product_qualification::verify_retained_qualification_guarded(
-        state,
-        &authority,
-        &guard,
-        limits,
-        &retained.proof,
-        &retained.owner_principal,
-    )?;
-    let product = crate::operator_external_content::product_receipt::load_product_source(
-        state,
-        &authority,
-        &guard,
-        limits,
-        &retained.owner_principal,
-        &retained.proof.evidence.product_witness_hash,
-        &retained.proof.evidence.witness_source,
-        crate::operator_external_content::product_receipt::ProductSourceVerification::Retained,
-    )?;
+    let product = match &retained.remote_testimony {
+        None => {
+            crate::operator_external_content::product_qualification::verify_retained_qualification_guarded(
+                state,
+                &authority,
+                &guard,
+                limits,
+                &retained.proof,
+                &retained.owner_principal,
+            )?;
+            crate::operator_external_content::product_receipt::load_product_source(
+                state,
+                &authority,
+                &guard,
+                limits,
+                &retained.owner_principal,
+                &retained.proof.evidence.product_witness_hash,
+                &retained.proof.evidence.witness_source,
+                crate::operator_external_content::product_receipt::ProductSourceVerification::Retained,
+            )?
+        }
+        Some(remote) => {
+            crate::operator_external_content::qualification_testimony::verify_retained_remote_testimony_guarded(
+                state,
+                &authority,
+                &guard,
+                limits,
+                remote,
+                &retained.proof,
+                &retained.owner_principal,
+            )?
+        }
+    };
     let manifest_hash = &retained.proof.evidence.result.subject_manifest_hash;
     ensure!(
         product.attestation_hash == retained.proof.evidence.product_witness_hash
@@ -2111,7 +2234,23 @@ fn match_retained_session_runtime_qualification<'a>(
                 retained.binding_hash == binding_hash
                     && retained.guest_runtime_manifest_hash == contract.guest_runtime_manifest_hash
                     && retained.owner_principal == selected.owner_principal
-                    && retained.proof.attestation_hash == selected.attestation_hash,
+                    && retained.proof.attestation_hash == selected.attestation_hash
+                    && retained
+                        .remote_testimony
+                        .as_ref()
+                        .map(|remote| &remote.acceptance_hash)
+                        == selected
+                            .remote_testimony
+                            .as_ref()
+                            .map(|remote| &remote.acceptance_hash)
+                    && retained
+                        .remote_testimony
+                        .as_ref()
+                        .map(|remote| &remote.acceptance.acceptance_policy_ref)
+                        == selected
+                            .remote_testimony
+                            .as_ref()
+                            .map(|remote| &remote.acceptance_policy_ref),
                 "retained external runtime proof differs from signed placement binding"
             );
             Ok(Some(retained))
@@ -2191,14 +2330,11 @@ pub fn preflight_external_candidate_program(
         .runtime_content_qualification
         .as_ref()
         .context("external candidate has no signed content selection")?;
-    let retained_content = ryeos_state::objects::RetainedExternalRuntimeContentQualification {
-        binding_hash: binding.digest().to_owned(),
-        runtime_manifest_hash: program.runtime_manifest_hash.clone(),
-        activation_ref: selected.activation_ref.clone(),
-        coordinate_id: content.coordinate_id,
-        attestation_hash: content.attestation_hash,
-        evidence: content.evidence,
-    };
+    let retained_content = content.into_retained(
+        binding.digest().to_owned(),
+        program.runtime_manifest_hash.clone(),
+        selected.activation_ref.clone(),
+    );
     retained_content.validate()?;
     preflight_external_candidate_dependencies(
         &state.node_config.external_execution,
@@ -2381,14 +2517,11 @@ pub fn prepare_content_candidate_program(
         .runtime_content_qualification
         .as_ref()
         .context("signed activated-runtime binding has no content selection")?;
-    let retained = ryeos_state::objects::RetainedExternalRuntimeContentQualification {
-        binding_hash: binding.digest().to_owned(),
-        runtime_manifest_hash: runtime.manifest_hash.clone(),
-        activation_ref: selected.activation_ref.clone(),
-        coordinate_id: qualified.coordinate_id,
-        attestation_hash: qualified.attestation_hash,
-        evidence: qualified.evidence,
-    };
+    let retained = qualified.into_retained(
+        binding.digest().to_owned(),
+        runtime.manifest_hash.clone(),
+        selected.activation_ref.clone(),
+    );
     let ryeos_state::external_content::qualification_purpose::QualificationSubject::ActivatedContent { content } =
         &retained.evidence.purpose.subject else { bail!("runtime content proof lost its activated source"); };
     content
@@ -9245,16 +9378,12 @@ pub mod test_support {
             let published = require_current_runtime_content_qualification(state, &contract)?
                 .context("composed fixture content selection has no authenticated content")?;
             program.require_content_qualification(&published.evidence)?;
-            capsule.retained_external_runtime_content_qualification = Some(
-                ryeos_state::objects::RetainedExternalRuntimeContentQualification {
-                    binding_hash: retained.digest().to_owned(),
-                    runtime_manifest_hash: program.runtime_manifest_hash.clone(),
-                    activation_ref: selected.activation_ref.clone(),
-                    coordinate_id: published.coordinate_id,
-                    attestation_hash: published.attestation_hash,
-                    evidence: published.evidence,
-                },
-            );
+            capsule.retained_external_runtime_content_qualification =
+                Some(published.into_retained(
+                    retained.digest().to_owned(),
+                    program.runtime_manifest_hash.clone(),
+                    selected.activation_ref.clone(),
+                ));
         }
         if contract.runtime_qualification.is_some() {
             capsule.retained_external_runtime_qualification =
@@ -10985,6 +11114,7 @@ mod tests {
                     policy_ref: Some("config:fixture/guest-mechanisms".into()),
                     required_claims: vec!["render_snapshot_v1".into()],
                 },
+                remote_testimony: None,
             },
         );
         assert!(require_ordinary_guest_wire_support_selection(&contract).is_err());
@@ -11010,6 +11140,46 @@ mod tests {
     }
 
     #[test]
+    fn structured_session_guest_wire_floor_accepts_exactly_the_wire_claim() {
+        use ryeos_external_execution_contract::{
+            DIRECT_PROGRAM_SUPPORT_CLAIM, GUEST_WIRE_SUPPORT_CLAIM,
+        };
+        let binding = InstalledExternalExecutionBinding::test_fixture();
+        let mut contract = binding.backend_contract();
+        assert!(matches!(
+            contract.workload,
+            crate::node_config::sections::external_execution::ExternalWorkloadBinding::StructuredSession(_)
+        ));
+        contract.runtime_qualification = Some(
+            crate::node_config::sections::external_execution::ExternalRuntimeQualificationBinding {
+                attestation_hash: "1".repeat(64),
+                owner_principal: format!("fp:{}", "2".repeat(64)),
+                qualification: ryeos_state::external_content::products::composition::ProductRelationshipQualification {
+                    policy_ref: Some("config:codex/guest-wire-qualification".into()),
+                    required_claims: vec![GUEST_WIRE_SUPPORT_CLAIM.into()],
+                },
+                remote_testimony: None,
+            },
+        );
+        contract
+            .runtime_qualification
+            .as_ref()
+            .unwrap()
+            .validate()
+            .unwrap();
+        // A structured session needs the wire claim and nothing more.
+        require_ordinary_guest_wire_support_selection(&contract).unwrap();
+        // The direct-program claim alone does not satisfy the wire floor.
+        contract
+            .runtime_qualification
+            .as_mut()
+            .unwrap()
+            .qualification
+            .required_claims = vec![DIRECT_PROGRAM_SUPPORT_CLAIM.into()];
+        assert!(require_ordinary_guest_wire_support_selection(&contract).is_err());
+    }
+
+    #[test]
     fn retained_guest_runtime_proof_matches_only_its_signed_binding() {
         let binding = RetainedExternalExecutionBinding::test_fixture();
         let mut contract = binding.backend_contract();
@@ -11032,6 +11202,7 @@ mod tests {
                     policy_ref: Some("config:render/snapshot-qualification".into()),
                     required_claims: vec!["render_snapshot_v1".into()],
                 },
+                remote_testimony: None,
             },
         );
         let retained = ryeos_state::objects::RetainedExternalRuntimeQualification {
@@ -11039,6 +11210,7 @@ mod tests {
             guest_runtime_manifest_hash: contract.guest_runtime_manifest_hash.clone(),
             owner_principal,
             proof,
+            remote_testimony: None,
         };
         assert!(
             match_retained_session_runtime_qualification(
@@ -11101,6 +11273,107 @@ mod tests {
                 binding.digest()
             )
             .is_err()
+        );
+    }
+
+    fn remote_testimony_selection(
+        acceptance_hash: &str,
+    ) -> crate::node_config::sections::external_execution::ExternalRuntimeQualificationBinding {
+        use ryeos_external_execution_contract::{
+            DIRECT_PROGRAM_SUPPORT_CLAIM, GUEST_WIRE_SUPPORT_CLAIM,
+        };
+        let mut claims = vec![
+            GUEST_WIRE_SUPPORT_CLAIM.to_owned(),
+            DIRECT_PROGRAM_SUPPORT_CLAIM.to_owned(),
+        ];
+        claims.sort();
+        crate::node_config::sections::external_execution::ExternalRuntimeQualificationBinding {
+            attestation_hash: "1".repeat(64),
+            owner_principal: format!("fp:{}", "2".repeat(64)),
+            qualification: ryeos_state::external_content::products::composition::ProductRelationshipQualification {
+                policy_ref: Some("config:fixture/guest-mechanisms".into()),
+                required_claims: claims,
+            },
+            remote_testimony: Some(
+                crate::node_config::sections::external_execution::ExternalRemoteQualificationTestimonyBinding {
+                    acceptance_hash: acceptance_hash.to_owned(),
+                    acceptance_policy_ref: "config:fixture/guest-acceptance".into(),
+                },
+            ),
+        }
+    }
+
+    #[test]
+    fn a_remote_testimony_selection_is_refused_without_a_current_attester_grant() {
+        let binding = InstalledExternalExecutionBinding::direct_test_fixture(30);
+        let mut contract = binding.backend_contract();
+        contract.runtime_qualification = Some(remote_testimony_selection(&"3".repeat(64)));
+        contract
+            .runtime_qualification
+            .as_ref()
+            .unwrap()
+            .validate()
+            .unwrap();
+        require_ordinary_guest_wire_support_selection(&contract).unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let (_owner, state) = crate::state::test_support::build(root.path()).unwrap();
+        let error =
+            admit_current_runtime_qualification(&state, &contract, binding.digest()).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("grant was revoked"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn a_retained_proof_must_agree_with_the_binding_on_remote_testimony() {
+        let binding = RetainedExternalExecutionBinding::test_fixture();
+        let mut contract = binding.backend_contract();
+        let selections = ryeos_state::external_content::products::qualification::test_support::qualified_runtime_selections(
+            &contract.guest_runtime_manifest_hash,
+        )
+        .unwrap();
+        let proof = selections
+            .get("auxiliary")
+            .unwrap()
+            .qualification
+            .clone()
+            .unwrap();
+        let owner_principal = format!("fp:{}", "7".repeat(64));
+        let mut selected = remote_testimony_selection(&"3".repeat(64));
+        selected.attestation_hash = proof.attestation_hash.clone();
+        selected.owner_principal = owner_principal.clone();
+        contract.runtime_qualification = Some(selected);
+        let retained = ryeos_state::objects::RetainedExternalRuntimeQualification {
+            binding_hash: binding.digest().to_owned(),
+            guest_runtime_manifest_hash: contract.guest_runtime_manifest_hash.clone(),
+            owner_principal,
+            proof,
+            remote_testimony: None,
+        };
+        // A binding that selects a remote testimony never matches a retained
+        // proof that carries none, and the reverse holds too.
+        assert!(
+            match_retained_session_runtime_qualification(
+                Some(&retained),
+                &contract,
+                binding.digest()
+            )
+            .is_err()
+        );
+        contract
+            .runtime_qualification
+            .as_mut()
+            .unwrap()
+            .remote_testimony = None;
+        assert!(
+            match_retained_session_runtime_qualification(
+                Some(&retained),
+                &contract,
+                binding.digest()
+            )
+            .unwrap()
+            .is_some()
         );
     }
 
@@ -11188,6 +11461,7 @@ mod tests {
                     policy_ref: Some("config:render/snapshot-qualification".into()),
                     required_claims: vec!["render_snapshot_v1".into()],
                 },
+                remote_testimony: None,
             },
         );
         assert!(
