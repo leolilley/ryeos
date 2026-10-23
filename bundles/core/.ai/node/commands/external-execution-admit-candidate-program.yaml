@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-22T22:00:32Z:66f5c8486ac90fdb381dea78fccdcf661d387b718221007c1244f835883c37de:b6rN++z6y8TTC0pNDwuJEQNqF+an1bpS8SjdYW3GRNu/wTZb9ca0bqEoPHlTWUMUOFf4amjEyr43MabJx5n1Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-23T00:35:23Z:660a3cd6e91ddc982a5de7371b50f3b6f6ec78807788d8db08437cf79eb98fe9:oi2wLn2PHMPyKYjqOMM92y5Nb+6C2KxCdCdAoE1YHLJsKk0/6b8ZbIwApKZrqO3wX49GBxQmA7OdGHZ/SB0zBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens: [external-execution, admit-candidate-program]
 description: Derive the admitted candidate program and runtime content qualification binding for a published content qualification without writing state
 arguments:
@@ -6,7 +6,7 @@ arguments:
     kind: json
     positional: 5
     required: true
-    arity: required
+    arity: one
     description: Sorted unique claim names the binding will require of the published testimony; passed as --required-claims <json>
 forms:
   - slots:
