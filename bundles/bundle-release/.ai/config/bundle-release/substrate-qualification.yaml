@@ -1,9 +1,9 @@
-# ryeos:signed:2026-09-30T20:05:49Z:36012231e1e7c5342055ac9f2cfc4ea0075b0dbb066998be1264e5ec4b9fca89:6xfTV/rCfrAOr2RByFWJUStfPKbWepze4HjjS9xECqFzOoKqdVv7VWj2Ou4t4Y76LrHv17AMU8/mfv6uBIzoDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-22T23:38:20Z:71f6ce5153bb406d50220eda98b440e283fbd6457e67411d8b17853aec82a204:vCcH8WeaEnh4rjD9hUubDLnk7FoAg3wsRCgurzWYUXXEYv5w8x1HL3QWDvF0k5KvKSM+++IciB+XzEg9rGs5Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: bundle-release
 version: "1.1.0"
 description: Independent qualification policy for the canonical receipt-only substrate release product.
 product_qualification_policy:
-  schema: ryeos.product_qualification_policy.v4
+  schema: ryeos.product_qualification_policy.v5
   verifier_ref: tool:ryeos/bundle-release/substrate-qualify
   subject_declaration_id: subject
   allowed_claims: [substrate_release_checks_v1]

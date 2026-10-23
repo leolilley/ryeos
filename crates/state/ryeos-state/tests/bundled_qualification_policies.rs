@@ -38,6 +38,8 @@ fn bundled_qualification_policies_match_the_current_reader() {
             for predecessor_schema in [
                 "ryeos.product_qualification_policy.v1",
                 "ryeos.product_qualification_policy.v2",
+                "ryeos.product_qualification_policy.v3",
+                "ryeos.product_qualification_policy.v4",
             ] {
                 let mut predecessor = wire.clone();
                 predecessor["schema"] = predecessor_schema.into();
@@ -113,8 +115,8 @@ fn shipped_codex_consumer_qualification_configs_agree_and_parse() {
 
     let scenario = policy.producer_scenarios.get("remote_codex").unwrap();
     assert_eq!(
-        scenario.recipe_ref,
-        "config:codex/consumer-qualification-recipe"
+        scenario.recipe_ref.as_deref(),
+        Some("config:codex/consumer-qualification-recipe")
     );
     let recipe = ProductProducerRecipe::from_value(codex_config(
         "consumer-qualification-recipe.yaml",

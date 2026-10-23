@@ -342,7 +342,8 @@ mod tests {
             max_bytes: 65536,
         };
         let scenario = ProductQualificationProducerScenario {
-            recipe_ref: "config:fixtures/recipe".into(),
+            recipe_ref: Some("config:fixtures/recipe".into()),
+            remote_probe_input: None,
             remote_verifier: None,
             consumer_worker_request: Some(ProductQualificationConsumerWorkerRequest {
                 schema: PRODUCT_QUALIFICATION_CONSUMER_WORKER_REQUEST_SCHEMA.into(),

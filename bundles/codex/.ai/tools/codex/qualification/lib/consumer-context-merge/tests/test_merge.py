@@ -50,7 +50,7 @@ TEMPLATE = {
     "category": "ryeos/environments/qualification",
     "version": "1.0.0",
     "product_qualification_policy": {
-        "schema": "ryeos.product_qualification_policy.v4",
+        "schema": "ryeos.product_qualification_policy.v5",
         "verifier_ref": "tool:codex/qualification/consumer-runtime-verifier",
         "subject_declaration_id": "guest-runtime",
         "allowed_claims": ["bounded_candidate_capture"],

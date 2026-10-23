@@ -1,9 +1,9 @@
-# ryeos:signed:2026-09-30T20:05:49Z:d843f8be541c49d9f8a81c1dbaea8a68fdae6ed523f34bc370491b47f3a28ba2:95D719LSuyhOdzq3XtyIW4H6V1qsoHjiZjVGAfJXch0BqSktZBSEQHPNOfHHjQsykEKYPsJsGjbiCaVcouJuAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-22T23:38:20Z:4a496484115e80f3de9d9dd4bba898d0d6e4e75f4b848a8a26138f82bab1c940:ZqaFR2AKe5uorFvnQEs5jk12nkL9F8+z83JhRqOX4Ho+ws7CvFyk2p21u8LUk7vUH9Ypf7ned9sx1odbadnlBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: bundle-release
 version: "1.1.0"
 description: Independent qualification policy for the exact signed substrate Core seed.
 product_qualification_policy:
-  schema: ryeos.product_qualification_policy.v4
+  schema: ryeos.product_qualification_policy.v5
   verifier_ref: tool:ryeos/bundle-release/core-seed-qualify
   subject_declaration_id: subject
   allowed_claims: [substrate_core_seed_checks_v1]

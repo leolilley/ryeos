@@ -42,6 +42,11 @@ pub const MAX_LIFECYCLE_REQUEST_BYTES: usize = 256 * 1024;
 pub const MAX_LIFECYCLE_PROVIDER_SPEC_BYTES: u64 = 256 * 1024;
 pub const MAX_GUEST_INPUT_PROJECTION_BYTES: usize = 192 * 1024;
 pub const EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA: u32 = 5;
+/// Schema version of the candidate launcher spec the launcher accepts and the
+/// supervisor-to-launcher exchange speaks. Writers and checkers of the spec
+/// both use this one constant, so a pinned claim about launcher version four
+/// cannot drift from the bytes actually produced.
+pub const EXTERNAL_CANDIDATE_LAUNCHER_SPEC_SCHEMA: u32 = 4;
 /// Core mechanism claims a signed guest product relationship may require. The
 /// controller refuses ordinary external execution unless the selected
 /// qualification names them and a current attestation carries them. These
