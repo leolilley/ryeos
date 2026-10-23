@@ -1,0 +1,43 @@
+# ryeos:signed:2026-10-22T23:38:01Z:3237ad215f028c123ef2302cab82e9ae52d9f33b9f840f0324d5bf754c210063:jyMRokhRcgRvVzGzF6G/csDp6MtROEZMCuV+svr/9hNKcEXsql3pGuzulHu9OejTr9zLm6Oh7Rw8AvmH27jBCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: codex/qualification
+version: "1.0.0"
+description: Prove in a restored guest, under an ephemeral key, that the subject guest owner speaks the pinned guest-inputs and launcher wire schemas; the claim binds the subject's owner executable digest and manifest hash, never the ephemeral probe manifest.
+executor_id: "@subprocess"
+execution_protocol: protocol:ryeos/core/qualification_consumer_callback
+effects: live
+filesystem_authority: captured_execution
+required_caps: []
+external_product_slots:
+  # The verifier inspects the unqualified guest owner through its own
+  # composition edge; the product never leaves the node.
+  - id: subject
+    relationship_ref: config:codex/guest-owner-runtime-products
+    relationship: owner_to_guest_wire_verifier
+    kind: tree
+    mount_root: execution_runtime
+    mount: guest-owner-runtime
+config:
+  command: bin:codex/ryeos-guest-wire-verifier
+  args: [--remote-probe-controller]
+  input_data: "${params_json}"
+  timeout_secs: 300
+config_schema:
+  type: object
+  additionalProperties: false
+  required: [schema, controller, claims_on_success, guest_inputs_schema, launcher_spec_schema]
+  properties:
+    schema: {type: string, enum: [ryeos.guest_wire_verifier.v1]}
+    controller:
+      type: object
+      additionalProperties: false
+      required: [scenario_id, maximum_duration_ms]
+      properties:
+        scenario_id: {type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9_-]+$'}
+        maximum_duration_ms: {type: integer, minimum: 1, maximum: 300000}
+    claims_on_success:
+      type: array
+      items: {type: string, minLength: 1, maxLength: 128}
+      minItems: 1
+      maxItems: 8
+    guest_inputs_schema: {type: integer, minimum: 1}
+    launcher_spec_schema: {type: integer, minimum: 1}

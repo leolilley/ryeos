@@ -1,0 +1,32 @@
+# ryeos:signed:2026-10-22T23:38:01Z:d953a5925c87e890031741381f03043daed28d27b9fc0d09913a1eacfca76ae8:CmxQb271fJmXK/fiUhEPdI3aLv2ZP9Ox6hea7OB8MfTiIA5VH4+rBKr77HTr0pK2+FZ67i5dQdMyy4nULhIBBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: codex
+version: 1.0.0
+description: Restored-guest qualification of the guest owner wire; the claim binds the subject's owner executable digest and manifest hash, proved under an ephemeral key in a restored guest
+product_qualification_policy:
+  schema: ryeos.product_qualification_policy.v5
+  verifier_ref: tool:codex/qualification/guest-wire-verifier
+  subject_declaration_id: subject
+  allowed_claims:
+  - external_guest_inputs_v5_launcher_v4
+  minimum_verifier_process_settlement: scope_empty
+  verifier_parameters:
+    schema: ryeos.guest_wire_verifier.v1
+    controller:
+      scenario_id: guest_wire
+      maximum_duration_ms: 240000
+    claims_on_success:
+    - external_guest_inputs_v5_launcher_v4
+    guest_inputs_schema: 5
+    launcher_spec_schema: 4
+  producer_scenarios:
+    guest_wire:
+      remote_verifier:
+        binary_ref: bin:codex/ryeos-guest-wire-verifier
+        guest_target_triple: x86_64-unknown-linux-gnu
+        archive_members:
+          ryeos-external-candidate-supervisor: bin:codex/ryeos-external-candidate-supervisor
+          ryeos-external-candidate-launcher: bin:codex/ryeos-external-candidate-launcher
+      remote_probe_input:
+        schema: ryeos.guest_wire_probe_input.v1
+        guest_inputs_schema: 5
+        launcher_spec_schema: 4

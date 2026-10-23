@@ -15,6 +15,8 @@ tool = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(tool)
 
 SUPERVISOR = "ryeos-external-candidate-supervisor"
+LAUNCHER = "ryeos-external-candidate-launcher"
+OWNER = "codex"
 TRIPLE = "x86_64-unknown-linux-gnu"
 
 
@@ -30,11 +32,14 @@ class SharedStaticPayloads(unittest.TestCase):
         self.assertIn(("modal-sandbox", "supervisor", SUPERVISOR), declared)
         self.assertIn(("render-sandbox", "supervisor", SUPERVISOR), declared)
         self.assertEqual([(e["owner_bundle"], e["consumer_bundles"]) for e in shared if e["binary"] == SUPERVISOR],
-                         [("render-sandbox", ["modal-sandbox"])])
+                         [(OWNER, ["modal-sandbox", "render-sandbox"])])
+        self.assertEqual([(e["owner_bundle"], e["consumer_bundles"]) for e in shared if e["binary"] == LAUNCHER],
+                         [(OWNER, ["render-sandbox"])])
 
     def test_the_payload_has_exactly_one_owner_and_one_build(self):
         records, shared, declared = real()
-        self.assertEqual([r["bundle"] for r in records if r["binary"] == SUPERVISOR], ["render-sandbox"])
+        self.assertEqual([r["bundle"] for r in records if r["binary"] == SUPERVISOR], [OWNER])
+        self.assertEqual([r["bundle"] for r in records if r["binary"] == LAUNCHER], [OWNER])
         copies = copy.deepcopy(records)
         copies.append({**next(r for r in records if r["binary"] == SUPERVISOR), "bundle": "modal-sandbox"})
         with self.assertRaisesRegex(tool.Refused, "more than one owner"):
@@ -61,28 +66,44 @@ class SharedStaticPayloads(unittest.TestCase):
             tool.validate(narrowed, shared, declared)
 
     def stage_tree(self, directory):
-        owner = directory / "render-sandbox"
+        owner = directory / OWNER
         owner.mkdir()
         (owner / SUPERVISOR).write_bytes(b"one supervisor build")
+        (owner / LAUNCHER).write_bytes(b"one launcher build")
         return real()[1]
+
+    def expected_record(self, consumers):
+        record = {}
+        if "render-sandbox" in consumers:
+            record[LAUNCHER] = {"sha256": hashlib.sha256(b"one launcher build").hexdigest(), "owner": OWNER,
+                                "consumers": ["render-sandbox"]}
+        supervisor_consumers = [c for c in ("modal-sandbox", "render-sandbox") if c in consumers]
+        if supervisor_consumers:
+            record[SUPERVISOR] = {"sha256": hashlib.sha256(b"one supervisor build").hexdigest(), "owner": OWNER,
+                                  "consumers": supervisor_consumers}
+        return record
 
     def test_staging_installs_one_build_and_records_one_hash(self):
         with tempfile.TemporaryDirectory() as raw:
             directory = Path(raw)
             shared = self.stage_tree(directory)
-            record = tool.stage(shared, directory, {"render-sandbox", "modal-sandbox"})
+            record = tool.stage(shared, directory, {OWNER, "render-sandbox", "modal-sandbox"})
             digest = hashlib.sha256(b"one supervisor build").hexdigest()
-            self.assertEqual(record, {SUPERVISOR: {"sha256": digest, "owner": "render-sandbox", "consumers": ["modal-sandbox"]}})
+            self.assertEqual(record, self.expected_record({"render-sandbox", "modal-sandbox"}))
             self.assertEqual(json.loads((directory / tool.RECORD).read_text()), record)
-            for bundle in ("render-sandbox", "modal-sandbox"):
+            for bundle in (OWNER, "render-sandbox", "modal-sandbox"):
                 self.assertEqual(tool.sha256_file(directory / bundle / SUPERVISOR), digest)
+            self.assertEqual(tool.sha256_file(directory / "render-sandbox" / LAUNCHER),
+                             hashlib.sha256(b"one launcher build").hexdigest())
+            self.assertFalse((directory / "modal-sandbox" / LAUNCHER).exists())
 
     def test_a_consumer_not_selected_receives_no_copy(self):
         with tempfile.TemporaryDirectory() as raw:
             directory = Path(raw)
             shared = self.stage_tree(directory)
-            self.assertEqual(tool.stage(shared, directory, {"render-sandbox"}), {})
+            self.assertEqual(tool.stage(shared, directory, {OWNER}), {})
             self.assertFalse((directory / "modal-sandbox").exists())
+            self.assertFalse((directory / "render-sandbox").exists())
 
     def test_a_per_target_copy_is_refused(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -91,24 +112,24 @@ class SharedStaticPayloads(unittest.TestCase):
             (directory / "modal-sandbox").mkdir()
             (directory / "modal-sandbox" / SUPERVISOR).write_bytes(b"separately built")
             with self.assertRaisesRegex(tool.Refused, "not built per target"):
-                tool.stage(shared, directory, {"render-sandbox", "modal-sandbox"})
+                tool.stage(shared, directory, {OWNER, "render-sandbox", "modal-sandbox"})
 
     def test_a_missing_owner_build_is_refused(self):
         with tempfile.TemporaryDirectory() as raw:
             with self.assertRaisesRegex(tool.Refused, "not staged"):
-                tool.stage(real()[1], Path(raw), {"render-sandbox", "modal-sandbox"})
+                tool.stage(real()[1], Path(raw), {OWNER, "render-sandbox", "modal-sandbox"})
 
     def published(self, directory, content=None):
         data = b"one supervisor build"
         digest = hashlib.sha256(data).hexdigest()
-        for bundle in ("render-sandbox", "modal-sandbox"):
+        for bundle in (OWNER, "render-sandbox", "modal-sandbox"):
             bin_dir = directory / "bundles" / bundle / ".ai/bin" / TRIPLE
             bin_dir.mkdir(parents=True)
             (bin_dir / SUPERVISOR).write_bytes(content.get(bundle, data) if content else data)
             blob = digest if not content or bundle not in content else hashlib.sha256(content[bundle]).hexdigest()
             (bin_dir / f"{SUPERVISOR}.item_source.json").write_text(
                 "# ryeos:signed:x\n" + json.dumps({"content_blob_hash": blob}))
-        return {SUPERVISOR: {"sha256": digest, "owner": "render-sandbox", "consumers": ["modal-sandbox"]}}
+        return {SUPERVISOR: {"sha256": digest, "owner": OWNER, "consumers": ["modal-sandbox", "render-sandbox"]}}
 
     def test_both_bundles_reference_the_recorded_hash(self):
         with tempfile.TemporaryDirectory() as raw:

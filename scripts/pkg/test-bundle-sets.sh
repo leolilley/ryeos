@@ -453,6 +453,7 @@ static_package_cases=(
   'ryeos-codex-external-configuration|ryeos-codex-external-configuration'
   'ryeos-codex-guest-runtime-producer|ryeos-codex-guest-runtime-producer'
   'ryeos-codex-runtime-verifier|codex-runtime-verifier'
+  'ryeos-guest-wire-verifier|ryeos-guest-wire-verifier'
 )
 for package_case in "${static_package_cases[@]}"; do
   selected_package="${package_case%%|*}"

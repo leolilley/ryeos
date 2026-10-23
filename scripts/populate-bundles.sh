@@ -405,7 +405,9 @@ case "$BUNDLE_SET" in
           ryeos-external-guest-occurrence-owner \
           ryeos-external-guest-runtime-producer \
           ryeos-codex-guest-runtime-producer \
-          ryeos-codex-runtime-verifier)
+          ryeos-codex-runtime-verifier \
+          ryeos-external-candidate-launcher ryeos-external-candidate-supervisor \
+          ryeos-guest-wire-verifier)
     ;;
   release-artifacts)
     pkgs=(lillux ryeosd ryeos-directive-runtime ryeos-graph-runtime ryeos-knowledge-runtime \
@@ -417,6 +419,7 @@ case "$BUNDLE_SET" in
           ryeos-codex-guest-runtime-producer \
           ryeos-codex-runtime-verifier \
           ryeos-external-candidate-launcher ryeos-external-candidate-supervisor \
+          ryeos-guest-wire-verifier \
           ryeos-external-guest-restoration-verifier ryeos-render-sandbox-lifecycle-adapter \
           modal-guest-launcher ryeos-modal-sandbox-lifecycle-adapter)
     ;;
@@ -437,7 +440,9 @@ case "$BUNDLE_SET" in
           ryeos-external-guest-occurrence-owner ryeos-codex-external-configuration \
           ryeos-external-guest-runtime-producer \
           ryeos-codex-guest-runtime-producer \
-          ryeos-codex-runtime-verifier)
+          ryeos-codex-runtime-verifier \
+          ryeos-external-candidate-launcher ryeos-external-candidate-supervisor \
+          ryeos-guest-wire-verifier)
     ;;
   f5r-controller)
     pkgs=(lillux ryeosd ryeos-graph-runtime ryeos-knowledge-runtime \
@@ -448,6 +453,7 @@ case "$BUNDLE_SET" in
           ryeos-codex-guest-runtime-producer \
           ryeos-codex-runtime-verifier \
           ryeos-external-candidate-launcher ryeos-external-candidate-supervisor \
+          ryeos-guest-wire-verifier \
           ryeos-external-guest-restoration-verifier ryeos-render-sandbox-lifecycle-adapter)
     ;;
   core-workflow)
@@ -509,6 +515,7 @@ build_static_modal_sandbox_lifecycle_adapter=0
 build_static_codex_external_configuration=0
 build_static_codex_guest_runtime_producer=0
 build_static_codex_runtime_verifier=0
+build_static_guest_wire_verifier=0
 for p in "${pkgs[@]}"; do
   case "$p" in
     ryeos-session-exec) build_static_session_exec=1 ;;
@@ -526,6 +533,7 @@ for p in "${pkgs[@]}"; do
     ryeos-codex-external-configuration) build_static_codex_external_configuration=1 ;;
     ryeos-codex-guest-runtime-producer) build_static_codex_guest_runtime_producer=1 ;;
     ryeos-codex-runtime-verifier) build_static_codex_runtime_verifier=1 ;;
+    ryeos-guest-wire-verifier) build_static_guest_wire_verifier=1 ;;
     *) host_pkgs+=("$p") ;;
   esac
 done
@@ -595,6 +603,7 @@ static_build_labels=()
 (( build_static_codex_external_configuration == 1 )) && static_build_labels+=(ryeos-codex-external-configuration)
 (( build_static_codex_guest_runtime_producer == 1 )) && static_build_labels+=(ryeos-codex-guest-runtime-producer)
 (( build_static_codex_runtime_verifier == 1 )) && static_build_labels+=(ryeos-codex-runtime-verifier)
+(( build_static_guest_wire_verifier == 1 )) && static_build_labels+=(ryeos-guest-wire-verifier)
 if (( ${#static_build_labels[@]} > 0 )); then
   ryeos_term_update "building selected static worker binaries" "${static_build_labels[*]}"
   ryeos_term_suspend
@@ -629,10 +638,11 @@ if bundle_in_set codex; then
   require_static_payload "$PAYLOAD_STAGE/codex/ryeos-external-guest-runtime-producer"
   require_static_payload "$PAYLOAD_STAGE/codex/ryeos-codex-external-configuration"
   require_static_payload "$PAYLOAD_STAGE/codex/ryeos-codex-guest-runtime-producer"
+  require_static_payload "$PAYLOAD_STAGE/codex/ryeos-external-candidate-launcher"
+  require_static_payload "$PAYLOAD_STAGE/codex/ryeos-external-candidate-supervisor"
+  require_static_payload "$PAYLOAD_STAGE/codex/ryeos-guest-wire-verifier"
 fi
 if bundle_in_set render-sandbox; then
-  require_static_payload "$PAYLOAD_STAGE/render-sandbox/ryeos-external-candidate-launcher"
-  require_static_payload "$PAYLOAD_STAGE/render-sandbox/ryeos-external-candidate-supervisor"
   require_static_payload "$PAYLOAD_STAGE/render-sandbox/ryeos-external-guest-restoration-verifier"
   require_static_payload "$PAYLOAD_STAGE/render-sandbox/ryeos-render-sandbox-lifecycle-adapter"
 fi
