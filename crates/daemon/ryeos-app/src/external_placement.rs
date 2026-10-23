@@ -1771,14 +1771,46 @@ fn require_current_runtime_qualification_for_start(
     Ok(())
 }
 
+/// The current runtime content qualification a launch or admission rests on.
+/// A remote testimony is never returned as a published content qualification:
+/// it keeps the origin's evidence and attestation hash beside the explicit
+/// marker of the local acceptance that admitted it.
+#[derive(Debug, Clone)]
+struct CurrentRuntimeContentQualification {
+    coordinate_id: String,
+    attestation_hash: String,
+    evidence: ryeos_state::external_content::qualification_evidence::ContentQualificationEvidence,
+    remote_testimony: Option<ryeos_state::objects::RetainedRemoteQualificationTestimony>,
+}
+
+impl CurrentRuntimeContentQualification {
+    fn into_retained(
+        self,
+        binding_hash: String,
+        runtime_manifest_hash: String,
+        activation_ref: String,
+    ) -> ryeos_state::objects::RetainedExternalRuntimeContentQualification {
+        ryeos_state::objects::RetainedExternalRuntimeContentQualification {
+            binding_hash,
+            runtime_manifest_hash,
+            activation_ref,
+            coordinate_id: self.coordinate_id,
+            attestation_hash: self.attestation_hash,
+            evidence: self.evidence,
+            remote_testimony: self.remote_testimony,
+        }
+    }
+}
+
 /// Acquired session-runtime compatibility does not substitute for the separate
 /// guest-owner snapshot proof. Missing testimony is not an activation permit.
+/// A binding that selects a remote testimony is checked against the local
+/// acceptance of it; it never falls back to, or is mistaken for, a local
+/// published qualification.
 fn require_current_runtime_content_qualification(
     state: &AppState,
     contract: &ExternalPlacementBackendContract,
-) -> Result<
-    Option<ryeos_state::external_content::qualification_publication::PublishedContentQualification>,
-> {
+) -> Result<Option<CurrentRuntimeContentQualification>> {
     let session = match &contract.workload {
         crate::node_config::sections::external_execution::ExternalWorkloadBinding::StructuredSession(session) => session,
         crate::node_config::sections::external_execution::ExternalWorkloadBinding::QualificationStructuredSession(_) => {
@@ -1801,20 +1833,49 @@ fn require_current_runtime_content_qualification(
         &selected.owner_principal,
     )?;
     let context = operator.handler_context();
-    let qualified =
-        crate::operator_external_content::content_qualification::load_current_qualified_content(
-            state,
-            &context,
-            &selected.activation_ref,
-            &selected.coordinate_id,
-            &selected.attestation_hash,
-            &session.runtime_manifest_hash,
-        )?;
-    qualified.evidence.result.validate_claims_for(
-        &qualified.evidence.purpose.policy_source.policy,
+    let current = match selected.remote_testimony.as_ref() {
+        None => {
+            let published =
+                crate::operator_external_content::content_qualification::load_current_qualified_content(
+                    state,
+                    &context,
+                    &selected.activation_ref,
+                    &selected.coordinate_id,
+                    &selected.attestation_hash,
+                    &session.runtime_manifest_hash,
+                )?;
+            CurrentRuntimeContentQualification {
+                coordinate_id: published.coordinate_id,
+                attestation_hash: published.attestation_hash,
+                evidence: published.evidence,
+                remote_testimony: None,
+            }
+        }
+        Some(_) => {
+            let remote = crate::operator_external_content::qualification_testimony::verify_current_remote_runtime_content_testimony(
+                state,
+                &context,
+                selected,
+                &session.runtime_manifest_hash,
+            )?;
+            CurrentRuntimeContentQualification {
+                coordinate_id: remote.coordinate_id,
+                attestation_hash: remote.qualification_attestation_hash,
+                evidence: remote.evidence,
+                remote_testimony: Some(
+                    ryeos_state::objects::RetainedRemoteQualificationTestimony {
+                        acceptance_hash: remote.acceptance_hash,
+                        acceptance: remote.acceptance,
+                    },
+                ),
+            }
+        }
+    };
+    current.evidence.result.validate_claims_for(
+        &current.evidence.purpose.policy_source.policy,
         &selected.required_claims,
     )?;
-    Ok(Some(qualified))
+    Ok(Some(current))
 }
 
 /// A signed selection must demand the mechanisms this controller will send.
@@ -1976,7 +2037,14 @@ fn require_retained_session_runtime_qualification(
             && content.coordinate_id == selected.coordinate_id
             && content.attestation_hash == selected.attestation_hash
             && content.runtime_manifest_hash == session.runtime_manifest_hash
-            && content.evidence.purpose.owner_fingerprint == selected.owner_principal,
+            && content.evidence.purpose.owner_fingerprint == selected.owner_principal
+            && content.remote_testimony.as_ref().map(|remote| (
+                &remote.acceptance_hash,
+                &remote.acceptance.acceptance_policy_ref
+            )) == selected
+                .remote_testimony
+                .as_ref()
+                .map(|remote| { (&remote.acceptance_hash, &remote.acceptance_policy_ref) }),
         "retained content testimony differs from signed session binding"
     );
     content.evidence.result.validate_claims_for(
@@ -2051,6 +2119,15 @@ fn verify_retained_runtime_content(
         .node_policy
         .require::<ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
         .closure_limits()?;
+    if retained.remote_testimony.is_some() {
+        return crate::operator_external_content::qualification_testimony::verify_retained_remote_content_testimony_guarded(
+            state,
+            &authority,
+            &guard,
+            limits,
+            retained,
+        );
+    }
     let value = ryeos_state::object_closure::load_exact_cas_object_with_cas(
         &authority.cas_store()?,
         &retained.attestation_hash,
@@ -2253,14 +2330,11 @@ pub fn preflight_external_candidate_program(
         .runtime_content_qualification
         .as_ref()
         .context("external candidate has no signed content selection")?;
-    let retained_content = ryeos_state::objects::RetainedExternalRuntimeContentQualification {
-        binding_hash: binding.digest().to_owned(),
-        runtime_manifest_hash: program.runtime_manifest_hash.clone(),
-        activation_ref: selected.activation_ref.clone(),
-        coordinate_id: content.coordinate_id,
-        attestation_hash: content.attestation_hash,
-        evidence: content.evidence,
-    };
+    let retained_content = content.into_retained(
+        binding.digest().to_owned(),
+        program.runtime_manifest_hash.clone(),
+        selected.activation_ref.clone(),
+    );
     retained_content.validate()?;
     preflight_external_candidate_dependencies(
         &state.node_config.external_execution,
@@ -2443,14 +2517,11 @@ pub fn prepare_content_candidate_program(
         .runtime_content_qualification
         .as_ref()
         .context("signed activated-runtime binding has no content selection")?;
-    let retained = ryeos_state::objects::RetainedExternalRuntimeContentQualification {
-        binding_hash: binding.digest().to_owned(),
-        runtime_manifest_hash: runtime.manifest_hash.clone(),
-        activation_ref: selected.activation_ref.clone(),
-        coordinate_id: qualified.coordinate_id,
-        attestation_hash: qualified.attestation_hash,
-        evidence: qualified.evidence,
-    };
+    let retained = qualified.into_retained(
+        binding.digest().to_owned(),
+        runtime.manifest_hash.clone(),
+        selected.activation_ref.clone(),
+    );
     let ryeos_state::external_content::qualification_purpose::QualificationSubject::ActivatedContent { content } =
         &retained.evidence.purpose.subject else { bail!("runtime content proof lost its activated source"); };
     content
@@ -9307,16 +9378,12 @@ pub mod test_support {
             let published = require_current_runtime_content_qualification(state, &contract)?
                 .context("composed fixture content selection has no authenticated content")?;
             program.require_content_qualification(&published.evidence)?;
-            capsule.retained_external_runtime_content_qualification = Some(
-                ryeos_state::objects::RetainedExternalRuntimeContentQualification {
-                    binding_hash: retained.digest().to_owned(),
-                    runtime_manifest_hash: program.runtime_manifest_hash.clone(),
-                    activation_ref: selected.activation_ref.clone(),
-                    coordinate_id: published.coordinate_id,
-                    attestation_hash: published.attestation_hash,
-                    evidence: published.evidence,
-                },
-            );
+            capsule.retained_external_runtime_content_qualification =
+                Some(published.into_retained(
+                    retained.digest().to_owned(),
+                    program.runtime_manifest_hash.clone(),
+                    selected.activation_ref.clone(),
+                ));
         }
         if contract.runtime_qualification.is_some() {
             capsule.retained_external_runtime_qualification =

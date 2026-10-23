@@ -16,6 +16,12 @@
 //! verb re-verifies a qualification against retained verifier threads, which
 //! a seeded attestation cannot satisfy, so the origin side is only asserted
 //! to refuse a qualification it does not hold.
+//!
+//! A second test covers the content lane of the same record kind: a testimony
+//! over a node-signed activated-content qualification is accepted without any
+//! product crossing, only under a receiver policy that lists the content lane,
+//! and a testimony signed again for an accepted coordinate is refused with
+//! re-qualification named as the remedy.
 
 use ryeosd::test_support as common;
 
@@ -51,11 +57,22 @@ use ryeos_state::external_content::products::{
     PRODUCT_DECLARATIONS_SCHEMA, ProductBounds, ProductCaptureEvidence, ProductDeclaration,
     ProductDeclarations, ProductProducerAdmission, ProductShape, ProductStorage,
 };
+use ryeos_state::external_content::qualification_evidence::{
+    CONTENT_QUALIFICATION_EVIDENCE_SCHEMA, ContentQualificationEvidence,
+};
+use ryeos_state::external_content::qualification_publication::CONTENT_QUALIFICATION_HEAD_NAMESPACE;
+use ryeos_state::external_content::qualification_purpose::{
+    QUALIFICATION_LAUNCH_PURPOSE_SCHEMA, QualificationLaunchPurpose, QualificationSubject,
+};
+use ryeos_state::external_content::qualification_subject::{
+    CONTENT_QUALIFICATION_SUBJECT_SCHEMA, ContentQualificationSubject,
+};
 use ryeos_state::object_closure::ObjectClosureLimits;
 use ryeos_state::objects::{
     AdmittedLaunchArtifactIdentity, Attestation, DirectExecutableIdentity,
     DirectRootSourceIdentity, DirectRuntimeIdentity, DirectRuntimeSourceSpace,
-    canonical_value_digest,
+    EXTERNAL_LARGE_CONTENT_MANIFEST_KIND, ExternalContentKind, ExternalContentMode,
+    ExternalContentMountRoot, ExternalContentRealization, canonical_value_digest,
 };
 use serde_json::{Value, json};
 
@@ -82,6 +99,8 @@ const QUALIFICATION_POLICY_REF: &str = "config:testimony/qualification-policy";
 const ACCEPT_POLICY_REF: &str = "config:testimony/acceptance-policy";
 const UNLISTED_POLICY_REF: &str = "config:testimony/acceptance-policy-unlisted";
 const STALE_POLICY_REF: &str = "config:testimony/acceptance-policy-stale";
+const CONTENT_POLICY_REF: &str = "config:testimony/acceptance-policy-content";
+const ACTIVATION_REF: &str = "config:testimony/runtime-activation";
 
 const CLAIM: &str = "command_probe";
 
@@ -586,9 +605,10 @@ fn acceptance_policy_value(
     origin_site_id: &str,
     definition_digests: &[String],
     artifact_digests: &[String],
+    lanes: &[&str],
 ) -> Value {
     json!({
-        "schema": "ryeos.remote_qualification_acceptance_policy.v1",
+        "schema": "ryeos.remote_qualification_acceptance_policy.v2",
         "qualification_policy_ref": QUALIFICATION_POLICY_REF,
         "trusted_attesters": [{
             "principal": attester_principal,
@@ -598,14 +618,17 @@ fn acceptance_policy_value(
         "allowed_claims": [CLAIM, "extension_probe"],
         "accepted_verifier_definition_digests": definition_digests,
         "accepted_verifier_artifact_digests": artifact_digests,
+        "allowed_lanes": lanes,
         "max_testimony_age_seconds": 86400,
+        "max_clock_skew_seconds": 300,
     })
 }
 
-/// Write the qualification policy and three acceptance policies into the
+/// Write the qualification policy and the acceptance policies into the
 /// fixture Bundle: one that names the origin operator and the seeded
-/// verifier, one that names a different attester, and one that names the
-/// origin operator but pins other verifier digests.
+/// verifier for the product lane, one that does the same for the content lane
+/// only, one that names a different attester, and one that names the origin
+/// operator but pins other verifier digests.
 fn plant_policies(bundle_root: &Path, publisher: &SigningKey, origin_site_id: &str) -> Result<()> {
     let directory = bundle_root
         .join(ryeos_engine::AI_DIR)
@@ -624,7 +647,24 @@ fn plant_policies(bundle_root: &Path, publisher: &SigningKey, origin_site_id: &s
         (
             "acceptance-policy",
             "remote_qualification_acceptance_policy",
-            acceptance_policy_value(&operator, origin_site_id, &definitions, &artifacts),
+            acceptance_policy_value(
+                &operator,
+                origin_site_id,
+                &definitions,
+                &artifacts,
+                &["product"],
+            ),
+        ),
+        (
+            "acceptance-policy-content",
+            "remote_qualification_acceptance_policy",
+            acceptance_policy_value(
+                &operator,
+                origin_site_id,
+                &definitions,
+                &artifacts,
+                &["content"],
+            ),
         ),
         (
             "acceptance-policy-unlisted",
@@ -634,12 +674,13 @@ fn plant_policies(bundle_root: &Path, publisher: &SigningKey, origin_site_id: &s
                 origin_site_id,
                 &definitions,
                 &artifacts,
+                &["product"],
             ),
         ),
         (
             "acceptance-policy-stale",
             "remote_qualification_acceptance_policy",
-            acceptance_policy_value(&operator, origin_site_id, &other, &other),
+            acceptance_policy_value(&operator, origin_site_id, &other, &other, &["product"]),
         ),
     ];
     for (name, field, value) in files {
@@ -967,7 +1008,7 @@ impl Origination {
 
     /// The honest testimony naming `policy_ref`.
     fn testimony(&self, policy_ref: &str) -> Result<Attestation> {
-        RemoteQualificationTestimonyBody::new(
+        RemoteQualificationTestimonyBody::new_product(
             self.qualification.clone(),
             self.origin_site_id.clone(),
             policy_ref.to_owned(),
@@ -996,7 +1037,7 @@ impl Origination {
 
     fn honest_body(&self, policy_ref: &str) -> Result<Value> {
         Ok(serde_json::to_value(
-            RemoteQualificationTestimonyBody::new(
+            RemoteQualificationTestimonyBody::new_product(
                 self.qualification.clone(),
                 self.origin_site_id.clone(),
                 policy_ref.to_owned(),
@@ -1087,7 +1128,7 @@ async fn testimony_is_accepted_only_under_receiver_policy() -> Result<()> {
         lillux::time::iso8601_now(),
         Some(origination.expires_at.clone()),
     )?;
-    let rogue_body = RemoteQualificationTestimonyBody::new(
+    let rogue_body = RemoteQualificationTestimonyBody::new_product(
         rogue_attestation,
         origination.origin_site_id.clone(),
         ACCEPT_POLICY_REF.to_owned(),
@@ -1178,5 +1219,287 @@ async fn testimony_is_accepted_only_under_receiver_policy() -> Result<()> {
         local.is_none(),
         "a remote testimony was published as a local qualification"
     );
+    Ok(())
+}
+
+// ----- the content lane ------------------------------------------------------
+
+/// Content evidence for the activated runtime content that `published` stands
+/// for, made under the policy identity `policy_source` and owned by the origin
+/// operator. As with the product fixture, nothing ran: the verifier, proof
+/// and result are those the product fixture records, rejoined to a sealed
+/// content purpose.
+fn content_qualification_evidence(
+    published: &Published,
+    policy_source: ProductQualificationPolicySource,
+) -> Result<ContentQualificationEvidence> {
+    let shared = qualification_evidence(published, policy_source)?;
+    let realization = ExternalContentRealization {
+        id: shared.verifier.subject_declaration_id.clone(),
+        kind: ExternalContentKind::Tree,
+        mode: ExternalContentMode::Pinned,
+        manifest_hash: published.manifest_hash.clone(),
+        entry_count: 1,
+        total_bytes: 1,
+        mount_root: ExternalContentMountRoot::ExecutionRuntime,
+        mount: "runtime".into(),
+    };
+    let evidence = ContentQualificationEvidence {
+        schema: CONTENT_QUALIFICATION_EVIDENCE_SCHEMA.into(),
+        purpose: QualificationLaunchPurpose {
+            schema: QUALIFICATION_LAUNCH_PURPOSE_SCHEMA.into(),
+            launch_id: format!("L-{}", "1".repeat(32)),
+            owner_fingerprint: operator_principal(),
+            subject: QualificationSubject::ActivatedContent {
+                content: ContentQualificationSubject {
+                    schema: CONTENT_QUALIFICATION_SUBJECT_SCHEMA,
+                    activation_receipt_hash: "2".repeat(64),
+                    activation_program_digest: "3".repeat(64),
+                    binding_hash: "4".repeat(64),
+                    consumer_ref: "worker:fixtures/content-candidate".into(),
+                    declaration_id: realization.id.clone(),
+                    manifest_hash: published.manifest_hash.clone(),
+                    manifest_kind: EXTERNAL_LARGE_CONTENT_MANIFEST_KIND.into(),
+                    target_node_fingerprint: "5".repeat(64),
+                    realization,
+                },
+            },
+            policy_source: shared.policy_source.clone(),
+            consumer_definitions: None,
+            consumer_content: None,
+            consumer_invocation: None,
+            producer_recipe_sources: BTreeMap::new(),
+            remote_verifier_sources: BTreeMap::new(),
+            subject_declaration_id: shared.verifier.subject_declaration_id.clone(),
+            subject_manifest_hash: published.manifest_hash.clone(),
+            required_claims: vec![CLAIM.into()],
+            admitted_parameters_digest: shared.verifier.admitted_parameters_digest.clone(),
+            verifier_ref: shared.verifier.canonical_ref.clone(),
+            verifier_effective_definition_digest: shared
+                .verifier
+                .effective_definition_digest
+                .clone(),
+            verifier_realized_definition_digest: shared
+                .verifier
+                .effective_definition_digest
+                .clone(),
+        },
+        verifier: shared.verifier,
+        execution_proof: shared.execution_proof,
+        result: shared.result,
+    };
+    evidence.validate()?;
+    Ok(evidence)
+}
+
+impl Origination {
+    /// A content qualification signed by ORIGIN's node key. Like every
+    /// published content qualification it carries no expiry of its own.
+    fn new_content(pair: &Pair, issued_at: String) -> Result<Self> {
+        let identity = daemon_identity(&pair.origin.harness.state_path)?;
+        let node_signer = NodeIdentitySigner::from_identity(&identity);
+        let expires_at = (chrono::Utc::now() + chrono::Duration::days(7))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let evidence =
+            content_qualification_evidence(&pair.origin.product, pair.policy_source.clone())?;
+        let qualification = evidence.sign_attestation(&node_signer, issued_at, None)?;
+        Ok(Self {
+            qualification,
+            origin_site_id: site_of(&common::fast_fixture::node_signing_key()),
+            origin_node_key: *identity.verifying_key(),
+            operator: KeySigner::new(common::fast_fixture::user_signing_key()),
+            expires_at,
+        })
+    }
+
+    /// The honest content testimony naming `policy_ref`, issued at `issued_at`.
+    fn content_testimony(&self, policy_ref: &str, issued_at: String) -> Result<Attestation> {
+        RemoteQualificationTestimonyBody::new_content(
+            self.qualification.clone(),
+            self.origin_site_id.clone(),
+            ACTIVATION_REF.to_owned(),
+            policy_ref.to_owned(),
+        )?
+        .sign(
+            &self.operator,
+            &self.origin_node_key,
+            issued_at,
+            self.expires_at.clone(),
+        )
+    }
+}
+
+fn utc_after(seconds: i64) -> String {
+    (chrono::Utc::now() + chrono::Duration::seconds(seconds))
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+/// The content lane of the same record kind. No product crosses: the
+/// testimony speaks to activated content. It is accepted only under a
+/// receiver policy that lists the content lane and names the attester, a
+/// product-lane policy refuses it, the issue time and the embedded
+/// qualification's age are bounded by the policy, and a testimony signed
+/// again for an accepted coordinate is refused with re-qualification named.
+#[tokio::test(flavor = "multi_thread")]
+async fn content_testimony_is_accepted_only_when_the_policy_lists_the_content_lane() -> Result<()> {
+    let mut pair = start_pair().await?;
+    let origination = Origination::new_content(&pair, utc_after(-60))?;
+    let honest = origination.content_testimony(CONTENT_POLICY_REF, utc_after(-30))?;
+    let honest_value = honest.to_value();
+    let testimony_hash = canonical_value_digest(&honest_value)?;
+
+    // A policy that lists only the product lane refuses a content testimony
+    // however well it verifies.
+    let product_policy = origination.content_testimony(ACCEPT_POLICY_REF, utc_after(-30))?;
+    let (status, text) = pair.accept(&product_policy.to_value()).await?;
+    assert_refused(
+        status,
+        &text,
+        "does not allow the content lane",
+        "content testimony under a product-only policy",
+    );
+
+    // The reverse holds: a content-only policy refuses a product testimony.
+    let product_origination = Origination::new(&pair)?;
+    let product = product_origination.testimony(CONTENT_POLICY_REF)?;
+    let (status, text) = pair.accept(&product.to_value()).await?;
+    assert_refused(
+        status,
+        &text,
+        "does not allow the product lane",
+        "product testimony under a content-only policy",
+    );
+
+    // The lane is explicit in the body and cannot be swapped under the
+    // operator's signature.
+    let mut swapped = serde_json::to_value(RemoteQualificationTestimonyBody::new_content(
+        origination.qualification.clone(),
+        origination.origin_site_id.clone(),
+        ACTIVATION_REF.to_owned(),
+        CONTENT_POLICY_REF.to_owned(),
+    )?)?;
+    swapped["lane"] = json!("product");
+    swapped["activation_ref"] = Value::Null;
+    let (status, text) = pair
+        .accept(&origination.forged(swapped)?.to_value())
+        .await?;
+    assert!(
+        !status.is_success(),
+        "a content attestation declared as the product lane was accepted: {text}"
+    );
+
+    // A testimony issued beyond the policy's clock skew is refused.
+    let early = origination.content_testimony(CONTENT_POLICY_REF, utc_after(2 * 60 * 60))?;
+    let (status, text) = pair.accept(&early.to_value()).await?;
+    assert_refused(
+        status,
+        &text,
+        "clock skew",
+        "testimony issued in the future",
+    );
+
+    // The embedded qualification's own age is bounded by the policy as well,
+    // even when the testimony about it is fresh.
+    let old = Origination::new_content(&pair, utc_after(-3 * 24 * 60 * 60))?;
+    let (status, text) = pair
+        .accept(
+            &old.content_testimony(CONTENT_POLICY_REF, utc_after(-30))?
+                .to_value(),
+        )
+        .await?;
+    assert_refused(
+        status,
+        &text,
+        "embedded qualification is older than the maximum testimony age",
+        "content qualification older than the policy allows",
+    );
+
+    // The honest content testimony is accepted with no product pushed.
+    let (status, text) = pair.accept(&honest_value).await?;
+    ensure!(status.is_success(), "accept returned {status}: {text}");
+    let accepted: Value = serde_json::from_str(&text)?;
+    assert_eq!(accepted["testimony_hash"], testimony_hash.as_str());
+    let acceptance_hash = assert_hash(&accepted["acceptance_hash"], "acceptance_hash");
+    let coordinate_id = assert_hash(&accepted["coordinate_id"], "coordinate_id");
+    assert_eq!(accepted["reused_existing"], false);
+
+    // Accepting the same testimony again returns the recorded acceptance.
+    let (status, text) = pair.accept(&honest_value).await?;
+    ensure!(
+        status.is_success(),
+        "second accept returned {status}: {text}"
+    );
+    let again: Value = serde_json::from_str(&text)?;
+    assert_eq!(again["acceptance_hash"], acceptance_hash.as_str());
+    assert_eq!(again["reused_existing"], true);
+
+    // A testimony signed again for the accepted coordinate is a different
+    // testimony: it is refused, the incumbent acceptance is named and
+    // re-qualification is the remedy.
+    let resigned = origination.content_testimony(CONTENT_POLICY_REF, utc_after(-10))?;
+    assert_ne!(
+        canonical_value_digest(&resigned.to_value())?,
+        testimony_hash
+    );
+    let (status, text) = pair.accept(&resigned.to_value()).await?;
+    assert_refused(
+        status,
+        &text,
+        "re-qualification at the origin is the remedy",
+        "re-signed testimony for an accepted coordinate",
+    );
+    assert!(
+        text.contains(&acceptance_hash),
+        "the refusal does not name the existing acceptance: {text}"
+    );
+
+    // The origin refuses to export a content qualification it does not hold.
+    let (status, body) = pair
+        .origin
+        .harness
+        .post_execute(
+            "service:external-content/export-qualification-testimony",
+            ".",
+            json!({
+                "remote": HOSTED_REMOTE,
+                "qualification_hash": "a".repeat(64),
+                "acceptance_policy_ref": CONTENT_POLICY_REF,
+                "content": {
+                    "activation_ref": ACTIVATION_REF,
+                    "coordinate_id": coordinate_id,
+                    "manifest_hash": pair.origin.product.manifest_hash,
+                },
+            }),
+        )
+        .await?;
+    assert!(
+        !status.is_success(),
+        "export of an unheld content qualification succeeded: {body}"
+    );
+
+    // The acceptance is HOSTED's published head in the shared testimony
+    // namespace, and no local content or product qualification head exists.
+    pair.hosted.kill_daemon().await?;
+    let store = open_daemon_state(&pair.hosted.state_path)?;
+    let head = store
+        .with_state_db(|db| {
+            db.read_generic_head_ref(
+                REMOTE_QUALIFICATION_TESTIMONY_HEAD_NAMESPACE,
+                &coordinate_id,
+            )
+        })?
+        .context("HOSTED has no acceptance head for the content coordinate")?;
+    assert_eq!(head.target_hash, acceptance_hash);
+    for namespace in [
+        CONTENT_QUALIFICATION_HEAD_NAMESPACE,
+        PRODUCT_QUALIFICATION_HEAD_NAMESPACE,
+    ] {
+        let local =
+            store.with_state_db(|db| db.read_generic_head_ref(namespace, &coordinate_id))?;
+        assert!(
+            local.is_none(),
+            "a remote content testimony was published as a local qualification in {namespace}"
+        );
+    }
     Ok(())
 }

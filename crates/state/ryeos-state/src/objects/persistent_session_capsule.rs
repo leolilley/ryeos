@@ -773,7 +773,7 @@ impl RetainedExternalRuntimeQualification {
         if let Some(testimony) = &self.remote_testimony {
             testimony.validate()?;
             let verified = testimony.acceptance.verify()?;
-            if verified.evidence != self.proof.evidence
+            if verified.evidence.product()? != &self.proof.evidence
                 || verified.body.qualification_attestation_hash != self.proof.attestation_hash
                 || verified.testimony.issuer != self.owner_principal
             {
@@ -795,6 +795,12 @@ pub struct RetainedExternalRuntimeContentQualification {
     pub coordinate_id: String,
     pub attestation_hash: String,
     pub evidence: crate::external_content::qualification_evidence::ContentQualificationEvidence,
+    /// Required nullable: `Some` marks the content as a remote testimony
+    /// accepted under local policy; `attestation_hash`, `coordinate_id` and
+    /// `evidence` then stay the origin's, and the testimony's activation ref
+    /// is this ref.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub remote_testimony: Option<RetainedRemoteQualificationTestimony>,
 }
 
 impl RetainedExternalRuntimeContentQualification {
@@ -820,6 +826,20 @@ impl RetainedExternalRuntimeContentQualification {
                 != self.coordinate_id
         {
             anyhow::bail!("retained session-runtime content differs from its exact testimony");
+        }
+        if let Some(testimony) = &self.remote_testimony {
+            testimony.validate()?;
+            let verified = testimony.acceptance.verify()?;
+            if verified.evidence.content()? != &self.evidence
+                || verified.body.qualification_attestation_hash != self.attestation_hash
+                || verified.coordinate_id != self.coordinate_id
+                || verified.body.activation_ref.as_deref() != Some(self.activation_ref.as_str())
+                || verified.testimony.issuer != self.evidence.purpose.owner_fingerprint
+            {
+                anyhow::bail!(
+                    "retained remote testimony differs from the retained runtime content"
+                );
+            }
         }
         Ok(())
     }

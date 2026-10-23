@@ -24,8 +24,31 @@ use super::content_qualification::{load_current_qualified_content, prepare_sourc
 use super::product_qualification::prepare_activated_bundle_consumer_content_inputs;
 use crate::handler_context::HandlerContext;
 use crate::managed_external_content_operation::AcquisitionMode;
-use crate::node_config::sections::external_execution::ExternalRuntimeContentQualificationBinding;
+use crate::node_config::sections::external_execution::{
+    ExternalRemoteQualificationTestimonyBinding, ExternalRuntimeContentQualificationBinding,
+};
 use crate::state::AppState;
+
+/// Selects a remote content testimony instead of a local publication: the
+/// local acceptance of it, the policy it was accepted under, and the
+/// attesting operator that owns it. The coordinate and attestation hash in the
+/// request are then the origin's.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CandidateRemoteTestimony {
+    pub acceptance_hash: String,
+    pub acceptance_policy_ref: String,
+    pub owner_principal: String,
+}
+
+impl CandidateRemoteTestimony {
+    fn acceptance(&self) -> ExternalRemoteQualificationTestimonyBinding {
+        ExternalRemoteQualificationTestimonyBinding {
+            acceptance_hash: self.acceptance_hash.clone(),
+            acceptance_policy_ref: self.acceptance_policy_ref.clone(),
+        }
+    }
+}
 
 /// Inputs name the exact published content qualification, the manifest of the
 /// runtime it qualifies, and the claims the binding will require of it.
@@ -37,6 +60,8 @@ pub struct CandidateProgramRequest {
     pub attestation_hash: String,
     pub runtime_manifest_hash: String,
     pub required_claims: Vec<String>,
+    #[serde(default)]
+    pub remote_testimony: Option<CandidateRemoteTestimony>,
 }
 
 impl CandidateProgramRequest {
@@ -70,6 +95,16 @@ impl CandidateProgramRequest {
         for claim in &self.required_claims {
             ryeos_state::external_content::products::validate_name(claim)?;
         }
+        if let Some(remote) = &self.remote_testimony {
+            remote.acceptance().validate()?;
+            ensure!(
+                remote
+                    .owner_principal
+                    .strip_prefix("fp:")
+                    .is_some_and(lillux::valid_hash),
+                "remote testimony owner must be a fingerprint principal"
+            );
+        }
         Ok(())
     }
 }
@@ -101,21 +136,56 @@ fn admit_blocking(
     request: &CandidateProgramRequest,
     owner_principal: String,
 ) -> anyhow::Result<CandidateProgramResponse> {
-    let published = load_current_qualified_content(
-        state,
-        context,
-        &request.activation_ref,
-        &request.coordinate_id,
-        &request.attestation_hash,
-        &request.runtime_manifest_hash,
-    )?;
-    ensure!(
-        published.coordinate_id == request.coordinate_id
-            && published.attestation_hash == request.attestation_hash,
-        "published content qualification differs from the requested coordinate"
-    );
-    let QualificationSubject::ActivatedContent { content } = &published.evidence.purpose.subject
-    else {
+    // A local selection loads the published qualification under the caller's
+    // own node key. A remote selection loads this node's acceptance of the
+    // origin's testimony instead, owned by the attesting operator, and
+    // yields the origin's evidence; it is never read as a local publication.
+    let (evidence, owner_principal, remote_testimony) = match &request.remote_testimony {
+        None => {
+            let published = load_current_qualified_content(
+                state,
+                context,
+                &request.activation_ref,
+                &request.coordinate_id,
+                &request.attestation_hash,
+                &request.runtime_manifest_hash,
+            )?;
+            ensure!(
+                published.coordinate_id == request.coordinate_id
+                    && published.attestation_hash == request.attestation_hash,
+                "published content qualification differs from the requested coordinate"
+            );
+            (published.evidence, owner_principal, None)
+        }
+        Some(remote) => {
+            let attester = crate::operator_authority::admitted_operator_authority_for_principal(
+                state,
+                &remote.owner_principal,
+            )?;
+            let acceptance = remote.acceptance();
+            let selection = ExternalRuntimeContentQualificationBinding {
+                activation_ref: request.activation_ref.clone(),
+                coordinate_id: request.coordinate_id.clone(),
+                attestation_hash: request.attestation_hash.clone(),
+                owner_principal: remote.owner_principal.clone(),
+                required_claims: request.required_claims.clone(),
+                remote_testimony: Some(acceptance.clone()),
+            };
+            let verified =
+                super::qualification_testimony::verify_current_remote_runtime_content_testimony(
+                    state,
+                    &attester.handler_context(),
+                    &selection,
+                    &request.runtime_manifest_hash,
+                )?;
+            (
+                verified.evidence,
+                remote.owner_principal.clone(),
+                Some(acceptance),
+            )
+        }
+    };
+    let QualificationSubject::ActivatedContent { content } = &evidence.purpose.subject else {
         bail!("content qualification has no acquired subject");
     };
     let source = prepare_source(
@@ -138,8 +208,7 @@ fn admit_blocking(
         .external_candidate_requirement()?
         .context("activated consumer has no external candidate requirement")?;
     let qualification_use = ExternalCandidateQualificationUse::from_value(
-        published
-            .evidence
+        evidence
             .purpose
             .policy_source
             .policy
@@ -150,9 +219,10 @@ fn admit_blocking(
     assemble(
         &requirement,
         &qualification_use,
-        &published.evidence,
+        &evidence,
         request,
         owner_principal,
+        remote_testimony,
     )
 }
 
@@ -165,6 +235,7 @@ fn assemble(
     evidence: &ContentQualificationEvidence,
     request: &CandidateProgramRequest,
     owner_principal: String,
+    remote_testimony: Option<ExternalRemoteQualificationTestimonyBinding>,
 ) -> anyhow::Result<CandidateProgramResponse> {
     evidence.result.validate_claims_for(
         &evidence.purpose.policy_source.policy,
@@ -188,6 +259,7 @@ fn assemble(
         attestation_hash: request.attestation_hash.clone(),
         owner_principal,
         required_claims: request.required_claims.clone(),
+        remote_testimony,
     };
     Ok(CandidateProgramResponse {
         program,
@@ -233,6 +305,7 @@ mod tests {
             attestation_hash: fixture.retained.attestation_hash.clone(),
             runtime_manifest_hash: fixture.retained.runtime_manifest_hash.clone(),
             required_claims: claims,
+            remote_testimony: None,
         }
     }
 
@@ -250,6 +323,7 @@ mod tests {
             &fixture.retained.evidence,
             &request(&fixture, claims.clone()),
             owner(),
+            None,
         )?;
         let launch = fixture
             .requirement
@@ -271,6 +345,72 @@ mod tests {
     }
 
     #[test]
+    fn a_remote_selection_is_carried_into_the_emitted_binding() -> Result<()> {
+        let fixture = fixture()?;
+        let claims = fixture.retained.evidence.result.claims.clone();
+        let local = assemble(
+            &fixture.requirement,
+            &fixture.qualification_use,
+            &fixture.retained.evidence,
+            &request(&fixture, claims.clone()),
+            owner(),
+            None,
+        )?;
+        ensure!(
+            local.runtime_content_qualification["remote_testimony"].is_null(),
+            "a local selection must state a null remote testimony"
+        );
+        let remote = assemble(
+            &fixture.requirement,
+            &fixture.qualification_use,
+            &fixture.retained.evidence,
+            &request(&fixture, claims),
+            owner(),
+            Some(ExternalRemoteQualificationTestimonyBinding {
+                acceptance_hash: "8".repeat(64),
+                acceptance_policy_ref: "config:fixtures/content-acceptance".into(),
+            }),
+        )?;
+        ensure!(
+            remote.program == local.program
+                && remote.runtime_content_qualification["remote_testimony"]["acceptance_hash"]
+                    == "8".repeat(64).as_str(),
+            "a remote selection changed the program or was not carried into the binding"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn remote_selection_is_validated_exactly() -> Result<()> {
+        let fixture = fixture()?;
+        let mut good = request(&fixture, vec!["alpha".into()]);
+        good.remote_testimony = Some(CandidateRemoteTestimony {
+            acceptance_hash: "8".repeat(64),
+            acceptance_policy_ref: "config:fixtures/content-acceptance".into(),
+            owner_principal: owner(),
+        });
+        good.validate()?;
+        for mutate in [
+            (|r: &mut CandidateProgramRequest| {
+                r.remote_testimony.as_mut().unwrap().acceptance_hash = "short".into()
+            }) as fn(&mut CandidateProgramRequest),
+            |r| {
+                r.remote_testimony.as_mut().unwrap().acceptance_policy_ref =
+                    "tool:fixtures/content-acceptance".into()
+            },
+            |r| r.remote_testimony.as_mut().unwrap().owner_principal = "9".repeat(64),
+        ] {
+            let mut bad = good.clone();
+            mutate(&mut bad);
+            ensure!(
+                bad.validate().is_err(),
+                "a malformed remote selection was admitted"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn claim_absent_from_the_evidence_is_refused() -> Result<()> {
         let fixture = fixture()?;
         let absent = "claim_the_testimony_does_not_carry".to_owned();
@@ -285,6 +425,7 @@ mod tests {
                 &fixture.retained.evidence,
                 &request(&fixture, vec![absent]),
                 owner(),
+                None,
             )
             .is_err(),
             "a claim absent from the evidence was admitted"
@@ -304,6 +445,7 @@ mod tests {
                 &fixture.retained.evidence,
                 &other,
                 owner(),
+                None,
             )
             .is_err(),
             "a coordinate that differs from the testimony was admitted"
@@ -323,6 +465,7 @@ mod tests {
                 &fixture.retained.evidence,
                 &other,
                 owner(),
+                None,
             )
             .is_err(),
             "a manifest that differs from the published runtime was admitted"

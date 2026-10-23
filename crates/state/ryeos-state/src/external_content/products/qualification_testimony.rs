@@ -8,38 +8,206 @@
 //! embedded attestation and admits it only under signed policy data that names
 //! the attester. The receiver never runs the origin's verifier and never reads
 //! the origin's retained execution as its own.
+//!
+//! One record kind carries both qualification lanes. The lane is explicit in
+//! the testimony body and in the receiver's acceptance, and a receiver policy
+//! lists the lanes it accepts. The product lane testifies to a guest-owner
+//! runtime product; the content lane testifies to an activated content
+//! manifest. The content lane carries no product, so what the receiver can
+//! re-derive offline is recorded in the acceptance as data.
 
 use anyhow::{Context as _, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::qualification::{
-    ProductQualificationEvidence, bounded, exact_coordinate, validate_claims,
+    ProductQualificationEvidence, ProductQualificationPolicySource, ProductQualificationResult,
+    ProductQualificationVerifier, bounded, exact_coordinate, validate_claims,
 };
 use super::qualification_publication::QualificationCoordinate;
 use super::transfer::ProductWitnessSource;
 use super::{validate_canonical_unsuffixed_ref, validate_hash};
 use crate::Signer;
-use crate::objects::{Attestation, canonical_value_digest};
+use crate::external_content::qualification_evidence::ContentQualificationEvidence;
+use crate::objects::{Attestation, canonical_value_digest, deserialize_required_nullable};
 
 pub const REMOTE_QUALIFICATION_TESTIMONY_CLAIM: &str = "qualification_testimony";
 pub const REMOTE_QUALIFICATION_TESTIMONY_POLICY: &str = "ryeos.remote_qualification_testimony.v1";
 pub const REMOTE_QUALIFICATION_TESTIMONY_BODY_SCHEMA: &str =
-    "ryeos.remote_qualification_testimony_body.v1";
+    "ryeos.remote_qualification_testimony_body.v2";
 pub const REMOTE_QUALIFICATION_ACCEPTANCE_CLAIM: &str = "qualification_testimony_accepted";
 pub const REMOTE_QUALIFICATION_ACCEPTANCE_POLICY: &str = "ryeos.remote_qualification_acceptance.v1";
 pub const REMOTE_QUALIFICATION_ACCEPTANCE_EVIDENCE_SCHEMA: &str =
-    "ryeos.remote_qualification_acceptance_evidence.v1";
+    "ryeos.remote_qualification_acceptance_evidence.v2";
 pub const REMOTE_QUALIFICATION_ACCEPTANCE_POLICY_SCHEMA: &str =
-    "ryeos.remote_qualification_acceptance_policy.v1";
-pub const REMOTE_QUALIFICATION_TESTIMONY_HEAD_NAMESPACE: &str =
-    "remote-product-qualification-testimonies";
+    "ryeos.remote_qualification_acceptance_policy.v2";
+pub const REMOTE_QUALIFICATION_TESTIMONY_HEAD_NAMESPACE: &str = "remote-qualification-testimonies";
 pub const MAX_REMOTE_QUALIFICATION_TESTIMONY_BODY_BYTES: usize = 128 * 1024;
 pub const MAX_REMOTE_QUALIFICATION_ACCEPTANCE_EVIDENCE_BYTES: usize = 256 * 1024;
 pub const MAX_REMOTE_QUALIFICATION_ACCEPTANCE_POLICY_BYTES: usize = 16 * 1024;
 pub const MAX_REMOTE_QUALIFICATION_TRUSTED_ATTESTERS: usize = 16;
 pub const MAX_REMOTE_QUALIFICATION_ACCEPTED_DIGESTS: usize = 32;
 pub const MAX_REMOTE_QUALIFICATION_TESTIMONY_AGE_SECONDS: u64 = 31 * 24 * 60 * 60;
+pub const MAX_REMOTE_QUALIFICATION_CLOCK_SKEW_SECONDS: u64 = 60 * 60;
+
+/// Digests and facts a receiver re-derives offline from a product testimony,
+/// recorded in the acceptance so it states what it did and nothing more.
+pub const PRODUCT_LANE_REDERIVATIONS: &[&str] = &[
+    "attestation_hash",
+    "claims",
+    "coordinate",
+    "origin_policy",
+    "received_product_join",
+    "subject_manifest",
+];
+/// The content lane re-derives the same facts without a product join. Source
+/// preparation against the receiver's own activation and consumer inputs is
+/// not part of acceptance; it is repeated by every use of the acceptance.
+pub const CONTENT_LANE_REDERIVATIONS: &[&str] = &[
+    "attestation_hash",
+    "claims",
+    "coordinate",
+    "origin_policy",
+    "subject_manifest",
+];
+
+/// Which qualification a testimony speaks to. Selects the evidence type the
+/// embedded attestation must decode as; it carries no policy of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QualificationLane {
+    Content,
+    Product,
+}
+
+impl QualificationLane {
+    pub fn rederivations(self) -> &'static [&'static str] {
+        match self {
+            Self::Product => PRODUCT_LANE_REDERIVATIONS,
+            Self::Content => CONTENT_LANE_REDERIVATIONS,
+        }
+    }
+
+    /// The owned form of [`Self::rederivations`], as recorded in an acceptance.
+    pub fn rederived(self) -> Vec<String> {
+        self.rederivations()
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect()
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Content => "content",
+            Self::Product => "product",
+        }
+    }
+}
+
+/// The embedded qualification evidence, decoded under the declared lane.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RemoteQualificationEvidence {
+    Product(ProductQualificationEvidence),
+    Content(ContentQualificationEvidence),
+}
+
+impl RemoteQualificationEvidence {
+    fn decode(lane: QualificationLane, attestation: &Attestation) -> anyhow::Result<Self> {
+        Ok(match lane {
+            QualificationLane::Product => {
+                Self::Product(ProductQualificationEvidence::from_attestation(attestation)?)
+            }
+            QualificationLane::Content => {
+                Self::Content(ContentQualificationEvidence::from_attestation(attestation)?)
+            }
+        })
+    }
+
+    fn verify_for_owner(
+        lane: QualificationLane,
+        attestation: &Attestation,
+        node_key: &lillux::crypto::VerifyingKey,
+        owner_principal: &str,
+    ) -> anyhow::Result<Self> {
+        Ok(match lane {
+            QualificationLane::Product => {
+                Self::Product(ProductQualificationEvidence::verify_attestation_for_owner(
+                    attestation,
+                    node_key,
+                    owner_principal,
+                )?)
+            }
+            QualificationLane::Content => {
+                Self::Content(ContentQualificationEvidence::verify_attestation_for_owner(
+                    attestation,
+                    node_key,
+                    owner_principal,
+                )?)
+            }
+        })
+    }
+
+    pub fn lane(&self) -> QualificationLane {
+        match self {
+            Self::Product(_) => QualificationLane::Product,
+            Self::Content(_) => QualificationLane::Content,
+        }
+    }
+
+    pub fn result(&self) -> &ProductQualificationResult {
+        match self {
+            Self::Product(evidence) => &evidence.result,
+            Self::Content(evidence) => &evidence.result,
+        }
+    }
+
+    pub fn verifier(&self) -> &ProductQualificationVerifier {
+        match self {
+            Self::Product(evidence) => &evidence.verifier,
+            Self::Content(evidence) => &evidence.verifier,
+        }
+    }
+
+    pub fn policy_source(&self) -> &ProductQualificationPolicySource {
+        match self {
+            Self::Product(evidence) => &evidence.policy_source,
+            Self::Content(evidence) => &evidence.purpose.policy_source,
+        }
+    }
+
+    /// The principal that owns the qualified subject.
+    pub fn owner_principal(&self) -> &str {
+        match self {
+            Self::Product(evidence) => &evidence.product_coordinate.owner_principal,
+            Self::Content(evidence) => &evidence.purpose.owner_fingerprint,
+        }
+    }
+
+    pub fn coordinate_id(&self) -> anyhow::Result<String> {
+        match self {
+            Self::Product(evidence) => {
+                QualificationCoordinate::from_evidence(evidence)?.coordinate_id()
+            }
+            Self::Content(evidence) => {
+                crate::external_content::qualification_publication::coordinate_id(evidence)
+            }
+        }
+    }
+
+    pub fn product(&self) -> anyhow::Result<&ProductQualificationEvidence> {
+        match self {
+            Self::Product(evidence) => Ok(evidence),
+            Self::Content(_) => bail!("remote qualification testimony is not a product testimony"),
+        }
+    }
+
+    pub fn content(&self) -> anyhow::Result<&ContentQualificationEvidence> {
+        match self {
+            Self::Content(evidence) => Ok(evidence),
+            Self::Product(_) => bail!("remote qualification testimony is not a content testimony"),
+        }
+    }
+}
 
 fn epoch_seconds(label: &str, value: &str) -> anyhow::Result<i64> {
     chrono::DateTime::parse_from_rfc3339(value)
@@ -73,28 +241,67 @@ fn validate_fingerprint_principal(label: &str, value: &str) -> anyhow::Result<()
 pub struct RemoteQualificationTestimonyBody {
     pub schema: String,
     pub origin_site_id: String,
+    pub lane: QualificationLane,
     pub qualification_attestation: Attestation,
     pub qualification_attestation_hash: String,
     pub asserted_coordinate_id: String,
     pub asserted_claims: Vec<String>,
+    /// Content lane only: the origin's name for the activated content. The
+    /// evidence cannot derive it, so it is a label the receiver joins to its
+    /// own binding and re-prepares against its own activation at use.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub activation_ref: Option<String>,
     pub acceptance_policy_ref: String,
 }
 
 impl RemoteQualificationTestimonyBody {
-    /// Derive the asserted fields from the origin's own attestation.
-    pub fn new(
+    /// Derive the asserted fields from the origin's own product attestation.
+    pub fn new_product(
         qualification_attestation: Attestation,
         origin_site_id: String,
         acceptance_policy_ref: String,
     ) -> anyhow::Result<Self> {
-        let evidence = ProductQualificationEvidence::from_attestation(&qualification_attestation)?;
+        Self::build(
+            QualificationLane::Product,
+            qualification_attestation,
+            origin_site_id,
+            None,
+            acceptance_policy_ref,
+        )
+    }
+
+    /// Derive the asserted fields from the origin's own content attestation.
+    pub fn new_content(
+        qualification_attestation: Attestation,
+        origin_site_id: String,
+        activation_ref: String,
+        acceptance_policy_ref: String,
+    ) -> anyhow::Result<Self> {
+        Self::build(
+            QualificationLane::Content,
+            qualification_attestation,
+            origin_site_id,
+            Some(activation_ref),
+            acceptance_policy_ref,
+        )
+    }
+
+    fn build(
+        lane: QualificationLane,
+        qualification_attestation: Attestation,
+        origin_site_id: String,
+        activation_ref: Option<String>,
+        acceptance_policy_ref: String,
+    ) -> anyhow::Result<Self> {
+        let evidence = RemoteQualificationEvidence::decode(lane, &qualification_attestation)?;
         let body = Self {
             schema: REMOTE_QUALIFICATION_TESTIMONY_BODY_SCHEMA.into(),
             origin_site_id,
+            lane,
             qualification_attestation_hash: attestation_hash(&qualification_attestation)?,
-            asserted_coordinate_id: QualificationCoordinate::from_evidence(&evidence)?
-                .coordinate_id()?,
-            asserted_claims: evidence.result.claims.clone(),
+            asserted_coordinate_id: evidence.coordinate_id()?,
+            asserted_claims: evidence.result().claims.clone(),
+            activation_ref,
             acceptance_policy_ref,
             qualification_attestation,
         };
@@ -134,10 +341,20 @@ impl RemoteQualificationTestimonyBody {
             "remote qualification acceptance policy",
             &self.acceptance_policy_ref,
         )?;
+        match (self.lane, self.activation_ref.as_deref()) {
+            (QualificationLane::Product, None) => {}
+            (QualificationLane::Content, Some(activation_ref)) => {
+                validate_config_ref("remote qualification activation ref", activation_ref)?;
+            }
+            _ => {
+                bail!("remote qualification activation ref is present exactly for the content lane")
+            }
+        }
         if attestation_hash(&self.qualification_attestation)? != self.qualification_attestation_hash
         {
             bail!("remote qualification attestation hash differs from the embedded attestation");
         }
+        RemoteQualificationEvidence::decode(self.lane, &self.qualification_attestation)?;
         bounded(
             self,
             MAX_REMOTE_QUALIFICATION_TESTIMONY_BODY_BYTES,
@@ -145,20 +362,21 @@ impl RemoteQualificationTestimonyBody {
         )
     }
 
-    fn check_derived(&self, evidence: &ProductQualificationEvidence) -> anyhow::Result<()> {
-        if QualificationCoordinate::from_evidence(evidence)?.coordinate_id()?
-            != self.asserted_coordinate_id
-        {
+    fn check_derived(&self, evidence: &RemoteQualificationEvidence) -> anyhow::Result<()> {
+        if evidence.lane() != self.lane {
+            bail!("remote qualification lane differs from the embedded evidence");
+        }
+        if evidence.coordinate_id()? != self.asserted_coordinate_id {
             bail!("remote qualification asserted coordinate differs from the embedded evidence");
         }
-        if evidence.result.claims != self.asserted_claims {
+        if evidence.result().claims != self.asserted_claims {
             bail!("remote qualification asserted claims differ from the embedded evidence");
         }
         Ok(())
     }
 
     /// Sign the testimony with the origin operator's key. The operator
-    /// fingerprint must own the qualified product, and the embedded
+    /// fingerprint must own the qualification, and the embedded
     /// attestation must verify under the origin node key.
     pub fn sign(
         &self,
@@ -193,8 +411,14 @@ pub struct VerifiedRemoteQualificationTestimony {
     pub testimony_hash: String,
     pub testimony: Attestation,
     pub body: RemoteQualificationTestimonyBody,
-    pub evidence: ProductQualificationEvidence,
+    pub evidence: RemoteQualificationEvidence,
     pub coordinate_id: String,
+}
+
+impl VerifiedRemoteQualificationTestimony {
+    pub fn lane(&self) -> QualificationLane {
+        self.body.lane
+    }
 }
 
 /// Verify the testimony signature against the attester key, the embedded
@@ -213,13 +437,14 @@ pub fn verify_remote_qualification_testimony(
         bail!("attestation is not remote qualification testimony");
     }
     let body = RemoteQualificationTestimonyBody::from_value(&testimony.evidence)?;
-    let evidence = ProductQualificationEvidence::verify_attestation_for_owner(
+    let evidence = RemoteQualificationEvidence::verify_for_owner(
+        body.lane,
         &body.qualification_attestation,
         origin_node_key,
         &testimony.issuer,
     )?;
     body.check_derived(&evidence)?;
-    if testimony.subject_hash != evidence.result.subject_manifest_hash
+    if testimony.subject_hash != evidence.result().subject_manifest_hash
         || testimony.subject_hash != body.qualification_attestation.subject_hash
     {
         bail!("remote qualification testimony subject differs from the qualified manifest");
@@ -250,13 +475,19 @@ pub fn verify_remote_qualification_testimony(
 #[serde(deny_unknown_fields)]
 pub struct RemoteQualificationAcceptanceEvidence {
     pub schema: String,
+    pub lane: QualificationLane,
     pub testimony: Attestation,
-    pub product_source: ProductWitnessSource,
+    /// Product lane: the received product the qualification was joined to.
+    /// Content lane: null, the content lane has no product.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub product_source: Option<ProductWitnessSource>,
     pub acceptance_policy_ref: String,
     pub acceptance_policy_digest: String,
     pub attester_verifying_key: [u8; 32],
     pub origin_node_verifying_key: [u8; 32],
     pub accepted_claims: Vec<String>,
+    /// Exactly the offline re-derivations acceptance performed for the lane.
+    pub rederived: Vec<String>,
 }
 
 impl RemoteQualificationAcceptanceEvidence {
@@ -278,10 +509,23 @@ impl RemoteQualificationAcceptanceEvidence {
         }
         self.testimony.validate()?;
         let body = RemoteQualificationTestimonyBody::from_value(&self.testimony.evidence)?;
-        if !matches!(self.product_source, ProductWitnessSource::Received { .. }) {
-            bail!("remote qualification acceptance requires a received product source");
+        if body.lane != self.lane {
+            bail!("remote qualification acceptance lane differs from the testimony");
         }
-        self.product_source.validate()?;
+        match (&self.product_source, self.lane) {
+            (Some(source @ ProductWitnessSource::Received { .. }), QualificationLane::Product) => {
+                source.validate()?;
+            }
+            (None, QualificationLane::Content) => {}
+            _ => bail!(
+                "remote qualification acceptance requires a received product source exactly for the product lane"
+            ),
+        }
+        if self.rederived != self.lane.rederivations() {
+            bail!(
+                "remote qualification acceptance records re-derivations the lane does not define"
+            );
+        }
         validate_config_ref(
             "remote qualification acceptance policy",
             &self.acceptance_policy_ref,
@@ -349,7 +593,12 @@ pub struct RemoteQualificationAcceptancePolicy {
     pub allowed_claims: Vec<String>,
     pub accepted_verifier_definition_digests: Vec<String>,
     pub accepted_verifier_artifact_digests: Vec<String>,
+    /// Lanes this receiver accepts testimony for. A lane absent here is
+    /// refused however well the testimony verifies.
+    pub allowed_lanes: Vec<QualificationLane>,
     pub max_testimony_age_seconds: u64,
+    /// Tolerated distance of an issue time into this node's future.
+    pub max_clock_skew_seconds: u64,
 }
 
 fn validate_digest_list(label: &str, digests: &[String]) -> anyhow::Result<()> {
@@ -416,10 +665,18 @@ impl RemoteQualificationAcceptancePolicy {
             "accepted verifier artifact digest",
             &self.accepted_verifier_artifact_digests,
         )?;
+        if self.allowed_lanes.is_empty()
+            || self.allowed_lanes.windows(2).any(|pair| pair[0] >= pair[1])
+        {
+            bail!("allowed lanes must be a non-empty sorted unique set");
+        }
         if self.max_testimony_age_seconds == 0
             || self.max_testimony_age_seconds > MAX_REMOTE_QUALIFICATION_TESTIMONY_AGE_SECONDS
         {
             bail!("maximum testimony age must be positive and bounded");
+        }
+        if self.max_clock_skew_seconds > MAX_REMOTE_QUALIFICATION_CLOCK_SKEW_SECONDS {
+            bail!("maximum clock skew must be bounded");
         }
         bounded(
             self,
@@ -432,6 +689,31 @@ impl RemoteQualificationAcceptancePolicy {
         self.validate()?;
         canonical_value_digest(&serde_json::to_value(self)?)
     }
+
+    /// A lane absent from the policy is refused however well the testimony
+    /// verifies.
+    pub fn require_lane(&self, lane: QualificationLane) -> anyhow::Result<()> {
+        if self.allowed_lanes.binary_search(&lane).is_err() {
+            bail!(
+                "remote qualification acceptance policy does not allow the {} lane",
+                lane.name()
+            );
+        }
+        Ok(())
+    }
+
+    /// An acceptance was made under exactly one policy value. Any edit of the
+    /// policy, including one that would still admit the testimony, voids it
+    /// until the testimony is accepted again under the edited policy.
+    pub fn require_unchanged_since_acceptance(&self, recorded_digest: &str) -> anyhow::Result<()> {
+        let current = self.digest()?;
+        if current != recorded_digest {
+            bail!(
+                "remote qualification acceptance policy changed since acceptance: recorded digest {recorded_digest}, current digest {current}; the testimony must be accepted again under the current policy"
+            );
+        }
+        Ok(())
+    }
 }
 
 /// Claims admitted by policy for one verified testimony.
@@ -443,7 +725,8 @@ pub struct AcceptedClaims {
 
 /// Pure admission under receiver policy. The live grant lookup (its
 /// configured origin site) and the binding's policy ref and required claims
-/// are taken as arguments; the caller owns those reads and the product load.
+/// are taken as arguments; the caller owns those reads and any lane-specific
+/// join (the received product, the receiver's own activation).
 pub fn admit(
     policy: &RemoteQualificationAcceptancePolicy,
     acceptance_policy_ref: &str,
@@ -457,10 +740,13 @@ pub fn admit(
     let evidence = &verified.evidence;
     let body = &verified.body;
 
+    // 0. The receiver names the lane it accepts.
+    policy.require_lane(body.lane)?;
+
     // 1. Policy refs agree between the receiver policy, binding and evidence.
     if body.acceptance_policy_ref != acceptance_policy_ref
         || policy.qualification_policy_ref != binding_policy_ref
-        || binding_policy_ref != evidence.policy_source.canonical_ref
+        || binding_policy_ref != evidence.policy_source().canonical_ref
     {
         bail!("remote qualification policy ref differs from the binding or the evidence");
     }
@@ -476,8 +762,8 @@ pub fn admit(
 
     // 3. required policy claims <= binding claims <= evidence claims
     //    <= allowed policy claims and the origin policy's allowance.
-    let claims = &evidence.result.claims;
-    let origin_allowed = &evidence.policy_source.policy.allowed_claims;
+    let claims = &evidence.result().claims;
+    let origin_allowed = &evidence.policy_source().policy.allowed_claims;
     if policy
         .required_claims
         .iter()
@@ -494,11 +780,12 @@ pub fn admit(
     }
 
     // 4. Verifier identity digests are pinned as policy data.
+    let verifier = evidence.verifier();
     let artifact_digest =
-        canonical_value_digest(&serde_json::to_value(&evidence.verifier.artifact_identity)?)?;
+        canonical_value_digest(&serde_json::to_value(&verifier.artifact_identity)?)?;
     if policy
         .accepted_verifier_definition_digests
-        .binary_search(&evidence.verifier.effective_definition_digest)
+        .binary_search(&verifier.effective_definition_digest)
         .is_err()
         || policy
             .accepted_verifier_artifact_digests
@@ -508,15 +795,21 @@ pub fn admit(
         bail!("remote qualification carries a stale verifier identity");
     }
 
-    // 5. Age and expiry of both the testimony and the qualification it carries.
-    let issued_at = epoch_seconds("testimony issue time", &verified.testimony.issued_at)?;
+    // 5. Age, clock skew and expiry of both the testimony and the
+    //    qualification it carries.
     let now_seconds = epoch_seconds("admission time", now)?;
-    if issued_at > now_seconds
-        || u64::try_from(now_seconds - issued_at)
-            .map_or(true, |age| age > policy.max_testimony_age_seconds)
-    {
-        bail!("remote qualification testimony is too old or issued in the future");
-    }
+    require_issue_time_within_policy(
+        policy,
+        "testimony",
+        &verified.testimony.issued_at,
+        now_seconds,
+    )?;
+    require_issue_time_within_policy(
+        policy,
+        "embedded qualification",
+        &body.qualification_attestation.issued_at,
+        now_seconds,
+    )?;
     if verified.testimony.is_expired_at(now)?
         || body.qualification_attestation.is_expired_at(now)?
     {
@@ -527,6 +820,32 @@ pub fn admit(
         coordinate_id: verified.coordinate_id.clone(),
         claims: claims.clone(),
     })
+}
+
+/// An issue time may lead this node's clock by at most the policy's skew and
+/// may trail it by at most the policy's maximum age.
+fn require_issue_time_within_policy(
+    policy: &RemoteQualificationAcceptancePolicy,
+    what: &str,
+    issued_at: &str,
+    now_seconds: i64,
+) -> anyhow::Result<()> {
+    let issued = epoch_seconds(&format!("{what} issue time"), issued_at)?;
+    let skew = i64::try_from(policy.max_clock_skew_seconds).unwrap_or(i64::MAX);
+    if issued > now_seconds.saturating_add(skew) {
+        bail!(
+            "remote qualification {what} is issued in the future beyond the allowed clock skew of {} seconds",
+            policy.max_clock_skew_seconds
+        );
+    }
+    let age = now_seconds.saturating_sub(issued);
+    if u64::try_from(age).is_ok_and(|age| age > policy.max_testimony_age_seconds) {
+        bail!(
+            "remote qualification {what} is older than the maximum testimony age of {} seconds",
+            policy.max_testimony_age_seconds
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -589,7 +908,7 @@ mod tests {
                 Some("2026-10-30T00:00:00Z".into()),
             )
             .unwrap();
-        let body = RemoteQualificationTestimonyBody::new(
+        let body = RemoteQualificationTestimonyBody::new_product(
             qualification,
             SITE.into(),
             ACCEPTANCE_REF.into(),
@@ -616,7 +935,9 @@ mod tests {
                 evidence.verifier.effective_definition_digest.clone(),
             ],
             accepted_verifier_artifact_digests: vec![artifact_digest],
+            allowed_lanes: vec![QualificationLane::Product],
             max_testimony_age_seconds: 30 * 24 * 60 * 60,
+            max_clock_skew_seconds: 300,
         };
         policy.validate().unwrap();
         Fixture {
@@ -665,7 +986,7 @@ mod tests {
         extra["extra"] = json!(1);
         assert!(RemoteQualificationTestimonyBody::from_value(&extra).is_err());
         let v = verified(&f);
-        assert_eq!(v.evidence.result.claims, f.body.asserted_claims);
+        assert_eq!(v.evidence.result().claims, f.body.asserted_claims);
     }
 
     #[test]
@@ -882,15 +1203,17 @@ mod tests {
         let f = fixture();
         let evidence = RemoteQualificationAcceptanceEvidence {
             schema: REMOTE_QUALIFICATION_ACCEPTANCE_EVIDENCE_SCHEMA.into(),
+            lane: QualificationLane::Product,
             testimony: f.testimony.clone(),
-            product_source: ProductWitnessSource::Received {
+            product_source: Some(ProductWitnessSource::Received {
                 acceptance_hash: "a".repeat(64),
-            },
+            }),
             acceptance_policy_ref: ACCEPTANCE_REF.into(),
             acceptance_policy_digest: f.policy.digest().unwrap(),
             attester_verifying_key: f.attester.verifying_key().to_bytes(),
             origin_node_verifying_key: f.node.verifying_key().to_bytes(),
             accepted_claims: f.body.asserted_claims.clone(),
+            rederived: QualificationLane::Product.rederived(),
         };
         let round_trip = RemoteQualificationAcceptanceEvidence::from_value(
             &serde_json::to_value(&evidence).unwrap(),
@@ -902,13 +1225,261 @@ mod tests {
         );
 
         let mut local = evidence.clone();
-        local.product_source = ProductWitnessSource::LocalCapture {};
+        local.product_source = Some(ProductWitnessSource::LocalCapture {});
         assert!(local.validate().is_err());
+        let mut overclaiming = evidence.clone();
+        overclaiming.rederived.push("source_preparation".into());
+        assert!(overclaiming.validate().is_err());
+        let mut wrong_lane = evidence.clone();
+        wrong_lane.lane = QualificationLane::Content;
+        assert!(wrong_lane.validate().is_err());
         let mut wrong_key = evidence.clone();
         wrong_key.attester_verifying_key = f.node.verifying_key().to_bytes();
         assert!(wrong_key.verify().is_err());
         let mut wrong_claims = evidence;
         wrong_claims.accepted_claims = vec!["command_probe".into()];
         assert!(wrong_claims.validate().is_err());
+    }
+
+    #[test]
+    fn issue_time_skew_and_embedded_qualification_age_are_bounded() {
+        let f = fixture();
+        // Testimony issued 2026-10-21T00:00:00Z.
+        assert!(admit_default(&f, &f.policy, "2026-10-20T23:57:00Z").is_ok());
+        let error = admit_default(&f, &f.policy, "2026-10-20T23:50:00Z").unwrap_err();
+        assert!(error.to_string().contains("clock skew"));
+        let mut no_skew = f.policy.clone();
+        no_skew.max_clock_skew_seconds = 0;
+        assert!(admit_default(&f, &no_skew, "2026-10-20T23:59:59Z").is_err());
+        assert!(admit_default(&f, &no_skew, "2026-10-21T00:00:00Z").is_ok());
+        // The embedded qualification was issued 2026-10-20T00:00:00Z, a day
+        // before the testimony, so a two-day age bound refuses it while the
+        // testimony alone would still pass.
+        let mut tight = f.policy.clone();
+        tight.max_testimony_age_seconds = 36 * 60 * 60;
+        assert!(admit_default(&f, &tight, "2026-10-21T06:00:00Z").is_ok());
+        let error = admit_default(&f, &tight, "2026-10-21T13:00:00Z").unwrap_err();
+        assert!(error.to_string().contains("embedded qualification"));
+        let mut huge = f.policy.clone();
+        huge.max_clock_skew_seconds = MAX_REMOTE_QUALIFICATION_CLOCK_SKEW_SECONDS + 1;
+        assert!(huge.validate().is_err());
+    }
+
+    #[test]
+    fn a_receiver_policy_must_name_the_lane_and_names_both_digests_on_edit() {
+        let f = fixture();
+        let mut content_only = f.policy.clone();
+        content_only.allowed_lanes = vec![QualificationLane::Content];
+        let error = admit_default(&f, &content_only, NOW).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("does not allow the product lane")
+        );
+        let mut unsorted = f.policy.clone();
+        unsorted.allowed_lanes = vec![QualificationLane::Product, QualificationLane::Content];
+        assert!(unsorted.validate().is_err());
+        let mut empty = f.policy.clone();
+        empty.allowed_lanes = Vec::new();
+        assert!(empty.validate().is_err());
+
+        let recorded = f.policy.digest().unwrap();
+        f.policy
+            .require_unchanged_since_acceptance(&recorded)
+            .unwrap();
+        let mut edited = f.policy.clone();
+        edited.max_testimony_age_seconds -= 1;
+        let error = edited
+            .require_unchanged_since_acceptance(&recorded)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(&recorded) && error.contains(&edited.digest().unwrap()));
+    }
+
+    struct ContentFixture {
+        testimony: Attestation,
+        body: RemoteQualificationTestimonyBody,
+        node: KeySigner,
+        attester: KeySigner,
+        policy: RemoteQualificationAcceptancePolicy,
+    }
+
+    const ACTIVATION_REF: &str = "config:fixtures/activation";
+
+    fn content_fixture() -> ContentFixture {
+        let attester = KeySigner::new(7);
+        let node = KeySigner::new(9);
+        let capsule =
+            crate::external_execution::admission::test_support::content_candidate_capsule(
+                &"a".repeat(64),
+            )
+            .unwrap();
+        let mut evidence = capsule
+            .retained_external_runtime_content_qualification
+            .unwrap()
+            .evidence;
+        evidence.purpose.owner_fingerprint = format!("fp:{}", attester.fingerprint());
+        evidence.validate().unwrap();
+        let artifact_digest = canonical_value_digest(
+            &serde_json::to_value(&evidence.verifier.artifact_identity).unwrap(),
+        )
+        .unwrap();
+        let qualification = evidence
+            .sign_attestation(&node, "2026-10-20T00:00:00Z".into(), None)
+            .unwrap();
+        let body = RemoteQualificationTestimonyBody::new_content(
+            qualification,
+            SITE.into(),
+            ACTIVATION_REF.into(),
+            ACCEPTANCE_REF.into(),
+        )
+        .unwrap();
+        let testimony = body
+            .sign(
+                &attester,
+                &node.verifying_key(),
+                "2026-10-21T00:00:00Z".into(),
+                "2026-10-25T00:00:00Z".into(),
+            )
+            .unwrap();
+        let policy = RemoteQualificationAcceptancePolicy {
+            schema: REMOTE_QUALIFICATION_ACCEPTANCE_POLICY_SCHEMA.into(),
+            qualification_policy_ref: evidence.purpose.policy_source.canonical_ref.clone(),
+            trusted_attesters: vec![RemoteQualificationTrustedAttester {
+                principal: format!("fp:{}", attester.fingerprint()),
+                origin_site_id: SITE.into(),
+            }],
+            required_claims: evidence.result.claims.clone(),
+            allowed_claims: evidence.purpose.policy_source.policy.allowed_claims.clone(),
+            accepted_verifier_definition_digests: vec![
+                evidence.verifier.effective_definition_digest.clone(),
+            ],
+            accepted_verifier_artifact_digests: vec![artifact_digest],
+            allowed_lanes: vec![QualificationLane::Content],
+            max_testimony_age_seconds: 30 * 24 * 60 * 60,
+            max_clock_skew_seconds: 300,
+        };
+        policy.validate().unwrap();
+        ContentFixture {
+            testimony,
+            body,
+            node,
+            attester,
+            policy,
+        }
+    }
+
+    fn verified_content(f: &ContentFixture) -> VerifiedRemoteQualificationTestimony {
+        verify_remote_qualification_testimony(
+            &f.testimony,
+            &f.attester.verifying_key(),
+            &f.node.verifying_key(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn the_content_lane_verifies_and_is_admitted_only_when_the_policy_allows_it() {
+        let f = content_fixture();
+        let verified = verified_content(&f);
+        assert_eq!(verified.lane(), QualificationLane::Content);
+        assert!(verified.evidence.content().is_ok());
+        assert!(verified.evidence.product().is_err());
+        assert_eq!(verified.coordinate_id, f.body.asserted_coordinate_id);
+        let claims = f.policy.required_claims.clone();
+        let policy_ref = f.policy.qualification_policy_ref.clone();
+        let accepted = admit(
+            &f.policy,
+            ACCEPTANCE_REF,
+            &verified,
+            SITE,
+            &policy_ref,
+            &claims,
+            NOW,
+        )
+        .unwrap();
+        assert_eq!(accepted.claims, f.body.asserted_claims);
+
+        let mut product_only = f.policy.clone();
+        product_only.allowed_lanes = vec![QualificationLane::Product];
+        let error = admit(
+            &product_only,
+            ACCEPTANCE_REF,
+            &verified,
+            SITE,
+            &policy_ref,
+            &claims,
+            NOW,
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("does not allow the content lane")
+        );
+    }
+
+    #[test]
+    fn the_lane_is_explicit_and_cannot_be_swapped() {
+        let f = content_fixture();
+        // A content attestation declared as the product lane does not decode.
+        let mut swapped = serde_json::to_value(&f.body).unwrap();
+        swapped["lane"] = json!("product");
+        swapped["activation_ref"] = Value::Null;
+        assert!(RemoteQualificationTestimonyBody::from_value(&swapped).is_err());
+        // The activation ref is present exactly for the content lane.
+        let mut missing = serde_json::to_value(&f.body).unwrap();
+        missing["activation_ref"] = Value::Null;
+        assert!(RemoteQualificationTestimonyBody::from_value(&missing).is_err());
+        let mut absent = serde_json::to_value(&f.body).unwrap();
+        absent.as_object_mut().unwrap().remove("activation_ref");
+        assert!(RemoteQualificationTestimonyBody::from_value(&absent).is_err());
+        let pf = fixture();
+        let mut forced = serde_json::to_value(&pf.body).unwrap();
+        forced["lane"] = json!("content");
+        forced["activation_ref"] = json!(ACTIVATION_REF);
+        assert!(RemoteQualificationTestimonyBody::from_value(&forced).is_err());
+        let mut predecessor = serde_json::to_value(&f.body).unwrap();
+        predecessor["schema"] = json!("ryeos.remote_qualification_testimony_body.v1");
+        assert!(RemoteQualificationTestimonyBody::from_value(&predecessor).is_err());
+    }
+
+    #[test]
+    fn content_acceptance_evidence_has_no_product_and_records_its_rederivations() {
+        let f = content_fixture();
+        let evidence = RemoteQualificationAcceptanceEvidence {
+            schema: REMOTE_QUALIFICATION_ACCEPTANCE_EVIDENCE_SCHEMA.into(),
+            lane: QualificationLane::Content,
+            testimony: f.testimony.clone(),
+            product_source: None,
+            acceptance_policy_ref: ACCEPTANCE_REF.into(),
+            acceptance_policy_digest: f.policy.digest().unwrap(),
+            attester_verifying_key: f.attester.verifying_key().to_bytes(),
+            origin_node_verifying_key: f.node.verifying_key().to_bytes(),
+            accepted_claims: f.body.asserted_claims.clone(),
+            rederived: QualificationLane::Content.rederived(),
+        };
+        let round_trip = RemoteQualificationAcceptanceEvidence::from_value(
+            &serde_json::to_value(&evidence).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            round_trip.verify().unwrap().coordinate_id,
+            f.body.asserted_coordinate_id
+        );
+        assert!(
+            !evidence
+                .rederived
+                .iter()
+                .any(|name| name == "received_product_join")
+        );
+        let mut with_product = evidence.clone();
+        with_product.product_source = Some(ProductWitnessSource::Received {
+            acceptance_hash: "a".repeat(64),
+        });
+        assert!(with_product.validate().is_err());
+        let mut product_rederivations = evidence;
+        product_rederivations.rederived = QualificationLane::Product.rederived();
+        assert!(product_rederivations.validate().is_err());
     }
 }

@@ -1039,6 +1039,7 @@ mod tests {
             "attestation_hash": program.qualification_attestation_hash,
             "owner_principal": format!("fp:{}", "7".repeat(64)),
             "required_claims": ["compatible"],
+            "remote_testimony": Value::Null,
         })
     }
 
@@ -1134,6 +1135,58 @@ mod tests {
         assert_eq!(
             loaded.document.runtime_content_qualification,
             Some(content_qualification())
+        );
+    }
+
+    #[test]
+    fn a_content_qualification_selection_states_its_remote_testimony_explicitly() {
+        let local = content_qualification_value();
+        assert!(content_qualification().remote_testimony.is_none());
+
+        let mut remote = local.clone();
+        remote["remote_testimony"] = serde_json::json!({
+            "acceptance_hash": "8".repeat(64),
+            "acceptance_policy_ref": "config:fixtures/content-acceptance",
+        });
+        let parsed: ExternalRuntimeContentQualificationBinding =
+            serde_json::from_value(remote).unwrap();
+        parsed.validate().unwrap();
+        assert_eq!(
+            parsed.remote_testimony.unwrap().acceptance_policy_ref,
+            "config:fixtures/content-acceptance"
+        );
+
+        let mut missing = local;
+        missing.as_object_mut().unwrap().remove("remote_testimony");
+        assert!(
+            serde_json::from_value::<ExternalRuntimeContentQualificationBinding>(missing).is_err()
+        );
+    }
+
+    #[test]
+    fn a_remote_content_testimony_selection_is_signed_through_composition() {
+        let node = stopped_node();
+        let mut request = compose_request(&node, "render");
+        let mut selected = content_qualification_value();
+        selected["remote_testimony"] = serde_json::json!({
+            "acceptance_hash": "8".repeat(64),
+            "acceptance_policy_ref": "config:fixtures/content-acceptance",
+        });
+        request.runtime_content_qualification = Some(selected);
+        let resolved =
+            installed_artifacts(&node, Some(PROVIDER_ID), vec![lifecycle(&"d".repeat(64))]);
+        let report = compose_with_resolver(request, |_| Ok(resolved)).unwrap();
+        let identity = ryeos_node_runtime::identity::NodeIdentity::load(
+            &node.root.path().join(".ai/node/identity/private_key.pem"),
+        )
+        .unwrap();
+        let signed = std::fs::read_to_string(&report.path).unwrap();
+        let loaded =
+            admit_signed_binding(node.root.path(), BINDING_ID, &signed, &identity).unwrap();
+        let selected = loaded.document.runtime_content_qualification.unwrap();
+        assert_eq!(
+            selected.remote_testimony.unwrap().acceptance_hash,
+            "8".repeat(64)
         );
     }
 

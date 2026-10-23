@@ -9,7 +9,9 @@ use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
 use ryeos_app::handler_context::HandlerContext;
-use ryeos_app::operator_external_content::qualification_testimony::export_testimony_blocking;
+use ryeos_app::operator_external_content::qualification_testimony::{
+    ContentExportSelection, export_content_testimony_blocking, export_testimony_blocking,
+};
 use ryeos_app::state::AppState;
 use ryeos_node_runtime::identity::NodeIdentity;
 use serde::Serialize;
@@ -22,6 +24,9 @@ pub struct QualificationTestimonyExportRequest {
     pub remote: String,
     pub qualification_hash: String,
     pub acceptance_policy_ref: String,
+    /// `Some` selects the content lane and names the activated content; `None`
+    /// is the product lane.
+    pub content: Option<ContentExportSelection>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -49,16 +54,28 @@ pub async fn export_qualification_testimony(
     let export = {
         let state = Arc::clone(state);
         let request = request.clone();
+        let ctx = ctx.clone();
         tokio::task::spawn_blocking(move || {
             let operator = NodeIdentity::load(&state.config.operator_signing_key_path)
                 .context("load configured operator identity for testimony export")?;
-            export_testimony_blocking(
-                &state,
-                &operator,
-                &request.qualification_hash,
-                &request.acceptance_policy_ref,
-                &lillux::time::iso8601_now(),
-            )
+            match &request.content {
+                None => export_testimony_blocking(
+                    &state,
+                    &operator,
+                    &request.qualification_hash,
+                    &request.acceptance_policy_ref,
+                    &lillux::time::iso8601_now(),
+                ),
+                Some(selection) => export_content_testimony_blocking(
+                    &state,
+                    &ctx,
+                    &operator,
+                    selection,
+                    &request.qualification_hash,
+                    &request.acceptance_policy_ref,
+                    &lillux::time::iso8601_now(),
+                ),
+            }
         })
         .await
         .context("qualification testimony export task stopped")??

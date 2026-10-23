@@ -1868,6 +1868,7 @@ pub mod test_support {
             )?,
             attestation_hash: "7".repeat(64),
             evidence,
+            remote_testimony: None,
         };
         capsule.external_candidate =
             Some(requirement.resolve_for_content(&retained, &use_context)?);

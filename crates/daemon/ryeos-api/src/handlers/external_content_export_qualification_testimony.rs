@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use anyhow::{Result, bail};
 use ryeos_app::handler_context::HandlerContext;
+use ryeos_app::operator_external_content::qualification_testimony::ContentExportSelection;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 use serde::Deserialize;
@@ -21,6 +22,40 @@ pub struct Request {
     pub remote: String,
     pub qualification_hash: String,
     pub acceptance_policy_ref: String,
+    /// Present for the content lane: the activated content the qualification
+    /// speaks to, named the way a launch names it. Absent for the product lane.
+    #[serde(default)]
+    pub content: Option<ContentSelection>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContentSelection {
+    pub activation_ref: String,
+    pub coordinate_id: String,
+    pub manifest_hash: String,
+}
+
+impl ContentSelection {
+    fn validate(&self) -> Result<()> {
+        if self.activation_ref.len() > 512
+            || self
+                .activation_ref
+                .strip_prefix("config:")
+                .is_none_or(str::is_empty)
+        {
+            bail!("content testimony export requires an exact config: activation ref");
+        }
+        for (field, value) in [
+            ("coordinate_id", &self.coordinate_id),
+            ("manifest_hash", &self.manifest_hash),
+        ] {
+            if !lillux::valid_hash(value) || value.bytes().any(|byte| byte.is_ascii_uppercase()) {
+                bail!("content testimony export requires an exact canonical {field}");
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Request {
@@ -44,6 +79,9 @@ impl Request {
         {
             bail!("qualification testimony export requires an exact config: acceptance policy ref");
         }
+        if let Some(content) = &self.content {
+            content.validate()?;
+        }
         Ok(())
     }
 }
@@ -58,6 +96,11 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
             remote: req.remote,
             qualification_hash: req.qualification_hash,
             acceptance_policy_ref: req.acceptance_policy_ref,
+            content: req.content.map(|content| ContentExportSelection {
+                activation_ref: content.activation_ref,
+                coordinate_id: content.coordinate_id,
+                manifest_hash: content.manifest_hash,
+            }),
         },
     )
     .await?;
@@ -98,6 +141,7 @@ mod tests {
                 "remote": "string",
                 "qualification_hash": "string",
                 "acceptance_policy_ref": "string",
+                "content": "object?",
             })
         );
         let mut coordinates = serde_json::Map::new();
@@ -151,6 +195,43 @@ mod tests {
         let mut substituted = valid;
         substituted["testimony"] = serde_json::json!({});
         assert!(serde_json::from_value::<Request>(substituted).is_err());
+    }
+
+    #[test]
+    fn content_lane_selection_is_exact_and_optional() {
+        let mut request = serde_json::json!({
+            "remote": "hosted",
+            "qualification_hash": "a".repeat(64),
+            "acceptance_policy_ref": "config:codex/runtime-acceptance-policy",
+            "content": {
+                "activation_ref": "config:codex/runtime-activation",
+                "coordinate_id": "b".repeat(64),
+                "manifest_hash": "c".repeat(64),
+            },
+        });
+        serde_json::from_value::<Request>(request.clone())
+            .unwrap()
+            .validate()
+            .unwrap();
+        for (field, value) in [
+            ("activation_ref", serde_json::json!("runtime-activation")),
+            ("coordinate_id", serde_json::json!("B".repeat(64))),
+            ("manifest_hash", serde_json::json!("short")),
+        ] {
+            let mut invalid = request.clone();
+            invalid["content"][field] = value;
+            assert!(
+                serde_json::from_value::<Request>(invalid)
+                    .unwrap()
+                    .validate()
+                    .is_err(),
+                "{field}"
+            );
+        }
+        request["content"]["extra"] = serde_json::json!(1);
+        assert!(serde_json::from_value::<Request>(request.clone()).is_err());
+        request["content"] = serde_json::json!({ "activation_ref": "config:x/y" });
+        assert!(serde_json::from_value::<Request>(request).is_err());
     }
 
     #[test]

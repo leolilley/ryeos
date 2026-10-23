@@ -22,29 +22,39 @@ use ryeos_state::external_content::products::qualification::{
     ProductQualificationEvidence, ProductQualificationPolicySource,
 };
 use ryeos_state::external_content::products::qualification_testimony::{
-    MAX_REMOTE_QUALIFICATION_ACCEPTANCE_EVIDENCE_BYTES, REMOTE_QUALIFICATION_ACCEPTANCE_CLAIM,
-    REMOTE_QUALIFICATION_ACCEPTANCE_EVIDENCE_SCHEMA, REMOTE_QUALIFICATION_ACCEPTANCE_POLICY,
-    REMOTE_QUALIFICATION_TESTIMONY_HEAD_NAMESPACE, RemoteQualificationAcceptanceEvidence,
-    RemoteQualificationAcceptancePolicy, RemoteQualificationTestimonyBody,
+    MAX_REMOTE_QUALIFICATION_ACCEPTANCE_EVIDENCE_BYTES,
+    MAX_REMOTE_QUALIFICATION_TESTIMONY_AGE_SECONDS, QualificationLane,
+    REMOTE_QUALIFICATION_ACCEPTANCE_CLAIM, REMOTE_QUALIFICATION_ACCEPTANCE_EVIDENCE_SCHEMA,
+    REMOTE_QUALIFICATION_ACCEPTANCE_POLICY, REMOTE_QUALIFICATION_TESTIMONY_HEAD_NAMESPACE,
+    RemoteQualificationAcceptanceEvidence, RemoteQualificationAcceptancePolicy,
+    RemoteQualificationEvidence, RemoteQualificationTestimonyBody,
     VerifiedRemoteQualificationTestimony, admit, verify_remote_qualification_testimony,
 };
 use ryeos_state::external_content::products::transfer::{
     MAX_PRODUCT_ADMISSION_ATTESTATION_BYTES, ProductWitnessSource, RECEIVED_PRODUCT_POLICY,
     ReceivedProductEvidence,
 };
+use ryeos_state::external_content::qualification_evidence::ContentQualificationEvidence;
+use ryeos_state::external_content::qualification_purpose::QualificationSubject;
 use ryeos_state::object_closure::{ObjectClosureLimits, load_exact_cas_object_with_cas};
 use ryeos_state::objects::{
-    Attestation, RetainedRemoteQualificationTestimony, canonical_value_digest,
+    Attestation, RetainedExternalRuntimeContentQualification, RetainedRemoteQualificationTestimony,
+    canonical_value_digest,
 };
 use ryeos_state::{CasMutationGuard, PinnedStateAuthority};
 
+use super::content_qualification::{load_current_qualified_content, prepare_source};
 use super::product_qualification::{
     load_current_qualification, require_unguarded_resolution,
     resolve_consumer_definition_in_generation, resolve_current_bundle_qualification_policy,
     verify_current_external_runtime_qualification, with_state_guard,
 };
 use super::product_receipt::{ProductSourceVerification, load_product_source};
-use crate::node_config::sections::external_execution::ExternalRuntimeQualificationBinding;
+use crate::handler_context::HandlerContext;
+use crate::managed_external_content_operation::AcquisitionMode;
+use crate::node_config::sections::external_execution::{
+    ExternalRuntimeContentQualificationBinding, ExternalRuntimeQualificationBinding,
+};
 use crate::state::AppState;
 
 const ACCEPTANCE_POLICY_FIELD: &str = "remote_qualification_acceptance_policy";
@@ -77,6 +87,22 @@ pub(crate) struct VerifiedRemoteRuntimeTestimony {
     pub(crate) qualification_attestation_hash: String,
     /// The origin's evidence, unmodified.
     pub(crate) evidence: ProductQualificationEvidence,
+}
+
+/// A remote content testimony that passed every live check at launch. It is
+/// a distinct type from a published content qualification on purpose: the
+/// evidence and attestation hash are the origin's, and nothing that accepts a
+/// local qualification accepts this.
+#[derive(Debug, Clone)]
+pub(crate) struct VerifiedRemoteRuntimeContentTestimony {
+    pub(crate) acceptance_hash: String,
+    pub(crate) acceptance: RemoteQualificationAcceptanceEvidence,
+    /// The origin's coordinate for the content qualification.
+    pub(crate) coordinate_id: String,
+    /// The origin's qualification attestation hash, unmodified.
+    pub(crate) qualification_attestation_hash: String,
+    /// The origin's evidence, unmodified.
+    pub(crate) evidence: ContentQualificationEvidence,
 }
 
 /// Origin side, blocking. The origin signs only what it would itself launch
@@ -131,7 +157,7 @@ pub fn export_testimony_blocking(
         .expires_at
         .clone()
         .context("a qualification without an expiry cannot be testified")?;
-    let body = RemoteQualificationTestimonyBody::new(
+    let body = RemoteQualificationTestimonyBody::new_product(
         witness.attestation.clone(),
         state.threads.site_id().to_owned(),
         acceptance_policy_ref.to_owned(),
@@ -150,11 +176,106 @@ pub fn export_testimony_blocking(
     })
 }
 
+/// Names the activated content a content testimony speaks to, the way a
+/// launch names it: the activation, the origin's coordinate and the manifest
+/// of the runtime content.
+#[derive(Debug, Clone)]
+pub struct ContentExportSelection {
+    pub activation_ref: String,
+    pub coordinate_id: String,
+    pub manifest_hash: String,
+}
+
+/// Origin side for the content lane, blocking. The exact published content
+/// qualification must pass the origin's full current verification, as a launch
+/// requires, so a stale proof is refused rather than exported. A content
+/// qualification carries no expiry of its own, so the testimony lives for the
+/// maximum testimony age, or less when the qualification expires sooner.
+pub fn export_content_testimony_blocking(
+    state: &AppState,
+    context: &HandlerContext,
+    operator: &NodeIdentity,
+    selection: &ContentExportSelection,
+    qualification_hash: &str,
+    acceptance_policy_ref: &str,
+    now: &str,
+) -> anyhow::Result<TestimonyExport> {
+    require_unguarded_resolution("remote content qualification testimony export")?;
+    for (label, hash) in [
+        ("qualification hash", qualification_hash),
+        ("coordinate id", selection.coordinate_id.as_str()),
+        ("manifest hash", selection.manifest_hash.as_str()),
+    ] {
+        ensure!(
+            lillux::valid_hash(hash),
+            "content {label} must be a canonical hash"
+        );
+    }
+    let owner_principal = operator.principal_id();
+    ensure!(
+        context.fingerprint == owner_principal,
+        "content testimony export requires the configured operator"
+    );
+    let published = load_current_qualified_content(
+        state,
+        context,
+        &selection.activation_ref,
+        &selection.coordinate_id,
+        qualification_hash,
+        &selection.manifest_hash,
+    )?;
+    ensure!(
+        published.coordinate_id == selection.coordinate_id
+            && published.attestation_hash == qualification_hash
+            && published.evidence.purpose.owner_fingerprint == owner_principal,
+        "published content qualification differs from the requested coordinate or operator"
+    );
+    let expires_at = content_testimony_expiry(&published.attestation, now)?;
+    let body = RemoteQualificationTestimonyBody::new_content(
+        published.attestation.clone(),
+        state.threads.site_id().to_owned(),
+        selection.activation_ref.clone(),
+        acceptance_policy_ref.to_owned(),
+    )?;
+    let signer = crate::state_store::NodeIdentitySigner::from_identity(operator);
+    let testimony = body.sign(
+        &signer,
+        state.identity.verifying_key(),
+        now.to_owned(),
+        expires_at,
+    )?;
+    Ok(TestimonyExport {
+        testimony_hash: canonical_value_digest(&testimony.to_value())?,
+        testimony,
+        coordinate_id: published.coordinate_id,
+    })
+}
+
+fn content_testimony_expiry(qualification: &Attestation, now: &str) -> anyhow::Result<String> {
+    let parse = |label: &str, value: &str| {
+        chrono::DateTime::parse_from_rfc3339(value)
+            .map(|time| time.with_timezone(&chrono::Utc))
+            .with_context(|| format!("{label} is not an RFC 3339 time"))
+    };
+    let limit = parse("export time", now)?
+        + chrono::Duration::seconds(i64::try_from(
+            MAX_REMOTE_QUALIFICATION_TESTIMONY_AGE_SECONDS,
+        )?);
+    let expiry = match qualification.expires_at.as_deref() {
+        Some(own) => limit.min(parse("qualification expiry", own)?),
+        None => limit,
+    };
+    Ok(expiry.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+}
+
 /// Controller side, blocking. `owner_principal` is the authenticated
 /// `remote_operator` and `origin_node_key` the pinned key of the configured
 /// origin. The testimony is admitted only under the receiver's own signed
 /// policy; the resulting node-signed acceptance is idempotent per coordinate
-/// and a contradicting head is refused.
+/// and a contradicting head is refused. The product lane joins the testimony
+/// to the received product. The content lane has no product: it records the
+/// offline re-derivations it performed and leaves source preparation to every
+/// use of the acceptance.
 pub fn accept_testimony_for_owner(
     state: &AppState,
     owner_principal: &str,
@@ -170,10 +291,11 @@ pub fn accept_testimony_for_owner(
     let grant = current_attester_grant(state, owner_principal)?;
     let verified = verify_remote_qualification_testimony(&testimony, &grant.key, origin_node_key)?;
     ensure!(
-        verified.evidence.product_coordinate.owner_principal == owner_principal,
-        "remote qualification belongs to another product owner"
+        verified.evidence.owner_principal() == owner_principal,
+        "remote qualification belongs to another owner"
     );
     let policy = resolve_acceptance_policy(state, &verified.body.acceptance_policy_ref)?;
+    policy.require_lane(verified.lane())?;
     let origin_policy =
         resolve_current_bundle_qualification_policy(state, &policy.qualification_policy_ref)?;
     require_origin_policy(&verified.evidence, &origin_policy, &policy.required_claims)?;
@@ -181,29 +303,39 @@ pub fn accept_testimony_for_owner(
     let limits = closure_limits(state)?;
     let authority = state.state_store.pinned_state_authority()?;
     let guard = authority.acquire_shared_guard()?;
-    let received_acceptance_hash = find_received_acceptance(
-        state,
-        &authority,
-        &guard,
-        limits,
-        owner_principal,
-        &verified.evidence.product_witness_hash,
-        origin_node_key,
-    )?;
-    let product_source = ProductWitnessSource::Received {
-        acceptance_hash: received_acceptance_hash,
+    let product_source = match verified.lane() {
+        QualificationLane::Product => {
+            let product_evidence = verified.evidence.product()?;
+            let received_acceptance_hash = find_received_acceptance(
+                state,
+                &authority,
+                &guard,
+                limits,
+                owner_principal,
+                &product_evidence.product_witness_hash,
+                origin_node_key,
+            )?;
+            let source = ProductWitnessSource::Received {
+                acceptance_hash: received_acceptance_hash,
+            };
+            let product = load_product_source(
+                state,
+                &authority,
+                &guard,
+                limits,
+                owner_principal,
+                &product_evidence.product_witness_hash,
+                &source,
+                ProductSourceVerification::Fresh,
+            )?;
+            require_received_product_join(&product, product_evidence)?;
+            Some(source)
+        }
+        QualificationLane::Content => {
+            verified.evidence.content()?;
+            None
+        }
     };
-    let product = load_product_source(
-        state,
-        &authority,
-        &guard,
-        limits,
-        owner_principal,
-        &verified.evidence.product_witness_hash,
-        &product_source,
-        ProductSourceVerification::Fresh,
-    )?;
-    require_received_product_join(&product, &verified.evidence)?;
     let accepted = admit(
         &policy,
         &verified.body.acceptance_policy_ref,
@@ -216,6 +348,7 @@ pub fn accept_testimony_for_owner(
 
     let evidence = RemoteQualificationAcceptanceEvidence {
         schema: REMOTE_QUALIFICATION_ACCEPTANCE_EVIDENCE_SCHEMA.into(),
+        lane: verified.lane(),
         testimony: testimony.clone(),
         product_source,
         acceptance_policy_ref: verified.body.acceptance_policy_ref.clone(),
@@ -223,6 +356,7 @@ pub fn accept_testimony_for_owner(
         attester_verifying_key: grant.key.to_bytes(),
         origin_node_verifying_key: origin_node_key.to_bytes(),
         accepted_claims: accepted.claims.clone(),
+        rederived: verified.lane().rederived(),
     };
     evidence.validate()?;
     let signer = crate::state_store::NodeIdentitySigner::from_identity(&state.identity);
@@ -237,6 +371,24 @@ pub fn accept_testimony_for_owner(
     .sign(&signer)?;
 
     let node_key = *state.identity.verifying_key();
+    // A coordinate is accepted once. A testimony signed again for it, or the
+    // same testimony under an edited policy, is refused here with the
+    // incumbent named; re-qualification is the remedy, not a supersede.
+    if let Some(head) = ryeos_state::immutable_testimony::read_immutable_attestation_head(
+        &authority,
+        REMOTE_QUALIFICATION_TESTIMONY_HEAD_NAMESPACE,
+        &accepted.coordinate_id,
+        &guard,
+    )? {
+        let incumbent = load_acceptance_attestation(&authority, limits, &head.target_hash)?;
+        let incumbent = verify_acceptance_attestation(&incumbent, &node_key)?;
+        ensure!(
+            incumbent.evidence == evidence,
+            "a different remote qualification testimony or acceptance policy is already accepted at coordinate {} as acceptance {}; accepted testimony is immutable at its coordinate, so re-qualification at the origin is the remedy, not a re-signed testimony",
+            accepted.coordinate_id,
+            incumbent.hash
+        );
+    }
     let _permit = state
         .write_barrier
         .acquire_with_timeout(crate::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
@@ -309,6 +461,13 @@ pub(crate) fn verify_current_remote_runtime_testimony(
         loaded.evidence.acceptance_policy_ref == remote.acceptance_policy_ref,
         "remote qualification acceptance was made under a different policy"
     );
+    ensure!(
+        loaded.evidence.lane == QualificationLane::Product,
+        "remote qualification acceptance is not a product acceptance"
+    );
+    acceptance_policy
+        .require_unchanged_since_acceptance(&loaded.evidence.acceptance_policy_digest)?;
+    let product = product.context("remote product acceptance has no received product")?;
     // The live grant keys re-verify the testimony: a rotated or revoked
     // attester or origin node key stops launches here even though the
     // retained keys still verify.
@@ -319,13 +478,14 @@ pub(crate) fn verify_current_remote_runtime_testimony(
         &grant.key,
         &origin_node_key,
     )?;
+    let live_evidence = live.evidence.product()?;
     ensure!(
         live.body.qualification_attestation_hash == binding.attestation_hash
             && live.testimony.issuer == binding.owner_principal
-            && live.evidence.result.subject_manifest_hash == expected_manifest_hash,
+            && live_evidence.result.subject_manifest_hash == expected_manifest_hash,
         "remote qualification differs from the signed runtime binding"
     );
-    require_received_product_join(&product, &live.evidence)?;
+    require_received_product_join(&product, live_evidence)?;
     require_origin_policy(
         &live.evidence,
         &origin_policy,
@@ -353,14 +513,136 @@ pub(crate) fn verify_current_remote_runtime_testimony(
         )
     })?;
     ensure!(
-        current.hash == loaded.hash && current_product.attestation_hash == product.attestation_hash,
+        current.hash == loaded.hash
+            && current_product.map(|current| current.attestation_hash)
+                == Some(product.attestation_hash.clone()),
         "remote qualification acceptance changed while its policy was re-resolved"
     );
+    let live_evidence = live_evidence.clone();
     Ok(VerifiedRemoteRuntimeTestimony {
         acceptance_hash: loaded.hash,
         acceptance: loaded.evidence,
         qualification_attestation_hash: live.body.qualification_attestation_hash,
-        evidence: live.evidence,
+        evidence: live_evidence,
+    })
+}
+
+/// Fresh launch check for a content binding that selects a remote testimony.
+/// It re-reads the attester's current grant, the published acceptance, the
+/// receiver's acceptance policy and the origin's qualification policy, and
+/// re-admits the testimony. It never runs a verifier. What acceptance left to
+/// use is done here: the receiver's own activation is prepared against the
+/// evidence's sealed purpose, so the content the controller will run is the
+/// content that was qualified. `context` is the attester's admitted authority.
+pub(crate) fn verify_current_remote_runtime_content_testimony(
+    state: &AppState,
+    context: &HandlerContext,
+    binding: &ExternalRuntimeContentQualificationBinding,
+    expected_manifest_hash: &str,
+) -> anyhow::Result<VerifiedRemoteRuntimeContentTestimony> {
+    binding.validate()?;
+    ensure!(
+        lillux::valid_hash(expected_manifest_hash),
+        "external runtime content manifest must be a canonical hash"
+    );
+    let remote = binding
+        .remote_testimony
+        .as_ref()
+        .context("runtime content qualification selects no remote testimony")?;
+    require_unguarded_resolution("remote content qualification testimony check")?;
+    let grant = current_attester_grant(state, &binding.owner_principal)?;
+    let acceptance_policy = resolve_acceptance_policy(state, &remote.acceptance_policy_ref)?;
+    let policy_ref = acceptance_policy.qualification_policy_ref.as_str();
+    let origin_policy = resolve_current_bundle_qualification_policy(state, policy_ref)?;
+    let limits = closure_limits(state)?;
+    let authority = state.state_store.pinned_state_authority()?;
+    let (loaded, product) = with_state_guard(&authority, |guard| {
+        read_published_acceptance(
+            state,
+            &authority,
+            guard,
+            limits,
+            &binding.owner_principal,
+            &remote.acceptance_hash,
+        )
+    })?;
+    ensure!(
+        loaded.evidence.acceptance_policy_ref == remote.acceptance_policy_ref,
+        "remote qualification acceptance was made under a different policy"
+    );
+    ensure!(
+        loaded.evidence.lane == QualificationLane::Content && product.is_none(),
+        "remote qualification acceptance is not a content acceptance"
+    );
+    acceptance_policy
+        .require_unchanged_since_acceptance(&loaded.evidence.acceptance_policy_digest)?;
+    let origin_node_key = loaded.evidence.origin_node_key()?;
+    require_current_origin_node_grant(state, &origin_node_key, &grant.origin_site_id)?;
+    let live = verify_remote_qualification_testimony(
+        &loaded.evidence.testimony,
+        &grant.key,
+        &origin_node_key,
+    )?;
+    let live_evidence = live.evidence.content()?;
+    let QualificationSubject::ActivatedContent { content } = &live_evidence.purpose.subject else {
+        bail!("remote content qualification has no activated content subject");
+    };
+    ensure!(
+        live.body.qualification_attestation_hash == binding.attestation_hash
+            && live.coordinate_id == binding.coordinate_id
+            && live.testimony.issuer == binding.owner_principal
+            && live.body.activation_ref.as_deref() == Some(binding.activation_ref.as_str())
+            && content.manifest_hash == expected_manifest_hash
+            && live_evidence.result.subject_manifest_hash == expected_manifest_hash,
+        "remote content qualification differs from the signed runtime binding"
+    );
+    require_origin_policy(&live.evidence, &origin_policy, &binding.required_claims)?;
+    admit(
+        &acceptance_policy,
+        &remote.acceptance_policy_ref,
+        &live,
+        &grant.origin_site_id,
+        policy_ref,
+        &binding.required_claims,
+        &lillux::time::iso8601_now(),
+    )?;
+    // Acceptance proved the origin's attestation and the receiver's policy.
+    // Whether this node's own activation of the content is the qualified
+    // content is established here, against the sealed purpose.
+    prepare_source(
+        state,
+        context,
+        &binding.activation_ref,
+        AcquisitionMode::Offline,
+        &content.realization,
+    )?
+    .require_current_consumer(
+        state,
+        context,
+        AcquisitionMode::Offline,
+        &live_evidence.purpose,
+    )?;
+    let (current, current_product) = with_state_guard(&authority, |guard| {
+        read_published_acceptance(
+            state,
+            &authority,
+            guard,
+            limits,
+            &binding.owner_principal,
+            &remote.acceptance_hash,
+        )
+    })?;
+    ensure!(
+        current.hash == loaded.hash && current_product.is_none(),
+        "remote content qualification acceptance changed while it was re-resolved"
+    );
+    let live_evidence = live_evidence.clone();
+    Ok(VerifiedRemoteRuntimeContentTestimony {
+        acceptance_hash: loaded.hash,
+        acceptance: loaded.evidence,
+        coordinate_id: live.coordinate_id,
+        qualification_attestation_hash: live.body.qualification_attestation_hash,
+        evidence: live_evidence,
     })
 }
 
@@ -384,11 +666,16 @@ pub(crate) fn verify_retained_remote_testimony_guarded(
         load_acceptance_guarded(state, authority, guard, limits, &retained.acceptance_hash)?;
     ensure!(
         loaded.evidence == retained.acceptance
-            && loaded.verified.evidence == proof.evidence
+            && loaded.verified.evidence.product()? == &proof.evidence
             && loaded.verified.body.qualification_attestation_hash == proof.attestation_hash
             && loaded.verified.testimony.issuer == owner_principal,
         "retained remote testimony differs from its authenticated acceptance"
     );
+    let source = loaded
+        .evidence
+        .product_source
+        .as_ref()
+        .context("retained remote product testimony has no received product source")?;
     let product = load_product_source(
         state,
         authority,
@@ -396,11 +683,43 @@ pub(crate) fn verify_retained_remote_testimony_guarded(
         limits,
         owner_principal,
         &proof.evidence.product_witness_hash,
-        &loaded.evidence.product_source,
+        source,
         ProductSourceVerification::Retained,
     )?;
     require_received_product_join(&product, &proof.evidence)?;
     Ok(product)
+}
+
+/// Recovery check for a retained remote content testimony under the caller's
+/// CAS guard, mirroring the product lane: only the retained keys and the
+/// signed acceptance are used, with no current grant, policy, source or
+/// wall-clock eligibility reapplied.
+pub(crate) fn verify_retained_remote_content_testimony_guarded(
+    state: &AppState,
+    authority: &PinnedStateAuthority,
+    guard: &CasMutationGuard,
+    limits: ObjectClosureLimits,
+    retained: &RetainedExternalRuntimeContentQualification,
+) -> anyhow::Result<()> {
+    retained.validate()?;
+    let remote = retained
+        .remote_testimony
+        .as_ref()
+        .context("retained runtime content selects no remote testimony")?;
+    authority.ensure_guard(guard)?;
+    let loaded = load_acceptance_guarded(state, authority, guard, limits, &remote.acceptance_hash)?;
+    ensure!(
+        loaded.evidence == remote.acceptance
+            && loaded.evidence.lane == QualificationLane::Content
+            && loaded.verified.evidence.content()? == &retained.evidence
+            && loaded.verified.body.qualification_attestation_hash == retained.attestation_hash
+            && loaded.verified.coordinate_id == retained.coordinate_id
+            && loaded.verified.body.activation_ref.as_deref()
+                == Some(retained.activation_ref.as_str())
+            && loaded.verified.testimony.issuer == retained.evidence.purpose.owner_fingerprint,
+        "retained remote content testimony differs from its authenticated acceptance"
+    );
+    Ok(())
 }
 
 struct AttesterGrant {
@@ -481,15 +800,28 @@ fn resolve_acceptance_policy(
 /// The verifier identity is compared against itself because the receiver's
 /// accepted-verifier digests, checked at admission, are what pin it.
 fn require_origin_policy(
-    evidence: &ProductQualificationEvidence,
+    evidence: &RemoteQualificationEvidence,
     current: &ProductQualificationPolicySource,
     required_claims: &[String],
 ) -> anyhow::Result<()> {
-    evidence.validate_current_policy(
-        current,
-        &evidence.verifier.effective_definition_digest,
-        required_claims,
-    )
+    match evidence {
+        RemoteQualificationEvidence::Product(evidence) => evidence.validate_current_policy(
+            current,
+            &evidence.verifier.effective_definition_digest,
+            required_claims,
+        ),
+        RemoteQualificationEvidence::Content(evidence) => {
+            evidence.validate()?;
+            current.validate()?;
+            ensure!(
+                &evidence.purpose.policy_source == current,
+                "qualification no longer matches the exact current policy"
+            );
+            evidence
+                .result
+                .validate_claims_for(&current.policy, required_claims)
+        }
+    }
 }
 
 fn require_received_product_join(
@@ -624,7 +956,7 @@ fn verify_acceptance_attestation(
     let evidence = RemoteQualificationAcceptanceEvidence::from_value(&attestation.evidence)?;
     let verified = evidence.verify()?;
     ensure!(
-        attestation.subject_hash == verified.evidence.result.subject_manifest_hash
+        attestation.subject_hash == verified.evidence.result().subject_manifest_hash
             && attestation.expires_at == evidence.testimony.expires_at,
         "remote qualification acceptance contradicts the testimony it retains"
     );
@@ -654,7 +986,7 @@ fn load_acceptance_guarded(
 
 /// Load the acceptance named by a binding, require it to be this node's
 /// current published head for its coordinate, and load its received product
-/// freshly.
+/// freshly when the lane has one.
 fn read_published_acceptance(
     state: &AppState,
     authority: &PinnedStateAuthority,
@@ -662,7 +994,7 @@ fn read_published_acceptance(
     limits: ObjectClosureLimits,
     owner_principal: &str,
     acceptance_hash: &str,
-) -> anyhow::Result<(LoadedAcceptance, VerifiedProductWitness)> {
+) -> anyhow::Result<(LoadedAcceptance, Option<VerifiedProductWitness>)> {
     let loaded = load_acceptance_guarded(state, authority, guard, limits, acceptance_hash)?;
     let head = state
         .state_store
@@ -677,22 +1009,26 @@ fn read_published_acceptance(
         head.signer == state.identity.fingerprint() && head.target_hash == acceptance_hash,
         "remote qualification acceptance is not the exact published head"
     );
-    let product = load_product_source(
-        state,
-        authority,
-        guard,
-        limits,
-        owner_principal,
-        &loaded.verified.evidence.product_witness_hash,
-        &loaded.evidence.product_source,
-        ProductSourceVerification::Fresh,
-    )?;
+    let product = match &loaded.evidence.product_source {
+        Some(source) => Some(load_product_source(
+            state,
+            authority,
+            guard,
+            limits,
+            owner_principal,
+            &loaded.verified.evidence.product()?.product_witness_hash,
+            source,
+            ProductSourceVerification::Fresh,
+        )?),
+        None => None,
+    };
     Ok((loaded, product))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::node_config::sections::external_execution::ExternalRuntimeContentQualificationBinding;
     use ryeos_state::Signer;
     use ryeos_state::external_content::products::qualification_testimony::{
         REMOTE_QUALIFICATION_TESTIMONY_CLAIM, REMOTE_QUALIFICATION_TESTIMONY_POLICY,
@@ -757,7 +1093,7 @@ mod tests {
                 Some("2026-10-30T00:00:00Z".into()),
             )
             .unwrap();
-        let body = RemoteQualificationTestimonyBody::new(
+        let body = RemoteQualificationTestimonyBody::new_product(
             qualification,
             "origin-site".into(),
             ACCEPTANCE_REF.into(),
@@ -773,15 +1109,17 @@ mod tests {
             .unwrap();
         let acceptance_evidence = RemoteQualificationAcceptanceEvidence {
             schema: REMOTE_QUALIFICATION_ACCEPTANCE_EVIDENCE_SCHEMA.into(),
+            lane: QualificationLane::Product,
             testimony: testimony.clone(),
-            product_source: ProductWitnessSource::Received {
+            product_source: Some(ProductWitnessSource::Received {
                 acceptance_hash: "a".repeat(64),
-            },
+            }),
             acceptance_policy_ref: ACCEPTANCE_REF.into(),
             acceptance_policy_digest: "b".repeat(64),
             attester_verifying_key: attester.verifying_key().to_bytes(),
             origin_node_verifying_key: origin_node.verifying_key().to_bytes(),
             accepted_claims: body.asserted_claims.clone(),
+            rederived: QualificationLane::Product.rederived(),
         };
         Fixture {
             attester,
@@ -964,6 +1302,57 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("authenticated operator"));
+    }
+
+    #[test]
+    fn content_launch_check_refuses_without_a_binding_selection_or_grant() {
+        let root = tempfile::tempdir().unwrap();
+        let (_owner, state) = crate::state::test_support::build(root.path()).unwrap();
+        let owner = format!("fp:{}", "9".repeat(64));
+        let context = HandlerContext::new(owner.clone(), vec![], true);
+        let mut binding = ExternalRuntimeContentQualificationBinding {
+            activation_ref: "config:fixtures/activation".into(),
+            coordinate_id: "1".repeat(64),
+            attestation_hash: "2".repeat(64),
+            owner_principal: owner,
+            required_claims: vec!["runtime_compatible".into()],
+            remote_testimony: None,
+        };
+        let error = verify_current_remote_runtime_content_testimony(
+            &state,
+            &context,
+            &binding,
+            &"4".repeat(64),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("no remote testimony"));
+        binding.remote_testimony = Some(
+            crate::node_config::sections::external_execution::ExternalRemoteQualificationTestimonyBinding {
+                acceptance_hash: "3".repeat(64),
+                acceptance_policy_ref: ACCEPTANCE_REF.into(),
+            },
+        );
+        let error = verify_current_remote_runtime_content_testimony(
+            &state,
+            &context,
+            &binding,
+            &"4".repeat(64),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("grant was revoked"));
+    }
+
+    #[test]
+    fn a_content_testimony_expires_with_the_qualification_or_the_maximum_age() {
+        let fixture = fixture();
+        let mut unbounded = fixture.testimony.clone();
+        unbounded.expires_at = None;
+        let expiry = content_testimony_expiry(&unbounded, "2026-10-21T00:00:00Z").unwrap();
+        assert_eq!(expiry, "2026-11-21T00:00:00Z");
+        let mut sooner = fixture.testimony;
+        sooner.expires_at = Some("2026-10-25T00:00:00Z".into());
+        let expiry = content_testimony_expiry(&sooner, "2026-10-21T00:00:00Z").unwrap();
+        assert_eq!(expiry, "2026-10-25T00:00:00Z");
     }
 
     #[test]

@@ -87,7 +87,10 @@ impl GuestRuntimeUploadBinding {
                         )?;
                     (
                         remote.evidence.product_witness_hash,
-                        remote.acceptance.product_source,
+                        remote
+                            .acceptance
+                            .product_source
+                            .context("remote product acceptance has no received product source")?,
                     )
                 } else {
                     let witness =

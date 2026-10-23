@@ -287,10 +287,17 @@ pub(crate) struct ExternalRuntimeContentQualificationBinding {
     pub(crate) attestation_hash: String,
     pub(crate) owner_principal: String,
     pub(crate) required_claims: Vec<String>,
+    /// Required nullable. `Some` selects a remote content testimony accepted
+    /// under local policy: `coordinate_id` and `attestation_hash` are then the
+    /// origin's, `owner_principal` is the attesting operator and
+    /// `activation_ref` names the content on both nodes. `None` is the local
+    /// qualification path, unchanged.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub(crate) remote_testimony: Option<ExternalRemoteQualificationTestimonyBinding>,
 }
 
 impl ExternalRuntimeContentQualificationBinding {
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         let reference = ryeos_engine::canonical_ref::CanonicalRef::parse(&self.activation_ref)?;
         ensure!(
             reference.kind == "config"
@@ -312,6 +319,9 @@ impl ExternalRuntimeContentQualificationBinding {
             "runtime content qualification requires bounded sorted compatibility claims");
         for claim in &self.required_claims {
             ryeos_state::external_content::products::validate_name(claim)?;
+        }
+        if let Some(remote) = &self.remote_testimony {
+            remote.validate()?;
         }
         Ok(())
     }
@@ -991,6 +1001,7 @@ impl RetainedExternalExecutionBinding {
                     attestation_hash: content.attestation_hash.clone(),
                     owner_principal: content.owner_principal.clone(),
                     required_claims: content.required_claims.clone(),
+                    remote_testimony: None,
                 }
             }),
             artifacts: compose::BundleArtifactFacts {
@@ -1524,6 +1535,7 @@ mod workload_binding_tests {
             attestation_hash: "2".repeat(64),
             owner_principal: format!("fp:{}", "3".repeat(64)),
             required_claims: vec!["runtime_compatible".into()],
+            remote_testimony: None,
         });
         assert!(document.validate().is_err());
         document.runtime_content_qualification = None;
@@ -1552,6 +1564,7 @@ mod workload_binding_tests {
             attestation_hash: "2".repeat(64),
             owner_principal: format!("fp:{}", "3".repeat(64)),
             required_claims: vec!["runtime_compatible".into()],
+            remote_testimony: None,
         });
         selected.validate().unwrap();
         assert_eq!(
@@ -1579,6 +1592,68 @@ mod workload_binding_tests {
             .required_claims
             .clear();
         assert!(empty_claims.validate().is_err());
+    }
+
+    #[test]
+    fn content_remote_testimony_selection_is_required_nullable_and_exact() {
+        let mut selected = document();
+        selected.runtime_content_qualification = Some(ExternalRuntimeContentQualificationBinding {
+            activation_ref: "config:codex/runtime-activation".into(),
+            coordinate_id: "1".repeat(64),
+            attestation_hash: "2".repeat(64),
+            owner_principal: format!("fp:{}", "3".repeat(64)),
+            required_claims: vec!["runtime_compatible".into()],
+            remote_testimony: Some(ExternalRemoteQualificationTestimonyBinding {
+                acceptance_hash: "8".repeat(64),
+                acceptance_policy_ref: "config:codex/runtime-acceptance".into(),
+            }),
+        });
+        selected.validate().unwrap();
+        let value = serde_json::to_value(&selected).unwrap();
+        assert!(serde_json::from_value::<BindingDocument>(value.clone()).unwrap() == selected);
+
+        let mut local = value.clone();
+        local["runtime_content_qualification"]["remote_testimony"] = serde_json::Value::Null;
+        let local = serde_json::from_value::<BindingDocument>(local).unwrap();
+        local.validate().unwrap();
+        assert!(
+            local
+                .runtime_content_qualification
+                .unwrap()
+                .remote_testimony
+                .is_none()
+        );
+
+        let mut missing = value.clone();
+        missing["runtime_content_qualification"]
+            .as_object_mut()
+            .unwrap()
+            .remove("remote_testimony");
+        assert!(serde_json::from_value::<BindingDocument>(missing).is_err());
+
+        let mut unknown = value;
+        unknown["runtime_content_qualification"]["remote_testimony"]["extra"] =
+            serde_json::json!(1);
+        assert!(serde_json::from_value::<BindingDocument>(unknown).is_err());
+
+        for (field, bad) in [
+            ("acceptance_hash", "not-a-hash"),
+            ("acceptance_policy_ref", "tool:codex/runtime-acceptance"),
+        ] {
+            let mut wrong = selected.clone();
+            let remote = wrong
+                .runtime_content_qualification
+                .as_mut()
+                .unwrap()
+                .remote_testimony
+                .as_mut()
+                .unwrap();
+            match field {
+                "acceptance_hash" => remote.acceptance_hash = bad.into(),
+                _ => remote.acceptance_policy_ref = bad.into(),
+            }
+            assert!(wrong.validate().is_err(), "{field} {bad}");
+        }
     }
 
     #[test]
