@@ -225,10 +225,21 @@ crates/tools/external-guest-occurrence-owner/Cargo.toml
 crates/tools/external-guest-restoration-verifier/Cargo.toml
 crates/tools/external-guest-runtime-producer/Cargo.toml
 crates/tools/codex-runtime-verifier/Cargo.toml
+crates/tools/guest-wire-verifier/Cargo.toml
+crates/tools/modal-guest-launcher/Cargo.toml
 crates/bin/cli/Cargo.toml
 crates/bin/daemon/Cargo.toml
 Cargo.lock
 ```
+
+`scripts/release/versioned-crates.txt` is the source of truth for this bump
+list: the publish workflow requires every manifest listed there to equal the
+release version and fails if any unlisted workspace crate carries a `0.X.Y`
+version with X >= 5. Add a new release-versioned crate to that file and to the
+list above.
+
+`Cargo.lock` carries 17 entries at the release version, one per bumped
+manifest; `rg "$old" Cargo.lock | wc -l` must drop to zero after the bump.
 
 The root `Cargo.toml` is a workspace manifest and does not currently contain a
 workspace package version. Do not invent one.
@@ -253,6 +264,8 @@ files=(
   crates/tools/external-guest-restoration-verifier/Cargo.toml
   crates/tools/external-guest-runtime-producer/Cargo.toml
   crates/tools/codex-runtime-verifier/Cargo.toml
+  crates/tools/guest-wire-verifier/Cargo.toml
+  crates/tools/modal-guest-launcher/Cargo.toml
   crates/bin/cli/Cargo.toml
   crates/bin/daemon/Cargo.toml
 )
@@ -464,21 +477,34 @@ GitHub release assets:
 GHCR image tags:
   ghcr.io/leolilley/ryeos-standard:$new
   ghcr.io/leolilley/ryeos-central-host:$new
+  ghcr.io/leolilley/ryeos-local-inference:$new
   ghcr.io/leolilley/ryeos-hosted-workflow:$new
 ```
 
 The workflow asks BuildKit to construct the bundle archive, standalone static
 workload-client realization, and three image candidates in one Bake invocation.
 Their common published stage performs one host Cargo build, one static-worker
-build closure, and one signed bundle publication. The five outputs then fan out
+build closure, and one signed bundle publication. The six outputs then fan out
 without recompiling RyeOS. The workload-client archive carries canonical build
 testimony both as a sidecar and embedded in the executable; recovery verifies
 their exact equality against the tagged release coordinate. The workflow checks
 provenance and SBOM attestations, verifies keyless signatures, promotes the
-immutable version tags, and only then advances all `latest` tags. Runtime
+immutable version tags, and only then advances all four `latest` tags. Runtime
 qualification is separate and non-gating. Verify the immutable tags, release
 assets, and successful publication workflow run; do not use the mutable tags as
 the release identity.
+
+### Prerelease versions
+
+A version with a prerelease suffix (`X.Y.Z-rc.N`) publishes the same immutable
+version tags, digests, signatures and attestations, but never moves a `latest`
+tag, and its GitHub release is created as a prerelease. Tagging the release
+candidate and the final release on the same commit is recommended, so the final
+publication rebuilds identical source; whether the final tag must reuse the
+candidate's commit is still an open decision.
+
+The `qualify` job also fails the run when any workspace crate's version differs
+from the release version.
 
 The shared GHA BuildKit cache is exported by the archive target only. Attaching
 the same cache export to every image target would upload the common compilation
@@ -709,6 +735,8 @@ Before tagging:
   - [ ] `crates/tools/core-tools/Cargo.toml`
   - [ ] `crates/tools/session-exec/Cargo.toml`
   - [ ] All `crates/tools/{codex-*,external-*}/Cargo.toml` release-version manifests
+  - [ ] `crates/tools/guest-wire-verifier/Cargo.toml`
+  - [ ] `crates/tools/modal-guest-launcher/Cargo.toml`
   - [ ] `crates/bin/cli/Cargo.toml`
   - [ ] `crates/bin/daemon/Cargo.toml`
   - [ ] `Cargo.lock`

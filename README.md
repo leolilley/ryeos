@@ -235,7 +235,8 @@ Composition images, one per bundle set:
 | `ryeos-central-host` | central-host | `central-host` |
 | `ryeos-substrate` | bundle-source | `bundle-source` |
 
-`ryeos-standard` and `ryeos-hosted-workflow` are the published release images.
+`ryeos-standard`, `ryeos-central-host`, `ryeos-local-inference` and
+`ryeos-hosted-workflow` are the four published release images.
 The rest are branch candidates deployed by digest, not tagged releases. See
 [deploy/composition-images.md](deploy/composition-images.md).
 
