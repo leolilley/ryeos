@@ -661,6 +661,28 @@ for target in core core-scheduling core-workflow core-knowledge standard central
         exit 1
     }
 done
+composition_workflow="$root/.github/workflows/qualify-composition-images.yml"
+smoke_step="$(sed -n '/^      - name: First-boot init smoke$/,$p' "$composition_workflow")"
+[[ -n "$smoke_step" ]] || {
+    echo "composition workflow must carry a First-boot init smoke step" >&2
+    exit 1
+}
+for target in core core-scheduling core-workflow core-knowledge standard central-host local-inference hosted-workflow bundle-source f5r-controller; do
+    grep -Eq "^ +for target in .*\\b$target\\b" <<<"$smoke_step" || {
+        echo "composition first-boot init smoke does not cover target $target" >&2
+        exit 1
+    }
+done
+for required in '@${DIGEST}' 'RYEOS_TRUST_BAKED_PUBLISHERS=1' 'RYEOS_INIT_HOST_CLASS=hosted' 'RYEOS_SUBSTRATE_IMAGE="$IMAGE"'; do
+    grep -Fq -- "$required" <<<"$smoke_step" || {
+        echo "composition first-boot init smoke must contain $required" >&2
+        exit 1
+    }
+done
+if grep -Fq 'RYEOS_INIT_NODE_PROFILE' <<<"$smoke_step" && grep -Eq -- '-e RYEOS_INIT_NODE_PROFILE=' <<<"$smoke_step"; then
+    echo "composition first-boot init smoke must use each image's baked profile" >&2
+    exit 1
+fi
 # Every bundle set is either built as a composition image or explicitly listed
 # as having none, so a new set cannot ship without a deliberate choice. The
 # stage of each imaged set is read from the Bake target of the same name.

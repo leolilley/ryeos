@@ -151,3 +151,45 @@ jobs:
             echo "${IMAGE}:${TAG} -> ${IMAGE}@${DIGEST}"
             echo "| ${target} | \`${IMAGE}@${DIGEST}\` |" >> "$GITHUB_STEP_SUMMARY"
           done
+
+      - name: First-boot init smoke
+        env:
+          BAKE_METADATA: ${{ steps.bake.outputs.metadata }}
+          PREFIX: ${{ steps.candidate.outputs.prefix }}
+        run: |
+          # Runs the node's own first-boot initialization, exactly as the image
+          # entrypoint does it (its functions are sourced, not copied), against a
+          # throwaway anonymous /data volume, as the image's node account. Only the
+          # init runs; the daemon is never started. The profile is the one each
+          # image bakes; the host class is a deployment fact and is declared here.
+          for target in core core-scheduling core-workflow core-knowledge standard central-host local-inference hosted-workflow bundle-source f5r-controller; do
+            DIGEST="$(jq -r --arg target "$target" '.[$target]["containerimage.digest"] // empty' <<<"$BAKE_METADATA")"
+            [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+              echo "no pushed digest for $target" >&2
+              exit 1
+            }
+            IMAGE="${PREFIX}-${target}@${DIGEST}"
+            echo "::group::first-boot init: ${target}"
+            # The single-quoted script is expanded by the container shell.
+            # shellcheck disable=SC2016
+            if ! docker run --rm \
+              --user 10000:10000 \
+              --volume /data \
+              --entrypoint /bin/bash \
+              -e RYEOS_SUBSTRATE_IMAGE="$IMAGE" \
+              -e RYEOS_SUBSTRATE_PROTOCOL=1 \
+              -e RYEOS_INIT_HOST_CLASS=hosted \
+              -e RYEOS_TRUST_BAKED_PUBLISHERS=1 \
+              "$IMAGE" \
+              -c 'source /usr/local/bin/entrypoint.sh
+                  collect_baked_publisher_trust_args /opt/ryeos
+                  build_ryeos_init_args /opt/ryeos /data/app 127.0.0.1:7400
+                  echo "[smoke] profile: $RYEOS_INIT_NODE_PROFILE"
+                  ryeos "${INIT_ARGS[@]}" "${TRUST_ARGS[@]}"'; then
+              echo "::endgroup::"
+              echo "first-boot init failed for image target ${target} (${IMAGE})" >&2
+              exit 1
+            fi
+            echo "::endgroup::"
+            echo "first-boot init ok: ${target}"
+          done
