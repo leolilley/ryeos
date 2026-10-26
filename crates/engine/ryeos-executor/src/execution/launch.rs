@@ -1337,16 +1337,21 @@ fn verify_native_executor_chain(
                         ),
                     });
                 }
-                if let Some((first_root, ..)) = &resolved_with {
-                    return Err(MaterializationError::ResolutionFailed {
-                        executor_ref: bare.to_string(),
-                        detail: format!(
-                            "native executor identity `bin/{}/{bare}` is published by both {} and {}; bundle root order cannot select an executor",
-                            probe.host_triple,
-                            first_root.display(),
-                            system_root.display(),
-                        ),
-                    });
+                if let Some((first_root, _, _, first_resolved, _)) = &resolved_with {
+                    if first_resolved.item_source_hash != resolved.item_source_hash {
+                        return Err(MaterializationError::ResolutionFailed {
+                            executor_ref: bare.to_string(),
+                            detail: format!(
+                                "native executor identity `bin/{}/{bare}` is published by both {} and {} with differing signed item sources; bundle root order cannot select an executor",
+                                probe.host_triple,
+                                first_root.display(),
+                                system_root.display(),
+                            ),
+                        });
+                    }
+                    // A byte-identical signed copy leaves nothing to select;
+                    // the first root stays the source.
+                    continue;
                 }
                 resolved_with = Some((
                     system_root.clone(),
@@ -12418,9 +12423,23 @@ mod tests {
         bare_name: &str,
         signing_key: &lillux::crypto::SigningKey,
     ) -> String {
+        write_materializer_fixture_with_bytes(
+            bundle_root,
+            bare_name,
+            signing_key,
+            b"not reached by duplicate check",
+        )
+    }
+
+    fn write_materializer_fixture_with_bytes(
+        bundle_root: &Path,
+        bare_name: &str,
+        signing_key: &lillux::crypto::SigningKey,
+        bytes: &[u8],
+    ) -> String {
         let ai_dir = bundle_root.join(ryeos_engine::AI_DIR);
         let cas = lillux::cas::CasStore::new(ai_dir.join("objects"));
-        let blob_hash = cas.store_blob(b"not reached by duplicate check").unwrap();
+        let blob_hash = cas.store_blob(bytes).unwrap();
         let item_ref = format!("bin/{}/{bare_name}", host_triple());
         let item_source = serde_json::json!({
             "kind": "item_source",
@@ -12990,7 +13009,12 @@ mod tests {
         let second = tmp.path().join("second");
         let key = lillux::crypto::SigningKey::from_bytes(&[71u8; 32]);
         let fingerprint = write_materializer_fixture(&first, "shared-executor", &key);
-        write_materializer_fixture(&second, "shared-executor", &key);
+        write_materializer_fixture_with_bytes(
+            &second,
+            "shared-executor",
+            &key,
+            b"different executor bytes",
+        );
         let trust_store = ryeos_engine::trust::TrustStore::from_signers(vec![
             ryeos_engine::trust::TrustedSigner {
                 fingerprint,
@@ -13008,8 +13032,37 @@ mod tests {
         .expect_err("root order must not select between duplicate executor identities");
         let message = error.to_string();
         assert!(message.contains("published by both"));
+        assert!(message.contains("differing signed item sources"));
         assert!(message.contains(&first.display().to_string()));
         assert!(message.contains(&second.display().to_string()));
+    }
+
+    #[test]
+    fn materializer_accepts_byte_identical_duplicate_from_first_root() {
+        let _guard = materializer_test_guard();
+        let tmp = tempfile::tempdir().unwrap();
+        let first = tmp.path().join("first");
+        let second = tmp.path().join("second");
+        let cache_root = tmp.path().join("state");
+        let key = lillux::crypto::SigningKey::from_bytes(&[76u8; 32]);
+        let first_fixture = write_executable_materializer_fixture(&first, "shared-executor", &key);
+        let second_fixture =
+            write_executable_materializer_fixture(&second, "shared-executor", &key);
+        assert_eq!(first_fixture.blob_hash, second_fixture.blob_hash);
+        let trust_store = materializer_trust_store(&first_fixture, &key);
+
+        let materialized = materialize_test_executor(
+            &[first, second],
+            "native:shared-executor",
+            &cache_root,
+            &trust_store,
+        )
+        .expect("identical signed copies leave nothing to select between");
+
+        assert_eq!(
+            std::fs::read(&materialized.path).unwrap(),
+            first_fixture.bytes
+        );
     }
 
     #[test]

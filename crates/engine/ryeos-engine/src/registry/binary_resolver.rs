@@ -266,7 +266,9 @@ pub struct BundleExecutorManifestIdentity {
 
 struct VerifiedBundleExecutorSet {
     identity: Option<BundleExecutorManifestIdentity>,
-    item_refs: HashSet<String>,
+    /// Signed executor item ref to the hash of its ItemSource object, which
+    /// commits the content blob hash, mode and item ref.
+    item_sources: HashMap<String, String>,
 }
 
 /// Capture exact signed executable bytes and retain a private witness of this
@@ -1200,38 +1202,48 @@ pub fn verify_bundle_executor_manifest_ref_identity(
     }))
 }
 
-/// Verify every admitted bundle's executable set and require one owner for
-/// each native-executor identity.
+/// Verify every admitted bundle's executable set and require each
+/// native-executor identity to resolve to exactly one signed executable.
 ///
 /// Native executor references are globally addressed as
 /// `native:<bare-name>` at launch time, with the target triple supplied by the
-/// node. Consequently, two bundles may not both publish the same
-/// `bin/<target-triple>/<bare-name>` identity. Checking every target triple at
+/// node, so bundle-root order must never choose between two different
+/// executables published as the same `bin/<target-triple>/<bare-name>`
+/// identity. Two bundles may nevertheless carry that identity when every copy
+/// has the same signed ItemSource (same content, mode and item ref): there is
+/// nothing to choose between, so the first owner is kept. Copies whose signed
+/// ItemSources differ in any way are refused. Checking every target triple at
 /// admission time keeps a bundle set portable: a collision cannot remain
 /// dormant merely because the current node has a different host triple.
 pub fn verify_bundle_executor_manifests(
     bundle_roots: &[PathBuf],
     node_trust_store: &TrustStore,
 ) -> Result<(), EngineError> {
-    let mut owners: HashMap<String, &Path> = HashMap::new();
+    let mut owners: HashMap<String, (&Path, String)> = HashMap::new();
 
     for bundle_root in bundle_roots {
-        let mut item_refs: Vec<String> =
+        let mut item_sources: Vec<(String, String)> =
             verify_bundle_executor_manifest_items(bundle_root, node_trust_store)?
-                .item_refs
+                .item_sources
                 .into_iter()
                 .collect();
-        item_refs.sort_unstable();
-        for item_ref in item_refs {
-            if let Some(first_root) = owners.insert(item_ref.clone(), bundle_root.as_path()) {
-                return Err(EngineError::BinManifestInvalid {
-                    bin: item_ref.clone(),
-                    reason: format!(
-                        "native executor identity `{item_ref}` is published by both {} and {}; each target-triple/name identity must have exactly one admitted bundle owner",
-                        first_root.display(),
-                        bundle_root.display(),
-                    ),
-                });
+        item_sources.sort_unstable();
+        for (item_ref, item_source_hash) in item_sources {
+            match owners.get(&item_ref) {
+                None => {
+                    owners.insert(item_ref, (bundle_root.as_path(), item_source_hash));
+                }
+                Some((_, first_hash)) if *first_hash == item_source_hash => {}
+                Some((first_root, _)) => {
+                    return Err(EngineError::BinManifestInvalid {
+                        bin: item_ref.clone(),
+                        reason: format!(
+                            "native executor identity `{item_ref}` is published by both {} and {} with differing signed item sources; each target-triple/name identity must resolve to exactly one signed executable",
+                            first_root.display(),
+                            bundle_root.display(),
+                        ),
+                    });
+                }
             }
         }
     }
@@ -1288,7 +1300,7 @@ fn verify_bundle_executor_manifest_items(
     if bin_root_metadata.is_none() && !manifest_ref_exists {
         return Ok(VerifiedBundleExecutorSet {
             identity: None,
-            item_refs: HashSet::new(),
+            item_sources: HashMap::new(),
         });
     }
     if !manifest_ref_exists {
@@ -1535,7 +1547,10 @@ fn verify_bundle_executor_manifest_items(
             manifest_hash: verified_manifest_ref.manifest_hash,
             signer_fingerprint: verified_manifest_ref.signer_fingerprint,
         }),
-        item_refs: expected_item_refs,
+        item_sources: item_source_hashes
+            .iter()
+            .map(|(item_ref, hash)| (item_ref.clone(), hash.clone()))
+            .collect(),
     })
 }
 
@@ -2101,11 +2116,26 @@ mod tests {
         triple: &str,
         signed_mode: u32,
     ) -> (String, SigningKey) {
+        write_resolver_fixture_with_bytes(
+            bundle_root,
+            bin_name,
+            triple,
+            signed_mode,
+            b"placeholder-binary\n",
+        )
+    }
+
+    fn write_resolver_fixture_with_bytes(
+        bundle_root: &Path,
+        bin_name: &str,
+        triple: &str,
+        signed_mode: u32,
+        bin_bytes: &[u8],
+    ) -> (String, SigningKey) {
         let ai = bundle_root.join(crate::AI_DIR);
         let bin_dir = ai.join("bin").join(triple);
         std::fs::create_dir_all(&bin_dir).unwrap();
         let bin_path = bin_dir.join(bin_name);
-        let bin_bytes = b"placeholder-binary\n";
         std::fs::write(&bin_path, bin_bytes).unwrap();
         #[cfg(unix)]
         {
@@ -2674,7 +2704,13 @@ mod tests {
         let collision_triple = "future-vendor-platform-abi";
         let (fingerprint, key) =
             write_resolver_fixture_for_triple(&first, "shared-executor", collision_triple);
-        write_resolver_fixture_for_triple(&second, "shared-executor", collision_triple);
+        write_resolver_fixture_with_bytes(
+            &second,
+            "shared-executor",
+            collision_triple,
+            0o755,
+            b"different-binary\n",
+        );
 
         let error = verify_bundle_executor_manifests(
             &[first.clone(), second.clone()],
@@ -2683,6 +2719,43 @@ mod tests {
         .expect_err("two owners of one target-triple/name identity must be refused");
         let message = error.to_string();
         assert!(message.contains(&format!("bin/{collision_triple}/shared-executor")));
+        assert!(message.contains(&first.display().to_string()));
+        assert!(message.contains(&second.display().to_string()));
+    }
+
+    #[test]
+    fn admitted_bundle_set_accepts_byte_identical_shared_executor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let first = tmp.path().join("first");
+        let second = tmp.path().join("second");
+        let triple = "future-vendor-platform-abi";
+        let (fingerprint, key) =
+            write_resolver_fixture_for_triple(&first, "shared-executor", triple);
+        write_resolver_fixture_for_triple(&second, "shared-executor", triple);
+
+        verify_bundle_executor_manifests(&[first, second], &trust_store_for(&fingerprint, &key))
+            .expect("copies with an identical signed item source have nothing to select between");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn admitted_bundle_set_rejects_shared_executor_with_differing_mode() {
+        let tmp = tempfile::tempdir().unwrap();
+        let first = tmp.path().join("first");
+        let second = tmp.path().join("second");
+        let triple = "future-vendor-platform-abi";
+        let (fingerprint, key) =
+            write_resolver_fixture_for_triple_with_mode(&first, "shared-executor", triple, 0o755);
+        write_resolver_fixture_for_triple_with_mode(&second, "shared-executor", triple, 0o750);
+
+        let error = verify_bundle_executor_manifests(
+            &[first.clone(), second.clone()],
+            &trust_store_for(&fingerprint, &key),
+        )
+        .expect_err("copies differing in signed mode must be refused");
+        let message = error.to_string();
+        assert!(message.contains(&format!("bin/{triple}/shared-executor")));
+        assert!(message.contains("differing signed item sources"));
         assert!(message.contains(&first.display().to_string()));
         assert!(message.contains(&second.display().to_string()));
     }
