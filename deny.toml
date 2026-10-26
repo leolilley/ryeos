@@ -9,6 +9,11 @@ ignore = [
     # advisory reports no vulnerability. The migration off serde_yaml is a
     # tracked item; until it lands this advisory is acknowledged, not fixed.
     "RUSTSEC-2024-0449",
+    # tokio's AsyncFd constructors accept any AsRawFd without proof of
+    # ownership. No workspace crate names AsyncFd; every descriptor tokio
+    # drives here is owned by the type that registers it. Acknowledged until
+    # the next dependency refresh moves tokio past the patched release.
+    "RUSTSEC-2026-0386",
 ]
 
 [licenses]
