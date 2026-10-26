@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-20T18:29:03Z:f90976941ffb59375a1ffccffe51c5607a2d54cdb27d40a8d5076f4ac57a8009:pMGP0LBHwn2g7/kPgShvZgcMWUoCKYGTB1ewpDdQwU4MMDIPUzGoGpY/OJMj01YnsGxkDDEuNWUqKcujJFiODQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-26T23:53:56Z:4f6d5058b9f98598d4c5b4f25dd8a6ae213105155dac1ebb2f5bf6c87a242cc4:vFjHv4RWfeQLePqga/6gfKrbtUQbQZ27CDEYlrwHteSrokJ1UYSpFZrRnAY38IA3CbdmWklIVlXgeWbDkz3zCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Core plus the graph workflow bundles.
 schema: 1
 exact_bundles:
@@ -316,6 +316,7 @@ policies:
       - ".svn/"
       - ".venv/"
       - "/.ai/config/remotes/"
+      - "/.ai/state/"
       - "__pycache__/"
       - "node_modules/"
       - "target/"
