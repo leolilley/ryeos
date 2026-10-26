@@ -161,7 +161,8 @@ jobs:
           # entrypoint does it (its functions are sourced, not copied), against a
           # throwaway anonymous /data volume, as the image's node account. Only the
           # init runs; the daemon is never started. The profile is the one each
-          # image bakes; the host class is a deployment fact and is declared here.
+          # image bakes; the host class is read from that profile's own
+          # declared classes, hosted when it declares it, else its first.
           for target in core core-scheduling core-workflow core-knowledge standard central-host local-inference hosted-workflow bundle-source f5r-controller; do
             DIGEST="$(jq -r --arg target "$target" '.[$target]["containerimage.digest"] // empty' <<<"$BAKE_METADATA")"
             [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || {
@@ -178,13 +179,21 @@ jobs:
               --entrypoint /bin/bash \
               -e RYEOS_SUBSTRATE_IMAGE="$IMAGE" \
               -e RYEOS_SUBSTRATE_PROTOCOL=1 \
-              -e RYEOS_INIT_HOST_CLASS=hosted \
               -e RYEOS_TRUST_BAKED_PUBLISHERS=1 \
               "$IMAGE" \
               -c 'source /usr/local/bin/entrypoint.sh
+                  profile=/opt/ryeos/.ai/node/init/profiles/$RYEOS_INIT_NODE_PROFILE.yaml
+                  classes="$(awk "
+                    /^ *host_classes:\$/ { base = match(\$0, /[^ ]/); on = 1; next }
+                    on && match(\$0, /[^ ]/) <= base { exit }
+                    on && match(\$0, /[^ ]/) == base + 2 && /^ +[a-z][a-z0-9_-]*:\$/ { sub(/^ +/, \"\"); sub(/:\$/, \"\"); print }
+                  " "$profile")"
+                  [[ -n "$classes" ]] || { echo "[smoke] no host classes declared in $profile" >&2; exit 1; }
+                  RYEOS_INIT_HOST_CLASS="$(grep -Fx hosted <<<"$classes" || head -n1 <<<"$classes")"
+                  export RYEOS_INIT_HOST_CLASS
                   collect_baked_publisher_trust_args /opt/ryeos
                   build_ryeos_init_args /opt/ryeos /data/app 127.0.0.1:7400
-                  echo "[smoke] profile: $RYEOS_INIT_NODE_PROFILE"
+                  echo "[smoke] profile: $RYEOS_INIT_NODE_PROFILE host class: $RYEOS_INIT_HOST_CLASS (declared: $(tr "\\n" " " <<<"$classes"))"
                   ryeos "${INIT_ARGS[@]}" "${TRUST_ARGS[@]}"'; then
               echo "::endgroup::"
               echo "first-boot init failed for image target ${target} (${IMAGE})" >&2

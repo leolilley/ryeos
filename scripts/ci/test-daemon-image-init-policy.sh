@@ -673,12 +673,16 @@ for target in core core-scheduling core-workflow core-knowledge standard central
         exit 1
     }
 done
-for required in '@${DIGEST}' 'RYEOS_TRUST_BAKED_PUBLISHERS=1' 'RYEOS_INIT_HOST_CLASS=hosted' 'RYEOS_SUBSTRATE_IMAGE="$IMAGE"'; do
+for required in '@${DIGEST}' 'RYEOS_TRUST_BAKED_PUBLISHERS=1' 'host_classes:' 'RYEOS_INIT_HOST_CLASS="$(' 'RYEOS_SUBSTRATE_IMAGE="$IMAGE"'; do
     grep -Fq -- "$required" <<<"$smoke_step" || {
         echo "composition first-boot init smoke must contain $required" >&2
         exit 1
     }
 done
+if grep -Eq -- '-e RYEOS_INIT_HOST_CLASS=' <<<"$smoke_step"; then
+    echo "composition first-boot init smoke must take the host class from each image's profile" >&2
+    exit 1
+fi
 if grep -Fq 'RYEOS_INIT_NODE_PROFILE' <<<"$smoke_step" && grep -Eq -- '-e RYEOS_INIT_NODE_PROFILE=' <<<"$smoke_step"; then
     echo "composition first-boot init smoke must use each image's baked profile" >&2
     exit 1
