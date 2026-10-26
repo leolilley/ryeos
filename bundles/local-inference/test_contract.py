@@ -30,7 +30,7 @@ WORKER_PATHS = {
     profile: BUNDLE / f".ai/workers/local-inference/{profile}.yaml"
     for profile in PROFILE_SPECS
 }
-GNU_WORKER_PATH = BUNDLE / ".ai/workers/local-inference/qwen3-0.6b-gnu-cuda-graph-free-2048-draft.yaml"
+GNU_WORKER_PATH = BUNDLE / "authoring/drafts/workers/local-inference/qwen3-0.6b-gnu-cuda-graph-free-2048-draft.yaml"
 GNU_WORKER_SOURCE = BUNDLE / ".ai/workers/local-inference/lib/local-tinygrad-gnu"
 PROVIDER_PATHS = {
     profile: BUNDLE / f".ai/config/ryeos-runtime/model-providers/{profile}.yaml"

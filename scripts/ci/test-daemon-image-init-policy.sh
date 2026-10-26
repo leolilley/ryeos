@@ -830,4 +830,14 @@ fi
     exit 1
 }
 
+# A draft descriptor must never ship inside a signed bundle tree; drafts live
+# under authoring/ until they can be admitted.
+unsigned_drafts="$(grep -rEl --include='*.yaml' --include='*.yml' \
+    "^[[:space:]]*description:[[:space:]]*['\"]?UNSIGNED" "$root"/bundles/*/.ai || true)"
+[[ -z "$unsigned_drafts" ]] || {
+    echo "bundle trees must not ship unsigned draft descriptors:" >&2
+    echo "$unsigned_drafts" >&2
+    exit 1
+}
+
 echo "daemon image init policy cases passed"

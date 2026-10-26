@@ -88,7 +88,7 @@ class RuntimeTests(unittest.TestCase):
 
     def test_gnu_ceiling_matches_authored_unsigned_product_relationship(self):
         contract = yaml.safe_load(
-            (SOURCE.parents[4] / '.ai/config/ryeos-runtime/gnu-cuda-products-draft.yaml').read_text()
+            (SOURCE.parents[4] / 'authoring/drafts/config/ryeos-runtime/gnu-cuda-products-draft.yaml').read_text()
         )
         relationship = next(
             item for item in contract['product_relationships']['relationships']
