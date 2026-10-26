@@ -1,8 +1,10 @@
 # Render controller deployment
 
 `controller.render.yaml.example` is the Render packaging for one RyeOS
-controller. It pins the hosted-workflow image from the successful v0.5.102
-release to `sha256:76845035deeefd312011f0792adbe85b0d23aac72307524284a5acb7586dd952`.
+controller. It pins the f5r-controller image built from a release's officially
+signed bundle assets by the controller-from-release workflow; the example
+carries a `<DIGEST>` placeholder in two places, to be replaced with the digest
+printed in that workflow run's summary.
 It is not a worker-runtime qualification or a grant of external execution
 authority. Validate the Blueprint with
 `render blueprints validate` and confirm the intended Render workspace. The
@@ -16,10 +18,11 @@ requires the Render Dashboard or an authorized Render API operation. Record
 the resulting service and disk IDs before proceeding. Deployment readiness at
 `/_ryeos/ready` proves only controller admission readiness.
 
-The first Blueprint sync on 2026-09-29 created service
+The first Blueprint sync on 2026-09-29 (which then pinned the v0.5.102
+hosted-workflow image `sha256:76845035deeefd312011f0792adbe85b0d23aac72307524284a5acb7586dd952`) created service
 `srv-datiea7avr4c73dm14fg` and 10 GB `/data` disk
 `dsk-datiea7avr4c73dm14og` in Singapore. Deploy
-`dep-datieb7avr4c73dm199g` finished `live` using the digest pinned above.
+`dep-datieb7avr4c73dm199g` finished `live` using that digest.
 The image's amd64 manifest was
 `sha256:918e198cee8386d57dacf68811179d893d939539f7cc1691ae13b67a91ae583e`.
 First boot installed seven bundles and retained operator fingerprint

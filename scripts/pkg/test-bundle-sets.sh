@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ryeos:signed:2026-10-22T00:00:39Z:7a3110e078735bec12de960b282912860ae9ab72b85af2405ece666532f60779:XU1JhYotKMNUzOpc6qoAAR9NEDm7PhNdetOQlE7jQMxKLNiSgeqv7R+7swlrYpLaPkomrzxQtrfVEigkTQv1Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-23T02:19:56Z:d6fd83115c50cf1588e5bd2ab163e4988dafef765bed72d074f2fc226482b78e:1rXP/T7w3X17oPPdQjVtPRMQB3+PDSYeqZM+h7WcyUglpdUTG4/2sa/k2pb4556X2z0r8ysMpbG0JrjTE8bwBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -152,6 +152,11 @@ mapfile -t core_scheduling_bins < <(ryeos_bundle_set_bin_managed_names core-sche
 for forbidden in central-auth knowledge directive graph ryeos-docs local-inference codex render-sandbox; do
   assert_rejected contains "$forbidden" "${core_scheduling[@]}"
 done
+# The release archive carries the sorted unique union of `full` and the
+# controller distribution; `full` itself does not gain render-sandbox.
+mapfile -t release_archive < <(ryeos_release_archive_bundle_names)
+[[ "${release_archive[*]}" == "browser central-auth codex core directive environment-qualification graph knowledge opencode render-sandbox ryeos-docs ryeos-ui scheduling web" ]]
+assert_rejected contains render-sandbox "${full[@]}"
 mapfile -t f5r_controller < <(ryeos_bundle_set_names f5r-controller)
 [[ "${f5r_controller[*]}" == "core graph knowledge codex render-sandbox" ]]
 mapfile -t f5r_controller_bins < <(ryeos_bundle_set_bin_managed_names f5r-controller)

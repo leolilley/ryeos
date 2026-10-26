@@ -30,7 +30,7 @@ while IFS= read -r bundle; do
     mkdir -p "$source_dir/$bundle/.ai"
     printf 'name: %s\n' "$bundle" > "$source_dir/$bundle/.ai/manifest.yaml"
     write_trust_doc "$source_dir/$bundle/PUBLISHER_TRUST.toml"
-done < <(ryeos_bundle_set_names full)
+done < <(ryeos_release_archive_bundle_names)
 mkdir -p "$source_dir/.ai/node/init/profiles"
 while IFS= read -r node_init_profile; do
     {
@@ -78,8 +78,12 @@ done
 mkdir -p "$app_root"
 printf '%s\n' "${node_profile:-none}" >> "${FAKE_RYEOS_CALLS:?}"
 [[ -n "$node_profile" ]] || exit 2
-# The verification root is a local preflight of the full profile.
-[[ "$host_class" == local ]]
+# The full profile is preflighted as a local host; the controller profile as
+# the hosting provider's container class.
+case "$node_profile" in
+    f5r-controller) [[ "$host_class" == hosted ]] ;;
+    *) [[ "$host_class" == local ]] ;;
+esac
 if [[ -n "$node_profile" ]]; then
     profile="$source_dir/.ai/node/init/profiles/$node_profile.yaml"
     [[ -f "$profile" ]]
@@ -92,7 +96,10 @@ if [[ -n "$node_profile" ]]; then
         find "$source_dir" -mindepth 1 -maxdepth 1 -type d -exec test -d '{}/.ai' \; -printf '%f\n' \
             | sort
     )"
-    [[ -n "$expected_bundles" && "$actual_bundles" == "$expected_bundles" ]]
+    # Init ignores bundles outside the profile, so the profile's members must
+    # all be present but extras are allowed.
+    [[ -n "$expected_bundles" ]]
+    [[ -z "$(comm -23 <(printf '%s\n' "$expected_bundles") <(printf '%s\n' "$actual_bundles"))" ]]
     mkdir -p "$app_root/.ai/node/policies"
     while IFS= read -r policy_name; do
         printf 'schema: 1\n' > "$app_root/.ai/node/policies/$policy_name.yaml"
@@ -113,7 +120,7 @@ for run in one two; do
         --output "$tmp/$run/ryeos-bundles-1.2.3-x86_64.tar.gz" \
         --source-date-epoch 1700000000 \
         --ryeos-bin "$fake_ryeos" >/dev/null
-    printf '%s\n' none full > "$tmp/$run/expected-init-calls"
+    printf '%s\n' none full f5r-controller > "$tmp/$run/expected-init-calls"
     cmp "$tmp/$run/expected-init-calls" "$tmp/$run/init-calls"
     (cd "$tmp/$run" && sha256sum -c ryeos-bundles-1.2.3-x86_64.tar.gz.sha256)
     "$root/scripts/release/verify-bundle-artifact.sh" \
@@ -128,6 +135,9 @@ tar -tzf "$tmp/one/ryeos-bundles-1.2.3-x86_64.tar.gz" \
     | grep -qx 'ryeos-bundles-1.2.3-x86_64/core/.ai/manifest.yaml'
 tar -tzf "$tmp/one/ryeos-bundles-1.2.3-x86_64.tar.gz" \
     | grep -qx 'ryeos-bundles-1.2.3-x86_64/.ai/node/init/profiles/hosted-workflow.yaml'
+# The controller distribution's bundle outside `full` is archived too.
+tar -tzf "$tmp/one/ryeos-bundles-1.2.3-x86_64.tar.gz" \
+    | grep -qx 'ryeos-bundles-1.2.3-x86_64/render-sandbox/.ai/manifest.yaml'
 
 mkdir "$tmp/malformed"
 malformed_checksum="$tmp/malformed/ryeos-bundles-1.2.3-x86_64.tar.gz.sha256"

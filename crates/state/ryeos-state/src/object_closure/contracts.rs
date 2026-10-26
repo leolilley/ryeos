@@ -1235,15 +1235,26 @@ fn links_persistent_session_capsule(value: &Value) -> Result<ContractLinks, Stri
     }
     match value.get("retained_external_runtime_qualification") {
         Some(Value::Null) => {}
-        Some(proof) => super::push_required_object_edge(
-            proof.get("proof").ok_or_else(|| {
-                "persistent-session external runtime qualification missing proof".to_owned()
-            })?,
-            "attestation_hash",
-            ExpectedObject::Kind("attestation"),
-            None,
-            &mut links.object_edges,
-        )?,
+        // A remote testimony's attestation lives in the origin's store; the
+        // capsule reaches only this node's own acceptance of it.
+        Some(proof) => match proof.get("remote_testimony") {
+            Some(remote) if !remote.is_null() => super::push_required_object_edge(
+                remote,
+                "acceptance_hash",
+                ExpectedObject::Kind("attestation"),
+                None,
+                &mut links.object_edges,
+            )?,
+            _ => super::push_required_object_edge(
+                proof.get("proof").ok_or_else(|| {
+                    "persistent-session external runtime qualification missing proof".to_owned()
+                })?,
+                "attestation_hash",
+                ExpectedObject::Kind("attestation"),
+                None,
+                &mut links.object_edges,
+            )?,
+        },
         None => {
             return Err("persistent-session capsule missing external runtime qualification".into());
         }

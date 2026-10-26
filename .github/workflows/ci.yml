@@ -90,6 +90,9 @@ jobs:
       - name: Check deterministic official bundle packaging
         run: ./scripts/release/test-package-bundle-artifact.sh
 
+      - name: Check released bundle materialization
+        run: ./scripts/release/test-materialize-release-bundles.sh
+
       - name: Check explicit publisher trust boundaries
         run: ./scripts/ci/test-publisher-trust-policy.sh
 

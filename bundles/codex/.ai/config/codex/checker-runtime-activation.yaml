@@ -1,0 +1,24 @@
+# ryeos:signed:2026-10-23T06:55:09Z:e6d7f19f143072bcc1d50dd71f15b3dd712834006487e2a892f78c8d59ee5bd1:gFMN9/p6oHk3ni3vFlVIMgVUdsgGkNhp4Xo0LTCXqYiLZpg5WIg1eOXD3EP9kNtf+TF43gyWtq6hKqd7Xp8CBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: codex
+schema: ryeos.external_content_activation.v3
+consumer_ref: tool:codex/qualification/consumer-runtime-verifier
+sources:
+  - id: checker-runtime-archive
+    url: https://github.com/leolilley/ryeos/releases/download/local-inference-qwen3-0.6b-v1/ryeos-local-inference-qwen3-0.6b-runtime-v1.tar.gz
+    sha256: 7d6239902fb584ef27aee8c97f5e9a0e66409750611f74d7e16235ddd4278eef
+    maximum_compressed_bytes: 24389591
+    maximum_expanded_bytes: 72448000
+    maximum_entries: 4481
+    archive_format: tar_gzip
+components:
+  - id: checker-runtime
+    storage: content
+    shape:
+      kind: whole_archive_tree
+      source: checker-runtime-archive
+      prefix: ryeos-local-inference-qwen3-0.6b-runtime-v1
+      bounds:
+        maximum_entries: 4480
+        maximum_depth: 11
+        maximum_file_bytes: 22166488
+        maximum_total_bytes: 68732630

@@ -162,7 +162,7 @@ while IFS= read -r bundle; do
     [[ -n "$bundle" ]] || continue
     bundle_source="$source_dir/$bundle"
     [[ -d "$bundle_source/.ai" ]] || {
-        ryeos_term_fail "full bundle set is missing $bundle/.ai"
+        ryeos_term_fail "release archive bundle set is missing $bundle/.ai"
         exit 2
     }
     # populate publishes one shared trust doc at the source root (asserted
@@ -172,7 +172,7 @@ while IFS= read -r bundle; do
         assert_official_trust_metadata "$bundle_source/PUBLISHER_TRUST.toml"
     fi
     cp -a "$bundle_source" "$stage/$bundle"
-done < <(ryeos_bundle_set_names full)
+done < <(ryeos_release_archive_bundle_names)
 
 if find "$stage" -type l -print -quit | grep -q .; then
     ryeos_term_fail "symbolic links are not allowed in release bundles"
@@ -274,6 +274,21 @@ actual_node_policies="$(find "$policy_directory" -mindepth 1 -maxdepth 1 -type f
     ryeos_term_fail "node init profile $node_init_profile produced the wrong policy generation"
     exit 2
 }
+
+# The released archive also feeds the remote-authoring controller image, so
+# its profile gets the same production preflight. The controller runs in a
+# hosting provider's container, which is the `hosted` host class.
+controller_profile=f5r-controller
+controller_verify_app_root="$tmp/verify-profile-$controller_profile"
+ryeos_term_update "verifying staged node init profile" "$controller_profile"
+"$ryeos_bin" init \
+    --non-interactive \
+    --app-root "$controller_verify_app_root" \
+    --source "$stage" \
+    --substrate-image-digest "$verification_substrate_digest" \
+    --substrate-protocol "$verification_substrate_protocol" \
+    --node-profile "$controller_profile" \
+    --host-class hosted >/dev/null
 
 mkdir -p "$(dirname "$output")"
 ryeos_term_update "writing deterministic archive" "$(basename "$output")"

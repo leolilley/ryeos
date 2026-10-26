@@ -14,7 +14,8 @@ its final stage of `Dockerfile.release`. The manual
 provenance and SBOM attestations, and prints each image's digest reference.
 Candidates are signed with the development publisher key, are tagged only with
 a candidate tag, and are deployed by digest. Building or pushing a candidate
-promotes nothing: only `ryeos-standard` and `ryeos-hosted-workflow` are published release images.
+promotes nothing: only `ryeos-standard`, `ryeos-central-host`, `ryeos-local-inference` and
+`ryeos-hosted-workflow` are published release images.
 
 The bundle sets are defined in `scripts/pkg/bundle-sets.sh`; the init profiles
 live in `bundles/.ai/node/init/profiles/`.

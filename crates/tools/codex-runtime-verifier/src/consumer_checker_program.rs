@@ -281,7 +281,7 @@ mod tests {
                 mode: ExternalContentMode::Pinned,
                 manifest_hash: selector.runtime.manifest_hash.clone(),
                 entry_count: 2,
-                total_bytes: 2,
+                total_bytes: selector.runtime.loader.bytes + selector.runtime.interpreter.bytes,
                 mount_root: ExternalContentMountRoot::ExecutionRuntime,
                 mount: "test-checker-runtime".to_owned(),
             },
@@ -291,7 +291,7 @@ mod tests {
                 mode: ExternalContentMode::Pinned,
                 manifest_hash: selector.code.manifest_hash.clone(),
                 entry_count: 1,
-                total_bytes: 1,
+                total_bytes: selector.code.script.bytes,
                 mount_root: ExternalContentMountRoot::ExecutionRuntime,
                 mount: "test-checker-code".to_owned(),
             },
@@ -326,6 +326,46 @@ mod tests {
                 "{mutation}"
             );
         }
+    }
+
+    #[test]
+    fn shipped_runtime_and_code_ids_select_and_refuse_wrong_entries() {
+        let selector = crate::finite_product_contract::checker_selector_fixture();
+        assert_eq!(selector.runtime.id, "checker-runtime");
+        assert_eq!(selector.code.id, "checker-code");
+        let root = set(&selector);
+        let (runtime, code) = select_realizations(&selector, &root).unwrap();
+        assert_eq!(runtime.manifest_hash, selector.runtime.manifest_hash);
+        assert_eq!(code.manifest_hash, selector.code.manifest_hash);
+
+        let mut entries = root.iter().cloned().collect::<Vec<_>>();
+        entries
+            .iter_mut()
+            .find(|e| e.id == "checker-code")
+            .unwrap()
+            .manifest_hash = "0".repeat(64);
+        let changed = ExternalContentRealizationSet::new(entries).unwrap();
+        assert!(select_realizations(&selector, &changed).is_err());
+
+        let mut entries = root.iter().cloned().collect::<Vec<_>>();
+        entries
+            .iter_mut()
+            .find(|e| e.id == "checker-runtime")
+            .unwrap()
+            .mount_root = ExternalContentMountRoot::Project;
+        let changed = ExternalContentRealizationSet::new(entries).unwrap();
+        assert!(select_realizations(&selector, &changed).is_err());
+
+        let mut entries = root.iter().cloned().collect::<Vec<_>>();
+        for entry in &mut entries {
+            entry.id = if entry.id == "checker-runtime" {
+                "checker-code".to_owned()
+            } else {
+                "checker-runtime".to_owned()
+            };
+        }
+        let swapped = ExternalContentRealizationSet::new(entries).unwrap();
+        assert!(select_realizations(&selector, &swapped).is_err());
     }
 
     #[test]

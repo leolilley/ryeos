@@ -772,3 +772,109 @@ LABEL io.ryeos.build-profile="$BUNDLE_BUILD_PROFILE"
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
   CMD ["python3", "-c", "import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('PORT','8000')+'/_ryeos/ready',timeout=3).read()"]
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
+
+# The remote-authoring controller built from the already-published, officially
+# signed release bundles. The build context `released-bundles` is a directory
+# laid out as `.ai` plus one directory per controller bundle. This stage chain
+# never runs the publication step and holds no publisher key: only the node
+# binaries are compiled here, from the tagged source and lockfile, with the
+# controller's exact native features. The bundles are the released bytes.
+FROM rust:1.95-slim@sha256:e14e87345b4d5964ddcc3491d27ee046a0f23820f340c3c1e24da6880141f7c0 AS controller-release-binaries
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl gzip openssl pkg-config libssl-dev tar xz-utils \
+        libcap-dev binutils python3 python3-yaml python3-cryptography && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY . .
+
+ARG VERSION
+ARG SOURCE_DATE_EPOCH
+ARG VCS_REF=unknown
+ARG BUILD_DATE=unknown
+ARG BUNDLE_BUILD_PROFILE=release
+ARG CARGO_BUILD_JOBS
+ENV RYEOS_VCS_REF=$VCS_REF
+ENV RYEOS_BUILD_DATE=$BUILD_DATE
+ENV RYEOS_BUILD_VERSION=$VERSION
+ENV SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH
+
+RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=ryeos-release-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=ryeos-release-cargo-target,target=/build/target-cache,sharing=locked \
+    if [ -z "${CARGO_BUILD_JOBS:-}" ]; then unset CARGO_BUILD_JOBS; fi && \
+    test -n "$VERSION" && \
+    test -n "$SOURCE_DATE_EPOCH" && \
+    source scripts/pkg/bundle-sets.sh && \
+    features=() && \
+    for package in ryeosd ryeos-cli; do \
+      selected="$(ryeos_bundle_set_cargo_features f5r-controller "$package")" && \
+      if [ -n "$selected" ]; then features+=("$selected"); fi; \
+    done && \
+    case "$BUNDLE_BUILD_PROFILE" in \
+      release) ;; \
+      latency-profiling) features+=(ryeosd/latency-profiling) ;; \
+      *) exit 2 ;; \
+    esac && \
+    feature_args=() && \
+    if [ "${#features[@]}" -gt 0 ]; then \
+      feature_args=(--features "$(IFS=,; printf '%s' "${features[*]}")"); \
+    fi && \
+    RYEOS_EXACT_BUILD_PROVENANCE=1 CARGO_TARGET_DIR=/build/target-cache \
+    cargo build --release --locked --no-default-features -p ryeosd -p ryeos-cli "${feature_args[@]}" && \
+    RYEOS_EXACT_BUILD_PROVENANCE=1 CARGO_TARGET_DIR=/build/target-cache \
+    cargo build --release --locked -p ryeos-core-tools && \
+    mkdir -p /build/target/f5r-controller && \
+    cp /build/target-cache/release/ryeosd /build/target/f5r-controller/ryeosd && \
+    cp /build/target-cache/release/ryeos /build/target/f5r-controller/ryeos && \
+    cp /build/target-cache/release/ryeos-core-tools /build/target/f5r-controller/ryeos-core-tools
+
+FROM workflow-runtime AS ryeos-f5r-controller-released
+COPY --from=controller-release-binaries /build/target/f5r-controller/ryeosd /usr/local/bin/ryeosd
+COPY --from=controller-release-binaries /build/target/f5r-controller/ryeos /usr/local/bin/ryeos
+COPY --from=controller-release-binaries /build/target/f5r-controller/ryeos-core-tools /usr/local/bin/ryeos-core-tools
+COPY --from=released-bundles / /opt/ryeos/
+COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+ENV RYEOS_APP_ROOT=/data/app
+ENV RYEOS_INIT_NODE_PROFILE=f5r-controller
+EXPOSE 8000
+ARG VERSION
+ARG VCS_REF=unknown
+ARG BUILD_DATE=unknown
+ARG BUNDLE_BUILD_PROFILE=release
+# Every trust document under the bundle tree must name the official publisher;
+# the image carries no other signer and no private key material.
+ARG OFFICIAL_PUBLISHER_FP
+RUN set -eu; \
+    test -n "$VERSION"; \
+    case "$OFFICIAL_PUBLISHER_FP" in \
+      *[!0-9a-f]*|"") echo "OFFICIAL_PUBLISHER_FP must be 64 lowercase hex digits" >&2; exit 1 ;; \
+    esac; \
+    test "${#OFFICIAL_PUBLISHER_FP}" -eq 64; \
+    test -f /opt/ryeos/.ai/PUBLISHER_TRUST.toml; \
+    for bundle in core graph knowledge codex render-sandbox; do \
+      test -d "/opt/ryeos/$bundle/.ai"; \
+    done; \
+    find /opt/ryeos -name PUBLISHER_TRUST.toml | while read -r doc; do \
+      fingerprint="$(sed -n 's/^[[:space:]]*fingerprint[[:space:]]*=[[:space:]]*"\([0-9A-Fa-f]\{64\}\)"[[:space:]]*$/\1/p' "$doc" | tr 'A-F' 'a-f')"; \
+      owner="$(sed -n 's/^[[:space:]]*owner[[:space:]]*=[[:space:]]*"\([^"]*\)"[[:space:]]*$/\1/p' "$doc")"; \
+      test "$fingerprint" = "$OFFICIAL_PUBLISHER_FP" || { echo "non-official fingerprint in $doc" >&2; exit 1; }; \
+      test "$owner" = ryeos-official || { echo "non-official owner in $doc" >&2; exit 1; }; \
+    done; \
+    test -z "$(find /opt/ryeos -type f \( -iname '*.pem' -o -iname '*.key' \) -print -quit)"
+RUN test "$(/usr/local/bin/ryeosd build-info --revision)" = "$VCS_REF"
+RUN test "$(/usr/local/bin/ryeosd build-info --profile)" = "$BUNDLE_BUILD_PROFILE"
+LABEL org.opencontainers.image.source="https://github.com/leolilley/ryeos"
+LABEL org.opencontainers.image.revision="$VCS_REF"
+LABEL org.opencontainers.image.created="$BUILD_DATE"
+LABEL io.ryeos.image="f5r-controller"
+LABEL io.ryeos.node-uid="10000"
+LABEL io.ryeos.node-gid="10000"
+LABEL io.ryeos.bundle-protocol="1.0"
+LABEL io.ryeos.build-profile="$BUNDLE_BUILD_PROFILE"
+LABEL io.ryeos.bundle-source="release:v$VERSION"
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+  CMD ["python3", "-c", "import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('PORT','8000')+'/_ryeos/ready',timeout=3).read()"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]

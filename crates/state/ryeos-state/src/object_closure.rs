@@ -2648,6 +2648,17 @@ mod tests {
         }));
         qualified["retained_external_runtime_qualification"] = json!({"proof": {}});
         assert!(typed_object_edges(&qualified).is_err());
+        // A remote product testimony reaches this node's own acceptance, not
+        // the origin's attestation.
+        qualified["retained_external_runtime_qualification"] = json!({
+            "proof": {"attestation_hash": h("aa")},
+            "remote_testimony": {"acceptance_hash": h("ad")}
+        });
+        let edges = typed_object_edges(&qualified).unwrap();
+        assert!(edges.iter().any(|edge| {
+            edge.hash == h("ad") && edge.expected == ExpectedObject::Kind("attestation")
+        }));
+        assert!(!edges.iter().any(|edge| edge.hash == h("aa")));
         let mut content_qualified = persistent.clone();
         content_qualified["retained_external_runtime_content_qualification"] =
             json!({"attestation_hash": h("ab")});

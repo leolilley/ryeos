@@ -37,6 +37,7 @@ jobs:
       contents: read
     outputs:
       version: ${{ steps.release.outputs.version }}
+      prerelease: ${{ steps.release.outputs.prerelease }}
       build_date: ${{ steps.source.outputs.build_date }}
       source_sha: ${{ steps.source.outputs.sha }}
       source_date_epoch: ${{ steps.source.outputs.source_date_epoch }}
@@ -60,8 +61,13 @@ jobs:
         run: |
           VERSION="$(scripts/release/resolve-version.sh \
             "$EVENT_NAME" "$REF_NAME" "$REQUESTED_VERSION")"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Resolved version: $VERSION"
+          PRERELEASE="$(scripts/release/resolve-version.sh \
+            "$EVENT_NAME" "$REF_NAME" "$REQUESTED_VERSION" --prerelease)"
+          {
+            echo "version=$VERSION"
+            echo "prerelease=$PRERELEASE"
+          } >> "$GITHUB_OUTPUT"
+          echo "Resolved version: $VERSION (prerelease=$PRERELEASE)"
 
       - name: Check out immutable release tag
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -69,6 +75,12 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
           ref: refs/tags/v${{ steps.release.outputs.version }}
+
+      - name: Check workspace crate versions match the release version
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: python3 -B scripts/release/check-workspace-versions.py "$VERSION" \
+          --manifests scripts/release/versioned-crates.txt
 
       - name: Resolve and verify source revision
         id: source
@@ -450,6 +462,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ needs.qualify.outputs.version }}
+          PRERELEASE: ${{ needs.qualify.outputs.prerelease }}
           ARCHIVE_EXISTS: ${{ steps.bundle-assets.outputs.archive_exists }}
           CHECKSUM_EXISTS: ${{ steps.bundle-assets.outputs.checksum_exists }}
         run: |
@@ -464,10 +477,15 @@ jobs:
             --archive "$ARCHIVE" \
             --checksum "$CHECKSUM"
           if ! gh release view "$TAG" >/dev/null 2>&1; then
+            PRERELEASE_FLAG=()
+            if [[ "$PRERELEASE" == true ]]; then
+              PRERELEASE_FLAG=(--prerelease)
+            fi
             gh release create "$TAG" \
               --verify-tag \
               --title "RyeOS ${VERSION}" \
-              --generate-notes
+              --generate-notes \
+              "${PRERELEASE_FLAG[@]}"
           fi
           # Archive-first publication keeps interrupted upload recovery safe.
           # Existing canonical bytes are never overwritten.
@@ -738,6 +756,7 @@ jobs:
       # Mutable image tags move only after all immutable images and the native
       # bundle artifact have passed verification and publication.
       - name: Promote verified images to latest
+        if: needs.qualify.outputs.prerelease != 'true'
         env:
           STANDARD_DIGEST: ${{ steps.release-digests.outputs.standard }}
           CENTRAL_DIGEST: ${{ steps.release-digests.outputs.central }}

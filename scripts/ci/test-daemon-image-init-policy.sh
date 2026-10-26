@@ -745,4 +745,63 @@ fi
     exit 1
 }
 
+# The released-bundle controller is a separate Bake contract: it builds the
+# controller daemon from the tag source but takes its bundles from the
+# released archive, so it must not be able to sign and must not be a
+# composition candidate.
+controller_release_bake="$root/docker-bake.controller-release.hcl"
+controller_release_workflow="$root/.github/workflows/build-controller-from-release.yml"
+controller_release_stage=ryeos-f5r-controller-released
+[[ "$(sed -nE 's/^target "([^"]+)" \{$/\1/p' "$controller_release_bake")" == f5r-controller-released ]] || {
+    echo "controller-release Bake contract must define exactly the f5r-controller-released target" >&2
+    exit 1
+}
+grep -Eq "^[[:space:]]*target[[:space:]]*=[[:space:]]*\"$controller_release_stage\"" "$controller_release_bake" || {
+    echo "controller-release Bake target must build the $controller_release_stage stage" >&2
+    exit 1
+}
+if grep -Eq 'secret|PUBLISHER_KEY|PUBLICATION_STAGE|inherits' "$controller_release_bake"; then
+    echo "controller-release Bake contract must not take a publisher key or inherit a composition target" >&2
+    exit 1
+fi
+grep -Fq 'released-bundles = RELEASED_BUNDLES_DIR' "$controller_release_bake" || {
+    echo "controller-release Bake target must take its bundles from the materialized release directory" >&2
+    exit 1
+}
+if grep -Fq "$controller_release_stage" "$composition_bake" "$release_bake"; then
+    echo "the released-bundle controller stage must not be a composition or release candidate" >&2
+    exit 1
+fi
+if grep -Fq 'docker-bake.controller-release.hcl' "$release_workflow"; then
+    echo "the released-bundle controller must not enter official release promotion" >&2
+    exit 1
+fi
+grep -Fq 'files: ./docker-bake.controller-release.hcl' "$controller_release_workflow" || {
+    echo "the controller-from-release workflow must bake the controller-release contract" >&2
+    exit 1
+}
+# The workflow may read the public development key to refuse its fingerprint,
+# but it must never mount a publisher signing key into the build.
+if grep -Eq 'RYEOS_PUBLISHER_KEY|id=publisher-key|secrets\.RYEOS' "$controller_release_workflow"; then
+    echo "the controller-from-release workflow must not carry a signing key" >&2
+    exit 1
+fi
+controller_release_instructions="$(dockerfile_stage_instructions "$root/Dockerfile.release" "$controller_release_stage")"
+[[ "$(grep -Fxc "$required_entrypoint" <<<"$controller_release_instructions")" -eq 1 ]] || {
+    echo "Dockerfile.release target $controller_release_stage must declare the exact tini-wrapped entrypoint once" >&2
+    exit 1
+}
+grep -Eqi '^copy --from=released-bundles / /opt/ryeos/$' <<<"$controller_release_instructions" || {
+    echo "Dockerfile.release target $controller_release_stage must take /opt/ryeos from the released bundles" >&2
+    exit 1
+}
+if grep -Eqi 'populate-bundles|RYEOS_PUBLISHER_KEY|mount=type=secret' <<<"$controller_release_instructions"; then
+    echo "Dockerfile.release target $controller_release_stage must not publish or sign bundles" >&2
+    exit 1
+fi
+[[ "$(release_runtime_base "$controller_release_stage")" == workflow-runtime ]] || {
+    echo "Dockerfile.release target $controller_release_stage must be built on the workflow runtime" >&2
+    exit 1
+}
+
 echo "daemon image init policy cases passed"

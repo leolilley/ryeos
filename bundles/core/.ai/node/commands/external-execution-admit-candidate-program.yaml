@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-23T01:20:17Z:fcc0dc45da9051352d44735d4f269f261b8e9b5a932b0e2b23d056b9483d01cf:Pjm1wDFj4TWTPfduUffl5x0fa+/gmr1GBDGfJDmsGKc0Ws65nnwBnhNPCNAanVhjI6VQyd9JFrpR43o12cEjBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-23T01:55:47Z:34d0f2198c267589e7b0be061a1425fa7431767b6d3dc08ead298b66cc09e2a1:HczjJ6ZsWEpwa4iNjJjQqD0S9wUhy0YP6JiFgSR1+HZMD/5Hpl3l+A6IL6sc+c+ojuFHKGHGxOXlzdF1CrSgDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens: [external-execution, admit-candidate-program]
 description: Derive the admitted candidate program and runtime content qualification binding for a published content qualification without writing state
 arguments:
@@ -11,9 +11,9 @@ arguments:
   - name: remote_testimony
     kind: json
     positional: 6
-    required: false
-    arity: optional
-    description: JSON object naming the local acceptance (acceptance_hash, acceptance_policy_ref) of a remote content testimony; omit for a local content qualification. Passed as --remote-testimony <json>
+    required: true
+    arity: one
+    description: JSON object naming the local acceptance (acceptance_hash, acceptance_policy_ref, owner_principal) of a remote content testimony, or null for a local content qualification. Passed as --remote-testimony <json>
 forms:
   - slots:
       - field: activation_ref
@@ -21,9 +21,9 @@ forms:
       - field: attestation_hash
       - field: runtime_manifest_hash
 help:
-  usage: ryeos external-execution admit-candidate-program <activation-ref> <coordinate-id> <attestation-hash> <runtime-manifest-hash> --required-claims <json> [--remote-testimony <json>]
+  usage: ryeos external-execution admit-candidate-program <activation-ref> <coordinate-id> <attestation-hash> <runtime-manifest-hash> --required-claims <json> --remote-testimony <json|null>
   examples:
-    - ryeos external-execution admit-candidate-program config:codex/external-authoring-activation <coordinate-id> <attestation-hash> <runtime-manifest-hash> --required-claims '["bounded_candidate_capture","candidate_only_execution"]'
+    - ryeos external-execution admit-candidate-program config:codex/external-authoring-activation <coordinate-id> <attestation-hash> <runtime-manifest-hash> --required-claims '["bounded_candidate_capture","candidate_only_execution"]' --remote-testimony null
 dispatch:
   kind: execute_ref
   execute: service:external-execution/admit-candidate-program
