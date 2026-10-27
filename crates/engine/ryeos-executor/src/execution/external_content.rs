@@ -2725,6 +2725,8 @@ mod tests {
 
     #[test]
     fn large_tree_materialization_preserves_modes_links_and_large_inodes() {
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt as _;
         let (dir, cas) = temp_cas();
         let runtime_root = dir.path().join("state");
         let runtime = lillux::PinnedDirectory::open_or_create(&runtime_root).unwrap();

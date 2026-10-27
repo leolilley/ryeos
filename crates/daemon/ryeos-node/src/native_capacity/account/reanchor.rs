@@ -1029,8 +1029,7 @@ mod controls {
             &f.operator_fingerprint,
             &f.original.node_fingerprint,
         )
-        .err()
-        .expect("tampered field");
+        .expect_err("tampered field");
         assert!(format!("{error:#}").to_lowercase().contains("signature"));
         // Bytes that do not hash to the name they sit under are not that
         // document.
