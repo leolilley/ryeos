@@ -178,7 +178,6 @@ trap 'cleanup "$?"' EXIT
 python3 - "$contract" "$policy_root/external-content.json" \
     "$archive_root" "$minimum_free_bytes" <<'PY'
 import json
-import os
 from pathlib import Path
 import sys
 
@@ -189,17 +188,15 @@ archive_root = sys.argv[3]
 minimum_free_bytes = int(sys.argv[4])
 if minimum_free_bytes > 2**63 - 1:
     raise SystemExit("minimum-free-bytes exceeds RyeOS's signed integer policy range")
-roots = {}
+# The node measures a declared root at initialization and records the
+# filesystem's own identity; this script never computes one.
+declared_roots = {}
 if archive_root:
-    identity = os.stat(archive_root, follow_symlinks=False)
-    roots["local-inference-archives"] = {
-        "path": archive_root,
-        "containing_device": identity.st_dev,
-        "root_inode": identity.st_ino,
-    }
+    declared_roots["local-inference-archives"] = {"path": archive_root}
 external = {
     "schema": 1,
-    "roots": roots,
+    "roots": {},
+    "declared_roots": declared_roots,
     "limits": {
         "max_depth": max(item["maximum_depth"] for item in bounds),
         "max_entries": max(item["maximum_entries"] for item in bounds),

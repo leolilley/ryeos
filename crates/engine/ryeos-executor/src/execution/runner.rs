@@ -3737,13 +3737,13 @@ mod process_input_selection_tests {
         let existing = root
             .create_child(std::ffi::OsStr::new(".ai"), 0o700)
             .unwrap();
-        let identity = existing.device_inode().unwrap();
+        let identity = existing.identity().unwrap();
         prepare_sparse_input_mount_target(&root, ".ai", Tree).unwrap();
         assert_eq!(
             root.open_child_directory(std::ffi::OsStr::new(".ai"))
                 .unwrap()
                 .unwrap()
-                .device_inode()
+                .identity()
                 .unwrap(),
             identity
         );

@@ -164,11 +164,12 @@ impl NativeJournalConnection {
         }
     }
 
-    /// The `(st_dev, st_ino)` of the main file the native keeper holds,
-    /// after it revalidated that its name still binds that inode.
+    /// The durable identity of the main file the native keeper holds, computed
+    /// from the keeper's descriptor after it revalidated that its name still
+    /// binds that inode.
     pub(super) fn main_identity(&self) -> Result<lillux::PinnedRegularFileIdentity> {
         match self {
-            Self::Live(connection) => Ok(regular_file_identity(connection.bound_main_identity()?)),
+            Self::Live(connection) => connection.bound_main_file_identity(),
             Self::CloseRetained(_) => {
                 anyhow::bail!("external journal close is retained; no identity is observed")
             }
@@ -215,14 +216,6 @@ impl NativeJournalConnection {
             }
         }
     }
-}
-
-/// The keeper reports the same `(st_dev, st_ino)` pair an open descriptor
-/// would, for the regular main file it holds.
-pub(super) fn regular_file_identity(
-    (containing_device, inode): (u64, u64),
-) -> lillux::PinnedRegularFileIdentity {
-    lillux::PinnedRegularFileIdentity::from_device_inode(containing_device, inode)
 }
 
 /// Establish and verify the journal's durability contract on one connection:

@@ -310,15 +310,14 @@ async fn import_filesystem(
     }
     let source_root = lillux::PinnedDirectory::open(&root_policy.path)?
         .ok_or_else(|| anyhow::anyhow!("external-content import root is unavailable"))?;
-    let (root_device, root_inode) = source_root.device_inode()?;
-    if root_policy.containing_device != root_device || root_policy.root_inode != root_inode {
+    let root_identity = source_root.identity()?;
+    if root_policy.root_identity != root_identity {
         bail!("external-content import root filesystem identity changed");
     }
     let request_digest = import_request_digest(
         &request,
         &policy.limits,
-        root_device,
-        root_inode,
+        &root_identity,
         state.ignore_matcher.as_ref(),
     )?;
     let publication_key =
@@ -1711,15 +1710,11 @@ fn open_pinned_source_file(
     if !observed.matches_directory_entry(&entry) {
         bail!("external-content source file changed inode during admission");
     }
-    Ok((
-        parent,
-        file,
-        ryeos_state::PinnedLargeObjectSourceIdentity {
-            containing_device: entry.containing_device,
-            inode: entry.inode,
-            size: observed.size(),
-        },
-    ))
+    let identity = ryeos_state::PinnedLargeObjectSourceIdentity {
+        file: lillux::pinned_regular_file_identity(&file)?,
+        size: observed.size(),
+    };
+    Ok((parent, file, identity))
 }
 
 fn open_admitted_source_tree(
@@ -1916,8 +1911,7 @@ impl ryeos_state::ExternalLargeContentSink for DurableLargeSink<'_> {
 fn import_request_digest(
     request: &FilesystemImportRequest,
     limits: &ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportLimits,
-    root_device: u64,
-    root_inode: u64,
+    root_identity: &lillux::PinnedDirectoryIdentity,
     configured_ignore: &ryeos_state::ignore::IgnoreMatcher,
 ) -> anyhow::Result<String> {
     let canonical = lillux::canonical_json(&serde_json::json!({
@@ -1933,8 +1927,7 @@ fn import_request_digest(
         },
         "selected_root_identity": {
             "logical_name": request.root,
-            "containing_device": root_device,
-            "root_inode": root_inode,
+            "root_identity": root_identity,
         },
         "limits": limits,
         "capture_floor_rules": ryeos_state::project_sync::durable_content_capture_floor_rules(),
@@ -2287,9 +2280,17 @@ mod tests {
             patterns: Vec::new(),
         })
         .unwrap();
-        let first = import_request_digest(&request, &limits, 7, 11, &ignore).unwrap();
-        let same_open_root = import_request_digest(&request, &limits, 7, 11, &ignore).unwrap();
-        let rebound_root = import_request_digest(&request, &limits, 8, 11, &ignore).unwrap();
+        let identity = |device: u64, inode: u64| -> lillux::PinnedDirectoryIdentity {
+            serde_json::from_value(
+                serde_json::json!({"filesystem": {"device": device}, "inode": inode}),
+            )
+            .unwrap()
+        };
+        let first = import_request_digest(&request, &limits, &identity(7, 11), &ignore).unwrap();
+        let same_open_root =
+            import_request_digest(&request, &limits, &identity(7, 11), &ignore).unwrap();
+        let rebound_root =
+            import_request_digest(&request, &limits, &identity(8, 11), &ignore).unwrap();
         assert_eq!(first, same_open_root);
         assert_ne!(first, rebound_root);
     }

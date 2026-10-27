@@ -1496,8 +1496,8 @@ mod tests {
             }},
             "backend": {"implementation": "linux_cgroup_v2",
                 "boot_id": "00000000-0000-4000-8000-000000000000",
-                "parent": {"containing_device": 1, "inode": 2},
-                "directory": {"containing_device": 1, "inode": 3},
+                "parent": {"filesystem": {"device": 1}, "inode": 2},
+                "directory": {"filesystem": {"device": 1}, "inode": 3},
                 "name": "producer-one"}
         }))
         .unwrap();

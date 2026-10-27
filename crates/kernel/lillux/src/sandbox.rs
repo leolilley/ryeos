@@ -6597,14 +6597,12 @@ mod imp {
     }
 
     fn directory_identity(fd: u32) -> Result<String, String> {
-        let fd = raw_fd(fd)?;
-        let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
-        syscall_zero(
-            unsafe { libc::fstat(fd, stat.as_mut_ptr()) },
-            "inspect directory identity",
-        )?;
-        let stat = unsafe { stat.assume_init() };
-        Ok(format!("dev{}-ino{}", stat.st_dev, stat.st_ino))
+        let duplicate = duplicate_fd(raw_fd(fd)?)?;
+        // SAFETY: duplicate_fd returned a new descriptor that nothing else owns.
+        let directory = unsafe { File::from_raw_fd(duplicate) };
+        crate::secure_fs::PinnedDirectoryIdentity::of_directory_descriptor(&directory)
+            .and_then(|identity| identity.canonical_text())
+            .map_err(|error| format!("inspect directory identity: {error:#}"))
     }
 
     pub fn write_descriptor(fd: u32, bytes: &[u8]) -> Result<(), String> {

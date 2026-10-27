@@ -891,7 +891,7 @@ fn admit_independent_verifier_input_root(
     );
     let root = lillux::PinnedDirectory::open(input_root)?
         .context("exact independent verifier input root absent")?;
-    let (containing_device, root_inode) = root.device_inode()?;
+    let root_identity = root.identity()?;
     let path = state.join(".ai/node/policies/external_content.yaml");
     let source = std::fs::read_to_string(&path)?;
     let mut policy: ExternalContentImportPolicyRecord =
@@ -911,8 +911,7 @@ fn admit_independent_verifier_input_root(
         "independent-verifier-inputs".into(),
         ExternalContentImportRoot {
             path: input_root.to_path_buf(),
-            containing_device,
-            root_inode,
+            root_identity,
         },
     );
     policy.validate()?;

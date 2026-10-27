@@ -99,27 +99,16 @@ fn ingest_large_object(
     std::fs::create_dir_all(scratch).unwrap();
     std::fs::write(scratch.join("payload.bin"), LARGE_OBJECT_BYTES).unwrap();
     let directory = lillux::PinnedDirectory::open(scratch).unwrap().unwrap();
-    let entry = directory
-        .entries_no_follow()
-        .unwrap()
-        .into_iter()
-        .find(|entry| entry.name == "payload.bin")
-        .unwrap();
     let file = directory
         .open_regular(std::ffi::OsStr::new("payload.bin"), false)
         .unwrap()
         .unwrap();
+    let source_identity = ryeos_state::PinnedLargeObjectSourceIdentity {
+        file: lillux::pinned_regular_file_identity(&file).unwrap(),
+        size: LARGE_OBJECT_BYTES.len() as u64,
+    };
     let ingested = store
-        .ingest_open_regular(
-            file,
-            ryeos_state::PinnedLargeObjectSourceIdentity {
-                containing_device: entry.containing_device,
-                inode: entry.inode,
-                size: LARGE_OBJECT_BYTES.len() as u64,
-            },
-            "payload.bin",
-            None,
-        )
+        .ingest_open_regular(file, source_identity, "payload.bin", None)
         .unwrap();
     ryeos_state::objects::ExternalLargeContentManifestEntry {
         path: "content".to_owned(),

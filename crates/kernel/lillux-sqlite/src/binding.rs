@@ -74,6 +74,7 @@ unsafe extern "C" {
         dev: *mut u64,
         ino: *mut u64,
     ) -> c_int;
+    fn ryeos_sqlite_binding_main_descriptor(context: *mut c_void, fd: *mut c_int) -> c_int;
     fn ryeos_sqlite_binding_main_empty(context: *mut c_void, empty: *mut c_int) -> c_int;
     fn ryeos_sqlite_binding_sync_live(
         context: *mut c_void,
@@ -596,6 +597,37 @@ impl Binding {
             "original native main identity refused ({code})"
         );
         Ok((dev, ino))
+    }
+    /// The durable identity Lillux computes from the live main keeper's own
+    /// descriptor, after confirming the descriptor still names `raw`, the
+    /// `(st_dev, st_ino)` the keeper reported for this same operation.
+    pub(super) fn main_file_identity(
+        &self,
+        raw: (u64, u64),
+    ) -> Result<lillux::PinnedRegularFileIdentity> {
+        let mut fd: c_int = -1;
+        let code = unsafe {
+            ryeos_sqlite_binding_main_descriptor(
+                self.0.expect("owned native context").as_ptr(),
+                &mut fd,
+            )
+        };
+        ensure!(
+            code == libsqlite3_sys::SQLITE_OK && fd >= 0,
+            "original native main descriptor refused ({code})"
+        );
+        // SAFETY: the keeper descriptor stays open and unchanged for the
+        // duration of this call because the binding is borrowed and Lillux
+        // duplicates it before use.
+        let borrowed = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
+        let identity = lillux::pinned_regular_file_identity_of_descriptor(borrowed)?;
+        let duplicate = borrowed.try_clone_to_owned()?;
+        let observed = lillux::observe_open_file_identity(&std::fs::File::from(duplicate))?;
+        ensure!(
+            (observed.device(), observed.inode()) == raw,
+            "original native main keeper changed identity while it was observed"
+        );
+        Ok(identity)
     }
     /// The retained existing main keeper is zero bytes and no WAL role was
     /// found when it was acquired.

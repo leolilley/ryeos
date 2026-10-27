@@ -394,7 +394,7 @@ mod tests {
         serde_json::json!({
             "schema_version": HOST_RUNTIME_BINDING_SCHEMA_VERSION,
             "app_root": "/node",
-            "app_root_identity": {"containing_device": 1, "inode": 2},
+            "app_root_identity": {"filesystem": {"device": 1}, "inode": 2},
             "node_fingerprint": "a".repeat(64),
             "account": {"implementation": "unix", "uid": 1000, "gid": 1000},
             "node_resources": {"maximum_memory_bytes": 268435456, "maximum_processes": 64},

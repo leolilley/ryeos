@@ -787,7 +787,7 @@ mod tests {
             roots["inline"]["path"],
             serde_json::json!(app_root.path().join("imports/inline").to_string_lossy())
         );
-        assert!(roots["inline"]["root_inode"].as_u64().unwrap() != 0);
+        assert!(roots["inline"]["root_identity"]["inode"].as_u64().unwrap() != 0);
     }
 
     #[test]
@@ -806,8 +806,12 @@ mod tests {
             roots["products"]["path"],
             serde_json::json!(app_root.path().join("imports/products").to_string_lossy())
         );
-        assert!(roots["products"]["containing_device"].as_u64().unwrap() != 0);
-        assert!(roots["products"]["root_inode"].as_u64().unwrap() != 0);
+        assert!(
+            roots["products"]["root_identity"]["inode"]
+                .as_u64()
+                .unwrap()
+                != 0
+        );
     }
 
     #[test]

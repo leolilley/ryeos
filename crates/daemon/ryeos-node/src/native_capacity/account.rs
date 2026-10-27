@@ -94,7 +94,7 @@ impl NativeCapacityAccountBinding {
         // This binding's canonical JSON has fixed, sorted keys; validated
         // fingerprint/nonce strings are ASCII hex. Stream the exact bytes
         // into the hash instead of allocating Value, canonical Vec and hex.
-        // Identity serializers also emit containing_device then inode.
+        // Identity serializers also emit filesystem then inode.
         #[derive(Serialize)]
         struct Units {
             allocator_steps: u64,
@@ -2454,11 +2454,11 @@ mod issuance_digest_tests {
                 cleanup_steps: if maximum { i64::MAX as u64 - 1 } else { 8 },
             };
             let directory: PinnedDirectoryIdentity = serde_json::from_value(serde_json::json!({
-                "containing_device": u64::MAX, "inode": 1,
+                "filesystem": {"device": u64::MAX}, "inode": 1,
             }))
             .unwrap();
             let account: PinnedRegularFileIdentity = serde_json::from_value(serde_json::json!({
-                "containing_device": 2, "inode": u64::MAX,
+                "filesystem": {"device": 2}, "inode": u64::MAX,
             }))
             .unwrap();
             let mut binding = NativeCapacityAccountBinding {

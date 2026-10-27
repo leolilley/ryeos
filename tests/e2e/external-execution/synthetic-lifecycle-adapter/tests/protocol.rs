@@ -337,13 +337,12 @@ fn install_live_engine(
             let archive_root = lillux::PinnedDirectory::open(&grant.archive_root)
                 .unwrap()
                 .unwrap();
-            let (containing_device, root_inode) = archive_root.device_inode().unwrap();
+            let root_identity = archive_root.identity().unwrap();
             roots.insert(
                 grant.archive_root_name.clone(),
                 ExternalContentImportRoot {
                     path: grant.archive_root.clone(),
-                    containing_device,
-                    root_inode,
+                    root_identity,
                 },
             );
             ManagedExternalContentPolicy {

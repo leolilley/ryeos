@@ -155,12 +155,11 @@ fn open_output_directory(
     relative: &str,
 ) -> anyhow::Result<Option<lillux::PinnedDirectory>> {
     let mut directory = project.try_clone()?;
-    let (device, _) = project.device_inode()?;
     for component in relative.split('/') {
         let Some(child) = directory.open_child_directory(OsStr::new(component))? else {
             return Ok(None);
         };
-        if child.device_inode()?.0 != device {
+        if directory.ensure_open_child_same_mount(&child).is_err() {
             bail!("workspace output crossed the admitted project filesystem");
         }
         directory = child;
