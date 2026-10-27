@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result, ensure};
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use ryeos_state::external_execution::transport::ExternalControllerTransportContract;
 use ryeos_state::external_execution::transport::{
     ExternalControllerTransportSelection, ExternalNetworkInputPolicy,
