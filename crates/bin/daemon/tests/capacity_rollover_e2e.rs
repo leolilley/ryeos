@@ -19,7 +19,8 @@ use common::DaemonHarness;
 use common::fast_fixture::{self, FastFixtureProfile};
 use lillux::crypto::SigningKey;
 use ryeos_node::native_capacity::{
-    ReissueRequest, inspect_capacity_account, read_capacity_reissuances, reissue_capacity,
+    ReanchorRequest, ReissueRequest, inspect_capacity_account, read_capacity_reanchors,
+    read_capacity_reissuances, reanchor_capacity, reissue_capacity,
 };
 use ryeos_node_runtime::state_lock::{StateLock, default_lock_path};
 
@@ -355,4 +356,94 @@ async fn twenty_one_rollovers_renew_the_epoch_without_exhausting() {
         assert_eq!(debited.incarnations_remaining, 15);
     }
     harness.stop_gracefully().await.expect("final stop");
+}
+
+/// Copy a sealed root to a fresh directory: every inode and the root
+/// directory itself differ, as they would on a different filesystem.
+fn moved_copy(app_root: &Path) -> (tempfile::TempDir, std::path::PathBuf) {
+    let destination = tempfile::tempdir().expect("destination for the moved node");
+    let status = std::process::Command::new("cp")
+        .arg("-a")
+        .arg(format!("{}/.", app_root.display()))
+        .arg(destination.path())
+        .status()
+        .expect("copy the app root");
+    assert!(status.success(), "copy the app root");
+    let moved = destination.path().to_path_buf();
+    (destination, moved)
+}
+
+fn reanchor(
+    app_root: &Path,
+    lock: &StateLock,
+    operator: &SigningKey,
+) -> anyhow::Result<ryeos_node::native_capacity::ReanchorReport> {
+    reanchor_capacity(ReanchorRequest {
+        app_root,
+        state_lock: lock,
+        operator_key: operator,
+        reason: "e2e move to another filesystem",
+        command: COMMAND,
+    })
+}
+
+#[test]
+fn reanchor_moves_the_account_only_through_the_operator_signed_document() {
+    let (_node_dir, app_root, _user_dir, _fixture) = sealed_core_root();
+    let operator = operator_key(&app_root);
+    // A node that was never moved is found anchored where it is.
+    {
+        let lock = StateLock::acquire(&default_lock_path(&app_root)).expect("stopped node lock");
+        let unmoved = reanchor(&app_root, &lock, &operator).expect("unmoved node");
+        assert!(unmoved.already_applied && unmoved.document_digest.is_none());
+    }
+    let (_moved_dir, moved) = moved_copy(&app_root);
+    let refusal = inspect_capacity_account(&moved).expect_err("the moved root names old places");
+    assert!(
+        format!("{refusal:#}").contains("ryeos node capacity reanchor"),
+        "{refusal:#}"
+    );
+    let lock = StateLock::acquire(&default_lock_path(&moved)).expect("stopped moved node lock");
+    let first = reanchor(&moved, &lock, &operator).expect("reanchor the moved node");
+    assert!(!first.already_applied);
+    let document_digest = first.document_digest.clone().expect("a signed document");
+    assert!(first.prior_binding_digest.is_some());
+    inspect_capacity_account(&moved)
+        .expect("boot accepts the account at the new place")
+        .expect("issued");
+    ryeos_node::init::verify_init_completion(&moved)
+        .expect("the resealed completion verifies")
+        .expect("completed");
+    let evidence = read_capacity_reanchors(&moved.join(".ai/state")).expect("read evidence");
+    assert_eq!(evidence.len(), 1);
+    assert_eq!(evidence[0].document_digest, document_digest);
+    assert_eq!(evidence[0].command, COMMAND);
+
+    // Rerunning finds the recorded binding already names this place.
+    let again = reanchor(&moved, &lock, &operator).expect("idempotent rerun");
+    assert!(again.already_applied);
+    assert_eq!(
+        again.document_digest.as_deref(),
+        Some(document_digest.as_str())
+    );
+
+    // The re-anchored account keeps its issuance: re-issuance still works.
+    let reissued = reissue(&moved, &lock, &operator, "e2e after reanchor").expect("reissue");
+    assert_eq!((reissued.from_epoch, reissued.to_epoch), (1, 2));
+    drop(lock);
+
+    // Boot accepts the new place only through the signed document: a changed
+    // byte, or an absent document, is refused.
+    let document_path = moved.join(".ai/config/onboarding/native-capacity-reanchor.json");
+    let signed = std::fs::read(&document_path).expect("published document");
+    let mut tampered = String::from_utf8(signed.clone()).unwrap();
+    tampered = tampered.replace("e2e move to another filesystem", "e2e move elsewhere");
+    std::fs::write(&document_path, tampered).unwrap();
+    assert!(inspect_capacity_account(&moved).is_err());
+    std::fs::remove_file(&document_path).unwrap();
+    assert!(inspect_capacity_account(&moved).is_err());
+    std::fs::write(&document_path, signed).unwrap();
+    inspect_capacity_account(&moved)
+        .expect("the genuine document restores acceptance")
+        .expect("issued");
 }

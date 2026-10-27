@@ -32,6 +32,7 @@ use std::sync::Mutex;
 mod anchor;
 #[cfg(all(test, target_os = "linux"))]
 mod persistence_controls;
+pub(super) mod reanchor;
 mod redo;
 pub(super) mod reissue;
 
@@ -63,6 +64,12 @@ pub struct NativeCapacityAccountBinding {
     account_identity: PinnedRegularFileIdentity,
     anchor_protocol: String,
     policy: NodeNativeCapacityPolicy,
+    /// Present only after an operator re-anchored the node to another
+    /// filesystem: the identities above are then the re-measured ones, and
+    /// this names the original issuance the account records still carry and
+    /// the signed re-anchor document that authorises the move.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reanchor: Option<reanchor::BindingReanchor>,
 }
 
 impl NativeCapacityAccountBinding {
@@ -91,6 +98,11 @@ impl NativeCapacityAccountBinding {
 
     fn issuance_digest(&self) -> Result<[u8; 32]> {
         self.validate()?;
+        // A re-anchored binding carries new identities, but the account and
+        // anchor records still carry the digest of the original issuance.
+        if let Some(reanchor) = &self.reanchor {
+            return reanchor.original_issuance();
+        }
         // This binding's canonical JSON has fixed, sorted keys; validated
         // fingerprint/nonce strings are ASCII hex. Stream the exact bytes
         // into the hash instead of allocating Value, canonical Vec and hex.
@@ -254,7 +266,8 @@ impl NativeCapacityAccountBinding {
             .context("capacity runtime absent")?;
         ensure!(
             root.identity()? == self.root_identity && runtime.identity()? == self.runtime_identity,
-            "capacity root/runtime identities changed"
+            "capacity root/runtime identities changed; if the app root was moved to another \
+             filesystem, the operator re-anchors it with `ryeos node capacity reanchor`"
         );
         root.ensure_path_binding()?;
         runtime.ensure_path_binding()?;
@@ -524,6 +537,7 @@ pub(crate) fn prepare_initial_capacity_binding(
                 .identity()?,
             anchor_protocol: anchor::PROTOCOL.to_owned(),
             policy: policy.clone(),
+            reanchor: None,
         };
         binding.validate()?;
         let genesis = CapacityRecord {
@@ -652,12 +666,16 @@ pub(crate) fn load_existing_capacity_binding(
         lillux::canonical_json(&serde_json::to_value(&document.body)?)?.as_bytes(),
         &signature,
     )?;
-    document
-        .body
-        .binding
-        .require_installed(app_root, node_fingerprint, policy)?;
+    // An operator re-anchor supersedes the identities this issuance recorded
+    // at its original place; without one the binding is returned as issued.
+    let binding =
+        document
+            .body
+            .binding
+            .with_current_reanchor(app_root, operator, operator_fingerprint)?;
+    binding.require_installed(app_root, node_fingerprint, policy)?;
     input.require_original()?;
-    Ok(document.body.binding)
+    Ok(binding)
 }
 
 /// One durable account image. `epoch` counts the grants opened under this
@@ -2469,6 +2487,7 @@ mod issuance_digest_tests {
                 account_directory_identity: directory,
                 account_identity: account,
                 anchor_protocol: anchor::PROTOCOL.to_owned(),
+                reanchor: None,
                 policy: NodeNativeCapacityPolicy {
                     schema: 6,
                     issuance_nonce: "a".repeat(32),

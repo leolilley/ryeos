@@ -5,6 +5,11 @@
 //! different number. A persisted directory or file identity therefore names the
 //! filesystem's own identity together with the inode. The value is opaque:
 //! callers may store and compare it, never interpret it.
+//!
+//! A btrfs filesystem shares one UUID across all its subvolumes and every
+//! subvolume root is inode 256, so `{uuid, inode}` alone collides across
+//! subvolumes. Where the kernel reports a subvolume id (`STATX_SUBVOL`), it is
+//! part of the identity; where it does not, no subvolume is recorded.
 
 use std::fs::File;
 
@@ -18,6 +23,7 @@ enum Repr {
     Uuid {
         len: u8,
         bytes: [u8; MAX_UUID_BYTES],
+        subvolume: Option<u64>,
     },
     Device(u64),
 }
@@ -33,21 +39,33 @@ pub struct FilesystemIdentity(Repr);
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(untagged, deny_unknown_fields)]
 enum Wire {
-    Uuid { uuid: String },
-    Device { device: u64 },
+    /// `subvolume` is omitted when the kernel reported none, so the keys stay
+    /// in sorted order (`subvolume` before `uuid`) for canonical digests.
+    Uuid {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subvolume: Option<u64>,
+        uuid: String,
+    },
+    Device {
+        device: u64,
+    },
 }
 
 impl From<FilesystemIdentity> for Wire {
     fn from(identity: FilesystemIdentity) -> Self {
         match identity.0 {
-            Repr::Uuid { len, bytes } => {
+            Repr::Uuid {
+                len,
+                bytes,
+                subvolume,
+            } => {
                 use std::fmt::Write as _;
                 let mut uuid = String::with_capacity(usize::from(len) * 2);
                 for byte in &bytes[..usize::from(len)] {
                     // Writing to a String cannot fail.
                     let _ = write!(uuid, "{byte:02x}");
                 }
-                Wire::Uuid { uuid }
+                Wire::Uuid { subvolume, uuid }
             }
             Repr::Device(device) => Wire::Device { device },
         }
@@ -60,7 +78,7 @@ impl TryFrom<Wire> for FilesystemIdentity {
     fn try_from(wire: Wire) -> std::result::Result<Self, Self::Error> {
         match wire {
             Wire::Device { device } => Ok(Self(Repr::Device(device))),
-            Wire::Uuid { uuid } => {
+            Wire::Uuid { subvolume, uuid } => {
                 let text = uuid.as_bytes();
                 if text.is_empty() || text.len() > MAX_UUID_BYTES * 2 || text.len() % 2 != 0 {
                     return Err("filesystem uuid has an invalid length".to_owned());
@@ -73,6 +91,7 @@ impl TryFrom<Wire> for FilesystemIdentity {
                     len: u8::try_from(text.len() / 2)
                         .map_err(|_| "filesystem uuid has an invalid length".to_owned())?,
                     bytes,
+                    subvolume,
                 }))
             }
         }
@@ -105,6 +124,7 @@ pub(crate) enum UuidProbe {
 pub(crate) fn select_filesystem_identity(
     probe: UuidProbe,
     st_dev: u64,
+    subvolume: Option<u64>,
 ) -> Result<FilesystemIdentity> {
     match probe {
         UuidProbe::Reported { len, bytes } => {
@@ -116,6 +136,7 @@ pub(crate) fn select_filesystem_identity(
             Ok(FilesystemIdentity(Repr::Uuid {
                 len,
                 bytes: canonical,
+                subvolume,
             }))
         }
         UuidProbe::Failed(errno) => {
@@ -142,7 +163,36 @@ fn uuid_unsupported(_errno: i32) -> bool {
     false
 }
 
+/// Whether a durable identity survives the same data being re-attached under
+/// another device number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IdentityStability {
+    /// Named by the filesystem's own UUID.
+    ReattachStable,
+    /// Named by the filesystem's own UUID and the subvolume id the kernel
+    /// reported, which separates btrfs subvolumes that share a UUID.
+    ReattachStableWithSubvolume,
+    /// No filesystem UUID was available, so the identity is the kernel's
+    /// device number and holds only while this attachment lasts.
+    AttachmentBound,
+}
+
 impl FilesystemIdentity {
+    /// Whether this identity survives a re-attach. This is a report of what
+    /// was discovered, not a way to read the identity.
+    pub fn stability(&self) -> IdentityStability {
+        match self.0 {
+            Repr::Uuid {
+                subvolume: Some(_), ..
+            } => IdentityStability::ReattachStableWithSubvolume,
+            Repr::Uuid {
+                subvolume: None, ..
+            } => IdentityStability::ReattachStable,
+            Repr::Device(_) => IdentityStability::AttachmentBound,
+        }
+    }
+
     /// Identity of the filesystem holding `file`.
     pub(crate) fn of_descriptor(file: &File) -> Result<Self> {
         #[cfg(not(unix))]
@@ -154,9 +204,88 @@ impl FilesystemIdentity {
         {
             use std::os::unix::fs::MetadataExt as _;
             let st_dev = file.metadata()?.dev();
-            select_filesystem_identity(probe_uuid(file), st_dev)
+            select_filesystem_identity(probe_uuid(file), st_dev, subvolume_of(file)?)
         }
     }
+
+    /// The identity of the filesystem holding `entry`, a child of `parent`,
+    /// when `entry` is a path-only descriptor from which the UUID cannot be
+    /// read. The UUID comes from `parent`; the subvolume is read from the
+    /// entry's own descriptor and must equal the parent's, because a
+    /// different subvolume is a different identity.
+    pub(crate) fn of_parent_and_entry(parent: &File, entry: &File) -> Result<Self> {
+        #[cfg(not(unix))]
+        {
+            let _ = (parent, entry);
+            bail!("filesystem identity is unavailable on this platform");
+        }
+        #[cfg(unix)]
+        {
+            let identity = Self::of_descriptor(parent)?;
+            if let Repr::Uuid { subvolume, .. } = identity.0 {
+                if subvolume_of(entry)? != subvolume {
+                    bail!("entry is in another subvolume than its parent directory");
+                }
+            }
+            Ok(identity)
+        }
+    }
+}
+
+/// `STATX_SUBVOL` (Linux 6.10).
+#[cfg(target_os = "linux")]
+const STATX_SUBVOL: u32 = 0x8000;
+/// Byte offsets inside `struct statx`: `stx_mask` and `stx_subvol`.
+#[cfg(target_os = "linux")]
+const STATX_MASK_OFFSET: usize = 0;
+#[cfg(target_os = "linux")]
+const STATX_SUBVOL_OFFSET: usize = 0xa0;
+#[cfg(target_os = "linux")]
+const STATX_BYTES: usize = 256;
+
+/// The subvolume id a `statx` result carries, only when its mask has the bit.
+pub(crate) fn subvolume_from_statx(mask: u32, value: u64) -> Option<u64> {
+    const SUBVOL_BIT: u32 = 0x8000;
+    (mask & SUBVOL_BIT != 0).then_some(value)
+}
+
+/// The subvolume of an open descriptor, including a path-only one, or `None`
+/// when the kernel or filesystem reports none.
+#[cfg(target_os = "linux")]
+fn subvolume_of(file: &File) -> Result<Option<u64>> {
+    use std::os::fd::AsRawFd as _;
+    let mut buffer = [0_u64; STATX_BYTES / 8];
+    // SAFETY: the descriptor is open for the call, the empty path with
+    // AT_EMPTY_PATH names the descriptor itself, and the kernel writes at most
+    // STATX_BYTES bytes into the exclusively borrowed buffer.
+    let status = unsafe {
+        libc::syscall(
+            libc::SYS_statx,
+            file.as_raw_fd(),
+            c"".as_ptr(),
+            libc::AT_EMPTY_PATH,
+            STATX_SUBVOL,
+            buffer.as_mut_ptr(),
+        )
+    };
+    if status != 0 {
+        let error = std::io::Error::last_os_error();
+        return match error.raw_os_error() {
+            Some(libc::ENOSYS | libc::EOPNOTSUPP | libc::EINVAL) => Ok(None),
+            _ => Err(error).context("read subvolume of open descriptor"),
+        };
+    }
+    // SAFETY: `buffer` is 256 initialized bytes; read the two fields at their
+    // fixed `struct statx` offsets without alignment assumptions.
+    let bytes = unsafe { std::slice::from_raw_parts(buffer.as_ptr().cast::<u8>(), STATX_BYTES) };
+    let mask = u32::from_ne_bytes(bytes[STATX_MASK_OFFSET..STATX_MASK_OFFSET + 4].try_into()?);
+    let value = u64::from_ne_bytes(bytes[STATX_SUBVOL_OFFSET..STATX_SUBVOL_OFFSET + 8].try_into()?);
+    Ok(subvolume_from_statx(mask, value))
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn subvolume_of(_file: &File) -> Result<Option<u64>> {
+    Ok(None)
 }
 
 /// `struct fsuuid2 { __u8 len; __u8 uuid[16]; }`.
@@ -206,6 +335,10 @@ fn probe_uuid(_file: &File) -> UuidProbe {
 mod tests {
     use super::*;
 
+    fn select(probe: UuidProbe, st_dev: u64) -> Result<FilesystemIdentity> {
+        select_filesystem_identity(probe, st_dev, None)
+    }
+
     fn uuid(first: u8) -> UuidProbe {
         let mut bytes = [0; MAX_UUID_BYTES];
         bytes[0] = first;
@@ -215,43 +348,43 @@ mod tests {
 
     #[test]
     fn same_uuid_with_different_device_is_the_same_filesystem() {
-        let before = select_filesystem_identity(uuid(1), 100).unwrap();
-        let after = select_filesystem_identity(uuid(1), 200).unwrap();
+        let before = select(uuid(1), 100).unwrap();
+        let after = select(uuid(1), 200).unwrap();
         assert_eq!(before, after);
     }
 
     #[test]
     fn different_uuid_is_a_different_filesystem() {
-        let left = select_filesystem_identity(uuid(1), 100).unwrap();
-        let right = select_filesystem_identity(uuid(2), 100).unwrap();
+        let left = select(uuid(1), 100).unwrap();
+        let right = select(uuid(2), 100).unwrap();
         assert_ne!(left, right);
     }
 
     #[test]
     fn missing_uuid_falls_back_to_the_device_number() {
         for errno in [libc::ENOTTY, libc::EOPNOTSUPP, libc::ENOSYS, libc::EINVAL] {
-            let a = select_filesystem_identity(UuidProbe::Failed(errno), 7).unwrap();
-            let b = select_filesystem_identity(UuidProbe::Failed(errno), 7).unwrap();
-            let c = select_filesystem_identity(UuidProbe::Failed(errno), 8).unwrap();
+            let a = select(UuidProbe::Failed(errno), 7).unwrap();
+            let b = select(UuidProbe::Failed(errno), 7).unwrap();
+            let c = select(UuidProbe::Failed(errno), 8).unwrap();
             assert_eq!(a, b);
             assert_ne!(a, c);
         }
         assert_ne!(
-            select_filesystem_identity(UuidProbe::Failed(libc::ENOTTY), 7).unwrap(),
-            select_filesystem_identity(uuid(1), 7).unwrap()
+            select(UuidProbe::Failed(libc::ENOTTY), 7).unwrap(),
+            select(uuid(1), 7).unwrap()
         );
     }
 
     #[test]
     fn other_errors_and_invalid_lengths_are_refused() {
-        assert!(select_filesystem_identity(UuidProbe::Failed(libc::EBADF), 7).is_err());
-        assert!(select_filesystem_identity(UuidProbe::Failed(libc::EIO), 7).is_err());
+        assert!(select(UuidProbe::Failed(libc::EBADF), 7).is_err());
+        assert!(select(UuidProbe::Failed(libc::EIO), 7).is_err());
         for len in [0_u8, 17] {
             let probe = UuidProbe::Reported {
                 len,
                 bytes: [1; MAX_UUID_BYTES],
             };
-            assert!(select_filesystem_identity(probe, 7).is_err());
+            assert!(select(probe, 7).is_err());
         }
     }
 
@@ -262,14 +395,14 @@ mod tests {
         left[0] = 5;
         right[0] = 5;
         right[10] = 77;
-        let left = select_filesystem_identity(
+        let left = select(
             UuidProbe::Reported {
                 len: 4,
                 bytes: left,
             },
             1,
         );
-        let right = select_filesystem_identity(
+        let right = select(
             UuidProbe::Reported {
                 len: 4,
                 bytes: right,
@@ -281,14 +414,14 @@ mod tests {
 
     #[test]
     fn serialization_round_trips_and_refuses_unknown_shapes() {
-        let identity = select_filesystem_identity(uuid(0xab), 1).unwrap();
+        let identity = select(uuid(0xab), 1).unwrap();
         let text = serde_json::to_string(&identity).unwrap();
         assert!(text.contains("ab"), "{text}");
         assert_eq!(
             serde_json::from_str::<FilesystemIdentity>(&text).unwrap(),
             identity
         );
-        let device = select_filesystem_identity(UuidProbe::Failed(libc::ENOTTY), 42).unwrap();
+        let device = select(UuidProbe::Failed(libc::ENOTTY), 42).unwrap();
         let text = serde_json::to_string(&device).unwrap();
         assert_eq!(
             serde_json::from_str::<FilesystemIdentity>(&text).unwrap(),
@@ -307,6 +440,43 @@ mod tests {
                 "{bad}"
             );
         }
+    }
+
+    #[test]
+    fn subvolume_roots_with_the_same_uuid_and_inode_are_different() {
+        let root = |subvolume: Option<u64>, dev: u64| {
+            select_filesystem_identity(uuid(1), dev, subvolume).unwrap()
+        };
+        // Two btrfs subvolume roots: one UUID, inode 256 in each.
+        assert_ne!(root(Some(256), 10), root(Some(257), 10));
+        // A reattach keeps the UUID and subvolume and changes only st_dev.
+        assert_eq!(root(Some(256), 10), root(Some(256), 99));
+        // A reported subvolume is never equal to none being reported.
+        assert_ne!(root(Some(256), 10), root(None, 10));
+    }
+
+    #[test]
+    fn subvolume_is_taken_only_when_the_mask_has_the_bit() {
+        assert_eq!(subvolume_from_statx(0x8000 | 0x7ff, 5), Some(5));
+        assert_eq!(subvolume_from_statx(0x7ff, 5), None);
+    }
+
+    #[test]
+    fn subvolume_serialization_is_sorted_omitted_when_absent_and_strict() {
+        let with = select_filesystem_identity(uuid(0xab), 1, Some(256)).unwrap();
+        let text = serde_json::to_string(&with).unwrap();
+        assert!(text.starts_with(r#"{"subvolume":256,"uuid":""#), "{text}");
+        assert_eq!(
+            serde_json::from_str::<FilesystemIdentity>(&text).unwrap(),
+            with
+        );
+        let without = select_filesystem_identity(uuid(0xab), 1, None).unwrap();
+        let text = serde_json::to_string(&without).unwrap();
+        assert!(text.starts_with(r#"{"uuid":""#), "{text}");
+        assert_ne!(with, without);
+        assert!(
+            serde_json::from_str::<FilesystemIdentity>(r#"{"subvolume":"x","uuid":"ab"}"#).is_err()
+        );
     }
 
     #[cfg(target_os = "linux")]

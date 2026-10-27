@@ -10,6 +10,7 @@
 //!   - `ryeos node status` — show local node lifecycle status
 //!   - `ryeos node doctor` — offline "why won't it start" checklist
 //!   - `ryeos node capacity reissue` — open the next native-capacity epoch on a stopped node
+//!   - `ryeos node capacity reanchor` — sign a stopped node's native-capacity account onto the filesystem its data moved to
 //!   - `ryeos node reset execution-history` — explicit offline epoch retirement
 //!   - `ryeos node reset execution-history-scratch` — clear stranded reset scratch
 //!   - `ryeos node reset replay-indexes` — explicit clean-cut replay activation
@@ -98,6 +99,11 @@ const LOCAL_COMMANDS: &[LocalCommandDescriptor] = &[
     LocalCommandDescriptor {
         tokens: &["node", "capacity", "reissue"],
         summary: "Open the next native-capacity epoch on a stopped node, under the operator key",
+        category: "lifecycle",
+    },
+    LocalCommandDescriptor {
+        tokens: &["node", "capacity", "reanchor"],
+        summary: "Anchor a stopped node's native-capacity account at the filesystem its data moved to, under the operator key",
         category: "lifecycle",
     },
     LocalCommandDescriptor {
@@ -237,6 +243,10 @@ pub async fn try_dispatch(
         }
         ("node", Some("capacity")) if argv.get(2).map(String::as_str) == Some("reissue") => {
             run_node_capacity_reissue_command(&argv[3..], console).map_err(map_local_err)?;
+            Ok(true)
+        }
+        ("node", Some("capacity")) if argv.get(2).map(String::as_str) == Some("reanchor") => {
+            run_node_capacity_reanchor_command(&argv[3..], console).map_err(map_local_err)?;
             Ok(true)
         }
         ("node", Some("external-execution"))
@@ -1783,6 +1793,112 @@ fn capacity_reissue_banner(
     banner
 }
 
+// ── ryeos node capacity reanchor ────────────────────────────────────
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "ryeos node capacity reanchor",
+    about = "Anchor a stopped node's native-capacity account at the filesystem its data \
+             moved to. The operator key signs a document naming the exact prior binding \
+             and the newly measured root and runtime identities; boot accepts the account \
+             at the new place only through it. Refused while an incarnation debit is \
+             outstanding.",
+    no_binary_name = true
+)]
+struct NodeCapacityReanchorArgs {
+    /// App root (parent of `.ai/`). Defaults to XDG data dir / ryeos.
+    #[arg(long)]
+    app_root: Option<PathBuf>,
+
+    /// Why the operator moves the account; recorded in the signed document
+    /// and the evidence log.
+    #[arg(long)]
+    reason: String,
+
+    /// Emit JSON instead of human-readable text.
+    #[arg(long)]
+    json: bool,
+}
+
+fn run_node_capacity_reanchor_command(
+    argv: &[String],
+    console: &crate::tty::Console,
+) -> Result<()> {
+    let Some(args) = parse_or_render_help::<NodeCapacityReanchorArgs>(argv, console)? else {
+        return Ok(());
+    };
+    let controller = LifecycleController::from_env(local_env(args.app_root)?);
+    let app_root = controller.config().app_root.clone();
+    // A running daemon holds the state lock, so re-anchoring refuses while the
+    // node is up.
+    let state_lock = ryeos_node_runtime::state_lock::StateLock::acquire(
+        &ryeos_node_runtime::state_lock::default_lock_path(&app_root),
+    )
+    .context("capacity reanchor requires the node to be stopped")?;
+    let operator_key_path = app_root
+        .join(ryeos_engine::AI_DIR)
+        .join("config/keys/signing/private_key.pem");
+    let operator_pem = zeroize::Zeroizing::new(String::from_utf8(
+        lillux::read_regular_file_bounded_no_follow(&operator_key_path, 32 * 1024)
+            .with_context(|| format!("read operator key {}", operator_key_path.display()))?,
+    )?);
+    let operator_key = {
+        use lillux::crypto::DecodePrivateKey as _;
+        lillux::crypto::SigningKey::from_pkcs8_pem(operator_pem.as_str())
+            .context("decode operator signing key")?
+    };
+    let report = ryeos_node::native_capacity::reanchor_capacity(
+        ryeos_node::native_capacity::ReanchorRequest {
+            app_root: &app_root,
+            state_lock: &state_lock,
+            operator_key: &operator_key,
+            reason: &args.reason,
+            command: "ryeos node capacity reanchor",
+        },
+    )?;
+    if args.json {
+        crate::tty::write_json(&serde_json::json!({ "app_root": app_root, "reanchor": report }))?;
+        return Ok(());
+    }
+    console.status(&capacity_reanchor_banner(&app_root, &report))?;
+    Ok(())
+}
+
+fn capacity_reanchor_banner(
+    app_root: &std::path::Path,
+    report: &ryeos_node::native_capacity::ReanchorReport,
+) -> crate::tty::StatusBanner {
+    let mut banner = if report.already_applied {
+        let mut banner = crate::tty::StatusBanner::new(
+            crate::tty::Tone::Neutral,
+            "ALREADY ANCHORED: the capacity account is recorded at this place".to_owned(),
+        );
+        banner.detail = Some("nothing was written".to_owned());
+        banner
+    } else {
+        crate::tty::StatusBanner::new(
+            crate::tty::Tone::Success,
+            "CAPACITY RE-ANCHORED: the account is now authorised at this place".to_owned(),
+        )
+    };
+    banner.rows.push(crate::tty::Row::key_value(
+        "app root",
+        app_root.display().to_string(),
+    ));
+    if let Some(document) = &report.document_digest {
+        banner
+            .rows
+            .push(crate::tty::Row::key_value("document", document.clone()));
+    }
+    if let Some(prior) = &report.prior_binding_digest {
+        banner.rows.push(crate::tty::Row::key_value(
+            "replaces binding",
+            prior.clone(),
+        ));
+    }
+    banner
+}
+
 // ── ryeos node doctor ───────────────────────────────────────────────
 
 #[derive(Parser, Debug)]
@@ -2046,6 +2162,7 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
     // not recovery: a torn or foreign record is reported, never repaired here.
     if initialized {
         checks.push(native_capacity_check(&config.app_root));
+        checks.push(durable_identity_check(&config.app_root));
     } else {
         checks.push(check(
             "native_capacity",
@@ -2385,6 +2502,41 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
 /// Doctor row for the native-capacity account: healthy with its summary,
 /// a warning with the cure when the allowance is spent and the signed policy
 /// lets the operator re-issue, a failure when it does not.
+fn durable_identity_check(
+    app_root: &std::path::Path,
+) -> ryeos_core_tools::actions::doctor::CheckResult {
+    use lillux::IdentityStability::{AttachmentBound, ReattachStable, ReattachStableWithSubvolume};
+    use ryeos_core_tools::actions::doctor::{FAIL, OK, WARN};
+    match ryeos_node::capability_report::DurableIdentityFacts::observe(app_root) {
+        Ok(facts) => {
+            let (status, note) = match facts.app_root {
+                ReattachStable => (
+                    OK,
+                    "the app root's durable identity is the filesystem UUID: it survives the volume being re-attached under another device",
+                ),
+                ReattachStableWithSubvolume => (
+                    OK,
+                    "the app root's durable identity is the filesystem UUID and subvolume id: it survives the volume being re-attached under another device",
+                ),
+                AttachmentBound => (
+                    WARN,
+                    "the filesystem reports no UUID, so the app root's durable identity is the device number and holds only while this attachment lasts; a re-attached volume needs `ryeos node capacity reanchor`",
+                ),
+            };
+            check(
+                "durable_identity",
+                status,
+                serde_json::json!({ "app_root": facts.app_root, "note": note }),
+            )
+        }
+        Err(error) => check(
+            "durable_identity",
+            FAIL,
+            serde_json::json!({ "error": format!("{error:#}") }),
+        ),
+    }
+}
+
 fn native_capacity_check(
     app_root: &std::path::Path,
 ) -> ryeos_core_tools::actions::doctor::CheckResult {
@@ -2423,7 +2575,7 @@ fn native_capacity_check(
             FAIL,
             serde_json::json!({
                 "error": format!("{error:#}"),
-                "fix": "the account or its anchor is unreadable or foreign; re-provision the node, do not repair records by hand",
+                "fix": "the account or its anchor is unreadable or foreign. If the app root was moved to another filesystem, `ryeos node capacity reanchor --reason \"...\"` anchors it at the new place; otherwise re-provision the node, do not repair records by hand",
             }),
         ),
     }
@@ -3480,6 +3632,61 @@ mod tests {
     }
 
     #[test]
+    fn reanchor_banner_reports_the_signed_document_or_that_nothing_moved() {
+        let report = ryeos_node::native_capacity::ReanchorReport {
+            document_digest: Some("a".repeat(64)),
+            prior_binding_digest: Some("b".repeat(64)),
+            already_applied: false,
+        };
+        let banner = capacity_reanchor_banner(std::path::Path::new("/srv/node"), &report);
+        assert!(banner.heading.starts_with("CAPACITY RE-ANCHORED"));
+        let value = |banner: &crate::tty::StatusBanner, key: &str| {
+            banner
+                .rows
+                .iter()
+                .find(|row| row.key.as_deref() == Some(key))
+                .map(|row| row.value.clone())
+        };
+        assert_eq!(value(&banner, "document"), Some("a".repeat(64)));
+        assert_eq!(value(&banner, "replaces binding"), Some("b".repeat(64)));
+        let unmoved = capacity_reanchor_banner(
+            std::path::Path::new("/srv/node"),
+            &ryeos_node::native_capacity::ReanchorReport {
+                document_digest: None,
+                prior_binding_digest: None,
+                already_applied: true,
+            },
+        );
+        assert!(unmoved.heading.starts_with("ALREADY ANCHORED"));
+        assert_eq!(value(&unmoved, "document"), None);
+    }
+
+    #[test]
+    fn doctor_reports_whether_the_app_root_identity_survives_a_reattach() {
+        let directory = tempfile::tempdir().unwrap();
+        let check = durable_identity_check(directory.path());
+        assert_eq!(check.name, "durable_identity");
+        assert!(
+            check.status == ryeos_core_tools::actions::doctor::OK
+                || check.status == ryeos_core_tools::actions::doctor::WARN,
+            "{}",
+            check.detail
+        );
+        let stability = check.detail["app_root"].as_str().unwrap();
+        assert!(
+            [
+                "reattach_stable",
+                "reattach_stable_with_subvolume",
+                "attachment_bound"
+            ]
+            .contains(&stability),
+            "{stability}"
+        );
+        let missing = durable_identity_check(&directory.path().join("absent"));
+        assert_eq!(missing.status, ryeos_core_tools::actions::doctor::FAIL);
+    }
+
+    #[test]
     fn doctor_renders_composition_storage_and_exposure_rows() {
         use lillux::process_control::{
             CapabilityEvidence, HostFacts, ProofSource, STORAGE_DURABLE_ROOT,
@@ -3520,6 +3727,9 @@ mod tests {
                 std::path::Path::new("/"),
                 std::path::Path::new("/"),
             ),
+            durable_identity: ryeos_node::capability_report::DurableIdentityFacts {
+                app_root: lillux::IdentityStability::ReattachStable,
+            },
             provided: std::collections::BTreeMap::new(),
             missing,
             capacity: std::collections::BTreeMap::new(),

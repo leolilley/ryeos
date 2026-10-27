@@ -19,7 +19,7 @@ use lillux::process_control::{
 };
 use serde::{Deserialize, Serialize};
 
-pub const CAPABILITY_REPORT_SCHEMA: &str = "ryeos.node.capability-report/v7";
+pub const CAPABILITY_REPORT_SCHEMA: &str = "ryeos.node.capability-report/v8";
 /// Provider-delivered environment values available for authorized delivery.
 pub const SECRETS_PROVIDER_ENV: &str = "secrets:provider_env";
 /// Provider id of the environment the hosting provider delivers to the node
@@ -132,6 +132,29 @@ pub struct FloorAdmission {
     pub unmet: BTreeMap<String, String>,
 }
 
+/// What the node discovered about how durably its persisted identities name
+/// the app root's filesystem. Report only: nothing here gates admission.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DurableIdentityFacts {
+    /// Whether the app root's durable identity is reattach-stable (the
+    /// filesystem UUID, with or without a subvolume id) or attachment-bound
+    /// (the device number fallback).
+    pub app_root: lillux::IdentityStability,
+}
+
+impl DurableIdentityFacts {
+    /// Observe the app root through a pinned descriptor.
+    pub fn observe(app_root: &Path) -> Result<Self> {
+        let root = lillux::PinnedDirectory::open(app_root)
+            .with_context(|| format!("open app root {}", app_root.display()))?
+            .with_context(|| format!("app root {} is absent", app_root.display()))?;
+        Ok(Self {
+            app_root: root.identity()?.filesystem().stability(),
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NodeCapabilityReport {
@@ -150,6 +173,8 @@ pub struct NodeCapabilityReport {
     /// The root every credential profile home lives under, and every
     /// directory from the app root down to it, as observed.
     pub credential_home: PrivateDirectoryFacts,
+    /// How durably persisted identities name the app root's filesystem.
+    pub durable_identity: DurableIdentityFacts,
     pub provided: BTreeMap<String, CapabilityEvidence>,
     pub missing: BTreeMap<String, String>,
     /// Budgets a placement could reserve against, by open name.
@@ -272,6 +297,7 @@ impl NodeCapabilityReport {
             exposure: NodeExposure::unattested(inputs.listeners),
             host,
             credential_home,
+            durable_identity: DurableIdentityFacts::observe(inputs.app_root)?,
             provided: view.provided,
             missing: view.missing,
             capacity,
@@ -806,6 +832,34 @@ fn refusal_text(
 mod tests {
     use super::*;
 
+    #[test]
+    fn durable_identity_facts_report_stability_and_serialize_by_name() {
+        let directory = tempfile::tempdir().unwrap();
+        let facts = DurableIdentityFacts::observe(directory.path()).unwrap();
+        let value = serde_json::to_value(&facts).unwrap();
+        assert!(
+            [
+                "reattach_stable",
+                "reattach_stable_with_subvolume",
+                "attachment_bound"
+            ]
+            .contains(&value["app_root"].as_str().unwrap()),
+            "{value}"
+        );
+        assert_eq!(
+            serde_json::from_value::<DurableIdentityFacts>(value).unwrap(),
+            facts
+        );
+        assert!(DurableIdentityFacts::observe(&directory.path().join("absent")).is_err());
+        let attached = DurableIdentityFacts {
+            app_root: lillux::IdentityStability::AttachmentBound,
+        };
+        assert_eq!(
+            serde_json::to_value(attached).unwrap(),
+            serde_json::json!({"app_root": "attachment_bound"})
+        );
+    }
+
     use lillux::process_control::{
         CapabilityRequirementSpec, DirectoryStepFacts, HOST_PROVIDER, MAX_CAPABILITY_ENTRIES,
         MAX_CAPABILITY_NAME_BYTES, MAX_CAPABILITY_TEXT_BYTES,
@@ -882,6 +936,9 @@ mod tests {
             exposure: NodeExposure::unattested(vec!["127.0.0.1:7400".to_owned()]),
             host: HostFacts::observe(0, Path::new("/")),
             credential_home: private_home(0o700, 40),
+            durable_identity: DurableIdentityFacts {
+                app_root: lillux::IdentityStability::ReattachStable,
+            },
             floor: match_floor(&requires, &provided),
             provided: provided.provided,
             missing: provided.missing,

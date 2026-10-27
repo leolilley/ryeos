@@ -162,7 +162,7 @@ enum Step {
 /// The record owners of a stopped node, opened under the operator's lock.
 /// Work and time are bounded by the policy's recovery envelope even though
 /// nothing is charged durably: an operator command is still finite work.
-struct StoppedCapacityAccount {
+pub(super) struct StoppedCapacityAccount {
     account: RetainedStore,
     anchor: RetainedAnchor,
     onboarding: PinnedDirectory,
@@ -195,7 +195,7 @@ impl Budget {
 }
 
 impl StoppedCapacityAccount {
-    fn open(
+    pub(super) fn open(
         directory: PinnedDirectory,
         account_identity: lillux::PinnedRegularFileIdentity,
         onboarding: PinnedDirectory,
@@ -221,6 +221,37 @@ impl StoppedCapacityAccount {
             },
             fail_after: Cell::new(None),
         })
+    }
+
+    /// Load the anchor and refuse unless the stopped account carries no
+    /// outstanding incarnation debit and holds its anchor's target image.
+    /// A debit, live or dead, is settled by a restart or a re-issuance,
+    /// never by moving the account's location.
+    pub(super) fn require_no_outstanding_debit(
+        &mut self,
+        policy: &NodeNativeCapacityPolicy,
+    ) -> Result<()> {
+        self.anchor
+            .load(policy, &self.issuance, self.budget.deadline, &|steps| {
+                self.budget.pay(steps)
+            })?;
+        let current = *self.anchor.current()?;
+        let bytes = self
+            .account
+            .read_bytes(self.budget.deadline, &|steps| self.budget.pay(steps))?;
+        ensure!(
+            current.accepts_account_bytes(&bytes)?,
+            "capacity account corruption has no permitted redo"
+        );
+        ensure!(
+            bytes == encode(current.target())?,
+            "capacity account has an unapplied redo; start the node or re-issue to settle it first"
+        );
+        ensure!(
+            current.target().outstanding.is_none(),
+            "an incarnation debit is outstanding; settle it before moving the account"
+        );
+        Ok(())
     }
 
     fn crash_after(&self, step: Step) -> Result<()> {
@@ -1025,6 +1056,23 @@ mod controls {
         f.debit_dead_incarnation();
         assert!(f.run(None).unwrap_err().to_string().contains("epoch bound"));
         assert_eq!(f.current().0.epoch(), 2);
+    }
+
+    #[test]
+    fn reanchor_precondition_refuses_an_outstanding_debit() {
+        let f = Fixture::new();
+        f.owner()
+            .require_no_outstanding_debit(&f.policy)
+            .expect("a fresh account has no debit");
+        f.debit_dead_incarnation();
+        let error = f
+            .owner()
+            .require_no_outstanding_debit(&f.policy)
+            .expect_err("an outstanding debit, even a dead one, blocks a move");
+        assert!(
+            format!("{error:#}").contains("incarnation debit is outstanding"),
+            "{error:#}"
+        );
     }
 
     #[test]

@@ -41,7 +41,7 @@ pub fn install_planned_removal_hook(hook: PlannedRemovalHook) {
 }
 
 mod filesystem_identity;
-pub use filesystem_identity::FilesystemIdentity;
+pub use filesystem_identity::{FilesystemIdentity, IdentityStability};
 mod descriptor_observation;
 pub use descriptor_observation::RetainedFileDescriptorObservation;
 #[cfg(target_os = "linux")]
@@ -3584,7 +3584,14 @@ impl PinnedDirectory {
         }
         #[cfg(unix)]
         {
-            self.regular_identity_of_observation(&observe_open_file_identity(pin)?)
+            let identity =
+                self.regular_identity_of_observation(&observe_open_file_identity(pin)?)?;
+            // The pin's own descriptor supplies the subvolume, which must
+            // match the parent's; the UUID comes from the parent.
+            Ok(PinnedRegularFileIdentity {
+                filesystem: FilesystemIdentity::of_parent_and_entry(&self.directory, pin)?,
+                inode: identity.inode,
+            })
         }
     }
 
