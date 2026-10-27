@@ -947,7 +947,7 @@ fn capture_directory(
                     .open_child_directory(OsStr::new(&name))?
                     .ok_or_else(|| anyhow::anyhow!("external content directory {path} vanished"))?;
                 directory.ensure_open_child_same_mount(&child)?;
-                if !child.matches_entry_metadata(&entry)? {
+                if !child.matches_entry_metadata(entry)? {
                     anyhow::bail!("external content directory {path} changed during capture");
                 }
                 capture_directory(
