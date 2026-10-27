@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-26T23:53:56Z:a8a75fb3f623f2144f3ec4f09c79356b4ec35b2acd1388b7f65be4e4ad401e14:uodUzyo+c2kA+RC4cmEBCkusPbDqagaPqmuGOZqALIBPFx6PViZN+0G7aIPh783g7+Ko6oFsNIXz+rJVzI1CAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-27T07:21:51Z:bf00be1258407857a1458090c61c1b87bdd472575a5a2d602487c5e87ca69210:l0hfOLOIllZPow5bRd90LySaPt6m1hMtYnxPe8l6q1ay4Om32MiuGB6j4vKf8jU1g3HqaijDPeV6kmQApxgKCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - browser
@@ -320,7 +320,10 @@ policies:
             # provider from an administrator-owned host association at daemon boot.
             mode: required
             control_timeout_ms: 5000
-          trusted_process_group_sessions: false
+          # The development qualification policies settle their verifiers as
+          # trusted process groups; a local development host that proves scope
+          # recovery admits that settlement.
+          trusted_process_group_sessions: true
           mode: enforce
           backend:
             bundle: core
