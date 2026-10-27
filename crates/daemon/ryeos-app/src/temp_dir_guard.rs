@@ -88,6 +88,11 @@ pub struct TempDirGuard {
     /// Retain its ORIGINAL guard here; neither path lookup nor a pool registry
     /// may recreate this local physical-close authority.
     owned_workspace_lifeline: Mutex<Option<Arc<TempDirGuard>>>,
+    /// Daemon-owned writable scratch that carries runtime state for an
+    /// execution whose materialized project is shared and read-only. It is
+    /// installed at most once, before the guard is shared with a launch, and
+    /// is removed when the last holder of this guard drops.
+    runtime_state_scratch: std::sync::OnceLock<Arc<TempDirGuard>>,
 }
 
 impl TempDirGuard {
@@ -106,6 +111,7 @@ impl TempDirGuard {
             finite_cleanup_deadline: Mutex::new(None),
             workspace_view: Mutex::new(None),
             owned_workspace_lifeline: Mutex::new(None),
+            runtime_state_scratch: std::sync::OnceLock::new(),
         }
     }
 
@@ -133,6 +139,7 @@ impl TempDirGuard {
             finite_cleanup_deadline: Mutex::new(None),
             workspace_view: Mutex::new(Some(WorkspaceViewSlot::Uncreated)),
             owned_workspace_lifeline: Mutex::new(None),
+            runtime_state_scratch: std::sync::OnceLock::new(),
         })
     }
 
@@ -154,6 +161,7 @@ impl TempDirGuard {
             finite_cleanup_deadline: Mutex::new(None),
             workspace_view: Mutex::new(None),
             owned_workspace_lifeline: Mutex::new(None),
+            runtime_state_scratch: std::sync::OnceLock::new(),
         }
     }
 
@@ -177,6 +185,7 @@ impl TempDirGuard {
             finite_cleanup_deadline: Mutex::new(None),
             workspace_view: Mutex::new(None),
             owned_workspace_lifeline: Mutex::new(None),
+            runtime_state_scratch: std::sync::OnceLock::new(),
         }
     }
 
@@ -435,6 +444,30 @@ impl TempDirGuard {
             *slot = Some(workspace);
         }
         Ok(())
+    }
+
+    /// Attach the writable runtime-state scratch for a read-only materialized
+    /// project. The scratch must lie outside this guard's own directory and
+    /// can be attached only once.
+    pub fn install_runtime_state_scratch(&self, scratch: Arc<TempDirGuard>) -> anyhow::Result<()> {
+        if scratch.effective_path.starts_with(&self.effective_path) {
+            anyhow::bail!(
+                "runtime state scratch {} lies inside the materialized project {}",
+                scratch.effective_path.display(),
+                self.effective_path.display()
+            );
+        }
+        self.runtime_state_scratch
+            .set(scratch)
+            .map_err(|_| anyhow::anyhow!("runtime state scratch is already installed"))
+    }
+
+    /// The writable runtime-state root for a read-only materialized project,
+    /// when one was installed. Pure: it never creates or probes a directory.
+    pub fn runtime_state_root(&self) -> Option<&std::path::Path> {
+        self.runtime_state_scratch
+            .get()
+            .map(|scratch| scratch.effective_path.as_path())
     }
 
     /// Exact existing owner, never a new guard synthesized from a journal path.
