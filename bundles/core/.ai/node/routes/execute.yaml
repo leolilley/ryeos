@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-09T05:54:13Z:d9446662a3ab2793b63286c3c9356989d7ebff0ce610ab7783fe09a64d10e720:Gkt0Cz8S1GJgM9ToTcgKFsi9BTfFKudmyqQKL71Ma2QyUQONKFKgDMfvegmJTtu8WJa5JUqzQoFh7qi9ee5TBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-27T08:17:49Z:bf97a85716f737354823b26810e0bf8d7b57314bf190be9817e456aaeff3c4ea:lAH8qoS3+imZraMUcCiZ7gu6NDaIB7QRuSsxAhptqMTmtSD6SlS8vM1tSVp6OZpNxKnOQ21lJXiV8MXuHi3eDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 id: core/execute
 path: /execute
 methods:
@@ -8,7 +8,10 @@ request:
   body: json
 limits:
   body_bytes_max: 10485760
-  timeout_ms: 300000
+  # A product qualification proof re-verifies its subject tree on every call;
+  # a gigabyte-scale subject takes longer than five minutes. The bound limits
+  # the caller's wait, never the work, which continues server-side either way.
+  timeout_ms: 1800000
   concurrent_max: 100
 response:
   mode: execute
