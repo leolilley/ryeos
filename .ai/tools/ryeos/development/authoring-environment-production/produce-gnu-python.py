@@ -1,3 +1,4 @@
+# ryeos:signed:2026-10-26T23:21:33Z:8f22d893d8364ba155f6fab2b58d3f85e407535c1b68ac2e965bb4b0c5c0b5e4:GxeVcTEfSFK+O9vEO47drjbw5OaffNp9xXxoqXIR86CGlbWKnO4qCtO0DWvG3B5Q5p1HMgy0WgpXwSuIPCOUAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # ryeos-tool:
 #   category: ryeos/development/authoring-environment-production
 #   version: "1.0.0"

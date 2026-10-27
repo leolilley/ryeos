@@ -1,5 +1,8 @@
 # GNU CUDA graph-free compatibility product — unsigned source
 
+Its descriptors live under `authoring/drafts/` (outside the signed `.ai/` tree, see
+`authoring/drafts/README.md`).
+
 The distinct `qwen3-0.6b-gnu-cuda-graph-free-2048-draft` worker runs the
 existing persistent-session/Qwen implementation under selected GNU Python.
 CPU workers and their signed source remain unchanged. This product is a

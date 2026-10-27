@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-22T07:04:36Z:636813417439f36fc0a2eb7c951c498188d3ab6381ee5c1f00a264b78e71443f:+iJg/Lpl3XecxgtGGSBhU4o7FWx9vAHMdMfidaojy6+cxhn38fkbnfZvhWo3t81lk2CrGsNWiBxxOz60XVYhBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-26T22:23:00Z:ba1bf9507f952f392491cc4724fdf41a4339849e4886981f6010301ec4dc2103:5HTt5DTxQUWJNampG/Ud4XwIzkzEZsZk/VE5XvgoJ9jYNsLOsMSWmD5p3l1P3aYI+N+E5TPUmc3rhTey5LC9DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Controller of remote Codex authoring leases: runs the Codex app server
 # and the render-sandbox lease adapter, and runs no schedules.
 schema: 1
@@ -392,10 +392,13 @@ policies:
         allowed_https_hosts:
           - releases.openai.com
         max_redirects: 0
-        max_archives: 1
+        # Two activations hold this controller's worker runtimes: the Codex
+        # package (two large members) and the checker runtime, a CPython tree
+        # of about 4500 entries. The member ceiling is sized for that tree.
+        max_archives: 2
         max_compressed_bytes: 134217728
         max_expanded_bytes: 335544320
-        max_members: 64
+        max_members: 8192
         max_member_bytes: 268435456
         max_concurrent_activations: 1
         cache_budget_bytes: 536870912
