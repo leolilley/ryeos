@@ -10,8 +10,9 @@ use std::sync::Arc;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct SourceFact {
-    device: u64,
-    inode: u64,
+    /// Durable identity of the source role file, never the kernel's
+    /// attachment number.
+    file: lillux::PinnedRegularFileIdentity,
     byte_length: u64,
 }
 
@@ -76,8 +77,7 @@ impl InspectionSourcePlan {
                     "inspection source exceeds native extent range"
                 );
                 roles[index] = Some(SourceFact {
-                    device: fact.device(),
-                    inode: fact.inode(),
+                    file: source.regular_identity_of_observation(&fact)?,
                     byte_length: fact.size(),
                 });
                 pins.push(pin);
@@ -137,8 +137,7 @@ impl InspectionSourcePlan {
             match (&self.roles[role], observed) {
                 (None, None) => true,
                 (Some(expected), Some(observed)) =>
-                    expected.device == observed.device
-                        && expected.inode == observed.inode
+                    expected.file == observed.file
                         && expected.byte_length == observed.byte_length
                         && observed.content_sha256.is_none(),
                 _ => false,
@@ -174,8 +173,7 @@ impl InspectionSourcePlan {
                     );
                     let fact = lillux::observe_open_file_identity(&pin)?;
                     ensure!(
-                        fact.device() == expected.device
-                            && fact.inode() == expected.inode
+                        source.regular_identity_of_observation(&fact)? == expected.file
                             && fact.size() == expected.byte_length,
                         "inspection source differs from original plan"
                     );
@@ -230,7 +228,7 @@ impl OperationalSourcePins {
     }
 }
 impl SourceFact {
-    fn capture_pin(pin: &File) -> Result<Self> {
+    fn capture_pin(parent: &lillux::PinnedDirectory, pin: &File) -> Result<Self> {
         ensure!(pin.metadata()?.is_file(), "source role is not regular");
         let fact = lillux::observe_open_file_identity(pin)?;
         ensure!(
@@ -238,30 +236,33 @@ impl SourceFact {
             "source extent exceeds native range"
         );
         Ok(Self {
-            device: fact.device(),
-            inode: fact.inode(),
+            file: parent.regular_identity_of_observation(&fact)?,
             byte_length: fact.size(),
         })
     }
     fn require_retained_pin(
         &self,
+        parent: &lillux::PinnedDirectory,
         pin: &lillux_sqlite::RetainedOriginalMetadataPin,
         require_extent: bool,
     ) -> Result<()> {
         let current = pin.observed_identity()?;
         ensure!(
-            current.device() == self.device
-                && current.inode() == self.inode
+            parent.regular_identity_of_observation(&current)? == self.file
                 && (!require_extent || current.size() == self.byte_length),
             "actual retained source pin differs from signed original identity"
         );
         Ok(())
     }
-    fn require_pin(&self, pin: &File, require_extent: bool) -> Result<()> {
-        let current = Self::capture_pin(pin)?;
+    fn require_pin(
+        &self,
+        parent: &lillux::PinnedDirectory,
+        pin: &File,
+        require_extent: bool,
+    ) -> Result<()> {
+        let current = Self::capture_pin(parent, pin)?;
         ensure!(
-            current.device == self.device
-                && current.inode == self.inode
+            current.file == self.file
                 && (!require_extent || current.byte_length == self.byte_length),
             "actual source pin differs from signed original identity"
         );
@@ -282,7 +283,7 @@ impl OperationalSourcePlan {
             std::array::from_fn(|_| None);
         for (index, name) in names.iter().enumerate() {
             if let Some(pin) = runtime.open_mount_entry(name)? {
-                roles[index] = Some(SourceFact::capture_pin(&pin)?);
+                roles[index] = Some(SourceFact::capture_pin(runtime, &pin)?);
                 // SAFETY: this is the actual regular O_PATH pin captured
                 // above from the locked namespace, not a descriptor clone.
                 pins[index] =
@@ -294,7 +295,7 @@ impl OperationalSourcePlan {
                 ryeos_state::operational::OPERATIONAL_INITIALIZED_FILENAME,
             ))?
             .context("established Operational initialization marker absent")?;
-        let marker = SourceFact::capture_pin(&marker_pin)?;
+        let marker = SourceFact::capture_pin(runtime, &marker_pin)?;
         let plan = Self {
             directory_identity: serde_json::to_string(&runtime.identity()?)?,
             roles,
@@ -346,7 +347,7 @@ impl OperationalSourcePlan {
             "Operational provenance selects another runtime namespace"
         );
         let mut coordinates = std::collections::BTreeSet::new();
-        let mut physical = std::collections::BTreeSet::new();
+        let mut physical = Vec::new();
         for copy in copies {
             for (name, fact) in role_names(&copy.database_name)?
                 .into_iter()
@@ -357,10 +358,8 @@ impl OperationalSourcePlan {
                     "duplicate source coordinate"
                 );
                 if let Some(fact) = fact {
-                    ensure!(
-                        physical.insert((fact.device, fact.inode)),
-                        "aliased source inode"
-                    );
+                    ensure!(!physical.contains(&fact.file), "aliased source inode");
+                    physical.push(fact.file);
                 }
             }
         }
@@ -380,9 +379,10 @@ impl OperationalSourcePlan {
             );
             if let Some(fact) = fact {
                 ensure!(
-                    physical.insert((fact.device, fact.inode)),
+                    !physical.contains(&fact.file),
                     "Operational source inode aliases another source"
                 );
+                physical.push(fact.file);
             }
         }
         Ok(())
@@ -414,8 +414,8 @@ impl OperationalSourcePlan {
             match (expected, pin, current) {
                 (None, None, None) => {}
                 (Some(fact), Some(original), Some(current)) => {
-                    fact.require_retained_pin(original, true)?;
-                    fact.require_pin(&current, true)?;
+                    fact.require_retained_pin(runtime, original, true)?;
+                    fact.require_pin(runtime, &current, true)?;
                 }
                 _ => anyhow::bail!("Operational source presence changed before admission"),
             }
@@ -433,13 +433,13 @@ impl OperationalSourcePlan {
         let expected = self.roles[0]
             .as_ref()
             .context("Operational main fact absent")?;
-        expected.require_retained_pin(pins.main()?, false)?;
+        expected.require_retained_pin(runtime, pins.main()?, false)?;
         let current = runtime
             .open_mount_entry(OsStr::new(
                 ryeos_state::operational::OPERATIONAL_DB_FILENAME,
             ))?
             .context("Operational main coordinate disappeared")?;
-        expected.require_pin(&current, false)
+        expected.require_pin(runtime, &current, false)
     }
     fn require_marker_identity(
         &self,
@@ -447,13 +447,14 @@ impl OperationalSourcePlan {
         pins: &OperationalSourcePins,
     ) -> Result<()> {
         self.require_directory(runtime)?;
-        self.marker.require_retained_pin(pins.marker(), true)?;
+        self.marker
+            .require_retained_pin(runtime, pins.marker(), true)?;
         let current = runtime
             .open_mount_entry(OsStr::new(
                 ryeos_state::operational::OPERATIONAL_INITIALIZED_FILENAME,
             ))?
             .context("Operational marker coordinate disappeared")?;
-        self.marker.require_pin(&current, true)
+        self.marker.require_pin(runtime, &current, true)
     }
     /// Caller must irreversibly debit the real original read/memory dimensions
     /// before the actual alias-excluding reader. No default debit is supplied.
@@ -523,7 +524,7 @@ pub(super) fn validate_sources(plans: &[InspectionSourcePlan; 2]) -> Result<()> 
         "inspection source ordering differs"
     );
     let mut coordinates = std::collections::BTreeSet::new();
-    let mut physical = std::collections::BTreeSet::new();
+    let mut physical = Vec::new();
     for plan in plans {
         plan.validate()?;
         for (name, fact) in role_names(&plan.database_name)?.iter().zip(&plan.roles) {
@@ -533,9 +534,10 @@ pub(super) fn validate_sources(plans: &[InspectionSourcePlan; 2]) -> Result<()> 
             );
             if let Some(fact) = fact {
                 ensure!(
-                    physical.insert((fact.device, fact.inode)),
+                    !physical.contains(&fact.file),
                     "inspection source roles alias the same inode"
                 );
+                physical.push(fact.file);
             }
         }
     }

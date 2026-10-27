@@ -1953,9 +1953,10 @@ impl OriginalInspectionSettlement {
                 claim_sha256: lillux::sha256_hex(&claim.signed),
                 claim_nonce: claim.record.claim_nonce.clone(),
                 ledger_identity: claim.ledger.identity()?,
-                reservation: (
-                    self.admission.reservation_identity.device(),
-                    self.admission.reservation_identity.inode(),
+                reservation: Some(
+                    claim
+                        .ledger
+                        .regular_identity_of_observation(&self.admission.reservation_identity)?,
                 ),
             },
             CompletedReleaseFacts {
@@ -6083,10 +6084,17 @@ impl OriginalInspectionSettlement {
                 for (slot, pin) in inventory {
                     self.admission.debit_original(2)?;
                     let identity = pin.observed_identity()?;
+                    // Each pin is a regular child of the directory it was taken
+                    // from, which supplies the filesystem identity.
+                    let parent = match slot {
+                        0..=7 => &claim._source_roots[usize::from(slot / 4)],
+                        8..=12 => &claim.runtime,
+                        super::creation_evidence::ISSUED_RESERVATION_PIN_SLOT => &claim.ledger,
+                        _ => anyhow::bail!("retired pin slot {slot} has no parent directory"),
+                    };
                     facts.push(super::creation_evidence::RetiredPinFact {
                         slot,
-                        device: identity.device(),
-                        inode: identity.inode(),
+                        file: parent.regular_identity_of_observation(&identity)?,
                         byte_length: identity.size(),
                     });
                     pins.push(pin);

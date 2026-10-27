@@ -363,6 +363,16 @@ impl ProjectionLease {
 // No Drop: only explicit original cleanup disposes the native lease owner.
 
 pub(super) struct Binding(Option<NonNull<c_void>>);
+
+/// The raw `(st_dev, st_ino, length)` this process observed from the live
+/// entry whose durable identity the caller already verified. The vendored
+/// native layer compares it against its own `fstat`; it is never persisted.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct StoppedRawExpectation {
+    pub(super) device: u64,
+    pub(super) inode: u64,
+    pub(super) byte_length: u64,
+}
 // SAFETY: the outer owner opens exactly one FULL_MUTEX connection. Native
 // context admits one main handle, serializes callbacks under that connection,
 // and retains descriptors until connection close. This permits moving the
@@ -405,7 +415,7 @@ impl Binding {
         root: &std::fs::File,
         names: &[String],
         selected: [i32; 3],
-        expected: &[Option<crate::SqliteRoleIdentity>; 3],
+        expected: &[Option<StoppedRawExpectation>; 3],
     ) -> std::result::Result<Self, (anyhow::Error, Option<Self>)> {
         use std::os::fd::AsRawFd;
         let names = names

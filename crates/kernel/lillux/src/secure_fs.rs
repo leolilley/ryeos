@@ -671,6 +671,11 @@ impl PinnedRegularFileIdentity {
     pub fn same_filesystem(&self, other: &Self) -> bool {
         self.filesystem == other.filesystem
     }
+
+    /// Whether this value names an inode at all; inode zero never does.
+    pub fn names_an_inode(&self) -> bool {
+        self.inode != 0
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -3544,6 +3549,98 @@ impl PinnedDirectory {
             let metadata = self.directory.metadata()?;
             Ok((metadata.dev(), metadata.ino()))
         }
+    }
+
+    /// The durable identity of a regular directory entry beneath this
+    /// directory. The filesystem identity comes from this directory's own
+    /// descriptor, which is a real directory fd; the entry's raw `st_dev`
+    /// must equal this directory's raw `st_dev` in the same call, which proves
+    /// both live on one filesystem without opening the entry.
+    pub fn regular_identity_of_entry(
+        &self,
+        entry: &PinnedDirectoryEntryMetadata,
+    ) -> Result<PinnedRegularFileIdentity> {
+        ensure!(
+            entry.entry_type == PinnedEntryType::Regular,
+            "directory entry is not a regular file"
+        );
+        self.require_same_device(entry.containing_device)?;
+        Ok(PinnedRegularFileIdentity {
+            filesystem: self.filesystem_identity()?,
+            inode: entry.inode,
+        })
+    }
+
+    /// The durable identity of an already-open regular file pin of a child of
+    /// this directory, including a path-only (`O_PATH`) pin from which the
+    /// filesystem UUID cannot be read. As for
+    /// [`PinnedDirectory::regular_identity_of_entry`], the pin's raw `st_dev`
+    /// must equal this directory's in the same call.
+    pub fn regular_identity_of_pin(&self, pin: &File) -> Result<PinnedRegularFileIdentity> {
+        #[cfg(not(unix))]
+        {
+            let _ = pin;
+            anyhow::bail!("pinned regular-file identity is unavailable on this platform");
+        }
+        #[cfg(unix)]
+        {
+            self.regular_identity_of_observation(&observe_open_file_identity(pin)?)
+        }
+    }
+
+    /// The durable identity named by an observation of a regular child of
+    /// this directory taken from a descriptor that is still held, with the
+    /// same same-device requirement as
+    /// [`PinnedDirectory::regular_identity_of_pin`].
+    pub fn regular_identity_of_observation(
+        &self,
+        observed: &OpenFileIdentity,
+    ) -> Result<PinnedRegularFileIdentity> {
+        #[cfg(not(unix))]
+        {
+            let _ = observed;
+            anyhow::bail!("pinned regular-file identity is unavailable on this platform");
+        }
+        #[cfg(unix)]
+        {
+            ensure!(
+                observed.file_type == libc::S_IFREG,
+                "descriptor is not a regular file"
+            );
+            self.require_same_device(observed.device)?;
+            Ok(PinnedRegularFileIdentity {
+                filesystem: self.filesystem_identity()?,
+                inode: observed.inode,
+            })
+        }
+    }
+
+    /// The durable identity of a regular child of this directory known only by
+    /// the raw coordinates another owner recorded when it retired the file,
+    /// with the same same-device requirement as
+    /// [`PinnedDirectory::regular_identity_of_pin`].
+    pub fn regular_identity_of_coordinates(
+        &self,
+        device: u64,
+        inode: u64,
+    ) -> Result<PinnedRegularFileIdentity> {
+        self.require_same_device(device)?;
+        Ok(PinnedRegularFileIdentity {
+            filesystem: self.filesystem_identity()?,
+            inode,
+        })
+    }
+
+    fn require_same_device(&self, device: u64) -> Result<()> {
+        ensure!(
+            self.raw_device_inode()?.0 == device,
+            "entry is not on the same filesystem as its parent directory"
+        );
+        Ok(())
+    }
+
+    fn filesystem_identity(&self) -> Result<FilesystemIdentity> {
+        FilesystemIdentity::of_descriptor(&self.directory)
     }
 
     /// Whether this open directory is the very inode a just-taken entry

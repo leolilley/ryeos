@@ -92,8 +92,9 @@ pub enum SchedulerRetirementPhase {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SchedulerRetirementRoleIdentity {
-    pub device: u64,
-    pub inode: u64,
+    /// Durable identity of the role file: the filesystem's own identity plus
+    /// the inode, never the kernel's attachment number.
+    pub file: lillux::PinnedRegularFileIdentity,
     pub byte_length: u64,
     #[serde(deserialize_with = "required_nullable_observation_field")]
     pub content_sha256: Option<String>,
@@ -111,7 +112,7 @@ impl SchedulerRetirementRoleIdentity {
             );
         }
         ensure!(
-            self.inode != 0,
+            self.file.names_an_inode(),
             "scheduler retirement role inode is invalid"
         );
         Ok(())
@@ -282,7 +283,7 @@ impl SchedulerRetirementIntent {
                 "original scheduler accounting overflows"
             );
         }
-        let mut physical_sources = std::collections::BTreeSet::new();
+        let mut physical_sources = Vec::new();
         for source in &self.scheduler_sources {
             match (&source.source, &source.current) {
                 (SchedulerRetirementStoppedSource::Absent, None) => {}
@@ -290,9 +291,10 @@ impl SchedulerRetirementIntent {
                     identity.validate()?;
                     ensure!(
                         identity.content_sha256.is_some()
-                            && physical_sources.insert((identity.device, identity.inode)),
+                            && !physical_sources.contains(&identity.file),
                         "original scheduler sources lack digests or alias a physical role"
                     );
+                    physical_sources.push(identity.file);
                 }
                 _ => anyhow::bail!("original scheduler source must be canonical or absent"),
             }
@@ -415,12 +417,10 @@ pub enum SchedulerRetirementNonRegularKind {
 pub enum SchedulerRetirementObservedCoordinate {
     Absent,
     SameOriginal {
-        device: u64,
-        inode: u64,
+        file: lillux::PinnedRegularFileIdentity,
     },
     ForeignRegular {
-        device: u64,
-        inode: u64,
+        file: lillux::PinnedRegularFileIdentity,
     },
     NonRegular {
         kind: SchedulerRetirementNonRegularKind,
@@ -538,12 +538,10 @@ enum ObservationCoordinateWire {
     // Tagged unit variants otherwise discard unknown fields.
     Absent {},
     SameOriginal {
-        device: u64,
-        inode: u64,
+        file: lillux::PinnedRegularFileIdentity,
     },
     ForeignRegular {
-        device: u64,
-        inode: u64,
+        file: lillux::PinnedRegularFileIdentity,
     },
     NonRegular {
         kind: SchedulerRetirementNonRegularKind,
@@ -571,11 +569,11 @@ impl From<SchedulerRetirementObservedCoordinate> for ObservationCoordinateWire {
     fn from(coordinate: SchedulerRetirementObservedCoordinate) -> Self {
         match coordinate {
             SchedulerRetirementObservedCoordinate::Absent => Self::Absent {},
-            SchedulerRetirementObservedCoordinate::SameOriginal { device, inode } => {
-                Self::SameOriginal { device, inode }
+            SchedulerRetirementObservedCoordinate::SameOriginal { file } => {
+                Self::SameOriginal { file }
             }
-            SchedulerRetirementObservedCoordinate::ForeignRegular { device, inode } => {
-                Self::ForeignRegular { device, inode }
+            SchedulerRetirementObservedCoordinate::ForeignRegular { file } => {
+                Self::ForeignRegular { file }
             }
             SchedulerRetirementObservedCoordinate::NonRegular { kind } => Self::NonRegular { kind },
             SchedulerRetirementObservedCoordinate::Unreadable { error_sha256 } => {
@@ -588,12 +586,8 @@ impl From<ObservationCoordinateWire> for SchedulerRetirementObservedCoordinate {
     fn from(coordinate: ObservationCoordinateWire) -> Self {
         match coordinate {
             ObservationCoordinateWire::Absent {} => Self::Absent,
-            ObservationCoordinateWire::SameOriginal { device, inode } => {
-                Self::SameOriginal { device, inode }
-            }
-            ObservationCoordinateWire::ForeignRegular { device, inode } => {
-                Self::ForeignRegular { device, inode }
-            }
+            ObservationCoordinateWire::SameOriginal { file } => Self::SameOriginal { file },
+            ObservationCoordinateWire::ForeignRegular { file } => Self::ForeignRegular { file },
             ObservationCoordinateWire::NonRegular { kind } => Self::NonRegular { kind },
             ObservationCoordinateWire::Unreadable { error_sha256 } => {
                 Self::Unreadable { error_sha256 }
@@ -858,7 +852,7 @@ impl SchedulerRetirementStoppedPlan {
                     (&self.roles[left].current, &self.roles[right].current)
                 {
                     ensure!(
-                        left.device != right.device || left.inode != right.inode,
+                        left.file != right.file,
                         "stopped scheduler roles alias one physical inode"
                     );
                 }
@@ -1034,15 +1028,15 @@ impl SchedulerRetirementResolutionObservation {
             ensure!(
                 !coordinate_is_same_original(coordinate)
                     || self.original.as_ref().is_some_and(|original| {
-                        coordinate_same_identity(coordinate, original.device, original.inode)
+                        coordinate_same_identity(coordinate, &original.file)
                     }),
                 "same-original observation differs from the retained descriptor"
             );
-            if let (Coordinate::ForeignRegular { device, inode }, Some(original)) =
+            if let (Coordinate::ForeignRegular { file }, Some(original)) =
                 (coordinate, self.original.as_ref())
             {
                 ensure!(
-                    *device != original.device || *inode != original.inode,
+                    *file != original.file,
                     "foreign coordinate aliases the retained original"
                 );
             }
@@ -1130,14 +1124,12 @@ fn validate_stopped_resolution_observation(
         {
             match &item.coordinate {
                 Coordinate::Absent => {}
-                Coordinate::SameOriginal { device, inode } => {
+                Coordinate::SameOriginal { file } => {
                     let identity = selected.context(
                         "stopped scheduler role without a source identity became present",
                     )?;
                     ensure!(
-                        *device == identity.device
-                            && *inode == identity.inode
-                            && allowed_locations.contains(&item.name),
+                        *file == identity.file && allowed_locations.contains(&item.name),
                         "stopped scheduler original is at an unauthorized coordinate"
                     );
                     same_original_count += 1;
@@ -1173,8 +1165,7 @@ fn validate_stopped_resolution_observation(
         match (&observation.original, &role_plan.current) {
             (None, None) => true,
             (Some(observed), Some(planned)) => {
-                observed.device == planned.device
-                    && observed.inode == planned.inode
+                observed.file == planned.file
                     && observed.byte_length == planned.byte_length
                     && observed
                         .content_sha256
@@ -1255,15 +1246,11 @@ fn coordinate_is_same_original(coordinate: &SchedulerRetirementObservedCoordinat
 
 fn coordinate_same_identity(
     coordinate: &SchedulerRetirementObservedCoordinate,
-    device: u64,
-    inode: u64,
+    file: &lillux::PinnedRegularFileIdentity,
 ) -> bool {
     matches!(
         coordinate,
-        SchedulerRetirementObservedCoordinate::SameOriginal {
-            device: observed_device,
-            inode: observed_inode,
-        } if *observed_device == device && *observed_inode == inode
+        SchedulerRetirementObservedCoordinate::SameOriginal { file: observed } if observed == file
     )
 }
 
@@ -1933,14 +1920,20 @@ fn validate_hex(value: &str, length: usize, label: &str) -> Result<()> {
 #[cfg(test)]
 mod compact_observation_controls {
     use super::*;
+
+    fn file_id(device: u64, inode: u64) -> lillux::PinnedRegularFileIdentity {
+        serde_json::from_value(
+            serde_json::json!({"filesystem": {"device": device}, "inode": inode}),
+        )
+        .unwrap()
+    }
     use SchedulerRetirementObservedCoordinate as Coordinate;
 
     fn observation() -> SchedulerRetirementResolutionObservation {
         let generations = (1..=4).map(|i| format!("{i:032x}")).collect::<Vec<_>>();
         let generation = generations[3].clone();
         let identity = |role: usize| SchedulerRetirementRoleIdentity {
-            device: u64::MAX,
-            inode: u64::MAX - role as u64,
+            file: file_id(u64::MAX, u64::MAX - role as u64),
             byte_length: u64::MAX,
             content_sha256: Some("ab".repeat(32)),
         };
@@ -1973,8 +1966,7 @@ mod compact_observation_controls {
                     role,
                     coordinate: current_role.map_or(Coordinate::Absent, |role| {
                         Coordinate::SameOriginal {
-                            device: u64::MAX,
-                            inode: u64::MAX - role as u64,
+                            file: file_id(u64::MAX, u64::MAX - role as u64),
                         }
                     }),
                 }
@@ -2020,8 +2012,7 @@ mod compact_observation_controls {
                 .collect(),
             public: Coordinate::Absent,
             quarantine: Coordinate::SameOriginal {
-                device: u64::MAX,
-                inode: u64::MAX,
+                file: file_id(u64::MAX, u64::MAX),
             },
             purge: Coordinate::Absent,
             resolution_quarantines: (0..3)
@@ -2127,8 +2118,7 @@ mod compact_observation_controls {
             .find(|item| item.role == Some(SchedulerRetirementRole::Main))
             .unwrap()
             .coordinate = Coordinate::SameOriginal {
-            device: u64::MAX,
-            inode: u64::MAX,
+            file: file_id(u64::MAX, u64::MAX),
         };
         assert!(alias.validate().is_err());
         let mut forged = observation;
@@ -2446,8 +2436,7 @@ mod compact_observation_controls {
                 }
                 "foreign" => {
                     observation.stopped_coordinates[0].coordinate = Coordinate::ForeignRegular {
-                        device: 1,
-                        inode: 2,
+                        file: file_id(1, 2),
                     }
                 }
                 _ => {
@@ -2552,8 +2541,7 @@ mod compact_observation_controls {
                         .swap(main, wal);
                 }
                 "foreign" => {
-                    changed["stopped_coordinates"][0] =
-                        serde_json::json!({"state":"foreign_regular","device":1,"inode":2})
+                    changed["stopped_coordinates"][0] = serde_json::json!({"state":"foreign_regular","file":{"filesystem":{"device":1},"inode":2}})
                 }
                 _ => changed["stopped_plan"] = serde_json::Value::Null,
             }

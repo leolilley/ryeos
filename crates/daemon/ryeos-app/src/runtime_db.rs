@@ -8089,8 +8089,7 @@ fn copy_sqlite_file_for_inspection(
     match (&copied, expected) {
         (None, None) => {}
         (Some(receipt), Some(expected)) => ensure!(
-            receipt.source_identity.device == expected.device()
-                && receipt.source_identity.inode == expected.inode()
+            receipt.source_identity.file == source.regular_identity_of_observation(&expected)?
                 && receipt.source_identity.byte_length == expected.size()
                 && receipt.copied_byte_length == expected.size(),
             "SQLite inspection source changed after the bounded copy plan"
@@ -23108,8 +23107,10 @@ mod tests {
             if index < 2 {
                 let original = source.entry_no_follow(name).unwrap().unwrap();
                 let receipt = receipt.as_ref().unwrap();
-                assert_eq!(receipt.source_identity.device, original.containing_device);
-                assert_eq!(receipt.source_identity.inode, original.inode);
+                assert_eq!(
+                    receipt.source_identity.file,
+                    source.regular_identity_of_entry(&original).unwrap()
+                );
                 assert_eq!(
                     receipt.source_identity.content_sha256.as_ref(),
                     Some(&receipt.copied_sha256)

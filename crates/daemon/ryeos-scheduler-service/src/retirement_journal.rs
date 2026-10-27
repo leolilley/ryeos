@@ -2629,14 +2629,8 @@ pub(crate) fn native_resolution_projection(
     let coordinate = |value: &NativeCoordinate| -> Result<Coordinate> {
         Ok(match value {
             NativeCoordinate::Absent => Coordinate::Absent,
-            NativeCoordinate::SameOriginal { device, inode } => Coordinate::SameOriginal {
-                device: *device,
-                inode: *inode,
-            },
-            NativeCoordinate::ForeignRegular { device, inode } => Coordinate::ForeignRegular {
-                device: *device,
-                inode: *inode,
-            },
+            NativeCoordinate::SameOriginal { file } => Coordinate::SameOriginal { file: *file },
+            NativeCoordinate::ForeignRegular { file } => Coordinate::ForeignRegular { file: *file },
             NativeCoordinate::Unreadable(error) => Coordinate::Unreadable {
                 error_sha256: lillux::sha256_hex(error.as_bytes()),
             },
@@ -2732,8 +2726,7 @@ pub(crate) fn native_resolution_projection(
         .original
         .as_ref()
         .map(|value| SchedulerRetirementRoleIdentity {
-            device: value.device,
-            inode: value.inode,
+            file: value.file,
             byte_length: value.byte_length,
             content_sha256: value.content_sha256.clone(),
         });
@@ -2851,8 +2844,7 @@ pub(crate) fn native_resolution_projection(
                         source: stopped_source_contract(&role.source),
                         current: role.current.as_ref().map(|current| {
                             SchedulerRetirementRoleIdentity {
-                                device: current.device,
-                                inode: current.inode,
+                                file: current.file,
                                 byte_length: current.byte_length,
                                 content_sha256: current.content_sha256.clone(),
                             }
@@ -2932,8 +2924,7 @@ fn resolution_identity_matches_phase(
     match (phase, observed) {
         (None, None) => true,
         (Some(phase), Some(observed)) => {
-            phase.device == observed.device
-                && phase.inode == observed.inode
+            phase.file == observed.file
                 && phase.byte_length == observed.byte_length
                 && phase.content_sha256.is_some()
                 && observed
@@ -3378,8 +3369,7 @@ fn validate_completed_flow(records: &[SchedulerRetirementRecord]) -> Result<()> 
         match (capture, drain) {
             (None, None) => {}
             (Some(before), Some(after)) => ensure!(
-                before.device == after.device
-                    && before.inode == after.inode
+                before.file == after.file
                     && before.content_sha256.is_none()
                     && after.content_sha256.is_some(),
                 "scheduler retirement captured/drained role facts disagree"
@@ -3773,8 +3763,7 @@ fn validate_phase_prefix(records: &[SchedulerRetirementRecord]) -> Result<()> {
             match (&capture.role_identity, &drain.role_identity) {
                 (None, None) => {}
                 (Some(before), Some(after)) => ensure!(
-                    before.device == after.device
-                        && before.inode == after.inode
+                    before.file == after.file
                         && before.content_sha256.is_none()
                         && after.content_sha256.is_some(),
                     "interrupted scheduler capture/drain role identity changed"
@@ -3941,8 +3930,7 @@ pub(crate) fn role_identity(
         return Ok(None);
     };
     let result = SchedulerRetirementRoleIdentity {
-        device: identity.device,
-        inode: identity.inode,
+        file: identity.file,
         byte_length: identity.byte_length,
         content_sha256: identity.content_sha256.clone(),
     };
@@ -4359,8 +4347,7 @@ mod terminal_scanner_controls {
             let length = file.metadata()?.len();
             let (digest, _) = lillux::digest_open_regular_file_stable_exact(&file, length)?;
             Ok(Some(SqliteRoleIdentity {
-                device: entry.containing_device,
-                inode: entry.inode,
+                file: runtime.regular_identity_of_entry(&entry)?,
                 byte_length: length,
                 content_sha256: Some(digest),
             }))
@@ -4618,8 +4605,7 @@ mod terminal_scanner_controls {
                     intent.scheduler_sources[0] = SchedulerRetirementStoppedRolePlan {
                         source: SchedulerRetirementStoppedSource::Canonical,
                         current: Some(SchedulerRetirementRoleIdentity {
-                            device: 1,
-                            inode: 2,
+                            file: crate::test_file_id(1, 2),
                             byte_length: 3,
                             content_sha256: Some("ff".repeat(32)),
                         }),
@@ -4838,8 +4824,7 @@ mod interrupted_prefix_presence_controls {
 
     fn role_identity(digested: bool) -> SchedulerRetirementRoleIdentity {
         SchedulerRetirementRoleIdentity {
-            device: 1,
-            inode: 2,
+            file: crate::test_file_id(1, 2),
             byte_length: 4096,
             content_sha256: digested.then(|| "ab".repeat(32)),
         }
@@ -5026,8 +5011,7 @@ pub(crate) mod compact_native_projection_controls {
             "scheduler.sqlite3-shm",
         ];
         let identity = |index: usize| lillux_sqlite::SqliteRoleIdentity {
-            device: u64::MAX,
-            inode: u64::MAX - index as u64,
+            file: crate::test_file_id(u64::MAX, u64::MAX - index as u64),
             byte_length: u64::MAX,
             content_sha256: Some("ab".repeat(32)),
         };
@@ -5058,8 +5042,7 @@ pub(crate) mod compact_native_projection_controls {
                     name: name.clone(),
                     observation: if present {
                         Coordinate::SameOriginal {
-                            device: u64::MAX,
-                            inode: u64::MAX - index as u64,
+                            file: crate::test_file_id(u64::MAX, u64::MAX - index as u64),
                         }
                     } else {
                         Coordinate::Absent
@@ -5109,8 +5092,7 @@ pub(crate) mod compact_native_projection_controls {
                 }),
             }),
             quarantine: Coordinate::SameOriginal {
-                device: u64::MAX,
-                inode: u64::MAX,
+                file: crate::test_file_id(u64::MAX, u64::MAX),
             },
             purge: Coordinate::Absent,
             quarantine_name,
@@ -5705,8 +5687,7 @@ pub(crate) mod compact_native_projection_controls {
         assert!(native_resolution_projection(&truncated).is_err());
         let mut foreign = native;
         foreign.stopped_coordinates[0].observation = Coordinate::ForeignRegular {
-            device: 1,
-            inode: 2,
+            file: crate::test_file_id(1, 2),
         };
         assert!(native_resolution_projection(&foreign).is_err());
         Ok(())
@@ -5848,8 +5829,7 @@ pub(crate) mod late_recovery_controls {
         let sources = std::array::from_fn(|index| SchedulerRetirementStoppedRolePlan {
             source: SchedulerRetirementStoppedSource::Canonical,
             current: Some(SchedulerRetirementRoleIdentity {
-                device: u64::MAX,
-                inode: u64::MAX - index as u64,
+                file: crate::test_file_id(u64::MAX, u64::MAX - index as u64),
                 byte_length: u64::MAX,
                 content_sha256: Some("ab".repeat(32)),
             }),
@@ -5921,8 +5901,7 @@ pub(crate) mod late_recovery_controls {
             let sources = std::array::from_fn(|index| SchedulerRetirementStoppedRolePlan {
                 source: SchedulerRetirementStoppedSource::Canonical,
                 current: Some(SchedulerRetirementRoleIdentity {
-                    device: 17,
-                    inode: 100 + index as u64,
+                    file: crate::test_file_id(17, 100 + index as u64),
                     byte_length: 29,
                     content_sha256: Some("ab".repeat(32)),
                 }),
@@ -6068,8 +6047,7 @@ pub(crate) mod late_recovery_controls {
             let roles = std::array::from_fn(|index| SchedulerRetirementStoppedRolePlan {
                 source: SchedulerRetirementStoppedSource::Canonical,
                 current: Some(SchedulerRetirementRoleIdentity {
-                    device: 7,
-                    inode: 100 + index as u64,
+                    file: crate::test_file_id(7, 100 + index as u64),
                     byte_length: 17,
                     content_sha256: Some("ab".repeat(32)),
                 }),
@@ -6106,8 +6084,7 @@ pub(crate) mod late_recovery_controls {
         let roles = std::array::from_fn(|index| SchedulerRetirementStoppedRolePlan {
             source: SchedulerRetirementStoppedSource::Canonical,
             current: Some(SchedulerRetirementRoleIdentity {
-                device: 7,
-                inode: 100 + index as u64,
+                file: crate::test_file_id(7, 100 + index as u64),
                 byte_length: 17,
                 content_sha256: Some("ab".repeat(32)),
             }),

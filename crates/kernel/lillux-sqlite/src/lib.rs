@@ -1830,8 +1830,7 @@ pub fn copy_regular_without_sqlite_alias(
                 destination,
                 name,
                 Some(&SqliteRoleIdentity {
-                    device: original.dev(),
-                    inode: original.ino(),
+                    file: source.regular_identity_of_pin(&pin)?,
                     byte_length: original.len(),
                     content_sha256: None,
                 }),
@@ -1957,8 +1956,7 @@ pub fn copy_regular_without_sqlite_alias(
             ensure_copy_source_unchanged(source, name, &pin, &original)?;
             Ok(Some(SqliteInspectionCopyReceipt {
                 source_identity: SqliteRoleIdentity {
-                    device: original.dev(),
-                    inode: original.ino(),
+                    file: source.regular_identity_of_pin(&pin)?,
                     byte_length: original.len(),
                     content_sha256: Some(copied_sha256.clone()),
                 },
@@ -1999,7 +1997,6 @@ pub fn verify_regular_without_sqlite_alias(
     #[cfg(target_os = "linux")]
     {
         use sha2::{Digest, Sha256};
-        use std::os::unix::fs::MetadataExt;
         let Some(expected) = expected else {
             ensure!(
                 source.entry_no_follow(name)?.is_none(),
@@ -2021,8 +2018,7 @@ pub fn verify_regular_without_sqlite_alias(
         let original = pin.metadata()?;
         ensure!(
             original.is_file()
-                && original.dev() == expected.device
-                && original.ino() == expected.inode
+                && source.regular_identity_of_pin(&pin)? == expected.file
                 && original.len() == expected.byte_length,
             "original SQLite source identity or extent changed"
         );
@@ -2465,8 +2461,9 @@ impl SqliteRole {
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SqliteRoleIdentity {
-    pub device: u64,
-    pub inode: u64,
+    /// Durable identity of the role file: the filesystem's own identity plus
+    /// the inode, never the kernel's attachment number.
+    pub file: lillux::PinnedRegularFileIdentity,
     pub byte_length: u64,
     pub content_sha256: Option<String>,
 }
@@ -2665,7 +2662,7 @@ impl StoppedSqliteProjectionPlan {
                 if let (Some(left), Some(right)) = (&self.roles[i].current, &self.roles[j].current)
                 {
                     ensure!(
-                        left.device != right.device || left.inode != right.inode,
+                        left.file != right.file,
                         "stopped role sources alias one physical object"
                     );
                 }
@@ -2678,8 +2675,12 @@ impl StoppedSqliteProjectionPlan {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SqliteRoleCoordinateObservation {
     Absent,
-    SameOriginal { device: u64, inode: u64 },
-    ForeignRegular { device: u64, inode: u64 },
+    SameOriginal {
+        file: lillux::PinnedRegularFileIdentity,
+    },
+    ForeignRegular {
+        file: lillux::PinnedRegularFileIdentity,
+    },
     NonRegular(lillux::secure_fs::PinnedEntryType),
     Unreadable(String),
 }
@@ -2976,6 +2977,7 @@ thread_local! {
     static FAIL_STOPPED_AFTER_ACQUIRE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 fn snapshot_role_facts(
+    runtime: &PinnedDirectory,
     binding: &Binding,
     generation: [u8; 16],
     digest: bool,
@@ -2993,7 +2995,6 @@ fn snapshot_role_facts(
             };
             #[cfg(unix)]
             {
-                use std::os::unix::fs::MetadataExt;
                 let metadata = file.metadata()?;
                 ensure!(metadata.is_file(), "retained SQLite role is not regular");
                 let (content_sha256, metadata) = if digest {
@@ -3004,8 +3005,7 @@ fn snapshot_role_facts(
                     (None, metadata)
                 };
                 Ok(Some(SqliteRoleIdentity {
-                    device: metadata.dev(),
-                    inode: metadata.ino(),
+                    file: runtime.regular_identity_of_pin(file)?,
                     byte_length: metadata.len(),
                     content_sha256,
                 }))
@@ -3036,6 +3036,7 @@ impl PendingCapturedSqliteProjection {
         self,
     ) -> std::result::Result<CapturedSqliteProjection, SqliteProjectionRetirementFailure> {
         match snapshot_role_facts(
+            &self.owner.runtime,
             self.owner.binding.as_ref().expect("same captured owner"),
             self.generation,
             false,
@@ -3172,7 +3173,38 @@ impl DrainedSqliteProjection {
                             .expect("derived source") as i32
                     })
                 });
-                let expected = std::array::from_fn(|i| plan.roles[i].current.clone());
+                // The persisted expectation is durable. The native layer
+                // compares raw coordinates against its own live `fstat`, so
+                // pass it the raw pair this process observes from the very
+                // entry whose durable identity matches. A missing or
+                // mismatched entry passes a pair no live file can match, and
+                // acquisition refuses exactly as it would for a replaced file.
+                let expected = std::array::from_fn(|i| {
+                    plan.roles[i].current.as_ref().map(|current| {
+                        let refusing = binding::StoppedRawExpectation {
+                            device: 0,
+                            inode: 0,
+                            byte_length: current.byte_length,
+                        };
+                        let Some(source) = plan.source_name(SqliteRole::all()[i]) else {
+                            return refusing;
+                        };
+                        match runtime.entry_no_follow(OsStr::new(&source)) {
+                            Ok(Some(entry))
+                                if runtime
+                                    .regular_identity_of_entry(&entry)
+                                    .is_ok_and(|file| file == current.file) =>
+                            {
+                                binding::StoppedRawExpectation {
+                                    device: entry.containing_device,
+                                    inode: entry.inode,
+                                    byte_length: current.byte_length,
+                                }
+                            }
+                            _ => refusing,
+                        }
+                    })
+                });
                 Ok(Binding::create_stopped(&root, &names, selected, &expected))
             }
             #[cfg(not(target_os = "linux"))]
@@ -3263,7 +3295,7 @@ impl DrainedSqliteProjection {
                 anyhow::bail!("injected stopped failure after actual acquisition before barriers");
             }
             binding.retirement_barriers()?;
-            let facts = snapshot_role_facts(binding, plan.generation, true)?;
+            let facts = snapshot_role_facts(&self.runtime, binding, plan.generation, true)?;
             for i in 0..3 {
                 ensure!(
                     facts.roles[i].original == plan.roles[i].current,
@@ -3310,7 +3342,8 @@ impl DrainedSqliteProjection {
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("not stopped intake"))?;
             let binding = self.binding.as_ref().expect("same stopped context");
-            let facts = snapshot_role_facts(binding, plan.generation, self.stopped_ready)?;
+            let facts =
+                snapshot_role_facts(&self.runtime, binding, plan.generation, self.stopped_ready)?;
             let mut links = [None; 3];
             for (i, link) in links.iter_mut().enumerate() {
                 *link = binding.with_retirement_role(i, |file| {
@@ -3333,24 +3366,20 @@ impl DrainedSqliteProjection {
                         {
                             SqliteRoleCoordinateObservation::NonRegular(entry.entry_type)
                         }
-                        Ok(Some(entry)) => {
-                            let identity =
-                                role.and_then(|role| facts.roles[role as usize].original.as_ref());
-                            if identity.is_some_and(|identity| {
-                                identity.device == entry.containing_device
-                                    && identity.inode == entry.inode
-                            }) {
-                                SqliteRoleCoordinateObservation::SameOriginal {
-                                    device: entry.containing_device,
-                                    inode: entry.inode,
-                                }
-                            } else {
-                                SqliteRoleCoordinateObservation::ForeignRegular {
-                                    device: entry.containing_device,
-                                    inode: entry.inode,
+                        Ok(Some(entry)) => match self.runtime.regular_identity_of_entry(&entry) {
+                            Err(error) => {
+                                SqliteRoleCoordinateObservation::Unreadable(error.to_string())
+                            }
+                            Ok(file) => {
+                                let identity = role
+                                    .and_then(|role| facts.roles[role as usize].original.as_ref());
+                                if identity.is_some_and(|identity| identity.file == file) {
+                                    SqliteRoleCoordinateObservation::SameOriginal { file }
+                                } else {
+                                    SqliteRoleCoordinateObservation::ForeignRegular { file }
                                 }
                             }
-                        }
+                        },
                         Err(error) => {
                             SqliteRoleCoordinateObservation::Unreadable(error.to_string())
                         }
@@ -3416,7 +3445,7 @@ impl DrainedSqliteProjection {
             });
         }
         self.barriers = true;
-        match snapshot_role_facts(binding, self.facts.generation, true) {
+        match snapshot_role_facts(&self.runtime, binding, self.facts.generation, true) {
             Ok(facts) => {
                 self.facts = facts;
                 Ok(self)
@@ -3490,14 +3519,14 @@ impl DrainedSqliteProjection {
                             self.facts.roles[index].original.as_ref().ok_or_else(|| {
                                 anyhow::anyhow!("unexpected retained role descriptor")
                             })?;
+                        let file_identity = self.runtime.regular_identity_of_pin(file)?;
                         ensure!(
-                            metadata.dev() == expected.device && metadata.ino() == expected.inode,
+                            file_identity == expected.file,
                             "retained original role identity changed"
                         );
                         Ok((
                             Some(SqliteRoleIdentity {
-                                device: metadata.dev(),
-                                inode: metadata.ino(),
+                                file: file_identity,
                                 byte_length: metadata.len(),
                                 content_sha256: None,
                             }),
@@ -3510,21 +3539,19 @@ impl DrainedSqliteProjection {
                 Ok(Some(entry)) if entry.entry_type != PinnedEntryType::Regular => {
                     SqliteRoleCoordinateObservation::NonRegular(entry.entry_type)
                 }
-                Ok(Some(entry)) => {
-                    if original.as_ref().is_some_and(|original| {
-                        original.device == entry.containing_device && original.inode == entry.inode
-                    }) {
-                        SqliteRoleCoordinateObservation::SameOriginal {
-                            device: entry.containing_device,
-                            inode: entry.inode,
-                        }
-                    } else {
-                        SqliteRoleCoordinateObservation::ForeignRegular {
-                            device: entry.containing_device,
-                            inode: entry.inode,
+                Ok(Some(entry)) => match self.runtime.regular_identity_of_entry(&entry) {
+                    Err(error) => SqliteRoleCoordinateObservation::Unreadable(error.to_string()),
+                    Ok(file) => {
+                        if original
+                            .as_ref()
+                            .is_some_and(|original| original.file == file)
+                        {
+                            SqliteRoleCoordinateObservation::SameOriginal { file }
+                        } else {
+                            SqliteRoleCoordinateObservation::ForeignRegular { file }
                         }
                     }
-                }
+                },
                 Err(error) => SqliteRoleCoordinateObservation::Unreadable(error.to_string()),
             };
             let facts = &self.facts.roles[index];
@@ -5844,12 +5871,10 @@ mod tests {
             if let Some(name) = plan.source_name(role) {
                 let file = std::fs::File::open(root.join(name)).unwrap();
                 let metadata = file.metadata().unwrap();
-                use std::os::unix::fs::MetadataExt;
                 let (digest, after) =
                     lillux::digest_open_regular_file_stable_exact(&file, metadata.len()).unwrap();
                 plan.roles[role as usize].current = Some(SqliteRoleIdentity {
-                    device: after.dev(),
-                    inode: after.ino(),
+                    file: lillux::pinned_regular_file_identity(&file).unwrap(),
                     byte_length: after.len(),
                     content_sha256: Some(digest),
                 });
@@ -6100,8 +6125,8 @@ mod tests {
         });
         assert!(!before.ready);
         assert_eq!(
-            before.roles[0].as_ref().unwrap().inode,
-            plan.roles[0].current.as_ref().unwrap().inode
+            before.roles[0].as_ref().unwrap().file,
+            plan.roles[0].current.as_ref().unwrap().file
         );
         // xAccess is metadata only: retain ordinary relative and claimed-name
         // existence semantics while opening/reusing the claimed inode refuses.
@@ -6135,8 +6160,8 @@ mod tests {
             let after = owner.observe_stopped_projection().unwrap();
             assert!(after.ready);
             assert_eq!(
-                after.roles[0].as_ref().unwrap().inode,
-                before.roles[0].as_ref().unwrap().inode
+                after.roles[0].as_ref().unwrap().file,
+                before.roles[0].as_ref().unwrap().file
             );
             owner.abort().unwrap();
         });
@@ -6178,8 +6203,8 @@ mod tests {
         });
         assert!(!observed.ready);
         assert_eq!(
-            observed.roles[0].as_ref().unwrap().inode,
-            plan.roles[0].current.as_ref().unwrap().inode
+            observed.roles[0].as_ref().unwrap().file,
+            plan.roles[0].current.as_ref().unwrap().file
         );
         assert!(
             observed
@@ -8136,7 +8161,6 @@ mod guarded_inspection_copy_controls {
             let name = format!("source-{length}");
             let bytes = (0..length).map(|i| (i % 251) as u8).collect::<Vec<_>>();
             std::fs::write(source_dir.path().join(&name), &bytes).unwrap();
-            let original = std::fs::metadata(source_dir.path().join(&name)).unwrap();
             let receipt = copy_regular_without_sqlite_alias(
                 &source,
                 OsStr::new(&name),
@@ -8146,8 +8170,10 @@ mod guarded_inspection_copy_controls {
             )
             .unwrap()
             .unwrap();
-            assert_eq!(receipt.source_identity.device, original.dev());
-            assert_eq!(receipt.source_identity.inode, original.ino());
+            assert_eq!(
+                receipt.source_identity.file,
+                crate::test_file_identity(&source_dir.path().join(&name))
+            );
             assert_eq!(receipt.source_identity.byte_length, length as u64);
             assert_eq!(receipt.copied_byte_length, length as u64);
             assert_eq!(receipt.copied_sha256, lillux::sha256_hex(&bytes));
@@ -8343,8 +8369,7 @@ mod guarded_inspection_copy_controls {
                 &destination,
                 OsStr::new("present"),
                 Some(&SqliteRoleIdentity {
-                    device: 1,
-                    inode: 1,
+                    file: crate::test_file_identity(&std::env::current_exe().unwrap()),
                     byte_length: 0,
                     content_sha256: None,
                 }),
@@ -8654,13 +8679,11 @@ mod guarded_inspection_copy_controls {
 #[cfg(all(test, target_os = "linux"))]
 mod original_source_verification_controls {
     use super::*;
-    use std::os::unix::fs::MetadataExt;
 
     fn original(path: &std::path::Path, bytes: &[u8]) -> SqliteRoleIdentity {
         let metadata = std::fs::metadata(path).unwrap();
         SqliteRoleIdentity {
-            device: metadata.dev(),
-            inode: metadata.ino(),
+            file: crate::test_file_identity(path),
             byte_length: metadata.len(),
             content_sha256: Some(lillux::sha256_hex(bytes)),
         }
@@ -8680,7 +8703,7 @@ mod original_source_verification_controls {
         let mut changed = bytes.clone();
         changed[65_536 + 3] ^= 1;
         std::fs::write(&path, &changed).unwrap();
-        assert_eq!(std::fs::metadata(&path).unwrap().ino(), expected.inode);
+        assert_eq!(crate::test_file_identity(&path), expected.file);
         assert_eq!(
             std::fs::metadata(&path).unwrap().len(),
             expected.byte_length
@@ -8717,7 +8740,7 @@ mod original_source_verification_controls {
                 .is_err()
         );
         VERIFY_AFTER_FIRST_CHUNK.with(|hook| assert!(hook.borrow().is_none()));
-        assert_eq!(std::fs::metadata(&path).unwrap().ino(), expected.inode);
+        assert_eq!(crate::test_file_identity(&path), expected.file);
         assert_eq!(
             std::fs::metadata(&path).unwrap().len(),
             expected.byte_length
@@ -8740,7 +8763,7 @@ mod original_source_verification_controls {
         let original_pin = root.open_mount_entry(name).unwrap().unwrap();
         std::fs::remove_file(&path).unwrap();
         std::fs::write(&path, b"").unwrap();
-        assert_ne!(std::fs::metadata(&path).unwrap().ino(), expected.inode);
+        assert_ne!(crate::test_file_identity(&path), expected.file);
         assert!(verify_regular_without_sqlite_alias(&root, name, Some(&expected)).is_err());
         drop(original_pin);
         std::fs::remove_file(&path).unwrap();
@@ -9290,4 +9313,10 @@ mod stopped_intake_scope_controls {
             "the host reserves exactly the layout quote"
         );
     }
+}
+
+/// The durable identity of the file currently at `path`.
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn test_file_identity(path: &std::path::Path) -> lillux::PinnedRegularFileIdentity {
+    lillux::pinned_regular_file_identity(&std::fs::File::open(path).unwrap()).unwrap()
 }

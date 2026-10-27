@@ -611,7 +611,7 @@ fn ensure_same_role_inode(
         (None, None) => Ok(()),
         (Some(before), Some(after)) => {
             ensure!(
-                before.device == after.device && before.inode == after.inode,
+                before.file == after.file,
                 "scheduler SQLite role inode changed while SQL drained"
             );
             Ok(())

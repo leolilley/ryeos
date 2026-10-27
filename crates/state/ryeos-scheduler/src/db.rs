@@ -3906,7 +3906,6 @@ mod tests {
         directory: &Path,
         name: &str,
     ) -> Option<lillux_sqlite::SqliteRoleIdentity> {
-        use std::os::unix::fs::MetadataExt;
         let file = match std::fs::File::open(directory.join(name)) {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
@@ -3916,8 +3915,7 @@ mod tests {
         let (digest, metadata) =
             lillux::digest_open_regular_file_stable_exact(&file, metadata.len()).unwrap();
         Some(lillux_sqlite::SqliteRoleIdentity {
-            device: metadata.dev(),
-            inode: metadata.ino(),
+            file: lillux::pinned_regular_file_identity(&file).unwrap(),
             byte_length: metadata.len(),
             content_sha256: Some(digest),
         })

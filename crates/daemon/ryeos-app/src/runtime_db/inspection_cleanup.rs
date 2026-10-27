@@ -183,12 +183,17 @@ impl InspectionCopyDisposal {
 
     /// Record the actual retired destination identities, not source-plan DTOs.
     /// Native proof validation provides facts only, never disposal authority.
-    pub(crate) fn role_identities(&self) -> Result<[Option<(u64, u64)>; 4]> {
+    pub(crate) fn role_identities(&self) -> Result<[Option<lillux::PinnedRegularFileIdentity>; 4]> {
         let mut identities = [None; 4];
         for (index, role) in self.roles.iter().enumerate() {
             if let CompletedRoleDisposition::Retired { original, proof } = role {
                 proof.require_original(original)?;
-                identities[index] = Some(proof.original_identity()?);
+                let (device, inode) = proof.original_identity()?;
+                identities[index] = Some(
+                    self.removed
+                        .child()
+                        .regular_identity_of_coordinates(device, inode)?,
+                );
             }
         }
         Ok(identities)
