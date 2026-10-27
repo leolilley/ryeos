@@ -227,10 +227,14 @@ impl StoppedCapacityAccount {
     /// outstanding incarnation debit and holds its anchor's target image.
     /// A debit, live or dead, is settled by a restart or a re-issuance,
     /// never by moving the account's location.
+    ///
+    /// Returns where the account stands: its epoch, its debit sequence and
+    /// the digest of the anchor's committed image, which a signed re-anchor
+    /// carries so a later document cannot step back to an older position.
     pub(super) fn require_no_outstanding_debit(
         &mut self,
         policy: &NodeNativeCapacityPolicy,
-    ) -> Result<()> {
+    ) -> Result<super::reanchor::AccountPosition> {
         self.anchor
             .load(policy, &self.issuance, self.budget.deadline, &|steps| {
                 self.budget.pay(steps)
@@ -251,7 +255,12 @@ impl StoppedCapacityAccount {
             current.target().outstanding.is_none(),
             "an incarnation debit is outstanding; settle it before moving the account"
         );
-        Ok(())
+        let target = *current.target();
+        Ok(super::reanchor::AccountPosition {
+            epoch: target.epoch,
+            sequence: target.sequence,
+            anchor_digest: hex_digest(&sha2::Sha256::digest(current.encode(policy)?).into()),
+        })
     }
 
     fn crash_after(&self, step: Step) -> Result<()> {
@@ -1061,9 +1070,11 @@ mod controls {
     #[test]
     fn reanchor_precondition_refuses_an_outstanding_debit() {
         let f = Fixture::new();
-        f.owner()
+        let position = f
+            .owner()
             .require_no_outstanding_debit(&f.policy)
             .expect("a fresh account has no debit");
+        assert_eq!((position.epoch, position.sequence), (1, 0));
         f.debit_dead_incarnation();
         let error = f
             .owner()

@@ -3553,9 +3553,10 @@ impl PinnedDirectory {
 
     /// The durable identity of a regular directory entry beneath this
     /// directory. The filesystem identity comes from this directory's own
-    /// descriptor, which is a real directory fd; the entry's raw `st_dev`
-    /// must equal this directory's raw `st_dev` in the same call, which proves
-    /// both live on one filesystem without opening the entry.
+    /// descriptor, which is a real directory fd. The entry is opened path-only
+    /// and no-follow (needing no read permission and leaving no access time),
+    /// must still be the observed inode, and must be on this directory's mount
+    /// by mount id in the same call.
     pub fn regular_identity_of_entry(
         &self,
         entry: &PinnedDirectoryEntryMetadata,
@@ -3564,18 +3565,47 @@ impl PinnedDirectory {
             entry.entry_type == PinnedEntryType::Regular,
             "directory entry is not a regular file"
         );
-        self.require_same_device(entry.containing_device)?;
-        Ok(PinnedRegularFileIdentity {
-            filesystem: self.filesystem_identity()?,
-            inode: entry.inode,
-        })
+        #[cfg(not(target_os = "linux"))]
+        {
+            self.require_same_device(entry.containing_device)?;
+            Ok(PinnedRegularFileIdentity {
+                filesystem: self.filesystem_identity()?,
+                inode: entry.inode,
+            })
+        }
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::FromRawFd as _;
+            use std::os::unix::ffi::OsStrExt as _;
+            let name = std::ffi::CString::new(entry.name.as_bytes())?;
+            let descriptor = unsafe {
+                libc::openat(
+                    self.directory.as_raw_fd(),
+                    name.as_ptr(),
+                    libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                )
+            };
+            if descriptor < 0 {
+                return Err(std::io::Error::last_os_error())
+                    .context("open directory entry path-only for its identity");
+            }
+            // SAFETY: openat returned a new descriptor that nothing else owns.
+            let pin = unsafe { File::from_raw_fd(descriptor) };
+            let identity = self.regular_identity_of_pin(&pin)?;
+            ensure!(
+                identity.inode == entry.inode,
+                "directory entry changed identity before its durable identity was read"
+            );
+            Ok(identity)
+        }
     }
 
     /// The durable identity of an already-open regular file pin of a child of
     /// this directory, including a path-only (`O_PATH`) pin from which the
-    /// filesystem UUID cannot be read. As for
-    /// [`PinnedDirectory::regular_identity_of_entry`], the pin's raw `st_dev`
-    /// must equal this directory's in the same call.
+    /// filesystem UUID cannot be read. The pin and this directory must be on
+    /// the same mount, proved by mount id in the same call: on overlayfs a
+    /// file can report another `st_dev` than its parent on one mount, so the
+    /// device number would refuse a genuine child.
     pub fn regular_identity_of_pin(&self, pin: &File) -> Result<PinnedRegularFileIdentity> {
         #[cfg(not(unix))]
         {
@@ -3584,20 +3614,44 @@ impl PinnedDirectory {
         }
         #[cfg(unix)]
         {
-            let identity =
-                self.regular_identity_of_observation(&observe_open_file_identity(pin)?)?;
+            let observed = observe_open_file_identity(pin)?;
+            ensure!(
+                observed.file_type == libc::S_IFREG,
+                "descriptor is not a regular file"
+            );
+            self.require_same_mount(pin)?;
             // The pin's own descriptor supplies the subvolume, which must
             // match the parent's; the UUID comes from the parent.
             Ok(PinnedRegularFileIdentity {
                 filesystem: FilesystemIdentity::of_parent_and_entry(&self.directory, pin)?,
-                inode: identity.inode,
+                inode: observed.inode,
             })
         }
     }
 
+    fn require_same_mount(&self, pin: &File) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        ensure!(
+            mount_id_of_open_descriptor(&self.directory)? == mount_id_of_open_descriptor(pin)?,
+            "entry is not on the same mount as its parent directory"
+        );
+        #[cfg(all(unix, not(target_os = "linux")))]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            ensure!(
+                self.directory.metadata()?.dev() == pin.metadata()?.dev(),
+                "entry is not on the same filesystem as its parent directory"
+            );
+        }
+        Ok(())
+    }
+
     /// The durable identity named by an observation of a regular child of
     /// this directory taken from a descriptor that is still held, with the
-    /// same same-device requirement as
+    /// same-device requirement of a descriptor-less claim: with no descriptor
+    /// to read a mount id from, the raw `st_dev` must equal this directory's.
+    /// That can only refuse (never accept) a genuine child on an overlay whose
+    /// layers report other device numbers; callers holding a descriptor use
     /// [`PinnedDirectory::regular_identity_of_pin`].
     pub fn regular_identity_of_observation(
         &self,
@@ -3624,8 +3678,8 @@ impl PinnedDirectory {
 
     /// The durable identity of a regular child of this directory known only by
     /// the raw coordinates another owner recorded when it retired the file,
-    /// with the same same-device requirement as
-    /// [`PinnedDirectory::regular_identity_of_pin`].
+    /// with the same descriptor-less same-device requirement as
+    /// [`PinnedDirectory::regular_identity_of_observation`].
     pub fn regular_identity_of_coordinates(
         &self,
         device: u64,
@@ -6808,12 +6862,14 @@ impl PinnedDirectory {
         if entry.entry_type != PinnedEntryType::Regular {
             anyhow::bail!("conditional authoring recovery encountered a non-regular entry");
         }
+        // Path-only: no read permission is needed and no access time is
+        // touched; the filesystem identity comes from this directory.
         let c_name = std::ffi::CString::new(name.as_bytes())?;
         let descriptor = unsafe {
             libc::openat(
                 self.directory.as_raw_fd(),
                 c_name.as_ptr(),
-                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
+                libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
             )
         };
         if descriptor < 0 {
@@ -6822,11 +6878,14 @@ impl PinnedDirectory {
         }
         // SAFETY: openat returned a new descriptor that nothing else owns.
         let file = unsafe { File::from_raw_fd(descriptor) };
-        let identity = regular_file_identity(&file)?;
+        let identity = self.regular_identity_of_pin(&file)?;
         if identity.inode != entry.inode {
             anyhow::bail!("conditional authoring recovery entry changed identity");
         }
-        Ok(Some(identity))
+        Ok(Some(RegularFileIdentity {
+            filesystem: identity.filesystem,
+            inode: identity.inode,
+        }))
     }
 
     #[cfg(target_os = "linux")]

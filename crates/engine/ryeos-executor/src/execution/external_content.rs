@@ -2734,8 +2734,6 @@ mod tests {
         std::fs::write(&source_path, large_bytes).unwrap();
         let source = std::fs::File::open(&source_path).unwrap();
         let metadata = source.metadata().unwrap();
-        #[cfg(unix)]
-        use std::os::unix::fs::MetadataExt as _;
         let source_identity = ryeos_state::PinnedLargeObjectSourceIdentity {
             file: lillux::pinned_regular_file_identity(&source).unwrap(),
             size: metadata.len(),

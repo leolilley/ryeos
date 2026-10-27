@@ -47,8 +47,8 @@
   },
   "ryeos_added_files": {
     "ryeos_instrument.rs": "48fc33f6d886ed302a041c2b5ac463610fa3d45cf5ca439591cd506eee7ffdc0",
-    "sqlite3/ryeos_binding.c": "fe5a8f132f00da655a2e9d9e6cc498107f1b7121ef9f57790a9f750d170ec06d",
-    "sqlite3/ryeos_binding.h": "08b83de3db9b8d33e27c063c7922dad826e4d94edd30db5cfbe1fcc3ca373f5d"
+    "sqlite3/ryeos_binding.c": "77824e07408ca805ab733c252cf9fcbf333212f2a035b3498a1551fca91bd550",
+    "sqlite3/ryeos_binding.h": "0b346c6134c2dac134757ab1c7eb1e0932c8dde00e34fe8e0ec1134db645778f"
   },
   "files_sha256": {
     ".cargo_vcs_info.json": "33e5e0818882b6e873b30deb60a9906d5958d75b0a54bda342490cf6a7c0d5f8",
@@ -69,8 +69,8 @@
     "sqlcipher/sqlite3ext.h": "7f9ae3bab94bbc62d909fbb0149861b4a0832299f12d7ccbfecc7f28a8d27aa2",
     "sqlite3/bindgen_bundled_version.rs": "3dda83bd41376847eb3e0fd9e4aa645e6f5b48ebdc5227df051c044ebdce177a",
     "sqlite3/bindgen_bundled_version_ext.rs": "73b54ea41acf310e13555ec925d5eaee6443d0787e6b1e4310f83647967a1a04",
-    "sqlite3/ryeos_binding.c": "fe5a8f132f00da655a2e9d9e6cc498107f1b7121ef9f57790a9f750d170ec06d",
-    "sqlite3/ryeos_binding.h": "08b83de3db9b8d33e27c063c7922dad826e4d94edd30db5cfbe1fcc3ca373f5d",
+    "sqlite3/ryeos_binding.c": "77824e07408ca805ab733c252cf9fcbf333212f2a035b3498a1551fca91bd550",
+    "sqlite3/ryeos_binding.h": "0b346c6134c2dac134757ab1c7eb1e0932c8dde00e34fe8e0ec1134db645778f",
     "sqlite3/sqlite3.c": "beb670be019aac60c8b30804dcb1c2ec7a2b9028fca7acf9aec9da664543c7ad",
     "sqlite3/sqlite3.h": "0c207567adc631521a353e067cfbc5044ebf11868f3c3fbf3178d6990409740e",
     "sqlite3/sqlite3ext.h": "b184dd1586d935133d37ad76fa353faf0a1021ff2fdedeedcc3498fff74bbb94",

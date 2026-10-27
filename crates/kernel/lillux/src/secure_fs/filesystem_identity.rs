@@ -118,21 +118,51 @@ pub(crate) enum UuidProbe {
     Failed(i32),
 }
 
+/// What the kernel says about a subvolume id for a descriptor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SubvolumeProbe {
+    /// The filesystem type has no subvolumes (anything but btrfs and
+    /// bcachefs): no subvolume is ever recorded, whatever `statx` returns.
+    NotApplicable,
+    /// A subvolume filesystem whose kernel reported this id.
+    Reported(u64),
+    /// A subvolume filesystem whose kernel did not report an id (older than
+    /// 6.10). The UUID alone would collide across subvolumes, so the identity
+    /// falls back to the attachment-bound device number.
+    Unavailable,
+}
+
 /// Choose the identity from a probe outcome and the descriptor's own
-/// `st_dev`. A filesystem without a UUID (or a kernel without the call) falls
-/// back to the device number; any other failure is an error.
+/// `st_dev`. A filesystem without a UUID (or a kernel without the call, or a
+/// caller the kernel refuses it to) falls back to the device number, as does
+/// an all-zero or all-ones UUID, which names nothing; any other failure is an
+/// error. The result is deterministic per filesystem type: a subvolume id is
+/// part of the identity on subvolume filesystems only.
 pub(crate) fn select_filesystem_identity(
     probe: UuidProbe,
     st_dev: u64,
-    subvolume: Option<u64>,
+    subvolume: SubvolumeProbe,
 ) -> Result<FilesystemIdentity> {
     match probe {
         UuidProbe::Reported { len, bytes } => {
             if len == 0 || usize::from(len) > MAX_UUID_BYTES {
                 bail!("kernel reported a filesystem uuid of invalid length {len}");
             }
+            let significant = &bytes[..usize::from(len)];
+            if significant.iter().all(|byte| *byte == 0)
+                || significant.iter().all(|byte| *byte == 0xff)
+            {
+                return Ok(FilesystemIdentity(Repr::Device(st_dev)));
+            }
+            let subvolume = match subvolume {
+                SubvolumeProbe::NotApplicable => None,
+                SubvolumeProbe::Reported(id) => Some(id),
+                SubvolumeProbe::Unavailable => {
+                    return Ok(FilesystemIdentity(Repr::Device(st_dev)));
+                }
+            };
             let mut canonical = [0_u8; MAX_UUID_BYTES];
-            canonical[..usize::from(len)].copy_from_slice(&bytes[..usize::from(len)]);
+            canonical[..usize::from(len)].copy_from_slice(significant);
             Ok(FilesystemIdentity(Repr::Uuid {
                 len,
                 bytes: canonical,
@@ -154,7 +184,7 @@ pub(crate) fn select_filesystem_identity(
 fn uuid_unsupported(errno: i32) -> bool {
     matches!(
         errno,
-        libc::ENOTTY | libc::EOPNOTSUPP | libc::ENOSYS | libc::EINVAL
+        libc::ENOTTY | libc::EOPNOTSUPP | libc::ENOSYS | libc::EINVAL | libc::EPERM | libc::EACCES
     )
 }
 
@@ -171,7 +201,8 @@ pub enum IdentityStability {
     /// Named by the filesystem's own UUID.
     ReattachStable,
     /// Named by the filesystem's own UUID and the subvolume id the kernel
-    /// reported, which separates btrfs subvolumes that share a UUID.
+    /// reported, which separates the subvolumes of a btrfs or bcachefs
+    /// filesystem that share a UUID. Other filesystems never carry one.
     ReattachStableWithSubvolume,
     /// No filesystem UUID was available, so the identity is the kernel's
     /// device number and holds only while this attachment lasts.
@@ -204,8 +235,14 @@ impl FilesystemIdentity {
         {
             use std::os::unix::fs::MetadataExt as _;
             let st_dev = file.metadata()?.dev();
-            select_filesystem_identity(probe_uuid(file), st_dev, subvolume_of(file)?)
+            select_filesystem_identity(probe_uuid(file), st_dev, subvolume_probe(file)?)
         }
+    }
+
+    /// Whether this names a filesystem at all: a device number of zero never
+    /// does.
+    pub fn is_named(&self) -> bool {
+        !matches!(self.0, Repr::Device(0))
     }
 
     /// The identity of the filesystem holding `entry`, a child of `parent`,
@@ -222,10 +259,11 @@ impl FilesystemIdentity {
         #[cfg(unix)]
         {
             let identity = Self::of_descriptor(parent)?;
-            if let Repr::Uuid { subvolume, .. } = identity.0 {
-                if subvolume_of(entry)? != subvolume {
-                    bail!("entry is in another subvolume than its parent directory");
-                }
+            if let Repr::Uuid { subvolume, .. } = identity.0
+                && subvolume_probe(entry)?
+                    != subvolume.map_or(SubvolumeProbe::NotApplicable, SubvolumeProbe::Reported)
+            {
+                bail!("entry is in another subvolume than its parent directory");
             }
             Ok(identity)
         }
@@ -243,14 +281,52 @@ const STATX_SUBVOL_OFFSET: usize = 0xa0;
 #[cfg(target_os = "linux")]
 const STATX_BYTES: usize = 256;
 
+/// btrfs and bcachefs `statfs` magic numbers: the filesystem types with
+/// subvolumes.
+#[cfg(target_os = "linux")]
+const SUBVOLUME_FILESYSTEMS: [i64; 2] = [0x9123_683e, 0xca45_1a4e];
+
 /// The subvolume id a `statx` result carries, only when its mask has the bit.
+#[cfg(target_os = "linux")]
 pub(crate) fn subvolume_from_statx(mask: u32, value: u64) -> Option<u64> {
     const SUBVOL_BIT: u32 = 0x8000;
     (mask & SUBVOL_BIT != 0).then_some(value)
 }
 
+/// Whether `file` is on a filesystem type that has subvolumes (`fstatfs`
+/// works on path-only descriptors).
+#[cfg(target_os = "linux")]
+fn on_subvolume_filesystem(file: &File) -> Result<bool> {
+    use std::os::fd::AsRawFd as _;
+    let mut stats = std::mem::MaybeUninit::<libc::statfs>::zeroed();
+    // SAFETY: the descriptor is open for the call and the kernel fully writes
+    // the exclusively borrowed output on success.
+    if unsafe { libc::fstatfs(file.as_raw_fd(), stats.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error())
+            .context("read filesystem type of open descriptor");
+    }
+    // SAFETY: fstatfs succeeded.
+    let kind = i64::from(unsafe { stats.assume_init() }.f_type);
+    Ok(SUBVOLUME_FILESYSTEMS.contains(&kind))
+}
+
+/// The subvolume disposition of an open descriptor, deterministic by
+/// filesystem type.
+#[cfg(target_os = "linux")]
+fn subvolume_probe(file: &File) -> Result<SubvolumeProbe> {
+    if !on_subvolume_filesystem(file)? {
+        return Ok(SubvolumeProbe::NotApplicable);
+    }
+    Ok(subvolume_of(file)?.map_or(SubvolumeProbe::Unavailable, SubvolumeProbe::Reported))
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn subvolume_probe(_file: &File) -> Result<SubvolumeProbe> {
+    Ok(SubvolumeProbe::NotApplicable)
+}
+
 /// The subvolume of an open descriptor, including a path-only one, or `None`
-/// when the kernel or filesystem reports none.
+/// when the kernel reports none.
 #[cfg(target_os = "linux")]
 fn subvolume_of(file: &File) -> Result<Option<u64>> {
     use std::os::fd::AsRawFd as _;
@@ -281,11 +357,6 @@ fn subvolume_of(file: &File) -> Result<Option<u64>> {
     let mask = u32::from_ne_bytes(bytes[STATX_MASK_OFFSET..STATX_MASK_OFFSET + 4].try_into()?);
     let value = u64::from_ne_bytes(bytes[STATX_SUBVOL_OFFSET..STATX_SUBVOL_OFFSET + 8].try_into()?);
     Ok(subvolume_from_statx(mask, value))
-}
-
-#[cfg(all(unix, not(target_os = "linux")))]
-fn subvolume_of(_file: &File) -> Result<Option<u64>> {
-    Ok(None)
 }
 
 /// `struct fsuuid2 { __u8 len; __u8 uuid[16]; }`.
@@ -336,7 +407,7 @@ mod tests {
     use super::*;
 
     fn select(probe: UuidProbe, st_dev: u64) -> Result<FilesystemIdentity> {
-        select_filesystem_identity(probe, st_dev, None)
+        select_filesystem_identity(probe, st_dev, SubvolumeProbe::NotApplicable)
     }
 
     fn uuid(first: u8) -> UuidProbe {
@@ -444,17 +515,78 @@ mod tests {
 
     #[test]
     fn subvolume_roots_with_the_same_uuid_and_inode_are_different() {
-        let root = |subvolume: Option<u64>, dev: u64| {
+        let root = |subvolume: SubvolumeProbe, dev: u64| {
             select_filesystem_identity(uuid(1), dev, subvolume).unwrap()
         };
+        let reported = SubvolumeProbe::Reported;
         // Two btrfs subvolume roots: one UUID, inode 256 in each.
-        assert_ne!(root(Some(256), 10), root(Some(257), 10));
+        assert_ne!(root(reported(256), 10), root(reported(257), 10));
         // A reattach keeps the UUID and subvolume and changes only st_dev.
-        assert_eq!(root(Some(256), 10), root(Some(256), 99));
-        // A reported subvolume is never equal to none being reported.
-        assert_ne!(root(Some(256), 10), root(None, 10));
+        assert_eq!(root(reported(256), 10), root(reported(256), 99));
+        // A reported subvolume never equals a filesystem without subvolumes.
+        assert_ne!(
+            root(reported(256), 10),
+            root(SubvolumeProbe::NotApplicable, 10)
+        );
     }
 
+    #[test]
+    fn identity_is_deterministic_by_filesystem_type() {
+        // A subvolume filesystem whose kernel reports no id is attachment
+        // bound: the UUID alone would collide across subvolumes.
+        let unavailable =
+            select_filesystem_identity(uuid(1), 10, SubvolumeProbe::Unavailable).unwrap();
+        assert_eq!(unavailable.stability(), IdentityStability::AttachmentBound);
+        assert_ne!(
+            unavailable,
+            select_filesystem_identity(uuid(1), 11, SubvolumeProbe::Unavailable).unwrap()
+        );
+        // Stability values follow the subvolume disposition.
+        assert_eq!(
+            select_filesystem_identity(uuid(1), 10, SubvolumeProbe::Reported(5))
+                .unwrap()
+                .stability(),
+            IdentityStability::ReattachStableWithSubvolume
+        );
+        assert_eq!(
+            select_filesystem_identity(uuid(1), 10, SubvolumeProbe::NotApplicable)
+                .unwrap()
+                .stability(),
+            IdentityStability::ReattachStable
+        );
+    }
+
+    #[test]
+    fn an_empty_uuid_names_nothing_and_a_refused_ioctl_is_unsupported() {
+        for bytes in [[0_u8; MAX_UUID_BYTES], [0xff; MAX_UUID_BYTES]] {
+            for len in [1_u8, 16] {
+                let probe = UuidProbe::Reported { len, bytes };
+                let identity = select(probe, 9).unwrap();
+                assert_eq!(identity.stability(), IdentityStability::AttachmentBound);
+                assert_eq!(identity, select(probe, 9).unwrap());
+                assert_ne!(identity, select(probe, 10).unwrap());
+            }
+        }
+        for errno in [libc::EPERM, libc::EACCES] {
+            assert_eq!(
+                select(UuidProbe::Failed(errno), 3).unwrap().stability(),
+                IdentityStability::AttachmentBound
+            );
+        }
+        assert!(
+            !select(UuidProbe::Failed(libc::ENOTTY), 0)
+                .unwrap()
+                .is_named()
+        );
+        assert!(
+            select(UuidProbe::Failed(libc::ENOTTY), 1)
+                .unwrap()
+                .is_named()
+        );
+        assert!(select(uuid(1), 0).unwrap().is_named());
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
     fn subvolume_is_taken_only_when_the_mask_has_the_bit() {
         assert_eq!(subvolume_from_statx(0x8000 | 0x7ff, 5), Some(5));
@@ -463,14 +595,16 @@ mod tests {
 
     #[test]
     fn subvolume_serialization_is_sorted_omitted_when_absent_and_strict() {
-        let with = select_filesystem_identity(uuid(0xab), 1, Some(256)).unwrap();
+        let with =
+            select_filesystem_identity(uuid(0xab), 1, SubvolumeProbe::Reported(256)).unwrap();
         let text = serde_json::to_string(&with).unwrap();
         assert!(text.starts_with(r#"{"subvolume":256,"uuid":""#), "{text}");
         assert_eq!(
             serde_json::from_str::<FilesystemIdentity>(&text).unwrap(),
             with
         );
-        let without = select_filesystem_identity(uuid(0xab), 1, None).unwrap();
+        let without =
+            select_filesystem_identity(uuid(0xab), 1, SubvolumeProbe::NotApplicable).unwrap();
         let text = serde_json::to_string(&without).unwrap();
         assert!(text.starts_with(r#"{"uuid":""#), "{text}");
         assert_ne!(with, without);

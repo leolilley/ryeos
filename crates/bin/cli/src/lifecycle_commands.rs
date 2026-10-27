@@ -2497,11 +2497,9 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
     }
 }
 
-/// Recorded, signed capability report plus a fresh probe-free generation
-/// check. A refused floor fails the doctor; a missing or stale report warns.
-/// Doctor row for the native-capacity account: healthy with its summary,
-/// a warning with the cure when the allowance is spent and the signed policy
-/// lets the operator re-issue, a failure when it does not.
+/// Doctor row for the app root's durable identity: whether persisted
+/// identities survive the volume being re-attached under another device
+/// number. Report only; a device-number identity warns, never fails.
 fn durable_identity_check(
     app_root: &std::path::Path,
 ) -> ryeos_core_tools::actions::doctor::CheckResult {
@@ -2537,6 +2535,9 @@ fn durable_identity_check(
     }
 }
 
+/// Doctor row for the native-capacity account: healthy with its summary,
+/// a warning with the cure when the allowance is spent and the signed policy
+/// lets the operator re-issue, a failure when it does not.
 fn native_capacity_check(
     app_root: &std::path::Path,
 ) -> ryeos_core_tools::actions::doctor::CheckResult {
@@ -2581,6 +2582,8 @@ fn native_capacity_check(
     }
 }
 
+/// Recorded, signed capability report plus a fresh probe-free generation
+/// check. A refused floor fails the doctor; a missing or stale report warns.
 fn inspect_capability_report(
     app_root: &std::path::Path,
 ) -> (

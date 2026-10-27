@@ -147,7 +147,7 @@ impl ExternalContentImportPolicyRecord {
             {
                 bail!("external-content import root `{name}` must be an absolute normalized path");
             }
-            if !root.root_identity.names_an_inode() {
+            if !root.root_identity.names_an_inode() || !root.root_identity.filesystem().is_named() {
                 bail!("external-content import root `{name}` has an invalid filesystem identity");
             }
         }

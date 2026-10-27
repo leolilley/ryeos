@@ -434,7 +434,9 @@ fn reanchor_moves_the_account_only_through_the_operator_signed_document() {
 
     // Boot accepts the new place only through the signed document: a changed
     // byte, or an absent document, is refused.
-    let document_path = moved.join(".ai/config/onboarding/native-capacity-reanchor.json");
+    let document_path = moved.join(format!(
+        ".ai/config/onboarding/native-capacity-reanchor.{document_digest}.json"
+    ));
     let signed = std::fs::read(&document_path).expect("published document");
     let mut tampered = String::from_utf8(signed.clone()).unwrap();
     tampered = tampered.replace("e2e move to another filesystem", "e2e move elsewhere");
