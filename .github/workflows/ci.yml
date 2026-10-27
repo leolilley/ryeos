@@ -329,7 +329,9 @@ jobs:
         run: ./scripts/gate.sh --refresh-bundles --skip-crash-qualification
 
       - name: Check explicit scheduler compositions
-        timeout-minutes: 30
+        # Three no-default-features checks at -j 1 take 20-30 minutes on a runner; the
+        # job ceiling, not this step, bounds a stuck compilation.
+        timeout-minutes: 60
         shell: bash
         run: |
           set -euo pipefail
