@@ -473,6 +473,39 @@ impl ExecutionProvenance {
         }
     }
 
+    /// Create the writable runtime-state scratch a read-only pinned generation
+    /// needs, under `<runtime_cache>/executions`. Only a launch that actually
+    /// runs calls this; resolution and validation never allocate it. Returns
+    /// `None` for every provenance that keeps state elsewhere.
+    pub fn ensure_read_only_runtime_state(
+        &self,
+        runtime_cache: &Path,
+    ) -> anyhow::Result<Option<&Path>> {
+        match self {
+            Self::RootPinnedGeneration {
+                workspace_lifeline,
+                project_authority:
+                    ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
+                        realization: ryeos_state::objects::PinnedProjectRealization::ReadOnly,
+                        ..
+                    },
+                ..
+            }
+            | Self::ChildPinnedGeneration {
+                workspace_lifeline,
+                project_authority:
+                    ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
+                        realization: ryeos_state::objects::PinnedProjectRealization::ReadOnly,
+                        ..
+                    },
+                ..
+            } => workspace_lifeline
+                .ensure_runtime_state_scratch(runtime_cache)
+                .map(Some),
+            _ => Ok(None),
+        }
+    }
+
     /// Construct Root provenance for a pushed-head checkout.
     ///
     /// # Panics
@@ -2297,13 +2330,10 @@ mod tests {
     fn read_only_pinned_generation_reports_state_root_outside_the_materialization() {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path().join("project");
-        let scratch_path = dir.path().join("state-scratch");
+        let cache = dir.path().join("cache");
         std::fs::create_dir(&project).unwrap();
-        std::fs::create_dir(&scratch_path).unwrap();
+        std::fs::create_dir(&cache).unwrap();
         let lifeline = Arc::new(TempDirGuard::new_borrowed_cache(project.clone()));
-        lifeline
-            .install_runtime_state_scratch(Arc::new(TempDirGuard::new(scratch_path.clone())))
-            .unwrap();
         let hash = "c".repeat(64);
         let original = PathBuf::from("/laptop");
         let root = ExecutionProvenance::root_pushed_head_for_test(
@@ -2316,12 +2346,23 @@ mod tests {
         )
         .unwrap();
 
-        let state_root = root.state_root_override().expect("read-only state root");
-        assert_eq!(state_root, scratch_path.as_path());
+        assert_eq!(root.state_root_override(), None);
+        assert!(!cache.join("executions").exists());
+        let state_root = root
+            .ensure_read_only_runtime_state(&cache)
+            .unwrap()
+            .expect("read-only state root")
+            .to_path_buf();
+        assert!(state_root.starts_with(cache.join("executions")));
         assert!(!state_root.starts_with(root.effective_path()));
+        assert_eq!(root.state_root_override(), Some(state_root.as_path()));
+        assert_eq!(
+            root.ensure_read_only_runtime_state(&cache).unwrap(),
+            Some(state_root.as_path())
+        );
         // Borrowed children keep writing to the same daemon-owned root.
         let child = root.clone_for_borrowed_child();
-        assert_eq!(child.state_root_override(), Some(scratch_path.as_path()));
+        assert_eq!(child.state_root_override(), Some(state_root.as_path()));
     }
 
     #[test]
@@ -2341,6 +2382,8 @@ mod tests {
     #[test]
     fn copy_on_write_pinned_generation_keeps_state_in_its_checkout() {
         let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        std::fs::create_dir(&cache).unwrap();
         let lifeline = Arc::new(TempDirGuard::new(dir.path().to_path_buf()));
         let hash = "d".repeat(64);
         let original = PathBuf::from("/laptop");
@@ -2353,8 +2396,10 @@ mod tests {
             pinned(&original, &hash),
         )
         .unwrap();
+        assert_eq!(root.ensure_read_only_runtime_state(&cache).unwrap(), None);
         assert_eq!(root.state_root_override(), None);
         assert_eq!(root.clone_for_borrowed_child().state_root_override(), None);
+        assert!(!cache.join("executions").exists());
     }
 
     #[test]

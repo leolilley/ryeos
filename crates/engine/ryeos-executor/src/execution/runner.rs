@@ -805,6 +805,11 @@ fn prepare_cas_context(
     thread_id: &str,
     guard: &mut ExecutionGuard,
 ) -> Result<PreparedCasContext> {
+    // A read-only pinned generation's runtime state lives in a daemon scratch
+    // that exists only for an execution that actually launches.
+    provenance
+        .ensure_read_only_runtime_state(&state.config.runtime_root().cache())
+        .context("allocate read-only runtime state scratch")?;
     let prepared_result: Result<PreparedCasContext> = match provenance {
         ExecutionProvenance::Projectless {
             effective_path,

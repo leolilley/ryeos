@@ -855,23 +855,7 @@ fn resolve_pinned_snapshot_context_admitted(
     );
     let project_guard = match project_guard {
         Some(guard) => guard,
-        None => {
-            // A read-only generation is a shared immutable cache directory, so
-            // the launch's own thread records cannot live inside it. Give this
-            // request a private daemon-owned writable state root outside the
-            // materialization; it is removed with the request's last lifeline
-            // holder.
-            let guard = Arc::new(TempDirGuard::new_borrowed_cache(effective_path.clone()));
-            let (_, state_scratch) = ryeos_app::temp_dir_guard::create_projectless_workspace(
-                &runtime_cache,
-                &format!("pinned-state-{:016x}", rand::random::<u64>()),
-            )
-            .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?;
-            guard
-                .install_runtime_state_scratch(state_scratch)
-                .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?;
-            guard
-        }
+        None => Arc::new(TempDirGuard::new_borrowed_cache(effective_path.clone())),
     };
     project_guard.retain_lease(generation_lease);
 
