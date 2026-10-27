@@ -4,9 +4,10 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result, ensure};
+#[cfg(test)]
+use ryeos_state::external_execution::transport::ExternalControllerTransportContract;
 use ryeos_state::external_execution::transport::{
-    ExternalControllerTransportContract, ExternalControllerTransportSelection,
-    ExternalNetworkInputPolicy,
+    ExternalControllerTransportSelection, ExternalNetworkInputPolicy,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
