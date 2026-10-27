@@ -306,8 +306,13 @@ fn on_subvolume_filesystem(file: &File) -> Result<bool> {
             .context("read filesystem type of open descriptor");
     }
     // SAFETY: fstatfs succeeded.
-    let kind = i64::from(unsafe { stats.assume_init() }.f_type);
-    Ok(SUBVOLUME_FILESYSTEMS.contains(&kind))
+    let kind = unsafe { stats.assume_init() }.f_type;
+    // `f_type`'s integer width and signedness differ by target, while the
+    // magic numbers are 32-bit; compare the low 32 bits.
+    let kind = i128::from(kind) & 0xffff_ffff;
+    Ok(SUBVOLUME_FILESYSTEMS
+        .iter()
+        .any(|magic| i128::from(*magic) == kind))
 }
 
 /// The subvolume disposition of an open descriptor, deterministic by
