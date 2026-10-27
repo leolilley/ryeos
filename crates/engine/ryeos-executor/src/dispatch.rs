@@ -2245,6 +2245,10 @@ pub(crate) async fn dispatch_method(
         )));
     }
 
+    request
+        .provenance
+        .ensure_read_only_runtime_state(&state.config.runtime_root().cache())
+        .map_err(DispatchError::Internal)?;
     // Generate callback token. The method child borrows the dispatch
     // provenance instead of minting an unprovenanced token.
     let ttl = ryeos_app::callback_token::launch_token_ttl(Some(METHOD_RUNTIME_TIMEOUT_SECS));

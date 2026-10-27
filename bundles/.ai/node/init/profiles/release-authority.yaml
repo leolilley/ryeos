@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-20T18:29:03Z:913bb3d4810c3196bc2bd68f7c337e43559bf694f820ea2918db504c20ce6341:nGtXKdrn2i4lMzebFKlkBv8PQFdYxl9bNIyS8LdyKzm7Hun/Q70uviQz61THBsZz9Jil0TBSzf4B6yjSgeiUBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-26T23:53:56Z:8f520a8e52a57111f86c34bfc0d57f097704e9d5f53dad51e0485020c1db8767:WbOaHA5zrZ3taX82SRSliy7xF/yeRteSYkrurBIYLlMjQLz9tTIUNlVEufBEj1h6Dr3GQnKWS2zBKqcY3Hz8DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - bundle-release
@@ -373,6 +373,7 @@ policies:
       - ".svn/"
       - ".venv/"
       - "/.ai/config/remotes/"
+      - "/.ai/state/"
       # Exclude this project's build output, not package source directories
       # such as a vendored crate's src/target/ required by its checksums.
       - "/target/"

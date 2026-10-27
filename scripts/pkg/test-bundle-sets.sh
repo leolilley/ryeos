@@ -299,13 +299,22 @@ for profile_name in "${node_init_profiles[@]}"; do
     *)
       [[ "$declared_host_classes" == "local " ]] ;;
   esac
-  if [[ "$profile_name" == hosted-workflow || "$profile_name" == f5r-controller ]]; then
-    assert_rejected grep -Eq '^          trusted_process_group_sessions: false$' "$node_init_profile"
-    grep -Eq '^          trusted_process_group_sessions: true$' "$node_init_profile"
-  else
-    assert_rejected grep -Eq '^          trusted_process_group_sessions: true$' "$node_init_profile"
-    grep -Eq '^          trusted_process_group_sessions: false$' "$node_init_profile"
-  fi
+  # Trusted process-group settlement is admitted per host class: the hosted
+  # workflow profiles and the composition controller admit it on every class,
+  # the development profile only on its administrator-associated `local`
+  # class, every other profile on none.
+  for host_class in $declared_host_classes; do
+    declared_trust="$(
+      sed -n "/^        ${host_class}:\$/,/^        [a-z_]*:\$/p" "$node_init_profile" \
+        | sed -nE 's/^          trusted_process_group_sessions: (true|false)$/\1/p'
+    )"
+    case "$profile_name:$host_class" in
+      hosted-workflow:*|f5r-controller:*|development:local)
+        [[ "$declared_trust" == true ]] ;;
+      *)
+        [[ "$declared_trust" == false ]] ;;
+    esac
+  done
   profile_bundle_set="$(ryeos_node_init_profile_bundle_set "$profile_name")"
   expected_exact_bundles="$(ryeos_bundle_set_names "$profile_bundle_set" | sort)"
   actual_exact_bundles="$(

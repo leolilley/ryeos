@@ -14,6 +14,8 @@
 #![recursion_limit = "256"]
 
 use ryeosd::test_support as common;
+#[path = "common/project_apply.rs"]
+mod project_apply;
 #[path = "common/project_push.rs"]
 mod project_push;
 
@@ -205,7 +207,7 @@ async fn assert_generation(
     deployed: &str,
 ) -> Result<()> {
     assert_eq!(
-        project_push::deployed_snapshot(h, &project.live_path)
+        project_apply::deployed_snapshot(h, &project.live_path)
             .await?
             .as_deref(),
         Some(deployed),
@@ -265,7 +267,7 @@ async fn apply_ok(
     expected_deployed: Option<&str>,
 ) -> Result<Value> {
     let (status, body) =
-        project_push::apply_snapshot(h, &project.live_path, target, expected_deployed).await?;
+        project_apply::apply_snapshot(h, &project.live_path, target, expected_deployed).await?;
     anyhow::ensure!(
         status.is_success(),
         "apply-snapshot refused with {status}: {body}"
@@ -332,7 +334,7 @@ async fn core_refuses_a_push_declaring_schedules() -> Result<()> {
     let target = project.push(&h, Generation::A, None).await?;
 
     let (status, body) =
-        project_push::apply_snapshot(&h, &project.live_path, &target, None).await?;
+        project_apply::apply_snapshot(&h, &project.live_path, &target, None).await?;
     assert!(
         !status.is_success(),
         "Core must refuse a deploy declaring schedules; got {status}: {body}"
@@ -343,7 +345,7 @@ async fn core_refuses_a_push_declaring_schedules() -> Result<()> {
         "refusal must name the missing scheduler service: {body}"
     );
     assert_eq!(
-        project_push::deployed_snapshot(&h, &project.live_path).await?,
+        project_apply::deployed_snapshot(&h, &project.live_path).await?,
         None,
         "a refused deploy must not publish a deployed ref"
     );
@@ -470,7 +472,7 @@ mod crash {
         let b = project.push(&h, Generation::B, Some(&a)).await?;
         let request = spawn_apply(
             &h,
-            project_push::apply_request(&project.live_path, &b, Some(&a)),
+            project_apply::apply_request(&project.live_path, &b, Some(&a)),
         )?;
         wait_for_cut(&mut h, boundary).await?;
         h.kill_daemon().await?;

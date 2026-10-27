@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-22T17:26:55Z:a8e46f0149770b28fb4b8cd9d5d18dcd0f9d7b992a52d8ab57f091b595d1e766:yeDCT/ytcE4A6wcy/GYfANvAbNu0kgJSJXFpEgtlhi0LB3BFf7xjv7AWKH7XT9KFFJgGdMAaclf9g1ihaGdHAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-27T12:26:47Z:df9dd16c05f623654d31d3517d1c7ddce1e68321ff66ef39b1cbf4744ef67bfc:uyUaXriFZiWgqkS6pHOe/hQDAkgq3EzxOSTFWybznFHuMq3kmReZ9wCOkGEtsJh2+/o/t0gT/1528INldX6eBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: codex/environments
 schema: ryeos.worker_environment.v6
 external_product_slots: []
@@ -7,7 +7,7 @@ external_content:
   - id: authoring-tools
     kind: tree
     mode: pinned
-    digest: 1ca7a7fe9ecc1d19c38c986ba9df435ff7bbe6d4ba020f2643564b8bba0c84e6
+    digest: 462135d8fd8f9df1101b9100ba3661baaba4a07c7070288262d7dd8b22a50050
     metadata_hint: ryeos-authoring-environment-v1-x86_64-linux
     mount_root: execution_runtime
     mount: authoring-tools

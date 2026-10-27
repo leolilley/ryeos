@@ -14,8 +14,10 @@
 //! row, so accepted launch never returns a phantom or leaves `created` stuck.
 
 use ryeosd::test_support as common;
+#[path = "common/project_push.rs"]
+mod project_push;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use common::DaemonHarness;
@@ -499,6 +501,90 @@ async fn execute_launch_admits_graph_ref() {
     let thread_id = unwrap_accepted(status, &body);
     let thread = wait_for_terminal_thread(&h, &thread_id).await;
     assert_completed(&thread, &thread_id);
+}
+
+/// Every `thread.json` below `root`, without following symlinks.
+fn thread_records_below(root: &Path, found: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        let path = entry.path();
+        if file_type.is_dir() {
+            thread_records_below(&path, found);
+        } else if file_type.is_file() && entry.file_name() == "thread.json" {
+            found.push(path);
+        }
+    }
+}
+
+/// A published snapshot executed read-only runs against a shared immutable
+/// materialization. The launch must reach the runtime and complete, and its
+/// own thread record must never be written into that materialization.
+#[tokio::test(flavor = "multi_thread")]
+async fn execute_launch_from_published_snapshot_keeps_thread_state_out_of_the_materialization() {
+    let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        register_workflow_bundles(state_path, fixture)?;
+        plant_vault_with_zen_key(state_path)?;
+        Ok(())
+    };
+    let (h, fixture) = DaemonHarness::start_fast_with(plant, |_| {})
+        .await
+        .expect("start daemon with the workflow bundles");
+
+    let source = tempfile::tempdir().expect("source tempdir");
+    plant_smoke_graph(source.path(), &fixture.publisher).expect("plant smoke graph");
+    let live = tempfile::tempdir().expect("live project tempdir");
+    let live_path = live
+        .path()
+        .canonicalize()
+        .expect("canonical live project")
+        .to_str()
+        .expect("utf-8 live project path")
+        .to_owned();
+    let captured = project_push::capture_ai_only_snapshot(source.path(), None)
+        .expect("capture published snapshot");
+    let pushed = project_push::push_snapshot(&h, &live_path, &captured)
+        .await
+        .expect("publish snapshot");
+
+    let (status, body) = h
+        .post_json(
+            "/execute/launch",
+            json!({
+                "item_ref": "graph:smoke",
+                "launch_id": TEST_LAUNCH_ID,
+                "ref_bindings": {},
+                "project_path": live_path,
+                "parameters": {},
+                "execution_policy":
+                    ryeos_app::execution_policy::ExecutionPolicy::local_pinned_snapshot_read_only(
+                        ryeos_app::execution_policy::ExecutionResponse::Accepted,
+                        pushed.snapshot_hash.clone(),
+                    )
+            }),
+        )
+        .await
+        .expect("post /execute/launch from a published snapshot");
+
+    let thread_id = unwrap_accepted(status, &body);
+    let thread = wait_for_terminal_thread(&h, &thread_id).await;
+    assert_completed(&thread, &thread_id);
+
+    let mut records = Vec::new();
+    thread_records_below(&h.state_path, &mut records);
+    for record in records {
+        assert!(
+            !record
+                .components()
+                .any(|part| part.as_os_str() == "snapshots"),
+            "thread record was written into a materialized snapshot: {}",
+            record.display()
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

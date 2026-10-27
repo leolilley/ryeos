@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-09T05:54:13Z:d9446662a3ab2793b63286c3c9356989d7ebff0ce610ab7783fe09a64d10e720:Gkt0Cz8S1GJgM9ToTcgKFsi9BTfFKudmyqQKL71Ma2QyUQONKFKgDMfvegmJTtu8WJa5JUqzQoFh7qi9ee5TBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-27T08:33:02Z:addcd197b64b7e777f3b45e829f493abc473438cc36d13b358747210eddd45b7:d9e304f5r3GyybhbHXFr8Br9bXZJ5fyrL3g1dkCBflyJDMvd/YWZvWc9TXS0M34zDjQ42XptUMxrE+XDk5lqDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 id: core/execute
 path: /execute
 methods:
@@ -8,7 +8,10 @@ request:
   body: json
 limits:
   body_bytes_max: 10485760
-  timeout_ms: 300000
+  # How long one request waits for its response; the work continues
+  # server-side when the caller stops waiting. Long enough for a proof that
+  # re-verifies a gigabyte-scale product tree.
+  timeout_ms: 1800000
   concurrent_max: 100
 response:
   mode: execute

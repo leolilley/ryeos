@@ -3999,6 +3999,12 @@ async fn prepare_managed_launch_authority(
     metadata_template: Option<&ryeos_app::launch_metadata::RuntimeLaunchMetadata>,
     transferred_continuation_capsule: Option<&ryeos_state::objects::AdmittedLaunchCapsule>,
 ) -> Result<PreparedManagedLaunchAuthority, BuildAndLaunchError> {
+    // Allocated before any reader of the state root, and only for a launch
+    // that proceeds; validation-only requests never reach here.
+    params
+        .provenance
+        .ensure_read_only_runtime_state(&params.state.config.runtime_root().cache())
+        .map_err(BuildAndLaunchError::Internal)?;
     let engine = params.provenance.request_engine();
     let root_admission = params.resolved.root_admission.as_ref().ok_or_else(|| {
         BuildAndLaunchError::Internal(anyhow::anyhow!(
@@ -6372,6 +6378,9 @@ async fn run_claimed_thread_row_inner(
     // Resolution and callback/state authority remain anchored at the
     // authoritative project path. Only the subprocess cwd/project input path
     // moves to the transient admitted-input root.
+    provenance
+        .ensure_read_only_runtime_state(&state.config.runtime_root().cache())
+        .map_err(BuildAndLaunchError::Internal)?;
     let runtime_state_root = provenance.state_root_override().unwrap_or(project_path);
     tracing::info!(
         acting_principal,

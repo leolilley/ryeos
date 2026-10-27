@@ -118,7 +118,7 @@ pub fn capture_ai_only_snapshot(
     })
 }
 
-async fn post_ok(h: &DaemonHarness, route: &str, body: Value) -> Result<Value> {
+pub(crate) async fn post_ok(h: &DaemonHarness, route: &str, body: Value) -> Result<Value> {
     let (status, response) = h.post_json(route, body).await?;
     anyhow::ensure!(
         status.is_success(),
@@ -198,42 +198,4 @@ pub async fn push_snapshot(
     Ok(PushedHead {
         snapshot_hash: captured.snapshot_hash.clone(),
     })
-}
-
-/// The `/project/apply-snapshot` request body for one pushed HEAD.
-pub fn apply_request(
-    live_project: &str,
-    snapshot_hash: &str,
-    expected_deployed: Option<&str>,
-) -> Value {
-    json!({
-        "project_path": live_project,
-        "snapshot_hash": snapshot_hash,
-        "expected_deployed_hash": expected_deployed,
-    })
-}
-
-/// Deploy a pushed HEAD, returning the node's status and body unchanged.
-pub async fn apply_snapshot(
-    h: &DaemonHarness,
-    live_project: &str,
-    snapshot_hash: &str,
-    expected_deployed: Option<&str>,
-) -> Result<(reqwest::StatusCode, Value)> {
-    h.post_json(
-        "/project/apply-snapshot",
-        apply_request(live_project, snapshot_hash, expected_deployed),
-    )
-    .await
-}
-
-/// The node's deployed snapshot for `live_project`, or `None` when the
-/// project has never been deployed.
-pub async fn deployed_snapshot(h: &DaemonHarness, live_project: &str) -> Result<Option<String>> {
-    let status = post_ok(h, "/project/status", json!({"project_path": live_project})).await?;
-    match status.get("deployed_snapshot_hash") {
-        Some(Value::String(hash)) => Ok(Some(hash.clone())),
-        Some(Value::Null) => Ok(None),
-        other => anyhow::bail!("project/status returned no deployed snapshot field: {other:?}"),
-    }
 }

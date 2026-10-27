@@ -3676,7 +3676,13 @@ impl IsolationRuntime {
             });
         let mut resolved_writable_mounts =
             if context.project_authority == IsolationProjectAuthority::ReadOnly {
-                Vec::new()
+                // A read-only project never becomes writable, but the daemon's
+                // own checkpoint directory for this launch does: a replay-aware
+                // runtime records its progress there, never in the project.
+                configured_writable
+                    .filter(|configured| configured.as_str() == "{checkpoint_dir}")
+                    .map(|configured| resolve_writable_mount(configured, &writable_resolution))
+                    .collect::<Result<Vec<_>, _>>()?
             } else {
                 configured_writable
                     .map(|configured| resolve_writable_mount(configured, &writable_resolution))
@@ -9551,6 +9557,131 @@ mod tests {
             error
                 .to_string()
                 .contains("writable runtime views require an enforced isolation backend")
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn read_only_project_launch_keeps_daemon_checkpoint_writable_and_project_read_only() {
+        let app_root = tempfile::tempdir().unwrap();
+        let mut policy = IsolationPolicy::disabled_for_authoring();
+        policy.mode = IsolationMode::Enforce;
+        policy.backend = Some(resolved_backend().selection.clone());
+        policy.filesystem.readable = vec!["{verified_code}".to_string(), "{project}".to_string()];
+        policy.filesystem.writable = vec!["{project}".to_string(), "{checkpoint_dir}".to_string()];
+        write_policy(app_root.path(), &policy);
+
+        let mut backend = resolved_backend();
+        backend.effective_capabilities = BTreeSet::from([
+            IsolationCapability::FilesystemPrivateRoot,
+            IsolationCapability::FilesystemFdReadOnly,
+            IsolationCapability::FilesystemFdWritable,
+            IsolationCapability::FilesystemOrderedOverlays,
+            IsolationCapability::FilesystemFixedParentViews,
+            IsolationCapability::FilesystemPrivateTmp,
+            IsolationCapability::FilesystemPidNamespaceProc,
+            IsolationCapability::DevicesMinimal,
+            IsolationCapability::EnvironmentExact,
+            IsolationCapability::NetworkIsolated,
+            IsolationCapability::NetworkHost,
+            IsolationCapability::ProcessHostPidNamespace,
+            IsolationCapability::ProcessIsolatedPidNamespace,
+            IsolationCapability::ProcessTargetPidReporting,
+            IsolationCapability::LifecycleSharedProcessGroup,
+        ]);
+        backend.declaration.capabilities = backend.effective_capabilities.clone();
+        let runtime =
+            IsolationRuntime::load_with_backend(app_root.path(), Some(Arc::new(backend))).unwrap();
+        let command = runtime
+            .capture_verified_command(Path::new("/bin/true"), None, None)
+            .unwrap();
+
+        let project = tempfile::tempdir().unwrap();
+        let canonical_app_root = std::fs::canonicalize(app_root.path()).unwrap();
+        let checkpoint_dir = canonical_app_root
+            .join("threads")
+            .join("T-read-only-checkpoint")
+            .join("checkpoints");
+        std::fs::create_dir_all(&checkpoint_dir).unwrap();
+        let checkpoint_authority = lillux::PinnedDirectory::open(&checkpoint_dir)
+            .unwrap()
+            .unwrap();
+        let request = || lillux::SubprocessRequest {
+            cmd: "/bin/true".to_string(),
+            argv0: None,
+            args: Vec::new(),
+            cwd: Some(project.path().to_string_lossy().into_owned()),
+            envs: Vec::new(),
+            stdin_data: None,
+            timeout: 1.0,
+            limits: None,
+            inherited_fds: Vec::new(),
+            inherited_fd_mappings: Vec::new(),
+            supervised_status: None,
+        };
+        let context = IsolationLaunchContext {
+            immutable_project: None,
+            workspace_view: None,
+            project_path: project.path(),
+            project_authority: IsolationProjectAuthority::ReadOnly,
+            filesystem_authority_ceiling: IsolationFilesystemAuthorityCeiling::NodePolicy,
+            network_authority_ceiling: IsolationNetworkAuthorityCeiling::Isolated,
+            live_access: None,
+            state_root: None,
+            checkpoint_dir: Some(&checkpoint_dir),
+            checkpoint_authority: Some(&checkpoint_authority),
+            daemon_socket_path: None,
+            bundle_roots: &[],
+            node_trusted_keys_dir: None,
+            verified_code: &[],
+            verified_command: Some(&command),
+            external_read_only_mounts: &[],
+            writable_runtime_view_mounts: &[],
+            producer_prepared_mounts: &[],
+            target_channels: &[],
+            item_ref: "worker:tests/read-only-checkpoint",
+            thread_id: "T-read-only-checkpoint",
+            verbatim_env_names: &[],
+        };
+
+        let applied = runtime.apply_with_provenance(request(), context).unwrap();
+        let (bytes, _) = applied
+            .request
+            .inherited_fds
+            .last()
+            .unwrap()
+            .read_regular_file_stable_bounded(ryeos_isolation_protocol::MAX_REQUEST_BYTES as u64)
+            .unwrap();
+        let wire: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let mounts = wire["plan"]["mounts"].as_array().unwrap();
+        assert!(
+            mounts.iter().any(|mount| {
+                mount["destination"].as_str() == checkpoint_dir.to_str()
+                    && mount["access"] == "writable"
+            }),
+            "the daemon checkpoint directory must stay writable: {mounts:?}"
+        );
+        assert!(
+            !mounts.iter().any(|mount| {
+                mount["access"] == "writable"
+                    && mount["destination"].as_str().is_some_and(|destination| {
+                        Path::new(destination).starts_with(project.path())
+                    })
+            }),
+            "a read-only project must never become writable: {mounts:?}"
+        );
+
+        let mut without_checkpoint = runtime.clone();
+        without_checkpoint.inspection.filesystem.writable = vec!["{project}".to_string()];
+        let error = without_checkpoint
+            .apply_with_provenance(request(), context)
+            .err()
+            .expect("a policy without {checkpoint_dir} must refuse the checkpoint directory");
+        assert!(
+            error
+                .to_string()
+                .contains("is not writable under the node isolation policy"),
+            "{error}"
         );
     }
 

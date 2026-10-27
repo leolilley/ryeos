@@ -439,16 +439,70 @@ impl ExecutionProvenance {
         self
     }
 
-    /// The deliberate runtime state-root override, when one was requested.
-    /// `None` = runtime state lives under the (effective) project path.
+    /// The runtime state-root override, when one applies. `None` = runtime
+    /// state lives under the (effective) project path.
+    ///
+    /// Live executions carry the operator's deliberate override. A pinned
+    /// generation realized read-only runs against a shared, immutable
+    /// materialization that must never receive the launch's own thread
+    /// records, so it reports the daemon-owned writable scratch attached to
+    /// its lifeline. Copy-on-write pinned generations own a writable checkout
+    /// and keep their state there.
     pub fn state_root_override(&self) -> Option<&Path> {
         match self {
             Self::Projectless { .. } => None,
             Self::RootLiveProject { state_root, .. }
             | Self::ChildLiveProject { state_root, .. } => state_root.as_deref(),
-            Self::RootPinnedGeneration { .. }
-            | Self::ChildPinnedGeneration { .. }
-            | Self::ChildImmutableWorkspaceInput { .. } => None,
+            Self::RootPinnedGeneration {
+                workspace_lifeline,
+                project_authority,
+                ..
+            }
+            | Self::ChildPinnedGeneration {
+                workspace_lifeline,
+                project_authority,
+                ..
+            } => match project_authority {
+                ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
+                    realization: ryeos_state::objects::PinnedProjectRealization::ReadOnly,
+                    ..
+                } => workspace_lifeline.runtime_state_root(),
+                _ => None,
+            },
+            Self::ChildImmutableWorkspaceInput { .. } => None,
+        }
+    }
+
+    /// Create the writable runtime-state scratch a read-only pinned generation
+    /// needs, under `<runtime_cache>/executions`. Only a launch that actually
+    /// runs calls this; resolution and validation never allocate it. Returns
+    /// `None` for every provenance that keeps state elsewhere.
+    pub fn ensure_read_only_runtime_state(
+        &self,
+        runtime_cache: &Path,
+    ) -> anyhow::Result<Option<&Path>> {
+        match self {
+            Self::RootPinnedGeneration {
+                workspace_lifeline,
+                project_authority:
+                    ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
+                        realization: ryeos_state::objects::PinnedProjectRealization::ReadOnly,
+                        ..
+                    },
+                ..
+            }
+            | Self::ChildPinnedGeneration {
+                workspace_lifeline,
+                project_authority:
+                    ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
+                        realization: ryeos_state::objects::PinnedProjectRealization::ReadOnly,
+                        ..
+                    },
+                ..
+            } => workspace_lifeline
+                .ensure_runtime_state_scratch(runtime_cache)
+                .map(Some),
+            _ => Ok(None),
         }
     }
 
@@ -645,6 +699,14 @@ impl ExecutionProvenance {
         {
             if !workspace_lifeline.owns_effective_path(effective_path) {
                 anyhow::bail!("pinned provenance lifeline does not own its effective project path");
+            }
+            if workspace_lifeline
+                .runtime_state_root()
+                .is_some_and(|state_root| state_root.starts_with(effective_path))
+            {
+                anyhow::bail!(
+                    "pinned provenance runtime state lies inside its materialized project"
+                );
             }
             if let Some(materialization) = pinned_materialization.verified() {
                 if materialization.snapshot_hash() != snapshot_hash
@@ -2247,6 +2309,97 @@ mod tests {
         )
         .unwrap();
         let _ = root.with_state_root(Some(PathBuf::from("/tmp/smoke")));
+    }
+
+    fn read_only_pinned(
+        original_path: &Path,
+        snapshot_hash: &str,
+    ) -> ryeos_state::objects::ExecutionProjectAuthority {
+        ryeos_state::objects::ExecutionProjectAuthority::pinned(
+            format!("site:test:{}", original_path.display()),
+            Some(original_path.to_path_buf()),
+            snapshot_hash.to_string(),
+            ryeos_state::objects::PinnedProjectRealization::ReadOnly,
+            ryeos_state::objects::EnvironmentAuthority::None,
+            Vec::new(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn read_only_pinned_generation_reports_state_root_outside_the_materialization() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        let cache = dir.path().join("cache");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::create_dir(&cache).unwrap();
+        let lifeline = Arc::new(TempDirGuard::new_borrowed_cache(project.clone()));
+        let hash = "c".repeat(64);
+        let original = PathBuf::from("/laptop");
+        let root = ExecutionProvenance::root_pushed_head_for_test(
+            project.clone(),
+            original.clone(),
+            engine(),
+            lifeline,
+            hash.clone(),
+            read_only_pinned(&original, &hash),
+        )
+        .unwrap();
+
+        assert_eq!(root.state_root_override(), None);
+        assert!(!cache.join("executions").exists());
+        let state_root = root
+            .ensure_read_only_runtime_state(&cache)
+            .unwrap()
+            .expect("read-only state root")
+            .to_path_buf();
+        assert!(state_root.starts_with(cache.join("executions")));
+        assert!(!state_root.starts_with(root.effective_path()));
+        assert_eq!(root.state_root_override(), Some(state_root.as_path()));
+        assert_eq!(
+            root.ensure_read_only_runtime_state(&cache).unwrap(),
+            Some(state_root.as_path())
+        );
+        // Borrowed children keep writing to the same daemon-owned root.
+        let child = root.clone_for_borrowed_child();
+        assert_eq!(child.state_root_override(), Some(state_root.as_path()));
+    }
+
+    #[test]
+    fn read_only_state_scratch_inside_the_materialization_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        let inside = project.join("state");
+        std::fs::create_dir_all(&inside).unwrap();
+        let lifeline = Arc::new(TempDirGuard::new_borrowed_cache(project));
+        assert!(
+            lifeline
+                .install_runtime_state_scratch(Arc::new(TempDirGuard::new(inside)))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn copy_on_write_pinned_generation_keeps_state_in_its_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        std::fs::create_dir(&cache).unwrap();
+        let lifeline = Arc::new(TempDirGuard::new(dir.path().to_path_buf()));
+        let hash = "d".repeat(64);
+        let original = PathBuf::from("/laptop");
+        let root = ExecutionProvenance::root_pushed_head_for_test(
+            dir.path().to_path_buf(),
+            original.clone(),
+            engine(),
+            lifeline,
+            hash.clone(),
+            pinned(&original, &hash),
+        )
+        .unwrap();
+        assert_eq!(root.ensure_read_only_runtime_state(&cache).unwrap(), None);
+        assert_eq!(root.state_root_override(), None);
+        assert_eq!(root.clone_for_borrowed_child().state_root_override(), None);
+        assert!(!cache.join("executions").exists());
     }
 
     #[test]
