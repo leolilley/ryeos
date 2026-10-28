@@ -1,0 +1,5 @@
+# ryeos:signed:2026-10-28T22:38:56Z:b2e81f2bc3ea7baea5c4174ed2763d0889af3e0bece26df6a808b1f2b5d318d0:AFEFRngphlLFsvUXgs506HBrd8RQcAxB/L1JR8EqDbEvgbCOo20VWAwis22RZi0HJW8mFePsoioMvbGwwbKMBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: offline-operations.facts
+required_caps: ["ryeos.execute.service.offline-operations/facts"]
+description: "The node's offline-operation precondition facts and ledger head, which a request is signed against"
