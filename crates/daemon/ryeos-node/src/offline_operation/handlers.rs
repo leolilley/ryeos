@@ -758,7 +758,11 @@ mod tests {
     use ryeos_node_runtime::state_lock::{StateLock, default_lock_path};
 
     fn workspace_root() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..")
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .find(|p| p.join("bundles").is_dir())
+            .expect("workspace root with bundles/ directory")
+            .to_path_buf()
     }
 
     #[test]

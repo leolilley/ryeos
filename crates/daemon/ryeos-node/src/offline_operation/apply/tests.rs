@@ -169,6 +169,27 @@ impl Fixture {
         self.try_write_grant(key, scopes, site, wildcard).unwrap()
     }
 
+    fn local_wildcard_grant(&self) {
+        let key = lillux::crypto::generate_signing_key();
+        let encoded =
+            base64::engine::general_purpose::STANDARD.encode(key.verifying_key().as_bytes());
+        reconcile_authorized_key_toml_scopes(
+            &authorized_keys_dir(self.path()),
+            &fingerprint(&key),
+            &encoded,
+            &["*".to_owned()],
+            "local operator",
+            "test",
+            "2026-01-01T00:00:00Z",
+            &self.node,
+            WildcardPolicy::AllowBootstrap,
+            false,
+            None,
+            true,
+        )
+        .unwrap();
+    }
+
     fn try_write_grant(
         &self,
         key: &SigningKey,
@@ -447,7 +468,8 @@ fn a_grant_cannot_carry_a_wildcard_under_the_offline_prefix() {
 #[test]
 fn wildcard_grants_are_reported_at_startup() {
     let fx = fixture();
-    let (_key, _grant) = fx.remote_operator(&["*"], SITE, WildcardPolicy::AllowBootstrap);
+    // Remote grants refuse wildcards, so only a local grant can carry one.
+    fx.local_wildcard_grant();
     let report = fx.run();
     assert_eq!(report.wildcard_grants.len(), 1);
     assert!(
