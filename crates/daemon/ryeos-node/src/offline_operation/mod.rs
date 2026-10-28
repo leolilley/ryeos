@@ -22,6 +22,7 @@
 
 pub mod apply;
 pub mod contract;
+pub mod deliver;
 mod envelope;
 pub mod facts;
 pub mod handlers;

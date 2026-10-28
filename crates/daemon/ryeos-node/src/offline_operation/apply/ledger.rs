@@ -203,6 +203,20 @@ impl<'a> Ledger<'a> {
         })
     }
 
+    /// The newest `limit` retained receipts, oldest first.
+    pub fn recent(&self, state: &LedgerState, limit: usize) -> Result<Vec<SignedReceipt>> {
+        let sequences: Vec<u64> = self
+            .sequences()?
+            .into_iter()
+            .filter(|sequence| *sequence <= state.last_sequence)
+            .collect();
+        let start = sequences.len().saturating_sub(limit);
+        sequences[start..]
+            .iter()
+            .map(|sequence| self.read_receipt(*sequence))
+            .collect()
+    }
+
     /// The retained receipt for `request_digest`, if there is one.
     pub fn find_receipt(
         &self,

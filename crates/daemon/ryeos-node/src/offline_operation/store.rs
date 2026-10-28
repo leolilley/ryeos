@@ -298,6 +298,18 @@ impl Store {
         read_bounded(&self.inbox_dir(), &format!("{digest}.input"), max_bytes)
     }
 
+    /// Durably queue an input under the digest of its bytes. Writing the same
+    /// bytes again changes nothing.
+    pub fn queue_input(&self, digest: &str, bytes: &[u8]) -> Result<()> {
+        write_private(&self.inbox_dir().join(format!("{digest}.input")), bytes)
+    }
+
+    /// Durably queue a request under the digest of its bytes. Inputs are
+    /// queued first, so a request is never in the inbox without them.
+    pub fn queue_request(&self, name: &str, bytes: &[u8]) -> Result<()> {
+        write_private(&self.inbox_dir().join(format!("{name}.json")), bytes)
+    }
+
     pub fn remove_request(&self, digest: &str) -> Result<()> {
         remove(&self.inbox_dir().join(format!("{digest}.json")))
     }

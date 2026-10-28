@@ -393,6 +393,8 @@ pub enum RefusalReason {
     HandlerFailed,
     /// The handler failed, or the node died inside it, three startups running.
     Stuck,
+    /// The inbox of a running node holds as many requests as it may.
+    InboxFull,
 }
 
 impl RefusalReason {
@@ -423,6 +425,7 @@ impl RefusalReason {
             Self::ExpectedResultMismatch => "expected_result_mismatch",
             Self::HandlerFailed => "handler_failed",
             Self::Stuck => "stuck",
+            Self::InboxFull => "inbox_full",
         }
     }
 }

@@ -1106,24 +1106,7 @@ impl<'a> Applier<'a> {
         body: &RequestBody,
         ledger_head: &str,
     ) -> std::result::Result<BTreeMap<String, String>, Refusal> {
-        let facts = measure(self.app_root, ledger_head);
-        let mut measured = BTreeMap::new();
-        for fact in MANDATORY_FACTS.iter().chain(spec.preconditions) {
-            let pinned = body.precondition.get(*fact).map(String::as_str);
-            let actual = facts.get(*fact).map(String::as_str);
-            if pinned != actual || actual.is_none() {
-                return Err(Refusal::new(
-                    RefusalReason::PreconditionFailed,
-                    format!(
-                        "fact `{fact}` is {} on this node, not the {} the request was signed against",
-                        actual.unwrap_or("unmeasured"),
-                        pinned.unwrap_or("unpinned")
-                    ),
-                ));
-            }
-            measured.insert((*fact).to_owned(), actual.unwrap_or_default().to_owned());
-        }
-        Ok(measured)
+        check_pins(self.app_root, spec, body, ledger_head)
     }
 
     /// Open each input once, check its size against the slot, hash the
@@ -1273,6 +1256,34 @@ impl<'a> Applier<'a> {
             .find_receipt(&state, request_digest)?
             .with_context(|| format!("no receipt for request {request_digest} in the ledger"))
     }
+}
+
+/// Measure every fact the request pins and compare. The facts are measured
+/// from the volume, so a running node and a stopped one answer alike.
+pub(super) fn check_pins(
+    app_root: &Path,
+    spec: &OperationSpec,
+    body: &RequestBody,
+    ledger_head: &str,
+) -> std::result::Result<BTreeMap<String, String>, Refusal> {
+    let facts = measure(app_root, ledger_head);
+    let mut measured = BTreeMap::new();
+    for fact in MANDATORY_FACTS.iter().chain(spec.preconditions) {
+        let pinned = body.precondition.get(*fact).map(String::as_str);
+        let actual = facts.get(*fact).map(String::as_str);
+        if pinned != actual || actual.is_none() {
+            return Err(Refusal::new(
+                RefusalReason::PreconditionFailed,
+                format!(
+                    "fact `{fact}` is {} on this node, not the {} the request was signed against",
+                    actual.unwrap_or("unmeasured"),
+                    pinned.unwrap_or("unpinned")
+                ),
+            ));
+        }
+        measured.insert((*fact).to_owned(), actual.unwrap_or_default().to_owned());
+    }
+    Ok(measured)
 }
 
 /// Step 7: every result fact the request pinned must be what the handler
