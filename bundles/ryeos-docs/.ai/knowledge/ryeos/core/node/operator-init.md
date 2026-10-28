@@ -108,23 +108,30 @@ choice:
   `RYEOS_TRUST_BAKED_PUBLISHERS=1`; and
 - the local source installer may opt in with `--trust-source-publishers`.
 
-Persisted container nodes preserve their complete signed policy generation by
-default. When a release intentionally cuts that policy schema or changes the
-image's exact init-profile bundle inventory, the operator may set
-`RYEOS_RESET_NODE_POLICY_GENERATION=1` for one stopped-container boot. The
-entrypoint asks one locked init to replace that generation from the trusted
-baked profile, align the prospective exact bundle inventory, and publish its
-completion fence before starting the daemon. All other node state is
-preserved; remove the variable after the successful cut.
+Persisted container nodes preserve their complete signed policy generation.
+When a release intentionally cuts that policy schema or changes the image's
+exact init-profile bundle inventory, the operator signs the offline operation
+`node.reset.policy-generation`. It is applied from the image seed at the top of
+the next startup, in one locked init transaction that aligns the prospective
+exact bundle inventory and publishes the completion fence. The request names
+the seed's measured digest, the node profile, the host class and the substrate
+image digest, so it applies only on the image it was signed for. All other node
+state is preserved. The retired variables `RYEOS_RESET_NODE_POLICY_GENERATION`
+and `RYEOS_EXECUTION_HISTORY_SCHEMA_CUT` refuse the start when set: the
+environment no longer changes node state.
 
-An execution-history schema cut is separate. A persisted container may set
-`RYEOS_EXECUTION_HISTORY_SCHEMA_CUT=FROM:TO`, using the exact runtime epochs
-reported by the startup refusal. Before daemon startup, the entrypoint runs the
-offline reset only when the retained database is exactly `FROM` and the
-installed binary owns exactly `TO`. Repeated boots at `TO` are non-destructive;
-every other pairing refuses. Project HEADs, node identity, trust, vault and
-stable credential profiles remain preserved. Remove the variable after success
-so a later release still requires a new explicit epoch authorization.
+An execution-history schema cut is the offline operation
+`node.reset.execution-history` with the exact `from` and `to` runtime epochs
+the startup refusal reports. It runs only when the retained database is
+exactly `from` and the installed binary owns exactly `to`; every other pairing
+refuses. Project HEADs, node identity, trust, vault and stable credential
+profiles remain preserved.
+
+A startup does not re-seed a volume that is not fresh: when the installed
+bundle generation is absent but the app root holds a node identity or a
+completed init, the entrypoint refuses instead of initializing it again under
+the image's profile. Signed offline operations on a hosted container are
+described in `deploy/composition-images.md`.
 
 Release containers pass no packaged trust documents to `ryeos init`.
 Development opt-ins trust every publisher document in the selected source

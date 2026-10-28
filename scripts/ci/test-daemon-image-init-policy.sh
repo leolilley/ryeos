@@ -471,22 +471,27 @@ fi
         exit 1
     fi
 
-    # Replacement is an explicit one-boot opt-in and remains part of the same
-    # locked init transaction as exact bundle reconciliation.
+    # The environment never replaces a policy generation: the retired
+    # variable refuses the start, whatever its value, and init arguments carry
+    # no replacement flags.
     RYEOS_RESET_NODE_POLICY_GENERATION=1
-    build_ryeos_init_args /opt/ryeos "$policy_test_root" '[::]:18081' >/dev/null
-    [[ "${INIT_ARGS[*]}" == "init --non-interactive --app-root $policy_test_root --source /opt/ryeos --bind [::]:18081 $substrate_args --node-profile hosted-workflow --host-class hosted --replace-node-policy-generation --confirm-node-policy-generation-replacement" ]]
-    unset RYEOS_INIT_HOST_CLASS
-    if build_ryeos_init_args /opt/ryeos "$policy_test_root" '[::]:18081' >/dev/null 2>&1; then
-        echo "entrypoint replaced a policy generation without a declared host class" >&2
+    if refuse_retired_environment >/dev/null 2>&1; then
+        echo "entrypoint accepted the retired policy-generation reset variable" >&2
         exit 1
     fi
-    RYEOS_RESET_NODE_POLICY_GENERATION=invalid
-    if build_ryeos_init_args /opt/ryeos "$policy_test_root" '[::]:18081' >/dev/null 2>&1; then
-        echo "entrypoint accepted an invalid policy replacement opt-in" >&2
+    RYEOS_RESET_NODE_POLICY_GENERATION=0
+    if refuse_retired_environment >/dev/null 2>&1; then
+        echo "entrypoint accepted the retired policy-generation reset variable set to 0" >&2
         exit 1
     fi
     unset RYEOS_RESET_NODE_POLICY_GENERATION
+    refuse_retired_environment
+    build_ryeos_init_args /opt/ryeos "$policy_test_root" '[::]:18081' >/dev/null
+    if grep -Fq 'replace-node-policy-generation' <<<"${INIT_ARGS[*]}"; then
+        echo "entrypoint passed a policy replacement flag" >&2
+        exit 1
+    fi
+    unset RYEOS_INIT_HOST_CLASS
     # Preserving a present generation selects nothing, so it needs no class.
     build_ryeos_init_args /opt/ryeos "$policy_test_root" '[::]:18081' >/dev/null
     [[ "${INIT_ARGS[*]}" == "init --non-interactive --app-root $policy_test_root --source /opt/ryeos --bind [::]:18081 $substrate_args" ]]
@@ -524,30 +529,95 @@ fi
     [[ "$(stat -c '%u' "$handed_root")" == "$(id -u)" ]]
     rm -rf "$handed_root"
 
-    # Execution-history schema cuts carry their exact predecessor/current
-    # epochs. Repeated boots are handled by the CLI's idempotent cut contract.
-    build_execution_history_schema_cut_args "$policy_test_root"
-    [[ ${#EXECUTION_HISTORY_SCHEMA_CUT_ARGS[@]} -eq 0 ]]
+    # The execution-history schema cut is a signed offline operation, not an
+    # environment route.
     RYEOS_EXECUTION_HISTORY_SCHEMA_CUT=35:39
-    build_execution_history_schema_cut_args "$policy_test_root"
-    [[ "${EXECUTION_HISTORY_SCHEMA_CUT_ARGS[*]}" == "node reset execution-history --app-root $policy_test_root --confirm --schema-cut-from 35 --schema-cut-to 39" ]]
-    RYEOS_EXECUTION_HISTORY_SCHEMA_CUT=39:39
-    if build_execution_history_schema_cut_args "$policy_test_root" >/dev/null 2>&1; then
-        echo "entrypoint accepted a non-cut execution-history epoch pair" >&2
-        exit 1
-    fi
-    RYEOS_EXECUTION_HISTORY_SCHEMA_CUT=invalid
-    if build_execution_history_schema_cut_args "$policy_test_root" >/dev/null 2>&1; then
-        echo "entrypoint accepted an invalid execution-history schema cut" >&2
+    if refuse_retired_environment >/dev/null 2>&1; then
+        echo "entrypoint accepted the retired execution-history schema cut variable" >&2
         exit 1
     fi
     unset RYEOS_EXECUTION_HISTORY_SCHEMA_CUT
 
+    # A volume holding a node identity or a completed init is never re-seeded
+    # because its bundle directory is missing.
+    fresh_root="$policy_test_root/fresh-root"
+    mkdir -p "$fresh_root/.ai"
+    require_fresh_app_root "$fresh_root"
+    mkdir -p "$fresh_root/.ai/node/identity"
+    : > "$fresh_root/.ai/node/identity/private_key.pem"
+    if require_fresh_app_root "$fresh_root" >/dev/null 2>&1; then
+        echo "entrypoint re-seeded an app root holding a node identity" >&2
+        exit 1
+    fi
+    rm -rf "$fresh_root/.ai/node"
+    mkdir -p "$fresh_root/.ai/config/onboarding"
+    : > "$fresh_root/.ai/config/onboarding/init-completion.json"
+    if require_fresh_app_root "$fresh_root" >/dev/null 2>&1; then
+        echo "entrypoint re-seeded an app root holding a completed init" >&2
+        exit 1
+    fi
+    rm -rf "$fresh_root"
+
+    # The platform's offline-operation request is copied into the inbox of an
+    # initialized node, once, by the digest of its bytes, and decided nowhere.
+    offline_root="$policy_test_root/offline-root"
+    mkdir -p "$offline_root/.ai/node/identity" "$offline_root/.ai/state"
+    : > "$offline_root/.ai/node/identity/private_key.pem"
+    offline_inbox="$offline_root/.ai/state/offline-operations/inbox"
+    printf '{"body":{},"signature":"x"}' > "$policy_test_root/request.json"
+    request_digest="$(sha256sum "$policy_test_root/request.json" | cut -d' ' -f1)"
+    mkdir -p "$policy_test_root/inputs"
+    printf 'input bytes' > "$policy_test_root/inputs/anything"
+    input_digest="$(sha256sum "$policy_test_root/inputs/anything" | cut -d' ' -f1)"
+    unset RYEOS_OFFLINE_OPERATION_DELIVERED
+    RYEOS_OFFLINE_OPERATION_REQUEST="$policy_test_root/request.json" \
+        RYEOS_OFFLINE_OPERATION_INPUTS="$policy_test_root/inputs" \
+        deliver_offline_operation_request "$offline_root" >/dev/null
+    [[ -f "$offline_inbox/$request_digest.json" ]]
+    [[ -f "$offline_inbox/$input_digest.input" ]]
+    [[ "$(stat -c %a "$offline_inbox")" == 700 ]]
+    [[ "$(stat -c %a "$offline_inbox/$request_digest.json")" == 600 ]]
+    # Delivered once: after the node applies and removes it, the same file is
+    # not copied again.
+    rm "$offline_inbox/$request_digest.json" "$offline_inbox/$input_digest.input"
+    RYEOS_OFFLINE_OPERATION_REQUEST="$policy_test_root/request.json" \
+        RYEOS_OFFLINE_OPERATION_INPUTS="$policy_test_root/inputs" \
+        deliver_offline_operation_request "$offline_root" >/dev/null
+    [[ -z "$(ls -A "$offline_inbox")" ]]
+    # A base64 value is accepted, a link and an oversized file are not, and a
+    # failure never stops the start.
+    rm -rf "$offline_root/.ai/state/offline-operations"
+    RYEOS_OFFLINE_OPERATION_REQUEST="$(base64 -w0 < "$policy_test_root/request.json")" \
+        deliver_offline_operation_request "$offline_root" >/dev/null
+    [[ -f "$offline_inbox/$request_digest.json" ]]
+    rm -rf "$offline_root/.ai/state/offline-operations"
+    ln -s "$policy_test_root/request.json" "$policy_test_root/request-link.json"
+    RYEOS_OFFLINE_OPERATION_REQUEST="$policy_test_root/request-link.json" \
+        deliver_offline_operation_request "$offline_root" >/dev/null 2>&1
+    [[ -z "$(ls -A "$offline_inbox")" ]]
+    head -c $((OFFLINE_MAX_REQUEST_BYTES + 1)) /dev/zero > "$policy_test_root/huge.json"
+    RYEOS_OFFLINE_OPERATION_REQUEST="$policy_test_root/huge.json" \
+        deliver_offline_operation_request "$offline_root" >/dev/null 2>&1
+    [[ -z "$(ls -A "$offline_inbox")" ]]
+    # A node that is not initialized receives nothing.
+    rm -rf "$offline_root/.ai/node" "$offline_root/.ai/state/offline-operations"
+    RYEOS_OFFLINE_OPERATION_REQUEST="$policy_test_root/request.json" \
+        deliver_offline_operation_request "$offline_root" >/dev/null 2>&1
+    [[ ! -e "$offline_root/.ai/state/offline-operations" ]]
+    rm -rf "$offline_root"
+
     # The daemon consumes the create-once endpoint from config.yaml; ordinary
     # container startup must not present a competing runtime override.
     unset RYEOS_HOST_RUNTIME_BINDING
+    # The image seed reaches the daemon as flags when the image pins its
+    # substrate by digest, and never otherwise.
+    build_ryeos_daemon_args /data/app
+    [[ "${DAEMON_ARGS[*]}" == "--app-root /data/app --image-seed-root /opt/ryeos --substrate-image-digest sha256:$(printf '1%.0s' {1..64})" ]]
+    saved_substrate_image="$RYEOS_SUBSTRATE_IMAGE"
+    unset RYEOS_SUBSTRATE_IMAGE
     build_ryeos_daemon_args /data/app
     [[ "${DAEMON_ARGS[*]}" == "--app-root /data/app" ]]
+    RYEOS_SUBSTRATE_IMAGE="$saved_substrate_image"
     RYEOS_HOST_RUNTIME_BINDING=/run/ryeos/host-runtime.json
     build_ryeos_daemon_args /data/app
     [[ "${DAEMON_ARGS[*]}" == "host-runtime --binding /run/ryeos/host-runtime.json" ]]

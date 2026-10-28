@@ -7,6 +7,11 @@
 # field, which is the always-restart behaviour the node needs: it exits 75 at
 # each service-window rollover and expects to start again. A start refused by
 # a recorded restart inhibition is paced by the image entrypoint.
+# The health check is liveness (`/_ryeos/health`: 200 while the node boots), not
+# readiness: a signed offline operation stops the node and starts it again to
+# apply the request, and Render must not replace the instance during that window.
+# No HTTP is served while the request is applied, which is bounded by time and
+# covered by Render's deploy grace period.
 services:
   - type: web
     name: ryeos-farm-controller
@@ -16,7 +21,7 @@ services:
     plan: 1c-2g
     region: singapore
     numInstances: 1
-    healthCheckPath: /_ryeos/ready
+    healthCheckPath: /_ryeos/health
     disk:
       name: ryeos-state
       mountPath: /data
