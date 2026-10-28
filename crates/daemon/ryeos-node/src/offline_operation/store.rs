@@ -571,7 +571,7 @@ mod tests {
         );
         assert_eq!(
             store.pending_digests().unwrap(),
-            [pending.request_digest.clone()]
+            std::slice::from_ref(&pending.request_digest)
         );
         store.remove_pending(&pending.request_digest).unwrap();
         assert_eq!(store.load_pending(&pending.request_digest).unwrap(), None);
