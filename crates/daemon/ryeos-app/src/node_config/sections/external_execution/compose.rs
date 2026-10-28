@@ -511,6 +511,11 @@ pub struct ComposeRequest<'a> {
     pub transport: ComposeTransportRequest,
     pub account: String,
     pub capacity_group: String,
+    /// The generation the binding names for its provider credential. The
+    /// caller chooses it: an interactive operator takes a fresh one, and a
+    /// signed offline request derives it from the request digest, so a
+    /// re-run of the same request names the generation it already installed.
+    pub credential_generation: String,
     pub settings: Value,
     pub guest_runtime_manifest_hash: String,
     pub runtime_qualification: Option<Value>,
@@ -519,7 +524,7 @@ pub struct ComposeRequest<'a> {
 }
 
 /// What was installed. It carries no credential and no vault key.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ComposeReport {
     pub id: String,
     pub path: PathBuf,
@@ -581,7 +586,7 @@ pub(crate) fn compose_with_resolver(
         backend,
         account: request.account,
         capacity_group: request.capacity_group,
-        credential_generation: fresh_credential_generation()?,
+        credential_generation: request.credential_generation,
         settings: request.settings,
         guest_runtime_manifest_hash: request.guest_runtime_manifest_hash,
         runtime_qualification,
@@ -609,6 +614,36 @@ pub(crate) fn compose_with_resolver(
         binding_digest: installed.digest.clone(),
         capacity_owner: installed.capacity_owner.clone(),
     })
+}
+
+/// The credential generation of the binding installed under `id`, or `None`
+/// when no such binding is installed. A binding whose document is unreadable
+/// is an error, not an absence.
+pub fn installed_binding_credential_generation(
+    app_root: &Path,
+    id: &str,
+) -> Result<Option<String>> {
+    validate_document_id(id, "external-execution binding")?;
+    let path = app_root
+        .join(ryeos_engine::AI_DIR)
+        .join("node")
+        .join(SECTION_NAME)
+        .join(format!("{id}.yaml"));
+    if lillux::read_optional_regular_file_bounded_no_follow(
+        &path,
+        ryeos_node_runtime::node_document::MAX_ITEM_BYTES,
+    )
+    .with_context(|| format!("inspect {SECTION_NAME} document {}", path.display()))?
+    .is_none()
+    {
+        return Ok(None);
+    }
+    let identity = load_node_identity(app_root)?;
+    Ok(Some(
+        read_installed_binding(app_root, id, &identity)?
+            .document
+            .credential_generation,
+    ))
 }
 
 /// Verify signed bytes exactly as the loader would: a trusted signature
@@ -1407,6 +1442,7 @@ mod tests {
             transport: https(),
             account: "operator-account".into(),
             capacity_group: DEFAULT_CAPACITY_GROUP.into(),
+            credential_generation: fresh_credential_generation().unwrap(),
             settings: serde_json::json!({}),
             guest_runtime_manifest_hash: "4".repeat(64),
             runtime_qualification: None,
@@ -1709,6 +1745,7 @@ mod tests {
             transport: https(),
             account: "operator-account".into(),
             capacity_group: DEFAULT_CAPACITY_GROUP.into(),
+            credential_generation: fresh_credential_generation().unwrap(),
             settings: serde_json::json!({}),
             guest_runtime_manifest_hash: "4".repeat(64),
             runtime_qualification: None,

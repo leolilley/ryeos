@@ -522,7 +522,60 @@ fn run_init_internal(
 /// have.
 fn run_init_on_storage(
     opts: &InitOptions,
+    ceremony: Option<InitOperatorCeremony>,
+    observe_storage: impl FnOnce(&Path) -> lillux::process_control::RootStorageFacts,
+    observe: impl FnMut(&InitProgress) -> Result<()>,
+) -> Result<InitReport> {
+    require_source_dir(opts)?;
+    // Init is an offline mutation of the same node namespace owned by the
+    // daemon. Acquire the exact operational lock before creating or changing
+    // any app-root entry, and retain it through final completion testimony.
+    let state_lock = ryeos_node_runtime::state_lock::StateLock::acquire(
+        &ryeos_node_runtime::state_lock::default_lock_path(&opts.app_root),
+    )
+    .context("acquire stopped-node authority for initialization")?;
+    run_init_under_lock_on_storage(opts, ceremony, &state_lock, None, observe_storage, observe)
+}
+
+fn require_source_dir(opts: &InitOptions) -> Result<()> {
+    if !opts.source_dir.is_dir() {
+        bail!(
+            "bundle source directory not found: {}\n\
+             \n\
+             If you installed from a package, the default source is /usr/share/ryeos.\n\
+             For development, use: ryeos init --source bundles\n\
+             For Docker, use: ryeos init --source /opt/ryeos",
+            opts.source_dir.display()
+        );
+    }
+    Ok(())
+}
+
+/// Initialization under a stopped-node state lock the caller already holds.
+/// The lock must protect `opts.app_root`. When `expected_policy_generation`
+/// is given, the prospective node policy generation must have exactly that
+/// digest, and the call refuses before any installed bundle or completion
+/// record changes when it does not.
+pub fn run_init_under_lock(
+    opts: &InitOptions,
+    state_lock: &ryeos_node_runtime::state_lock::StateLock,
+    expected_policy_generation: Option<&str>,
+) -> Result<InitReport> {
+    run_init_under_lock_on_storage(
+        opts,
+        None,
+        state_lock,
+        expected_policy_generation,
+        lillux::process_control::RootStorageFacts::observe,
+        |_| Ok(()),
+    )
+}
+
+fn run_init_under_lock_on_storage(
+    opts: &InitOptions,
     mut ceremony: Option<InitOperatorCeremony>,
+    state_lock: &ryeos_node_runtime::state_lock::StateLock,
+    expected_policy_generation: Option<&str>,
     observe_storage: impl FnOnce(&Path) -> lillux::process_control::RootStorageFacts,
     mut observe: impl FnMut(&InitProgress) -> Result<()>,
 ) -> Result<InitReport> {
@@ -536,24 +589,10 @@ fn run_init_on_storage(
     };
     progress(InitPhase::PreparingLayout, None, None, None)?;
     // ── 0. Source exists? ──
-    if !opts.source_dir.is_dir() {
-        bail!(
-            "bundle source directory not found: {}\n\
-             \n\
-             If you installed from a package, the default source is /usr/share/ryeos.\n\
-             For development, use: ryeos init --source bundles\n\
-             For Docker, use: ryeos init --source /opt/ryeos",
-            opts.source_dir.display()
-        );
-    }
-
-    // Init is an offline mutation of the same node namespace owned by the
-    // daemon. Acquire the exact operational lock before creating or changing
-    // any app-root entry, and retain it through final completion testimony.
-    let state_lock = ryeos_node_runtime::state_lock::StateLock::acquire(
-        &ryeos_node_runtime::state_lock::default_lock_path(&opts.app_root),
-    )
-    .context("acquire stopped-node authority for initialization")?;
+    require_source_dir(opts)?;
+    state_lock
+        .ensure_protects_app_root(&opts.app_root)
+        .context("initialization needs the state lock of the app root it initializes")?;
 
     // ── 1. Layout ──
     create_layout(&opts.app_root)?;
@@ -593,7 +632,7 @@ fn run_init_on_storage(
             ..Default::default()
         })
         .context("resolve node bootstrap configuration")?;
-    ryeos_node_runtime::config::seed_bootstrap_config(&bootstrap_config, &state_lock)
+    ryeos_node_runtime::config::seed_bootstrap_config(&bootstrap_config, state_lock)
         .context("seed node bootstrap configuration")?;
     // Operator config root (`<app_root>/.ai/config`) — the single trust
     // source for `ryeos init`. Bundles are never a trust source.
@@ -844,6 +883,14 @@ fn run_init_on_storage(
         .map(|update| update.generation())
         .or(current_node_policy_generation.as_ref())
         .context("init has no complete prospective node policy generation")?;
+    if let Some(expected) = expected_policy_generation
+        && prospective_policy_generation.digest() != expected
+    {
+        bail!(
+            "the policy generation this initialization would install has digest {}, not the {expected} the request pinned; nothing was changed",
+            prospective_policy_generation.digest()
+        );
+    }
     let prospective_records = prospective_bundle_records(&plan, None);
     let prospective_policy = ryeos_node_runtime::node_policy::compile_generation(
         &opts.app_root,
@@ -1141,7 +1188,7 @@ fn run_init_on_storage(
             update,
             &identity,
             &seed_trust_store,
-            &state_lock,
+            state_lock,
         )
         .context("materialize selected node policy generation")?;
     }
@@ -1178,7 +1225,7 @@ fn run_init_on_storage(
     let vault_pubkey_fingerprint = vault_sk.public_key().fingerprint();
     let capacity_issuance = crate::native_capacity::prepare_initial_capacity_binding(
         &opts.app_root,
-        &state_lock,
+        state_lock,
         &user_key,
         user_key_created,
         &node_fp,

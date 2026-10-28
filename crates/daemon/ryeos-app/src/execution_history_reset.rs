@@ -43,7 +43,7 @@ pub use scratch::{
     ExecutionHistoryScratchInspection, ExecutionHistoryScratchRepairOptions,
     ExecutionHistoryScratchRepairReport, ScratchEntry, ScratchLocation,
     execution_history_scratch_repair_command, inspect_execution_history_scratch,
-    repair_execution_history_scratch,
+    repair_execution_history_scratch, repair_execution_history_scratch_locked,
 };
 
 use crate::runtime_db::{
@@ -975,12 +975,15 @@ impl ExecutionHistoryResetReport {
     }
 }
 
-/// Inspect or execute the explicit all-execution-history reset transaction.
+/// Inspect or execute the explicit all-execution-history reset transaction,
+/// taking the node's state lock for the call. A dry run takes the existing
+/// lock read-only; a mutation takes it exclusively.
 pub fn run_execution_history_reset(
     options: &ExecutionHistoryResetOptions,
     participant: Option<&dyn SchedulerHistoryResetParticipant>,
 ) -> Result<ExecutionHistoryResetReport> {
-    run_execution_history_reset_inner(options, participant, None)
+    let state_lock = acquire_reset_state_lock(options)?;
+    run_execution_history_reset_locked(options, participant, &state_lock)
 }
 
 pub fn run_execution_history_reset_with_progress(
@@ -988,7 +991,45 @@ pub fn run_execution_history_reset_with_progress(
     participant: Option<&dyn SchedulerHistoryResetParticipant>,
     observer: &mut dyn FnMut(&ExecutionHistoryResetProgress),
 ) -> Result<ExecutionHistoryResetReport> {
-    run_execution_history_reset_inner(options, participant, Some(observer))
+    let state_lock = acquire_reset_state_lock(options)?;
+    run_execution_history_reset_with_progress_locked(options, participant, observer, &state_lock)
+}
+
+/// The reset transaction under a state lock the caller already holds. The
+/// lock must protect the app root the options name; a dry run needs only a
+/// read-only hold, a mutation the exclusive one.
+pub fn run_execution_history_reset_locked(
+    options: &ExecutionHistoryResetOptions,
+    participant: Option<&dyn SchedulerHistoryResetParticipant>,
+    state_lock: &StateLock,
+) -> Result<ExecutionHistoryResetReport> {
+    run_execution_history_reset_inner(options, participant, None, state_lock)
+}
+
+pub fn run_execution_history_reset_with_progress_locked(
+    options: &ExecutionHistoryResetOptions,
+    participant: Option<&dyn SchedulerHistoryResetParticipant>,
+    observer: &mut dyn FnMut(&ExecutionHistoryResetProgress),
+    state_lock: &StateLock,
+) -> Result<ExecutionHistoryResetReport> {
+    run_execution_history_reset_inner(options, participant, Some(observer), state_lock)
+}
+
+/// The outer ownership proof for a stand-alone reset: a running daemon and
+/// every cooperating standalone state service hold the same lock.
+fn acquire_reset_state_lock(options: &ExecutionHistoryResetOptions) -> Result<StateLock> {
+    let config = Config::load(&ConfigSources {
+        app_root: options.app_root.clone(),
+        ..ConfigSources::default()
+    })
+    .context("load local node configuration for execution-history reset")?;
+    let state_lock_path = default_lock_path(&config.app_root);
+    if options.dry_run {
+        StateLock::acquire_existing_read_only(&state_lock_path)
+    } else {
+        StateLock::acquire(&state_lock_path)
+    }
+    .context("execution-history reset requires the daemon to be stopped")
 }
 
 /// A closed scheduler copy inspection made the way a preview makes it: the
@@ -1972,9 +2013,10 @@ fn run_execution_history_reset_inner(
     options: &ExecutionHistoryResetOptions,
     participant: Option<&dyn SchedulerHistoryResetParticipant>,
     observer: Option<&mut dyn FnMut(&ExecutionHistoryResetProgress)>,
+    state_lock: &StateLock,
 ) -> Result<ExecutionHistoryResetReport> {
     let custody = Arc::new(InspectionControllerCustody::default());
-    run_execution_history_reset_owned(options, participant, observer, &custody).map_err(|error| {
+    run_execution_history_reset_owned(options, participant, observer, &custody, state_lock).map_err(|error| {
         let error = if custody.reservation_published.load(std::sync::atomic::Ordering::Acquire) {
             error.context(
                 "this attempt's reservation stays charged; the next `ryeos node reset execution-history` settles it",
@@ -1991,6 +2033,7 @@ fn run_execution_history_reset_owned(
     participant: Option<&dyn SchedulerHistoryResetParticipant>,
     mut observer: Option<&mut dyn FnMut(&ExecutionHistoryResetProgress)>,
     inspection_custody: &Arc<InspectionControllerCustody>,
+    state_lock: &StateLock,
 ) -> Result<ExecutionHistoryResetReport> {
     crate::object_contracts::install()
         .context("install application object contracts for execution-history reset")?;
@@ -2006,15 +2049,10 @@ fn run_execution_history_reset_owned(
     .context("load local node configuration for execution-history reset")?;
     let runtime_state_dir = config.runtime_state_dir();
 
-    // This is the outer ownership proof. A running daemon and every
-    // cooperating standalone state service hold the same lock.
-    let state_lock_path = default_lock_path(&config.app_root);
-    let state_lock = if options.dry_run {
-        StateLock::acquire_existing_read_only(&state_lock_path)
-    } else {
-        StateLock::acquire(&state_lock_path)
-    }
-    .context("execution-history reset requires the daemon to be stopped")?;
+    // The caller's lock is the outer ownership proof; it must be this node's.
+    state_lock
+        .ensure_protects_app_root(&config.app_root)
+        .context("execution-history reset needs the state lock of the node it resets")?;
     let runtime_directory =
         lillux::PinnedDirectory::open(&runtime_state_dir)?.ok_or_else(|| {
             anyhow::anyhow!("runtime state is absent: {}", runtime_state_dir.display())
@@ -2034,7 +2072,7 @@ fn run_execution_history_reset_owned(
     let offline_policy = OfflineResetPolicyOwner::load(
         &config,
         &identity,
-        &state_lock,
+        state_lock,
         &runtime_directory,
         &runtime_directory_lock,
     )?;
@@ -2518,7 +2556,7 @@ fn run_execution_history_reset_owned(
         .take()
         .context("mutating reset lost original runtime owner")?;
     let mut reset_authority = OfflineResetAuthority::capture(
-        &state_lock,
+        state_lock,
         &runtime_directory,
         &runtime_directory_lock,
         &config,
@@ -3074,7 +3112,7 @@ fn run_execution_history_reset_owned(
     if let Some(participant) = participant {
         participant
             .retire_acknowledged_evidence(&SchedulerAcknowledgedReset {
-                state_lock: &state_lock,
+                state_lock,
                 app_root: &config.app_root,
                 runtime_directory: &runtime_directory,
                 namespace_lock: &runtime_directory_lock,

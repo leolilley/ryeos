@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
 use ryeos_external_execution_contract::runtime_snapshot::MAX_RUNTIME_SNAPSHOT_UPLOAD_BYTES;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{
@@ -21,9 +21,9 @@ use super::{
 };
 use crate::node_config::NodeConfigSection as _;
 use crate::node_config::sections::external_execution::compose::{
-    ProducerSourceFacts, fresh_credential_generation, item_context, load_node_identity,
-    publish_signed_document, read_installed_binding, read_installed_document, sign_node_document,
-    validate_document_id, verify_node_signed,
+    ProducerSourceFacts, item_context, load_node_identity, publish_signed_document,
+    read_installed_binding, read_installed_document, sign_node_document, validate_document_id,
+    verify_node_signed,
 };
 
 /// Largest snapshot production spec the adapter accepts.
@@ -66,11 +66,14 @@ pub struct ProductionComposeRequest<'a> {
     pub sandbox_group_id: String,
     pub region: String,
     pub source_plan: String,
+    /// The generation the binding names for its provider credential; see the
+    /// external-execution compose request for who chooses it.
+    pub credential_generation: String,
     pub limits: ProductionLimits,
 }
 
 /// What was installed. It carries no credential.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProductionComposeReport {
     pub id: String,
     pub path: PathBuf,
@@ -161,7 +164,7 @@ pub(crate) fn compose_with_facts(
         backend: facts.backend,
         account: facts.account,
         provider_group_id: request.sandbox_group_id,
-        credential_generation: fresh_credential_generation()?,
+        credential_generation: request.credential_generation,
         adapter_artifact_hash: facts.adapter_artifact_hash,
         snapshot_spec_sha256: lillux::sha256_hex(&request.snapshot_spec),
         settings_digest: lillux::sha256_hex(lillux::canonical_json(&settings)?.as_bytes()),
@@ -191,6 +194,36 @@ pub(crate) fn compose_with_facts(
         settings_digest: installed.document.settings_digest.clone(),
         binding_digest: installed.digest.clone(),
     })
+}
+
+/// The credential generation of the production binding installed under `id`,
+/// or `None` when no such binding is installed.
+pub fn installed_production_credential_generation(
+    app_root: &Path,
+    id: &str,
+) -> Result<Option<String>> {
+    validate_document_id(id, "runtime snapshot production binding")?;
+    let path = app_root
+        .join(ryeos_engine::AI_DIR)
+        .join("node")
+        .join(SECTION_NAME)
+        .join(format!("{id}.yaml"));
+    if lillux::read_optional_regular_file_bounded_no_follow(
+        &path,
+        ryeos_node_runtime::node_document::MAX_ITEM_BYTES,
+    )
+    .with_context(|| format!("inspect {SECTION_NAME} document {}", path.display()))?
+    .is_none()
+    {
+        return Ok(None);
+    }
+    let identity = load_node_identity(app_root)?;
+    let signed = read_installed_document(app_root, SECTION_NAME, id)?;
+    Ok(Some(
+        admit_signed_production(app_root, id, &signed, &identity)?
+            .document
+            .credential_generation,
+    ))
 }
 
 /// Non-empty run of ASCII alphanumerics, `_` and `-`, at most `max` long.
@@ -267,6 +300,7 @@ pub(crate) fn installed_production_binding(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::node_config::sections::external_execution::compose::fresh_credential_generation;
 
     /// A stopped node: identity plus the state lock.
     pub(crate) struct StoppedNode {
@@ -320,6 +354,7 @@ pub(crate) mod tests {
             sandbox_group_id: "sbg-exact".into(),
             region: "oregon".into(),
             source_plan: "standard".into(),
+            credential_generation: fresh_credential_generation().unwrap(),
             limits: ProductionLimits::default(),
         }
     }
