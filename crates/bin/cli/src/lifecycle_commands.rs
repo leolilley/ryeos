@@ -3166,7 +3166,7 @@ struct StartArgs {
 /// running node holds the state lock, which skips it quietly, and nothing
 /// here can stop the start: an error is reported and the start goes on to its
 /// own checks.
-fn apply_offline_operations_before_start(app_root: Option<PathBuf>) {
+fn apply_offline_operations_before_start(app_root: Option<PathBuf>, console: &crate::tty::Console) {
     let Ok(config) = ryeos_node::NodeConfig::load_local(app_root) else {
         return;
     };
@@ -3180,11 +3180,15 @@ fn apply_offline_operations_before_start(app_root: Option<PathBuf>) {
         Ok(report) => {
             for line in report.log_lines() {
                 if !line.starts_with("offline-operations: fact ") {
-                    eprintln!("{line}");
+                    let _ = console.info(&crate::tty::Diagnostic::info(line));
                 }
             }
         }
-        Err(error) => eprintln!("offline-operations: not applied: {error:#}"),
+        Err(error) => {
+            let _ = console.warning(&crate::tty::Diagnostic::warning(format!(
+                "offline-operations: not applied: {error:#}"
+            )));
+        }
     }
 }
 
@@ -3192,7 +3196,7 @@ async fn run_start_command(argv: &[String], console: &crate::tty::Console) -> Re
     let Some(args) = parse_or_render_help::<StartArgs>(argv, console)? else {
         return Ok(());
     };
-    apply_offline_operations_before_start(args.app_root.clone());
+    apply_offline_operations_before_start(args.app_root.clone(), console);
     let env = LocalLifecycleEnv::load(args.app_root)?;
     let controller = LifecycleController::from_env(env);
     let endpoints = ryeos_node::StartEndpointConfiguration {

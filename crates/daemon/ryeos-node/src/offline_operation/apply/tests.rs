@@ -1141,6 +1141,8 @@ fn an_alone_operation_waits_behind_anything_applied_before_it() {
         store: &fx.store,
         lock: &lock,
         clock: Utc::now,
+        bumped: RefCell::new(BTreeMap::new()),
+        notes: RefCell::new(Vec::new()),
     };
     let state = applier.ledger().load().unwrap();
     let attempt = applier
