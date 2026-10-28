@@ -14344,7 +14344,8 @@ mod tests {
                 schedules: Vec::new(),
                 offline_reset: None,
                 offline_native,
-            })])
+            remote_offline_operations: Vec::new(),
+        })])
         };
         let contract = InstalledExternalExecutionBinding::test_fixture().backend_contract();
         let lifetime =

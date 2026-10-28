@@ -792,6 +792,7 @@ schedules:
             offline_reset: None,
             offline_native: Default::default(),
             schedules: Vec::new(),
+            remote_offline_operations: Vec::new(),
         };
         apply_maintenance_schedules(&node_dir, &id, &trust, &empty).unwrap();
 
@@ -816,6 +817,7 @@ schedules:
             offline_reset: None,
             offline_native: Default::default(),
             schedules: Vec::new(),
+            remote_offline_operations: Vec::new(),
         };
 
         apply_maintenance_schedules(&node_dir, &id, &trust, &empty).unwrap();
@@ -844,6 +846,7 @@ schedules:
             offline_reset: None,
             offline_native: Default::default(),
             schedules: Vec::new(),
+            remote_offline_operations: Vec::new(),
         };
         let schedules = node_dir.join("schedules");
 

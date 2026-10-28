@@ -76,6 +76,7 @@ impl AuthorizeClientRequest {
             ryeos_runtime::authorizer::validate_scope_pattern(scope)
                 .map_err(|error| anyhow::anyhow!("invalid scope: {error}"))?;
         }
+        ryeos_node_runtime::identity::reject_offline_scope_wildcards(&scopes)?;
         let subject = match (self.origin_site_id, self.remote_node_origin_site_id) {
             (Some(origin_site_id), None) => {
                 AuthorizeClientSubject::RemoteOperator { origin_site_id }
@@ -846,5 +847,47 @@ admission_enabled: {admission_enabled}
             format!("{err:#}").contains("hosted-node admission is disabled"),
             "got: {err:#}"
         );
+    }
+
+    fn offline_scope_request(scopes: &str) -> AuthorizeClientRequest {
+        let key = lillux::crypto::SigningKey::generate(&mut OsRng);
+        AuthorizeClientRequest {
+            public_key: base64::engine::general_purpose::STANDARD
+                .encode(key.verifying_key().as_bytes()),
+            scopes: scopes.to_owned(),
+            label: "remote operator".to_owned(),
+            merge_scopes: false,
+            origin_site_id: Some("site:origin".to_owned()),
+            remote_node_origin_site_id: None,
+            allow_semantic_conversion: false,
+        }
+    }
+
+    #[test]
+    fn authorize_client_refuses_offline_operation_wildcards() {
+        for scopes in [
+            "ryeos.offline.*",
+            "ryeos.offline.node.*",
+            "ryeos.execute.service.remote/run,ryeos.offline.node.reset.*",
+        ] {
+            let error = offline_scope_request(scopes)
+                .into_params(std::path::PathBuf::from("/nonexistent"))
+                .err()
+                .unwrap_or_else(|| panic!("{scopes} was accepted"));
+            assert!(
+                format!("{error:#}").contains("wildcard"),
+                "{scopes}: {error:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn authorize_client_accepts_an_exact_offline_operation_scope() {
+        let params = offline_scope_request(
+            "ryeos.offline.node.external-execution.compose,ryeos.execute.service.remote/run",
+        )
+        .into_params(std::path::PathBuf::from("/nonexistent"))
+        .unwrap();
+        assert_eq!(params.scopes.len(), 2);
     }
 }
