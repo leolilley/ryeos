@@ -242,6 +242,8 @@ async fn run_core_initialization(
         host_class: options.host_class.clone(),
         substrate_identity: options.substrate_identity.clone(),
         replace_node_policy_generation: options.replace_node_policy_generation,
+        replace_substrate_identity: options.replace_substrate_identity,
+        confirm_substrate_identity_replacement: options.confirm_substrate_identity_replacement,
         skip_preflight: options.skip_preflight,
     };
     let ceremony = InitOperatorCeremony {

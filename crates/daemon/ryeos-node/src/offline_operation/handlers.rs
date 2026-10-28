@@ -281,6 +281,8 @@ pub(super) fn reset_policy_generation(ctx: &HandlerContext<'_>) -> Result<Value>
             host_class: Some(arguments.host_class.clone()),
             substrate_identity: None,
             replace_node_policy_generation: true,
+            replace_substrate_identity: false,
+            confirm_substrate_identity_replacement: false,
             skip_preflight: false,
         },
         ctx.state_lock,
@@ -787,6 +789,8 @@ mod tests {
                 .unwrap(),
             ),
             replace_node_policy_generation: false,
+            replace_substrate_identity: false,
+            confirm_substrate_identity_replacement: false,
             skip_preflight: true,
         })
         .expect("initial generation");
