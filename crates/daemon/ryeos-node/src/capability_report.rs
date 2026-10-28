@@ -838,12 +838,7 @@ mod tests {
         let facts = DurableIdentityFacts::observe(directory.path()).unwrap();
         let value = serde_json::to_value(&facts).unwrap();
         assert!(
-            [
-                "reattach_stable",
-                "reattach_stable_with_subvolume",
-                "attachment_bound"
-            ]
-            .contains(&value["app_root"].as_str().unwrap()),
+            ["reattach_stable", "attachment_bound"].contains(&value["app_root"].as_str().unwrap()),
             "{value}"
         );
         assert_eq!(

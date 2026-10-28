@@ -17,6 +17,11 @@ on:
         required: false
         default: ""
         type: string
+      targets:
+        description: "Bake targets to build: the whole `composition` group, or a comma-separated list such as `f5r-controller`"
+        required: false
+        default: "composition"
+        type: string
 
 permissions:
   contents: read
@@ -111,7 +116,7 @@ jobs:
         with:
           source: .
           files: ./docker-bake.composition.hcl
-          targets: composition
+          targets: ${{ inputs.targets }}
           # The bake file names no output; pushing candidates is this
           # workflow's explicit choice.
           push: true
@@ -140,7 +145,9 @@ jobs:
             echo "| image | digest reference |"
             echo "|---|---|"
           } >> "$GITHUB_STEP_SUMMARY"
-          for target in core core-scheduling core-workflow core-knowledge standard central-host local-inference hosted-workflow bundle-source f5r-controller; do
+          built="$(jq -r 'to_entries[] | select((.value | type) == "object" and (.value | has("containerimage.digest"))) | .key' <<<"$BAKE_METADATA" | sort)"
+          [[ -n "$built" ]] || { echo "bake pushed no images" >&2; exit 1; }
+          for target in $built; do
             DIGEST="$(jq -r --arg target "$target" '.[$target]["containerimage.digest"] // empty' <<<"$BAKE_METADATA")"
             [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || {
               echo "no pushed digest for $target" >&2
@@ -164,7 +171,9 @@ jobs:
           # image bakes; the host class is read from that profile's own
           # declared classes, hosted when it declares it, else its first.
           failed=()
-          for target in core core-scheduling core-workflow core-knowledge standard central-host local-inference hosted-workflow bundle-source f5r-controller; do
+          built="$(jq -r 'to_entries[] | select((.value | type) == "object" and (.value | has("containerimage.digest"))) | .key' <<<"$BAKE_METADATA" | sort)"
+          [[ -n "$built" ]] || { echo "bake pushed no images" >&2; exit 1; }
+          for target in $built; do
             DIGEST="$(jq -r --arg target "$target" '.[$target]["containerimage.digest"] // empty' <<<"$BAKE_METADATA")"
             [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || {
               echo "no pushed digest for $target" >&2
