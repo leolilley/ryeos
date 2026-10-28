@@ -274,7 +274,9 @@ pub async fn try_dispatch(
                 .map_err(map_local_err)?;
             Ok(true)
         }
-        ("node", Some("offline-operation")) if argv.get(2).map(String::as_str) == Some("submit") => {
+        ("node", Some("offline-operation"))
+            if argv.get(2).map(String::as_str) == Some("submit") =>
+        {
             crate::lifecycle_offline_operation::run_submit(&argv[3..], console)
                 .await
                 .map_err(map_local_err)?;
