@@ -202,7 +202,13 @@ pub fn run_sign(argv: &[String], console: &crate::tty::Console) -> Result<()> {
             inputs,
             expected_result,
             pins,
-            lifetime: args.lifetime_minutes.map(Duration::minutes),
+            lifetime: args
+                .lifetime_minutes
+                .map(|minutes| {
+                    Duration::try_minutes(minutes)
+                        .context("--lifetime-minutes is out of range")
+                })
+                .transpose()?,
             remote,
         },
         &key,
@@ -302,6 +308,11 @@ async fn call(
     Ok(reply)
 }
 
+/// A string field of a node's reply, or `unknown`.
+fn field_text<'a>(reply: &'a Value, field: &str) -> &'a str {
+    reply.get(field).and_then(Value::as_str).unwrap_or("unknown")
+}
+
 // ── submit ───────────────────────────────────────────────────────────
 
 #[derive(Parser, Debug)]
@@ -364,7 +375,7 @@ pub async fn run_submit(argv: &[String], console: &crate::tty::Console) -> Resul
         crate::tty::write_json(&reply)?;
         return Ok(());
     }
-    let text = |field: &str| reply.get(field).and_then(Value::as_str).unwrap_or("unknown");
+    let text = |field: &str| field_text(&reply, field);
     let stopping = text("stop") == "requested";
     let mut banner = crate::tty::StatusBanner::new(
         crate::tty::Tone::Success,
@@ -424,7 +435,7 @@ pub async fn run_list(argv: &[String], console: &crate::tty::Console) -> Result<
     let report = match &args.url {
         Some(url) => {
             call(
-                Some(url),
+                Some(url.as_str()),
                 args.app_root,
                 args.signing_key,
                 "GET",

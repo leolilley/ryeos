@@ -144,7 +144,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::offline_operation::facts::FACT_INIT_COMPLETION;
+    use crate::offline_operation::facts::{FACT_INIT_COMPLETION, FACT_RESTART_INHIBITION};
 
     fn draft() -> SignDraft {
         SignDraft {
@@ -156,6 +156,7 @@ mod tests {
             pins: BTreeMap::from([
                 (FACT_INIT_COMPLETION.to_owned(), "absent".to_owned()),
                 ("ledger_head".to_owned(), "b".repeat(64)),
+                (FACT_RESTART_INHIBITION.to_owned(), "absent".to_owned()),
             ]),
             lifetime: None,
             remote: None,
