@@ -24,7 +24,9 @@ pub async fn handle(
 ) -> Result<Value> {
     ryeos_app::operator_authority::require_local_configured_operator(&state, &context)
         .context("grant reconciliation requires the configured local operator")?;
-    let params = request.into_params(state.config.app_root.clone())?;
+    // The caller was just proved to be the configured local operator, the one
+    // identity that may put an offline-operation scope into a grant.
+    let params = request.into_params_as_local_operator(state.config.app_root.clone())?;
     tokio::task::spawn_blocking(move || {
         // Standalone dispatch already owns this exact lock. Borrow that
         // authority, not a boolean mode flag or a second flock acquisition.

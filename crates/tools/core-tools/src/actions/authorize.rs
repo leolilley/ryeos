@@ -48,7 +48,21 @@ fn default_authorize_client_label() -> String {
 }
 
 impl AuthorizeClientRequest {
+    /// Parameters for a grant written on behalf of anyone but the node's local
+    /// operator: no scope under the offline-operation prefix may be granted.
     pub fn into_params(self, app_root: PathBuf) -> Result<AuthorizeClientParams> {
+        self.build_params(app_root, false)
+    }
+
+    /// Parameters for a grant the node's local operator asks for, either on
+    /// the volume itself or through the daemon after it proved the caller is
+    /// the configured local operator. Exact offline-operation scopes may be
+    /// granted this way, and only this way; wildcards under the prefix never.
+    pub fn into_params_as_local_operator(self, app_root: PathBuf) -> Result<AuthorizeClientParams> {
+        self.build_params(app_root, true)
+    }
+
+    fn build_params(self, app_root: PathBuf, local_operator: bool) -> Result<AuthorizeClientParams> {
         if self.origin_site_id.is_some() && self.remote_node_origin_site_id.is_some() {
             bail!("origin_site_id and remote_node_origin_site_id are mutually exclusive");
         }
@@ -77,6 +91,9 @@ impl AuthorizeClientRequest {
                 .map_err(|error| anyhow::anyhow!("invalid scope: {error}"))?;
         }
         ryeos_node_runtime::identity::reject_offline_scope_wildcards(&scopes)?;
+        if !local_operator {
+            ryeos_node_runtime::identity::reject_offline_scopes(&scopes)?;
+        }
         let subject = match (self.origin_site_id, self.remote_node_origin_site_id) {
             (Some(origin_site_id), None) => {
                 AuthorizeClientSubject::RemoteOperator { origin_site_id }
@@ -224,7 +241,10 @@ impl MintAdmissionTokenRequest {
             .map(str::trim)
             .filter(|scope| !scope.is_empty())
             .map(str::to_owned)
-            .collect();
+            .collect::<Vec<String>>();
+        // An admission token is redeemed by the party being admitted, never by
+        // the local operator, so it cannot carry an offline-operation scope.
+        ryeos_node_runtime::identity::reject_offline_scopes(&scopes)?;
         Ok(MintAdmissionTokenParams {
             app_root,
             scopes,
@@ -882,12 +902,33 @@ admission_enabled: {admission_enabled}
     }
 
     #[test]
-    fn authorize_client_accepts_an_exact_offline_operation_scope() {
-        let params = offline_scope_request(
-            "ryeos.offline.node.external-execution.compose,ryeos.execute.service.remote/run",
-        )
-        .into_params(std::path::PathBuf::from("/nonexistent"))
-        .unwrap();
+    fn only_the_local_operator_may_grant_an_exact_offline_operation_scope() {
+        let scopes =
+            "ryeos.offline.node.external-execution.compose,ryeos.execute.service.remote/run";
+        let params = offline_scope_request(scopes)
+            .into_params_as_local_operator(std::path::PathBuf::from("/nonexistent"))
+            .unwrap();
         assert_eq!(params.scopes.len(), 2);
+        let error = offline_scope_request(scopes)
+            .into_params(std::path::PathBuf::from("/nonexistent"))
+            .err()
+            .expect("an offline scope was granted on behalf of someone else");
+        assert!(format!("{error:#}").contains("local operator"), "{error:#}");
+        // Wildcards under the prefix are refused even for the local operator.
+        assert!(
+            offline_scope_request("ryeos.offline.*")
+                .into_params_as_local_operator(std::path::PathBuf::from("/nonexistent"))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn an_admission_token_cannot_carry_an_offline_operation_scope() {
+        let request = MintAdmissionTokenRequest {
+            scopes: "ryeos.offline.node.allow-restart".to_owned(),
+            label: None,
+            ttl_secs: 60,
+        };
+        assert!(request.into_params(std::path::PathBuf::from("/nonexistent")).is_err());
     }
 }

@@ -298,6 +298,21 @@ pub fn matches_only_by_wildcard(scopes: &[String], required: &str) -> bool {
             .any(|scope| ryeos_runtime::authorizer::cap_matches(scope, required))
 }
 
+/// Refuse every scope under the offline-operation prefix. Writers that act
+/// for anyone but the node's local operator use this: only the local operator
+/// may put an offline scope into a grant.
+pub fn reject_offline_scopes(scopes: &[String]) -> Result<()> {
+    if let Some(scope) = scopes
+        .iter()
+        .find(|scope| scope.starts_with(OFFLINE_OPERATION_SCOPE_PREFIX))
+    {
+        bail!(
+            "scope `{scope}` is an offline-operation scope; only the node's local operator may grant one"
+        );
+    }
+    Ok(())
+}
+
 /// Refuse any scope that is a wildcard under the offline-operation prefix.
 pub fn reject_offline_scope_wildcards(scopes: &[String]) -> Result<()> {
     if let Some(scope) = scopes.iter().find(|scope| is_offline_scope_wildcard(scope)) {
