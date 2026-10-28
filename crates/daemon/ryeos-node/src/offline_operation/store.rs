@@ -786,7 +786,10 @@ mod tests {
         assert_eq!(store.attempts(&digest), 0);
         store.record_attempts(&digest, 2).unwrap();
         assert_eq!(store.attempts(&digest), 2);
-        assert_eq!(store.attempt_digests().unwrap(), [digest.clone()]);
+        assert_eq!(
+            store.attempt_digests().unwrap(),
+            std::slice::from_ref(&digest)
+        );
         std::fs::write(
             store.attempts_dir().join(format!("{digest}.json")),
             b"garbage",
