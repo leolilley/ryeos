@@ -88,7 +88,7 @@ pub fn measure(app_root: &Path, ledger_head: &str) -> NodeFacts {
     );
     facts.insert(
         FACT_AUTHORIZED_KEYS.to_owned(),
-        tree_digest(&root.authorized_keys_dir()),
+        tree_digest(&super::envelope::authorized_keys_dir(app_root)),
     );
     facts.insert(
         FACT_EXTERNAL_EXECUTION.to_owned(),

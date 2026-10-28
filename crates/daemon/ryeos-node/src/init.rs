@@ -489,6 +489,54 @@ pub fn preflight_existing_policy_generation(
     }
 }
 
+/// Digest of the node policy generation that replacing the node's policy from
+/// the image seed `source_dir` would install. Nothing is written: the trust
+/// the profile is verified under is the node's pinned trust plus the official
+/// publisher and the named trust documents, held in memory. A request builder
+/// pins this digest so the replacement refuses before any change if the seed
+/// would install anything else.
+pub fn prospective_replacement_policy_digest(
+    app_root: &Path,
+    source_dir: &Path,
+    node_profile: &str,
+    host_class: &str,
+    trust_files: &[PathBuf],
+) -> Result<String> {
+    let operator_config_root = app_root.join(ryeos_engine::AI_DIR).join("config");
+    let mut trust = TrustStore::load(None, &operator_config_root)
+        .context("load the node's pinned trust for the replacement profile")?;
+    let official = decode_official_publisher_pubkey()?;
+    let mut extra = vec![ryeos_engine::trust::TrustedSigner {
+        fingerprint: compute_fingerprint(&official),
+        verifying_key: official,
+        label: Some("ryeos-official".to_owned()),
+    }];
+    for trust_file in trust_files {
+        let content = fs::read_to_string(trust_file)
+            .with_context(|| format!("read trust file {}", trust_file.display()))?;
+        let doc = ryeos_engine::trust::PublisherTrustDoc::parse(&content)
+            .map_err(|error| anyhow!("{error}"))?;
+        let verifying_key = doc
+            .decode_verifying_key()
+            .map_err(|error| anyhow!("{error}"))?;
+        extra.push(ryeos_engine::trust::TrustedSigner {
+            fingerprint: compute_fingerprint(&verifying_key),
+            verifying_key,
+            label: Some(doc.owner),
+        });
+    }
+    trust.extend_from(&TrustStore::from_signers(extra));
+    let profile = load_trusted_init_node_profile(source_dir, node_profile, &trust)?;
+    let profile = select_profile_host_class(node_profile, &profile, Some(host_class))?
+        .admit_import_roots(app_root)
+        .context("admit declared external-content import roots")?;
+    let generation = profile.validated_generation(
+        &ryeos_node_runtime::node_policy::NodePolicyTable::new(),
+        Path::new("selected-node-profile"),
+    )?;
+    Ok(generation.digest().to_owned())
+}
+
 pub fn run_init_with_progress(
     opts: &InitOptions,
     mut observe: impl FnMut(&InitProgress) -> Result<()>,
@@ -3281,6 +3329,64 @@ mod tests {
             })
             .collect::<std::collections::BTreeMap<_, _>>();
         assert_eq!(after, before, "reinit must not reseed node policy");
+    }
+
+    #[test]
+    fn a_policy_replacement_rerun_after_a_crash_reproduces_the_pinned_generation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let user = tmp.path().join("home");
+        run_init(&make_opts(&state, &user)).expect("initial full generation");
+        let source = workspace_root().join("bundles");
+        let pinned = prospective_replacement_policy_digest(
+            &state,
+            &source,
+            "standard",
+            "local",
+            &[dev_trust_file()],
+        )
+        .expect("the generation the seed would install");
+        let replacement = InitOptions {
+            app_root: state.clone(),
+            bind: None,
+            uds_path: None,
+            source_dir: source,
+            trust_files: vec![dev_trust_file()],
+            node_profile: Some("standard".to_owned()),
+            host_class: Some("local".to_owned()),
+            substrate_identity: None,
+            replace_node_policy_generation: true,
+            skip_preflight: true,
+        };
+        let lock = ryeos_node_runtime::state_lock::StateLock::acquire(
+            &ryeos_node_runtime::state_lock::default_lock_path(&state),
+        )
+        .unwrap();
+        // A pin the seed would not install refuses before anything changes.
+        let before = verify_init_completion(&state).unwrap().unwrap();
+        let wrong = "0".repeat(64);
+        let error = run_init_under_lock(&replacement, &lock, Some(&wrong)).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("nothing was changed"),
+            "{error:#}"
+        );
+        assert_eq!(
+            verify_init_completion(&state)
+                .unwrap()
+                .unwrap()
+                .policy_generation_digest,
+            before.policy_generation_digest
+        );
+
+        run_init_under_lock(&replacement, &lock, Some(&pinned)).expect("replacement");
+        let first = verify_init_completion(&state).unwrap().unwrap();
+        assert_eq!(first.policy_generation_digest, pinned);
+        // The node died before the receipt: the completion is gone and the same
+        // request runs again, to the same generation.
+        invalidate_init_completion(&state).unwrap();
+        run_init_under_lock(&replacement, &lock, Some(&pinned)).expect("rerun");
+        let second = verify_init_completion(&state).unwrap().unwrap();
+        assert_eq!(second.policy_generation_digest, pinned);
     }
 
     #[test]

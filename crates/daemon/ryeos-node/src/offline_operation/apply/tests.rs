@@ -842,15 +842,27 @@ fn a_handler_that_keeps_failing_is_stuck_after_three_startups() {
             "attempt {attempt}: {:?}",
             report.stopped
         );
-        let pending = fx.store.load_pending(&digest).unwrap().unwrap();
-        assert_eq!(pending.attempts, attempt);
+        // An ordinary failure leaves no intent record, only its count.
+        assert!(fx.store.load_pending(&digest).unwrap().is_none());
+        assert_eq!(fx.store.attempts(&digest), attempt);
         assert!(fx.refusals().is_empty());
     }
     let report = fx.run();
     assert_eq!(report.refused.len(), 1);
     assert_eq!(fx.only_refusal(), RefusalReason::Stuck);
+    // The refusal says the handler had begun, so its effect may have landed.
+    assert!(
+        fx.refusals()[0].body.detail.contains("may have landed"),
+        "{}",
+        fx.refusals()[0].body.detail
+    );
     assert!(fx.inbox_names().is_empty());
     assert!(fx.store.pending_digests().unwrap().is_empty());
+    assert_eq!(
+        fx.store.attempts(&digest),
+        0,
+        "the counter goes with the request"
+    );
     assert_eq!(
         fx.ledger().last_sequence,
         0,
@@ -870,7 +882,6 @@ fn a_node_that_died_inside_a_handler_three_times_is_stuck() {
             request_digest: digest.clone(),
             inbox_name: name,
             request,
-            attempts: MAX_STARTUP_ATTEMPTS,
             phase: Phase::Running,
             measured_preconditions: BTreeMap::new(),
             result: None,
@@ -878,8 +889,12 @@ fn a_node_that_died_inside_a_handler_three_times_is_stuck() {
             started_at: "2026-10-28T00:00:00Z".to_owned(),
         })
         .unwrap();
+    fx.store
+        .record_attempts(&digest, MAX_STARTUP_ATTEMPTS)
+        .unwrap();
     fx.run();
     assert_eq!(fx.only_refusal(), RefusalReason::Stuck);
+    assert!(fx.store.pending_digests().unwrap().is_empty());
 }
 
 #[test]
@@ -927,7 +942,6 @@ fn a_node_that_died_after_the_effect_writes_the_receipt_without_rerunning_it() {
             request_digest: digest.clone(),
             inbox_name: name,
             request: request.clone(),
-            attempts: 1,
             phase: Phase::Committed,
             measured_preconditions: BTreeMap::new(),
             result: Some(json!({ "done": true })),
@@ -962,7 +976,6 @@ fn a_node_that_died_after_the_receipt_only_cleans_up() {
             request_digest: digest,
             inbox_name: name,
             request,
-            attempts: 1,
             phase: Phase::Committed,
             measured_preconditions: BTreeMap::new(),
             result: Some(json!({})),
@@ -991,7 +1004,6 @@ fn a_node_that_died_inside_the_handler_reruns_it_against_changed_facts() {
             request_digest: digest.clone(),
             inbox_name: name,
             request,
-            attempts: 1,
             phase: Phase::Running,
             measured_preconditions: measured,
             result: None,
@@ -1090,7 +1102,6 @@ fn the_receipt_is_in_the_ledger_before_the_grants_are_swapped() {
             request_digest: digest.clone(),
             inbox_name: name,
             request,
-            attempts: 1,
             phase: Phase::Receipted,
             measured_preconditions: BTreeMap::new(),
             result: None,
@@ -1307,4 +1318,245 @@ fn log_lines_name_what_was_refused() {
     let lines = report.log_lines().join("\n");
     assert!(lines.contains("refused request"), "{lines}");
     let _: Value = json!(null);
+}
+
+// ── Nothing in the inbox or the intent records stops a startup ──────────
+
+fn pending_for(fx: &Fixture, request: SignedRequest, phase: Phase) -> Pending {
+    Pending {
+        request_digest: request.digest().unwrap(),
+        inbox_name: fx.drop_request(&request),
+        request,
+        phase,
+        measured_preconditions: BTreeMap::new(),
+        result: Some(json!({ "done": true })),
+        discarded_grant_digests: Vec::new(),
+        started_at: "2026-10-28T00:00:00Z".to_owned(),
+    }
+}
+
+#[test]
+fn an_inbox_too_full_to_list_whole_does_not_fail_the_startup() {
+    let fx = fixture();
+    for index in 0..4200 {
+        std::fs::write(fx.store.inbox_dir().join(format!("junk-{index}")), b"x").unwrap();
+    }
+    let report = apply_pending_offline_operations(fx.path(), &BareHost).unwrap();
+    assert!(report.skipped.is_none() && report.refused.is_empty());
+}
+
+#[test]
+fn an_unparseable_intent_record_is_set_aside_with_a_refusal() {
+    let fx = fixture();
+    let digest = "a".repeat(64);
+    std::fs::write(
+        fx.store.pending_dir().join(format!("{digest}.json")),
+        b"{ not json",
+    )
+    .unwrap();
+    let report = fx.run();
+    assert_eq!(report.refused.len(), 1);
+    assert_eq!(fx.only_refusal(), RefusalReason::Malformed);
+    assert!(fx.store.pending_digests().unwrap().is_empty());
+}
+
+#[test]
+fn an_oversized_intent_record_is_set_aside_with_a_refusal() {
+    let fx = fixture();
+    let digest = "b".repeat(64);
+    std::fs::write(
+        fx.store.pending_dir().join(format!("{digest}.json")),
+        vec![
+            b' ';
+            usize::try_from(crate::offline_operation::store::MAX_PENDING_BYTES).unwrap() + 1
+        ],
+    )
+    .unwrap();
+    fx.run();
+    assert_eq!(fx.only_refusal(), RefusalReason::Malformed);
+    assert!(fx.store.pending_digests().unwrap().is_empty());
+}
+
+#[test]
+fn an_intent_record_for_an_operation_this_build_lacks_is_refused() {
+    let fx = fixture();
+    let request = fx.sign(fx.body("node.does-not-exist", json!({})));
+    let pending = pending_for(&fx, request, Phase::Running);
+    fx.store.save_pending(&pending).unwrap();
+    fx.run();
+    assert_eq!(fx.only_refusal(), RefusalReason::UnknownOperation);
+    assert!(fx.store.pending_digests().unwrap().is_empty());
+    assert!(fx.inbox_names().is_empty());
+}
+
+// ── Continuations are checked again ──────────────────────────────────────
+
+#[test]
+fn a_continuation_whose_signature_does_not_verify_is_refused() {
+    let fx = fixture();
+    let mut request = fx.sign(fx.restart_body());
+    request.body.arguments = json!({ "tampered": true });
+    let pending = pending_for(&fx, request, Phase::Running);
+    fx.store.save_pending(&pending).unwrap();
+    fx.run();
+    assert_eq!(fx.only_refusal(), RefusalReason::BadSignature);
+    assert!(fx.refusals()[0].body.detail.contains("may have landed"));
+}
+
+#[test]
+fn a_continuation_pinned_to_neither_the_current_head_nor_its_receipts_is_refused() {
+    let fx = fixture();
+    let mut body = fx.restart_body();
+    body.precondition
+        .insert("ledger_head".into(), "9".repeat(64));
+    let pending = pending_for(&fx, fx.sign(body), Phase::Running);
+    fx.store.save_pending(&pending).unwrap();
+    let report = fx.run();
+    assert!(report.applied.is_empty());
+    assert_eq!(fx.only_refusal(), RefusalReason::StaleLedgerHead);
+}
+
+#[test]
+fn a_continuation_is_not_checked_against_the_clock() {
+    let fx = fixture();
+    let mut body = fx.restart_body();
+    body.issued_at = stamp(ChronoDuration::hours(-3));
+    body.not_after = stamp(ChronoDuration::hours(-2));
+    let pending = pending_for(&fx, fx.sign(body), Phase::Running);
+    fx.store.save_pending(&pending).unwrap();
+    assert_eq!(fx.run().applied.len(), 1);
+}
+
+#[test]
+fn the_local_path_finishes_an_interrupted_operation_before_its_own() {
+    let fx = fixture();
+    let interrupted = fx.sign(fx.restart_body());
+    let digest = interrupted.digest().unwrap();
+    let pending = pending_for(&fx, interrupted, Phase::Committed);
+    fx.store.save_pending(&pending).unwrap();
+    let applied = apply_local(fx.path(), &BareHost, restart_draft()).unwrap();
+    assert_eq!(applied.receipt.body.sequence, 2);
+    assert!(fx.ledger().request_digests.contains(&digest));
+    assert!(fx.store.pending_digests().unwrap().is_empty());
+}
+
+// ── The receipt-first crash window ───────────────────────────────────────
+
+#[test]
+fn a_node_that_died_between_the_receipt_and_the_intent_record_still_makes_the_effect() {
+    let fx = fixture();
+    fx.remote_operator(&[RESTART_SCOPE], SITE, WildcardPolicy::Reject);
+    let request = reset_request(&fx);
+    let digest = request.digest().unwrap();
+    let pending = pending_for(&fx, request.clone(), Phase::Running);
+    // The receipt was appended; the record still says the handler was running.
+    let ledger = Ledger::new(&fx.store, &fx.node);
+    let state = ledger.load().unwrap();
+    ledger
+        .append(
+            &state,
+            ReceiptDraft {
+                request,
+                measured_preconditions: BTreeMap::new(),
+                result: json!({ "effect": "follows this receipt" }),
+                discarded_grant_digests: Vec::new(),
+            },
+        )
+        .unwrap();
+    fx.store.save_pending(&pending).unwrap();
+    let report = fx.run();
+    assert_eq!(report.applied.len(), 1, "{:?}", report.stopped);
+    assert_eq!(fx.ledger().last_sequence, 1, "no second receipt");
+    assert!(fx.ledger().request_digests.contains(&digest));
+    let remaining = std::fs::read_dir(authorized_keys_dir(fx.path()))
+        .unwrap()
+        .count();
+    assert_eq!(remaining, 1, "the swap ran");
+}
+
+// ── Inputs belong to the requests that pass ──────────────────────────────
+
+#[test]
+fn an_input_with_no_request_is_cleaned_up() {
+    let fx = fixture();
+    let digest = fx.drop_input(b"nobody wants this");
+    fx.run();
+    assert!(!fx.inbox_names().contains(&format!("{digest}.input")));
+}
+
+#[test]
+fn a_request_that_fails_the_envelope_cannot_delete_anothers_input() {
+    let fx = fixture();
+    let policy = b"schema: 1";
+    let input = fx.drop_input(policy);
+    // A waiting request (a head not yet reached) wants the input.
+    let mut waiting = policy_apply_body(&fx, policy);
+    waiting
+        .precondition
+        .insert("ledger_head".into(), "9".repeat(64));
+    let waiting = fx.sign(waiting);
+    fx.drop_request(&waiting);
+    // A forged request names the same input.
+    let mut forged = fx.sign(policy_apply_body(&fx, policy));
+    forged.body.arguments = json!({ "section": "ingest_ignore" });
+    fx.drop_request(&forged);
+    let report = fx.run();
+    assert_eq!(report.refused.len(), 1);
+    assert!(fx.inbox_names().contains(&format!("{input}.input")));
+    assert_eq!(report.waiting, 1);
+}
+
+#[test]
+fn a_refused_request_leaves_an_input_another_still_names() {
+    let fx = fixture();
+    let policy = b"schema: 1";
+    let input = fx.drop_input(policy);
+    let mut waiting = policy_apply_body(&fx, policy);
+    waiting
+        .precondition
+        .insert("ledger_head".into(), "9".repeat(64));
+    fx.drop_request(&fx.sign(waiting));
+    // A second, validly signed request with the same input fails its
+    // preconditions: its refusal must leave the shared input in place.
+    let mut stale = policy_apply_body(&fx, policy);
+    stale
+        .precondition
+        .insert(FACT_POLICY_GENERATION.into(), "7".repeat(64));
+    stale.not_after = stamp(ChronoDuration::hours(2));
+    fx.drop_request(&fx.sign(stale));
+    fx.run();
+    assert_eq!(fx.only_refusal(), RefusalReason::PreconditionFailed);
+    assert!(fx.inbox_names().contains(&format!("{input}.input")));
+}
+
+// ── A failed read is not a refusal ───────────────────────────────────────
+
+#[test]
+fn an_unreadable_grant_leaves_a_signed_request_waiting_until_it_is_stuck() {
+    let fx = fixture();
+    let key = lillux::crypto::generate_signing_key();
+    let fp = fingerprint(&key);
+    let directory = authorized_keys_dir(fx.path());
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(directory.join(format!("{fp}.toml")), b"not a grant").unwrap();
+    let mut body = fx.restart_body();
+    body.signer_fingerprint = fp;
+    body.signer_grant_digest = Some("d".repeat(64));
+    body.signer_origin_site_id = Some(SITE.to_owned());
+    let request = SignedRequest::sign(body, &key).unwrap();
+    fx.drop_request(&request);
+    for startup in 1..=3 {
+        let report = fx.run();
+        assert!(report.refused.is_empty(), "startup {startup}");
+        assert_eq!(report.waiting, 1, "startup {startup}");
+        assert!(fx.refusals().is_empty());
+    }
+    let report = fx.run();
+    assert_eq!(report.refused.len(), 1);
+    assert_eq!(fx.only_refusal(), RefusalReason::Stuck);
+    assert!(
+        fx.refusals()[0].body.detail.contains("never began"),
+        "{}",
+        fx.refusals()[0].body.detail
+    );
 }

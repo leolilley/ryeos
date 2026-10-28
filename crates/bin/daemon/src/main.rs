@@ -3832,16 +3832,22 @@ async fn run(
     // controller applies them; the standalone subcommands do not.
     if cli.command.is_none() {
         let host = offline_host::DaemonOfflineHost::from_cli(&cli);
-        let applied = ryeos_node::offline_operation::apply_pending_offline_operations(
+        // Nothing offline operations do may keep the node from starting: an
+        // error here is logged and the ordinary startup checks run next, so a
+        // bad inbox can never make a crash loop.
+        match ryeos_node::offline_operation::apply_pending_offline_operations(
             &selected_app_root,
             &host,
-        )
-        .context("apply signed offline operations")?;
-        // Tracing is not running yet; the platform log is standard error.
-        // The facts are printed every start so a node that cannot start still
-        // tells its operator what a request must be signed against.
-        for line in applied.log_lines() {
-            eprintln!("{line}");
+        ) {
+            // Tracing is not running yet; the platform log is standard error.
+            // The facts are printed every start so a node that cannot start
+            // still tells its operator what a request must be signed against.
+            Ok(applied) => {
+                for line in applied.log_lines() {
+                    eprintln!("{line}");
+                }
+            }
+            Err(error) => eprintln!("offline-operations: not applied: {error:#}"),
         }
     }
     ryeosd::init_shutdown_channel();

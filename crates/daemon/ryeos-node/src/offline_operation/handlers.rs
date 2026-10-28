@@ -262,7 +262,9 @@ pub(super) fn reset_policy_generation(ctx: &HandlerContext<'_>) -> Result<Value>
         "the image seed measures {measured}, not the {} the request pinned",
         arguments.seed_digest
     );
-    let expected = ctx.expected("policy_generation");
+    let expected = ctx
+        .expected("policy_generation")
+        .context("the request pins no policy generation")?;
     let trust_files = arguments
         .trust_documents
         .iter()
@@ -282,20 +284,17 @@ pub(super) fn reset_policy_generation(ctx: &HandlerContext<'_>) -> Result<Value>
             skip_preflight: false,
         },
         ctx.state_lock,
-        expected,
+        Some(expected),
     )
     .context("replace the node policy generation in a locked initialization")?;
-    let mut result = json!({
+    // The pinned generation was checked before anything changed.
+    Ok(json!({
         "node_profile": arguments.node_profile,
         "host_class": arguments.host_class,
         "node_fingerprint": report.node_key_fingerprint,
         "bundles": report.bundles_installed,
-    });
-    // A pinned generation was checked before anything changed.
-    if let Some(expected) = expected {
-        result["policy_generation"] = json!(expected);
-    }
-    Ok(result)
+        "policy_generation": expected,
+    }))
 }
 
 /// The policy generation a member replacement would publish, and the trust
@@ -748,4 +747,80 @@ pub(super) fn authorization_reset_effect(ctx: &HandlerContext<'_>) -> Result<Val
         "operator_fingerprint": operator.fingerprint(),
         "authorized_keys_dir": authorized_keys_dir,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::offline_operation::contract::{REQUEST_SCHEMA, RequestBody};
+    use crate::offline_operation::host::BareHost;
+    use crate::offline_operation::table::VerifiedInputs;
+    use ryeos_node_runtime::state_lock::{StateLock, default_lock_path};
+
+    fn workspace_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..")
+    }
+
+    #[test]
+    fn a_policy_apply_rerun_after_a_crash_reproduces_the_pinned_generation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        crate::init::run_init(&crate::InitOptions {
+            app_root: state.clone(),
+            bind: None,
+            uds_path: None,
+            source_dir: workspace_root().join("bundles"),
+            trust_files: vec![workspace_root().join(".dev-keys/PUBLISHER_DEV_TRUST.toml")],
+            node_profile: Some("full".to_owned()),
+            host_class: Some("local".to_owned()),
+            substrate_identity: Some(
+                crate::SubstrateIdentity::new(
+                    format!("sha256:{}", "1".repeat(64)),
+                    1,
+                    Some("full".to_owned()),
+                    Some("local".to_owned()),
+                )
+                .unwrap(),
+            ),
+            replace_node_policy_generation: false,
+            skip_preflight: true,
+        })
+        .expect("initial generation");
+        let policy = b"schema: 2\npatterns:\n  - \"*.trace\"\n".to_vec();
+        let pinned = prospective_policy_apply_digest(&state, "ingest_ignore", &policy).unwrap();
+        let node =
+            NodeIdentity::load(&RuntimeRoot::new(state.clone()).node_signing_key_path()).unwrap();
+        let lock = StateLock::acquire(&default_lock_path(&state)).unwrap();
+        let request = RequestBody {
+            schema: REQUEST_SCHEMA.to_owned(),
+            node_fingerprint: node.fingerprint().to_owned(),
+            signer_fingerprint: "b".repeat(64),
+            signer_grant_digest: None,
+            signer_origin_site_id: None,
+            operation: "node.policy-apply".to_owned(),
+            arguments: json!({ "section": "ingest_ignore" }),
+            inputs: BTreeMap::new(),
+            expected_result: BTreeMap::from([("policy_generation".to_owned(), pinned.clone())]),
+            precondition: BTreeMap::new(),
+            issued_at: "2026-10-28T00:00:00Z".to_owned(),
+            not_after: "2026-10-28T01:00:00Z".to_owned(),
+        };
+        let inputs = VerifiedInputs::new(BTreeMap::from([("policy".to_owned(), policy)]));
+        let context = HandlerContext {
+            app_root: &state,
+            state_lock: &lock,
+            request: &request,
+            request_digest: &"c".repeat(64),
+            inputs: &inputs,
+            host: &BareHost,
+            node: &node,
+        };
+        policy_apply(&context).expect("first application");
+        let first = crate::verify_init_completion(&state).unwrap().unwrap();
+        assert_eq!(first.policy_generation_digest, pinned);
+        // The node died before the receipt: the very same request runs again.
+        policy_apply(&context).expect("rerun after the crash");
+        let second = crate::verify_init_completion(&state).unwrap().unwrap();
+        assert_eq!(second.policy_generation_digest, pinned);
+    }
 }

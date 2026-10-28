@@ -16,6 +16,7 @@ mod ledger;
 #[cfg(test)]
 mod tests;
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -31,7 +32,7 @@ pub use ledger::{LEDGER_KEEP, LEDGER_ROTATE_AT, Ledger, LedgerState};
 
 use super::contract::{
     DEFAULT_REQUEST_LIFETIME, REQUEST_SCHEMA, Refusal, RefusalReason, RequestBody, SignedReceipt,
-    SignedRequest,
+    SignedRequest, bound_result,
 };
 use super::envelope::{Envelope, WildcardGrant, wildcard_only_grants};
 use super::facts::{FACT_LEDGER_HEAD, MANDATORY_FACTS, NodeFacts, measure};
@@ -75,6 +76,8 @@ pub enum Skipped {
     NodeIdentityUnreadable(String),
     LockHeld(String),
     LedgerUnreadable(String),
+    /// The offline-operation directories could not be established.
+    LayoutUnavailable(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,6 +119,10 @@ pub struct ApplyReport {
     /// Requests left in the inbox for a later startup.
     pub waiting: usize,
     pub stopped: Option<StopReason>,
+    /// Failures that did not stop application: a file that could not be
+    /// removed, a receipt that could not be recorded. Each is met again at
+    /// the next startup.
+    pub problems: Vec<String>,
 }
 
 impl ApplyReport {
@@ -158,6 +165,9 @@ impl ApplyReport {
         if let Some(stopped) = &self.stopped {
             lines.push(format!("offline-operations: stopped: {stopped:?}"));
         }
+        for problem in &self.problems {
+            lines.push(format!("offline-operations: problem: {problem}"));
+        }
         lines
     }
 }
@@ -174,6 +184,12 @@ fn node_identity(app_root: &Path) -> Result<Option<NodeIdentity>, String> {
 }
 
 /// Apply what the inbox holds, at the top of daemon startup.
+///
+/// Nothing in the inbox or the intent records can make this fail: a file that
+/// cannot be read or parsed is refused or set aside, a listing too long to
+/// read whole is read as far as its bound, and an error inside application is
+/// reported as a problem in the returned report. The caller logs the report
+/// and goes on to the ordinary startup checks.
 pub fn apply_pending_offline_operations(
     app_root: &Path,
     host: &dyn OfflineHost,
@@ -200,9 +216,16 @@ pub fn apply_with_options(
         }
     };
     let state_dir = RuntimeRoot::new(app_root.to_path_buf()).state();
-    if lillux::PinnedDirectory::open(&state_dir)?.is_none() {
-        report.skipped = Some(Skipped::NotInitialized);
-        return Ok(report);
+    match lillux::PinnedDirectory::open(&state_dir) {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            report.skipped = Some(Skipped::NotInitialized);
+            return Ok(report);
+        }
+        Err(error) => {
+            report.skipped = Some(Skipped::LayoutUnavailable(format!("{error:#}")));
+            return Ok(report);
+        }
     }
     let lock =
         match StateLock::acquire_with_timeout(&default_lock_path(app_root), options.lock_timeout) {
@@ -212,9 +235,15 @@ pub fn apply_with_options(
                 return Ok(report);
             }
         };
-    lock.ensure_protects_app_root(app_root)?;
+    if let Err(error) = lock.ensure_protects_app_root(app_root) {
+        report.skipped = Some(Skipped::LockHeld(format!("{error:#}")));
+        return Ok(report);
+    }
     let store = Store::for_app_root(app_root);
-    store.create_layout()?;
+    if let Err(error) = store.create_layout() {
+        report.skipped = Some(Skipped::LayoutUnavailable(format!("{error:#}")));
+        return Ok(report);
+    }
     let mut state = match Ledger::new(&store, &node).load() {
         Ok(state) => state,
         Err(error) => {
@@ -225,21 +254,20 @@ pub fn apply_with_options(
     };
     report.facts = measure(app_root, &state.head);
     report.wildcard_grants = wildcard_only_grants(app_root, &node);
-    let applier = Applier {
-        app_root,
-        host,
-        node: &node,
-        store: &store,
-        lock: &lock,
-        clock: options.clock,
-    };
+    let applier = Applier::new(app_root, host, &node, &store, &lock, options.clock);
     let started = Instant::now();
-    let mut run = Run {
-        report: &mut report,
-        started,
-        budget: options.time_budget,
-    };
-    applier.run_startup(&mut state, &mut run)?;
+    {
+        let mut run = Run {
+            report: &mut report,
+            started,
+            budget: options.time_budget,
+        };
+        if let Err(error) = applier.run_startup(&mut state, &mut run) {
+            applier.note(format!("application stopped: {error:#}"));
+        }
+        applier.clean_orphans();
+    }
+    report.problems.extend(applier.notes.take());
     Ok(report)
 }
 
@@ -252,6 +280,12 @@ struct Applier<'a> {
     store: &'a Store,
     lock: &'a StateLock,
     clock: fn() -> DateTime<Utc>,
+    /// Attempt counts as they stood before this startup began counting, by
+    /// canonical request digest: a request is counted once per startup
+    /// however many rounds look at it.
+    bumped: RefCell<BTreeMap<String, u32>>,
+    /// Failures that must not stop application: reported, not raised.
+    notes: RefCell<Vec<String>>,
 }
 
 struct Run<'a> {
@@ -280,7 +314,7 @@ enum Attempt {
         authority_bearing: bool,
     },
     Refused(Refusal),
-    /// The handler failed; the request stays for another startup.
+    /// The handler failed; the request is evaluated afresh next startup.
     Failed(anyhow::Error),
     /// The request must be applied alone and something came before it.
     Deferred,
@@ -289,7 +323,11 @@ enum Attempt {
 /// What evaluating an inbox candidate decided.
 enum Verdict {
     Ready,
-    Refuse(Refusal),
+    /// Refuse it. The flag says the request passed the envelope, so its
+    /// inputs are its own to discard; before that they may be someone else's.
+    Refuse(Refusal, bool),
+    /// A read failed; the request waits for the next startup.
+    Retry(Refusal),
     /// Signed against a head the ledger has not reached.
     Wait,
 }
@@ -301,21 +339,82 @@ struct Candidate {
     digest: String,
 }
 
-impl Applier<'_> {
+/// The refusal of a request that has used its attempts.
+fn stuck_refusal(attempts: u32, phase: Option<Phase>, error: Option<&str>) -> Refusal {
+    let mut detail = format!("the request has been begun by {attempts} startups without finishing");
+    match phase {
+        None => detail.push_str("; its handler never began, so nothing of its effect landed"),
+        Some(Phase::Running) => detail.push_str(
+            "; its handler had begun, so part of its effect may have landed before it stopped",
+        ),
+        Some(Phase::Committed) => detail.push_str(
+            "; its effect was made and its result recorded, but its receipt could not be written",
+        ),
+        Some(Phase::Receipted) => {
+            detail.push_str("; its receipt is in the ledger, but its effect was not completed")
+        }
+    }
+    if let Some(error) = error {
+        detail.push_str(&format!(": {error}"));
+    }
+    Refusal::new(RefusalReason::Stuck, detail)
+}
+
+impl<'a> Applier<'a> {
+    fn new(
+        app_root: &'a Path,
+        host: &'a dyn OfflineHost,
+        node: &'a NodeIdentity,
+        store: &'a Store,
+        lock: &'a StateLock,
+        clock: fn() -> DateTime<Utc>,
+    ) -> Self {
+        Self {
+            app_root,
+            host,
+            node,
+            store,
+            lock,
+            clock,
+            bumped: RefCell::new(BTreeMap::new()),
+            notes: RefCell::new(Vec::new()),
+        }
+    }
+
+    fn note(&self, problem: String) {
+        self.notes.borrow_mut().push(problem);
+    }
+
     fn now(&self) -> DateTime<Utc> {
         (self.clock)()
     }
 
-    fn envelope(&self) -> Envelope<'_> {
+    fn envelope(&self, enforce_clock: bool) -> Envelope<'_> {
         Envelope {
             app_root: self.app_root,
             node: self.node,
             now: self.now(),
+            enforce_clock,
         }
     }
 
     fn ledger(&self) -> Ledger<'_> {
         Ledger::new(self.store, self.node)
+    }
+
+    /// Count this startup against a request, once, and say how many startups
+    /// had begun it before.
+    fn bump_once(&self, digest: &str) -> Result<u32> {
+        if let Some(previous) = self.bumped.borrow().get(digest) {
+            return Ok(*previous);
+        }
+        let previous = self.store.attempts(digest);
+        if previous < u32::MAX {
+            self.store
+                .record_attempts(digest, previous.saturating_add(1))?;
+        }
+        self.bumped.borrow_mut().insert(digest.to_owned(), previous);
+        Ok(previous)
     }
 
     // ── Startup ──────────────────────────────────────────────────────────
@@ -330,11 +429,17 @@ impl Applier<'_> {
                 run.report.stopped = Some(StopReason::TimeBudget);
                 break;
             }
-            let inbox = self.store.list_inbox()?;
+            let inbox = match self.store.list_inbox() {
+                Ok(inbox) => inbox,
+                Err(error) => {
+                    self.note(format!("the inbox cannot be listed: {error:#}"));
+                    break;
+                }
+            };
             let mut candidates = Vec::new();
             let mut refused_any = false;
             for name in &inbox.requests {
-                match self.load_candidate(name, run)? {
+                match self.load_candidate(name, run) {
                     Some(candidate) => candidates.push(candidate),
                     None => refused_any = true,
                 }
@@ -345,8 +450,27 @@ impl Applier<'_> {
                 match self.evaluate(state, candidate) {
                     Verdict::Ready => ready.push(candidate),
                     Verdict::Wait => waiting += 1,
-                    Verdict::Refuse(refusal) => {
-                        self.refuse_candidate(candidate, &refusal, run)?;
+                    Verdict::Retry(refusal) => match self.bump_once(&candidate.digest) {
+                        Ok(previous) if previous >= MAX_STARTUP_ATTEMPTS => {
+                            let stuck = stuck_refusal(
+                                previous,
+                                None,
+                                Some(&format!(
+                                    "its verification kept failing: {}",
+                                    refusal.detail
+                                )),
+                            );
+                            self.refuse_candidate(candidate, &stuck, run, false);
+                            refused_any = true;
+                        }
+                        Ok(_) => waiting += 1,
+                        Err(error) => {
+                            self.note(format!("an attempt could not be counted: {error:#}"));
+                            waiting += 1;
+                        }
+                    },
+                    Verdict::Refuse(refusal, passed_envelope) => {
+                        self.refuse_candidate(candidate, &refusal, run, passed_envelope);
                         refused_any = true;
                     }
                 }
@@ -391,7 +515,7 @@ impl Applier<'_> {
                     }
                 }
                 Attempt::Refused(refusal) => {
-                    self.refuse_candidate(next, &refusal, run)?;
+                    self.refuse_candidate(next, &refusal, run, true);
                 }
                 Attempt::Failed(error) => {
                     run.report.stopped = Some(StopReason::HandlerFailed {
@@ -413,25 +537,109 @@ impl Applier<'_> {
         Ok(())
     }
 
-    /// Requests with an intent record are continued before anything new:
-    /// they were begun at an earlier startup and are owed their receipt. A
-    /// continuation is of an application that passed the envelope when it
-    /// began, so it is not checked against the clock again: finishing what a
-    /// valid authorization started is better than leaving it half made.
+    /// Continue the applications a node died inside. Only genuine crash
+    /// leftovers have an intent record: an ordinary handler failure drops its
+    /// record, so that request is evaluated afresh. A continuation is checked
+    /// again against everything but the clock (it began inside its window),
+    /// and against the ledger: its pinned head must be the current head, or
+    /// the head its own receipt follows.
     fn resume_pending(&self, state: &mut LedgerState, run: &mut Run<'_>) -> Result<()> {
-        for digest in self.store.pending_digests()? {
-            let Some(pending) = self.store.load_pending(&digest)? else {
-                continue;
+        let digests = match self.store.pending_digests() {
+            Ok(digests) => digests,
+            Err(error) => {
+                self.note(format!("the intent records cannot be listed: {error:#}"));
+                return Ok(());
+            }
+        };
+        for digest in digests {
+            let pending = match self.store.load_pending(&digest) {
+                Ok(Some(pending)) => pending,
+                Ok(None) => continue,
+                Err(error) => {
+                    self.quarantine_pending(&digest, &format!("{error:#}"), run);
+                    continue;
+                }
+            };
+            let bytes = match pending.request.to_bytes() {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    self.quarantine_pending(&digest, &format!("{error:#}"), run);
+                    continue;
+                }
             };
             let candidate = Candidate {
                 name: pending.inbox_name.clone(),
-                bytes: pending.request.to_bytes()?,
+                bytes,
                 digest: digest.clone(),
                 request: pending.request.clone(),
             };
-            if state.request_digests.contains(&digest) && pending.phase != Phase::Receipted {
+            let began = "the handler had begun, so part of its effect may have landed";
+            let Some(spec) = lookup(&candidate.request.body.operation) else {
+                let refusal = Refusal::new(
+                    RefusalReason::UnknownOperation,
+                    format!(
+                        "this build has no operation `{}`; {began}",
+                        candidate.request.body.operation
+                    ),
+                );
+                self.refuse_candidate(&candidate, &refusal, run, true);
+                continue;
+            };
+            match self.envelope(false).check(&candidate.request) {
+                Ok(()) => {}
+                Err(refusal) if refusal.retryable => {
+                    match self.bump_once(&digest) {
+                        Ok(previous) if previous >= MAX_STARTUP_ATTEMPTS => {
+                            let stuck =
+                                stuck_refusal(previous, Some(pending.phase), Some(&refusal.detail));
+                            self.refuse_candidate(&candidate, &stuck, run, true);
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            self.note(format!("an attempt could not be counted: {error:#}"));
+                        }
+                    }
+                    continue;
+                }
+                Err(refusal) => {
+                    let refusal =
+                        Refusal::new(refusal.reason, format!("{}; {began}", refusal.detail));
+                    self.refuse_candidate(&candidate, &refusal, run, true);
+                    continue;
+                }
+            }
+            let pinned = candidate
+                .request
+                .body
+                .precondition
+                .get(FACT_LEDGER_HEAD)
+                .cloned()
+                .unwrap_or_default();
+            let in_ledger = state.request_digests.contains(&digest);
+            let head_holds = if in_ledger {
+                matches!(
+                    self.ledger().find_receipt(state, &digest),
+                    Ok(Some(receipt)) if receipt.body.previous == pinned
+                )
+            } else {
+                pinned == state.head
+            };
+            if !head_holds {
+                let refusal = Refusal::new(
+                    RefusalReason::StaleLedgerHead,
+                    format!(
+                        "the ledger head the request was signed against is neither the current head nor the one its own receipt follows; {began}"
+                    ),
+                );
+                self.refuse_candidate(&candidate, &refusal, run, true);
+                continue;
+            }
+            let receipt_first = matches!(spec.handler, Handler::ReceiptThenEffect { .. });
+            if in_ledger && !receipt_first {
                 // The receipt is in the ledger: only the clean-up was owed.
-                self.finish(&candidate)?;
+                if let Err(error) = self.release(&candidate, true) {
+                    self.note(format!("clean-up of {digest} failed: {error:#}"));
+                }
                 continue;
             }
             match self.attempt(
@@ -459,7 +667,7 @@ impl Applier<'_> {
                     }
                 }
                 Attempt::Refused(refusal) => {
-                    self.refuse_candidate(&candidate, &refusal, run)?;
+                    self.refuse_candidate(&candidate, &refusal, run, true);
                 }
                 Attempt::Failed(error) => {
                     run.report.stopped = Some(StopReason::HandlerFailed {
@@ -480,13 +688,38 @@ impl Applier<'_> {
         Ok(())
     }
 
+    /// An intent record that cannot be read is set aside with a refusal
+    /// receipt; the request it belonged to, if it is still in the inbox, is
+    /// evaluated afresh.
+    fn quarantine_pending(&self, digest: &str, why: &str, run: &mut Run<'_>) {
+        let refusal = Refusal::new(
+            RefusalReason::Malformed,
+            format!("the intent record is unusable and was set aside: {why}"),
+        );
+        if let Err(error) = self
+            .store
+            .record_refusal(self.node, digest, None, None, &refusal, None)
+        {
+            self.note(format!(
+                "refusal of intent record {digest} not recorded: {error:#}"
+            ));
+        }
+        if let Err(error) = self.store.remove_pending(digest) {
+            self.note(format!("intent record {digest} not removed: {error:#}"));
+        }
+        run.report.refused.push(RefusedOperation {
+            request_digest: digest.to_owned(),
+            reason: RefusalReason::Malformed,
+        });
+    }
+
     /// Read and parse one inbox request. A document that cannot be read
     /// within bounds, or is not a request, is refused here (and removed);
     /// `None` says so.
-    fn load_candidate(&self, name: &str, run: &mut Run<'_>) -> Result<Option<Candidate>> {
-        let bytes = match self.store.read_request(name)? {
-            Read::Missing => return Ok(None),
-            Read::TooLarge => {
+    fn load_candidate(&self, name: &str, run: &mut Run<'_>) -> Option<Candidate> {
+        let bytes = match self.store.read_request(name) {
+            Ok(Read::Missing) => return None,
+            Ok(Read::TooLarge) => {
                 self.refuse_unparsed(
                     name,
                     name,
@@ -496,10 +729,23 @@ impl Applier<'_> {
                         "the request document exceeds its size bound",
                     ),
                     run,
-                )?;
-                return Ok(None);
+                );
+                return None;
             }
-            Read::Bytes(bytes) => bytes,
+            Ok(Read::Bytes(bytes)) => bytes,
+            Err(error) => {
+                self.refuse_unparsed(
+                    name,
+                    name,
+                    None,
+                    Refusal::new(
+                        RefusalReason::Malformed,
+                        format!("the request cannot be read: {error:#}"),
+                    ),
+                    run,
+                );
+                return None;
+            }
         };
         let digest_of_bytes = lillux::sha256_hex(&bytes);
         if digest_of_bytes != name {
@@ -512,16 +758,28 @@ impl Applier<'_> {
                     "the request file is not named by the digest of its content",
                 ),
                 run,
-            )?;
-            return Ok(None);
+            );
+            return None;
         }
         match SignedRequest::parse(&bytes) {
-            Ok(request) => Ok(Some(Candidate {
-                name: name.to_owned(),
-                digest: request.digest()?,
-                bytes,
-                request,
-            })),
+            Ok(request) => match request.digest() {
+                Ok(digest) => Some(Candidate {
+                    name: name.to_owned(),
+                    digest,
+                    bytes,
+                    request,
+                }),
+                Err(error) => {
+                    self.refuse_unparsed(
+                        name,
+                        name,
+                        Some(&bytes),
+                        Refusal::new(RefusalReason::Malformed, format!("{error:#}")),
+                        run,
+                    );
+                    None
+                }
+            },
             Err(error) => {
                 self.refuse_unparsed(
                     name,
@@ -529,14 +787,16 @@ impl Applier<'_> {
                     Some(&bytes),
                     Refusal::new(RefusalReason::Malformed, format!("{error:#}")),
                     run,
-                )?;
-                Ok(None)
+                );
+                None
             }
         }
     }
 
     /// Refuse a document that is not a usable request: one receipt under
-    /// `digest`, and the inbox file `file_name` removed.
+    /// `digest`, and the inbox file `file_name` removed. Failures to write the
+    /// receipt or remove the file are reported, not raised: the document is
+    /// met again at the next startup.
     fn refuse_unparsed(
         &self,
         file_name: &str,
@@ -544,83 +804,166 @@ impl Applier<'_> {
         bytes: Option<&[u8]>,
         refusal: Refusal,
         run: &mut Run<'_>,
-    ) -> Result<()> {
-        self.store
-            .record_refusal(self.node, digest, None, None, &refusal, bytes)?;
-        self.store.remove_request(file_name)?;
+    ) {
+        if let Err(error) = self
+            .store
+            .record_refusal(self.node, digest, None, None, &refusal, bytes)
+        {
+            self.note(format!("refusal of {digest} not recorded: {error:#}"));
+        }
+        if let Err(error) = self.store.remove_request(file_name) {
+            self.note(format!("request file {file_name} not removed: {error:#}"));
+        }
         run.report.refused.push(RefusedOperation {
             request_digest: digest.to_owned(),
             reason: refusal.reason,
         });
-        Ok(())
     }
 
     /// Decide what to do with a parsed request, in the order the rules state:
     /// envelope, replay, then the ledger head.
     fn evaluate(&self, state: &LedgerState, candidate: &Candidate) -> Verdict {
         let request = &candidate.request;
-        if let Err(refusal) = self.envelope().check(request) {
-            return Verdict::Refuse(refusal);
+        if let Err(refusal) = self.envelope(true).check(request) {
+            return if refusal.retryable {
+                Verdict::Retry(refusal)
+            } else {
+                Verdict::Refuse(refusal, false)
+            };
         }
         if state.request_digests.contains(&candidate.digest) {
-            return Verdict::Refuse(Refusal::new(
-                RefusalReason::Replayed,
-                "the request digest is already in the ledger",
-            ));
+            return Verdict::Refuse(
+                Refusal::new(
+                    RefusalReason::Replayed,
+                    "the request digest is already in the ledger",
+                ),
+                true,
+            );
         }
         let Some(head) = request.body.precondition.get(FACT_LEDGER_HEAD) else {
-            return Verdict::Refuse(Refusal::new(
-                RefusalReason::PreconditionFailed,
-                "the request pins no ledger head",
-            ));
+            return Verdict::Refuse(
+                Refusal::new(
+                    RefusalReason::PreconditionFailed,
+                    "the request pins no ledger head",
+                ),
+                true,
+            );
         };
         if *head == state.head {
-            Verdict::Ready
-        } else if state.is_past_head(head) {
-            Verdict::Refuse(Refusal::new(
-                RefusalReason::StaleLedgerHead,
-                "the ledger has moved past the head the request was signed against",
-            ))
+            return Verdict::Ready;
+        }
+        let dropped_by_rotation = request
+            .body
+            .issued_at()
+            .is_ok_and(|issued_at| state.predates_retained(issued_at));
+        if state.is_past_head(head) || dropped_by_rotation {
+            Verdict::Refuse(
+                Refusal::new(
+                    RefusalReason::StaleLedgerHead,
+                    "the ledger has moved past the head the request was signed against",
+                ),
+                true,
+            )
         } else {
             Verdict::Wait
         }
     }
 
+    /// Record a refusal and discard the request. `passed_envelope` says the
+    /// request's inputs are its own to delete; a request that did not pass
+    /// may name someone else's. Failures are reported, not raised.
     fn refuse_candidate(
         &self,
         candidate: &Candidate,
         refusal: &Refusal,
         run: &mut Run<'_>,
-    ) -> Result<()> {
+        passed_envelope: bool,
+    ) {
         let body = &candidate.request.body;
-        self.store.record_refusal(
+        if let Err(error) = self.store.record_refusal(
             self.node,
             &candidate.digest,
             Some(&body.operation),
             Some(&body.signer_fingerprint),
             refusal,
             Some(&candidate.bytes),
-        )?;
-        self.discard(candidate)?;
+        ) {
+            self.note(format!(
+                "refusal of {} not recorded: {error:#}",
+                candidate.digest
+            ));
+        }
+        if let Err(error) = self.release(candidate, passed_envelope) {
+            self.note(format!("discarding {} failed: {error:#}", candidate.digest));
+        }
         run.report.refused.push(RefusedOperation {
             request_digest: candidate.digest.clone(),
             reason: refusal.reason,
         });
-        Ok(())
     }
 
-    /// Remove a refused request, its inputs and its intent record.
-    fn discard(&self, candidate: &Candidate) -> Result<()> {
-        self.finish(candidate)
-    }
-
-    /// Remove an applied request and its inputs, then its intent record.
-    fn finish(&self, candidate: &Candidate) -> Result<()> {
-        self.store.remove_request(&candidate.name)?;
-        for digest in candidate.request.body.inputs.values() {
-            self.store.remove_input(digest)?;
+    /// Remove a request that is finished with: its file, its intent record
+    /// and counter, and (when they are its own) its inputs. An input another
+    /// request or intent record still names is kept. Every step is tried;
+    /// the first failure is returned.
+    fn release(&self, candidate: &Candidate, remove_inputs: bool) -> Result<()> {
+        let mut first: Option<anyhow::Error> = None;
+        let mut keep = |result: Result<()>| {
+            if let Err(error) = result {
+                first.get_or_insert(error);
+            }
+        };
+        keep(self.store.remove_request(&candidate.name));
+        if remove_inputs {
+            match self.store.in_use(Some(&candidate.digest)) {
+                Ok(in_use) if in_use.complete => {
+                    for digest in candidate.request.body.inputs.values() {
+                        if !in_use.inputs.contains(digest) {
+                            keep(self.store.remove_input(digest));
+                        }
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => keep(Err(error)),
+            }
         }
-        self.store.remove_pending(&candidate.digest)
+        keep(self.store.remove_pending(&candidate.digest));
+        keep(self.store.clear_attempts(&candidate.digest));
+        first.map_or(Ok(()), Err)
+    }
+
+    /// Delete what nothing refers to any more: input files no request or
+    /// intent record names, and counters of requests that are gone. Only when
+    /// the whole inbox could be read.
+    fn clean_orphans(&self) {
+        let in_use = match self.store.in_use(None) {
+            Ok(in_use) if in_use.complete => in_use,
+            Ok(_) => return,
+            Err(error) => {
+                self.note(format!("orphans could not be found: {error:#}"));
+                return;
+            }
+        };
+        match self.store.input_files() {
+            Ok(inputs) => {
+                for digest in inputs.iter().filter(|d| !in_use.inputs.contains(*d)) {
+                    if let Err(error) = self.store.remove_input(digest) {
+                        self.note(format!("orphan input {digest} not removed: {error:#}"));
+                    }
+                }
+            }
+            Err(error) => self.note(format!("inputs could not be listed: {error:#}")),
+        }
+        match self.store.attempt_digests() {
+            Ok(counters) => {
+                for digest in counters.iter().filter(|d| !in_use.requests.contains(*d)) {
+                    if let Err(error) = self.store.clear_attempts(digest) {
+                        self.note(format!("orphan counter {digest} not removed: {error:#}"));
+                    }
+                }
+            }
+            Err(error) => self.note(format!("counters could not be listed: {error:#}")),
+        }
     }
 
     // ── Applying one request ─────────────────────────────────────────────
@@ -628,9 +971,14 @@ impl Applier<'_> {
     /// Steps 3 to 8 for a request the envelope admitted: preconditions,
     /// inputs, the handler, the receipt, the clean-up.
     ///
-    /// With an intent record the request is a continuation: its preconditions
-    /// were verified when it began, and the state they described may already
-    /// have been changed by the handler.
+    /// With an intent record the request is a continuation of an application
+    /// that passed these steps when it began, and the state its preconditions
+    /// described may already have been changed by its handler.
+    ///
+    /// Each startup that begins a request is counted, in every phase. A
+    /// request begun `MAX_STARTUP_ATTEMPTS` times without finishing is
+    /// refused as stuck, whatever phase it is in, and the refusal says how
+    /// far it got.
     fn attempt(
         &self,
         state: &LedgerState,
@@ -640,23 +988,29 @@ impl Applier<'_> {
         applied_this_startup: usize,
     ) -> Result<Attempt> {
         let body = &candidate.request.body;
-        let spec = lookup(&body.operation)
-            .with_context(|| format!("this build has no offline operation `{}`", body.operation))?;
+        let Some(spec) = lookup(&body.operation) else {
+            return Ok(Attempt::Refused(Refusal::new(
+                RefusalReason::UnknownOperation,
+                format!("this build has no offline operation `{}`", body.operation),
+            )));
+        };
         if spec.alone && applied_this_startup > 0 && resumed.is_none() {
             return Ok(Attempt::Deferred);
         }
-        // A continuation that has already used its attempts is stuck.
-        if let Some(pending) = &resumed
-            && pending.attempts >= MAX_STARTUP_ATTEMPTS
-            && pending.phase == Phase::Running
-        {
-            return Ok(Attempt::Refused(Refusal::new(
-                RefusalReason::Stuck,
-                format!(
-                    "the request began {} startups without finishing",
-                    pending.attempts
-                ),
-            )));
+        let persists = matches!(source, InputSource::Inbox);
+        let mut previous_attempts = 0;
+        if persists {
+            previous_attempts = match self.bump_once(&candidate.digest) {
+                Ok(previous) => previous,
+                Err(error) => return Ok(Attempt::Failed(error)),
+            };
+            if previous_attempts >= MAX_STARTUP_ATTEMPTS {
+                return Ok(Attempt::Refused(stuck_refusal(
+                    previous_attempts,
+                    resumed.as_ref().map(|pending| pending.phase),
+                    None,
+                )));
+            }
         }
         let measured = match &resumed {
             Some(pending) => pending.measured_preconditions.clone(),
@@ -677,19 +1031,12 @@ impl Applier<'_> {
                 Err(refusal) => return Ok(Attempt::Refused(refusal)),
             }
         };
-        let persists = matches!(source, InputSource::Inbox);
         let mut pending = match resumed {
-            Some(mut pending) => {
-                if pending.phase == Phase::Running {
-                    pending.attempts += 1;
-                }
-                pending
-            }
+            Some(pending) => pending,
             None => Pending {
                 request_digest: candidate.digest.clone(),
                 inbox_name: candidate.name.clone(),
                 request: candidate.request.clone(),
-                attempts: 1,
                 phase: Phase::Running,
                 measured_preconditions: measured.clone(),
                 result: None,
@@ -697,8 +1044,8 @@ impl Applier<'_> {
                 started_at: lillux::time::iso8601_now(),
             },
         };
-        if persists {
-            self.store.save_pending(&pending)?;
+        if persists && let Err(error) = self.store.save_pending(&pending) {
+            return Ok(Attempt::Failed(error));
         }
         let context = HandlerContext {
             app_root: self.app_root,
@@ -713,20 +1060,37 @@ impl Applier<'_> {
         let (receipt, _) = match outcome {
             Ok(done) => done,
             Err(error) => {
-                if persists && pending.attempts >= MAX_STARTUP_ATTEMPTS {
-                    return Ok(Attempt::Refused(Refusal::new(
-                        RefusalReason::Stuck,
-                        format!(
-                            "the handler failed {} startups running: {error:#}",
-                            pending.attempts
-                        ),
-                    )));
+                if persists {
+                    // Before the effect is made, a failed attempt leaves no
+                    // record: the request is evaluated afresh next time, its
+                    // attempts still counted. Once the effect or the receipt
+                    // exists, the record stays: that much is owed completion.
+                    if pending.phase == Phase::Running
+                        && let Err(remove) = self.store.remove_pending(&candidate.digest)
+                    {
+                        self.note(format!(
+                            "intent record {} not removed: {remove:#}",
+                            candidate.digest
+                        ));
+                    }
+                    if previous_attempts.saturating_add(1) >= MAX_STARTUP_ATTEMPTS {
+                        return Ok(Attempt::Refused(stuck_refusal(
+                            previous_attempts.saturating_add(1),
+                            Some(pending.phase),
+                            Some(&format!("{error:#}")),
+                        )));
+                    }
                 }
                 return Ok(Attempt::Failed(error));
             }
         };
-        if persists {
-            self.finish(candidate)?;
+        if persists && let Err(error) = self.release(candidate, true) {
+            // The receipt is in the ledger; what is left is cleaned at the
+            // next startup.
+            self.note(format!(
+                "clean-up of {} failed: {error:#}",
+                candidate.digest
+            ));
         }
         Ok(Attempt::Applied {
             sequence: receipt.body.sequence,
@@ -828,7 +1192,10 @@ impl Applier<'_> {
     }
 
     /// Steps 6 to 8: the handler, the check of what it reported, and the
-    /// receipt. The order of effect and receipt follows the handler's shape.
+    /// receipt. The order of effect and receipt follows the handler's shape,
+    /// and what a continuation still owes follows from the ledger and the
+    /// intent record, not from the phase alone: a receipt-first operation
+    /// whose receipt is in the ledger owes its effect whatever the record says.
     fn run_handler(
         &self,
         spec: &OperationSpec,
@@ -849,6 +1216,8 @@ impl Applier<'_> {
                     let result = effect(context)?;
                     verify_expected(&context.request.expected_result, &result)
                         .map_err(|refusal| anyhow!("{refusal}"))?;
+                    // What is recorded is bounded; what was verified was not.
+                    let result = bound_result(result);
                     pending.phase = Phase::Committed;
                     pending.result = Some(result.clone());
                     if persists {
@@ -868,8 +1237,10 @@ impl Applier<'_> {
                 Ok((receipt, result))
             }
             Handler::ReceiptThenEffect { prepare, effect } => {
-                let receipt = if pending.phase == Phase::Receipted {
-                    // The receipt is already in the ledger; find it.
+                let receipt = if state.request_digests.contains(&pending.request_digest) {
+                    // The receipt was written by an earlier run, whichever
+                    // phase the record reached before that run died.
+                    pending.phase = Phase::Receipted;
                     self.receipt_of(&pending.request_digest)?
                 } else {
                     let prepared = prepare(context)?;
@@ -889,7 +1260,7 @@ impl Applier<'_> {
                     }
                     receipt
                 };
-                let result = effect(context)?;
+                let result = bound_result(effect(context)?);
                 Ok((receipt, result))
             }
         }
@@ -973,6 +1344,38 @@ pub fn apply_local_with_options(
     let store = Store::for_app_root(app_root);
     store.create_layout()?;
     let ledger = Ledger::new(&store, &node);
+    let mut state = ledger
+        .load()
+        .context("verify the offline-operation ledger")?;
+    let applier = Applier::new(app_root, host, &node, &store, &lock, options.clock);
+    // An application a node died inside is finished before a new request is
+    // built on the state it left; a request signed now would otherwise run
+    // over a half-made change.
+    let mut scratch = ApplyReport::default();
+    {
+        let mut run = Run {
+            report: &mut scratch,
+            started: Instant::now(),
+            budget: options.time_budget,
+        };
+        applier
+            .resume_pending(&mut state, &mut run)
+            .context("finish the interrupted offline operation")?;
+    }
+    if let Some(stopped) = &scratch.stopped {
+        anyhow::bail!("an interrupted offline operation could not be finished: {stopped:?}");
+    }
+    if !store.pending_digests()?.is_empty() {
+        anyhow::bail!(
+            "an earlier offline operation was interrupted and is not finished (see the offline-operation log lines at startup); start the node once, or resolve it, before applying another{}",
+            applier
+                .notes
+                .borrow()
+                .first()
+                .map(|note| format!(": {note}"))
+                .unwrap_or_default()
+        );
+    }
     let state = ledger
         .load()
         .context("verify the offline-operation ledger")?;
@@ -1017,14 +1420,6 @@ pub fn apply_local_with_options(
         &operator,
     )?;
     let digest = request.digest()?;
-    let applier = Applier {
-        app_root,
-        host,
-        node: &node,
-        store: &store,
-        lock: &lock,
-        clock: options.clock,
-    };
     let candidate = Candidate {
         name: digest.clone(),
         bytes: request.to_bytes()?,
@@ -1033,7 +1428,9 @@ pub fn apply_local_with_options(
     };
     match applier.evaluate(&state, &candidate) {
         Verdict::Ready => {}
-        Verdict::Refuse(refusal) => return Err(anyhow!("{refusal}")),
+        Verdict::Refuse(refusal, _) | Verdict::Retry(refusal) => {
+            return Err(anyhow!("{refusal}"));
+        }
         Verdict::Wait => anyhow::bail!("the ledger head moved while the request was built"),
     }
     match applier.attempt(

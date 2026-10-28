@@ -532,6 +532,16 @@ fn run_node_policy_generation_reset_command(
             trust_documents,
         },
     )?;
+    // The request pins the generation the seed will install; the operation
+    // recomputes it and refuses before any change if it differs.
+    let policy_generation = ryeos_node::prospective_replacement_policy_digest(
+        &app_root,
+        &args.source,
+        &args.node_profile,
+        &args.host_class,
+        &args.trust_files,
+    )
+    .context("compute the policy generation the image seed would install")?;
     let host = crate::offline_apply::CliHost::new()
         .with_image_seed(args.source.clone(), substrate_image_digest);
     let applied = host.apply(
@@ -539,7 +549,7 @@ fn run_node_policy_generation_reset_command(
         "node.reset.policy-generation",
         arguments,
         std::collections::BTreeMap::new(),
-        std::collections::BTreeMap::new(),
+        std::collections::BTreeMap::from([("policy_generation".to_owned(), policy_generation)]),
     )?;
 
     if args.json {
@@ -3144,10 +3154,45 @@ struct StartArgs {
     uds_path: Option<PathBuf>,
 }
 
+/// Apply the signed offline operations waiting for a node, before this start
+/// asks whether the node is inhibited.
+///
+/// `ryeos start` refuses an inhibited node before it spawns `ryeosd` (a
+/// supervisor would otherwise relaunch the refusing daemon in a tight loop),
+/// so a request that clears the inhibition would never reach the application
+/// the daemon runs at the top of its own startup. Starts driven by a
+/// supervisor or an entrypoint spawn `ryeosd` directly and apply there; this
+/// is the same application, run in process, so both routes behave alike. A
+/// running node holds the state lock, which skips it quietly, and nothing
+/// here can stop the start: an error is reported and the start goes on to its
+/// own checks.
+fn apply_offline_operations_before_start(app_root: Option<PathBuf>) {
+    let Ok(config) = ryeos_node::NodeConfig::load_local(app_root) else {
+        return;
+    };
+    let options = ryeos_node::offline_operation::ApplyOptions {
+        lock_timeout: std::time::Duration::from_millis(200),
+        ..Default::default()
+    };
+    let host = crate::offline_apply::CliHost::new();
+    match ryeos_node::offline_operation::apply_with_options(&config.app_root, &host, &options) {
+        Ok(report) if report.skipped.is_some() => {}
+        Ok(report) => {
+            for line in report.log_lines() {
+                if !line.starts_with("offline-operations: fact ") {
+                    eprintln!("{line}");
+                }
+            }
+        }
+        Err(error) => eprintln!("offline-operations: not applied: {error:#}"),
+    }
+}
+
 async fn run_start_command(argv: &[String], console: &crate::tty::Console) -> Result<()> {
     let Some(args) = parse_or_render_help::<StartArgs>(argv, console)? else {
         return Ok(());
     };
+    apply_offline_operations_before_start(args.app_root.clone());
     let env = LocalLifecycleEnv::load(args.app_root)?;
     let controller = LifecycleController::from_env(env);
     let endpoints = ryeos_node::StartEndpointConfiguration {

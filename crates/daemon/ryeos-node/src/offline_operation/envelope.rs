@@ -12,8 +12,9 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use anyhow::Context as _;
 use chrono::{DateTime, Utc};
-use lillux::crypto::VerifyingKey;
+use lillux::crypto::{DecodePrivateKey as _, VerifyingKey};
 use ryeos_engine::roots::RuntimeRoot;
 use ryeos_node_runtime::identity::{
     AuthorizedKeyPrincipalClass, NodeIdentity, VerifiedAuthorizedKeyGrant,
@@ -38,21 +39,31 @@ pub fn authorized_keys_dir(app_root: &Path) -> PathBuf {
 }
 
 /// The fingerprint and public key of the local operator: the key on this
-/// node's volume. `None` when the node has no operator key yet.
-pub fn local_operator(app_root: &Path) -> Option<(String, VerifyingKey)> {
+/// node's volume. `Ok(None)` when the node has no operator key yet; an error
+/// when the key is there and cannot be read.
+pub fn local_operator(app_root: &Path) -> anyhow::Result<Option<(String, VerifyingKey)>> {
     let path = RuntimeRoot::new(app_root.to_path_buf()).operator_signing_key_path();
-    let key = lillux::crypto::load_signing_key(&path).ok()?;
+    let Some(bytes) = lillux::read_optional_regular_file_bounded_no_follow(&path, 64 * 1024)?
+    else {
+        return Ok(None);
+    };
+    let pem = std::str::from_utf8(&bytes).context("the local operator key is not UTF-8")?;
+    let key = lillux::crypto::SigningKey::from_pkcs8_pem(pem)
+        .with_context(|| format!("decode the local operator key {}", path.display()))?;
     let verifying = key.verifying_key();
-    Some((
+    Ok(Some((
         lillux::signature::compute_fingerprint(&verifying),
         verifying,
-    ))
+    )))
 }
 
 pub struct Envelope<'a> {
     pub app_root: &'a Path,
     pub node: &'a NodeIdentity,
     pub now: DateTime<Utc>,
+    /// Check the request's time window. A continuation of an application that
+    /// began inside its window is not checked against the clock again.
+    pub enforce_clock: bool,
 }
 
 fn refuse<T>(reason: RefusalReason, detail: impl Into<String>) -> Result<T, Refusal> {
@@ -63,6 +74,16 @@ fn refuse<T>(reason: RefusalReason, detail: impl Into<String>) -> Result<T, Refu
 /// operator request. Read only when a remote signer asks for one; a policy
 /// that cannot be read delegates nothing.
 fn delegated_remote_operations(app_root: &Path) -> anyhow::Result<BTreeSet<String>> {
+    // A node with no policy generation at all delegates nothing; one whose
+    // generation is there and cannot be read is an error, which the caller
+    // treats as a failed read to retry, not as a refusal.
+    if lillux::inspect_optional_entry_no_follow(
+        &ryeos_node_runtime::node_policy::generation::policy_directory(app_root),
+    )?
+    .is_none()
+    {
+        return Ok(BTreeSet::new());
+    }
     let root = RuntimeRoot::new(app_root.to_path_buf());
     let trust = ryeos_engine::trust::TrustStore::load(None, &root.config())?;
     let snapshot = ryeos_node_runtime::node_policy::load_snapshot(
@@ -131,18 +152,20 @@ impl Envelope<'_> {
                         );
                     }
                     Err(error) => {
-                        return refuse(
+                        return Err(Refusal::retryable(
                             RefusalReason::NotDelegable,
                             format!(
                                 "`{}` is authority-bearing and the node's signed policy cannot be read to find a delegation: {error:#}",
                                 spec.id
                             ),
-                        );
+                        ));
                     }
                 }
             }
         }
-        self.check_time(body)?;
+        if self.enforce_clock {
+            self.check_time(body)?;
+        }
         check_shape(spec, body)
     }
 
@@ -153,7 +176,13 @@ impl Envelope<'_> {
         request: &SignedRequest,
     ) -> Result<Option<VerifiedAuthorizedKeyGrant>, Refusal> {
         let body = &request.body;
-        if let Some((fingerprint, key)) = local_operator(self.app_root)
+        let local = local_operator(self.app_root).map_err(|error| {
+            Refusal::retryable(
+                RefusalReason::UnknownSigner,
+                format!("the local operator key cannot be read: {error:#}"),
+            )
+        })?;
+        if let Some((fingerprint, key)) = local
             && fingerprint == body.signer_fingerprint
         {
             request
@@ -178,10 +207,10 @@ impl Envelope<'_> {
                     );
                 }
                 Err(error) => {
-                    return refuse(
+                    return Err(Refusal::retryable(
                         RefusalReason::UnknownSigner,
                         format!("the signer's grant cannot be verified: {error:#}"),
-                    );
+                    ));
                 }
             };
         // Never a remote node, and no ordinary client: only a remote

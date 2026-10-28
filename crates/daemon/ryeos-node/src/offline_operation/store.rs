@@ -7,7 +7,10 @@
 //! - `inbox/`: `<64-hex>.json` requests and `<64-hex>.input` inputs, written
 //!   by others and read here; anything else is ignored.
 //! - `refused/`: node-signed refusal receipts and the refused request copies.
-//! - `pending/`: one intent record per request being applied.
+//! - `pending/`: one intent record per request whose handler has begun; it
+//!   exists only so a node that died inside the handler can finish.
+//! - `attempts/`: how many startups have begun a request, kept apart from the
+//!   intent record so that dropping a failed attempt does not forget it.
 //! - `ledger/`: the hash-chained receipts; written only by the application.
 
 use std::ffi::OsStr;
@@ -30,13 +33,18 @@ const INBOX: &str = "inbox";
 const REFUSED: &str = "refused";
 const PENDING: &str = "pending";
 const LEDGER: &str = "ledger";
+const ATTEMPTS: &str = "attempts";
 
 /// Most refusal receipts kept; the oldest are pruned past it.
 pub const MAX_REFUSAL_RECEIPTS: usize = 64;
 /// Most bytes the refused directory holds before the oldest are pruned.
 pub const MAX_REFUSED_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_REFUSAL_RECEIPT_BYTES: u64 = 16 * 1024;
-const MAX_PENDING_BYTES: u64 = 1024 * 1024;
+pub(super) const MAX_PENDING_BYTES: u64 = 1024 * 1024;
+const MAX_ATTEMPT_BYTES: u64 = 1024;
+/// Request files read to learn which inputs and counters are still wanted.
+/// Past it the answer is "unknown" and nothing is deleted on its strength.
+const MAX_INUSE_SCAN: usize = 64;
 /// How many inbox names are read in one listing, to bound the work a flooded
 /// inbox can cost one startup.
 const MAX_INBOX_LISTING: usize = 4096;
@@ -63,12 +71,68 @@ pub struct Inbox {
     pub overflow: bool,
 }
 
+/// What a bounded listing of one directory found.
+pub(super) struct Names {
+    /// UTF-8 names with whether each is a regular file (links are not).
+    pub entries: Vec<(String, bool)>,
+    /// More entries than the bound exist; the listing is the first of them.
+    pub truncated: bool,
+}
+
+/// List up to `limit` entries without ever failing for having more. A
+/// missing directory has none.
+pub(super) fn bounded_names(directory: &Path, limit: usize) -> Result<Names> {
+    let reader = match std::fs::read_dir(directory) {
+        Ok(reader) => reader,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Names {
+                entries: Vec::new(),
+                truncated: false,
+            });
+        }
+        Err(error) => {
+            return Err(error).with_context(|| format!("list {}", directory.display()));
+        }
+    };
+    let mut entries = Vec::new();
+    let mut truncated = false;
+    for entry in reader {
+        let entry = entry.with_context(|| format!("list {}", directory.display()))?;
+        if entries.len() >= limit {
+            truncated = true;
+            break;
+        }
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let regular = entry
+            .file_type()
+            .with_context(|| format!("inspect {}", entry.path().display()))?
+            .is_file();
+        entries.push((name, regular));
+    }
+    entries.sort();
+    Ok(Names { entries, truncated })
+}
+
+/// What the inbox and the intent records still refer to.
+#[derive(Debug, Default)]
+pub(super) struct InUse {
+    /// Input digests named by a request or an intent record.
+    pub inputs: std::collections::BTreeSet<String>,
+    /// Canonical request digests of the requests present.
+    pub requests: std::collections::BTreeSet<String>,
+    /// Every request file was read; when false nothing may be deleted on the
+    /// strength of this answer.
+    pub complete: bool,
+}
+
 /// Where in its application a request stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Phase {
     /// The handler started. A record found in this phase at startup means
-    /// the node died inside the handler or the handler failed.
+    /// the node died inside the handler.
     Running,
     /// The handler finished; the receipt is not yet in the ledger.
     Committed,
@@ -88,8 +152,6 @@ pub struct Pending {
     /// The request itself, so a continuation can finish and receipt it even
     /// if its file has gone.
     pub request: SignedRequest,
-    /// Startups that have begun applying this request.
-    pub attempts: u32,
     pub phase: Phase,
     pub measured_preconditions: std::collections::BTreeMap<String, String>,
     pub result: Option<Value>,
@@ -122,11 +184,15 @@ impl Store {
         self.root.join(LEDGER)
     }
 
+    pub fn attempts_dir(&self) -> PathBuf {
+        self.root.join(ATTEMPTS)
+    }
+
     /// Create the directories, owner-private. Idempotent.
     pub fn create_layout(&self) -> Result<()> {
         let root = PinnedDirectory::open_or_create(&self.root)?;
         root.tighten_owner_private_directory()?;
-        for name in [INBOX, REFUSED, PENDING, LEDGER] {
+        for name in [INBOX, REFUSED, PENDING, LEDGER, ATTEMPTS] {
             root.open_or_create_child(OsStr::new(name), 0o700)?
                 .tighten_owner_private_directory()?;
         }
@@ -135,23 +201,86 @@ impl Store {
 
     // ── Inbox ────────────────────────────────────────────────────────────
 
+    /// The requests to consider this round: the first few by name. An inbox
+    /// with more names than the listing bound is read as far as the bound and
+    /// no further; it never fails for being full.
     pub fn list_inbox(&self) -> Result<Inbox> {
-        let Some(directory) = PinnedDirectory::open(&self.inbox_dir())? else {
-            return Ok(Inbox::default());
-        };
-        let entries = directory.entries_no_follow_bounded(MAX_INBOX_LISTING)?;
-        let mut requests: Vec<String> = entries
+        let names = bounded_names(&self.inbox_dir(), MAX_INBOX_LISTING)?;
+        let mut requests: Vec<String> = names
+            .entries
             .iter()
-            .filter(|entry| entry.entry_type == lillux::PinnedEntryType::Regular)
-            .filter_map(|entry| entry.name.to_str())
-            .filter_map(|name| name.strip_suffix(".json"))
+            .filter(|(_, regular)| *regular)
+            .filter_map(|(name, _)| name.strip_suffix(".json"))
             .filter(|stem| is_digest(stem))
             .map(str::to_owned)
             .collect();
-        requests.sort();
-        let overflow = requests.len() > MAX_INBOX_REQUESTS;
+        let overflow = requests.len() > MAX_INBOX_REQUESTS || names.truncated;
         requests.truncate(MAX_INBOX_REQUESTS);
         Ok(Inbox { requests, overflow })
+    }
+
+    /// Digests named by the `.input` files present (bounded by the listing).
+    pub fn input_files(&self) -> Result<Vec<String>> {
+        Ok(bounded_names(&self.inbox_dir(), MAX_INBOX_LISTING)?
+            .entries
+            .into_iter()
+            .filter(|(_, regular)| *regular)
+            .filter_map(|(name, _)| name.strip_suffix(".input").map(str::to_owned))
+            .filter(|stem| is_digest(stem))
+            .collect())
+    }
+
+    /// What the requests in the inbox and the intent records still refer to,
+    /// leaving out the request `except` (a canonical digest). Unreadable or
+    /// foreign files name nothing; a request count past the scan bound makes
+    /// the answer incomplete.
+    pub(super) fn in_use(&self, except: Option<&str>) -> Result<InUse> {
+        let mut in_use = InUse {
+            complete: true,
+            ..InUse::default()
+        };
+        let names = bounded_names(&self.inbox_dir(), MAX_INBOX_LISTING)?;
+        in_use.complete = !names.truncated;
+        let mut scanned = 0;
+        for (name, regular) in &names.entries {
+            let Some(stem) = name.strip_suffix(".json").filter(|stem| is_digest(stem)) else {
+                continue;
+            };
+            if !regular {
+                continue;
+            }
+            scanned += 1;
+            if scanned > MAX_INUSE_SCAN {
+                in_use.complete = false;
+                break;
+            }
+            let Ok(Read::Bytes(bytes)) = self.read_request(stem) else {
+                continue;
+            };
+            let Ok(request) = SignedRequest::parse(&bytes) else {
+                continue;
+            };
+            let Ok(digest) = request.digest() else {
+                continue;
+            };
+            if Some(digest.as_str()) == except {
+                continue;
+            }
+            in_use.inputs.extend(request.body.inputs.values().cloned());
+            in_use.requests.insert(digest);
+        }
+        for digest in self.pending_digests()? {
+            if Some(digest.as_str()) == except {
+                continue;
+            }
+            if let Ok(Some(pending)) = self.load_pending(&digest) {
+                in_use
+                    .inputs
+                    .extend(pending.request.body.inputs.values().cloned());
+            }
+            in_use.requests.insert(digest);
+        }
+        Ok(in_use)
     }
 
     pub fn read_request(&self, digest: &str) -> Result<Read> {
@@ -200,32 +329,73 @@ impl Store {
         Ok(Some(pending))
     }
 
+    /// Write an intent record. A record larger than the bound it is read
+    /// under would be unreadable, so it is refused here instead.
     pub fn save_pending(&self, pending: &Pending) -> Result<()> {
-        write_private(
-            &self.pending_path(&pending.request_digest),
-            &serde_json::to_vec(pending)?,
-        )
+        let bytes = serde_json::to_vec(pending)?;
+        ensure!(
+            u64::try_from(bytes.len())? <= MAX_PENDING_BYTES,
+            "intent record exceeds {MAX_PENDING_BYTES} bytes"
+        );
+        write_private(&self.pending_path(&pending.request_digest), &bytes)
     }
 
     pub fn remove_pending(&self, digest: &str) -> Result<()> {
         remove(&self.pending_path(digest))
     }
 
-    /// Digests of every request that has an intent record.
+    /// Digests of the requests that have an intent record (bounded by the
+    /// listing).
     pub fn pending_digests(&self) -> Result<Vec<String>> {
-        let Some(directory) = PinnedDirectory::open(&self.pending_dir())? else {
-            return Ok(Vec::new());
-        };
-        let mut digests: Vec<String> = directory
-            .entries_no_follow_bounded(MAX_INBOX_LISTING)?
-            .iter()
-            .filter_map(|entry| entry.name.to_str())
-            .filter_map(|name| name.strip_suffix(".json"))
+        Ok(bounded_names(&self.pending_dir(), MAX_INBOX_LISTING)?
+            .entries
+            .into_iter()
+            .filter_map(|(name, _)| name.strip_suffix(".json").map(str::to_owned))
             .filter(|stem| is_digest(stem))
-            .map(str::to_owned)
-            .collect();
-        digests.sort();
-        Ok(digests)
+            .collect())
+    }
+
+    // ── Attempt counters ─────────────────────────────────────────────────
+
+    fn attempts_path(&self, digest: &str) -> PathBuf {
+        self.attempts_dir().join(format!("{digest}.json"))
+    }
+
+    /// How many startups have begun this request. A counter that cannot be
+    /// read counts as spent: a request that cannot be counted cannot be
+    /// bounded, so it is not run.
+    pub fn attempts(&self, digest: &str) -> u32 {
+        let path = self.attempts_path(digest);
+        match lillux::read_optional_regular_file_bounded_no_follow(&path, MAX_ATTEMPT_BYTES) {
+            Ok(None) => 0,
+            Ok(Some(bytes)) => serde_json::from_slice::<serde_json::Value>(&bytes)
+                .ok()
+                .and_then(|value| value.get("count").and_then(Value::as_u64))
+                .and_then(|count| u32::try_from(count).ok())
+                .unwrap_or(u32::MAX),
+            Err(_) => u32::MAX,
+        }
+    }
+
+    pub fn record_attempts(&self, digest: &str, count: u32) -> Result<()> {
+        write_private(
+            &self.attempts_path(digest),
+            &serde_json::to_vec(&serde_json::json!({ "count": count }))?,
+        )
+    }
+
+    pub fn clear_attempts(&self, digest: &str) -> Result<()> {
+        remove(&self.attempts_path(digest))
+    }
+
+    /// Digests that have a counter (bounded by the listing).
+    pub fn attempt_digests(&self) -> Result<Vec<String>> {
+        Ok(bounded_names(&self.attempts_dir(), MAX_INBOX_LISTING)?
+            .entries
+            .into_iter()
+            .filter_map(|(name, _)| name.strip_suffix(".json").map(str::to_owned))
+            .filter(|stem| is_digest(stem))
+            .collect())
     }
 
     // ── Refusals ─────────────────────────────────────────────────────────
@@ -254,7 +424,7 @@ impl Store {
         ensure!(is_digest(request_digest), "refusal names no digest");
         let now = lillux::time::iso8601_now();
         let path = self.refusal_path(request_digest, refusal.reason);
-        let (occurrences, first_seen) = match self.read_refusal(&path)? {
+        let (occurrences, first_seen) = match self.read_refusal(&path).ok().flatten() {
             Some(previous) => (previous.body.occurrences + 1, previous.body.first_seen),
             None => (1, now.clone()),
         };
@@ -297,20 +467,15 @@ impl Store {
         })?))
     }
 
-    /// Every refusal receipt, oldest first by last sighting.
+    /// Every readable refusal receipt, oldest first by last sighting. A file
+    /// that is not a receipt is not one.
     pub fn refusals(&self) -> Result<Vec<SignedRefusal>> {
-        let Some(directory) = PinnedDirectory::open(&self.refused_dir())? else {
-            return Ok(Vec::new());
-        };
         let mut receipts = Vec::new();
-        for entry in directory.entries_no_follow_bounded(MAX_INBOX_LISTING)? {
-            let Some(name) = entry.name.to_str() else {
-                continue;
-            };
-            if !name.ends_with(".refusal.json") {
+        for (name, regular) in bounded_names(&self.refused_dir(), MAX_INBOX_LISTING)?.entries {
+            if !regular || !name.ends_with(".refusal.json") {
                 continue;
             }
-            if let Some(receipt) = self.read_refusal(&self.refused_dir().join(name))? {
+            if let Ok(Some(receipt)) = self.read_refusal(&self.refused_dir().join(&name)) {
                 receipts.push(receipt);
             }
         }
@@ -326,13 +491,9 @@ impl Store {
     fn prune_refused(&self) -> Result<()> {
         let receipts = self.refusals()?;
         let mut bytes: u64 = 0;
-        if let Some(directory) = PinnedDirectory::open(&self.refused_dir())? {
-            for entry in directory.entries_no_follow_bounded(MAX_INBOX_LISTING)? {
-                if entry.entry_type == lillux::PinnedEntryType::Regular
-                    && let Some(file) = directory.open_regular(&entry.name, false)?
-                {
-                    bytes = bytes.saturating_add(file.metadata()?.len());
-                }
+        for (name, regular) in bounded_names(&self.refused_dir(), MAX_INBOX_LISTING)?.entries {
+            if regular {
+                bytes = bytes.saturating_add(file_len(&self.refused_dir().join(name)));
             }
         }
         let mut count = receipts.len();
@@ -557,7 +718,6 @@ mod tests {
             request_digest: "2".repeat(64),
             inbox_name: "3".repeat(64),
             request,
-            attempts: 1,
             phase: Phase::Running,
             measured_preconditions: Default::default(),
             result: None,
@@ -575,5 +735,84 @@ mod tests {
         );
         store.remove_pending(&pending.request_digest).unwrap();
         assert_eq!(store.load_pending(&pending.request_digest).unwrap(), None);
+    }
+
+    #[test]
+    fn an_intent_record_past_its_read_bound_is_not_written() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::for_app_root(root.path());
+        store.create_layout().unwrap();
+        let key = lillux::crypto::generate_signing_key();
+        let request = SignedRequest::sign(
+            crate::offline_operation::contract::RequestBody {
+                schema: crate::offline_operation::contract::REQUEST_SCHEMA.to_owned(),
+                node_fingerprint: "a".repeat(64),
+                signer_fingerprint: "b".repeat(64),
+                signer_grant_digest: None,
+                signer_origin_site_id: None,
+                operation: "node.allow-restart".to_owned(),
+                arguments: serde_json::json!({}),
+                inputs: Default::default(),
+                expected_result: Default::default(),
+                precondition: Default::default(),
+                issued_at: "2026-10-28T00:00:00Z".to_owned(),
+                not_after: "2026-10-28T01:00:00Z".to_owned(),
+            },
+            &key,
+        )
+        .unwrap();
+        let pending = Pending {
+            request_digest: "4".repeat(64),
+            inbox_name: "5".repeat(64),
+            request,
+            phase: Phase::Committed,
+            measured_preconditions: Default::default(),
+            result: Some(serde_json::json!({
+                "blob": "x".repeat(usize::try_from(MAX_PENDING_BYTES).unwrap())
+            })),
+            discarded_grant_digests: Vec::new(),
+            started_at: "2026-10-28T00:00:00Z".to_owned(),
+        };
+        assert!(store.save_pending(&pending).is_err());
+        assert!(store.pending_digests().unwrap().is_empty());
+    }
+
+    #[test]
+    fn attempt_counters_count_and_an_unreadable_one_is_spent() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::for_app_root(root.path());
+        store.create_layout().unwrap();
+        let digest = "6".repeat(64);
+        assert_eq!(store.attempts(&digest), 0);
+        store.record_attempts(&digest, 2).unwrap();
+        assert_eq!(store.attempts(&digest), 2);
+        assert_eq!(store.attempt_digests().unwrap(), [digest.clone()]);
+        std::fs::write(
+            store.attempts_dir().join(format!("{digest}.json")),
+            b"garbage",
+        )
+        .unwrap();
+        assert_eq!(store.attempts(&digest), u32::MAX);
+        store.clear_attempts(&digest).unwrap();
+        assert_eq!(store.attempts(&digest), 0);
+    }
+
+    #[test]
+    fn a_listing_longer_than_its_bound_is_cut_not_refused() {
+        let root = tempfile::tempdir().unwrap();
+        for index in 0..10 {
+            std::fs::write(root.path().join(format!("f{index}")), b"x").unwrap();
+        }
+        let names = bounded_names(root.path(), 4).unwrap();
+        assert_eq!(names.entries.len(), 4);
+        assert!(names.truncated);
+        let all = bounded_names(root.path(), 100).unwrap();
+        assert_eq!((all.entries.len(), all.truncated), (10, false));
+        assert!(
+            bounded_names(&root.path().join("absent"), 4)
+                .unwrap()
+                .entries
+                .is_empty()
+        );
     }
 }

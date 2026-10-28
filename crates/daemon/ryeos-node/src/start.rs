@@ -96,6 +96,10 @@ pub async fn start_with_endpoint_configuration(
     // The daemon refuses an inhibited start itself, but only after the
     // supervisor launched it; a supervisor would then relaunch it in a tight
     // loop until this operation's deadline. Refuse before any Up intent.
+    // Because this check precedes the daemon, signed offline operations that
+    // clear an inhibition are applied by the caller before this function
+    // runs (`ryeos start` does so in process); a start that spawns `ryeosd`
+    // directly applies them at the top of the daemon's own startup.
     require_start_not_inhibited(&original_config.app_root)?;
 
     // Resolve launch ownership only after acquiring the same lifecycle lock

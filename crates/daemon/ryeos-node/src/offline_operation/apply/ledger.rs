@@ -9,7 +9,7 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use ryeos_node_runtime::identity::NodeIdentity;
 use serde_json::Value;
 
@@ -17,7 +17,7 @@ use crate::offline_operation::contract::{
     CHECKPOINT_SCHEMA, CheckpointBody, MAX_RECEIPT_BYTES, RECEIPT_SCHEMA, ReceiptBody,
     SignedCheckpoint, SignedReceipt, SignedRequest, genesis_ledger_head,
 };
-use crate::offline_operation::store::{Store, remove, write_private};
+use crate::offline_operation::store::{Store, bounded_names, remove, write_private};
 
 /// Receipts kept before rotation drops the oldest into a checkpoint.
 pub const LEDGER_ROTATE_AT: usize = 1024;
@@ -39,9 +39,27 @@ pub struct LedgerState {
     pub past_heads: BTreeSet<String>,
     pub retained: usize,
     pub dropped_receipts: u64,
+    /// When the oldest retained receipt was recorded.
+    pub oldest_recorded_at: Option<String>,
+    /// When the checkpoint that stands for the dropped receipts was written;
+    /// present exactly when rotation has dropped any.
+    pub checkpoint_recorded_at: Option<String>,
 }
 
 impl LedgerState {
+    /// Whether a request issued at `issued_at` can only have been signed
+    /// against a head that rotation has since dropped. A head the ledger has
+    /// not reached cannot be older than the receipts it retains, so a request
+    /// issued before them and pinned to an unknown head names a dropped one.
+    pub fn predates_retained(&self, issued_at: chrono::DateTime<chrono::Utc>) -> bool {
+        let Some(checkpoint) = &self.checkpoint_recorded_at else {
+            return false;
+        };
+        let reference = self.oldest_recorded_at.as_ref().unwrap_or(checkpoint);
+        crate::offline_operation::contract::parse_instant("recorded_at", reference)
+            .is_ok_and(|reference| issued_at <= reference)
+    }
+
     /// Whether `head` was once this ledger's head and no longer is.
     pub fn is_past_head(&self, head: &str) -> bool {
         head != self.head && self.past_heads.contains(head)
@@ -83,25 +101,32 @@ impl<'a> Ledger<'a> {
         Ok(Some(checkpoint))
     }
 
+    /// The sequences of the receipts present. Names that are not receipts
+    /// are ignored (a stray file does not stop the node's repair); a name that
+    /// is a receipt's but is not a regular file is an error naming it, and a
+    /// directory too full to list whole is an error, since a partial list
+    /// would read as a broken chain.
     fn sequences(&self) -> Result<Vec<u64>> {
-        let Some(directory) = lillux::PinnedDirectory::open(&self.dir)? else {
-            return Ok(Vec::new());
-        };
+        let names = bounded_names(&self.dir, LEDGER_ROTATE_AT * 4)
+            .with_context(|| format!("list the offline-operation ledger {}", self.dir.display()))?;
+        ensure!(
+            !names.truncated,
+            "the offline-operation ledger {} holds more than {} entries",
+            self.dir.display(),
+            LEDGER_ROTATE_AT * 4
+        );
         let mut sequences = Vec::new();
-        for entry in directory.entries_no_follow_bounded(LEDGER_ROTATE_AT * 4)? {
-            let Some(name) = entry.name.to_str() else {
-                bail!("ledger holds a non-UTF-8 name");
-            };
-            if name == CHECKPOINT_FILE {
-                continue;
-            }
-            let stem = name
+        for (name, regular) in names.entries {
+            let Some(stem) = name
                 .strip_suffix(".json")
                 .filter(|stem| stem.len() == 20 && stem.bytes().all(|b| b.is_ascii_digit()))
-                .with_context(|| format!("ledger holds the foreign entry `{name}`"))?;
+            else {
+                continue;
+            };
             ensure!(
-                entry.entry_type == lillux::PinnedEntryType::Regular,
-                "ledger entry `{name}` is not a regular file"
+                regular,
+                "ledger entry {} is not a regular file",
+                self.dir.join(&name).display()
             );
             sequences.push(stem.parse::<u64>()?);
         }
@@ -133,6 +158,7 @@ impl<'a> Ledger<'a> {
         }
         let mut request_digests = BTreeSet::new();
         let mut retained = 0;
+        let mut oldest_recorded_at = None;
         for sequence in self.sequences()? {
             if sequence <= last_sequence {
                 // Already covered by the checkpoint: a rotation that died
@@ -156,6 +182,9 @@ impl<'a> Ledger<'a> {
                 body.previous == head,
                 "receipt {sequence} does not continue the chain"
             );
+            if oldest_recorded_at.is_none() {
+                oldest_recorded_at = Some(body.recorded_at.clone());
+            }
             head = receipt.digest()?;
             past_heads.insert(head.clone());
             request_digests.insert(body.request_digest.clone());
@@ -169,6 +198,8 @@ impl<'a> Ledger<'a> {
             past_heads,
             retained,
             dropped_receipts: dropped,
+            oldest_recorded_at,
+            checkpoint_recorded_at: checkpoint.map(|checkpoint| checkpoint.body.recorded_at),
         })
     }
 
@@ -232,6 +263,9 @@ impl<'a> Ledger<'a> {
             .insert(receipt.body.request_digest.clone());
         next.past_heads.insert(next.head.clone());
         next.retained += 1;
+        if next.oldest_recorded_at.is_none() {
+            next.oldest_recorded_at = Some(receipt.body.recorded_at.clone());
+        }
         if next.retained > LEDGER_ROTATE_AT {
             self.rotate()?;
             return Ok((receipt, self.load()?));
@@ -434,9 +468,49 @@ mod tests {
         assert!(loaded.retained <= LEDGER_KEEP + 1);
         assert!(loaded.dropped_receipts > 0);
         assert!(fx.store.ledger_dir().join(CHECKPOINT_FILE).exists());
+        // A request issued before the retained receipts and pinned to a head
+        // the ledger does not hold names a head rotation dropped.
+        assert!(loaded.predates_retained(chrono::Utc::now() - chrono::Duration::hours(1)));
+        assert!(!loaded.predates_retained(chrono::Utc::now() + chrono::Duration::hours(1)));
         // Appending continues the chain across the checkpoint.
         let (next, _) = ledger.append(&loaded, draft(&fx.node, 7)).unwrap();
         assert_eq!(next.body.previous, loaded.head);
         ledger.load().unwrap();
+    }
+
+    #[test]
+    fn a_ledger_that_never_rotated_drops_no_head() {
+        let fx = fixture();
+        let ledger = Ledger::new(&fx.store, &fx.node);
+        let state = ledger
+            .append(&ledger.load().unwrap(), draft(&fx.node, 1))
+            .unwrap()
+            .1;
+        assert!(!state.predates_retained(chrono::Utc::now() - chrono::Duration::hours(1)));
+    }
+
+    #[test]
+    fn a_stray_file_does_not_stop_the_ledger() {
+        let fx = fixture();
+        let ledger = Ledger::new(&fx.store, &fx.node);
+        std::fs::write(fx.store.ledger_dir().join("notes.txt"), b"hello").unwrap();
+        std::fs::write(
+            fx.store.ledger_dir().join("00000000000000000001.json.tmp"),
+            b"{}",
+        )
+        .unwrap();
+        let state = ledger.load().unwrap();
+        let (_, next) = ledger.append(&state, draft(&fx.node, 1)).unwrap();
+        assert_eq!(ledger.load().unwrap(), next);
+    }
+
+    #[test]
+    fn a_receipt_name_that_is_not_a_file_is_a_specific_error() {
+        let fx = fixture();
+        let ledger = Ledger::new(&fx.store, &fx.node);
+        std::fs::create_dir(fx.store.ledger_dir().join("00000000000000000001.json")).unwrap();
+        let error = format!("{:#}", ledger.load().unwrap_err());
+        assert!(error.contains("is not a regular file"), "{error}");
+        assert!(error.contains("00000000000000000001.json"), "{error}");
     }
 }

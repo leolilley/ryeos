@@ -432,6 +432,10 @@ impl RefusalReason {
 pub struct Refusal {
     pub reason: RefusalReason,
     pub detail: String,
+    /// The refusal came from a read that failed, not from what was read. A
+    /// validly signed request is not discarded for it: it waits for the next
+    /// startup, bounded by its own expiry and the attempt counter.
+    pub retryable: bool,
 }
 
 impl Refusal {
@@ -439,7 +443,38 @@ impl Refusal {
         Self {
             reason,
             detail: detail.into(),
+            retryable: false,
         }
+    }
+
+    pub fn retryable(reason: RefusalReason, detail: impl Into<String>) -> Self {
+        Self {
+            reason,
+            detail: detail.into(),
+            retryable: true,
+        }
+    }
+}
+
+/// Most bytes of a handler's result a receipt or intent record carries. A
+/// larger result is replaced by its length and digest, so one handler cannot
+/// make a receipt too large to write.
+pub const MAX_RESULT_BYTES: usize = 32 * 1024;
+
+/// The result as it is recorded: itself when it fits, otherwise a marker
+/// naming its size and digest.
+pub fn bound_result(result: Value) -> Value {
+    match serde_json::to_vec(&result) {
+        Ok(bytes) if bytes.len() <= MAX_RESULT_BYTES => result,
+        Ok(bytes) => serde_json::json!({
+            "result_truncated": true,
+            "result_bytes": bytes.len(),
+            "result_sha256": lillux::sha256_hex(&bytes),
+        }),
+        Err(error) => serde_json::json!({
+            "result_truncated": true,
+            "result_error": error.to_string(),
+        }),
     }
 }
 
@@ -569,6 +604,16 @@ mod tests {
     fn oversized_documents_are_refused_unparsed() {
         let bytes = vec![b' '; usize::try_from(MAX_REQUEST_BYTES).unwrap() + 1];
         assert!(SignedRequest::parse(&bytes).is_err());
+    }
+
+    #[test]
+    fn an_oversized_result_is_recorded_by_size_and_digest() {
+        let small = serde_json::json!({ "ok": true });
+        assert_eq!(bound_result(small.clone()), small);
+        let big = serde_json::json!({ "blob": "x".repeat(MAX_RESULT_BYTES) });
+        let bounded = bound_result(big);
+        assert_eq!(bounded["result_truncated"], true);
+        assert!(serde_json::to_vec(&bounded).unwrap().len() < 1024);
     }
 
     #[test]

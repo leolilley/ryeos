@@ -185,7 +185,7 @@ static OPERATIONS: &[OperationSpec] = &[
         inputs: NO_INPUTS,
         preconditions: &[FACT_POLICY_GENERATION],
         expected_result: &["policy_generation"],
-        required_expected_result: &[],
+        required_expected_result: &["policy_generation"],
         validate_request: |request| {
             let arguments: handlers::PolicyReplaceArguments =
                 serde_json::from_value(request.arguments.clone())?;
