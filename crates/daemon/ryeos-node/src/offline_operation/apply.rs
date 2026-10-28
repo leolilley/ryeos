@@ -22,7 +22,6 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
-use chrono::{DateTime, Utc};
 use ryeos_engine::roots::RuntimeRoot;
 use ryeos_node_runtime::identity::NodeIdentity;
 use ryeos_node_runtime::state_lock::{StateLock, default_lock_path};
@@ -31,8 +30,8 @@ use serde_json::{Value, json};
 pub use ledger::{LEDGER_KEEP, LEDGER_ROTATE_AT, Ledger, LedgerState};
 
 use super::contract::{
-    DEFAULT_REQUEST_LIFETIME, REQUEST_SCHEMA, Refusal, RefusalReason, RequestBody, SignedReceipt,
-    SignedRequest, bound_result,
+    DEFAULT_REQUEST_LIFETIME_SECS, REQUEST_SCHEMA, Refusal, RefusalReason, RequestBody,
+    SignedReceipt, SignedRequest, bound_result,
 };
 use super::envelope::{Envelope, WildcardGrant, wildcard_only_grants};
 use super::facts::{FACT_LEDGER_HEAD, MANDATORY_FACTS, NodeFacts, measure};
@@ -55,7 +54,8 @@ const MAX_ROUNDS: usize = 64;
 pub struct ApplyOptions {
     pub time_budget: Duration,
     pub lock_timeout: Duration,
-    pub clock: fn() -> DateTime<Utc>,
+    /// Unix seconds.
+    pub clock: fn() -> u64,
 }
 
 impl Default for ApplyOptions {
@@ -63,7 +63,7 @@ impl Default for ApplyOptions {
         Self {
             time_budget: DEFAULT_TIME_BUDGET,
             lock_timeout: DEFAULT_LOCK_TIMEOUT,
-            clock: Utc::now,
+            clock: lillux::time::unix_secs_now,
         }
     }
 }
@@ -279,7 +279,7 @@ struct Applier<'a> {
     node: &'a NodeIdentity,
     store: &'a Store,
     lock: &'a StateLock,
-    clock: fn() -> DateTime<Utc>,
+    clock: fn() -> u64,
     /// Attempt counts as they stood before this startup began counting, by
     /// canonical request digest: a request is counted once per startup
     /// however many rounds look at it.
@@ -367,7 +367,7 @@ impl<'a> Applier<'a> {
         node: &'a NodeIdentity,
         store: &'a Store,
         lock: &'a StateLock,
-        clock: fn() -> DateTime<Utc>,
+        clock: fn() -> u64,
     ) -> Self {
         Self {
             app_root,
@@ -385,7 +385,7 @@ impl<'a> Applier<'a> {
         self.notes.borrow_mut().push(problem);
     }
 
-    fn now(&self) -> DateTime<Utc> {
+    fn now(&self) -> u64 {
         (self.clock)()
     }
 
@@ -1424,9 +1424,8 @@ pub fn apply_local_with_options(
             inputs: digests,
             expected_result: draft.expected_result,
             precondition,
-            issued_at: now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-            not_after: (now + DEFAULT_REQUEST_LIFETIME)
-                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            issued_at: lillux::time::iso8601_from_unix_secs(now),
+            not_after: lillux::time::iso8601_from_unix_secs(now + DEFAULT_REQUEST_LIFETIME_SECS),
         },
         &operator,
     )?;

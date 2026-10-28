@@ -16,7 +16,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
 use ryeos_node_runtime::identity::NodeIdentity;
 use serde_json::{Value, json};
 
@@ -85,7 +84,7 @@ pub fn accept(
     submitted_by: &str,
     request: &SignedRequest,
     inputs: &BTreeMap<String, Vec<u8>>,
-    now: DateTime<Utc>,
+    now_secs: u64,
 ) -> Result<Accepted, DeliveryError> {
     let bytes = request.to_bytes().map_err(|error| {
         DeliveryError::Refused(Refusal::new(RefusalReason::Malformed, format!("{error:#}")))
@@ -105,7 +104,7 @@ pub fn accept(
     Envelope {
         app_root,
         node,
-        now,
+        now: now_secs,
         enforce_clock: true,
     }
     .check(&request)?;
@@ -353,7 +352,6 @@ pub fn status_report(app_root: &Path, node: &NodeIdentity) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use base64::Engine as _;
-    use chrono::Duration;
     use lillux::crypto::SigningKey;
     use ryeos_engine::roots::RuntimeRoot;
     use ryeos_node_runtime::identity::{WildcardPolicy, reconcile_authorized_key_toml_scopes};
@@ -391,8 +389,12 @@ mod tests {
         lillux::signature::compute_fingerprint(&key.verifying_key())
     }
 
-    fn stamp(offset: Duration) -> String {
-        (Utc::now() + offset).to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    fn stamp(offset_secs: i64) -> String {
+        lillux::time::iso8601_from_unix_secs(
+            lillux::time::unix_secs_now()
+                .checked_add_signed(offset_secs)
+                .unwrap(),
+        )
     }
 
     impl Fixture {
@@ -418,8 +420,8 @@ mod tests {
                     .chain(spec.preconditions)
                     .map(|fact| ((*fact).to_owned(), facts[*fact].clone()))
                     .collect(),
-                issued_at: stamp(Duration::seconds(-30)),
-                not_after: stamp(Duration::hours(1)),
+                issued_at: stamp(-30),
+                not_after: stamp(3600),
             }
         }
 
@@ -434,7 +436,7 @@ mod tests {
                 &request.body.signer_fingerprint,
                 request,
                 &BTreeMap::new(),
-                Utc::now(),
+                lillux::time::unix_secs_now(),
             )
         }
 
@@ -553,7 +555,7 @@ mod tests {
         let stale = fx.signed(fx.body());
         let first = fx.signed({
             let mut body = fx.body();
-            body.issued_at = stamp(Duration::seconds(-20));
+            body.issued_at = stamp(-20);
             body
         });
         fx.submit(&first).unwrap();
@@ -571,12 +573,9 @@ mod tests {
     fn an_expired_request_is_refused() {
         let fx = fixture();
         let mut body = fx.body();
-        body.issued_at = stamp(Duration::hours(-3));
-        body.not_after = stamp(Duration::hours(-2));
-        assert_eq!(
-            refused(fx.submit(&fx.signed(body))),
-            RefusalReason::Expired
-        );
+        body.issued_at = stamp(-10800);
+        body.not_after = stamp(-7200);
+        assert_eq!(refused(fx.submit(&fx.signed(body))), RefusalReason::Expired);
     }
 
     #[test]
@@ -599,15 +598,12 @@ mod tests {
             fx.grant(&key, &scopes, WildcardPolicy::AllowBootstrap);
             let mut body = fx.body();
             body.signer_fingerprint = fingerprint(&key);
-            body.signer_grant_digest = Some(
-                lillux::sha256_hex(
-                    &std::fs::read(
-                        authorized_keys_dir(fx.path())
-                            .join(format!("{}.toml", fingerprint(&key))),
-                    )
-                    .unwrap(),
-                ),
-            );
+            body.signer_grant_digest = Some(lillux::sha256_hex(
+                &std::fs::read(
+                    authorized_keys_dir(fx.path()).join(format!("{}.toml", fingerprint(&key))),
+                )
+                .unwrap(),
+            ));
             body.signer_origin_site_id = Some(SITE.to_owned());
             let request = SignedRequest::sign(body, &key).unwrap();
             assert_eq!(
@@ -643,7 +639,7 @@ mod tests {
             &"f".repeat(64),
             &request,
             &BTreeMap::new(),
-            Utc::now(),
+            lillux::time::unix_secs_now(),
         );
         assert_eq!(refused(result), RefusalReason::UnknownSigner);
     }
@@ -659,7 +655,7 @@ mod tests {
             &request.body.signer_fingerprint,
             &request,
             &BTreeMap::from([(lillux::sha256_hex(&stray), stray)]),
-            Utc::now(),
+            lillux::time::unix_secs_now(),
         );
         assert_eq!(refused(result), RefusalReason::InvalidInputs);
         assert!(fx.inbox().is_empty());
@@ -694,11 +690,7 @@ mod tests {
         let store = Store::for_app_root(fx.path());
         store.create_layout().unwrap();
         for index in 0..MAX_INBOX_REQUESTS {
-            std::fs::write(
-                store.inbox_dir().join(format!("{index:064x}.json")),
-                b"{}",
-            )
-            .unwrap();
+            std::fs::write(store.inbox_dir().join(format!("{index:064x}.json")), b"{}").unwrap();
         }
         let request = fx.signed(fx.body());
         assert_eq!(refused(fx.submit(&request)), RefusalReason::InboxFull);

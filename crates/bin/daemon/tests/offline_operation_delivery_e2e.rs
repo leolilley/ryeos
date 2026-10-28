@@ -13,12 +13,11 @@ use ryeosd::test_support as common;
 
 use std::time::Duration;
 
-use chrono::Utc;
 use common::DaemonHarness;
 use lillux::crypto::SigningKey;
 use ryeos_engine::roots::RuntimeRoot;
 use ryeos_node::lifecycle_marker::{LifecycleMarker, read as read_marker};
-use ryeos_node::offline_operation::sign::{Delivery, SignDraft, sign_request};
+use ryeos_node::offline_operation::sign::{Delivery, SignDraft, sign_request_now};
 use serde_json::{Value, json};
 
 const OPERATION: &str = "node.allow-restart";
@@ -57,7 +56,7 @@ async fn signed_delivery(daemon: &DaemonHarness, key: &SigningKey) -> anyhow::Re
             )
         })
         .collect();
-    sign_request(
+    sign_request_now(
         SignDraft {
             node_fingerprint: report["node_fingerprint"]
                 .as_str()
@@ -72,7 +71,6 @@ async fn signed_delivery(daemon: &DaemonHarness, key: &SigningKey) -> anyhow::Re
             remote: None,
         },
         key,
-        Utc::now(),
     )
 }
 

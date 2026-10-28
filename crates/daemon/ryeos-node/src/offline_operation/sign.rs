@@ -10,13 +10,13 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, bail, ensure};
 use base64::Engine as _;
-use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use lillux::crypto::SigningKey;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::contract::{
-    DEFAULT_REQUEST_LIFETIME, MAX_REQUEST_LIFETIME, REQUEST_SCHEMA, RequestBody, SignedRequest,
+    DEFAULT_REQUEST_LIFETIME_SECS, MAX_REQUEST_LIFETIME_SECS, REQUEST_SCHEMA, RequestBody,
+    SignedRequest,
 };
 use super::facts::MANDATORY_FACTS;
 use super::table::lookup;
@@ -40,7 +40,7 @@ pub struct SignDraft {
     /// The node facts the request is signed against, by name.
     pub pins: BTreeMap<String, String>,
     /// How long the request stays valid, in minutes; `None` signs for
-    /// [`DEFAULT_REQUEST_LIFETIME`]. The clock is the library's: a caller
+    /// [`DEFAULT_REQUEST_LIFETIME_SECS`]. The clock is the library's: a caller
     /// never reasons about time.
     pub lifetime_minutes: Option<u32>,
     /// Absent for the node's local operator.
@@ -74,19 +74,20 @@ impl Delivery {
 
 /// Sign `draft` as of the current wall clock.
 pub fn sign_request_now(draft: SignDraft, key: &SigningKey) -> Result<Delivery> {
-    sign_request(draft, key, Utc::now())
+    sign_request(draft, key, lillux::time::unix_secs_now())
 }
 
-pub fn sign_request(draft: SignDraft, key: &SigningKey, now: DateTime<Utc>) -> Result<Delivery> {
+/// Sign `draft` as of `now_secs`, Unix seconds.
+pub fn sign_request(draft: SignDraft, key: &SigningKey, now_secs: u64) -> Result<Delivery> {
     let lifetime = match draft.lifetime_minutes {
-        None => DEFAULT_REQUEST_LIFETIME,
-        Some(minutes) => Duration::minutes(i64::from(minutes)),
+        None => DEFAULT_REQUEST_LIFETIME_SECS,
+        Some(minutes) => u64::from(minutes) * 60,
     };
-    ensure!(lifetime > Duration::zero(), "the lifetime must be positive");
+    ensure!(lifetime > 0, "the lifetime must be positive");
     ensure!(
-        lifetime <= MAX_REQUEST_LIFETIME,
+        lifetime <= MAX_REQUEST_LIFETIME_SECS,
         "the lifetime exceeds {} hours",
-        MAX_REQUEST_LIFETIME.num_hours()
+        MAX_REQUEST_LIFETIME_SECS / 3600
     );
     let spec = lookup(&draft.operation)
         .with_context(|| format!("this build has no offline operation `{}`", draft.operation))?;
@@ -135,8 +136,8 @@ pub fn sign_request(draft: SignDraft, key: &SigningKey, now: DateTime<Utc>) -> R
         inputs: digests,
         expected_result: draft.expected_result,
         precondition: draft.pins,
-        issued_at: now.to_rfc3339_opts(SecondsFormat::Secs, true),
-        not_after: (now + lifetime).to_rfc3339_opts(SecondsFormat::Secs, true),
+        issued_at: lillux::time::iso8601_from_unix_secs(now_secs),
+        not_after: lillux::time::iso8601_from_unix_secs(now_secs + lifetime),
     };
     body.validate_shape()?;
     (spec.validate_request)(&body)?;
@@ -155,6 +156,8 @@ mod tests {
 
     use super::*;
     use crate::offline_operation::facts::{FACT_INIT_COMPLETION, FACT_RESTART_INHIBITION};
+
+    const NOW: u64 = 1_761_700_000;
 
     fn draft() -> SignDraft {
         SignDraft {
@@ -176,11 +179,12 @@ mod tests {
     #[test]
     fn the_default_lifetime_is_one_hour() {
         let key = lillux::crypto::generate_signing_key();
-        let delivery = sign_request(draft(), &key, Utc::now()).unwrap();
+        let delivery = sign_request(draft(), &key, NOW).unwrap();
         let body = &delivery.request.body;
+        assert_eq!(body.issued_at().unwrap().unix_secs(), NOW);
         assert_eq!(
-            body.not_after().unwrap() - body.issued_at().unwrap(),
-            Duration::hours(1)
+            body.not_after().unwrap().unix_secs() - body.issued_at().unwrap().unix_secs(),
+            3600
         );
         delivery
             .request
@@ -193,13 +197,13 @@ mod tests {
         let key = lillux::crypto::generate_signing_key();
         let mut day = draft();
         day.lifetime_minutes = Some(24 * 60);
-        sign_request(day, &key, Utc::now()).unwrap();
+        sign_request(day, &key, NOW).unwrap();
         let mut long = draft();
         long.lifetime_minutes = Some(25 * 60);
-        assert!(sign_request(long, &key, Utc::now()).is_err());
+        assert!(sign_request(long, &key, NOW).is_err());
         let mut none = draft();
         none.lifetime_minutes = Some(0);
-        assert!(sign_request(none, &key, Utc::now()).is_err());
+        assert!(sign_request(none, &key, NOW).is_err());
     }
 
     #[test]
@@ -207,12 +211,12 @@ mod tests {
         let key = lillux::crypto::generate_signing_key();
         let mut missing = draft();
         missing.pins.remove("ledger_head");
-        assert!(sign_request(missing, &key, Utc::now()).is_err());
+        assert!(sign_request(missing, &key, NOW).is_err());
         let mut extra = draft();
         extra
             .pins
             .insert("policy_generation".to_owned(), "c".repeat(64));
-        assert!(sign_request(extra, &key, Utc::now()).is_err());
+        assert!(sign_request(extra, &key, NOW).is_err());
     }
 
     #[test]
@@ -220,10 +224,10 @@ mod tests {
         let key = lillux::crypto::generate_signing_key();
         let mut unknown = draft();
         unknown.operation = "node.does-not-exist".to_owned();
-        assert!(sign_request(unknown, &key, Utc::now()).is_err());
+        assert!(sign_request(unknown, &key, NOW).is_err());
         let mut slot = draft();
         slot.inputs.insert("nothing".to_owned(), b"x".to_vec());
-        assert!(sign_request(slot, &key, Utc::now()).is_err());
+        assert!(sign_request(slot, &key, NOW).is_err());
     }
 
     #[test]
@@ -234,7 +238,7 @@ mod tests {
             grant_digest: "d".repeat(64),
             origin_site_id: "site:origin-a".to_owned(),
         });
-        let delivery = sign_request(remote, &key, Utc::now()).unwrap();
+        let delivery = sign_request(remote, &key, NOW).unwrap();
         assert_eq!(
             delivery.request.body.signer_grant_digest.as_deref(),
             Some("d".repeat(64).as_str())
@@ -244,7 +248,7 @@ mod tests {
     #[test]
     fn a_delivery_round_trips_through_json() {
         let key = lillux::crypto::generate_signing_key();
-        let delivery = sign_request(draft(), &key, Utc::now()).unwrap();
+        let delivery = sign_request(draft(), &key, NOW).unwrap();
         let text = serde_json::to_string(&delivery).unwrap();
         let again: Delivery = serde_json::from_str(&text).unwrap();
         assert_eq!(again, delivery);

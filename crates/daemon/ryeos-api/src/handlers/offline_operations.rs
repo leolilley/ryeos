@@ -114,8 +114,7 @@ pub async fn submit(
                 .get::<StopForOfflineOperation>()
                 .ok_or_else(|| {
                     HandlerError::Internal(
-                        "this daemon was composed without a stop for offline operations"
-                            .to_owned(),
+                        "this daemon was composed without a stop for offline operations".to_owned(),
                     )
                 })?,
         ),
@@ -138,7 +137,7 @@ pub async fn submit(
             &submitted_by,
             &request,
             &inputs,
-            chrono::Utc::now(),
+            lillux::time::unix_secs_now(),
         )
     })
     .await
