@@ -62,7 +62,11 @@ impl AuthorizeClientRequest {
         self.build_params(app_root, true)
     }
 
-    fn build_params(self, app_root: PathBuf, local_operator: bool) -> Result<AuthorizeClientParams> {
+    fn build_params(
+        self,
+        app_root: PathBuf,
+        local_operator: bool,
+    ) -> Result<AuthorizeClientParams> {
         if self.origin_site_id.is_some() && self.remote_node_origin_site_id.is_some() {
             bail!("origin_site_id and remote_node_origin_site_id are mutually exclusive");
         }
@@ -929,6 +933,10 @@ admission_enabled: {admission_enabled}
             label: None,
             ttl_secs: 60,
         };
-        assert!(request.into_params(std::path::PathBuf::from("/nonexistent")).is_err());
+        assert!(
+            request
+                .into_params(std::path::PathBuf::from("/nonexistent"))
+                .is_err()
+        );
     }
 }
