@@ -152,10 +152,10 @@ impl<'a> Ledger<'a> {
             ),
             None => (genesis_ledger_head(self.node.fingerprint()), 0, 0),
         };
-        let mut past_heads = BTreeSet::new();
-        if checkpoint.is_some() {
-            past_heads.insert(head.clone());
-        }
+        // The starting head (genesis, or a checkpoint's tip) is a head the
+        // ledger has been at: a request pinned to it is stale once a receipt
+        // follows. The current head itself is never "past" (`is_past_head`).
+        let mut past_heads = BTreeSet::from([head.clone()]);
         let mut request_digests = BTreeSet::new();
         let mut retained = 0;
         let mut oldest_recorded_at = None;
