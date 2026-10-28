@@ -389,7 +389,8 @@ impl<'a> Fixture<'a> {
         let mut next = local.clone();
         next.phase = qualification_local_start::QualificationLocalStartPhase::WorkspaceReady;
         next.workspace_identity = Some(
-            serde_json::from_value(serde_json::json!({"containing_device":1,"inode":123})).unwrap(),
+            serde_json::from_value(serde_json::json!({"filesystem": {"device": 1},"inode": 123}))
+                .unwrap(),
         );
         self.db
             .conn

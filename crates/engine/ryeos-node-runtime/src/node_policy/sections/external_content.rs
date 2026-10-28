@@ -43,8 +43,9 @@ pub struct ExternalContentImportRootDeclaration {
 #[serde(deny_unknown_fields)]
 pub struct ExternalContentImportRoot {
     pub path: PathBuf,
-    pub containing_device: u64,
-    pub root_inode: u64,
+    /// The measured root directory, as the filesystem's own identity plus the
+    /// inode, so it survives the filesystem being re-attached.
+    pub root_identity: lillux::PinnedDirectoryIdentity,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -146,7 +147,7 @@ impl ExternalContentImportPolicyRecord {
             {
                 bail!("external-content import root `{name}` must be an absolute normalized path");
             }
-            if root.containing_device == 0 || root.root_inode == 0 {
+            if !root.root_identity.names_an_inode() || !root.root_identity.filesystem().is_named() {
                 bail!("external-content import root `{name}` has an invalid filesystem identity");
             }
         }
@@ -270,15 +271,14 @@ pub fn admit_declared_roots(body: &Value, app_root: &Path) -> anyhow::Result<Val
                     )
                 })?,
         };
-        let (containing_device, root_inode) = directory
-            .device_inode()
+        let root_identity = directory
+            .identity()
             .with_context(|| format!("measure external-content import root `{name}`"))?;
         record.roots.insert(
             name.clone(),
             ExternalContentImportRoot {
                 path: resolved,
-                containing_device,
-                root_inode,
+                root_identity,
             },
         );
     }
@@ -406,8 +406,10 @@ mod tests {
                 "source".to_owned(),
                 ExternalContentImportRoot {
                     path: PathBuf::from("relative"),
-                    containing_device: 1,
-                    root_inode: 1,
+                    root_identity: serde_json::from_value(
+                        serde_json::json!({"filesystem": {"device": 1}, "inode": 1}),
+                    )
+                    .unwrap(),
                 },
             )]),
             declared_roots: BTreeMap::new(),
@@ -432,7 +434,7 @@ mod tests {
         let value = serde_json::json!({
             "schema": 1,
             "roots": {
-                "source": {"path": "/srv/source", "containing_device": 7}
+                "source": {"path": "/srv/source", "root_identity": {"filesystem": {"device": 7}}}
             },
             "limits": {
                 "max_depth": 8,
@@ -505,9 +507,8 @@ mod tests {
         let expected = app_root.path().join("imports/products");
         assert_eq!(root.path, expected);
         let pinned = lillux::PinnedDirectory::open(&expected).unwrap().unwrap();
-        let (device, inode) = pinned.device_inode().unwrap();
-        assert_eq!((root.containing_device, root.root_inode), (device, inode));
-        assert!(root.containing_device != 0 && root.root_inode != 0);
+        assert_eq!(root.root_identity, pinned.identity().unwrap());
+        assert!(root.root_identity.names_an_inode());
     }
 
     #[test]

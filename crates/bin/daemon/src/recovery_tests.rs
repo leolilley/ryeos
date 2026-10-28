@@ -63,12 +63,13 @@ async fn unattached_scope_recovery_settles_only_an_ended_host_lifetime() {
             }},
             "backend": {"implementation": "linux_cgroup_v2", "boot_id": boot,
                 "cgroup_enclosure": current["backend"]["cgroup_enclosure"],
-                "parent": {"containing_device": 1, "inode": 2}, "name": worker}
+                "parent": {"filesystem": {"device": 1}, "inode": 2}, "name": worker}
         });
         let allocation = serde_json::from_value(planned.clone()).unwrap();
         let mut bound = planned;
         bound["version"] = 5.into();
-        bound["backend"]["directory"] = serde_json::json!({"containing_device": 1, "inode": 3});
+        bound["backend"]["directory"] =
+            serde_json::json!({"filesystem": {"device": 1}, "inode": 3});
         let recovery = serde_json::from_value(bound).unwrap();
         let retained = ryeos_app::runtime_db::DedicatedWorkerScopeReservation {
             worker_instance_id: worker.clone(),
@@ -149,7 +150,7 @@ fn precontact_resource_scope_recovery_discards_without_relaunch() {
         }},
         "backend": {"implementation": "linux_cgroup_v2",
             "boot_id": "00000000-0000-4000-8000-000000000000",
-            "parent": {"containing_device": 1, "inode": 2},
+            "parent": {"filesystem": {"device": 1}, "inode": 2},
             "name": "resource-startup-fixture"}
     });
     let reservation = ProcessResourceReservationRecord {
@@ -229,9 +230,9 @@ fn unattached_resource_owner_startup_releases_hold_and_fences_without_relaunch()
         }},
         "backend": {"implementation": "linux_cgroup_v2",
             "boot_id": "00000000-0000-4000-8000-000000000000",
-            "parent": {"containing_device": 1, "inode": 2},
+            "parent": {"filesystem": {"device": 1}, "inode": 2},
             "name": "unattached-resource-fixture",
-            "directory": {"containing_device": 1, "inode": 3}}
+            "directory": {"filesystem": {"device": 1}, "inode": 3}}
     }))
     .unwrap();
     let process_identity = ryeos_app::process::ExecutionProcessIdentity {
@@ -613,14 +614,15 @@ fn resource_owner_startup_reconciliation_retries_settlement_after_cleanup() {
         }},
         "backend": {"implementation": "linux_cgroup_v2",
             "boot_id": "00000000-0000-4000-8000-000000000000",
-            "parent": {"containing_device": 1, "inode": 2},
+            "parent": {"filesystem": {"device": 1}, "inode": 2},
             "name": "resource-owner-recovery"}
     });
     let allocation: lillux::ProcessScopeAllocation =
         serde_json::from_value(planned_scope.clone()).unwrap();
     let mut bound_scope = planned_scope;
     bound_scope["version"] = 5.into();
-    bound_scope["backend"]["directory"] = serde_json::json!({"containing_device": 1, "inode": 3});
+    bound_scope["backend"]["directory"] =
+        serde_json::json!({"filesystem": {"device": 1}, "inode": 3});
     let recovery: lillux::ProcessScopeRecovery = serde_json::from_value(bound_scope).unwrap();
     attached_identity.process_scope = Some(recovery.clone());
     state

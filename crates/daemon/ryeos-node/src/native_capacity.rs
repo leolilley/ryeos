@@ -36,6 +36,10 @@ pub const MAX_FINALIZATION_ATTEMPTS: u8 = 4;
 pub use account::NativeCapacityAccountBinding;
 pub(crate) use account::load_existing_capacity_binding;
 pub(crate) use account::prepare_initial_capacity_binding;
+pub use account::reanchor::{
+    CapacityReanchorEvidence, ReanchorReport, ReanchorRequest, read_capacity_reanchors,
+    reanchor_capacity,
+};
 pub use account::reissue::{
     CapacityReissueEvidence, ReissueReport, ReissueRequest, read_capacity_reissuances,
     reissue_capacity,

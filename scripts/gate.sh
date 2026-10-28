@@ -13,6 +13,16 @@
 #     ./scripts/gate.sh --refresh-bundles --skip-crash-qualification
 #     ./scripts/gate.sh --bundle-set core --refresh-bundles
 #
+# CI-only split of the gate into one build and many shards (see
+# .github/workflows/ci.yml). None of these change a plain local run:
+#     ./scripts/gate.sh --nextest-archive FILE        # build the workspace test archive, run nothing
+#     ./scripts/gate.sh --nextest-run-archive FILE --partition hash:1/8
+#                                                     # run one shard from that archive, no compiling
+#     ./scripts/gate.sh --crash-archive FILE          # build the crash-qualification archive + CLI
+#     ./scripts/gate.sh --crash-run-archive FILE --crash-phase NAME [--crash-partition M/N]
+#                                                     # one serial crash phase from that archive
+#   NAME: directive | handoff | schedule-deploy | reset-scheduler
+#
 # CI/release jobs that need regenerated bundle binaries/manifests must pass
 # --refresh-bundles explicitly. Local UI/dev loops should not.
 
@@ -56,6 +66,12 @@ refresh_bundles=0
 skip_crash_qualification=0
 crash_qualification_only=0
 bundle_set="full"
+nextest_archive=""
+nextest_run_archive=""
+crash_archive=""
+crash_run_archive=""
+crash_phase=""
+crash_partition=""
 nextest_args=()
 selected_packages=()
 explicit_workspace=0
@@ -76,6 +92,18 @@ while [[ $# -gt 0 ]]; do
         --crash-qualification-only)
             crash_qualification_only=1
             shift
+            ;;
+        --nextest-archive|--nextest-run-archive|--crash-archive|--crash-run-archive|--crash-phase|--crash-partition)
+            [[ $# -ge 2 && -n "$2" ]] || { gate_fail "$1 requires a value"; exit 2; }
+            case "$1" in
+                --nextest-archive) nextest_archive="$2" ;;
+                --nextest-run-archive) nextest_run_archive="$2" ;;
+                --crash-archive) crash_archive="$2" ;;
+                --crash-run-archive) crash_run_archive="$2" ;;
+                --crash-phase) crash_phase="$2" ;;
+                --crash-partition) crash_partition="$2" ;;
+            esac
+            shift 2
             ;;
         --bundle-set)
             [[ $# -ge 2 ]] || { gate_fail "--bundle-set requires a value"; exit 2; }
@@ -112,6 +140,24 @@ done
 
 if [[ "$skip_crash_qualification" == "1" && "$crash_qualification_only" == "1" ]]; then
     gate_fail "--skip-crash-qualification conflicts with --crash-qualification-only"
+    exit 2
+fi
+archive_modes=0
+for mode_value in "$nextest_archive" "$nextest_run_archive" "$crash_archive" "$crash_run_archive"; do
+    [[ -z "$mode_value" ]] || archive_modes=$((archive_modes + 1))
+done
+if (( archive_modes > 1 )); then
+    gate_fail "only one of --nextest-archive, --nextest-run-archive, --crash-archive, --crash-run-archive may be given"
+    exit 2
+fi
+if (( archive_modes == 1 )); then
+    if [[ "$refresh_bundles" == "1" || "$skip_tests" == "1" || "$crash_qualification_only" == "1" ]]; then
+        gate_fail "archive modes take staged bundles from the checkout and conflict with --refresh-bundles, --no-tests and --crash-qualification-only"
+        exit 2
+    fi
+fi
+if [[ -n "$crash_run_archive" && -z "$crash_phase" ]] || [[ -z "$crash_run_archive" && ( -n "$crash_phase" || -n "$crash_partition" ) ]]; then
+    gate_fail "--crash-phase and --crash-partition go with --crash-run-archive, which requires --crash-phase"
     exit 2
 fi
 if [[ "$crash_qualification_only" == "1" ]]; then
@@ -163,7 +209,7 @@ fi
 # publish idempotency tests need exactly those, and each nextest test is its
 # own process, so name the staged directory rather than letting every such
 # test run its own cold release build.
-if [[ "$refresh_bundles" == "1" ]]; then
+if [[ "$refresh_bundles" == "1" || -n "$nextest_run_archive" || -n "$crash_run_archive" ]]; then
     staged_core_bins="$ROOT/bundles/core/.ai/bin/x86_64-unknown-linux-gnu"
     if [[ -d "$staged_core_bins" ]]; then
         export RYEOS_TEST_HANDLER_BIN_DIR="$staged_core_bins"
@@ -185,12 +231,134 @@ cargo_jobs_args=()
 test_threads_args=()
 [[ "$test_threads" != "0" ]] && test_threads_args=(--test-threads "$test_threads")
 
+# Cargo's target directory, for the CI archive modes.
+gate_target_dir() {
+    if [[ -n "${CARGO_TARGET_DIR:-}" ]]; then
+        printf '%s\n' "$CARGO_TARGET_DIR"
+    else
+        printf '%s\n' "$ROOT/target"
+    fi
+}
+
+# Archive modes extract here. Nextest keeps the archived target tree under
+# <dir>/target. The default is the checkout itself, so the target directory is
+# the one the archive was built in: test sources bake absolute binary paths
+# with env!("CARGO_BIN_EXE_*"), which only resolve at the original location.
+archive_extract_dir="${GATE_ARCHIVE_EXTRACT_DIR:-$ROOT}"
+
+# Extra files for an archive: nextest archives only the test binaries and the
+# binaries each test names through CARGO_BIN_EXE, but tests also locate sibling
+# workspace binaries beside their own executable. These ride in a tarball next
+# to the archive, relative to the target directory.
+gate_pack_extras() {
+    local out="$1"
+    shift
+    local tdir
+    tdir="$(gate_target_dir)"
+    (
+        cd "$tdir"
+        {
+            find debug -maxdepth 1 -type f -perm -u+x -print0
+            for extra in "$@"; do printf '%s\0' "$extra"; done
+        } | tar --null --files-from=- -cf "$out"
+    )
+}
+
+gate_unpack_extras() {
+    local extras="$1"
+    [[ -f "$extras" ]] || { gate_fail "missing archive companion $extras"; exit 1; }
+    mkdir -p "$archive_extract_dir/target"
+    tar -xf "$extras" -C "$archive_extract_dir/target"
+}
+
+# One serial crash-qualification phase. Each phase is a single test binary run
+# on one test thread; in the archive modes each runs in its own job.
+crash_features="scheduling,model-provider-setup,crash-qualification-test-support,handoff-test-support"
+crash_phase_test() {
+    case "$1" in
+        directive) echo directive_crash_recovery_e2e ;;
+        handoff) echo handoff_crash_recovery_e2e ;;
+        schedule-deploy) echo project_schedule_deploy_e2e ;;
+        reset-scheduler) echo execution_history_reset_scheduler_e2e ;;
+        *) return 1 ;;
+    esac
+}
+
+if [[ -n "$crash_archive" ]]; then
+    crash_tests=()
+    for phase in directive handoff schedule-deploy reset-scheduler; do
+        crash_tests+=(--test "$(crash_phase_test "$phase")")
+    done
+    gate_info "cargo nextest archive crash qualification (build_jobs=${build_jobs})"
+    "$CARGO" nextest archive -p ryeosd --features "$crash_features" \
+        "${crash_tests[@]}" "${cargo_jobs_args[@]}" --archive-file "$crash_archive"
+    gate_info "building the crash-qualification ryeos CLI for scheduler reset cuts"
+    cli_jobs_args=()
+    [[ "$build_jobs" != "0" ]] && cli_jobs_args=(-j "$build_jobs")
+    crash_cli_target="$(gate_target_dir)/crash-qualification"
+    "$CARGO" build -p ryeos-cli \
+        --target-dir "$crash_cli_target" \
+        --features scheduling,model-provider-setup,ryeos-scheduler-service/crash-qualification-test-support \
+        "${cli_jobs_args[@]}"
+    gate_pack_extras "${crash_archive}.extras.tar" crash-qualification/debug/ryeos
+    exit 0
+fi
+
+if [[ -n "$crash_run_archive" ]]; then
+    phase_test="$(crash_phase_test "$crash_phase")" || {
+        gate_fail "unknown crash phase: $crash_phase"
+        exit 2
+    }
+    gate_unpack_extras "${crash_run_archive}.extras.tar"
+    partition_args=()
+    [[ -z "$crash_partition" ]] || partition_args=(--partition "$crash_partition")
+    run_phase=("$CARGO" nextest run --archive-file "$crash_run_archive"
+        --extract-to "$archive_extract_dir" --extract-overwrite --workspace-remap "$ROOT"
+        -E "binary($phase_test)" "${partition_args[@]}" --test-threads 1)
+    gate_info "qualifying crash phase $crash_phase${crash_partition:+ (partition $crash_partition)}"
+    case "$crash_phase" in
+        directive|schedule-deploy)
+            "${run_phase[@]}"
+            ;;
+        reset-scheduler)
+            RYEOS_TEST_CLI_BINARY="$archive_extract_dir/target/crash-qualification/debug/ryeos" \
+                "${run_phase[@]}"
+            ;;
+        handoff)
+            handoff_report_dir="$ROOT/target/qualification"
+            mkdir -p "$handoff_report_dir"
+            handoff_report="$handoff_report_dir/explicit-worker-handoff.json"
+            handoff_report_candidate="$(mktemp "$handoff_report_dir/.explicit-worker-handoff.XXXXXX")"
+            rm -f -- "$handoff_report" "$handoff_report_candidate"
+            trap 'rm -f -- "$handoff_report_candidate"' EXIT
+            RYEOS_HANDOFF_QUALIFICATION_REPORT="$handoff_report_candidate" \
+                "${run_phase[@]}" --success-output immediate
+            if [[ ! -f "$handoff_report_candidate" || ! -s "$handoff_report_candidate" ]]; then
+                gate_fail "handoff qualification succeeded without a nonempty canonical report"
+                exit 1
+            fi
+            mv -- "$handoff_report_candidate" "$handoff_report"
+            trap - EXIT
+            gate_info "retained explicit handoff qualification report: $handoff_report"
+            ;;
+    esac
+    exit 0
+fi
+
 if [[ "$crash_qualification_only" != "1" ]]; then
     # The Core reporter revisions are stdlib-only Python with their own
     # unit tests; no cargo target runs them.
-    if [[ "$skip_tests" != "1" ]]; then
+    if [[ "$skip_tests" != "1" && -z "$nextest_run_archive" ]]; then
         gate_info "running Core reporter unit tests"
         python3 -I -B "$ROOT/bundles/core/tests/reporter/test_reporter.py"
+    fi
+    if [[ -n "$nextest_run_archive" ]]; then
+        gate_unpack_extras "${nextest_run_archive}.extras.tar"
+        gate_info "cargo nextest run --archive-file (test_threads=${test_threads}) ${nextest_args[*]:-}"
+        "$CARGO" nextest run --archive-file "$nextest_run_archive" \
+            --extract-to "$archive_extract_dir" --extract-overwrite --workspace-remap "$ROOT" \
+            --no-fail-fast "${test_threads_args[@]}" "${nextest_args[@]}"
+        exit 0
     fi
     workspace_args=()
     if [[ ${#selected_packages[@]} -eq 0 && "$explicit_workspace" == 0 ]]; then
@@ -221,6 +389,14 @@ if [[ "$crash_qualification_only" != "1" ]]; then
     done
     feature_args=()
     [[ -z "$gate_features" ]] || feature_args=(--features "$gate_features")
+    if [[ -n "$nextest_archive" ]]; then
+        gate_info "cargo nextest archive ${workspace_args[*]:-} (build_jobs=${build_jobs}) ${nextest_args[*]:-}"
+        "$CARGO" nextest archive "${workspace_args[@]}" \
+            "${feature_args[@]}" "${cargo_jobs_args[@]}" "${nextest_args[@]}" \
+            --archive-file "$nextest_archive"
+        gate_pack_extras "${nextest_archive}.extras.tar"
+        exit 0
+    fi
     gate_info "cargo nextest run ${workspace_args[*]:-} --no-fail-fast (build_jobs=${build_jobs}, test_threads=${test_threads}) ${nextest_args[*]:-}"
     "$CARGO" nextest run "${workspace_args[@]}" --no-fail-fast \
         "${feature_args[@]}" \

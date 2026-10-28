@@ -2263,7 +2263,8 @@ mod tests {
         unknown["backend"]["implicit_delegation"] = true.into();
         assert!(serde_json::from_value::<ProcessScopeConfiguration>(unknown).is_err());
         let mut ambiguous = configuration();
-        ambiguous["backend"]["identity"] = serde_json::json!({"containing_device":1,"inode":2});
+        ambiguous["backend"]["identity"] =
+            serde_json::json!({"filesystem": {"device": 1},"inode": 2});
         assert!(
             serde_json::from_value::<ProcessScopeConfiguration>(ambiguous).is_err(),
             "policy must not pretend that a reboot-ephemeral inode is a stable host selection"
@@ -2388,8 +2389,8 @@ mod tests {
         let value = serde_json::json!({"version": SCOPE_RECOVERY_VERSION, "configuration": configuration(),
             "control_timeout": {"secs": 1, "nanos": 0}, "backend": {
             "implementation": "linux_cgroup_v2", "boot_id": "00000000-0000-4000-8000-000000000000",
-            "cgroup_enclosure": 7, "parent": {"containing_device": 1, "inode": 2},
-            "directory": {"containing_device": 1, "inode": 3}, "name": "existing-allocation"
+            "cgroup_enclosure": 7, "parent": {"filesystem": {"device": 1}, "inode": 2},
+            "directory": {"filesystem": {"device": 1}, "inode": 3}, "name": "existing-allocation"
         }});
         let recovery: ProcessScopeRecovery = serde_json::from_value(value.clone()).unwrap();
         recovery.validate().unwrap();

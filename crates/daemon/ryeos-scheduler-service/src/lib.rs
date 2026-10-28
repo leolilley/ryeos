@@ -33,3 +33,10 @@ pub fn validate_project_declarations(
 ) -> anyhow::Result<usize> {
     project::validate_project_declarations(staging_root, project_path)
 }
+
+/// A fixed file identity for fixtures that never touch a real file.
+#[cfg(test)]
+pub(crate) fn test_file_id(device: u64, inode: u64) -> lillux::PinnedRegularFileIdentity {
+    serde_json::from_value(serde_json::json!({"filesystem": {"device": device}, "inode": inode}))
+        .unwrap()
+}

@@ -67,7 +67,7 @@ def request(claim="installed_qualification"):
             "controller_account": {"implementation": "unix", "uid": 10001, "gid": 10001},
             "lifecycle_identity": {
                 "host_boot_id": "exact-boot", "init_pid": 42,
-                "init_start_time_ticks": 1234, "scope_identity": {"device": 1, "inode": 2},
+                "init_start_time_ticks": 1234, "scope_identity": {"filesystem": {"device": 1}, "inode": 2},
             },
             "hook_digest": "sha256:" + "0" * 64,
             "lifetime_generation": "sha256:" + "f" * 64,

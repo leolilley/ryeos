@@ -117,13 +117,15 @@ pub struct StageProgress {
 ///
 /// The store receives the already-open regular file as the read authority and
 /// compares these coordinates with that descriptor before reading. It then
-/// compares the complete descriptor metadata again after the stream. A path
+/// compares the complete descriptor metadata again after the stream. The file
+/// identity names the filesystem's own identity, not the kernel's attachment
+/// number, because the resumable staging key derived from it outlives a
+/// process and a re-attached disk must still find its staged prefix. A path
 /// is deliberately absent: state mechanics must never reopen ambient source
 /// names or infer node capture policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PinnedLargeObjectSourceIdentity {
-    pub containing_device: u64,
-    pub inode: u64,
+    pub file: lillux::PinnedRegularFileIdentity,
     pub size: u64,
 }
 
@@ -406,13 +408,11 @@ impl LargeObjectStore {
         }
         #[cfg(unix)]
         let metadata = {
-            use std::os::unix::fs::MetadataExt as _;
             let metadata = source.metadata()?;
             if !metadata.file_type().is_file() {
                 bail!("large-content source {source_label} is not a regular file");
             }
-            if metadata.dev() != expected_source.containing_device
-                || metadata.ino() != expected_source.inode
+            if lillux::pinned_regular_file_identity(&source)? != expected_source.file
                 || metadata.len() != expected_source.size
             {
                 bail!(
@@ -436,7 +436,7 @@ impl LargeObjectStore {
         // The opaque staging identity contains no source pathname. Matching
         // descriptor coordinates make an interrupted read resumable; the
         // byte-for-byte prefix comparison below remains the content proof.
-        let staging_key = staging_key_for_source(expected_source);
+        let staging_key = staging_key_for_source(expected_source)?;
         let staging_name = OsString::from(format!("ingest-{staging_key}"));
         let lock = self.locks.open_regular_create(
             OsStr::new(&format!("ingest-{staging_key}")),
@@ -1219,14 +1219,10 @@ impl LargeObjectStore {
     }
 }
 
-fn staging_key_for_source(source: PinnedLargeObjectSourceIdentity) -> String {
-    lillux::cas::sha256_hex(
-        format!(
-            "{}\n{}\n{}",
-            source.containing_device, source.inode, source.size
-        )
-        .as_bytes(),
-    )
+fn staging_key_for_source(source: PinnedLargeObjectSourceIdentity) -> anyhow::Result<String> {
+    Ok(lillux::cas::sha256_hex(
+        format!("{}\n{}", serde_json::to_string(&source.file)?, source.size).as_bytes(),
+    ))
 }
 
 /// Streaming whole-file + fixed-chunk hashing over one pass of bytes.
@@ -1396,16 +1392,15 @@ mod tests {
         source: &Path,
         expected_sha256: Option<&str>,
     ) -> anyhow::Result<IngestedLargeObject> {
-        use std::os::unix::fs::MetadataExt as _;
         let file = fs::File::open(source)?;
         let metadata = file.metadata()?;
+        let identity = PinnedLargeObjectSourceIdentity {
+            file: lillux::pinned_regular_file_identity(&file)?,
+            size: metadata.len(),
+        };
         store.ingest_open_regular(
             file,
-            PinnedLargeObjectSourceIdentity {
-                containing_device: metadata.dev(),
-                inode: metadata.ino(),
-                size: metadata.len(),
-            },
+            identity,
             source
                 .file_name()
                 .and_then(OsStr::to_str)
@@ -1451,13 +1446,12 @@ mod tests {
         let source = write_source(&dir, "payload.bin", &bytes);
 
         // Simulate a crash: a staged prefix left behind by a dead ingest.
-        use std::os::unix::fs::MetadataExt as _;
         let metadata = fs::metadata(&source).unwrap();
         let staging_key = staging_key_for_source(PinnedLargeObjectSourceIdentity {
-            containing_device: metadata.dev(),
-            inode: metadata.ino(),
+            file: lillux::pinned_regular_file_identity(&fs::File::open(&source).unwrap()).unwrap(),
             size: metadata.len(),
-        });
+        })
+        .unwrap();
         let staged = dir
             .path()
             .join("large-objects/.staging")
@@ -1475,10 +1469,10 @@ mod tests {
         let source2 = write_source(&dir, "payload-2.bin", &other);
         let metadata = fs::metadata(&source2).unwrap();
         let key2 = staging_key_for_source(PinnedLargeObjectSourceIdentity {
-            containing_device: metadata.dev(),
-            inode: metadata.ino(),
+            file: lillux::pinned_regular_file_identity(&fs::File::open(&source2).unwrap()).unwrap(),
             size: metadata.len(),
-        });
+        })
+        .unwrap();
         let staged2 = dir
             .path()
             .join("large-objects/.staging")

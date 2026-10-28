@@ -18,6 +18,9 @@ PATH="$tool_dir:$PATH" "$actionlint" -color
     scripts/ci/check-test-support-feature-leak.sh \
     scripts/ci/install-static-linters.sh \
     scripts/ci/lint-workflows-and-shell.sh \
+    scripts/ci/pack-bundle-state.sh \
+    scripts/ci/prepare-runner.sh \
+    scripts/ci/unpack-bundle-state.sh \
     scripts/ci/test-daemon-image-init-policy.sh \
     scripts/ci/test-publisher-trust-policy.sh \
     scripts/release/resolve-version.sh \

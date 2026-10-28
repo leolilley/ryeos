@@ -827,6 +827,13 @@ mod tests {
         );
     }
 
+    fn directory_identity(device: u64, inode: u64) -> lillux::PinnedDirectoryIdentity {
+        serde_json::from_value(
+            serde_json::json!({"filesystem": {"device": device}, "inode": inode}),
+        )
+        .unwrap()
+    }
+
     #[test]
     fn offline_root_authority_digest_binds_only_the_selected_node_root() {
         let mut policy = ExternalContentImportPolicyRecord {
@@ -837,16 +844,14 @@ mod tests {
                     "archives".to_owned(),
                     ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportRoot {
                         path: std::path::PathBuf::from("/srv/ryeos-offline"),
-                        containing_device: 7,
-                        root_inode: 11,
+                        root_identity: directory_identity(7, 11),
                     },
                 ),
                 (
                     "unrelated".to_owned(),
                     ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportRoot {
                         path: std::path::PathBuf::from("/srv/unrelated"),
-                        containing_device: 8,
-                        root_inode: 12,
+                        root_identity: directory_identity(8, 12),
                     },
                 ),
             ]),
@@ -859,14 +864,14 @@ mod tests {
         };
         let baseline = offline_archive_root_authority_digest(&policy, "archives").unwrap();
 
-        policy.roots.get_mut("unrelated").unwrap().root_inode += 1;
+        policy.roots.get_mut("unrelated").unwrap().root_identity = directory_identity(8, 13);
         assert_eq!(
             baseline,
             offline_archive_root_authority_digest(&policy, "archives").unwrap(),
             "unselected roots must not perturb an offline acquisition job"
         );
 
-        policy.roots.get_mut("archives").unwrap().root_inode += 1;
+        policy.roots.get_mut("archives").unwrap().root_identity = directory_identity(7, 12);
         assert_ne!(
             baseline,
             offline_archive_root_authority_digest(&policy, "archives").unwrap(),

@@ -360,8 +360,7 @@ fn verify_source_identity(
     expected: Option<&SchedulerRetirementRoleIdentity>,
 ) -> Result<()> {
     let native = expected.map(|identity| lillux_sqlite::SqliteRoleIdentity {
-        device: identity.device,
-        inode: identity.inode,
+        file: identity.file,
         byte_length: identity.byte_length,
         content_sha256: identity.content_sha256.clone(),
     });
@@ -501,7 +500,7 @@ fn verify_remaining_inventory(
         for earlier in &roles[..index] {
             if let (Some(left), Some(right)) = (&earlier.current, &roles[index].current) {
                 ensure!(
-                    (left.device, left.inode) != (right.device, right.inode),
+                    left.file != right.file,
                     "remaining scheduler roles alias one inode"
                 );
             }
@@ -736,8 +735,7 @@ fn native_stopped_plan(
                 .current
                 .as_ref()
                 .map(|identity| lillux_sqlite::SqliteRoleIdentity {
-                    device: identity.device,
-                    inode: identity.inode,
+                    file: identity.file,
                     byte_length: identity.byte_length,
                     content_sha256: identity.content_sha256.clone(),
                 }),
@@ -1211,8 +1209,7 @@ fn recovery_identity(
             digest = None;
         }
         SchedulerRetirementRoleIdentity {
-            device: identity.device,
-            inode: identity.inode,
+            file: identity.file,
             byte_length: identity.byte_length,
             content_sha256: digest,
         }
@@ -1319,7 +1316,10 @@ fn retry_notice(stage: &str, error: &anyhow::Error) {
 #[cfg(all(test, target_os = "linux"))]
 mod source_continuity_controls {
     use super::*;
-    use std::os::unix::fs::MetadataExt;
+
+    fn test_file_identity(path: impl AsRef<std::path::Path>) -> lillux::PinnedRegularFileIdentity {
+        lillux::pinned_regular_file_identity(&std::fs::File::open(path).unwrap()).unwrap()
+    }
 
     #[test]
     fn complete_fixed_inventory_refuses_each_unauthorized_noncanonical_coordinate_before_release()
@@ -1340,8 +1340,7 @@ mod source_continuity_controls {
         );
         let metadata = std::fs::metadata(directory.path().join("scheduler.sqlite3"))?;
         let current = SchedulerRetirementRoleIdentity {
-            device: metadata.dev(),
-            inode: metadata.ino(),
+            file: test_file_identity(directory.path().join("scheduler.sqlite3")),
             byte_length: metadata.len(),
             content_sha256: Some(lillux::sha256_hex(data)),
         };
@@ -1436,8 +1435,7 @@ mod source_continuity_controls {
         );
         let metadata = std::fs::metadata(&path)?;
         let original = SchedulerRetirementRoleIdentity {
-            device: metadata.dev(),
-            inode: metadata.ino(),
+            file: test_file_identity(&path),
             byte_length: metadata.len(),
             content_sha256: Some(lillux::sha256_hex(bytes)),
         };
@@ -1446,7 +1444,7 @@ mod source_continuity_controls {
         // Same length, same inode, and a valid signed-style original digest;
         // metadata identity alone cannot distinguish this in-place edit.
         std::fs::write(&path, vec![b'x'; bytes.len()])?;
-        assert_eq!(std::fs::metadata(&path)?.ino(), original.inode);
+        assert_eq!(test_file_identity(&path), original.file);
         assert_eq!(std::fs::metadata(&path)?.len(), original.byte_length);
         assert!(verify_source_identity(&runtime, name, Some(&original)).is_err());
         std::fs::write(&path, bytes)?;
@@ -1475,7 +1473,10 @@ mod source_continuity_controls {
 mod late_source_controls {
     use super::*;
     use crate::retirement_journal::late_recovery_controls::{initial_intent, signed_prefix};
-    use std::os::unix::fs::MetadataExt;
+
+    fn test_file_identity(path: impl AsRef<std::path::Path>) -> lillux::PinnedRegularFileIdentity {
+        lillux::pinned_regular_file_identity(&std::fs::File::open(path).unwrap()).unwrap()
+    }
 
     #[test]
     fn original_stopped_early_prefix_uses_exact_original_digest_and_never_assumes_absence()
@@ -1497,8 +1498,7 @@ mod late_source_controls {
                 SchedulerRetirementStoppedRolePlan {
                     source: SchedulerRetirementStoppedSource::Canonical,
                     current: Some(SchedulerRetirementRoleIdentity {
-                        device: metadata.dev(),
-                        inode: metadata.ino(),
+                        file: test_file_identity(&canonical),
                         byte_length: metadata.len(),
                         content_sha256: Some(lillux::sha256_hex(bytes)),
                     }),
@@ -1577,8 +1577,7 @@ mod late_source_controls {
             std::fs::write(&canonical, bytes)?;
             let metadata = std::fs::metadata(&canonical)?;
             let original = SchedulerRetirementRoleIdentity {
-                device: metadata.dev(),
-                inode: metadata.ino(),
+                file: test_file_identity(&canonical),
                 byte_length: metadata.len(),
                 content_sha256: Some(lillux::sha256_hex(bytes)),
             };
@@ -1619,8 +1618,7 @@ mod late_source_controls {
             observation.source = Coordinate::Absent;
             observation.quarantine = Coordinate::Absent;
             observation.purge = Coordinate::SameOriginal {
-                device: original.device,
-                inode: original.inode,
+                file: original.file,
             };
             let failure = ryeos_scheduler_contract::SchedulerRetirementFailureFact {
                 operation: Effect::Purge,
@@ -1639,8 +1637,7 @@ mod late_source_controls {
                     ryeos_scheduler_contract::SchedulerRetirementObservedStoppedCoordinate {
                         coordinate: if name == observation.purge_name {
                             Coordinate::SameOriginal {
-                                device: original.device,
-                                inode: original.inode,
+                                file: original.file,
                             }
                         } else {
                             Coordinate::Absent
@@ -1731,8 +1728,7 @@ mod late_source_controls {
             std::fs::write(&canonical, bytes)?;
             let metadata = std::fs::metadata(&canonical)?;
             let original = SchedulerRetirementRoleIdentity {
-                device: metadata.dev(),
-                inode: metadata.ino(),
+                file: test_file_identity(&canonical),
                 byte_length: metadata.len(),
                 content_sha256: Some(lillux::sha256_hex(bytes)),
             };

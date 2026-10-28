@@ -360,8 +360,7 @@ fn ingest_file(
         let captured = authority.large_object_store()?.ingest_open_regular(
             file.try_clone()?,
             ryeos_state::PinnedLargeObjectSourceIdentity {
-                containing_device: before.device(),
-                inode: before.inode(),
+                file: lillux::pinned_regular_file_identity(&file)?,
                 size,
             },
             &mutation.path,

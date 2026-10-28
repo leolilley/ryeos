@@ -107,8 +107,11 @@ impl Source {
     fn observe_identity(&self) -> Result<OriginalPhysicalSourceIdentity> {
         Ok(match self {
             Self::Directory(actual) => {
-                let (device, inode) = actual.device_inode()?;
-                OriginalPhysicalSourceIdentity::Directory { device, inode }
+                let identity = lillux::observe_open_file_identity(&actual.try_clone_descriptor()?)?;
+                OriginalPhysicalSourceIdentity::Directory {
+                    device: identity.device(),
+                    inode: identity.inode(),
+                }
             }
             Self::Namespace(actual) => {
                 let identity = actual.observe_retained_identity()?;
@@ -1862,8 +1865,8 @@ mod tests {
                 .unwrap(),
         );
         assert_eq!(
-            original.device_inode().unwrap(),
-            independently_opened.device_inode().unwrap()
+            original.identity().unwrap(),
+            independently_opened.identity().unwrap()
         );
         let mut registry = unsafe { OriginalPhysicalRegistry::issued(1, &|_, _| Ok(())) }.unwrap();
         let binding = match unsafe { registry.register_directory(original.clone(), &|_, _| Ok(())) }

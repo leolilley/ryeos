@@ -2725,6 +2725,8 @@ mod tests {
 
     #[test]
     fn large_tree_materialization_preserves_modes_links_and_large_inodes() {
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt as _;
         let (dir, cas) = temp_cas();
         let runtime_root = dir.path().join("state");
         let runtime = lillux::PinnedDirectory::open_or_create(&runtime_root).unwrap();
@@ -2734,19 +2736,12 @@ mod tests {
         std::fs::write(&source_path, large_bytes).unwrap();
         let source = std::fs::File::open(&source_path).unwrap();
         let metadata = source.metadata().unwrap();
-        #[cfg(unix)]
-        use std::os::unix::fs::MetadataExt as _;
+        let source_identity = ryeos_state::PinnedLargeObjectSourceIdentity {
+            file: lillux::pinned_regular_file_identity(&source).unwrap(),
+            size: metadata.len(),
+        };
         let ingested = store
-            .ingest_open_regular(
-                source,
-                ryeos_state::PinnedLargeObjectSourceIdentity {
-                    containing_device: metadata.dev(),
-                    inode: metadata.ino(),
-                    size: metadata.len(),
-                },
-                "lib/payload.so",
-                None,
-            )
+            .ingest_open_regular(source, source_identity, "lib/payload.so", None)
             .unwrap();
         let driver_bytes = b"#!/bin/sh\nexit 0\n";
         let driver = cas.store_blob(driver_bytes).unwrap();
@@ -3262,7 +3257,6 @@ mod tests {
     fn external_repair_refuses_live_or_durable_custody_for_both_tiers() {
         use super::super::cache::tests::{open_custody_store, storage_pin};
         use ryeos_app::runtime_db::process_resource_custody::ProcessMaterializationCache;
-        use std::os::unix::fs::MetadataExt as _;
         for large in [false, true] {
             let (dir, cas) = temp_cas();
             let app = dir.path().join("app");
@@ -3277,17 +3271,12 @@ mod tests {
             fs::write(&input, b"storage-only large runtime").unwrap();
             let file = fs::File::open(&input).unwrap();
             let metadata = file.metadata().unwrap();
+            let source_identity = ryeos_state::PinnedLargeObjectSourceIdentity {
+                file: lillux::pinned_regular_file_identity(&file).unwrap(),
+                size: metadata.len(),
+            };
             let ingested = large_store
-                .ingest_open_regular(
-                    file,
-                    ryeos_state::PinnedLargeObjectSourceIdentity {
-                        containing_device: metadata.dev(),
-                        inode: metadata.ino(),
-                        size: metadata.len(),
-                    },
-                    "payload",
-                    None,
-                )
+                .ingest_open_regular(file, source_identity, "payload", None)
                 .unwrap();
             let manifest = ryeos_state::objects::ExternalLargeContentManifestObject {
                 schema: ryeos_state::objects::EXTERNAL_LARGE_CONTENT_SCHEMA.to_owned(),
@@ -3400,17 +3389,12 @@ mod tests {
             fs::write(&input, large_bytes).unwrap();
             let file = fs::File::open(&input).unwrap();
             let metadata = file.metadata().unwrap();
+            let source_identity = ryeos_state::PinnedLargeObjectSourceIdentity {
+                file: lillux::pinned_regular_file_identity(&file).unwrap(),
+                size: metadata.len(),
+            };
             let ingested = large_store
-                .ingest_open_regular(
-                    file,
-                    ryeos_state::PinnedLargeObjectSourceIdentity {
-                        containing_device: metadata.dev(),
-                        inode: metadata.ino(),
-                        size: metadata.len(),
-                    },
-                    "payload",
-                    None,
-                )
+                .ingest_open_regular(file, source_identity, "payload", None)
                 .unwrap();
             let manifest = ryeos_state::objects::ExternalLargeContentManifestObject {
                 schema: ryeos_state::objects::EXTERNAL_LARGE_CONTENT_SCHEMA.to_owned(),

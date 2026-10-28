@@ -231,12 +231,11 @@ pub fn isolation_live_access_authority_for_project(
                         )
                     })?;
                 drop(ai);
-                let (root_device_id, root_inode) = root.device_inode()?;
+                let root_identity = root.identity()?;
                 Ok(
                     ryeos_engine::isolation::IsolationLiveAccessAuthority::DescriptorRootedFixedParents {
                         root: Arc::new(root),
-                        root_device_id,
-                        root_inode,
+                        root_identity,
                         denied_control_paths: denied_control_paths
                             .iter()
                             .map(PathBuf::from)
@@ -1805,8 +1804,7 @@ mod tests {
             .expect("live authority");
         let ryeos_engine::isolation::IsolationLiveAccessAuthority::DescriptorRootedFixedParents {
             root: retained_root,
-            root_device_id,
-            root_inode,
+            root_identity,
             denied_control_paths,
             authorized_write_namespaces,
         } = live_access
@@ -1816,7 +1814,7 @@ mod tests {
         let root = lillux::secure_fs::PinnedDirectory::open(project.path())
             .unwrap()
             .expect("project root");
-        assert_eq!((root_device_id, root_inode), root.device_inode().unwrap());
+        assert_eq!(root_identity, root.identity().unwrap());
         assert!(retained_root.is_same_directory(&root).unwrap());
         assert_eq!(
             denied_control_paths,
@@ -1849,8 +1847,7 @@ mod tests {
             .unwrap();
         let ryeos_engine::isolation::IsolationLiveAccessAuthority::DescriptorRootedFixedParents {
             root,
-            root_device_id,
-            root_inode,
+            root_identity,
             ..
         } = live_access
         else {
@@ -1863,7 +1860,7 @@ mod tests {
         std::fs::create_dir(project.join(ryeos_engine::AI_DIR)).unwrap();
 
         assert!(root.ensure_path_binding().is_err());
-        assert_eq!((root_device_id, root_inode), root.device_inode().unwrap());
+        assert_eq!(root_identity, root.identity().unwrap());
         let displaced_root = lillux::PinnedDirectory::open(&displaced).unwrap().unwrap();
         assert!(root.is_same_directory(&displaced_root).unwrap());
     }

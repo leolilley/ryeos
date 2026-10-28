@@ -143,7 +143,7 @@ pub(super) enum InspectionStoreDispositionRecord {
         destination_name: String,
         created_identity: lillux::PinnedDirectoryIdentity,
         witness_sha256: String,
-        retired_outputs: [Option<(u64, u64)>; 4],
+        retired_outputs: [Option<lillux::PinnedRegularFileIdentity>; 4],
     },
 }
 /// One obligation a reset holds while its reservation is charged. The order
@@ -452,8 +452,9 @@ where
 #[serde(deny_unknown_fields)]
 pub(super) struct RetiredPinFact {
     pub slot: u8,
-    pub device: u64,
-    pub inode: u64,
+    /// Durable identity of the retired file, never the kernel's attachment
+    /// number.
+    pub file: lillux::PinnedRegularFileIdentity,
     pub byte_length: u64,
 }
 pub(super) const ISSUED_RESERVATION_PIN_SLOT: u8 = 14;
@@ -598,8 +599,7 @@ pub(super) enum DepositIdentity {
         identity: lillux::PinnedDirectoryIdentity,
     },
     File {
-        device: u64,
-        inode: u64,
+        file: lillux::PinnedRegularFileIdentity,
     },
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -660,8 +660,10 @@ pub(super) struct OfflineResetReleasedRecord {
     pub claim_sha256: String,
     pub claim_nonce: String,
     pub ledger_identity: lillux::PinnedDirectoryIdentity,
-    /// (device, inode) of `reserved.<op>`.
-    pub reservation: (u64, u64),
+    /// Durable identity of `reserved.<op>`; absent only for a recovery-only
+    /// release that no reservation anchors.
+    #[serde(deserialize_with = "required_nullable")]
+    pub reservation: Option<lillux::PinnedRegularFileIdentity>,
     pub outcome: ReleasedOutcome,
 }
 pub(super) const RELEASED_SCHEMA: u32 = 1;
@@ -686,7 +688,7 @@ pub(super) struct ReleasedBinding {
     pub claim_sha256: String,
     pub claim_nonce: String,
     pub ledger_identity: lillux::PinnedDirectoryIdentity,
-    pub reservation: (u64, u64),
+    pub reservation: Option<lillux::PinnedRegularFileIdentity>,
 }
 
 /// Captured plain-data facts of a completed release.
@@ -791,12 +793,12 @@ impl OfflineResetReleasedRecord {
             ensure!(
                 claim_sha256.bytes().all(|b| b == b'0')
                     && claim_nonce.bytes().all(|b| b == b'0')
-                    && *reservation == (0, 0),
+                    && reservation.is_none(),
                 "recovery-only release names a reservation"
             );
         } else {
             ensure!(
-                reservation.1 > 0,
+                reservation.is_some_and(|reservation| reservation.names_an_inode()),
                 "released record lacks its reservation identity"
             );
         }
@@ -863,7 +865,7 @@ impl OfflineResetReleasedRecord {
                 let mut issued = 0u32;
                 for pin in pins {
                     ensure!(
-                        pin.inode > 0 && previous.is_none_or(|slot| pin.slot > slot),
+                        pin.file.names_an_inode() && previous.is_none_or(|slot| pin.slot > slot),
                         "retired pins are unsorted, repeated or unidentified"
                     );
                     previous = Some(pin.slot);
@@ -1060,8 +1062,11 @@ fn require_deposit(operation: &str, deposit: &AbandonedDeposit) -> Result<()> {
     );
     match identity {
         DepositIdentity::Directory { identity: _ } => {}
-        DepositIdentity::File { device: _, inode } => {
-            ensure!(*inode > 0, "abandoned file deposit lacks its identity")
+        DepositIdentity::File { file } => {
+            ensure!(
+                file.names_an_inode(),
+                "abandoned file deposit lacks its identity"
+            )
         }
     }
     Ok(())
@@ -1071,6 +1076,13 @@ fn require_deposit(operation: &str, deposit: &AbandonedDeposit) -> Result<()> {
 mod tests {
     use super::super::inspection_destination::OriginalInspectionMode;
     use super::*;
+
+    fn file_id(device: u64, inode: u64) -> lillux::PinnedRegularFileIdentity {
+        serde_json::from_value(
+            serde_json::json!({"filesystem": {"device": device}, "inode": inode}),
+        )
+        .unwrap()
+    }
 
     const QUOTE_BOUND: usize = 8192;
 
@@ -1103,7 +1115,7 @@ mod tests {
             claim_sha256: "b".repeat(64),
             claim_nonce: "c".repeat(32),
             ledger_identity: ledger.identity().unwrap(),
-            reservation: (1, 7),
+            reservation: Some(file_id(1, 7)),
         }
     }
 
@@ -1120,20 +1132,17 @@ mod tests {
         vec![
             RetiredPinFact {
                 slot: 0,
-                device: 1,
-                inode: 10,
+                file: file_id(1, 10),
                 byte_length: 4096,
             },
             RetiredPinFact {
                 slot: 8,
-                device: 1,
-                inode: 11,
+                file: file_id(1, 11),
                 byte_length: 0,
             },
             RetiredPinFact {
                 slot: ISSUED_RESERVATION_PIN_SLOT,
-                device: 1,
-                inode: 7,
+                file: file_id(1, 7),
                 byte_length: 900,
             },
         ]
@@ -1191,7 +1200,9 @@ mod tests {
     }
 
     fn file(inode: u64) -> DepositIdentity {
-        DepositIdentity::File { device: 1, inode }
+        DepositIdentity::File {
+            file: file_id(1, inode),
+        }
     }
 
     fn abandoned(
@@ -1479,7 +1490,7 @@ mod tests {
         recovery.operation_id = RECOVERY_ONLY_OPERATION.into();
         recovery.claim_sha256 = "0".repeat(64);
         recovery.claim_nonce = "0".repeat(32);
-        recovery.reservation = (0, 0);
+        recovery.reservation = None;
         if let ReleasedOutcome::Abandoned {
             disposition_sha256, ..
         } = &mut recovery.outcome
@@ -1592,7 +1603,7 @@ mod tests {
         recovery.operation_id = RECOVERY_ONLY_OPERATION.into();
         recovery.claim_sha256 = "0".repeat(64);
         recovery.claim_nonce = "0".repeat(32);
-        recovery.reservation = (0, 0);
+        recovery.reservation = None;
         let error = recovery.validate().unwrap_err();
         assert!(
             format!("{error:#}").contains("does not match its kind"),
@@ -1703,8 +1714,7 @@ mod tests {
             .identity()
             .unwrap();
         let wide = |inode| DepositIdentity::File {
-            device: u64::MAX,
-            inode,
+            file: file_id(u64::MAX, inode),
         };
         let mut deposits = Vec::new();
         for purpose in ["runtime", "scheduler"] {
@@ -1792,7 +1802,7 @@ mod tests {
         recovery.operation_id = RECOVERY_ONLY_OPERATION.into();
         recovery.claim_sha256 = "0".repeat(64);
         recovery.claim_nonce = "0".repeat(32);
-        recovery.reservation = (0, 0);
+        recovery.reservation = None;
         if let ReleasedOutcome::Abandoned {
             disposition_sha256,
             recovered_at_ms,

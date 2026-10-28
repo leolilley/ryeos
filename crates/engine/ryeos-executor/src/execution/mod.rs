@@ -2575,8 +2575,8 @@ mod pinned_child_authority_tests {
                 "implementation": "linux_cgroup_v2", "parent": "/fixture/delegation"
             }},
             "backend": {"implementation": "linux_cgroup_v2", "boot_id": "00000000-0000-4000-8000-000000000000",
-                "parent": {"containing_device": 1, "inode": 2},
-                "directory": {"containing_device": 1, "inode": 3}, "name": "fixture-scope"}
+                "parent": {"filesystem": {"device": 1}, "inode": 2},
+                "directory": {"filesystem": {"device": 1}, "inode": 3}, "name": "fixture-scope"}
         }))
         .unwrap();
         // An unconfigured node qualifies no scope capability. Its node-level
@@ -2619,8 +2619,8 @@ mod pinned_child_authority_tests {
                 "implementation": "linux_cgroup_v2", "parent": "/fixture/delegation"
             }},
             "backend": {"implementation": "linux_cgroup_v2", "boot_id": boot,
-                "parent": {"containing_device": 1, "inode": 2},
-                "directory": {"containing_device": 1, "inode": 3}, "name": "fixture-scope"}
+                "parent": {"filesystem": {"device": 1}, "inode": 2},
+                "directory": {"filesystem": {"device": 1}, "inode": 3}, "name": "fixture-scope"}
         }))
         .unwrap();
         let identity = ryeos_app::process::ExecutionProcessIdentity {
@@ -2833,8 +2833,8 @@ mod pinned_child_authority_tests {
                 "implementation": "linux_cgroup_v2", "parent": "/fixture/delegation"
             }},
             "backend": {"implementation": "linux_cgroup_v2", "boot_id": boot,
-                "parent": {"containing_device": 1, "inode": 2},
-                "directory": {"containing_device": 1, "inode": 3}, "name": "fixture-scope"}
+                "parent": {"filesystem": {"device": 1}, "inode": 2},
+                "directory": {"filesystem": {"device": 1}, "inode": 3}, "name": "fixture-scope"}
         }))
         .unwrap();
         let mut identity = ryeos_app::process::ExecutionProcessIdentity {

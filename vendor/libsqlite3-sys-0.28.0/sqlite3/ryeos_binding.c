@@ -2143,6 +2143,18 @@ SQLITE_API int ryeos_sqlite_binding_main_identity(void *h,sqlite3_uint64 *dev,sq
       || osFstat(atomic_load(&c->files[0]),&st)!=0 || !S_ISREG(st.st_mode))return SQLITE_IOERR;
   *dev=(sqlite3_uint64)st.st_dev;*ino=(sqlite3_uint64)st.st_ino;return SQLITE_OK;
 }
+/* The existing native main keeper's descriptor number, borrowed for the
+   caller's single call: ownership stays with the binding and the number is
+   valid only while the binding lives. A caller derives a durable identity
+   from it and never closes or retains it. */
+SQLITE_API int ryeos_sqlite_binding_main_descriptor(void *h,int *fd){
+  if(!ryeos_native_process_matches()){return SQLITE_MISUSE;}
+  RyeosBinding *c=(RyeosBinding*)h;struct stat st;int d;
+  if(!c || !fd || atomic_load(&c->poisoned)) return SQLITE_IOERR;
+  d=atomic_load(&c->files[0]);
+  if(d<0 || osFstat(d,&st)!=0 || !S_ISREG(st.st_mode)) return SQLITE_IOERR;
+  *fd=d;return SQLITE_OK;
+}
 /* An existing main proves empty only while its retained keeper is a zero-byte
    regular file and no WAL role was found at acquisition: nothing then exists
    for a rollback journal to protect. No descriptor is duplicated. */
@@ -2318,6 +2330,7 @@ SQLITE_API void *ryeos_sqlite_take_ready_copy_lease(void){ return 0; }
 SQLITE_API const char *ryeos_sqlite_binding_name(void *h){ (void)h;return 0; }
 SQLITE_API const char *ryeos_sqlite_binding_path(void *h){ (void)h;return 0; }
 SQLITE_API int ryeos_sqlite_binding_main_identity(void*h,sqlite3_uint64*d,sqlite3_uint64*i){(void)h;(void)d;(void)i;return SQLITE_NOTFOUND;}
+SQLITE_API int ryeos_sqlite_binding_main_descriptor(void*h,int*f){(void)h;if(f)*f=-1;return SQLITE_NOTFOUND;}
 SQLITE_API int ryeos_sqlite_binding_main_empty(void*h,int*e){(void)h;if(e)*e=0;return SQLITE_NOTFOUND;}
 SQLITE_API int ryeos_sqlite_sync_closed_main(int p,int w,sqlite3_uint64 d,sqlite3_uint64 i,int*s,int*a,int*e){(void)p;(void)w;(void)d;(void)i;if(s)*s=0;if(a)*a=0;if(e)*e=0;return SQLITE_NOTFOUND;}
 SQLITE_API int ryeos_projection_lease_open(int p,int m,void**o,int*f){(void)p;(void)m;if(o)*o=0;if(f)*f=-1;return SQLITE_NOTFOUND;}

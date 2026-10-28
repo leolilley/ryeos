@@ -1539,7 +1539,7 @@ mod tests {
 
     fn directory_identity(inode: u64) -> lillux::PinnedDirectoryIdentity {
         serde_json::from_value(serde_json::json!({
-            "containing_device": 1, "inode": inode,
+            "filesystem": {"device": 1}, "inode": inode,
         }))
         .unwrap()
     }
@@ -2093,8 +2093,8 @@ mod tests {
         };
         let binding:QControllerCanaryBinding=serde_json::from_value(serde_json::json!({
             "schema":1,"controller_path":path,
-            "initial_file":{"directory_identity":{"containing_device":1,"inode":44},
-                "file_identity":{"containing_device":1,"inode":45},"content_sha256":"a".repeat(64),"size_bytes":65,"permission_mode":384},
+            "initial_file":{"directory_identity":{"filesystem": {"device": 1},"inode": 44},
+                "file_identity":{"filesystem": {"device": 1},"inode": 45},"content_sha256":"a".repeat(64),"size_bytes":65,"permission_mode":384},
             "provider_declaration_id":"provider","configuration_adapter_artifact_hash":"b".repeat(64),"configuration_adapter_artifact_bytes":1,
             "binding_input_digest":input.digest().unwrap(),"binding_output_digest":output.digest().unwrap(),
             "template_request_digest":ryeos_state::objects::canonical_value_digest(&input.template).unwrap(),

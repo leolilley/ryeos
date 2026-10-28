@@ -1058,8 +1058,7 @@ fn open_offline_archive_root(
         })?;
     let root = lillux::PinnedDirectory::open(&root_policy.path)?
         .ok_or_else(|| anyhow::anyhow!("offline managed activation archive root is unavailable"))?;
-    let (device, inode) = root.device_inode()?;
-    if device != root_policy.containing_device || inode != root_policy.root_inode {
+    if root.identity()? != root_policy.root_identity {
         bail!("offline managed activation archive root filesystem identity changed");
     }
     root.ensure_path_binding()?;

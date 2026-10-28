@@ -236,7 +236,7 @@ pub fn prepare(
         "current signed fixture node limits cannot admit the declared large runtime; do not widen small CAS"
     );
     let root = lillux::PinnedDirectory::open(&incoming)?.context("private input root")?;
-    let (containing_device, root_inode) = root.device_inode()?;
+    let root_identity = root.identity()?;
     ensure!(
         import_policy.roots.is_empty(),
         "unexpected ambient fixture import roots"
@@ -245,8 +245,7 @@ pub fn prepare(
         IMPORT_ROOT.into(),
         ExternalContentImportRoot {
             path: incoming,
-            containing_device,
-            root_inode,
+            root_identity,
         },
     );
     import_policy.managed_activation = ManagedExternalContentPolicy {

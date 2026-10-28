@@ -265,8 +265,7 @@ impl PinnedProjectMaterialization {
         let root = lillux::PinnedDirectory::open(path)?.ok_or_else(|| {
             anyhow::anyhow!("retained project workspace is missing: {}", path.display())
         })?;
-        let (device, inode) = root.device_inode()?;
-        let observed_root_identity = format!("dev{device}-ino{inode}");
+        let observed_root_identity = root.identity()?.canonical_text()?;
         if observed_root_identity != expected_root_identity {
             anyhow::bail!(
                 "retained project workspace root identity changed: expected {expected_root_identity}, observed {observed_root_identity}"

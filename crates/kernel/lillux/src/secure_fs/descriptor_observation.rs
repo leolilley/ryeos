@@ -16,6 +16,10 @@ use super::PinnedRegularFileIdentity;
 pub struct RetainedFileDescriptorObservation {
     retained_file: File,
     identity: PinnedRegularFileIdentity,
+    /// Raw device and inode for matching this process's descriptor table; the
+    /// observation never outlives the process, so the attachment number is
+    /// valid here.
+    raw: (u64, u64),
     captured: BTreeSet<i32>,
 }
 
@@ -43,10 +47,13 @@ impl RetainedFileDescriptorObservation {
             if !super::matches_pinned_regular_file_identity(&retained_file, identity)? {
                 anyhow::bail!("retained descriptor does not identify the observed regular file");
             }
-            let captured = matching_descriptors(identity)?;
+            let observed = super::observe_open_file_identity(&retained_file)?;
+            let raw = (observed.device(), observed.inode());
+            let captured = matching_descriptors(raw)?;
             Ok(Self {
                 retained_file,
                 identity,
+                raw,
                 captured,
             })
         }
@@ -65,14 +72,14 @@ impl RetainedFileDescriptorObservation {
             if !super::matches_pinned_regular_file_identity(&self.retained_file, self.identity)? {
                 anyhow::bail!("observed retained regular-file identity changed");
             }
-            let current = matching_descriptors(self.identity)?;
+            let current = matching_descriptors(self.raw)?;
             Ok(!current.is_subset(&self.captured))
         }
     }
 }
 
 #[cfg(target_os = "linux")]
-fn matching_descriptors(expected: PinnedRegularFileIdentity) -> Result<BTreeSet<i32>> {
+fn matching_descriptors(expected: (u64, u64)) -> Result<BTreeSet<i32>> {
     use anyhow::Context as _;
     use std::os::unix::fs::MetadataExt as _;
 
@@ -91,10 +98,7 @@ fn matching_descriptors(expected: PinnedRegularFileIdentity) -> Result<BTreeSet<
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(error) => return Err(error).context("observe process descriptor identity"),
         };
-        if metadata.is_file()
-            && metadata.dev() == expected.containing_device
-            && metadata.ino() == expected.inode
-        {
+        if metadata.is_file() && (metadata.dev(), metadata.ino()) == expected {
             descriptors.insert(descriptor);
         }
     }

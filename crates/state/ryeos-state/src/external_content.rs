@@ -674,8 +674,7 @@ fn capture_large_directory(
                     let ingested = sink.store_large_file(
                         file.try_clone()?,
                         crate::large_object_store::PinnedLargeObjectSourceIdentity {
-                            containing_device: entry.containing_device,
-                            inode: entry.inode,
+                            file: lillux::pinned_regular_file_identity(&file)?,
                             size,
                         },
                         &path,
@@ -948,8 +947,7 @@ fn capture_directory(
                     .open_child_directory(OsStr::new(&name))?
                     .ok_or_else(|| anyhow::anyhow!("external content directory {path} vanished"))?;
                 directory.ensure_open_child_same_mount(&child)?;
-                let (child_device, child_inode) = child.device_inode()?;
-                if child_device != entry.containing_device || child_inode != entry.inode {
+                if !child.matches_entry_metadata(entry)? {
                     anyhow::bail!("external content directory {path} changed during capture");
                 }
                 capture_directory(

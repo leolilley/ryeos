@@ -1506,7 +1506,7 @@ fn require_lower_hex_digest(label: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-fn seal_current_init_completion(
+pub(crate) fn seal_current_init_completion(
     app_root: &Path,
     expected_policy_generation_digest: Option<&str>,
 ) -> Result<()> {
@@ -1662,6 +1662,23 @@ pub fn seal_test_fixture_init_completion(app_root: &Path) -> Result<()> {
 }
 
 pub fn verify_init_completion(app_root: &Path) -> Result<Option<InitCompletionReport>> {
+    verify_init_completion_checking_capacity(app_root, true)
+}
+
+/// Everything [`verify_init_completion`] verifies except that the capacity
+/// account sits where its binding says. The operator's re-anchor command
+/// needs the signed completion of a node whose data moved to another
+/// filesystem, to decide what to re-anchor; nothing else may call it.
+pub(crate) fn verify_init_completion_before_capacity_install(
+    app_root: &Path,
+) -> Result<Option<InitCompletionReport>> {
+    verify_init_completion_checking_capacity(app_root, false)
+}
+
+fn verify_init_completion_checking_capacity(
+    app_root: &Path,
+    require_capacity_installed: bool,
+) -> Result<Option<InitCompletionReport>> {
     let path = init_completion_path(app_root);
     match fs::symlink_metadata(&path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -1746,11 +1763,18 @@ pub fn verify_init_completion(app_root: &Path) -> Result<Option<InitCompletionRe
     if snapshot.generation_digest() != document.body.policy_generation_digest {
         bail!("capacity policy generation changed during completion verification");
     }
-    document.body.capacity_account.require_installed(
+    document.body.capacity_account.require_reanchor_document(
         app_root,
-        &document.body.node_fingerprint,
-        snapshot.require::<ryeos_node_runtime::node_policy::sections::native_capacity::NodeNativeCapacityPolicy>()?,
+        operator_key,
+        &operator_fingerprint,
     )?;
+    if require_capacity_installed {
+        document.body.capacity_account.require_installed(
+            app_root,
+            &document.body.node_fingerprint,
+            snapshot.require::<ryeos_node_runtime::node_policy::sections::native_capacity::NodeNativeCapacityPolicy>()?,
+        )?;
+    }
     Ok(Some(InitCompletionReport {
         operator_fingerprint,
         node_fingerprint: document.body.node_fingerprint,

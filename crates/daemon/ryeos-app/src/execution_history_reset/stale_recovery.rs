@@ -106,7 +106,7 @@ impl LedgerKind {
 /// One ledger record of a stale operation, public or quarantined.
 struct LedgerEntry {
     name: String,
-    identity: (u64, u64),
+    identity: lillux::PinnedRegularFileIdentity,
     bytes: Vec<u8>,
 }
 
@@ -317,7 +317,7 @@ fn regular_identity(
     name: &str,
     place: &str,
     owned: Option<&str>,
-) -> Result<(u64, u64)> {
+) -> Result<lillux::PinnedRegularFileIdentity> {
     let entry = directory
         .entry_no_follow(OsStr::new(name))?
         .with_context(|| format!("{place} entry `{name}` disappeared during recovery"))?;
@@ -328,7 +328,7 @@ fn regular_identity(
             None => repair(what),
         });
     }
-    Ok((entry.containing_device, entry.inode))
+    directory.regular_identity_of_entry(&entry)
 }
 
 fn scan_ledger(
@@ -496,13 +496,12 @@ fn scan_reset_temporaries(
             }
             bound.charge(1)?;
             let text = utf8(&name, "reset temporary debris")?;
-            let (device, inode) =
-                regular_identity(directory, &text, "reset temporary debris", owned)?;
+            let file = regular_identity(directory, &text, "reset temporary debris", owned)?;
             debris.push(AbandonedDeposit {
                 location,
                 name: text,
                 kind: AbandonedDepositKind::SecureTemp,
-                identity: DepositIdentity::File { device, inode },
+                identity: DepositIdentity::File { file },
                 witness_bound: false,
             });
         }
@@ -563,7 +562,7 @@ struct Settlement<'a> {
     operation: &'a str,
     stale: &'a StaleOperation,
     record: OfflineResetReleasedRecord,
-    published: Option<(u64, u64)>,
+    published: Option<lillux::PinnedRegularFileIdentity>,
 }
 
 /// Authenticate one stale operation and decide its settlement. Nothing is
@@ -604,7 +603,7 @@ fn plan_operation<'a>(
     // A reservation still present beside its release is the one the
     // release settles, public or quarantined.
     if let Some(reserved) = reserved
-        && reserved.identity != record.reservation
+        && Some(reserved.identity) != record.reservation
     {
         return Err(repair(format!(
             "reservation `{}` is not the reservation its release `{}` settles",
@@ -761,7 +760,7 @@ fn observe_abandoned(
             continue;
         };
         bound.charge(3)?;
-        let (device, inode) = regular_identity(
+        let file = regular_identity(
             copy_root,
             name,
             "offline reset inspections parent",
@@ -796,7 +795,7 @@ fn observe_abandoned(
             } else {
                 AbandonedDepositKind::Witness
             },
-            identity: DepositIdentity::File { device, inode },
+            identity: DepositIdentity::File { file },
             witness_bound: false,
         });
     }
@@ -846,7 +845,7 @@ fn observe_abandoned(
     if reservation.mode() == OriginalInspectionMode::Mutating && !resumed {
         for name in &stale.runtime {
             bound.charge(3)?;
-            let (device, inode) = regular_identity(roots.runtime, name, "runtime namespace", None)?;
+            let file = regular_identity(roots.runtime, name, "runtime namespace", None)?;
             let bytes = lillux_sqlite::read_regular_without_sqlite_alias(
                 roots.runtime,
                 OsStr::new(name),
@@ -867,7 +866,7 @@ fn observe_abandoned(
                 } else {
                     AbandonedDepositKind::InertOperation
                 },
-                identity: DepositIdentity::File { device, inode },
+                identity: DepositIdentity::File { file },
                 witness_bound: false,
             });
         }
@@ -895,7 +894,7 @@ fn observe_abandoned(
         claim_sha256: reservation.sha256().to_owned(),
         claim_nonce: reservation.claim_nonce().to_owned(),
         ledger_identity: roots.ledger_identity,
-        reservation: reserved.identity,
+        reservation: Some(reserved.identity),
         outcome: ReleasedOutcome::Abandoned {
             disposition_sha256,
             deposits,
@@ -912,7 +911,7 @@ fn publish_release(
     roots: &Roots<'_>,
     record: &OfflineResetReleasedRecord,
     bound: &mut RecoveryBound,
-) -> Result<(u64, u64)> {
+) -> Result<lillux::PinnedRegularFileIdentity> {
     record.validate()?;
     bound.charge(4)?;
     let storage = lillux::cas::canonical_record_storage_quote(record, RECORD_BYTES)?;
@@ -932,7 +931,7 @@ fn publish_release(
         .sync()
         .context("sync the recovered release record")?;
     let identity = lillux::observe_open_file_identity(&file)?;
-    Ok((identity.device(), identity.inode()))
+    roots.ledger.regular_identity_of_observation(&identity)
 }
 
 /// Remove each recorded deposit still present with its recorded identity,
@@ -979,9 +978,7 @@ fn remove_deposits(
                 }
                 true
             }
-            DepositIdentity::File { device, inode } => {
-                unlink_if_same(parent, &deposit.name, (*device, *inode))?
-            }
+            DepositIdentity::File { file } => unlink_if_same(parent, &deposit.name, *file)?,
         };
         if gone {
             removed += 1;
@@ -993,13 +990,13 @@ fn remove_deposits(
 fn unlink_if_same(
     parent: &lillux::PinnedDirectory,
     name: &str,
-    expected: (u64, u64),
+    expected: lillux::PinnedRegularFileIdentity,
 ) -> Result<bool> {
     let Some(pin) = parent.open_mount_entry(OsStr::new(name))? else {
         return Ok(false);
     };
     let observed = lillux::observe_open_file_identity(&pin)?;
-    if (observed.device(), observed.inode()) != expected {
+    if parent.regular_identity_of_observation(&observed)? != expected {
         return Err(repair(format!(
             "`{name}` was replaced since recovery observed it"
         )));
@@ -1014,7 +1011,7 @@ fn unlink_records(
     roots: &Roots<'_>,
     operation: &str,
     stale: &StaleOperation,
-    released: (u64, u64),
+    released: lillux::PinnedRegularFileIdentity,
     bound: &mut RecoveryBound,
 ) -> Result<usize> {
     let mut unlinked = 0;
@@ -1057,7 +1054,7 @@ fn settle_debris(
         claim_sha256: "0".repeat(64),
         claim_nonce: "0".repeat(32),
         ledger_identity: roots.ledger_identity,
-        reservation: (0, 0),
+        reservation: None,
         outcome: ReleasedOutcome::Abandoned {
             disposition_sha256: None,
             deposits: debris.clone(),
@@ -1504,10 +1501,6 @@ mod tests {
             lillux::signature::strip_canonical_signature_with_envelope(raw, "#", None, false)
                 .unwrap();
         let claim: serde_json::Value = serde_json::from_str(&body).unwrap();
-        let metadata =
-            std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(&reserved_path).unwrap());
-        let device =
-            std::os::unix::fs::MetadataExt::dev(&std::fs::metadata(&reserved_path).unwrap());
         let ledger = lillux::PinnedDirectory::open(&node.ledger())
             .unwrap()
             .unwrap();
@@ -1519,7 +1512,16 @@ mod tests {
             claim_sha256: lillux::sha256_hex(&reserved),
             claim_nonce: claim["claim_nonce"].as_str().unwrap().to_owned(),
             ledger_identity: ledger.identity().unwrap(),
-            reservation: (device, metadata),
+            reservation: Some(
+                ledger
+                    .regular_identity_of_entry(
+                        &ledger
+                            .entry_no_follow(OsStr::new(&format!("reserved.{operation}")))
+                            .unwrap()
+                            .unwrap(),
+                    )
+                    .unwrap(),
+            ),
             outcome: ReleasedOutcome::Abandoned {
                 disposition_sha256: None,
                 deposits,
@@ -1607,7 +1609,12 @@ mod tests {
                 claim_sha256: "e".repeat(64),
                 claim_nonce: "b".repeat(32),
                 ledger_identity: ledger.identity().unwrap(),
-                reservation: (1, 7),
+                reservation: Some(
+                    serde_json::from_value(
+                        serde_json::json!({"filesystem": {"device": 1}, "inode": 7}),
+                    )
+                    .unwrap(),
+                ),
             },
             CompletedReleaseFacts {
                 mode: OriginalInspectionMode::DryRun,
@@ -1621,8 +1628,10 @@ mod tests {
                 ],
                 pins: vec![RetiredPinFact {
                     slot: ISSUED_RESERVATION_PIN_SLOT,
-                    device: 1,
-                    inode: 7,
+                    file: serde_json::from_value(
+                        serde_json::json!({"filesystem": {"device": 1}, "inode": 7}),
+                    )
+                    .unwrap(),
                     byte_length: 1,
                 }],
                 state_ack: None,

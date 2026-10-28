@@ -2224,7 +2224,7 @@ mod tests {
         assert!(serde_json::from_value::<ScopedAttemptLocator>(missing_prepared_sources).is_err());
         let mut invalid_prepared_source = valid.clone();
         invalid_prepared_source["prepared_directory_sources"]["../foreign"] =
-            json!({"containing_device": 1, "inode": 2});
+            json!({"filesystem": {"device": 1}, "inode": 2});
         assert!(
             serde_json::from_value::<ScopedAttemptLocator>(invalid_prepared_source)
                 .unwrap()

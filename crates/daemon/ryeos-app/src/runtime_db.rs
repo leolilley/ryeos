@@ -8089,8 +8089,7 @@ fn copy_sqlite_file_for_inspection(
     match (&copied, expected) {
         (None, None) => {}
         (Some(receipt), Some(expected)) => ensure!(
-            receipt.source_identity.device == expected.device()
-                && receipt.source_identity.inode == expected.inode()
+            receipt.source_identity.file == source.regular_identity_of_observation(&expected)?
                 && receipt.source_identity.byte_length == expected.size()
                 && receipt.copied_byte_length == expected.size(),
             "SQLite inspection source changed after the bounded copy plan"
@@ -23108,8 +23107,10 @@ mod tests {
             if index < 2 {
                 let original = source.entry_no_follow(name).unwrap().unwrap();
                 let receipt = receipt.as_ref().unwrap();
-                assert_eq!(receipt.source_identity.device, original.containing_device);
-                assert_eq!(receipt.source_identity.inode, original.inode);
+                assert_eq!(
+                    receipt.source_identity.file,
+                    source.regular_identity_of_entry(&original).unwrap()
+                );
                 assert_eq!(
                     receipt.source_identity.content_sha256.as_ref(),
                     Some(&receipt.copied_sha256)
@@ -24316,7 +24317,7 @@ mod tests {
                     }},
                     "backend": {"implementation": "linux_cgroup_v2",
                         "boot_id": "00000000-0000-4000-8000-000000000000",
-                        "parent": {"containing_device": 1, "inode": 2}, "name": worker}
+                        "parent": {"filesystem": {"device": 1}, "inode": 2}, "name": worker}
                 }))
                 .unwrap();
             db.reserve_dedicated_worker_scope(&placement, &worker, 1, &allocation)
@@ -24425,8 +24426,8 @@ mod tests {
                     "implementation": "linux_cgroup_v2", "parent": "/fixture/delegation"
                 }},
                 "backend": {"implementation": "linux_cgroup_v2", "boot_id": boot,
-                    "parent": {"containing_device": 1, "inode": 2},
-                    "directory": {"containing_device": 1, "inode": 3},
+                    "parent": {"filesystem": {"device": 1}, "inode": 2},
+                    "directory": {"filesystem": {"device": 1}, "inode": 3},
                     "name": "worker-one"}
             }))
             .unwrap();
@@ -29640,14 +29641,14 @@ mod tests {
             "backend": {"implementation": "linux_cgroup_v2",
                 "boot_id": host["backend"]["boot_id"],
                 "cgroup_enclosure": host["backend"]["cgroup_enclosure"],
-                "parent": {"containing_device": 1, "inode": 2}, "name": name}
+                "parent": {"filesystem": {"device": 1}, "inode": 2}, "name": name}
         });
         let allocation: lillux::ProcessScopeAllocation =
             serde_json::from_value(planned.clone()).unwrap();
         let mut bound = planned;
         bound["version"] = 5.into();
         bound["backend"]["directory"] =
-            serde_json::json!({"containing_device": 1, "inode": identity.target_pid});
+            serde_json::json!({"filesystem": {"device": 1}, "inode": identity.target_pid});
         let recovery: lillux::ProcessScopeRecovery = serde_json::from_value(bound).unwrap();
         identity.process_scope = Some(recovery.clone());
         let reservation = ProcessResourceReservationRecord {
@@ -29829,7 +29830,7 @@ mod tests {
             "backend": {"implementation": "linux_cgroup_v2",
                 "boot_id": host["backend"]["boot_id"],
                 "cgroup_enclosure": host["backend"]["cgroup_enclosure"],
-                "parent": {"containing_device": 1, "inode": 2},
+                "parent": {"filesystem": {"device": 1}, "inode": 2},
                 "name": "test-101"}
         });
         let allocation: lillux::ProcessScopeAllocation =
@@ -29860,7 +29861,8 @@ mod tests {
 
         let mut bound = planned;
         bound["version"] = 5.into();
-        bound["backend"]["directory"] = serde_json::json!({"containing_device": 1, "inode": 101});
+        bound["backend"]["directory"] =
+            serde_json::json!({"filesystem": {"device": 1}, "inode": 101});
         let recovery: lillux::ProcessScopeRecovery = serde_json::from_value(bound).unwrap();
         db.bind_process_resource_scope("thread", "t1", &recovery)
             .unwrap();
@@ -29918,7 +29920,7 @@ mod tests {
             "backend": {"implementation": "linux_cgroup_v2",
                 "boot_id": host["backend"]["boot_id"],
                 "cgroup_enclosure": host["backend"]["cgroup_enclosure"],
-                "parent": {"containing_device": 1, "inode": 2},
+                "parent": {"filesystem": {"device": 1}, "inode": 2},
                 "name": "scope-only-test"}
         });
         let allocation: lillux::ProcessScopeAllocation =
@@ -29934,7 +29936,8 @@ mod tests {
         assert!(db.reserve_thread_process_scope(&reservation).is_err());
         let mut bound = planned;
         bound["version"] = 5.into();
-        bound["backend"]["directory"] = serde_json::json!({"containing_device": 1, "inode": 101});
+        bound["backend"]["directory"] =
+            serde_json::json!({"filesystem": {"device": 1}, "inode": 101});
         let recovery: lillux::ProcessScopeRecovery = serde_json::from_value(bound).unwrap();
         assert!(
             db.bind_thread_process_scope("scope-t", "wrong-owner", &recovery)
@@ -30036,7 +30039,7 @@ mod tests {
                 "backend": {"implementation": "linux_cgroup_v2",
                     "boot_id": host["backend"]["boot_id"],
                     "cgroup_enclosure": host["backend"]["cgroup_enclosure"],
-                    "parent": {"containing_device": 1, "inode": 2},
+                    "parent": {"filesystem": {"device": 1}, "inode": 2},
                     "name": "scope-recovery-test"}
             }))
             .unwrap();

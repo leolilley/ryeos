@@ -204,17 +204,12 @@ impl RetainedProjectContent {
                 if size != file.size {
                     bail!("retained blob size disagrees with ProjectFile");
                 }
-                let identity = lillux::observe_open_file_identity(&input)?;
-                let ingested = store.ingest_open_regular(
-                    input,
-                    crate::PinnedLargeObjectSourceIdentity {
-                        containing_device: identity.device(),
-                        inode: identity.inode(),
-                        size,
-                    },
-                    path,
-                    Some(&file.blob_hash),
-                )?;
+                let identity = crate::PinnedLargeObjectSourceIdentity {
+                    file: lillux::pinned_regular_file_identity(&input)?,
+                    size,
+                };
+                let ingested =
+                    store.ingest_open_regular(input, identity, path, Some(&file.blob_hash))?;
                 if ingested.size != file.size || ingested.file_sha256 != file.blob_hash {
                     bail!("retained large-content ingest contradicts ProjectFile");
                 }

@@ -10,8 +10,9 @@ pub enum IsolationLiveAccessAuthority {
         /// spawn. Isolation mounts clone this descriptor; they never reopen the
         /// ambient project pathname after identity validation.
         root: Arc<lillux::PinnedDirectory>,
-        root_device_id: u64,
-        root_inode: u64,
+        /// The root's durable identity, so a recorded authority survives the
+        /// filesystem being re-attached under another device number.
+        root_identity: lillux::PinnedDirectoryIdentity,
         denied_control_paths: Vec<PathBuf>,
         authorized_write_namespaces: Vec<String>,
     },

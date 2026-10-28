@@ -1134,8 +1134,7 @@ fn observe_surface_content(
             let directory = parent
                 .open_child_directory(&name)?
                 .context("managed surface directory disappeared")?;
-            let (containing_device, inode) = directory.device_inode()?;
-            if containing_device != entry.containing_device || inode != entry.inode {
+            if !directory.matches_entry_metadata(&entry)? {
                 anyhow::bail!("managed surface directory changed during content observation");
             }
             let mut total_bytes = 0_u64;

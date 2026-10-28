@@ -2717,8 +2717,8 @@ fn bound_canary_preserves_distinct_stages_and_combined_original_request_bound() 
         };
         serde_json::from_value::<QControllerCanaryBinding>(json!({
             "schema":1,"controller_path":input.controller_canary_path,
-            "initial_file":{"directory_identity":{"containing_device":1,"inode":2},
-                "file_identity":{"containing_device":1,"inode":3},
+            "initial_file":{"directory_identity":{"filesystem": {"device": 1},"inode": 2},
+                "file_identity":{"filesystem": {"device": 1},"inode": 3},
                 "content_sha256":"a".repeat(64),"size_bytes":65,"permission_mode":384},
             "provider_declaration_id":"provider","configuration_adapter_artifact_hash":"b".repeat(64),
             "configuration_adapter_artifact_bytes":1,

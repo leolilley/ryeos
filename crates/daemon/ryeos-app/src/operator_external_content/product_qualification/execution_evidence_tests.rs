@@ -39,8 +39,8 @@ fn q_issuance_joins_actual_bound_turn_instead_of_signed_template() {
     };
     let binding: QControllerCanaryBinding = serde_json::from_value(json!({
         "schema":1,"controller_path":input.controller_canary_path,
-        "initial_file":{"directory_identity":{"containing_device":1,"inode":2},
-            "file_identity":{"containing_device":1,"inode":3},
+        "initial_file":{"directory_identity":{"filesystem": {"device": 1},"inode": 2},
+            "file_identity":{"filesystem": {"device": 1},"inode": 3},
             "content_sha256":"a".repeat(64),"size_bytes":65,"permission_mode":384},
         "provider_declaration_id":"provider","configuration_adapter_artifact_hash":"b".repeat(64),
         "configuration_adapter_artifact_bytes":1,

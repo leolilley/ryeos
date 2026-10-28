@@ -1092,8 +1092,8 @@ mod tests {
             input_digest: input.digest().unwrap(),
             resolved_body: json!({"provider_defined":"bound"}),
         };
-        let initial = json!({"directory_identity":{"containing_device":1,"inode":2},
-            "file_identity":{"containing_device":1,"inode":3},"content_sha256":"a".repeat(64),"size_bytes":65,"permission_mode":384});
+        let initial = json!({"directory_identity":{"filesystem": {"device": 1},"inode": 2},
+            "file_identity":{"filesystem": {"device": 1},"inode": 3},"content_sha256":"a".repeat(64),"size_bytes":65,"permission_mode":384});
         let binding = json!({
             "schema":1,"controller_path":input.controller_canary_path,"initial_file":initial,
             "provider_declaration_id":manifest.provider_configuration.provider_declaration_id,

@@ -309,16 +309,17 @@ impl OriginalOperation {
                 && self.record.scheduler_selected == scheduler_selected,
             "reset options or scheduler selection differ from the original operation"
         );
-        let mut physical_sources = std::collections::BTreeSet::new();
+        let mut physical_sources = Vec::new();
         for source in &self.record.scheduler_sources {
             match (&source.source, &source.current) {
                 (SchedulerRetirementStoppedSource::Absent, None) => {}
                 (SchedulerRetirementStoppedSource::Canonical, Some(identity)) => {
                     identity.validate()?;
                     ensure!(
-                        physical_sources.insert((identity.device, identity.inode)),
+                        !physical_sources.contains(&identity.file),
                         "original scheduler roles alias the same physical source"
                     );
+                    physical_sources.push(identity.file);
                     ensure!(
                         identity.content_sha256.is_some(),
                         "original source lacks its copied digest"
@@ -485,8 +486,7 @@ impl OriginalOperation {
                 Some(receipt) => SchedulerRetirementStoppedRolePlan {
                     source: SchedulerRetirementStoppedSource::Canonical,
                     current: Some(ryeos_scheduler_contract::SchedulerRetirementRoleIdentity {
-                        device: receipt.source_identity.device,
-                        inode: receipt.source_identity.inode,
+                        file: receipt.source_identity.file,
                         byte_length: receipt.source_identity.byte_length,
                         content_sha256: Some(receipt.copied_sha256.clone()),
                     }),

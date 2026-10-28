@@ -181,7 +181,9 @@ pub(super) fn install(
             .ok_or("fixed-parent top ancestor must already exist as a real source directory")?;
         let destination = view.destination.join(name);
         let target = open_mount_target_no_symlinks(&destination)?;
-        let expected = source.device_inode().map_err(|error| error.to_string())?;
+        let expected = source
+            .raw_device_inode()
+            .map_err(|error| error.to_string())?;
         let observed = mount_source_stat(target.as_raw_fd())?;
         if expected != (observed.st_dev, observed.st_ino) {
             return Err("fixed-parent source ancestor changed before view attachment".into());

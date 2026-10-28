@@ -4981,6 +4981,27 @@ impl OriginalNativeConnection {
             binding.main_identity()
         })
     }
+    /// The durable identity of the same admitted Bound keeper's main file,
+    /// computed by Lillux from the keeper's descriptor after the keeper's name
+    /// binding was revalidated.
+    pub fn bound_main_file_identity(&self) -> Result<lillux::PinnedRegularFileIdentity> {
+        let raw = self.bound_main_identity()?;
+        self.with_sql(|_| {
+            let NativeConnectionBody::Bound(owner) = self
+                .inner
+                .body
+                .as_deref()
+                .context("original live native body missing")?
+            else {
+                anyhow::bail!("original connection is not a Bound owner")
+            };
+            owner
+                .binding
+                .as_ref()
+                .context("original Bound keeper missing")?
+                .main_file_identity(raw)
+        })
+    }
     /// Service boundary of one scoped SQL operation: process, durable
     /// authority facts, producer and destination.
     fn service_boundary(&self) -> Result<()> {

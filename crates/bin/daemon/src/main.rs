@@ -9394,6 +9394,10 @@ mod node_capability_report_reader_tests {
                 app_root,
                 &ryeos_app::private_artifact_home::root(&state_dir),
             ),
+            durable_identity: ryeos_node::capability_report::DurableIdentityFacts::observe(
+                app_root,
+            )
+            .unwrap(),
             floor: match_floor(&[], &view),
             provided: view.provided,
             missing: view.missing,

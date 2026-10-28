@@ -1204,10 +1204,11 @@ impl IsolationRuntime {
                 self.verify_runtime_workspace_layout(workspace_id, &project_root, None)?;
                 let root_identity =
                     |label: &str, root: &lillux::PinnedDirectory| -> Result<String, EngineError> {
-                        let (device, inode) = root.device_inode().map_err(|error| {
-                            refused(format!("inspect workspace {label} identity: {error}"))
-                        })?;
-                        Ok(format!("dev{device}-ino{inode}"))
+                        root.identity()
+                            .and_then(|identity| identity.canonical_text())
+                            .map_err(|error| {
+                                refused(format!("inspect workspace {label} identity: {error}"))
+                            })
                     };
                 let pinned_root_identities = BTreeMap::from([(
                     "project".to_string(),
@@ -1444,10 +1445,11 @@ impl IsolationRuntime {
                 }
                 let root_identity =
                     |label: &str, root: &lillux::PinnedDirectory| -> Result<String, EngineError> {
-                        let (device, inode) = root.device_inode().map_err(|error| {
-                            refused(format!("inspect workspace {label} identity: {error}"))
-                        })?;
-                        Ok(format!("dev{device}-ino{inode}"))
+                        root.identity()
+                            .and_then(|identity| identity.canonical_text())
+                            .map_err(|error| {
+                                refused(format!("inspect workspace {label} identity: {error}"))
+                            })
                     };
                 let observed_roots = BTreeMap::from([
                     (
@@ -3257,8 +3259,7 @@ impl IsolationRuntime {
         let fixed_parent_views = match context.live_access {
             Some(IsolationLiveAccessAuthority::DescriptorRootedFixedParents {
                 root,
-                root_device_id,
-                root_inode,
+                root_identity,
                 denied_control_paths,
                 authorized_write_namespaces,
             }) => {
@@ -3283,12 +3284,12 @@ impl IsolationRuntime {
                         "live project path binding changed before launch: {error}"
                     ))
                 })?;
-                let (current_device_id, current_inode) = root.device_inode().map_err(|error| {
+                let current_identity = root.identity().map_err(|error| {
                     refused(format!(
                         "live project descriptor cannot be inspected: {error}"
                     ))
                 })?;
-                if current_device_id != *root_device_id || current_inode != *root_inode {
+                if current_identity != *root_identity {
                     return Err(refused(format!(
                         "live project descriptor identity changed before launch: {}",
                         root.path().display()
@@ -7866,11 +7867,10 @@ mod tests {
         let root = lillux::PinnedDirectory::open(project.path())
             .unwrap()
             .unwrap();
-        let (root_device_id, root_inode) = root.device_inode().unwrap();
+        let root_identity = root.identity().unwrap();
         let live_access = IsolationLiveAccessAuthority::DescriptorRootedFixedParents {
             root: Arc::new(root),
-            root_device_id,
-            root_inode,
+            root_identity,
             denied_control_paths: ryeos_state::project_sync::live_execution_denied_control_paths()
                 .into_iter()
                 .map(PathBuf::from)
@@ -7951,11 +7951,10 @@ mod tests {
         let project = parent.path().join("project");
         std::fs::create_dir(&project).unwrap();
         let root = lillux::PinnedDirectory::open(&project).unwrap().unwrap();
-        let (root_device_id, root_inode) = root.device_inode().unwrap();
+        let root_identity = root.identity().unwrap();
         let live_access = IsolationLiveAccessAuthority::DescriptorRootedFixedParents {
             root: Arc::new(root),
-            root_device_id,
-            root_inode,
+            root_identity,
             denied_control_paths: ryeos_state::project_sync::live_execution_denied_control_paths()
                 .into_iter()
                 .map(PathBuf::from)
@@ -8506,11 +8505,10 @@ mod tests {
         let root = lillux::PinnedDirectory::open(project.path())
             .unwrap()
             .unwrap();
-        let (root_device_id, root_inode) = root.device_inode().unwrap();
+        let root_identity = root.identity().unwrap();
         let live_access = IsolationLiveAccessAuthority::DescriptorRootedFixedParents {
             root: Arc::new(root),
-            root_device_id,
-            root_inode,
+            root_identity,
             denied_control_paths: ryeos_state::project_sync::live_execution_denied_control_paths()
                 .into_iter()
                 .map(PathBuf::from)
@@ -10518,8 +10516,10 @@ mod tests {
                     .unwrap()
                     .expect("app root"),
             ),
-            root_device_id: 0,
-            root_inode: 0,
+            root_identity: serde_json::from_value(
+                serde_json::json!({"filesystem": {"device": 0}, "inode": 0}),
+            )
+            .unwrap(),
             denied_control_paths: vec![PathBuf::from(".ai")],
             authorized_write_namespaces: vec!["project".to_string()],
         };

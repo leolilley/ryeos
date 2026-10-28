@@ -38,6 +38,8 @@ SQLITE_API int ryeos_sqlite_close_original_output(int,sqlite3_uint64,sqlite3_uin
 
 /* Genuine original Bound keeper snapshot and post-close alias-safe fsync. */
 SQLITE_API int ryeos_sqlite_binding_main_identity(void*,sqlite3_uint64*,sqlite3_uint64*);
+/* Borrowed descriptor number of the live main keeper. */
+SQLITE_API int ryeos_sqlite_binding_main_descriptor(void*,int*);
 /* Retained existing main is zero bytes with no WAL role at acquisition. */
 SQLITE_API int ryeos_sqlite_binding_main_empty(void*,int*);
 /* SAME live Bound main/WAL VFS handles; no descriptor open/dup/close. */

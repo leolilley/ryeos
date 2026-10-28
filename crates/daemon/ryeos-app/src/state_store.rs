@@ -33377,14 +33377,15 @@ mod tests {
             "backend": {"implementation": "linux_cgroup_v2",
                 "boot_id": host["backend"]["boot_id"],
                 "cgroup_enclosure": host["backend"]["cgroup_enclosure"],
-                "parent": {"containing_device": 1, "inode": 2},
+                "parent": {"filesystem": {"device": 1}, "inode": 2},
                 "name": format!("resource-{coordinate}")}
         });
         let allocation: lillux::ProcessScopeAllocation =
             serde_json::from_value(planned.clone()).unwrap();
         let mut bound = planned;
         bound["version"] = 5.into();
-        bound["backend"]["directory"] = serde_json::json!({"containing_device": 1, "inode": 3});
+        bound["backend"]["directory"] =
+            serde_json::json!({"filesystem": {"device": 1}, "inode": 3});
         let recovery: lillux::ProcessScopeRecovery = serde_json::from_value(bound).unwrap();
         (
             runtime_db::ProcessResourceReservationRecord {

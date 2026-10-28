@@ -335,13 +335,12 @@ fn install_bundle_engine(
             let root = lillux::PinnedDirectory::open(&grant.archive_root)
                 .unwrap()
                 .unwrap();
-            let (containing_device, root_inode) = root.device_inode().unwrap();
+            let root_identity = root.identity().unwrap();
             roots.insert(
                 grant.archive_root_name.clone(),
                 ExternalContentImportRoot {
                     path: grant.archive_root.clone(),
-                    containing_device,
-                    root_inode,
+                    root_identity,
                 },
             );
             ManagedExternalContentPolicy {

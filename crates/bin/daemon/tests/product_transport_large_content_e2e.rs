@@ -269,24 +269,14 @@ fn publish_large_product(
     std::fs::create_dir_all(scratch)?;
     std::fs::write(scratch.join("payload.bin"), payload)?;
     let directory = lillux::PinnedDirectory::open(scratch)?.context("open payload directory")?;
-    let listed = directory
-        .entries_no_follow()?
-        .into_iter()
-        .find(|entry| entry.name == "payload.bin")
-        .context("payload file is not listed")?;
     let file = directory
         .open_regular(std::ffi::OsStr::new("payload.bin"), false)?
         .context("open payload file")?;
-    let ingested = large.ingest_open_regular(
-        file,
-        ryeos_state::PinnedLargeObjectSourceIdentity {
-            containing_device: listed.containing_device,
-            inode: listed.inode,
-            size: u64::try_from(payload.len())?,
-        },
-        "payload.bin",
-        None,
-    )?;
+    let source_identity = ryeos_state::PinnedLargeObjectSourceIdentity {
+        file: lillux::pinned_regular_file_identity(&file)?,
+        size: u64::try_from(payload.len())?,
+    };
+    let ingested = large.ingest_open_regular(file, source_identity, "payload.bin", None)?;
     let entry = ryeos_state::objects::ExternalLargeContentManifestEntry {
         path: "content".to_owned(),
         kind: ryeos_state::objects::ExternalContentManifestEntryKind::File,
