@@ -9,6 +9,7 @@
 //!   - `ryeos stop`   — gracefully stop the local node runtime
 //!   - `ryeos node status` — show local node lifecycle status
 //!   - `ryeos node doctor` — offline "why won't it start" checklist
+//!   - `ryeos node offline-operation facts` — print the facts a signed offline-operation request is signed against
 //!   - `ryeos node capacity reissue` — open the next native-capacity epoch on a stopped node
 //!   - `ryeos node capacity reanchor` — sign a stopped node's native-capacity account onto the filesystem its data moved to
 //!   - `ryeos node reset execution-history` — explicit offline epoch retirement
@@ -27,6 +28,11 @@
 //!
 //! `ryeos identity` is local as a bootstrap affordance: remote
 //! operators need to copy their node public key before the daemon is running.
+//!
+//! The commands that change a stopped node (`allow-restart`, `capacity`,
+//! `reset`, `policy-apply`, `external-execution compose` and its snapshot
+//! forms) build a signed offline-operation request and apply it in process
+//! through the library the daemon applies at startup; see `offline_apply.rs`.
 //!
 //! All other commands — including `sign`, `verify`, `fetch` — are
 //! descriptor-driven and dispatched through the offline/dual path
@@ -89,6 +95,11 @@ const LOCAL_COMMANDS: &[LocalCommandDescriptor] = &[
     LocalCommandDescriptor {
         tokens: &["node", "doctor"],
         summary: "Diagnose local node startup and config",
+        category: "lifecycle",
+    },
+    LocalCommandDescriptor {
+        tokens: &["node", "offline-operation", "facts"],
+        summary: "Print the node facts a signed offline-operation request is signed against; works with the daemon stopped",
         category: "lifecycle",
     },
     LocalCommandDescriptor {
@@ -235,6 +246,10 @@ pub async fn try_dispatch(
             run_node_doctor_command(&argv[2..], console)
                 .await
                 .map_err(map_local_err)?;
+            Ok(true)
+        }
+        ("node", Some("offline-operation")) if argv.get(2).map(String::as_str) == Some("facts") => {
+            run_node_offline_operation_facts_command(&argv[3..], console).map_err(map_local_err)?;
             Ok(true)
         }
         ("node", Some("allow-restart")) => {
@@ -416,12 +431,13 @@ fn run_node_host_setup_command(argv: &[String], _console: &crate::tty::Console) 
 #[derive(Parser, Debug)]
 #[command(
     name = "ryeos node reset policy-generation",
-    about = "Replace an obsolete node-policy generation from a trusted init profile",
-    long_about = "Explicitly replace one complete stopped-node policy generation that the current registry can no longer decode. The trusted publisher-signed init profile selects the prospective exact bundle inventory; bundle installation and policy publication occur in the same locked init transaction. Node identity, credentials, execution history, project heads, and other state are preserved.",
+    about = "Replace an obsolete node-policy generation from the image seed",
+    long_about = "Explicitly replace one complete stopped-node policy generation that the current registry can no longer decode. The image seed (--source) is measured, and the publisher-signed init profile inside it selects the prospective exact bundle inventory; bundle installation and policy publication occur in the same locked init transaction, under a signed offline-operation request that pins the seed's digest. Node identity, credentials, execution history, project heads, and other state are preserved.",
     no_binary_name = true
 )]
 struct NodePolicyGenerationResetArgs {
-    /// Publisher-signed source root containing `.ai/node/init/profiles/`.
+    /// Image seed root containing the bundles and `.ai/node/init/profiles/`.
+    /// It is measured; the request pins its digest.
     #[arg(long, default_value = "/usr/share/ryeos")]
     source: PathBuf,
 
@@ -435,9 +451,15 @@ struct NodePolicyGenerationResetArgs {
     host_class: String,
 
     /// Additional publisher trust doc(s) needed to verify the replacement
-    /// profile and selected source bundles.
+    /// profile and selected source bundles. Each must lie inside `--source`:
+    /// the seed digest is what vouches for it.
     #[arg(long = "trust-file", action = clap::ArgAction::Append)]
     trust_files: Vec<PathBuf>,
+
+    /// Digest (`sha256:<hex>`) of the substrate image the seed belongs to.
+    /// Defaults to the image the node recorded when it was initialized.
+    #[arg(long)]
+    substrate_image_digest: Option<String>,
 
     /// App root (parent of `.ai/`). Defaults to XDG data dir / ryeos.
     #[arg(long)]
@@ -464,6 +486,24 @@ impl NodePolicyGenerationResetArgs {
         }
         Ok(())
     }
+
+    /// Each trust document as a path inside the seed.
+    fn trust_documents(&self) -> Result<Vec<String>> {
+        self.trust_files
+            .iter()
+            .map(|file| {
+                file.strip_prefix(&self.source)
+                    .map(|relative| relative.to_string_lossy().into_owned())
+                    .map_err(|_| {
+                        anyhow::anyhow!(
+                            "trust file {} is outside the image seed {}; the seed digest cannot vouch for it",
+                            file.display(),
+                            self.source.display()
+                        )
+                    })
+            })
+            .collect()
+    }
 }
 
 fn run_node_policy_generation_reset_command(
@@ -474,40 +514,50 @@ fn run_node_policy_generation_reset_command(
         return Ok(());
     };
     args.validate()?;
-    let config =
-        ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
-            app_root: args.app_root,
-            ..Default::default()
-        })
-        .context("load local node location for policy-generation reset")?;
-    let report = ryeos_node::run_init(&ryeos_node::InitOptions {
-        app_root: config.app_root,
-        bind: None,
-        uds_path: None,
-        source_dir: args.source,
-        trust_files: args.trust_files,
-        node_profile: Some(args.node_profile.clone()),
-        host_class: Some(args.host_class.clone()),
-        substrate_identity: None,
-        replace_node_policy_generation: true,
-        skip_preflight: false,
-    })
-    .context("replace node policy generation in locked initialization")?;
+    let app_root = ryeos_node::NodeConfig::load_local(args.app_root.clone())?.app_root;
+    let trust_documents = args.trust_documents()?;
+    let seed_digest = ryeos_node::offline_operation::seed::seed_tree_digest(&args.source)
+        .context("measure the image seed")?;
+    let substrate_image_digest = match &args.substrate_image_digest {
+        Some(digest) => digest.clone(),
+        None => ryeos_node::load_verified_substrate_identity(&app_root)
+            .context("read the substrate image the node was initialized under; pass --substrate-image-digest")?
+            .image_digest,
+    };
+    let arguments = serde_json::to_value(
+        ryeos_node::offline_operation::handlers::PolicyReplaceArguments {
+            seed_digest,
+            node_profile: args.node_profile.clone(),
+            host_class: args.host_class.clone(),
+            substrate_image_digest: substrate_image_digest.clone(),
+            trust_documents,
+        },
+    )?;
+    let host = crate::offline_apply::CliHost::new()
+        .with_image_seed(args.source.clone(), substrate_image_digest);
+    let applied = host.apply(
+        &app_root,
+        "node.reset.policy-generation",
+        arguments,
+        std::collections::BTreeMap::new(),
+        std::collections::BTreeMap::new(),
+    )?;
 
     if args.json {
         crate::tty::write_json(&serde_json::json!({
             "status": "replaced",
             "node_profile": args.node_profile,
             "host_class": args.host_class,
-            "app_root": report.app_root,
-            "node_fingerprint": report.node_key_fingerprint,
-            "bundles": report.bundles_installed,
+            "app_root": app_root,
+            "node_fingerprint": applied.result["node_fingerprint"],
+            "bundles": applied.result["bundles"],
+            "receipt": applied.receipt.digest()?,
         }))?;
     } else {
         console.text(&format!(
             "Node policy generation and exact bundle inventory replaced from trusted profile `{}`: {}\n",
             args.node_profile,
-            report.app_root.display()
+            app_root.display()
         ))?;
     }
     Ok(())
@@ -536,78 +586,48 @@ struct NodePolicyApplyArgs {
     json: bool,
 }
 
+/// Largest policy source the command reads; the operation's input slot
+/// allows the same.
+const POLICY_SOURCE_MAX_BYTES: u64 = 256 * 1024;
+
 fn run_node_policy_apply_command(argv: &[String], console: &crate::tty::Console) -> Result<()> {
     let Some(args) = parse_or_render_help::<NodePolicyApplyArgs>(argv, console)? else {
         return Ok(());
     };
-    let config =
-        ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
-            app_root: args.app_root,
-            ..Default::default()
-        })
-        .context("load local node location for policy apply")?;
-    let _state_lock = ryeos_node_runtime::state_lock::StateLock::acquire(
-        &ryeos_node_runtime::state_lock::default_lock_path(&config.app_root),
-    )
-    .context("node policy apply requires the daemon to be stopped")?;
-
-    let table = ryeos_node_runtime::node_policy::NodePolicyTable::new();
-    table
-        .get(&args.section)
-        .with_context(|| format!("unknown node-policy section `{}`", args.section))?;
-
-    let raw = lillux::read_regular_file_to_string_no_follow(&args.source)
-        .with_context(|| format!("read policy source {}", args.source.display()))?;
-    let body: serde_json::Value = serde_yaml::from_str(&raw)
-        .with_context(|| format!("parse policy source {}", args.source.display()))?;
-    if !body.is_object() {
-        anyhow::bail!("node policy source must contain a YAML mapping");
-    }
-    for forbidden in ["category", "section"] {
-        if body.get(forbidden).is_some() {
-            anyhow::bail!("node policy source declares path-owned field `{forbidden}`");
-        }
-    }
-
-    let identity = ryeos_node_runtime::identity::NodeIdentity::load(&config.node_signing_key_path)
-        .context("load node identity for policy apply")?;
-    let trust_store = ryeos_engine::trust::TrustStore::load(None, &config.runtime_config_dir())
-        .context("load trust store for current node policies")?;
-    // The replacement generation must stay the isolation policy of the host
-    // class the node's signed substrate identity binds.
-    let substrate = ryeos_node::load_verified_substrate_identity(&config.app_root)
-        .context("verify the node's substrate identity for policy apply")?;
-    let update = ryeos_node_runtime::node_policy::generation::prepare_policy_member_replacement(
-        &config.app_root,
-        &trust_store,
-        &table,
-        substrate.bound_host_class()?,
-        &args.section,
-        body,
-        &args.source,
+    let app_root = ryeos_node::NodeConfig::load_local(args.app_root.clone())?.app_root;
+    let policy =
+        crate::offline_apply::read_input(&args.source, "policy source", POLICY_SOURCE_MAX_BYTES)?;
+    // The request pins the generation it will publish. Computing it writes
+    // nothing; the operation recomputes and refuses before any change if the
+    // node's policy moved in between.
+    let policy_generation =
+        ryeos_node::offline_operation::handlers::prospective_policy_apply_digest(
+            &app_root,
+            &args.section,
+            &policy,
+        )?;
+    let host = crate::offline_apply::CliHost::new();
+    let applied = host.apply(
+        &app_root,
+        "node.policy-apply",
+        serde_json::to_value(
+            ryeos_node::offline_operation::handlers::PolicyApplyArguments {
+                section: args.section.clone(),
+            },
+        )?,
+        std::collections::BTreeMap::from([("policy".to_owned(), policy)]),
+        std::collections::BTreeMap::from([("policy_generation".to_owned(), policy_generation)]),
     )?;
-    let policy_dir = ryeos_node_runtime::node_policy::generation::publish_policy_update(
-        &config.app_root,
-        &update,
-        &identity,
-        &trust_store,
-        &_state_lock,
-    )
-    .context("atomically publish signed node policy generation")?;
-    ryeos_node::seal_init_completion_after_policy_update(
-        &config.app_root,
-        update.generation().digest(),
-        &_state_lock,
-    )
-    .context("commit updated node policy generation into initialized state")?;
-    let installed = policy_dir.join(format!("{}.yaml", args.section));
+    let installed = ryeos_node_runtime::node_policy::generation::policy_directory(&app_root)
+        .join(format!("{}.yaml", args.section));
 
     if args.json {
         crate::tty::write_json(&serde_json::json!({
             "status": "installed",
             "section": args.section,
             "path": installed,
-            "signer_fingerprint": identity.fingerprint(),
+            "signer_fingerprint": applied.result["signer_fingerprint"],
+            "receipt": applied.receipt.digest()?,
         }))?;
     } else {
         console.text(&format!(
@@ -646,30 +666,31 @@ fn run_node_replay_reset_command(argv: &[String], console: &crate::tty::Console)
     if !args.confirm {
         anyhow::bail!("resetting predecessor replay indexes requires --confirm");
     }
-    let config =
-        ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
-            app_root: args.app_root,
-            ..Default::default()
-        })
-        .context("load local node configuration for replay-index reset")?;
-    let _state_lock = ryeos_node_runtime::state_lock::StateLock::acquire(
-        &ryeos_node_runtime::state_lock::default_lock_path(&config.app_root),
-    )
-    .context("replay-index reset requires the daemon to be stopped")?;
-    let activation = ryeos_app::offline_native::reset_replay_indexes(&config, &_state_lock)
-        .context("activate current replay indexes through the offline native host")?;
-    let (path, report, facts) = (activation.database, activation.report, activation.facts);
+    let app_root = ryeos_node::NodeConfig::load_local(args.app_root.clone())?.app_root;
+    let host = crate::offline_apply::CliHost::new();
+    let applied = host.apply(
+        &app_root,
+        "node.reset.replay-indexes",
+        serde_json::json!({}),
+        std::collections::BTreeMap::new(),
+        std::collections::BTreeMap::new(),
+    )?;
+    let report = host
+        .take_captured()
+        .replay_indexes
+        .context("the replay-index reset reported no activation")?;
+    let path = applied.result["database"].clone();
     if args.json {
         crate::tty::write_json(&serde_json::json!({
             "status": "activated",
             "database": path,
             "replay_indexes": report,
-            "native_connections": facts.tickets_issued,
+            "native_connections": applied.result["native_connections"],
         }))?;
     } else {
         let mut status =
             crate::tty::StatusBanner::new(crate::tty::Tone::Success, "REPLAY INDEX RESET COMPLETE");
-        status.detail = Some(path.display().to_string());
+        status.detail = path.as_str().map(str::to_owned);
         status.rows = vec![
             crate::tty::Row::key_value("replay indexes", replay_reset_summary(report)),
             crate::tty::Row::key_value(
@@ -731,29 +752,47 @@ fn run_node_external_content_reset_command(
     if !args.dry_run && !args.confirm {
         anyhow::bail!("resetting predecessor external-content bindings requires --confirm");
     }
-    let config =
-        ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
-            app_root: args.app_root,
-            ..Default::default()
-        })
-        .context("load local node configuration for external-content binding reset")?;
-    let state_lock = ryeos_node_runtime::state_lock::StateLock::acquire(
-        &ryeos_node_runtime::state_lock::default_lock_path(&config.app_root),
-    )
-    .context("external-content binding reset requires the daemon to be stopped")?;
-    let reset = ryeos_app::offline_native::reset_external_content_bindings(
-        &config,
-        &state_lock,
-        args.dry_run,
-    )
-    .context("reset external-content bindings through the offline native host")?;
-    let bindings = reset.bindings;
+    let app_root = ryeos_node::NodeConfig::load_local(args.app_root.clone())?.app_root;
+    let (bindings, native_connections) = if args.dry_run {
+        // A preview changes nothing, so it is not an operation: it only needs
+        // the existing lock held read-only to prove the daemon is stopped.
+        let config =
+            ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
+                app_root: Some(app_root.clone()),
+                ..Default::default()
+            })
+            .context("load local node configuration for external-content binding reset")?;
+        let state_lock = ryeos_node_runtime::state_lock::StateLock::acquire_existing_read_only(
+            &ryeos_node_runtime::state_lock::default_lock_path(&config.app_root),
+        )
+        .context("external-content binding reset requires the daemon to be stopped")?;
+        let reset =
+            ryeos_app::offline_native::reset_external_content_bindings(&config, &state_lock, true)
+                .context("reset external-content bindings through the offline native host")?;
+        (
+            serde_json::json!(reset.bindings),
+            serde_json::json!(reset.facts.tickets_issued),
+        )
+    } else {
+        let host = crate::offline_apply::CliHost::new();
+        let applied = host.apply(
+            &app_root,
+            "node.reset.external-content-bindings",
+            serde_json::json!({}),
+            std::collections::BTreeMap::new(),
+            std::collections::BTreeMap::new(),
+        )?;
+        (
+            applied.result["bindings"].clone(),
+            applied.result["native_connections"].clone(),
+        )
+    };
     if args.json {
         crate::tty::write_json(&serde_json::json!({
             "status": if args.dry_run { "inspected" } else { "retired" },
             "bindings": bindings,
             "requires_reimport": !args.dry_run,
-            "native_connections": reset.facts.tickets_issued,
+            "native_connections": native_connections,
         }))?;
     } else if args.dry_run {
         console.text(&format!(
@@ -795,85 +834,27 @@ fn run_node_auth_reset_command(argv: &[String], console: &crate::tty::Console) -
     if !args.confirm {
         anyhow::bail!("resetting every authorized key requires --confirm");
     }
-    let config =
-        ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
-            app_root: args.app_root,
-            ..Default::default()
-        })
-        .context("load local node configuration for authorization reset")?;
-    let _state_lock = ryeos_node_runtime::state_lock::StateLock::acquire(
-        &ryeos_node_runtime::state_lock::default_lock_path(&config.app_root),
-    )
-    .context("authorization reset requires the daemon to be stopped")?;
-
-    let node = ryeos_node_runtime::identity::NodeIdentity::load(&config.node_signing_key_path)
-        .context("load node identity for authorization reset")?;
-    let operator =
-        ryeos_node_runtime::identity::NodeIdentity::load(&config.operator_signing_key_path)
-            .context("load operator identity for authorization reset")?;
-    let parent = config
-        .authorized_keys_dir
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("authorized-key namespace has no parent directory"))?;
-    fs::create_dir_all(parent)?;
-    if let Ok(metadata) = fs::symlink_metadata(&config.authorized_keys_dir)
-        && (metadata.file_type().is_symlink() || !metadata.file_type().is_dir())
-    {
-        anyhow::bail!(
-            "authorized-key namespace is not a regular directory: {}",
-            config.authorized_keys_dir.display()
-        );
-    }
-    let nonce = std::process::id();
-    let staging = parent.join(format!(".authorized_keys.reset-{nonce}"));
-    if staging.exists() {
-        anyhow::bail!(
-            "authorization reset staging paths already exist; inspect {}",
-            parent.display()
-        );
-    }
-    fs::create_dir(&staging)?;
-    let operator_key = base64::Engine::encode(
-        &base64::engine::general_purpose::STANDARD,
-        operator.verifying_key().as_bytes(),
-    );
-    ryeos_node_runtime::identity::write_authorized_key_toml(
-        &staging,
-        operator.fingerprint(),
-        &operator_key,
-        &["*".to_string()],
-        "bootstrap-authorized-user",
-        operator.fingerprint(),
-        &lillux::time::iso8601_now(),
-        node.signing_key(),
-        ryeos_node_runtime::identity::WildcardPolicy::AllowBootstrap,
+    let app_root = ryeos_node::NodeConfig::load_local(args.app_root.clone())?.app_root;
+    let host = crate::offline_apply::CliHost::new();
+    let applied = host.apply(
+        &app_root,
+        "node.reset.authorization",
+        serde_json::json!({}),
+        std::collections::BTreeMap::new(),
+        std::collections::BTreeMap::new(),
     )?;
-    lillux::sync_tree_durable(&staging)
-        .context("durably flush reset authorized-key namespace before publication")?;
-    let discarded = if config.authorized_keys_dir.exists() {
-        let count = fs::read_dir(&config.authorized_keys_dir)?.count();
-        // Exchange keeps the live namespace present at every instant. The
-        // exchanged staging path becomes the retired tree only after the new
-        // namespace is durably published in the parent directory.
-        lillux::atomic_exchange_paths(&config.authorized_keys_dir, &staging)
-            .map_err(anyhow::Error::from)
-            .context("atomically publish reset authorized-key namespace")?;
-        lillux::remove_dir_all_durable(&staging)
-            .context("durably remove retired authorized-key namespace")?;
-        count
-    } else {
-        lillux::rename_path_noreplace_durable(&staging, &config.authorized_keys_dir)
-            .map_err(anyhow::Error::from)
-            .context("durably publish initial authorized-key namespace")?;
-        0
-    };
-    let result = serde_json::json!({
-        "discarded_grants": discarded,
-        "operator_fingerprint": operator.fingerprint(),
-        "authorized_keys_dir": config.authorized_keys_dir,
-    });
+    let discarded = applied.receipt.body.discarded_grant_digests.len();
+    let operator = applied.result["operator_fingerprint"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
     if args.json {
-        crate::tty::write_json(&result)?;
+        crate::tty::write_json(&serde_json::json!({
+            "discarded_grants": discarded,
+            "operator_fingerprint": operator,
+            "authorized_keys_dir": applied.result["authorized_keys_dir"],
+            "receipt": applied.receipt.digest()?,
+        }))?;
     } else {
         let mut status = crate::tty::StatusBanner::new(
             crate::tty::Tone::Success,
@@ -881,7 +862,7 @@ fn run_node_auth_reset_command(argv: &[String], console: &crate::tty::Console) -
         );
         status.rows = vec![
             crate::tty::Row::key_value("discarded grants", discarded.to_string()),
-            crate::tty::Row::key_value("operator", operator.fingerprint()),
+            crate::tty::Row::key_value("operator", operator),
             crate::tty::Row::key_value("remote nodes", "re-admission required"),
         ];
         console.success(&status)?;
@@ -926,13 +907,29 @@ fn run_execution_history_scratch_command(
     if !args.dry_run && !args.confirm {
         anyhow::bail!("clearing execution-history reset scratch requires --confirm");
     }
-    let report = ryeos_app::execution_history_reset::repair_execution_history_scratch(
-        &ryeos_app::execution_history_reset::ExecutionHistoryScratchRepairOptions {
-            app_root: args.app_root,
-            dry_run: args.dry_run,
-        },
-    )
-    .context("execution-history scratch repair failed")?;
+    let report = if args.dry_run {
+        // A preview changes nothing, so it is not an operation.
+        ryeos_app::execution_history_reset::repair_execution_history_scratch(
+            &ryeos_app::execution_history_reset::ExecutionHistoryScratchRepairOptions {
+                app_root: args.app_root,
+                dry_run: true,
+            },
+        )
+        .context("execution-history scratch repair failed")?
+    } else {
+        let app_root = ryeos_node::NodeConfig::load_local(args.app_root.clone())?.app_root;
+        let host = crate::offline_apply::CliHost::new();
+        host.apply(
+            &app_root,
+            "node.reset.execution-history-scratch",
+            serde_json::json!({}),
+            std::collections::BTreeMap::new(),
+            std::collections::BTreeMap::new(),
+        )?;
+        host.take_captured()
+            .scratch
+            .context("the scratch repair reported nothing")?
+    };
     if args.json {
         crate::tty::write_json(&report)?;
         return Ok(());
@@ -1074,34 +1071,6 @@ impl ExecutionHistoryResetArgs {
     }
 }
 
-/// Whether the stopped node's installed, trusted composition selects the
-/// scheduler. The engine is built from the node's verified bundle
-/// registrations; an installed scheduler service that does not resolve or is
-/// not trusted refuses the reset.
-fn scheduler_selected_by_installed_composition(app_root: Option<PathBuf>) -> Result<bool> {
-    let config =
-        ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
-            app_root,
-            ..Default::default()
-        })
-        .context("load local node location for scheduler selection")?;
-    let snapshot = crate::node_descriptors::load_verified_snapshot(&config.app_root)
-        .context("load verified node composition for scheduler selection")?;
-    let bundle_roots = crate::effective_metadata::snapshot_bundle_roots(&snapshot);
-    let engine = crate::effective_metadata::build_effective_item_engine(
-        &config.app_root,
-        None,
-        &bundle_roots,
-    )
-    .context("build installed-composition engine for scheduler selection")?;
-    // A build that cannot run a selected scheduler refuses.
-    ryeos_api::scheduler_selection::resolve_scheduler_selection(
-        &engine,
-        cfg!(feature = "scheduling"),
-    )
-    .context("derive scheduler selection from the installed composition")
-}
-
 fn run_execution_history_reset_command(
     argv: &[String],
     console: &crate::tty::Console,
@@ -1111,63 +1080,79 @@ fn run_execution_history_reset_command(
     };
     args.validate()?;
 
-    let options = ryeos_app::execution_history_reset::ExecutionHistoryResetOptions {
-        app_root: args.app_root,
-        dry_run: args.dry_run,
-        discard_project_heads: args.include_project_heads,
-        schema_cut: args
-            .schema_cut_from
-            .zip(args.schema_cut_to)
-            .map(
-                |(from, to)| ryeos_app::execution_history_reset::ExecutionHistorySchemaCut {
-                    from,
-                    to,
-                },
-            ),
-        discard_unreadable_lifetime_fence_after_reboot: args
-            .discard_unreadable_lifetime_fence_after_reboot,
-    };
-    let mut progress =
+    let app_root = ryeos_node::NodeConfig::load_local(args.app_root.clone())?.app_root;
+    let progress =
         crate::tty::ExecutionHistoryResetProgress::new(!args.json, console.capabilities());
-    // The stopped node's installed, trusted composition decides whether the
-    // scheduler participant takes part, exactly as daemon startup decides it.
-    // An unselected scheduler is never opened or created; the reset then
-    // proves the runtime holds no scheduler namespace instead.
-    let scheduler_selected = scheduler_selected_by_installed_composition(options.app_root.clone())?;
-    #[cfg(feature = "scheduling")]
-    let scheduler_reset = ryeos_scheduler_service::SchedulerHistoryReset::new();
-    #[cfg(feature = "scheduling")]
-    let scheduler_participant: Option<
-        &dyn ryeos_app::execution_history_reset::SchedulerHistoryResetParticipant,
-    > = scheduler_selected.then_some(
-        &scheduler_reset
-            as &dyn ryeos_app::execution_history_reset::SchedulerHistoryResetParticipant,
-    );
-    #[cfg(not(feature = "scheduling"))]
-    let scheduler_participant: Option<
-        &dyn ryeos_app::execution_history_reset::SchedulerHistoryResetParticipant,
-    > = {
-        let _ = scheduler_selected;
-        None
-    };
-    let report = match progress.as_mut() {
-        Some(progress) => {
-            let mut observer =
-                |event: &ryeos_app::execution_history_reset::ExecutionHistoryResetProgress| {
-                    progress.observe(event);
-                };
-            ryeos_app::execution_history_reset::run_execution_history_reset_with_progress(
+    let (report, progress) = if args.dry_run {
+        // A preview changes nothing, so it is not an operation; it only needs
+        // the existing lock held read-only.
+        let options =
+            ryeos_app::execution_history_reset::ExecutionHistoryResetOptions {
+                app_root: Some(app_root.clone()),
+                dry_run: true,
+                discard_project_heads: args.include_project_heads,
+                schema_cut: args
+                    .schema_cut_from
+                    .zip(args.schema_cut_to)
+                    .map(|(from, to)| {
+                        ryeos_app::execution_history_reset::ExecutionHistorySchemaCut { from, to }
+                    }),
+                discard_unreadable_lifetime_fence_after_reboot: args
+                    .discard_unreadable_lifetime_fence_after_reboot,
+            };
+        // The stopped node's installed, trusted composition decides whether
+        // the scheduler participant takes part, exactly as daemon startup
+        // decides it. An unselected scheduler is never opened or created; the
+        // reset then proves the runtime holds no scheduler namespace instead.
+        let participant = crate::offline_apply::scheduler_participant(&app_root)?;
+        let mut progress = progress;
+        let report = match progress.as_mut() {
+            Some(progress) => {
+                let mut observer =
+                    |event: &ryeos_app::execution_history_reset::ExecutionHistoryResetProgress| {
+                        progress.observe(event);
+                    };
+                ryeos_app::execution_history_reset::run_execution_history_reset_with_progress(
+                    &options,
+                    participant.as_deref(),
+                    &mut observer,
+                )
+            }
+            None => ryeos_app::execution_history_reset::run_execution_history_reset(
                 &options,
-                scheduler_participant,
-                &mut observer,
-            )
+                participant.as_deref(),
+            ),
         }
-        None => ryeos_app::execution_history_reset::run_execution_history_reset(
-            &options,
-            scheduler_participant,
-        ),
-    }
-    .context("offline execution-history reset failed")?;
+        .context("offline execution-history reset failed")?;
+        (report, progress)
+    } else {
+        let host = crate::offline_apply::CliHost::new().with_progress(progress);
+        host.apply(
+            &app_root,
+            "node.reset.execution-history",
+            serde_json::to_value(
+                ryeos_node::offline_operation::handlers::ExecutionHistoryResetArguments {
+                    discard_project_heads: args.include_project_heads,
+                    schema_cut: args
+                        .schema_cut_from
+                        .zip(args.schema_cut_to)
+                        .map(|(from, to)| {
+                            ryeos_node::offline_operation::handlers::SchemaCutArguments { from, to }
+                        }),
+                    discard_unreadable_lifetime_fence_after_reboot: args
+                        .discard_unreadable_lifetime_fence_after_reboot,
+                },
+            )?,
+            std::collections::BTreeMap::new(),
+            std::collections::BTreeMap::new(),
+        )?;
+        host.finish_progress()?;
+        let report = host
+            .take_captured()
+            .execution_history
+            .context("the reset reported nothing")?;
+        (report, None)
+    };
     if args.json {
         crate::tty::write_json(&report)?;
         return Ok(());
@@ -1621,6 +1606,70 @@ async fn run_status_command(argv: &[String], console: &crate::tty::Console) -> R
     Ok(())
 }
 
+// ── ryeos node offline-operation facts ──────────────────────────────
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "ryeos node offline-operation facts",
+    about = "Print the node facts a signed offline-operation request is signed against",
+    long_about = "Read-only. Prints every precondition fact of the node and the ledger head, and the operations this build can apply with the facts each pins. Works with the daemon stopped, so an operator can sign a request for a node that cannot start. The daemon prints the same facts in its log on every start.",
+    no_binary_name = true
+)]
+struct NodeOfflineFactsArgs {
+    /// App root (parent of `.ai/`). Defaults to XDG data dir / ryeos.
+    #[arg(long)]
+    app_root: Option<PathBuf>,
+
+    /// Emit structured JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+fn run_node_offline_operation_facts_command(
+    argv: &[String],
+    console: &crate::tty::Console,
+) -> Result<()> {
+    let Some(args) = parse_or_render_help::<NodeOfflineFactsArgs>(argv, console)? else {
+        return Ok(());
+    };
+    let app_root = ryeos_node::NodeConfig::load_local(args.app_root)?.app_root;
+    let facts = ryeos_node::offline_operation::read_facts(&app_root)
+        .context("measure the node's offline-operation facts")?;
+    let operations = ryeos_node::offline_operation::table::operations();
+    if args.json {
+        crate::tty::write_json(&serde_json::json!({
+            "app_root": app_root,
+            "facts": facts,
+            "operations": operations.iter().map(|spec| serde_json::json!({
+                "operation": spec.id,
+                "scope": spec.scope(),
+                "authority_bearing": spec.authority_bearing,
+                "local_signer_only": spec.local_signer_only,
+                "pins": ryeos_node::offline_operation::facts::MANDATORY_FACTS
+                    .iter()
+                    .chain(spec.preconditions)
+                    .collect::<Vec<_>>(),
+                "inputs": spec.inputs.iter().map(|slot| serde_json::json!({
+                    "slot": slot.name,
+                    "max_bytes": slot.max_bytes,
+                    "required": slot.required,
+                })).collect::<Vec<_>>(),
+                "expected_result": spec.expected_result,
+            })).collect::<Vec<_>>(),
+        }))?;
+        return Ok(());
+    }
+    let mut status =
+        crate::tty::StatusBanner::new(crate::tty::Tone::Neutral, "OFFLINE-OPERATION FACTS");
+    status.detail = Some(app_root.display().to_string());
+    status.rows = facts
+        .iter()
+        .map(|(fact, value)| crate::tty::Row::key_value(fact.as_str(), value.clone()))
+        .collect();
+    console.status(&status)?;
+    Ok(())
+}
+
 // ── ryeos node allow-restart ────────────────────────────────────────
 
 #[derive(Parser, Debug)]
@@ -1646,37 +1695,33 @@ fn run_node_allow_restart_command(argv: &[String], console: &crate::tty::Console
     };
     let controller = LifecycleController::from_env(local_env(args.app_root)?);
     let app_root = controller.config().app_root.clone();
-    // A running daemon holds the state lock, so the clear refuses while the
-    // node is up and cannot race a stop that is recording an inhibition.
-    let state_lock = ryeos_node_runtime::state_lock::StateLock::acquire(
-        &ryeos_node_runtime::state_lock::default_lock_path(&app_root),
-    )
-    .context("allow-restart requires the node to be stopped")?;
-    let cleared = ryeos_node::lifecycle_marker::clear_restart_inhibition(
+    let host = crate::offline_apply::CliHost::new();
+    let applied = host.apply(
         &app_root,
-        &state_lock,
-        "ryeos node allow-restart",
+        "node.allow-restart",
+        serde_json::json!({}),
+        std::collections::BTreeMap::new(),
+        std::collections::BTreeMap::new(),
     )?;
+    let cleared = &applied.result["cleared"];
     if args.json {
         crate::tty::write_json(&serde_json::json!({ "app_root": app_root, "cleared": cleared }))?;
         return Ok(());
     }
-    let status = match &cleared {
-        Some(record) => {
-            let mut banner =
-                crate::tty::StatusBanner::new(crate::tty::Tone::Success, "RESTART ALLOWED");
-            banner.detail = Some(format!(
-                "cleared `{}` recorded at {}; the next start may proceed",
-                record.reason, record.recorded_at
-            ));
-            banner
-        }
-        None => {
-            let mut banner =
-                crate::tty::StatusBanner::new(crate::tty::Tone::Neutral, "NO RESTART INHIBITION");
-            banner.detail = Some(format!("{} has nothing to clear", app_root.display()));
-            banner
-        }
+    let status = if cleared.is_null() {
+        let mut banner =
+            crate::tty::StatusBanner::new(crate::tty::Tone::Neutral, "NO RESTART INHIBITION");
+        banner.detail = Some(format!("{} has nothing to clear", app_root.display()));
+        banner
+    } else {
+        let mut banner =
+            crate::tty::StatusBanner::new(crate::tty::Tone::Success, "RESTART ALLOWED");
+        banner.detail = Some(format!(
+            "cleared `{}` recorded at {}; the next start may proceed",
+            crate::offline_apply::text(cleared, "reason").unwrap_or("unknown"),
+            crate::offline_apply::text(cleared, "recorded_at").unwrap_or("unknown")
+        ));
+        banner
     };
     console.status(&status)?;
     Ok(())
@@ -1713,33 +1758,21 @@ fn run_node_capacity_reissue_command(argv: &[String], console: &crate::tty::Cons
     };
     let controller = LifecycleController::from_env(local_env(args.app_root)?);
     let app_root = controller.config().app_root.clone();
-    // A running daemon holds the state lock, so re-issuance refuses while the
-    // node is up: the live account owner is the only writer of a live node.
-    let state_lock = ryeos_node_runtime::state_lock::StateLock::acquire(
-        &ryeos_node_runtime::state_lock::default_lock_path(&app_root),
-    )
-    .context("capacity reissue requires the node to be stopped")?;
-    let operator_key_path = app_root
-        .join(ryeos_engine::AI_DIR)
-        .join("config/keys/signing/private_key.pem");
-    let operator_pem = zeroize::Zeroizing::new(String::from_utf8(
-        lillux::read_regular_file_bounded_no_follow(&operator_key_path, 32 * 1024)
-            .with_context(|| format!("read operator key {}", operator_key_path.display()))?,
-    )?);
-    let operator_key = {
-        use lillux::crypto::DecodePrivateKey as _;
-        lillux::crypto::SigningKey::from_pkcs8_pem(operator_pem.as_str())
-            .context("decode operator signing key")?
-    };
-    let report = ryeos_node::native_capacity::reissue_capacity(
-        ryeos_node::native_capacity::ReissueRequest {
-            app_root: &app_root,
-            state_lock: &state_lock,
-            operator_key: &operator_key,
-            reason: &args.reason,
-            command: "ryeos node capacity reissue",
-        },
+    // The signed request carries the reason; the library signs it with the
+    // operator key on this node's volume and applies it under the state lock a
+    // running daemon would hold.
+    let host = crate::offline_apply::CliHost::new();
+    let applied = host.apply(
+        &app_root,
+        "node.capacity.reissue",
+        serde_json::to_value(ryeos_node::offline_operation::handlers::CapacityArguments {
+            reason: args.reason.clone(),
+        })?,
+        std::collections::BTreeMap::new(),
+        std::collections::BTreeMap::new(),
     )?;
+    let report: ryeos_node::native_capacity::ReissueReport =
+        serde_json::from_value(applied.result).context("read the re-issuance report")?;
     if args.json {
         crate::tty::write_json(&serde_json::json!({ "app_root": app_root, "reissue": report }))?;
         return Ok(());
@@ -1829,33 +1862,18 @@ fn run_node_capacity_reanchor_command(
     };
     let controller = LifecycleController::from_env(local_env(args.app_root)?);
     let app_root = controller.config().app_root.clone();
-    // A running daemon holds the state lock, so re-anchoring refuses while the
-    // node is up.
-    let state_lock = ryeos_node_runtime::state_lock::StateLock::acquire(
-        &ryeos_node_runtime::state_lock::default_lock_path(&app_root),
-    )
-    .context("capacity reanchor requires the node to be stopped")?;
-    let operator_key_path = app_root
-        .join(ryeos_engine::AI_DIR)
-        .join("config/keys/signing/private_key.pem");
-    let operator_pem = zeroize::Zeroizing::new(String::from_utf8(
-        lillux::read_regular_file_bounded_no_follow(&operator_key_path, 32 * 1024)
-            .with_context(|| format!("read operator key {}", operator_key_path.display()))?,
-    )?);
-    let operator_key = {
-        use lillux::crypto::DecodePrivateKey as _;
-        lillux::crypto::SigningKey::from_pkcs8_pem(operator_pem.as_str())
-            .context("decode operator signing key")?
-    };
-    let report = ryeos_node::native_capacity::reanchor_capacity(
-        ryeos_node::native_capacity::ReanchorRequest {
-            app_root: &app_root,
-            state_lock: &state_lock,
-            operator_key: &operator_key,
-            reason: &args.reason,
-            command: "ryeos node capacity reanchor",
-        },
+    let host = crate::offline_apply::CliHost::new();
+    let applied = host.apply(
+        &app_root,
+        "node.capacity.reanchor",
+        serde_json::to_value(ryeos_node::offline_operation::handlers::CapacityArguments {
+            reason: args.reason.clone(),
+        })?,
+        std::collections::BTreeMap::new(),
+        std::collections::BTreeMap::new(),
     )?;
+    let report: ryeos_node::native_capacity::ReanchorReport =
+        serde_json::from_value(applied.result).context("read the re-anchor report")?;
     if args.json {
         crate::tty::write_json(&serde_json::json!({ "app_root": app_root, "reanchor": report }))?;
         return Ok(());
@@ -3554,7 +3572,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn capacity_reissue_refuses_while_the_state_lock_is_held_and_names_the_operator_key_next() {
+    fn capacity_reissue_refuses_while_the_state_lock_is_held_and_names_the_uninitialized_node_next()
+    {
         let root = tempfile::tempdir().unwrap();
         let lock_path = ryeos_node_runtime::state_lock::default_lock_path(root.path());
         let held = ryeos_node_runtime::state_lock::StateLock::acquire(&lock_path).unwrap();
@@ -3573,7 +3592,7 @@ mod tests {
         // before it reads a key or opens the account.
         let error = run_node_capacity_reissue_command(&argv, &console).unwrap_err();
         assert!(
-            format!("{error:#}").contains("requires the node to be stopped"),
+            format!("{error:#}").contains("state lock is held"),
             "{error:#}"
         );
         assert!(
@@ -3583,10 +3602,13 @@ mod tests {
                 .exists()
         );
         drop(held);
-        // With the lock free, the next refusal is the absent operator key of an
+        // With the lock free, the next refusal is the absent identity of an
         // uninitialized root; nothing about capacity has been touched.
         let error = run_node_capacity_reissue_command(&argv, &console).unwrap_err();
-        assert!(format!("{error:#}").contains("operator key"), "{error:#}");
+        assert!(
+            format!("{error:#}").contains("not initialized"),
+            "{error:#}"
+        );
         assert!(!root.path().join(".ai/config/onboarding").exists());
     }
 
@@ -3858,6 +3880,7 @@ mod tests {
             node_profile: "full".to_string(),
             host_class: "local".to_string(),
             trust_files: Vec::new(),
+            substrate_image_digest: None,
             app_root: None,
             confirm,
             json: false,

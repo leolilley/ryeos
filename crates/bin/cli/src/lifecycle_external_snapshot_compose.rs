@@ -2,24 +2,22 @@
 //! `snapshot-qualification-compose`: offline composition of the two
 //! node-signed bindings runtime snapshot production and qualification need.
 //!
-//! Both follow `compose`: authorization is filesystem access to the node's
-//! keys, the command refuses unless it holds the node's state lock (a running
+//! Both follow `compose`: the command builds the request and the
+//! offline-operation library applies it under the node's state lock (a running
 //! daemon would read the section while it is rewritten), the document is
 //! signed by the node identity and verified through the section's own parse
 //! before it is published, and the installed document id is printed. Provider,
 //! plan and region names are passed through to the section's validation.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
-use ryeos_app::node_config::sections::runtime_snapshot_production::compose::{
-    ProductionComposeReport, ProductionComposeRequest, ProductionLimits,
-    compose_runtime_snapshot_production_binding,
-};
-use ryeos_app::node_config::sections::runtime_snapshot_qualification::compose::{
-    QualificationComposeReport, QualificationComposeRequest, QualificationLimits,
-    compose_runtime_snapshot_qualification_binding,
+use ryeos_app::node_config::sections::runtime_snapshot_production::compose::ProductionComposeReport;
+use ryeos_app::node_config::sections::runtime_snapshot_qualification::compose::QualificationComposeReport;
+use ryeos_node::offline_operation::handlers::{
+    QualificationComposeArguments, SnapshotComposeArguments,
 };
 
 /// Largest input document the commands read (specs, consumer verifiers).
@@ -145,47 +143,32 @@ fn parse_args<T: Parser>(argv: &[String], console: &crate::tty::Console) -> Resu
     }
 }
 
-fn acquire_stopped_node(
-    app_root: &Path,
-    verb: &str,
-) -> Result<ryeos_node_runtime::state_lock::StateLock> {
-    // A running daemon holds the state lock, so composition refuses while the
-    // node is up: the live node is the only reader of its own sections.
-    ryeos_node_runtime::state_lock::StateLock::acquire(
-        &ryeos_node_runtime::state_lock::default_lock_path(app_root),
-    )
-    .with_context(|| format!("{verb} requires the node to be stopped"))
-}
-
 /// Entry point for `snapshot-compose`. `argv` excludes the verb words.
 pub fn run_snapshot_compose(argv: &[String], console: &crate::tty::Console) -> Result<()> {
     let Some(args) = parse_args::<SnapshotComposeArgs>(argv, console)? else {
         return Ok(());
     };
     let app_root = ryeos_node::NodeConfig::load_local(args.app_root.clone())?.app_root;
-    let state_lock = acquire_stopped_node(&app_root, "snapshot-compose")?;
-    let defaults = ProductionLimits::default();
-    let report = compose_runtime_snapshot_production_binding(ProductionComposeRequest {
-        app_root: &app_root,
-        state_lock: &state_lock,
-        id: args.id.clone(),
-        external_binding_id: args.binding.clone(),
-        snapshot_spec: read_bytes(&args.provider_spec, "snapshot production spec")?,
-        sandbox_group_id: args.sandbox_group_id.clone(),
-        region: args.region.clone(),
-        source_plan: args.source_plan.clone(),
-        limits: ProductionLimits {
-            contact_timeout_seconds: args
-                .contact_timeout_seconds
-                .unwrap_or(defaults.contact_timeout_seconds),
-            maximum_bootstrap_lifetime_seconds: args
-                .maximum_bootstrap_lifetime_seconds
-                .unwrap_or(defaults.maximum_bootstrap_lifetime_seconds),
-            maximum_upload_bytes: args
-                .maximum_upload_bytes
-                .unwrap_or(defaults.maximum_upload_bytes),
-        },
-    })?;
+    let spec = read_bytes(&args.provider_spec, "snapshot production spec")?;
+    let host = crate::offline_apply::CliHost::new();
+    let applied = host.apply(
+        &app_root,
+        "node.external-execution.snapshot-compose",
+        serde_json::to_value(SnapshotComposeArguments {
+            id: args.id.clone(),
+            binding: args.binding.clone(),
+            sandbox_group_id: args.sandbox_group_id.clone(),
+            region: args.region.clone(),
+            source_plan: args.source_plan.clone(),
+            contact_timeout_seconds: args.contact_timeout_seconds,
+            maximum_bootstrap_lifetime_seconds: args.maximum_bootstrap_lifetime_seconds,
+            maximum_upload_bytes: args.maximum_upload_bytes,
+        })?,
+        BTreeMap::from([("provider_spec".to_owned(), spec)]),
+        BTreeMap::new(),
+    )?;
+    let report: ProductionComposeReport =
+        serde_json::from_value(applied.result).context("read the composition report")?;
     if args.json {
         crate::tty::write_json(&serde_json::json!({
             "app_root": app_root,
@@ -208,32 +191,34 @@ pub fn run_snapshot_qualification_compose(
         return Ok(());
     };
     let app_root = ryeos_node::NodeConfig::load_local(args.app_root.clone())?.app_root;
-    let state_lock = acquire_stopped_node(&app_root, "snapshot-qualification-compose")?;
-    let defaults = QualificationLimits::default();
-    let consumer_verifiers = match &args.consumer_verifiers {
-        Some(path) => Some(
-            serde_json::from_slice(&read_bytes(path, "consumer verifiers")?)
-                .with_context(|| format!("parse consumer verifiers {}", path.display()))?,
-        ),
-        None => None,
-    };
-    let report = compose_runtime_snapshot_qualification_binding(QualificationComposeRequest {
-        app_root: &app_root,
-        state_lock: &state_lock,
-        id: args.id.clone(),
-        snapshot_binding_id: args.snapshot_binding.clone(),
-        provider_spec: read_bytes(&args.provider_spec, "provider spec")?,
-        verifier_artifact_hash: args.verifier.clone(),
-        consumer_verifiers,
-        limits: QualificationLimits {
-            contact_timeout_seconds: args
-                .contact_timeout_seconds
-                .unwrap_or(defaults.contact_timeout_seconds),
-            maximum_lifetime_seconds: args
-                .maximum_lifetime_seconds
-                .unwrap_or(defaults.maximum_lifetime_seconds),
-        },
-    })?;
+    let mut inputs = BTreeMap::from([(
+        "provider_spec".to_owned(),
+        read_bytes(&args.provider_spec, "provider spec")?,
+    )]);
+    if let Some(path) = &args.consumer_verifiers {
+        let bytes = read_bytes(path, "consumer verifiers")?;
+        // Parsed here only to refuse a malformed document before a request is
+        // built; the operation parses the same bytes again.
+        let _: serde_json::Value = serde_json::from_slice(&bytes)
+            .with_context(|| format!("parse consumer verifiers {}", path.display()))?;
+        inputs.insert("consumer_verifiers".to_owned(), bytes);
+    }
+    let host = crate::offline_apply::CliHost::new();
+    let applied = host.apply(
+        &app_root,
+        "node.external-execution.snapshot-qualification-compose",
+        serde_json::to_value(QualificationComposeArguments {
+            id: args.id.clone(),
+            snapshot_binding: args.snapshot_binding.clone(),
+            verifier: args.verifier.clone(),
+            contact_timeout_seconds: args.contact_timeout_seconds,
+            maximum_lifetime_seconds: args.maximum_lifetime_seconds,
+        })?,
+        inputs,
+        BTreeMap::new(),
+    )?;
+    let report: QualificationComposeReport =
+        serde_json::from_value(applied.result).context("read the composition report")?;
     if args.json {
         crate::tty::write_json(&serde_json::json!({
             "app_root": app_root,
@@ -406,7 +391,7 @@ mod tests {
     }
 
     #[test]
-    fn both_verbs_refuse_while_the_state_lock_is_held() {
+    fn both_verbs_read_their_inputs_before_they_touch_the_node() {
         let root = tempfile::tempdir().unwrap();
         let lock_path = ryeos_node_runtime::state_lock::default_lock_path(root.path());
         let held = ryeos_node_runtime::state_lock::StateLock::acquire(&lock_path).unwrap();
@@ -430,7 +415,7 @@ mod tests {
         ]);
         let error = run_snapshot_compose(&production, &console()).unwrap_err();
         assert!(
-            format!("{error:#}").contains("requires the node to be stopped"),
+            format!("{error:#}").contains("snapshot production spec"),
             "{error:#}"
         );
         let qualification = argv(&[
@@ -447,10 +432,7 @@ mod tests {
             "--json",
         ]);
         let error = run_snapshot_qualification_compose(&qualification, &console()).unwrap_err();
-        assert!(
-            format!("{error:#}").contains("requires the node to be stopped"),
-            "{error:#}"
-        );
+        assert!(format!("{error:#}").contains("provider spec"), "{error:#}");
         assert!(
             !root
                 .path()

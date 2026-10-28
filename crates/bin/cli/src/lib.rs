@@ -17,6 +17,7 @@ mod lifecycle_external_compose;
 mod lifecycle_external_credential;
 mod lifecycle_external_snapshot_compose;
 pub mod node_descriptors;
+pub mod offline_apply;
 pub mod offline_dispatch;
 pub mod presenter;
 pub mod project_resolve;

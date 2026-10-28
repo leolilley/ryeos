@@ -40,6 +40,17 @@ pub struct Cli {
     #[arg(long)]
     pub force: bool,
 
+    /// Root of the immutable image seed tree this node runs from. A signed
+    /// offline policy replacement is seeded from it and from nothing else;
+    /// without it that operation is refused. Needs `--substrate-image-digest`.
+    #[arg(long, requires = "substrate_image_digest")]
+    pub image_seed_root: Option<PathBuf>,
+
+    /// Digest of the substrate image this process runs, `sha256:<hex>`.
+    /// A signed offline policy replacement names the image it is for.
+    #[arg(long, requires = "image_seed_root")]
+    pub substrate_image_digest: Option<String>,
+
     /// Test-only selection paired with a Lillux-owned inherited channel.
     #[cfg(feature = "handoff-test-support")]
     #[arg(long, hide = true)]
