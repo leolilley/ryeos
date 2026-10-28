@@ -1538,6 +1538,15 @@ async fn run_init_command(argv: &[String], console: &crate::tty::Console) -> Res
             crate::tty::Row::key_value("vault", report.vault_pubkey_fingerprint),
             crate::tty::Row::key_value("bundles", report.bundles_installed.join(", ")),
         ];
+        if let Some(replacement) = &report.substrate_image_replacement {
+            status.rows.push(crate::tty::Row::key_value(
+                "substrate image",
+                format!(
+                    "{} -> {}",
+                    replacement.previous_image_digest, replacement.new_image_digest
+                ),
+            ));
+        }
         console.success(&status)?;
     }
     Ok(())

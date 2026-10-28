@@ -411,6 +411,11 @@ fn require_substrate_replacement_flags(opts: &InitOptions) -> Result<()> {
             "--replace-substrate-identity is valid only together with --replace-node-policy-generation"
         );
     }
+    if opts.substrate_identity.is_none() {
+        bail!(
+            "--replace-substrate-identity needs the offered substrate identity (--substrate-image-digest/--substrate-protocol)"
+        );
+    }
     Ok(())
 }
 
@@ -3673,6 +3678,7 @@ mod tests {
         let error = run_init(&opts).expect_err("a host-class change is refused");
         assert!(format!("{error:#}").contains("host class"), "{error:#}");
         assert_eq!(fs::read(substrate_identity_path(&state)).unwrap(), before);
+        assert!(verify_init_completion(&state).unwrap().is_some());
     }
 
     #[test]
@@ -3694,6 +3700,15 @@ mod tests {
         let error = run_init(&opts).expect_err("no confirmation");
         assert!(
             format!("{error:#}").contains("required together"),
+            "{error:#}"
+        );
+        assert!(!substrate_identity_path(&state).exists());
+
+        opts.confirm_substrate_identity_replacement = true;
+        opts.substrate_identity = None;
+        let error = run_init(&opts).expect_err("no offered identity");
+        assert!(
+            format!("{error:#}").contains("needs the offered substrate identity"),
             "{error:#}"
         );
         assert!(!substrate_identity_path(&state).exists());
