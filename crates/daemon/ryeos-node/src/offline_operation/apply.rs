@@ -994,8 +994,8 @@ pub fn apply_local_with_options(
         .collect();
     let by_digest: BTreeMap<String, Vec<u8>> = draft
         .inputs
-        .into_iter()
-        .map(|(_, bytes)| (lillux::sha256_hex(&bytes), bytes))
+        .into_values()
+        .map(|bytes| (lillux::sha256_hex(&bytes), bytes))
         .collect();
     let request = SignedRequest::sign(
         RequestBody {
