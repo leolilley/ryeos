@@ -91,6 +91,75 @@ pub fn scheduler_selected_by_composition(engine: &ryeos_engine::engine::Engine) 
     })
 }
 
+/// The scheduler selection of a stopped node, read from its verified node
+/// configuration and installed bundles: the engine is built from the node's
+/// registered bundle generation, exactly as the stopped-node maintenance
+/// commands and the daemon's offline operations need it. Callers pass
+/// `cfg!(feature = "scheduling")` for `build_has_scheduler`.
+pub fn scheduler_selected_for_app_root(
+    app_root: &std::path::Path,
+    build_has_scheduler: bool,
+) -> Result<bool> {
+    use ryeos_app::node_config::NodeConfigTable;
+    use ryeos_app::node_config::loader::NodeConfigLoader;
+    use ryeos_node_runtime::bundle_bootstrap::BundleBootstrapLoader;
+    use ryeos_node_runtime::node_policy::NodePolicyTable;
+    use ryeos_node_runtime::node_policy::sections::command_registration::CommandRegistrationAuthority;
+    use ryeos_node_runtime::node_policy::sections::execution::NodeExecutionAdmissionPolicy;
+
+    let trust_store = ryeos_engine::trust::TrustStore::load(
+        None,
+        &ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).config(),
+    )
+    .context("load trust store for scheduler selection")?;
+    let policy_table = NodePolicyTable::new();
+    let policy =
+        ryeos_node_runtime::node_policy::load_snapshot(app_root, &trust_store, &policy_table)
+            .context("load verified node policy generation for scheduler selection")?;
+    let bundles = BundleBootstrapLoader {
+        app_root,
+        trust_store: &trust_store,
+    }
+    .load_bundle_section()
+    .context("load verified node bundle registrations for scheduler selection")?;
+    let snapshot = NodeConfigLoader {
+        app_root,
+        trust_store: &trust_store,
+    }
+    .load_full(
+        &NodeConfigTable::new(),
+        &bundles,
+        policy.require::<CommandRegistrationAuthority>()?,
+        &policy_table,
+    )
+    .context("load verified node config for scheduler selection")?;
+    let bundle_roots: Vec<std::path::PathBuf> = snapshot
+        .bundles
+        .iter()
+        .map(|record| record.path.clone())
+        .collect();
+    let config =
+        ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
+            app_root: Some(app_root.to_path_buf()),
+            ..Default::default()
+        })
+        .context("load local node location for scheduler selection")?;
+    let isolation = ryeos_node_runtime::engine_init::load_locked_registered_definition_isolation(
+        &config.app_root,
+    )
+    .context("load node isolation policy for scheduler selection")?;
+    let engine = ryeos_node_runtime::engine_init::build_registered_engine_for_roots(
+        &config,
+        &bundle_roots,
+        None,
+        None,
+        isolation,
+        policy.require::<NodeExecutionAdmissionPolicy>()?,
+    )
+    .context("build installed-composition engine for scheduler selection")?;
+    resolve_scheduler_selection(&engine, build_has_scheduler)
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};

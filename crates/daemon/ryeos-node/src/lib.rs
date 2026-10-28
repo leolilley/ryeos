@@ -15,6 +15,7 @@ pub mod lifecycle_wire;
 pub mod metadata;
 pub mod model_setup;
 pub mod native_capacity;
+pub mod offline_operation;
 pub mod provider_env;
 pub mod start;
 pub mod status;
@@ -35,7 +36,7 @@ pub use init::{
     ProspectiveInitCompletionInput, SubstrateIdentity, load_trusted_init_node_profile,
     load_verified_substrate_identity, preflight_existing_policy_generation,
     prepare_bundle_set_init_completion, prepare_prospective_init_completion, run_init,
-    run_init_with_operator_ceremony, run_init_with_progress,
+    run_init_under_lock, run_init_with_operator_ceremony, run_init_with_progress,
     seal_init_completion_after_bundle_registration_change,
     seal_init_completion_after_policy_update, verify_init_completion,
 };

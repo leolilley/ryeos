@@ -172,7 +172,7 @@ pub fn acknowledge_startup_failure(state_dir: &Path) -> anyhow::Result<()> {
     directory.remove_pinned_regular_if_same(&marker)
 }
 
-const RESTART_INHIBIT_FILE: &str = "restart-inhibited.json";
+pub(crate) const RESTART_INHIBIT_FILE: &str = "restart-inhibited.json";
 const MAX_RESTART_INHIBIT_BYTES: u64 = 16 * 1024;
 
 /// Durable record that this node stopped itself in a state where an
