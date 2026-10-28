@@ -218,14 +218,8 @@ pub fn accept(
         )
         .into());
     }
-    for (digest, bytes) in inputs {
-        store
-            .queue_input(digest, bytes)
-            .map_err(|error| DeliveryError::Failed(error.context("queue an input")))?;
-    }
-    store
-        .queue_request(&name, &bytes)
-        .map_err(|error| DeliveryError::Failed(error.context("queue the request")))?;
+    queue_with_cleanup(&store, inputs, || store.queue_request(&name, &bytes))
+        .map_err(DeliveryError::Failed)?;
     Ok(accepted)
 }
 
@@ -243,6 +237,45 @@ pub fn local_facts_report(app_root: &Path) -> Result<Value> {
 /// [`status_report`] for a node read from its volume, running or not.
 pub fn local_status_report(app_root: &Path) -> Result<Value> {
     status_report(app_root, &local_node(app_root)?)
+}
+
+/// Queue the inputs, then the request. When the request cannot be queued the
+/// inputs written for it are removed again (those that were already in the
+/// inbox belong to another request and stay), so a failed delivery leaves
+/// nothing behind. A clean-up failure is named in the error.
+fn queue_with_cleanup(
+    store: &Store,
+    inputs: &BTreeMap<String, Vec<u8>>,
+    queue_request: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    let mut written = Vec::new();
+    let outcome = (|| {
+        for (digest, bytes) in inputs {
+            let present = store.inbox_dir().join(format!("{digest}.input")).exists();
+            store.queue_input(digest, bytes)?;
+            if !present {
+                written.push(digest.clone());
+            }
+        }
+        queue_request()
+    })();
+    let Err(error) = outcome else {
+        return Ok(());
+    };
+    let mut leftovers = Vec::new();
+    for digest in &written {
+        if let Err(remove) = store.remove_input(digest) {
+            leftovers.push(format!("{digest}: {remove:#}"));
+        }
+    }
+    if leftovers.is_empty() {
+        Err(error.context("queue the request"))
+    } else {
+        Err(error.context(format!(
+            "queue the request; inputs left in the inbox: {}",
+            leftovers.join("; ")
+        )))
+    }
 }
 
 /// The node's offline-operation facts and ledger tip, for the operator who
@@ -629,6 +662,29 @@ mod tests {
             Utc::now(),
         );
         assert_eq!(refused(result), RefusalReason::InvalidInputs);
+        assert!(fx.inbox().is_empty());
+    }
+
+    #[test]
+    fn a_request_that_cannot_be_queued_takes_its_inputs_back() {
+        let fx = fixture();
+        let store = Store::for_app_root(fx.path());
+        store.create_layout().unwrap();
+        let kept = b"already queued for another request".to_vec();
+        let kept_digest = lillux::sha256_hex(&kept);
+        store.queue_input(&kept_digest, &kept).unwrap();
+        let fresh = b"written for this delivery".to_vec();
+        let inputs = BTreeMap::from([
+            (kept_digest.clone(), kept),
+            (lillux::sha256_hex(&fresh), fresh),
+        ]);
+        let result = queue_with_cleanup(&store, &inputs, || anyhow::bail!("disk full"));
+        assert!(format!("{:#}", result.unwrap_err()).contains("disk full"));
+        assert_eq!(fx.inbox(), [format!("{kept_digest}.input")]);
+        // With nothing else queued, a refused delivery leaves an empty inbox.
+        store.remove_input(&kept_digest).unwrap();
+        let alone = BTreeMap::from([(lillux::sha256_hex(b"x"), b"x".to_vec())]);
+        assert!(queue_with_cleanup(&store, &alone, || anyhow::bail!("no")).is_err());
         assert!(fx.inbox().is_empty());
     }
 

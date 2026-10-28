@@ -279,18 +279,20 @@ refuse_retired_environment() {
   fi
 }
 
-# Refuse to seed an app root that is not fresh. A node that has an identity or
-# a completed init must not be silently re-initialized under this image's
-# profile because its bundle directory went missing.
+# Refuse to seed an app root that is not fresh. A node with a completed init
+# or a published policy generation (the markers the daemon treats as
+# initialized) must not be silently re-initialized under this image's profile
+# because its bundle directory went missing. An identity alone is what a first
+# init that died before completion leaves, and it is seeded again.
 require_fresh_app_root() {
   local app_root="$1"
   local held
 
   for held in \
-    "$app_root/.ai/node/identity/private_key.pem" \
-    "$app_root/.ai/config/onboarding/init-completion.json"; do
+    "$app_root/.ai/config/onboarding/init-completion.json" \
+    "$app_root/.ai/node/policies"; do
     if [[ -e "$held" || -L "$held" ]]; then
-      echo "[entrypoint] refusing to start: the installed bundle generation is absent but $held exists. This app root is not a fresh volume, so it is not re-seeded from the image; restore the bundle generation, or start a fresh app root" >&2
+      echo "[entrypoint] refusing to start: the installed bundle generation is absent but $held exists. This app root is initialized, so it is not re-seeded from the image; restore the bundle generation, or start a fresh app root" >&2
       return 1
     fi
   done

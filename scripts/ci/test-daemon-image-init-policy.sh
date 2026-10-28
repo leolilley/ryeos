@@ -538,18 +538,19 @@ fi
     fi
     unset RYEOS_EXECUTION_HISTORY_SCHEMA_CUT
 
-    # A volume holding a node identity or a completed init is never re-seeded
-    # because its bundle directory is missing.
+    # An initialized volume (a completed init or a policy generation) is never
+    # re-seeded because its bundle directory is missing; an identity alone is
+    # what an init that died early leaves, and is seeded again.
     fresh_root="$policy_test_root/fresh-root"
-    mkdir -p "$fresh_root/.ai"
-    require_fresh_app_root "$fresh_root"
     mkdir -p "$fresh_root/.ai/node/identity"
     : > "$fresh_root/.ai/node/identity/private_key.pem"
+    require_fresh_app_root "$fresh_root"
+    mkdir -p "$fresh_root/.ai/node/policies"
     if require_fresh_app_root "$fresh_root" >/dev/null 2>&1; then
-        echo "entrypoint re-seeded an app root holding a node identity" >&2
+        echo "entrypoint re-seeded an app root holding a policy generation" >&2
         exit 1
     fi
-    rm -rf "$fresh_root/.ai/node"
+    rm -rf "$fresh_root/.ai/node/policies"
     mkdir -p "$fresh_root/.ai/config/onboarding"
     : > "$fresh_root/.ai/config/onboarding/init-completion.json"
     if require_fresh_app_root "$fresh_root" >/dev/null 2>&1; then
