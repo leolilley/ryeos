@@ -14,6 +14,7 @@ use serde_json::{Value, json};
 use super::*;
 use crate::offline_operation::contract::genesis_ledger_head;
 use crate::offline_operation::contract::{MAX_REQUEST_BYTES, SignedRefusal};
+use crate::offline_operation::envelope::authorized_keys_dir;
 use crate::offline_operation::facts::{FACT_POLICY_GENERATION, FACT_RESTART_INHIBITION};
 use crate::offline_operation::host::BareHost;
 

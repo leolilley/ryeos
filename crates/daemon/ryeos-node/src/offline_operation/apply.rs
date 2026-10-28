@@ -936,6 +936,7 @@ pub struct LocalDraft {
     pub expected_result: BTreeMap<String, String>,
 }
 
+#[derive(Debug)]
 pub struct LocalApplied {
     pub receipt: SignedReceipt,
     pub result: Value,
