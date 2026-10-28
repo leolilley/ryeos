@@ -229,6 +229,22 @@ pub fn accept(
     Ok(accepted)
 }
 
+fn local_node(app_root: &Path) -> Result<NodeIdentity> {
+    super::apply::node_identity(app_root)
+        .map_err(|error| anyhow::anyhow!("{error}"))?
+        .context("the node has no identity; it is not initialized")
+}
+
+/// [`facts_report`] for a node read from its volume, running or not.
+pub fn local_facts_report(app_root: &Path) -> Result<Value> {
+    facts_report(app_root, &local_node(app_root)?)
+}
+
+/// [`status_report`] for a node read from its volume, running or not.
+pub fn local_status_report(app_root: &Path) -> Result<Value> {
+    status_report(app_root, &local_node(app_root)?)
+}
+
 /// The node's offline-operation facts and ledger tip, for the operator who
 /// signs against them.
 pub fn facts_report(app_root: &Path, node: &NodeIdentity) -> Result<Value> {

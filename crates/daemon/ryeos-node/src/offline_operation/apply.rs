@@ -172,7 +172,7 @@ impl ApplyReport {
     }
 }
 
-fn node_identity(app_root: &Path) -> Result<Option<NodeIdentity>, String> {
+pub(super) fn node_identity(app_root: &Path) -> Result<Option<NodeIdentity>, String> {
     let path = RuntimeRoot::new(app_root.to_path_buf()).node_signing_key_path();
     match lillux::read_optional_regular_file_bounded_no_follow(&path, 64 * 1024) {
         Ok(None) => Ok(None),
@@ -1480,6 +1480,16 @@ pub fn read_facts(app_root: &Path) -> Result<NodeFacts> {
         Err(_) => "unreadable".to_owned(),
     };
     Ok(measure(app_root, &head))
+}
+
+/// The fingerprint of this node's identity key, for the operator who signs a
+/// request for it.
+pub fn read_node_fingerprint(app_root: &Path) -> Result<String> {
+    Ok(node_identity(app_root)
+        .map_err(|error| anyhow!("{error}"))?
+        .context("the node has no identity; it is not initialized")?
+        .fingerprint()
+        .to_owned())
 }
 
 /// The node's ledger chain tip, verified.
