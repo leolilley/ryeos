@@ -235,7 +235,13 @@ impl FilesystemIdentity {
         {
             use std::os::unix::fs::MetadataExt as _;
             let st_dev = file.metadata()?.dev();
-            select_filesystem_identity(probe_uuid(file), st_dev, subvolume_probe(file)?)
+            // The UUID ioctl needs a real descriptor. A path-only descriptor
+            // (an exact process root, an inherited directory handle, a pin)
+            // is reopened first; any other failure of the query stays an
+            // error.
+            let reopened = reopen_path_only(file)?;
+            let queried = reopened.as_ref().unwrap_or(file);
+            select_filesystem_identity(probe_uuid(queried), st_dev, subvolume_probe(queried)?)
         }
     }
 
@@ -268,6 +274,61 @@ impl FilesystemIdentity {
             Ok(identity)
         }
     }
+}
+
+/// A real read-only descriptor for `file` when it is a path-only (`O_PATH`)
+/// descriptor, else `None`; the filesystem UUID ioctl needs a real one. A
+/// directory is reopened relative to itself. Anything else is reopened
+/// through its own `/proc/self/fd` entry, which names the same inode, and the
+/// result is refused unless it still is that inode. A descriptor that cannot
+/// be reopened (for instance a file nobody may read) is an error, never a
+/// silent fallback.
+#[cfg(target_os = "linux")]
+fn reopen_path_only(file: &File) -> Result<Option<File>> {
+    use std::os::fd::{AsRawFd as _, FromRawFd as _};
+    use std::os::unix::fs::MetadataExt as _;
+    // SAFETY: F_GETFL only reads the descriptor's status flags.
+    let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
+    if flags < 0 {
+        return Err(std::io::Error::last_os_error()).context("read descriptor status flags");
+    }
+    if flags & libc::O_PATH == 0 {
+        return Ok(None);
+    }
+    let metadata = file.metadata()?;
+    // SAFETY: both calls name the inode the descriptor itself holds and return
+    // a new descriptor that nothing else owns.
+    let descriptor = unsafe {
+        if metadata.is_dir() {
+            libc::openat(
+                file.as_raw_fd(),
+                c".".as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+            )
+        } else {
+            let path = std::ffi::CString::new(format!("/proc/self/fd/{}", file.as_raw_fd()))?;
+            libc::open(
+                path.as_ptr(),
+                libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NONBLOCK | libc::O_NOCTTY,
+            )
+        }
+    };
+    if descriptor < 0 {
+        return Err(std::io::Error::last_os_error())
+            .context("reopen path-only descriptor for its filesystem identity");
+    }
+    // SAFETY: open returned a new descriptor that nothing else owns.
+    let reopened = unsafe { File::from_raw_fd(descriptor) };
+    let after = reopened.metadata()?;
+    if (after.dev(), after.ino()) != (metadata.dev(), metadata.ino()) {
+        bail!("path-only descriptor changed identity while it was reopened");
+    }
+    Ok(Some(reopened))
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn reopen_path_only(_file: &File) -> Result<Option<File>> {
+    Ok(None)
 }
 
 /// `STATX_SUBVOL` (Linux 6.10).
@@ -615,6 +676,62 @@ mod tests {
         assert_ne!(with, without);
         assert!(
             serde_json::from_str::<FilesystemIdentity>(r#"{"subvolume":"x","uuid":"ab"}"#).is_err()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_path_only_directory_and_procfs_have_identities() {
+        use std::os::fd::FromRawFd as _;
+        let open_path = |path: &std::ffi::CStr| {
+            // SAFETY: the path is NUL-terminated; the descriptor returned is
+            // new and owned by the File built from it.
+            let descriptor = unsafe {
+                libc::open(
+                    path.as_ptr(),
+                    libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC,
+                )
+            };
+            assert!(descriptor >= 0, "open {path:?}");
+            unsafe { File::from_raw_fd(descriptor) }
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let path = std::ffi::CString::new(directory.path().to_str().unwrap()).unwrap();
+        let path_only = open_path(&path);
+        let real = File::open(directory.path()).unwrap();
+        assert_eq!(
+            FilesystemIdentity::of_descriptor(&path_only).unwrap(),
+            FilesystemIdentity::of_descriptor(&real).unwrap()
+        );
+        // procfs has no UUID: the ioctl is refused and the device number is
+        // the identity, for a real and a path-only descriptor alike.
+        let proc_path_only = open_path(c"/proc");
+        let proc_real = File::open("/proc").unwrap();
+        let proc_identity = FilesystemIdentity::of_descriptor(&proc_path_only).unwrap();
+        assert_eq!(
+            proc_identity.stability(),
+            IdentityStability::AttachmentBound
+        );
+        assert_eq!(
+            proc_identity,
+            FilesystemIdentity::of_descriptor(&proc_real).unwrap()
+        );
+        // A path-only regular file resolves to the same identity as a real one.
+        let file_path = directory.path().join("regular");
+        std::fs::write(&file_path, b"x").unwrap();
+        let c_file = std::ffi::CString::new(file_path.to_str().unwrap()).unwrap();
+        // SAFETY: NUL-terminated path; the returned descriptor is owned below.
+        let descriptor = unsafe {
+            libc::open(
+                c_file.as_ptr(),
+                libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        assert!(descriptor >= 0);
+        let path_only_file = unsafe { File::from_raw_fd(descriptor) };
+        assert_eq!(
+            FilesystemIdentity::of_descriptor(&path_only_file).unwrap(),
+            FilesystemIdentity::of_descriptor(&File::open(&file_path).unwrap()).unwrap()
         );
     }
 

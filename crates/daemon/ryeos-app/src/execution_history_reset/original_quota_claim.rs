@@ -329,8 +329,8 @@ pub(super) fn fixture_signed_reservation(
         inspection: OriginalInspectionPlan::original(mode, false, None, &sources),
         operational_source: serde_json::from_value(serde_json::json!({
             "directory_identity": json(runtime),
-            "roles": [{"device": 1, "inode": 2, "byte_length": 0}, null, null, null],
-            "marker": {"device": 1, "inode": 3, "byte_length":
+            "roles": [{"file": {"filesystem": {"device": 1}, "inode": 2}, "byte_length": 0}, null, null, null],
+            "marker": {"file": {"filesystem": {"device": 1}, "inode": 3}, "byte_length":
                 ryeos_state::operational::OPERATIONAL_INITIALIZED_CONTENT.len()}
         }))
         .unwrap(),
@@ -5376,8 +5376,8 @@ mod clock_controls {
             clock_binding: "f".repeat(64),
             operational_source: serde_json::from_value(serde_json::json!({
                 "directory_identity":"{}",
-                "roles":[{"device":1,"inode":2,"byte_length":0},null,null,null],
-                "marker":{"device":1,"inode":3,"byte_length":
+                "roles":[{"file":{"filesystem":{"device":1},"inode":2},"byte_length":0},null,null,null],
+                "marker":{"file":{"filesystem":{"device":1},"inode":3},"byte_length":
                     ryeos_state::operational::OPERATIONAL_INITIALIZED_CONTENT.len()}
             }))
             .unwrap(),
