@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-26T23:53:56Z:2fcb3f6d38c564b3dfb9e12d79903aa2412bdc2a8f87e34556d4d671b5ed0d80:5m2Q/gpp2bA/dsQ9gl1iXGGoxfmRH8pkgw/pxeuQnCBOVxVyGwKVj5oy0f6Pa3UHOq7i4aGluEd3P91ZH4BsBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-28T06:18:02Z:eedff12640b74f4beade78f1988d42eb886922a971fb1d858bdbf9d752b73251:d8od0nXlD21I7kvYuWs3XVWRIi1Ul+jfBwlrIyajo+v9CwmMsR3qVkeOouAhZxft6Pk1C6PfTbvJ9rvvWCmdAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Controller of remote Codex authoring leases: runs the Codex app server
 # and the render-sandbox lease adapter, and runs no schedules.
 schema: 1
@@ -375,17 +375,20 @@ policies:
     declared_roots:
       products:
         path: "{app_root}/imports/products"
+    # Every managed-activation component must fit these import limits. The
+    # checker runtime is a CPython tree of 4480 entries at most 11 levels deep,
+    # so the entry and depth limits are sized for that tree; the byte limits
+    # stay the standard profile's.
     limits:
-      max_depth: 8
-      max_entries: 64
+      max_depth: 11
+      max_entries: 4480
       max_file_bytes: 268435456
       max_total_bytes: 536870912
       store_budget_bytes: 1073741824
       minimum_free_bytes: 1073741824
-    # The controller activates only the pinned Codex package, one archive
-    # from releases.openai.com within its own declared bounds, so these are
-    # the standard profile's limits: none of the wider development-product
-    # limits or GitHub release hosts a hosted workflow node admits.
+    # The controller fetches only from releases.openai.com; the checker
+    # runtime, whose release host is not admitted, arrives through the
+    # declared products root as an offline activation.
     managed_activation:
       enabled: true
       limits:

@@ -3620,10 +3620,10 @@ impl PinnedDirectory {
                 "descriptor is not a regular file"
             );
             self.require_same_mount(pin)?;
-            // The pin's own descriptor supplies the subvolume, which must
-            // match the parent's; the UUID comes from the parent.
+            // `fstatfs` answers for a path-only descriptor, so the pin
+            // names its own filesystem.
             Ok(PinnedRegularFileIdentity {
-                filesystem: FilesystemIdentity::of_parent_and_entry(&self.directory, pin)?,
+                filesystem: FilesystemIdentity::of_descriptor(pin)?,
                 inode: observed.inode,
             })
         }

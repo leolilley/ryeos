@@ -667,12 +667,20 @@ smoke_step="$(sed -n '/^      - name: First-boot init smoke$/,$p' "$composition_
     echo "composition workflow must carry a First-boot init smoke step" >&2
     exit 1
 }
-for target in core core-scheduling core-workflow core-knowledge standard central-host local-inference hosted-workflow bundle-source f5r-controller; do
-    grep -Eq "^ +for target in .*\\b$target\\b" <<<"$smoke_step" || {
-        echo "composition first-boot init smoke does not cover target $target" >&2
-        exit 1
-    }
-done
+# The smoke boots exactly the images the bake pushed, read from its
+# metadata, and an undirected dispatch bakes the whole composition group.
+grep -Fq 'built="$(jq -r '"'"'to_entries[] | select((.value | type) == "object" and (.value | has("containerimage.digest"))) | .key'"'"' <<<"$BAKE_METADATA" | sort)"' <<<"$smoke_step" || {
+    echo "composition first-boot init smoke must cover every image the bake pushed" >&2
+    exit 1
+}
+grep -Eq '^ +for target in \$built; do$' <<<"$smoke_step" || {
+    echo "composition first-boot init smoke must iterate the pushed images" >&2
+    exit 1
+}
+grep -Fq 'default: "composition"' "$composition_workflow" || {
+    echo "composition workflow must bake the whole group unless a dispatch names targets" >&2
+    exit 1
+}
 for required in '@${DIGEST}' 'RYEOS_TRUST_BAKED_PUBLISHERS=1' 'host_classes:' 'RYEOS_INIT_HOST_CLASS="$(' 'RYEOS_SUBSTRATE_IMAGE="$IMAGE"'; do
     grep -Fq -- "$required" <<<"$smoke_step" || {
         echo "composition first-boot init smoke must contain $required" >&2
