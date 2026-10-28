@@ -13,10 +13,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail, ensure};
-use chrono::{Duration, Utc};
 use clap::Parser;
 use ryeos_node::offline_operation::facts::MANDATORY_FACTS;
-use ryeos_node::offline_operation::sign::{Delivery, RemoteSigner, SignDraft, sign_request};
+use ryeos_node::offline_operation::sign::{Delivery, RemoteSigner, SignDraft, sign_request_now};
 use ryeos_node::offline_operation::table::lookup;
 use serde_json::{Value, json};
 
@@ -110,7 +109,7 @@ struct SignArgs {
     /// How long the request stays valid, in minutes. Defaults to 60; at most
     /// 1440.
     #[arg(long)]
-    lifetime_minutes: Option<i64>,
+    lifetime_minutes: Option<u32>,
 
     /// Write the delivery document here instead of printing it.
     #[arg(long)]
@@ -194,7 +193,7 @@ pub fn run_sign(argv: &[String], console: &crate::tty::Console) -> Result<()> {
     let key_path = operator_key_path(args.app_root, args.signing_key)?;
     let key = lillux::crypto::load_signing_key(&key_path)
         .with_context(|| format!("load the signing key {}", key_path.display()))?;
-    let delivery = sign_request(
+    let delivery = sign_request_now(
         SignDraft {
             node_fingerprint,
             operation: args.operation,
@@ -202,17 +201,10 @@ pub fn run_sign(argv: &[String], console: &crate::tty::Console) -> Result<()> {
             inputs,
             expected_result,
             pins,
-            lifetime: args
-                .lifetime_minutes
-                .map(|minutes| {
-                    Duration::try_minutes(minutes)
-                        .context("--lifetime-minutes is out of range")
-                })
-                .transpose()?,
+            lifetime_minutes: args.lifetime_minutes,
             remote,
         },
         &key,
-        Utc::now(),
     )?;
     let request_digest = delivery.request.digest()?;
     let text = serde_json::to_vec_pretty(&delivery)?;
@@ -238,9 +230,10 @@ pub fn run_sign(argv: &[String], console: &crate::tty::Console) -> Result<()> {
         crate::tty::Row::key_value("not after", delivery.request.body.not_after.clone()),
     ];
     if let Some(path) = &args.out {
-        banner
-            .rows
-            .push(crate::tty::Row::key_value("delivery", path.display().to_string()));
+        banner.rows.push(crate::tty::Row::key_value(
+            "delivery",
+            path.display().to_string(),
+        ));
     }
     if let Some(directory) = &args.stage_dir {
         banner.rows.push(crate::tty::Row::key_value(
@@ -256,12 +249,14 @@ pub fn run_sign(argv: &[String], console: &crate::tty::Console) -> Result<()> {
 /// that cannot start: `request.json`, and `inputs/<digest>` for each input.
 fn stage(directory: &Path, delivery: &Delivery) -> Result<()> {
     let inputs = directory.join("inputs");
-    std::fs::create_dir_all(&inputs)
-        .with_context(|| format!("create {}", inputs.display()))?;
+    std::fs::create_dir_all(&inputs).with_context(|| format!("create {}", inputs.display()))?;
     for (digest, bytes) in delivery.input_bytes()? {
         write_new(&inputs.join(digest), &bytes)?;
     }
-    write_new(&directory.join("request.json"), &delivery.request.to_bytes()?)
+    write_new(
+        &directory.join("request.json"),
+        &delivery.request.to_bytes()?,
+    )
 }
 
 // ── remote calls ─────────────────────────────────────────────────────
@@ -310,7 +305,10 @@ async fn call(
 
 /// A string field of a node's reply, or `unknown`.
 fn field_text<'a>(reply: &'a Value, field: &str) -> &'a str {
-    reply.get(field).and_then(Value::as_str).unwrap_or("unknown")
+    reply
+        .get(field)
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
 }
 
 // ── submit ───────────────────────────────────────────────────────────
@@ -462,7 +460,11 @@ pub async fn run_list(argv: &[String], console: &crate::tty::Console) -> Result<
     };
     let cell = |item: &Value, field: &str| {
         item.get(field)
-            .map(|value| value.as_str().map_or_else(|| value.to_string(), str::to_owned))
+            .map(|value| {
+                value
+                    .as_str()
+                    .map_or_else(|| value.to_string(), str::to_owned)
+            })
             .unwrap_or_default()
     };
     let mut banner = crate::tty::StatusBanner::new(crate::tty::Tone::Neutral, "OFFLINE OPERATIONS");
@@ -477,13 +479,21 @@ pub async fn run_list(argv: &[String], console: &crate::tty::Console) -> Result<
     for item in list("queued") {
         banner.rows.push(crate::tty::Row::key_value(
             "queued",
-            format!("{} {}", cell(&item, "operation"), cell(&item, "request_digest")),
+            format!(
+                "{} {}",
+                cell(&item, "operation"),
+                cell(&item, "request_digest")
+            ),
         ));
     }
     for item in list("receipts") {
         banner.rows.push(crate::tty::Row::key_value(
             format!("receipt {}", cell(&item, "sequence")),
-            format!("{} {}", cell(&item, "operation"), cell(&item, "request_digest")),
+            format!(
+                "{} {}",
+                cell(&item, "operation"),
+                cell(&item, "request_digest")
+            ),
         ));
     }
     for item in list("refusals") {

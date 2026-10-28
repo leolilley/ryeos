@@ -39,8 +39,10 @@ pub struct SignDraft {
     pub expected_result: BTreeMap<String, String>,
     /// The node facts the request is signed against, by name.
     pub pins: BTreeMap<String, String>,
-    /// `None` signs for [`DEFAULT_REQUEST_LIFETIME`].
-    pub lifetime: Option<Duration>,
+    /// How long the request stays valid, in minutes; `None` signs for
+    /// [`DEFAULT_REQUEST_LIFETIME`]. The clock is the library's: a caller
+    /// never reasons about time.
+    pub lifetime_minutes: Option<u32>,
     /// Absent for the node's local operator.
     pub remote: Option<RemoteSigner>,
 }
@@ -70,8 +72,16 @@ impl Delivery {
     }
 }
 
+/// Sign `draft` as of the current wall clock.
+pub fn sign_request_now(draft: SignDraft, key: &SigningKey) -> Result<Delivery> {
+    sign_request(draft, key, Utc::now())
+}
+
 pub fn sign_request(draft: SignDraft, key: &SigningKey, now: DateTime<Utc>) -> Result<Delivery> {
-    let lifetime = draft.lifetime.unwrap_or(DEFAULT_REQUEST_LIFETIME);
+    let lifetime = match draft.lifetime_minutes {
+        None => DEFAULT_REQUEST_LIFETIME,
+        Some(minutes) => Duration::minutes(i64::from(minutes)),
+    };
     ensure!(lifetime > Duration::zero(), "the lifetime must be positive");
     ensure!(
         lifetime <= MAX_REQUEST_LIFETIME,
@@ -158,7 +168,7 @@ mod tests {
                 ("ledger_head".to_owned(), "b".repeat(64)),
                 (FACT_RESTART_INHIBITION.to_owned(), "absent".to_owned()),
             ]),
-            lifetime: None,
+            lifetime_minutes: None,
             remote: None,
         }
     }
@@ -182,13 +192,13 @@ mod tests {
     fn a_lifetime_may_reach_a_day_and_no_further() {
         let key = lillux::crypto::generate_signing_key();
         let mut day = draft();
-        day.lifetime = Some(Duration::hours(24));
+        day.lifetime_minutes = Some(24 * 60);
         sign_request(day, &key, Utc::now()).unwrap();
         let mut long = draft();
-        long.lifetime = Some(Duration::hours(25));
+        long.lifetime_minutes = Some(25 * 60);
         assert!(sign_request(long, &key, Utc::now()).is_err());
         let mut none = draft();
-        none.lifetime = Some(Duration::zero());
+        none.lifetime_minutes = Some(0);
         assert!(sign_request(none, &key, Utc::now()).is_err());
     }
 
@@ -199,7 +209,9 @@ mod tests {
         missing.pins.remove("ledger_head");
         assert!(sign_request(missing, &key, Utc::now()).is_err());
         let mut extra = draft();
-        extra.pins.insert("policy_generation".to_owned(), "c".repeat(64));
+        extra
+            .pins
+            .insert("policy_generation".to_owned(), "c".repeat(64));
         assert!(sign_request(extra, &key, Utc::now()).is_err());
     }
 

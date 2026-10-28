@@ -28,7 +28,8 @@ async fn get(daemon: &DaemonHarness, path: &str) -> anyhow::Result<(reqwest::Sta
     let user_key = daemon.user_key.as_ref().expect("fast fixture operator key");
     let node_key = daemon.node_key.as_ref().expect("fast fixture node key");
     let mut request = reqwest::Client::new().get(format!("http://{}{path}", daemon.bind));
-    for (name, value) in common::build_signed_headers_for_bytes(user_key, node_key, "GET", path, b"")
+    for (name, value) in
+        common::build_signed_headers_for_bytes(user_key, node_key, "GET", path, b"")
     {
         request = request.header(name, value);
     }
@@ -40,7 +41,10 @@ async fn get(daemon: &DaemonHarness, path: &str) -> anyhow::Result<(reqwest::Sta
 /// Sign `node.allow-restart` against the facts the running node reports.
 async fn signed_delivery(daemon: &DaemonHarness, key: &SigningKey) -> anyhow::Result<Delivery> {
     let (status, report) = get(daemon, "/offline-operations/facts").await?;
-    anyhow::ensure!(status.is_success(), "facts route answered {status}: {report}");
+    anyhow::ensure!(
+        status.is_success(),
+        "facts route answered {status}: {report}"
+    );
     let facts = report["facts"].as_object().expect("facts object");
     let spec = ryeos_node::offline_operation::table::lookup(OPERATION).expect("operation");
     let pins = ryeos_node::offline_operation::facts::MANDATORY_FACTS
@@ -64,7 +68,7 @@ async fn signed_delivery(daemon: &DaemonHarness, key: &SigningKey) -> anyhow::Re
             inputs: Default::default(),
             expected_result: Default::default(),
             pins,
-            lifetime: None,
+            lifetime_minutes: None,
             remote: None,
         },
         key,
