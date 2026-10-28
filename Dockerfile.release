@@ -109,6 +109,39 @@ RUN mkdir -p /usr/local/cargo/git && \
     cargo chef cook --release --locked --recipe-path recipe.json \
       --package ryeos-core-tools
 
+# Placeholder workspace artifacts must never be reusable by the real build: the
+# sources copied later carry checkout mtimes older than these outputs, so Cargo
+# could otherwise treat an empty placeholder binary as fresh. Remove every
+# workspace member's artifacts, derived from the manifests, and fail if any remain.
+RUN python3 - <<'PY'
+import json, os, re, shutil, subprocess, sys
+meta = json.loads(subprocess.check_output(
+    ["cargo", "metadata", "--no-deps", "--locked", "--offline", "--format-version", "1"]))
+names = set()
+for package in meta["packages"]:
+    names.add(package["name"])
+    names.update(target["name"] for target in package["targets"])
+names |= {n.replace("-", "_") for n in names}
+member = re.compile(r"^(?:lib)?(?:%s)(?:-[0-9a-f]{16}(?:\..*)?)?$" % "|".join(map(re.escape, sorted(names))))
+targets = ["/build/target-cache/release", "/build/target-cache/x86_64-unknown-linux-gnu/release"]
+def hits():
+    found = []
+    for root in targets:
+        for sub in (".fingerprint", "deps", "build", "."):
+            directory = os.path.join(root, sub)
+            if not os.path.isdir(directory):
+                continue
+            for entry in os.listdir(directory):
+                if sub == "." and entry.removesuffix(".d") in names or sub != "." and member.match(entry):
+                    found.append(os.path.join(directory, entry))
+    return found
+for path in hits():
+    shutil.rmtree(path) if os.path.isdir(path) and not os.path.islink(path) else os.remove(path)
+left = hits()
+if left:
+    sys.exit("workspace artifacts remain: %s" % left)
+PY
+
 FROM rust:1.95-slim@sha256:e14e87345b4d5964ddcc3491d27ee046a0f23820f340c3c1e24da6880141f7c0 AS compiled-publication
 
 RUN apt-get update && apt-get install -y --no-install-recommends \

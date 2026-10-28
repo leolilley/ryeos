@@ -63,6 +63,15 @@ done <<<"$mounts"
 # named packages, never a bare build of the workspace.
 grep -q 'cargo build' <<<"$dep_stage" && fail "dependency-build must cook, never build workspace crates"
 
+# Placeholder workspace artifacts are removed, and checked gone, after the last cook.
+last_cook="$(grep -n 'cargo chef cook' <<<"$instructions" | tail -1 | cut -d: -f1)"
+cleanup="$(awk -v a="$last_cook" -v b="$compiled" 'NR > a && NR < b' <<<"$instructions")"
+grep -q '"metadata", "--no-deps"' <<<"$cleanup" || fail "no workspace member list is derived after the last cook"
+grep -q '\.fingerprint' <<<"$cleanup" && grep -q '"deps"' <<<"$cleanup" \
+    && grep -q 'x86_64-unknown-linux-gnu/release' <<<"$cleanup" || fail "cleanup must cover fingerprints, deps and both target dirs"
+grep -q 'shutil.rmtree' <<<"$cleanup" && grep -q 'workspace artifacts remain' <<<"$cleanup" \
+    || fail "cleanup must remove workspace artifacts and fail if any remain"
+
 # 3. Every real cargo invocation has a cook with the same flags.
 cooks="$(grep -o 'cargo chef cook [^&]*' <<<"$dep_stage")"
 [[ "$(grep -c . <<<"$cooks")" -ge 8 ]] || fail "expected a cook for each distinct cargo invocation"
@@ -140,6 +149,7 @@ for target in $targets; do
 done
 grep -q 'type=registry,ref=${BUILD_CACHE_REF}:${name},mode=max' "$bake" || fail "cache-to must be a mode=max registry cache"
 grep -q 'type=registry,ref=${BUILD_CACHE_REF}:${name}"' "$bake" || fail "cache-from must read the registry cache"
+grep -q 'compression=zstd,ignore-error=true' "$bake" || fail "cache-to must ignore export errors"
 grep -q 'type=provenance,mode=max' "$bake" && grep -q 'type=sbom' "$bake" || fail "attestations must be kept"
 grep -q 'BUILD_CACHE_REF=${{ steps.candidate.outputs.cache_ref }}' "$workflow" || fail "workflow does not pass BUILD_CACHE_REF"
 grep -q 'ghcr.io/${OWNER,,}/ryeos-buildcache' "$workflow" || fail "workflow cache reference is not on GHCR"

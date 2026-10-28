@@ -34,10 +34,11 @@ function "cache_from" {
   ])
 }
 
+# A cache export failure (registry 5xx, quota, permission) must not fail a finished build.
 function "cache_to" {
   params = [name]
   result = BUILD_CACHE_REF == "" ? [] : [
-    "type=registry,ref=${BUILD_CACHE_REF}:${name},mode=max,image-manifest=true,oci-mediatypes=true,compression=zstd",
+    "type=registry,ref=${BUILD_CACHE_REF}:${name},mode=max,image-manifest=true,oci-mediatypes=true,compression=zstd,ignore-error=true",
   ]
 }
 
