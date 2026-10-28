@@ -38,7 +38,6 @@
 //! descriptor-driven and dispatched through the offline/dual path
 //! (see `offline_dispatch.rs`) or forwarded to the daemon.
 
-use std::fs;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
