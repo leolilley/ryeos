@@ -27,8 +27,7 @@ pub struct NodeMaintenancePolicy {
     /// `remote_operator` grant may be authorized for on this node. An
     /// authority-bearing operation changes what the node trusts or runs, so a
     /// remote signer may not request one unless this signed policy names it.
-    /// Absent means none; the local operator is never governed by this list.
-    #[serde(default)]
+    /// An empty list means none (the field is required); the local operator is never governed by this list.
     pub remote_offline_operations: Vec<String>,
 }
 
@@ -437,10 +436,17 @@ mod tests {
     #[test]
     fn offline_quota_requires_explicit_current_policy_and_every_dimension() {
         let disabled: NodeMaintenancePolicy = serde_json::from_value(
-            serde_json::json!({"schema": 5, "schedules": [], "offline_reset": null, "offline_native": {}}),
+            serde_json::json!({"schema": 5, "schedules": [], "offline_reset": null, "offline_native": {}, "remote_offline_operations": []}),
         )
         .unwrap();
         disabled.validate().unwrap();
+        assert!(
+            serde_json::from_value::<NodeMaintenancePolicy>(serde_json::json!({
+                "schema": 5, "schedules": [], "offline_reset": null, "offline_native": {}
+            }))
+            .is_err(),
+            "remote_offline_operations is required, empty when nothing is delegated"
+        );
         assert!(
             serde_json::from_value::<NodeMaintenancePolicy>(
                 serde_json::json!({"schema": 5, "schedules": [], "offline_native": {}})

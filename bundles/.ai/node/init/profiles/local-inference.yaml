@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-26T23:53:56Z:1b13748af6ac009fdecd1a4b0364cade60f19d2578b4561a0a52240297e10474:t/SEzqKSlMwJZGO1BZNxPrFzBxHlgcMomVCKPT4uhi2J+kPxwxS1qPR9KJY60Lts0hOZ47I+21B7njdigBeCDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-28T04:00:46Z:0457c8f2838aad5eb988a9cb2a32c7006e65fc0d51162229d80f0fde88ca6d7d:z6w/BBjfpYTWv/YsZET6qdwblcNNjDK+sqq/YjUVTpPfX9VZMo8QbasSlfiTecfC6KOEQO01lGgRHzOE6ek+Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - core
@@ -179,6 +179,8 @@ policies:
     schema: 5
     # Process-scoped native envelopes for stopped-node maintenance, keyed by
     # operation class. A class absent here is refused.
+    # No authority-bearing offline operation is open to a remote signer.
+    remote_offline_operations: []
     offline_native:
       external-content-bindings:
         max_native_storage_bytes: 33554432

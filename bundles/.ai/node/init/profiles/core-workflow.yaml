@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-26T23:53:56Z:4f6d5058b9f98598d4c5b4f25dd8a6ae213105155dac1ebb2f5bf6c87a242cc4:vFjHv4RWfeQLePqga/6gfKrbtUQbQZ27CDEYlrwHteSrokJ1UYSpFZrRnAY38IA3CbdmWklIVlXgeWbDkz3zCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-28T04:00:46Z:4ef1f23343fe31f5e14f4dbb2596703ccd6be57e066c15daa425c1b24b179664:7Ro44jKwZW1wbrJS3QE1jRL5uM/uxQD6NuW1CqSG9m5MCNgjg4X/bOcjK1Mri0i+/ApQiNh5CnavHvO9VEcjDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Core plus the graph workflow bundles.
 schema: 1
 exact_bundles:
@@ -157,6 +157,8 @@ policies:
     schema: 5
     # Process-scoped native envelopes for stopped-node maintenance, keyed by
     # operation class. A class absent here is refused.
+    # No authority-bearing offline operation is open to a remote signer.
+    remote_offline_operations: []
     offline_native:
       external-content-bindings:
         max_native_storage_bytes: 33554432

@@ -551,6 +551,7 @@ mod tests {
 
     const POLICY: &str = r#"schema: 5
 offline_native: {}
+remote_offline_operations: []
 offline_reset: null
 schedules:
   - schedule_id: maintenance-gc
