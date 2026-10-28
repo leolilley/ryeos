@@ -241,8 +241,10 @@ gate_target_dir() {
 }
 
 # Archive modes extract here. Nextest keeps the archived target tree under
-# <dir>/target.
-archive_extract_dir="${GATE_ARCHIVE_EXTRACT_DIR:-$ROOT/target/gate-archive}"
+# <dir>/target. The default is the checkout itself, so the target directory is
+# the one the archive was built in: test sources bake absolute binary paths
+# with env!("CARGO_BIN_EXE_*"), which only resolve at the original location.
+archive_extract_dir="${GATE_ARCHIVE_EXTRACT_DIR:-$ROOT}"
 
 # Extra files for an archive: nextest archives only the test binaries and the
 # binaries each test names through CARGO_BIN_EXE, but tests also locate sibling
