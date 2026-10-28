@@ -22,4 +22,6 @@ paths = [
 regexes = [
   '''id=publisher-key,src=''',
   '''Sec-WebSocket-Key: ''',
+  # rust-cache cache names in the CI workflow.
+  '''key: (workspace-crates|scheduler-compositions|crash-qualification)-v[0-9]+''',
 ]
