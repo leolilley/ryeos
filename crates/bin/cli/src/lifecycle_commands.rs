@@ -2503,22 +2503,18 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
 fn durable_identity_check(
     app_root: &std::path::Path,
 ) -> ryeos_core_tools::actions::doctor::CheckResult {
-    use lillux::IdentityStability::{AttachmentBound, ReattachStable, ReattachStableWithSubvolume};
+    use lillux::IdentityStability::{AttachmentBound, ReattachStable};
     use ryeos_core_tools::actions::doctor::{FAIL, OK, WARN};
     match ryeos_node::capability_report::DurableIdentityFacts::observe(app_root) {
         Ok(facts) => {
             let (status, note) = match facts.app_root {
                 ReattachStable => (
                     OK,
-                    "the app root's durable identity is the filesystem UUID: it survives the volume being re-attached under another device",
-                ),
-                ReattachStableWithSubvolume => (
-                    OK,
-                    "the app root's durable identity is the filesystem UUID and subvolume id: it survives the volume being re-attached under another device",
+                    "the app root's durable identity is its filesystem's UUID-derived id: it survives the volume being re-attached under another device",
                 ),
                 AttachmentBound => (
                     WARN,
-                    "the filesystem reports no UUID, so the app root's durable identity is the device number and holds only while this attachment lasts; a re-attached volume needs `ryeos node capacity reanchor`",
+                    "the app root's filesystem type offers no UUID-derived id, so its durable identity is the device number and holds only while this attachment lasts; a re-attached volume needs `ryeos node capacity reanchor`",
                 ),
             };
             check(
@@ -3677,12 +3673,7 @@ mod tests {
         );
         let stability = check.detail["app_root"].as_str().unwrap();
         assert!(
-            [
-                "reattach_stable",
-                "reattach_stable_with_subvolume",
-                "attachment_bound"
-            ]
-            .contains(&stability),
+            ["reattach_stable", "attachment_bound"].contains(&stability),
             "{stability}"
         );
         let missing = durable_identity_check(&directory.path().join("absent"));
