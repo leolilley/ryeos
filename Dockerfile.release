@@ -12,6 +12,103 @@ ARG CONTAINED_PUBLICATION_STAGE=published
 # The composition images select their publication the same way: `published` for official images,
 # `development-publication` for candidate builds signed with a development key.
 ARG PUBLICATION_STAGE=published
+# Third-party dependency compilation, persisted across CI runs. The stages
+# below see only the dependency recipe (manifests, lockfile, toolchain pin and
+# the vendored sqlite patch), never workspace sources, so their layers are
+# keyed by the dependency closure alone and a bake's registry cache restores
+# them on a fresh runner. Workspace crates are deliberately not compiled here:
+# their build scripts embed RYEOS_VCS_REF, RYEOS_BUILD_DATE and
+# RYEOS_EXACT_BUILD_PROVENANCE, so every workspace artifact in a shipped binary
+# is produced by the real stages below from the committed source. The cooking
+# tool removes the placeholder workspace artifacts it compiled, so only
+# third-party compilation survives into the layer.
+#
+# BuildKit does not export cache mounts, so the compiled dependencies live in
+# this stage's filesystem and seed the real stages' cache mounts through
+# `from=dependency-build`, which applies only when a mount is first created.
+#
+# cargo-chef is pinned by exact version under --locked, on the digest-pinned
+# toolchain image used by every compile stage. Each `cargo chef cook` below
+# mirrors one real `cargo build` invocation (same packages, features, target
+# and RUSTFLAGS) because Cargo unifies third-party features per invocation;
+# a mismatched invocation would only miss the cache, never change a binary.
+# SOURCE_DATE_EPOCH and the RYEOS_* build coordinates are deliberately not
+# set here: they change every commit and would defeat the layer.
+FROM rust:1.95-slim@sha256:e14e87345b4d5964ddcc3491d27ee046a0f23820f340c3c1e24da6880141f7c0 AS dependency-toolchain
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl gzip openssl pkg-config libssl-dev tar xz-utils \
+        libcap-dev binutils python3 python3-yaml python3-cryptography && \
+    rm -rf /var/lib/apt/lists/*
+RUN cargo install cargo-chef --locked --version 0.1.71
+
+FROM dependency-toolchain AS dependency-recipe
+WORKDIR /build
+COPY . .
+RUN cargo chef prepare --recipe-path /recipe.json
+
+FROM dependency-toolchain AS dependency-build
+WORKDIR /build
+COPY rust-toolchain.toml ./
+COPY vendor vendor
+COPY --from=dependency-recipe /recipe.json recipe.json
+ENV CARGO_TARGET_DIR=/build/target-cache
+# 1. scripts/populate-bundles.sh --bundle-set release-artifacts: the host
+#    packages with that set's native features, then the static worker packages.
+# 2. The contained OCI hook and the static workload client.
+# 3. Every node and CLI pair: the scheduler-free substrate and the core,
+#    workflow, knowledge and controller pairs (no features), the scheduling
+#    pair, and the standard pair; then the controller's core tools.
+RUN mkdir -p /usr/local/cargo/git && \
+    cargo chef cook --release --locked --recipe-path recipe.json \
+      --package lillux \
+      --package ryeosd \
+      --package ryeos-directive-runtime \
+      --package ryeos-graph-runtime \
+      --package ryeos-knowledge-runtime \
+      --package ryeos-handler-bins \
+      --package ryeos-parser-bins \
+      --package ryeos-cli \
+      --package ryeos-core-tools \
+      --package ryeos-web-tools \
+      --package ryeos-browser-tools \
+      --package ryeos-client-terminal \
+      --package ryeos-client-web \
+      --features ryeosd/model-provider-setup,ryeosd/scheduling,ryeos-cli/model-provider-setup,ryeos-cli/scheduling && \
+    RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static" \
+    cargo chef cook --release --locked --recipe-path recipe.json --target x86_64-unknown-linux-gnu \
+      --package ryeos-session-exec \
+      --package ryeos-structured-session \
+      --package ryeos-lillux-isolation-adapter \
+      --package ryeos-external-candidate-connector \
+      --package ryeos-codex-external-configuration \
+      --package ryeos-external-guest-occurrence-owner \
+      --package ryeos-external-guest-runtime-producer \
+      --package ryeos-codex-guest-runtime-producer \
+      --package ryeos-codex-runtime-verifier \
+      --package ryeos-external-candidate-launcher \
+      --package ryeos-external-candidate-supervisor \
+      --package ryeos-guest-wire-verifier \
+      --package ryeos-external-guest-restoration-verifier \
+      --package ryeos-render-sandbox-lifecycle-adapter \
+      --package modal-guest-launcher \
+      --package ryeos-modal-sandbox-lifecycle-adapter && \
+    cargo chef cook --release --locked --recipe-path recipe.json \
+      --package lillux --package ryeos-lillux-oci-hook && \
+    RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static" \
+    cargo chef cook --release --locked --recipe-path recipe.json --target x86_64-unknown-linux-gnu \
+      --package ryeos-workload-client && \
+    cargo chef cook --release --locked --recipe-path recipe.json --no-default-features \
+      --package ryeosd --package ryeos-cli && \
+    cargo chef cook --release --locked --recipe-path recipe.json --no-default-features \
+      --package ryeosd --package ryeos-cli \
+      --features ryeosd/scheduling,ryeos-cli/scheduling && \
+    cargo chef cook --release --locked --recipe-path recipe.json --no-default-features \
+      --package ryeosd --package ryeos-cli \
+      --features ryeosd/model-provider-setup,ryeosd/scheduling,ryeos-cli/model-provider-setup,ryeos-cli/scheduling && \
+    cargo chef cook --release --locked --recipe-path recipe.json \
+      --package ryeos-core-tools
+
 FROM rust:1.95-slim@sha256:e14e87345b4d5964ddcc3491d27ee046a0f23820f340c3c1e24da6880141f7c0 AS compiled-publication
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -42,9 +139,9 @@ ENV SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH
 # coordinate as a standalone external realization. It is not staged into a
 # bundle and no runtime image filesystem is later mined for it.
 RUN --mount=type=secret,id=publisher-key,required=true \
-    --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,id=ryeos-release-cargo-git,target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,id=ryeos-release-cargo-target,target=/build/target-cache,sharing=locked \
+    --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/registry,sharing=locked,from=dependency-build,source=/usr/local/cargo/registry \
+    --mount=type=cache,id=ryeos-release-cargo-git,target=/usr/local/cargo/git,sharing=locked,from=dependency-build,source=/usr/local/cargo/git \
+    --mount=type=cache,id=ryeos-release-cargo-target,target=/build/target-cache,sharing=locked,from=dependency-build,source=/build/target-cache \
     if [ -z "${CARGO_BUILD_JOBS:-}" ]; then unset CARGO_BUILD_JOBS; fi && \
     cp -a bundles .bundles-writable && \
     rm -rf bundles && \
@@ -93,7 +190,7 @@ RUN --mount=type=secret,id=publisher-key,required=true \
 
 FROM compiled-publication AS published
 # Never bypass official signer admission for distributable release artifacts.
-RUN --mount=type=cache,id=ryeos-release-cargo-target,target=/build/target-cache,sharing=locked \
+RUN --mount=type=cache,id=ryeos-release-cargo-target,target=/build/target-cache,sharing=locked,from=dependency-build,source=/build/target-cache \
     ./scripts/release/package-bundle-artifact.sh \
       --version "$VERSION" \
       --source /build/bundles \
@@ -119,9 +216,9 @@ FROM ${PUBLICATION_STAGE} AS composition-publication
 FROM composition-publication AS scheduler-free-publication
 ARG BUNDLE_BUILD_PROFILE=release
 ARG CARGO_BUILD_JOBS
-RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,id=ryeos-release-cargo-git,target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,id=ryeos-release-cargo-target,target=/build/target-cache,sharing=locked \
+RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/registry,sharing=locked,from=dependency-build,source=/usr/local/cargo/registry \
+    --mount=type=cache,id=ryeos-release-cargo-git,target=/usr/local/cargo/git,sharing=locked,from=dependency-build,source=/usr/local/cargo/git \
+    --mount=type=cache,id=ryeos-release-cargo-target,target=/build/target-cache,sharing=locked,from=dependency-build,source=/build/target-cache \
     if [ -z "${CARGO_BUILD_JOBS:-}" ]; then unset CARGO_BUILD_JOBS; fi && \
     case "$BUNDLE_BUILD_PROFILE" in \
       release) set -- ;; \
@@ -139,9 +236,9 @@ FROM composition-publication AS core-pair
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 ARG BUNDLE_BUILD_PROFILE=release
 ARG CARGO_BUILD_JOBS
-RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,id=ryeos-release-cargo-git,target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,id=ryeos-release-cargo-target,target=/build/target-cache,sharing=locked \
+RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/registry,sharing=locked,from=dependency-build,source=/usr/local/cargo/registry \
+    --mount=type=cache,id=ryeos-release-cargo-git,target=/usr/local/cargo/git,sharing=locked,from=dependency-build,source=/usr/local/cargo/git \
+    --mount=type=cache,id=ryeos-release-cargo-target,target=/build/target-cache,sharing=locked,from=dependency-build,source=/build/target-cache \
     if [ -z "${CARGO_BUILD_JOBS:-}" ]; then unset CARGO_BUILD_JOBS; fi && \
     source scripts/pkg/bundle-sets.sh && \
     features=() && \
@@ -169,9 +266,9 @@ FROM composition-publication AS core-scheduling-pair
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 ARG BUNDLE_BUILD_PROFILE=release
 ARG CARGO_BUILD_JOBS
-RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,id=ryeos-release-cargo-git,target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,id=ryeos-release-cargo-target,target=/build/target-cache,sharing=locked \
+RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/registry,sharing=locked,from=dependency-build,source=/usr/local/cargo/registry \
+    --mount=type=cache,id=ryeos-release-cargo-git,target=/usr/local/cargo/git,sharing=locked,from=dependency-build,source=/usr/local/cargo/git \
+    --mount=type=cache,id=ryeos-release-cargo-target,target=/build/target-cache,sharing=locked,from=dependency-build,source=/build/target-cache \
     if [ -z "${CARGO_BUILD_JOBS:-}" ]; then unset CARGO_BUILD_JOBS; fi && \
     source scripts/pkg/bundle-sets.sh && \
     features=() && \
@@ -199,9 +296,9 @@ FROM composition-publication AS core-workflow-pair
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 ARG BUNDLE_BUILD_PROFILE=release
 ARG CARGO_BUILD_JOBS
-RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,id=ryeos-release-cargo-git,target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,id=ryeos-release-cargo-target,target=/build/target-cache,sharing=locked \
+RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/registry,sharing=locked,from=dependency-build,source=/usr/local/cargo/registry \
+    --mount=type=cache,id=ryeos-release-cargo-git,target=/usr/local/cargo/git,sharing=locked,from=dependency-build,source=/usr/local/cargo/git \
+    --mount=type=cache,id=ryeos-release-cargo-target,target=/build/target-cache,sharing=locked,from=dependency-build,source=/build/target-cache \
     if [ -z "${CARGO_BUILD_JOBS:-}" ]; then unset CARGO_BUILD_JOBS; fi && \
     source scripts/pkg/bundle-sets.sh && \
     features=() && \
@@ -229,9 +326,9 @@ FROM composition-publication AS core-knowledge-pair
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 ARG BUNDLE_BUILD_PROFILE=release
 ARG CARGO_BUILD_JOBS
-RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,id=ryeos-release-cargo-git,target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,id=ryeos-release-cargo-target,target=/build/target-cache,sharing=locked \
+RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/registry,sharing=locked,from=dependency-build,source=/usr/local/cargo/registry \
+    --mount=type=cache,id=ryeos-release-cargo-git,target=/usr/local/cargo/git,sharing=locked,from=dependency-build,source=/usr/local/cargo/git \
+    --mount=type=cache,id=ryeos-release-cargo-target,target=/build/target-cache,sharing=locked,from=dependency-build,source=/build/target-cache \
     if [ -z "${CARGO_BUILD_JOBS:-}" ]; then unset CARGO_BUILD_JOBS; fi && \
     source scripts/pkg/bundle-sets.sh && \
     features=() && \
@@ -260,9 +357,9 @@ FROM composition-publication AS controller-pair
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 ARG BUNDLE_BUILD_PROFILE=release
 ARG CARGO_BUILD_JOBS
-RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,id=ryeos-release-cargo-git,target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,id=ryeos-release-cargo-target,target=/build/target-cache,sharing=locked \
+RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/registry,sharing=locked,from=dependency-build,source=/usr/local/cargo/registry \
+    --mount=type=cache,id=ryeos-release-cargo-git,target=/usr/local/cargo/git,sharing=locked,from=dependency-build,source=/usr/local/cargo/git \
+    --mount=type=cache,id=ryeos-release-cargo-target,target=/build/target-cache,sharing=locked,from=dependency-build,source=/build/target-cache \
     if [ -z "${CARGO_BUILD_JOBS:-}" ]; then unset CARGO_BUILD_JOBS; fi && \
     source scripts/pkg/bundle-sets.sh && \
     features=() && \
@@ -290,9 +387,9 @@ FROM composition-publication AS standard-pair
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 ARG BUNDLE_BUILD_PROFILE=release
 ARG CARGO_BUILD_JOBS
-RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,id=ryeos-release-cargo-git,target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,id=ryeos-release-cargo-target,target=/build/target-cache,sharing=locked \
+RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/registry,sharing=locked,from=dependency-build,source=/usr/local/cargo/registry \
+    --mount=type=cache,id=ryeos-release-cargo-git,target=/usr/local/cargo/git,sharing=locked,from=dependency-build,source=/usr/local/cargo/git \
+    --mount=type=cache,id=ryeos-release-cargo-target,target=/build/target-cache,sharing=locked,from=dependency-build,source=/build/target-cache \
     if [ -z "${CARGO_BUILD_JOBS:-}" ]; then unset CARGO_BUILD_JOBS; fi && \
     source scripts/pkg/bundle-sets.sh && \
     features=() && \
@@ -800,9 +897,9 @@ ENV RYEOS_BUILD_DATE=$BUILD_DATE
 ENV RYEOS_BUILD_VERSION=$VERSION
 ENV SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH
 
-RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,id=ryeos-release-cargo-git,target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,id=ryeos-release-cargo-target,target=/build/target-cache,sharing=locked \
+RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/registry,sharing=locked,from=dependency-build,source=/usr/local/cargo/registry \
+    --mount=type=cache,id=ryeos-release-cargo-git,target=/usr/local/cargo/git,sharing=locked,from=dependency-build,source=/usr/local/cargo/git \
+    --mount=type=cache,id=ryeos-release-cargo-target,target=/build/target-cache,sharing=locked,from=dependency-build,source=/build/target-cache \
     if [ -z "${CARGO_BUILD_JOBS:-}" ]; then unset CARGO_BUILD_JOBS; fi && \
     test -n "$VERSION" && \
     test -n "$SOURCE_DATE_EPOCH" && \

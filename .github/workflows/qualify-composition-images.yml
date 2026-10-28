@@ -65,6 +65,7 @@ jobs:
           BUILD_DATE="$(date --utc --date="@${SOURCE_DATE_EPOCH}" '+%Y-%m-%dT%H:%M:%SZ')"
           TAG="candidate-${SOURCE_SHA}${TAG_SUFFIX:+-$TAG_SUFFIX}"
           PREFIX="ghcr.io/${OWNER,,}/ryeos"
+          CACHE_REF="ghcr.io/${OWNER,,}/ryeos-buildcache"
           {
             echo "version=$VERSION"
             echo "sha=$SOURCE_SHA"
@@ -72,6 +73,7 @@ jobs:
             echo "build_date=$BUILD_DATE"
             echo "tag=$TAG"
             echo "prefix=$PREFIX"
+            echo "cache_ref=$CACHE_REF"
           } >> "$GITHUB_OUTPUT"
 
       - name: Assert development publisher key
@@ -118,7 +120,11 @@ jobs:
           files: ./docker-bake.composition.hcl
           targets: ${{ inputs.targets }}
           # The bake file names no output; pushing candidates is this
-          # workflow's explicit choice.
+          # workflow's explicit choice. The build cache goes to a GHCR
+          # registry cache, not `type=gha`: the gha cache is capped at 10 GB
+          # across the repository, which one compiled dependency closure
+          # exceeds, and the compiled dependencies are exported as an image
+          # layer that only a registry cache carries between fresh runners.
           push: true
           vars: |
             PUBLICATION_STAGE=development-publication
@@ -129,6 +135,7 @@ jobs:
             BUILD_DATE=${{ steps.candidate.outputs.build_date }}
             IMAGE_PREFIX=${{ steps.candidate.outputs.prefix }}
             IMAGE_TAG=${{ steps.candidate.outputs.tag }}
+            BUILD_CACHE_REF=${{ steps.candidate.outputs.cache_ref }}
 
       - name: Print candidate digests
         env:
