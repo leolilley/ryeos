@@ -58,10 +58,11 @@ env:
   SCCACHE_GHA_ENABLED: "true"
   RUSTC_WRAPPER: sccache
   CARGO_INCREMENTAL: "0"
-  # Keep CI resource usage predictable. Override in workflow YAML if the runner
-  # class changes; local gate defaults remain machine-sensitive.
-  GATE_BUILD_JOBS: 2
-  GATE_TEST_THREADS: 2
+  # A hosted runner is dedicated to one job, so cargo and nextest use every core
+  # (0 selects their own defaults). The gate's half-the-cores defaults are for
+  # shared desktops and apply only to local runs.
+  GATE_BUILD_JOBS: 0
+  GATE_TEST_THREADS: 0
 
 jobs:
   static-policy:
@@ -238,14 +239,69 @@ jobs:
           base="$(git merge-base HEAD origin/next)"
           gitleaks git --redact --verbose --exit-code=2 --config .gitleaks.toml --log-opts="$base..HEAD"
 
-  test:
-    name: Workspace tests
+  # The workspace gate is split so that its long serial stages overlap:
+  #
+  #   bundles ---------------------------------------+
+  #   archive (test-profile build, nextest archive) -+--> shards 1..8 --> Workspace tests
+  #   scheduler-compositions ------------------------------------------+
+  #
+  #   bundles ----------------------------------------+
+  #   crash-archive (crash features build + CLI) -----+--> crash phases --> Crash recovery
+  #
+  # Every test the single-runner gate ran still runs, with the same flags; the
+  # shards partition one archive by test hash, so each test runs exactly once.
+
+  bundles:
+    name: Bundle refresh for tests
     runs-on: ubuntu-latest
-    # The full two-thread gate runs more than 11,800 tests in about 130
-    # minutes, and the scheduler-composition check that follows it rebuilds
-    # the feature variants for up to 30 more; a 150-minute ceiling cancelled
-    # a green run during that check.
-    timeout-minutes: 200
+    timeout-minutes: 90
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_tests }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libcap-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
+        with:
+          toolchain: 1.95.0
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+
+      - name: Prepare the runner
+        run: ./scripts/ci/prepare-runner.sh
+
+      - name: Refresh and sign the bundle sources
+        # --refresh-bundles populates + dev-key-signs the bundle bin trees the
+        # live-registry tests load from. The release build graph lives in a
+        # disposable target that the gate removes afterwards.
+        env:
+          GATE_BUNDLE_TARGET_DIR: ${{ runner.temp }}/ryeos-bundle-target
+        run: ./scripts/gate.sh --refresh-bundles --no-tests
+
+      - name: Pack the refreshed bundle state
+        run: |
+          mkdir -p "$RUNNER_TEMP/bundle-state"
+          ./scripts/ci/pack-bundle-state.sh "$RUNNER_TEMP/bundle-state/bundle-state.tar.zst"
+
+      - name: Upload the refreshed bundle state
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: bundle-state-${{ github.sha }}
+          path: ${{ runner.temp }}/bundle-state/bundle-state.tar.zst
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  workspace-archive:
+    name: Workspace test archive
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_tests }}
     steps:
       - name: Check out repository
@@ -270,7 +326,7 @@ jobs:
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # Keep the expensive bundle/test compilation warm across CI repair runs.
+          # Keep the expensive test compilation warm across CI repair runs.
           key: workspace-crates-v1
           cache-workspace-crates: true
           cache-on-failure: true
@@ -281,57 +337,125 @@ jobs:
           cargo --version
           cargo nextest --version
 
-      - name: Free runner disk for the test binaries
+      - name: Prepare the runner
         # The gate links one large debug test binary per crate; the hosted
         # image's preinstalled SDKs take the space those binaries need.
+        run: ./scripts/ci/prepare-runner.sh --no-scratch
+
+      - name: Build the workspace test archive
+        # Compiles every test binary once, exactly as the single-runner gate
+        # did (same workspace, features and profile), and runs the Core
+        # reporter unit tests that no cargo target covers.
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
-          df -h /
+          mkdir -p "$RUNNER_TEMP/test-archive"
+          ./scripts/gate.sh --nextest-archive "$RUNNER_TEMP/test-archive/workspace.tar.zst"
 
-      - name: Place scratch on the attached volume
-        # The durable-root probe refuses an app root on a virtual machine's
-        # root disk.
-        # On the current hosted image /mnt shares the root disk, so a
-        # loop-mounted ext4 volume stands in for an attached disk: the node
-        # judges durability by the mount being distinct from /.
+      - name: Upload the workspace test archive
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: workspace-test-archive-${{ github.sha }}
+          path: ${{ runner.temp }}/test-archive
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  test-shard:
+    name: Workspace tests shard ${{ matrix.shard }}/8
+    needs: [bundles, workspace-archive]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+    env:
+      # Shards only run prebuilt binaries.
+      RUSTC_WRAPPER: ""
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install system dependencies
         run: |
-          sudo fallocate -l 6G /var/tmp/ryeos-volume.img
-          sudo mkfs.ext4 -q -F /var/tmp/ryeos-volume.img
-          sudo mkdir -p /mnt/ryeos-tmp
-          sudo mount -o loop /var/tmp/ryeos-volume.img /mnt/ryeos-tmp
-          sudo chown "$(id -u):$(id -g)" /mnt/ryeos-tmp
-          findmnt --target /mnt/ryeos-tmp
-          echo "TMPDIR=/mnt/ryeos-tmp" >> "$GITHUB_ENV"
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libcap-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
 
-      - name: Allow unprivileged user namespaces on the runner
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
+        with:
+          toolchain: 1.95.0
 
-        # The sandbox probes map a user namespace; this selects the
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@e658debeddbabf20b2b866d9235eb08a2375b1ad # nextest
 
-        # namespace-enabled test-host baseline on the disposable VM, not an
+      - name: Prepare the runner
+        # The durable-root probe refuses an app root on the root disk, so this
+        # also places TMPDIR on a loop-mounted volume.
+        run: ./scripts/ci/prepare-runner.sh
 
-        # application fallback or node policy.
+      - name: Download the refreshed bundle state
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: bundle-state-${{ github.sha }}
+          path: ${{ runner.temp }}/bundle-state
 
-        run: sudo -n sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Download the workspace test archive
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: workspace-test-archive-${{ github.sha }}
+          path: ${{ runner.temp }}/test-archive
 
+      - name: Restore the refreshed bundles
+        run: ./scripts/ci/unpack-bundle-state.sh "$RUNNER_TEMP/bundle-state/bundle-state.tar.zst"
 
-      - name: Run workspace gate
-        # --refresh-bundles populates + dev-key-signs the bundle bin trees the
-        # live-registry tests load from, then runs the suite (with per-test
-        # bundle refresh skipped so it isn't repeated).
+      - name: Run this shard of the workspace tests
         env:
-          GATE_BUNDLE_TARGET_DIR: ${{ runner.temp }}/ryeos-bundle-target
           # The follow-child admission future retains several complete sealed
           # launch-authority maps across awaits. Libtest's default 2 MiB worker
           # stack aborts while polling its deep rejection-path tests in debug
           # builds; 8 MiB is the standard Rust thread-stack escape hatch and
           # leaves the production state machine unchanged.
           RUST_MIN_STACK: 8388608
-        run: ./scripts/gate.sh --refresh-bundles --skip-crash-qualification
+        run: >-
+          ./scripts/gate.sh
+          --nextest-run-archive "$RUNNER_TEMP/test-archive/workspace.tar.zst"
+          --partition "hash:${{ matrix.shard }}/8"
+
+  scheduler-compositions:
+    name: Scheduler composition checks
+    runs-on: ubuntu-latest
+    # Three no-default-features checks at -j 1 take 20-30 minutes on a runner; the
+    # job ceiling, not a step, bounds a stuck compilation.
+    timeout-minutes: 60
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_tests }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libcap-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
+        with:
+          toolchain: 1.95.0
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: scheduler-compositions-v1
+          cache-workspace-crates: true
+          cache-on-failure: true
+
+      - name: Prepare the runner
+        run: ./scripts/ci/prepare-runner.sh
 
       - name: Check explicit scheduler compositions
-        # Three no-default-features checks at -j 1 take 20-30 minutes on a runner; the
-        # job ceiling, not this step, bounds a stuck compilation.
-        timeout-minutes: 60
         shell: bash
         run: |
           set -euo pipefail
@@ -385,13 +509,26 @@ jobs:
             fi
           done
 
-  crash-qualification:
-    name: Crash recovery qualification
+  test:
+    name: Workspace tests
+    # Aggregates the build, shards and composition checks so the required
+    # check keeps its name and fails if any part failed or was skipped.
+    needs: [bundles, workspace-archive, test-shard, scheduler-compositions]
     runs-on: ubuntu-latest
-    # The serial two-node handoff matrix takes roughly 40 minutes on the
-    # development host by itself. Keep it outside the already-near-ceiling
-    # workspace gate so neither mandatory validation lane can starve the other.
-    timeout-minutes: 120
+    timeout-minutes: 5
+    if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.run_tests) }}
+    steps:
+      - name: Require every workspace-test job to succeed
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          printf '%s\n' "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          printf '%s\n' "$NEEDS" | jq -e 'all(.[]; .result == "success")' > /dev/null
+
+  crash-archive:
+    name: Crash qualification build
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_tests }}
     steps:
       - name: Check out repository
@@ -426,46 +563,122 @@ jobs:
           cargo --version
           cargo nextest --version
 
-      - name: Free runner disk for the test binaries
-        # The gate links one large debug test binary per crate; the hosted
-        # image's preinstalled SDKs take the space those binaries need.
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
-          df -h /
+      - name: Prepare the runner
+        run: ./scripts/ci/prepare-runner.sh --no-scratch
 
-      - name: Place scratch on the attached volume
-        # The durable-root probe refuses an app root on a virtual machine's
-        # root disk.
-        # On the current hosted image /mnt shares the root disk, so a
-        # loop-mounted ext4 volume stands in for an attached disk: the node
-        # judges durability by the mount being distinct from /.
+      - name: Build the crash qualification archive and CLI
         run: |
-          sudo fallocate -l 6G /var/tmp/ryeos-volume.img
-          sudo mkfs.ext4 -q -F /var/tmp/ryeos-volume.img
-          sudo mkdir -p /mnt/ryeos-tmp
-          sudo mount -o loop /var/tmp/ryeos-volume.img /mnt/ryeos-tmp
-          sudo chown "$(id -u):$(id -g)" /mnt/ryeos-tmp
-          findmnt --target /mnt/ryeos-tmp
-          echo "TMPDIR=/mnt/ryeos-tmp" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/crash-archive"
+          ./scripts/gate.sh --crash-archive "$RUNNER_TEMP/crash-archive/crash.tar.zst"
 
-      - name: Allow unprivileged user namespaces on the runner
+      - name: Upload the crash qualification archive
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: crash-qualification-archive-${{ github.sha }}
+          path: ${{ runner.temp }}/crash-archive
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  crash-phase:
+    name: Crash recovery ${{ matrix.label }}
+    needs: [bundles, crash-archive]
+    runs-on: ubuntu-latest
+    # The serial two-node handoff matrix takes roughly 15 minutes of test time
+    # on a runner by itself; every phase gets a runner of its own and keeps its
+    # single test thread.
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: directive native-resume cuts
+            phase: directive
+          - label: explicit worker handoff cuts
+            phase: handoff
+          - label: project schedule deploy cuts
+            phase: schedule-deploy
+          - label: scheduler reset cuts (1/2)
+            phase: reset-scheduler
+            partition: hash:1/2
+          - label: scheduler reset cuts (2/2)
+            phase: reset-scheduler
+            partition: hash:2/2
+    env:
+      RUSTC_WRAPPER: ""
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libcap-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
+        with:
+          toolchain: 1.95.0
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@e658debeddbabf20b2b866d9235eb08a2375b1ad # nextest
+
+      - name: Prepare the runner
         # The crash cuts start enforce-mode nodes whose sandbox probes map a
-        # user namespace, the same test-host baseline the workspace gate selects.
-        run: sudo -n sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+        # user namespace, the same test-host baseline the workspace tests select.
+        run: ./scripts/ci/prepare-runner.sh
 
-      - name: Run crash recovery qualification
+      - name: Download the refreshed bundle state
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: bundle-state-${{ github.sha }}
+          path: ${{ runner.temp }}/bundle-state
+
+      - name: Download the crash qualification archive
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: crash-qualification-archive-${{ github.sha }}
+          path: ${{ runner.temp }}/crash-archive
+
+      - name: Restore the refreshed bundles
+        run: ./scripts/ci/unpack-bundle-state.sh "$RUNNER_TEMP/bundle-state/bundle-state.tar.zst"
+
+      - name: Run crash recovery qualification phase
         env:
-          GATE_BUNDLE_TARGET_DIR: ${{ runner.temp }}/ryeos-bundle-target
           RUST_MIN_STACK: 8388608
-        run: ./scripts/gate.sh --refresh-bundles --crash-qualification-only
+          CRASH_PHASE: ${{ matrix.phase }}
+          CRASH_PARTITION: ${{ matrix.partition }}
+        run: |
+          partition_args=()
+          if [[ -n "$CRASH_PARTITION" ]]; then
+            partition_args=(--crash-partition "$CRASH_PARTITION")
+          fi
+          ./scripts/gate.sh \
+            --crash-run-archive "$RUNNER_TEMP/crash-archive/crash.tar.zst" \
+            --crash-phase "$CRASH_PHASE" "${partition_args[@]}"
 
       - name: Retain explicit worker-handoff qualification
+        if: ${{ matrix.phase == 'handoff' }}
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: explicit-worker-handoff-qualification-${{ github.sha }}
           path: target/qualification/explicit-worker-handoff.json
           if-no-files-found: error
           retention-days: 30
+
+  crash-qualification:
+    name: Crash recovery qualification
+    needs: [bundles, crash-archive, crash-phase]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.run_tests) }}
+    steps:
+      - name: Require every crash qualification job to succeed
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          printf '%s\n' "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          printf '%s\n' "$NEEDS" | jq -e 'all(.[]; .result == "success")' > /dev/null
 
   bundle-refresh:
     name: Bundle refresh
