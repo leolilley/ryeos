@@ -17,7 +17,7 @@ sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup 
 df -h /
 
 if [[ "$scratch" == 1 ]]; then
-    sudo fallocate -l 6G /var/tmp/ryeos-volume.img
+    sudo fallocate -l 12G /var/tmp/ryeos-volume.img
     sudo mkfs.ext4 -q -F /var/tmp/ryeos-volume.img
     sudo mkdir -p /mnt/ryeos-tmp
     sudo mount -o loop /var/tmp/ryeos-volume.img /mnt/ryeos-tmp
