@@ -827,14 +827,20 @@ mod tests {
                 .is_ok()
         );
         assert!(arguments(None, true, true, true).validate(&roots).is_ok());
-        for refused in [
+        let mixed = [
             arguments(Some("operator"), true, false, false).validate(&none),
             arguments(Some("operator"), false, false, false).validate(&roots),
+        ];
+        for refused in mixed {
+            assert!(format!("{:#}", refused.unwrap_err()).contains("do not state them beside it"));
+        }
+        let incomplete = [
             arguments(None, true, true, true).validate(&none),
             arguments(None, true, true, false).validate(&roots),
             arguments(None, false, false, false).validate(&none),
-        ] {
-            assert!(refused.is_err());
+        ];
+        for refused in incomplete {
+            assert!(format!("{:#}", refused.unwrap_err()).contains("must all be stated"));
         }
     }
 

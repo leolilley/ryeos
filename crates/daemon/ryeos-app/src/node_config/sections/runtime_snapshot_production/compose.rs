@@ -162,6 +162,10 @@ fn standalone_source_facts(
         identifier(&stated.owner_id, 256),
         "owner id must be 1..=256 characters of A-Z a-z 0-9 _ -"
     );
+    ensure!(
+        identifier_with_dot(&stated.account, 128),
+        "account must be 1..=128 characters of A-Z a-z 0-9 _ - ."
+    );
     let roots = parse_tls_root_pem(&stated.roots_pem)?;
     let backend = canonical_backend_id(&stated.backend).to_owned();
     let adapter_artifact_hash = adapter_artifact_hash(&backend)?;
@@ -303,6 +307,15 @@ pub fn installed_production_credential_generation(
             .document
             .credential_generation,
     ))
+}
+
+/// Non-empty run of ASCII alphanumerics, `_`, `-` and `.`, at most `max` long.
+fn identifier_with_dot(value: &str, max: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= max
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
 }
 
 /// Non-empty run of ASCII alphanumerics, `_` and `-`, at most `max` long.
@@ -615,6 +628,9 @@ pub(crate) mod tests {
         assert!(refused(&|f| f.owner_id = "".into()).contains("owner id"));
         assert!(refused(&|f| f.owner_id = "usr test".into()).contains("owner id"));
         assert!(refused(&|f| f.owner_id = "u".repeat(257)).contains("owner id"));
+        assert!(refused(&|f| f.account = "".into()).contains("account"));
+        assert!(refused(&|f| f.account = "acct name".into()).contains("account"));
+        assert!(refused(&|f| f.account = "a".repeat(129)).contains("account"));
         assert!(refused(&|f| f.roots_pem = "".into()).contains("no CERTIFICATE block"));
         assert!(refused(&|f| f.roots_pem = "stray text".into()).contains("only CERTIFICATE"));
         let message = format!(
@@ -629,7 +645,11 @@ pub(crate) mod tests {
         let node = stopped_node();
         let mut req = request(&node, "snapshot-producer");
         req.facts_source = ProducerFactsSource::Standalone(stated());
-        assert!(compose_runtime_snapshot_production_binding(req).is_err());
+        let error = compose_runtime_snapshot_production_binding(req).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("load installed bundle registrations"),
+            "{error:#}"
+        );
         assert!(
             !node
                 .root
