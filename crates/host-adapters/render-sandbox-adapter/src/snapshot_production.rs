@@ -21,6 +21,8 @@ use serde::{Deserialize, Serialize};
 use std::io::Read as _;
 use zeroize::Zeroizing;
 
+use crate::fail_class::{Classify as _, FailClass, ensure_class};
+
 use crate::snapshot_provider_spec::{MAX_SPEC_BYTES, SnapshotProductionSpec};
 use crate::{
     ADAPTER_ID, IDLE_TIMEOUT, LIFECYCLE_BOOTSTRAP_FD_ENV, LIFECYCLE_PROVIDER_SPEC_FD_ENV,
@@ -51,7 +53,8 @@ impl SnapshotProductionSettings {
     }
 
     fn validate_for_intent(&self, intent: &RuntimeSnapshotIntent) -> Result<()> {
-        ensure!(
+        ensure_class!(
+            FailClass::RequestParse,
             self.schema == 1
                 && self.sandbox_group_id == intent.provider_group_id
                 && self.owner_id.len() <= 256
@@ -233,7 +236,7 @@ pub(crate) fn operate(adapter: &lillux::InheritedDescriptorAuthority) -> Result<
 /// First-contact upload stage. A completed response is only an upload
 /// acknowledgment; it cannot create or qualify a snapshot.
 pub(crate) fn operate_upload(adapter: &lillux::InheritedDescriptorAuthority) -> Result<()> {
-    let deadline = operation_deadline()?;
+    let deadline = operation_deadline().classed(FailClass::Deadline)?;
     ensure!(
         [
             LIFECYCLE_BOOTSTRAP_FD_ENV,
@@ -247,31 +250,42 @@ pub(crate) fn operate_upload(adapter: &lillux::InheritedDescriptorAuthority) -> 
     let request_bytes = read_sealed_env(
         LIFECYCLE_REQUEST_FD_ENV,
         MAX_RUNTIME_SNAPSHOT_ADAPTER_REQUEST_BYTES,
-    )?;
+    )
+    .classed(FailClass::RequestParse)?;
     let request: RuntimeSnapshotUploadAdapterRequest =
         ryeos_external_execution_contract::from_json_slice_strict(
             &request_bytes,
             MAX_RUNTIME_SNAPSHOT_ADAPTER_REQUEST_BYTES,
-        )?;
-    request.validate()?;
-    ensure!(
-        ryeos_external_execution_contract::canonical_json(&request)? == request_bytes
+        )
+        .classed(FailClass::RequestParse)?;
+    request.validate().classed(FailClass::RequestParse)?;
+    ensure_class!(
+        FailClass::RequestParse,
+        ryeos_external_execution_contract::canonical_json(&request)
+            .classed(FailClass::RequestParse)?
+            == request_bytes
             && request.intent.provider_id == ADAPTER_ID,
         "snapshot upload request is noncanonical or selects another provider"
     );
     verify_artifact(adapter, &request.intent.adapter_artifact_hash, None)?;
-    let deadline = request_deadline(request.stage.attempt_deadline_ms, deadline)?;
-    let spec_bytes = read_sealed_env(LIFECYCLE_PROVIDER_SPEC_FD_ENV, MAX_SPEC_BYTES)?;
+    let deadline = request_deadline(request.stage.attempt_deadline_ms, deadline)
+        .classed(FailClass::Deadline)?;
+    let spec_bytes = read_sealed_env(LIFECYCLE_PROVIDER_SPEC_FD_ENV, MAX_SPEC_BYTES)
+        .classed(FailClass::SpecDigest)?;
     let captured_spec_digest = std::env::var(LIFECYCLE_PROVIDER_SPEC_SHA256_ENV)
-        .context("snapshot upload lacks captured provider spec digest")?;
-    ensure!(
+        .context("snapshot upload lacks captured provider spec digest")
+        .classed(FailClass::SpecDigest)?;
+    ensure_class!(
+        FailClass::SpecDigest,
         captured_spec_digest == request.provider_spec_digest
             && lillux::sha256_hex(&spec_bytes) == request.provider_spec_digest,
         "snapshot upload provider spec changed its signed handoff"
     );
-    let spec = SnapshotProductionSpec::parse(&spec_bytes)?;
-    let settings_bytes = read_sealed_env(LIFECYCLE_SETTINGS_FD_ENV, MAX_SETTINGS_BYTES)?;
-    ensure!(
+    let spec = SnapshotProductionSpec::parse(&spec_bytes).classed(FailClass::SpecDigest)?;
+    let settings_bytes = read_sealed_env(LIFECYCLE_SETTINGS_FD_ENV, MAX_SETTINGS_BYTES)
+        .classed(FailClass::SettingsDigest)?;
+    ensure_class!(
+        FailClass::SettingsDigest,
         lillux::sha256_hex(&settings_bytes) == request.intent.settings_digest,
         "snapshot upload settings changed"
     );
@@ -279,17 +293,22 @@ pub(crate) fn operate_upload(adapter: &lillux::InheritedDescriptorAuthority) -> 
         ryeos_external_execution_contract::from_json_slice_strict(
             &settings_bytes,
             MAX_SETTINGS_BYTES,
-        )?;
-    settings.validate_for_intent(&request.intent)?;
+        )
+        .classed(FailClass::SettingsShape)?;
+    settings
+        .validate_for_intent(&request.intent)
+        .classed(FailClass::SettingsShape)?;
     // SAFETY: this exact inherited descriptor is transferred once by the
     // admitted no-process-creation runner into this upload-only invocation.
     let upload = unsafe { lillux::take_inherited_descriptor_authority(request.upload_descriptor) }
-        .map_err(anyhow::Error::msg)?;
+        .map_err(anyhow::Error::msg)
+        .classed(FailClass::UploadModeOrDigest)?;
     crate::activation_contact::verify_package_before_contact(
         &upload,
         request.upload_bytes,
         &request.upload_sha256,
-    )?;
+    )
+    .classed(FailClass::UploadModeOrDigest)?;
     let network = crate::network_context_from_captured_inputs()?;
     let cancellation = lillux::network::NetworkCancellation::default();
     let credential = crate::read_credential()?;
@@ -329,7 +348,8 @@ pub(crate) fn operate_upload(adapter: &lillux::InheritedDescriptorAuthority) -> 
 /// non-idempotent snapshot-create POST.
 pub(crate) fn operate_create(adapter: &lillux::InheritedDescriptorAuthority) -> Result<()> {
     let deadline = operation_deadline()?;
-    ensure!(
+    ensure_class!(
+        FailClass::SourceGetStatusOrShape,
         [
             LIFECYCLE_BOOTSTRAP_FD_ENV,
             LIFECYCLE_SIGNED_IMPORT_FD_ENV,
@@ -460,9 +480,12 @@ fn send_snapshot_upload(
     cancellation: &lillux::network::NetworkCancellation,
 ) -> Result<SnapshotUploadObservation> {
     let source_id = &intent.source_occurrence_id;
-    let source_path = spec.source_status_path(source_id)?;
-    let source_url = control_url(&source_path, &settings.owner_id, None)?;
-    let (status, source_body) = read_control_json(send_control(
+    let source_path = spec
+        .source_status_path(source_id)
+        .classed(FailClass::SourceGetStatusOrShape)?;
+    let source_url = control_url(&source_path, &settings.owner_id, None)
+        .classed(FailClass::SourceGetStatusOrShape)?;
+    let response = send_control(
         network,
         &source_url,
         "GET",
@@ -471,7 +494,10 @@ fn send_snapshot_upload(
         settings,
         deadline,
         cancellation,
-    )?)?;
+    )
+    .classed(FailClass::SourceGetTransport)?;
+    let (status, source_body) =
+        read_control_json(response).classed(FailClass::SourceGetStatusOrShape)?;
     ensure!(
         status == spec.get_status(),
         "snapshot source did not return exact status"
@@ -479,18 +505,24 @@ fn send_snapshot_upload(
     let source: crate::RenderSandbox = ryeos_external_execution_contract::from_json_slice_strict(
         &source_body,
         MAX_SNAPSHOT_RESPONSE_BYTES,
-    )?;
-    validate_snapshot_source(&source, intent, settings)?;
+    )
+    .classed(FailClass::SourceGetStatusOrShape)?;
+    validate_snapshot_source(&source, intent, settings)
+        .classed(FailClass::SourceNotDenyAllRunning)?;
     let source_response_sha256 = lillux::sha256_hex(&source_body);
 
     crate::activation_contact::verify_package_before_contact(
         upload,
         intent.upload_bytes,
         &intent.upload_sha256,
-    )?;
-    let token_path = spec.source_upload_token_path(source_id)?;
-    let token_url = control_url(&token_path, &settings.owner_id, Some(spec.upload_path()))?;
-    let (status, token_body) = read_control_json(send_control(
+    )
+    .classed(FailClass::UploadModeOrDigest)?;
+    let token_path = spec
+        .source_upload_token_path(source_id)
+        .classed(FailClass::TokenStatus)?;
+    let token_url = control_url(&token_path, &settings.owner_id, Some(spec.upload_path()))
+        .classed(FailClass::TokenStatus)?;
+    let response = send_control(
         network,
         &token_url,
         "POST",
@@ -499,8 +531,14 @@ fn send_snapshot_upload(
         settings,
         deadline,
         cancellation,
-    )?)?;
-    ensure!(status == 201, "snapshot upload token was not accepted");
+    )
+    .classed(FailClass::TokenStatus)?;
+    let (status, token_body) = read_control_json(response).classed(FailClass::TokenStatus)?;
+    ensure_class!(
+        FailClass::TokenStatus,
+        status == 201,
+        "snapshot upload token was not accepted"
+    );
     let operation = crate::proxy_route::ProxyOperation::UploadFile {
         remote_path: spec.upload_path(),
     };
@@ -510,15 +548,18 @@ fn send_snapshot_upload(
         &settings.region,
         operation,
         lillux::time::timestamp_millis(),
-    )?;
+    )
+    .classed(FailClass::ProxyRoute)?;
     crate::proxy_route::validate_proxy_route(
         token.route.as_str(),
         &token.method,
         source_id,
         &settings.region,
         operation,
-    )?;
-    ensure!(
+    )
+    .classed(FailClass::ProxyRoute)?;
+    ensure_class!(
+        FailClass::ProxyRoute,
         token.expires_at_ms > lillux::time::timestamp_millis(),
         "snapshot upload proxy token expired before use"
     );
@@ -541,12 +582,17 @@ fn send_snapshot_upload(
             intent.upload_bytes,
             intent.upload_sha256.clone(),
         ),
-        tls_roots_der: tls_roots_from_base64(&settings.tls_roots_der_base64)?,
+        tls_roots_der: tls_roots_from_base64(&settings.tls_roots_der_base64)
+            .classed(FailClass::SettingsShape)?,
         limits,
         deadlines: Deadlines::new(SETUP_TIMEOUT, IDLE_TIMEOUT, deadline),
         cancellation: cancellation.clone(),
-    })?;
-    ensure!(
+    });
+    let uploaded = uploaded
+        .map_err(anyhow::Error::from)
+        .classed(FailClass::UploadStatus)?;
+    ensure_class!(
+        FailClass::UploadStatus,
         (200..300).contains(&uploaded.status),
         "snapshot owner-product directory upload was not accepted"
     );
@@ -579,9 +625,12 @@ fn send_snapshot_create(
     cancellation: &lillux::network::NetworkCancellation,
 ) -> Result<BoundSnapshotCreation> {
     let source_id = &intent.source_occurrence_id;
-    let source_path = spec.source_status_path(source_id)?;
-    let source_url = control_url(&source_path, &settings.owner_id, None)?;
-    let (status, source_body) = read_control_json(send_control(
+    let source_path = spec
+        .source_status_path(source_id)
+        .classed(FailClass::SourceGetStatusOrShape)?;
+    let source_url = control_url(&source_path, &settings.owner_id, None)
+        .classed(FailClass::SourceGetStatusOrShape)?;
+    let response = send_control(
         network,
         &source_url,
         "GET",
@@ -590,22 +639,32 @@ fn send_snapshot_create(
         settings,
         deadline,
         cancellation,
-    )?)?;
-    ensure!(
+    )
+    .classed(FailClass::SourceGetTransport)?;
+    let (status, source_body) =
+        read_control_json(response).classed(FailClass::SourceGetStatusOrShape)?;
+    ensure_class!(
+        FailClass::SourceGetStatusOrShape,
         status == spec.get_status(),
         "snapshot source did not return exact status"
     );
     let source: crate::RenderSandbox = ryeos_external_execution_contract::from_json_slice_strict(
         &source_body,
         MAX_SNAPSHOT_RESPONSE_BYTES,
-    )?;
-    validate_snapshot_source(&source, intent, settings)?;
-    let create_path = spec.create_path(source_id)?;
-    let create_url = control_url(&create_path, &settings.owner_id, None)?;
+    )
+    .classed(FailClass::SourceGetStatusOrShape)?;
+    validate_snapshot_source(&source, intent, settings)
+        .classed(FailClass::SourceNotDenyAllRunning)?;
+    let create_path = spec
+        .create_path(source_id)
+        .classed(FailClass::CreateStatus)?;
+    let create_url =
+        control_url(&create_path, &settings.owner_id, None).classed(FailClass::CreateStatus)?;
     let body = ryeos_external_execution_contract::canonical_json(
         &serde_json::json!({"kind": spec.create_kind()}),
-    )?;
-    let (status, response_body) = read_control_json(send_control(
+    )
+    .classed(FailClass::CreateStatus)?;
+    let response = send_control(
         network,
         &create_url,
         "POST",
@@ -614,8 +673,11 @@ fn send_snapshot_create(
         settings,
         deadline,
         cancellation,
-    )?)?;
+    )
+    .classed(FailClass::CreateStatus)?;
+    let (status, response_body) = read_control_json(response).classed(FailClass::CreateStatus)?;
     bind_snapshot_create_response(spec, creation_intent, status, &response_body)
+        .classed(FailClass::CreateStatus)
 }
 
 fn validate_snapshot_source(

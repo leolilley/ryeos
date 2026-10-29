@@ -3,6 +3,7 @@
 //! validation contract and RyeOS bootstrap mapping are not established.
 
 mod activation_contact;
+mod fail_class;
 mod lease;
 mod provider_spec;
 mod proxy_route;
@@ -332,10 +333,16 @@ impl Drop for SignalCancellation {
 }
 
 fn main() {
-    if run().is_err() {
-        // Never forward provider text, credentials, URLs, or settings to stderr.
-        let _ = writeln!(std::io::stderr(), "render lifecycle adapter failed closed");
-        std::process::exit(1);
+    if let Err(error) = run() {
+        // Never forward provider text, credentials, URLs, or settings to stderr:
+        // only the compile-time class word and its stable exit code leave.
+        let class = fail_class::FailClass::of(&error);
+        let _ = writeln!(
+            std::io::stderr(),
+            "render lifecycle adapter failed closed: {}",
+            class.word()
+        );
+        std::process::exit(class.exit_code());
     }
 }
 
@@ -1398,6 +1405,11 @@ fn observe_termination_with_network(
 }
 
 fn network_context_from_captured_inputs() -> Result<NetworkContext> {
+    use fail_class::{Classify as _, FailClass};
+    network_context_from_captured_inputs_inner().classed(FailClass::NetInputs)
+}
+
+fn network_context_from_captured_inputs_inner() -> Result<NetworkContext> {
     let resolver = read_sealed_env(LIFECYCLE_RESOLVER_FD_ENV, MAX_NETWORK_INPUT_BYTES)?;
     let hosts = read_sealed_env(LIFECYCLE_HOSTS_FD_ENV, MAX_NETWORK_INPUT_BYTES)?;
     let resolver_digest =
@@ -1504,7 +1516,8 @@ fn tls_roots(settings: &Settings) -> Result<Vec<Vec<u8>>> {
 }
 
 fn read_credential() -> Result<Zeroizing<String>> {
-    ryeos_remote_lease_core::read_credential("Render")
+    use fail_class::{Classify as _, FailClass};
+    ryeos_remote_lease_core::read_credential("Render").classed(FailClass::CredentialFormat)
 }
 
 fn send_api_request<S: RenderApiSettings>(
@@ -1667,13 +1680,21 @@ fn verify_artifact(
     expected_digest: &str,
     expected_bytes: Option<u64>,
 ) -> Result<LifecycleArtifactInspection> {
-    authority.require_owned_executable()?;
-    let observation = authority.regular_file_observation()?;
-    ensure!(
-        expected_bytes.is_none_or(|bytes| bytes == observation.size())
-            && authority.digest_regular_file_stable_exact(&observation)? == expected_digest,
-        "lifecycle artifact identity changed"
-    );
+    use fail_class::{Classify as _, FailClass};
+    authority
+        .require_owned_executable()
+        .classed(FailClass::ArtifactDigest)?;
+    let observation = authority
+        .regular_file_observation()
+        .classed(FailClass::ArtifactDigest)?;
+    let digest = authority
+        .digest_regular_file_stable_exact(&observation)
+        .classed(FailClass::ArtifactDigest)?;
+    if !expected_bytes.is_none_or(|bytes| bytes == observation.size()) || digest != expected_digest
+    {
+        return Err(anyhow::anyhow!("lifecycle artifact identity changed")
+            .context(FailClass::ArtifactDigest));
+    }
     Ok(LifecycleArtifactInspection {
         descriptor: authority
             .inherited_descriptor()
