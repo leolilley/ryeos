@@ -22,6 +22,7 @@ PATH="$tool_dir:$PATH" "$actionlint" -color
     scripts/ci/prepare-runner.sh \
     scripts/ci/unpack-bundle-state.sh \
     scripts/ci/test-daemon-image-init-policy.sh \
+    scripts/ci/test-image-build-cache.sh \
     scripts/ci/test-publisher-trust-policy.sh \
     scripts/release/resolve-version.sh \
     scripts/release/test-resolve-version.sh \

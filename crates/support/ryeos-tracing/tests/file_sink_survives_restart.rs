@@ -30,6 +30,8 @@ fn init_node_once(tmp: &tempfile::TempDir) -> (std::path::PathBuf, std::path::Pa
                 .unwrap(),
         ),
         replace_node_policy_generation: false,
+        replace_substrate_identity: false,
+        confirm_substrate_identity_replacement: false,
         skip_preflight: true,
     })
     .expect("ryeos init state for tracing test");
