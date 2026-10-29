@@ -1086,6 +1086,32 @@ enum SnapshotStatus {
     Failed,
 }
 
+/// Whether two RFC 3339 timestamps name the same instant at the coarser of
+/// their two fractional-second precisions. Render reports a snapshot's request
+/// and expiry with nanosecond digits on creation and microsecond digits on
+/// later reads, so the finer value is truncated, never rounded, to the digits
+/// of the coarser one. Either value failing to parse is a mismatch.
+fn same_instant(left: &str, right: &str) -> bool {
+    fn fractional_digits(value: &str) -> u32 {
+        value
+            .split_once('.')
+            .map_or(0, |(_, rest)| {
+                rest.bytes().take_while(u8::is_ascii_digit).count() as u32
+            })
+            .min(9)
+    }
+    let (Ok(left_time), Ok(right_time)) = (
+        DateTime::parse_from_rfc3339(left),
+        DateTime::parse_from_rfc3339(right),
+    ) else {
+        return false;
+    };
+    let digits = fractional_digits(left).min(fractional_digits(right));
+    let unit = 10_u32.pow(9 - digits);
+    left_time.timestamp() == right_time.timestamp()
+        && left_time.timestamp_subsec_nanos() / unit == right_time.timestamp_subsec_nanos() / unit
+}
+
 /// A provider locator, not an installed-runtime or product qualification.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1229,8 +1255,8 @@ pub(crate) fn observe_snapshot_available(
             && snapshot.plan == intent.plan
             && snapshot.name.is_none()
             && snapshot.error.is_none()
-            && snapshot.requested_at == creation.requested_at
-            && snapshot.expires_at == creation.expires_at,
+            && same_instant(&snapshot.requested_at, &creation.requested_at)
+            && same_instant(&snapshot.expires_at, &creation.expires_at),
         "available snapshot differs from its exact creation"
     );
     let requested = DateTime::parse_from_rfc3339(&snapshot.requested_at)?;
@@ -1697,6 +1723,65 @@ mod tests {
                 &serde_json::to_vec(&creating).unwrap()
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn same_instant_compares_at_the_coarser_precision_without_rounding() {
+        assert!(same_instant(
+            "2026-10-29T23:16:59.230783106Z",
+            "2026-10-29T23:16:59.230783Z"
+        ));
+        assert!(same_instant(
+            "2026-10-29T23:16:59.230783Z",
+            "2026-10-29T23:16:59.230783999Z"
+        ));
+        assert!(same_instant(
+            "2026-10-29T23:16:59.230783Z",
+            "2026-10-29T23:16:59.230783Z"
+        ));
+        assert!(same_instant(
+            "2026-10-29T23:16:59Z",
+            "2026-10-29T23:16:59.999999999Z"
+        ));
+        assert!(same_instant(
+            "2026-10-30T12:16:59.5+13:00",
+            "2026-10-29T23:16:59.5Z"
+        ));
+        assert!(!same_instant(
+            "2026-10-29T23:16:59.230783106Z",
+            "2026-10-29T23:16:59.230784Z"
+        ));
+        assert!(!same_instant(
+            "2026-10-29T23:16:59.230783999Z",
+            "2026-10-29T23:16:59.230784Z"
+        ));
+        assert!(!same_instant(
+            "2026-10-29T23:16:59.230783Z",
+            "2026-10-29T23:17:59.230783Z"
+        ));
+        assert!(!same_instant("not-a-time", "2026-10-29T23:16:59Z"));
+    }
+
+    #[test]
+    fn live_readiness_accepts_microsecond_echoes_of_nanosecond_creation() {
+        let profile = profile();
+        let intent = live_intent();
+        let bound =
+            bind_snapshot_create_response(&profile, &intent, 202, LIVE_CREATE.as_bytes()).unwrap();
+        let observed =
+            observe_snapshot_available(&profile, &intent, &bound, 200, LIVE_AVAILABLE.as_bytes())
+                .unwrap();
+        assert_eq!(observed.size_bytes, 4_660_019);
+        assert_eq!(observed.captured_at, "2026-10-29T23:16:59.34709Z");
+        let shifted = LIVE_AVAILABLE.replace("59.230783Z", "59.230784Z");
+        assert!(
+            observe_snapshot_available(&profile, &intent, &bound, 200, shifted.as_bytes()).is_err()
+        );
+        let other_expiry = LIVE_AVAILABLE.replace("2026-11-28T", "2026-11-29T");
+        assert!(
+            observe_snapshot_available(&profile, &intent, &bound, 200, other_expiry.as_bytes())
+                .is_err()
         );
     }
 }
