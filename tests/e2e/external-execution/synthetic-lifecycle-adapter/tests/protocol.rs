@@ -3273,11 +3273,25 @@ fn run_production_tls_candidate_with_test_stack(
                     publication,
                 ))
             }));
-            drop(runtime);
-            let closed = store_owner.close();
             match outcome {
-                Ok(()) => closed.unwrap(),
-                Err(panic) => std::panic::resume_unwind(panic),
+                Ok(()) => {
+                    drop(runtime);
+                    store_owner.close().unwrap();
+                }
+                Err(panic) => {
+                    // A failed scenario can have tasks parked on a blocking
+                    // call or an expired store deadline; waiting for them
+                    // would hold the failure report for the whole window.
+                    // Give them a short grace period, then abandon them.
+                    runtime.shutdown_timeout(Duration::from_secs(5));
+                    // The owner is deliberately never closed or dropped: its
+                    // close waits on the same stalled store and would delay
+                    // the panic. Each test runs in its own process, so the
+                    // shared native host it leaves dirty affects no later
+                    // case, and only the temp directory goes uncleaned.
+                    let _abandoned = std::mem::ManuallyDrop::new(store_owner);
+                    std::panic::resume_unwind(panic)
+                }
             }
         })
         .unwrap()
@@ -4319,26 +4333,25 @@ async fn run_production_tls_candidate(
                 // or recover a lost activation observation. Print paths only,
                 // never the private bootstrap/adapter document contents.
                 let retained_provider_state = provider_state.keep();
+                // The dispatch error leads the report: the store reads below
+                // can themselves be refused (an expired runtime deadline is
+                // the usual cause of a stalled dispatch), so each is printed
+                // as the Result it is and none may hide the first error.
                 panic!(
-                    "public worker dispatch failed: {error}; placement={placement}; \
+                    "public worker dispatch failed: {error:#}; placement={placement}; \
                      retained_node={}; retained_provider_state={}; \
                      base_snapshot={base_snapshot_hash}; \
+                     controller_evidence={:#?}; \
                      thread={:#?}; session={:#?}; commands={:#?}; \
-                     controller_evidence={:#?}; channel={:#?}; events={:#?}",
+                     channel={:#?}; events={:#?}",
                     retained_node.display(),
                     retained_provider_state.display(),
-                    state.state_store.get_thread(&placement).unwrap(),
-                    state.state_store.dedicated_session(&placement).unwrap(),
-                    state
-                        .state_store
-                        .dedicated_session_commands(&placement)
-                        .unwrap(),
-                    controller_evidence.lock().unwrap(),
+                    controller_evidence.lock(),
+                    state.state_store.get_thread(&placement),
+                    state.state_store.dedicated_session(&placement),
+                    state.state_store.dedicated_session_commands(&placement),
                     state.state_store.external_execution_channel(&placement),
-                    state
-                        .state_store
-                        .latest_thread_events(&placement, 32)
-                        .unwrap(),
+                    state.state_store.latest_thread_events(&placement, 32),
                 )
             }
         };
@@ -4347,14 +4360,11 @@ async fn run_production_tls_candidate(
             let retained_provider_state = provider_state.keep();
             panic!(
                 "public worker terminal failed; retained_node={}; retained_provider_state={}; \
-                 dispatch={public:#}; commands={:#?}; controller_evidence={:#?}",
+                 dispatch={public:#}; controller_evidence={:#?}; commands={:#?}",
                 retained_node.display(),
                 retained_provider_state.display(),
-                state
-                    .state_store
-                    .dedicated_session_commands(&placement)
-                    .unwrap(),
-                controller_evidence.lock().unwrap(),
+                controller_evidence.lock(),
+                state.state_store.dedicated_session_commands(&placement),
             );
         }
         assert!(
@@ -4865,13 +4875,11 @@ async fn run_production_tls_candidate(
     )
     .await
     .unwrap_or_else(|error| {
-        let commands = state
-            .state_store
-            .dedicated_session_commands(&placement)
-            .unwrap();
         panic!(
-            "joined session start failed: {error:#}; retained commands: {commands:#?}; controller evidence: {:?}",
-            controller_evidence.lock().unwrap()
+            "joined session start failed: {error:#}; controller evidence: {:?}; \
+             retained commands: {:#?}",
+            controller_evidence.lock(),
+            state.state_store.dedicated_session_commands(&placement),
         )
     });
     if scripted_turn || publication == PublicationScenario::StaleBase {
