@@ -1053,19 +1053,19 @@ impl SnapshotCreationIntent {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct RenderSnapshotCreateResponse {
-    #[serde(deserialize_with = "required_nullable")]
+    #[serde(default)]
     captured_at: Option<String>,
-    #[serde(deserialize_with = "required_nullable")]
+    #[serde(default)]
     error: Option<String>,
     expires_at: String,
     id: String,
     kind: SnapshotKind,
-    #[serde(deserialize_with = "required_nullable")]
+    #[serde(default)]
     name: Option<String>,
     plan: RenderPlan,
     requested_at: String,
     sandbox_group_id: String,
-    #[serde(deserialize_with = "required_nullable")]
+    #[serde(default)]
     size_bytes: Option<i64>,
     source_sandbox_id: String,
     status: SnapshotStatus,
@@ -1084,14 +1084,6 @@ enum SnapshotStatus {
     Creating,
     Available,
     Failed,
-}
-
-fn required_nullable<'de, D, T>(deserializer: D) -> std::result::Result<Option<T>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    T: Deserialize<'de>,
-{
-    Option::<T>::deserialize(deserializer)
 }
 
 /// A provider locator, not an installed-runtime or product qualification.
@@ -1555,14 +1547,14 @@ mod tests {
         assert!(
             bind_snapshot_create_response(&profile, &intent, 202, duplicated.as_bytes()).is_err()
         );
-        let mut missing = response();
-        missing.as_object_mut().unwrap().remove("sizeBytes");
+        let mut claimed = response();
+        claimed["sizeBytes"] = serde_json::json!(10);
         assert!(
             bind_snapshot_create_response(
                 &profile,
                 &intent,
                 202,
-                &serde_json::to_vec(&missing).unwrap()
+                &serde_json::to_vec(&claimed).unwrap()
             )
             .is_err()
         );
@@ -1622,6 +1614,89 @@ mod tests {
         assert!(
             observe_snapshot_available(&profile, &intent, &creation, 200, duplicated.as_bytes())
                 .is_err()
+        );
+    }
+
+    const LIVE_CREATE: &str = r#"{"expiresAt":"2026-11-28T23:16:59.190498656Z","id":"snp-dbht7qr346tc73dqpacg","kind":"filesystem","plan":"starter","requestedAt":"2026-10-29T23:16:59.230783106Z","sandboxGroupId":"sbg-damv59p42hec73ck8b7g","sourceSandboxId":"sbx-18p4gdbht7ogae00c739p3070","status":"creating"}"#;
+    const LIVE_AVAILABLE: &str = r#"{"capturedAt":"2026-10-29T23:16:59.34709Z","expiresAt":"2026-11-28T23:16:59.190498Z","id":"snp-dbht7qr346tc73dqpacg","kind":"filesystem","plan":"starter","requestedAt":"2026-10-29T23:16:59.230783Z","sandboxGroupId":"sbg-damv59p42hec73ck8b7g","sizeBytes":4660019,"sourceSandboxId":"sbx-18p4gdbht7ogae00c739p3070","status":"available"}"#;
+
+    fn live_intent() -> SnapshotCreationIntent {
+        let mut live = intent();
+        live.sandbox_group_id = "sbg-damv59p42hec73ck8b7g".into();
+        live.source_sandbox_id = "sbx-18p4gdbht7ogae00c739p3070".into();
+        live
+    }
+
+    #[test]
+    fn live_snapshot_shapes_omit_absent_fields() {
+        let profile = profile();
+        let intent = live_intent();
+        let available = LIVE_AVAILABLE
+            .replace("59.230783Z", "59.230783106Z")
+            .replace("59.190498Z", "59.190498656Z");
+        let bound =
+            bind_snapshot_create_response(&profile, &intent, 202, LIVE_CREATE.as_bytes()).unwrap();
+        let observed =
+            observe_snapshot_available(&profile, &intent, &bound, 200, available.as_bytes())
+                .unwrap();
+        assert_eq!(observed.size_bytes, 4_660_019);
+        assert_eq!(observed.captured_at, "2026-10-29T23:16:59.34709Z");
+        let shifted = available.replace("59.230783106Z", "59.230784106Z");
+        assert!(
+            observe_snapshot_available(&profile, &intent, &bound, 200, shifted.as_bytes()).is_err()
+        );
+        // An available snapshot must carry its capture metadata and no name or error.
+        for (key, value) in [("name", "x"), ("error", "boom")] {
+            let mut changed: serde_json::Value = serde_json::from_str(&available).unwrap();
+            changed[key] = serde_json::json!(value);
+            assert!(
+                observe_snapshot_available(
+                    &profile,
+                    &intent,
+                    &bound,
+                    200,
+                    &serde_json::to_vec(&changed).unwrap()
+                )
+                .is_err()
+            );
+        }
+        for key in ["capturedAt", "sizeBytes"] {
+            let mut changed: serde_json::Value = serde_json::from_str(&available).unwrap();
+            changed.as_object_mut().unwrap().remove(key);
+            assert!(
+                observe_snapshot_available(
+                    &profile,
+                    &intent,
+                    &bound,
+                    200,
+                    &serde_json::to_vec(&changed).unwrap()
+                )
+                .is_err()
+            );
+        }
+        let mut empty: serde_json::Value = serde_json::from_str(&available).unwrap();
+        empty["sizeBytes"] = serde_json::json!(0);
+        assert!(
+            observe_snapshot_available(
+                &profile,
+                &intent,
+                &bound,
+                200,
+                &serde_json::to_vec(&empty).unwrap()
+            )
+            .is_err()
+        );
+        // A creating snapshot may not claim captured content.
+        let mut creating: serde_json::Value = serde_json::from_str(LIVE_CREATE).unwrap();
+        creating["capturedAt"] = serde_json::json!("2026-10-29T23:16:59.34709Z");
+        assert!(
+            bind_snapshot_create_response(
+                &profile,
+                &intent,
+                202,
+                &serde_json::to_vec(&creating).unwrap()
+            )
+            .is_err()
         );
     }
 }
