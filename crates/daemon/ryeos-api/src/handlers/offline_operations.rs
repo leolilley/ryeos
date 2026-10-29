@@ -94,6 +94,18 @@ fn refusal_error(refusal: Refusal) -> HandlerError {
     }
 }
 
+/// The key fingerprint behind an authenticated principal. Signed-HTTP
+/// principals are `fp:<fingerprint>`; a request names its signer by the bare
+/// fingerprint, so the two are compared in that one form.
+fn submitting_fingerprint(principal: &str) -> Result<&str, HandlerError> {
+    principal
+        .strip_prefix("fp:")
+        .filter(|fingerprint| !fingerprint.is_empty())
+        .ok_or_else(|| {
+            HandlerError::Forbidden("the delivery was not authenticated by a key".to_owned())
+        })
+}
+
 fn blocking_failure(error: impl std::fmt::Display) -> HandlerError {
     HandlerError::Internal(format!("offline-operation task failed: {error}"))
 }
@@ -128,7 +140,7 @@ pub async fn submit(
     }
     let app_root = state.config.app_root.clone();
     let identity = Arc::clone(&state.identity);
-    let submitted_by = ctx.fingerprint.clone();
+    let submitted_by = submitting_fingerprint(&ctx.fingerprint)?.to_owned();
     let request = req.request;
     let accepted = tokio::task::spawn_blocking(move || {
         accept(
@@ -257,6 +269,14 @@ mod tests {
         assert_eq!(refusal_status(RefusalReason::Expired), 409);
         assert_eq!(refusal_status(RefusalReason::StaleLedgerHead), 409);
         assert_eq!(refusal_status(RefusalReason::Malformed), 400);
+    }
+
+    #[test]
+    fn the_submitting_key_is_the_fingerprint_behind_the_principal() {
+        assert_eq!(submitting_fingerprint("fp:abc123").unwrap(), "abc123");
+        for principal in ["abc123", "fp:", "", "route:anonymous"] {
+            assert!(submitting_fingerprint(principal).is_err(), "{principal}");
+        }
     }
 
     #[test]
