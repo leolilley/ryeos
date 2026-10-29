@@ -9,7 +9,12 @@
 
 use std::sync::Arc;
 
+use std::collections::BTreeMap;
+
 use anyhow::{Context as _, bail};
+use ryeos_external_execution_contract::restored_runtime_measurement::{
+    ConsumerArchiveBudget, ConsumerRuntimeVerifierSelection,
+};
 use ryeos_state::external_content::products::composition::{
     ExternalProductSlotDeclaration, ProductRelationship, ProductRelationships,
 };
@@ -19,8 +24,8 @@ use serde::{Deserialize, Serialize};
 use super::product_qualification::{
     AdmittedUseInputs, load_runtime_manifest_identity,
     prepare_current_bundle_consumer_content_inputs, realize_runtime_slot,
-    require_unguarded_resolution, resolve_consumer_definition_in_generation,
-    resolve_current_bundle_qualification_policy,
+    remote_worker_verifier_facts, require_unguarded_resolution,
+    resolve_consumer_definition_in_generation, resolve_current_bundle_qualification_policy,
 };
 use crate::handler_context::HandlerContext;
 use crate::state::AppState;
@@ -57,9 +62,21 @@ impl ConsumerQualificationContextRequest {
     }
 }
 
+/// Room reserved for the accepted consumer input record, whose exact size is
+/// only known once an occurrence exists. The record carries identities and
+/// digests, never content.
+const CONSUMER_INPUT_RECORD_ALLOWANCE_BYTES: u64 = 1024 * 1024;
+
+/// Per-entry archive framing reserved on top of the regular file bytes, plus
+/// the fixed slack the budget contract itself requires.
+const ARCHIVE_FRAMING_BYTES_PER_ENTRY: u64 = 1024;
+
 /// The emitted document. `verifier_parameters` is the fragment to merge into
 /// the policy's `verifier_parameters`; `consumer_execution_context` is the
-/// signed context the digests were derived under.
+/// signed context the digests were derived under. `consumer_verifier_selections`
+/// maps each remote Worker scenario id to the protected selection its launch
+/// will require; that object, written alone to a file, is the
+/// `--consumer-verifiers` input of `snapshot-qualification-compose`.
 #[derive(Debug, Clone, Serialize)]
 pub struct ConsumerQualificationContextResponse {
     pub policy_ref: String,
@@ -68,6 +85,7 @@ pub struct ConsumerQualificationContextResponse {
     pub bundle_generation_identity: String,
     pub verifier_parameters: serde_json::Value,
     pub consumer_execution_context: ProductQualificationConsumerExecutionContext,
+    pub consumer_verifier_selections: BTreeMap<String, ConsumerRuntimeVerifierSelection>,
 }
 
 pub async fn derive(
@@ -131,6 +149,27 @@ fn derive_blocking(
         entry_count,
         total_bytes,
     );
+    // Everything the launch delivers besides the verifier and the input
+    // record: the Worker literals, the environment and the runtime product,
+    // charged exactly as the delivery's own budget precheck charges them.
+    let mut product_bytes = total_bytes;
+    let mut product_entries = entry_count
+        .checked_add(1)
+        .context("consumer runtime entry total overflow")?;
+    for realization in prepared
+        .worker_literals
+        .iter()
+        .chain(prepared.environment.realizations.iter())
+    {
+        product_bytes = product_bytes
+            .checked_add(realization.total_bytes)
+            .context("consumer product byte total overflow")?;
+        product_entries = realization
+            .entry_count
+            .checked_add(1)
+            .and_then(|count| count.checked_add(product_entries))
+            .context("consumer product entry total overflow")?;
+    }
     let qualification_use = AdmittedUseInputs {
         requirement: &requirement,
         profile: &prepared.worker_source.profile,
@@ -142,6 +181,26 @@ fn derive_blocking(
         process_environment: &prepared.environment.definition.process_environment,
     }
     .derive()?;
+    let verifier_facts =
+        remote_worker_verifier_facts(state, &policy_source, &request.subject_manifest_hash)?;
+    let mut consumer_verifier_selections = BTreeMap::new();
+    for (scenario_id, facts) in verifier_facts {
+        let archive_budget = archive_budget_for(
+            product_bytes,
+            product_entries,
+            facts.shipped_bytes,
+            facts.archive_member_count,
+        )
+        .with_context(|| format!("remote Worker scenario {scenario_id} archive budget"))?;
+        consumer_verifier_selections.insert(
+            scenario_id,
+            ConsumerRuntimeVerifierSelection {
+                scenario_source_digest: facts.scenario_source_digest,
+                verifier_artifact_hash: facts.verifier_artifact_hash,
+                archive_budget,
+            },
+        );
+    }
     // Nothing was published: dropping the staged content leaves node state
     // exactly as it was.
     Ok(ConsumerQualificationContextResponse {
@@ -151,7 +210,36 @@ fn derive_blocking(
         bundle_generation_identity: prepared.definitions.bundle_generation_identity.clone(),
         verifier_parameters: qualification_use.parameters()?,
         consumer_execution_context: signed_context,
+        consumer_verifier_selections,
     })
+}
+
+/// The archive allowance is operator policy bounded only by the contract's
+/// finite staging limits, so the daemon proposes the smallest allowance that
+/// holds this scenario's exact delivery: the admitted products, the shipped
+/// verifier and members, an input record allowance, and archive framing.
+fn archive_budget_for(
+    product_bytes: u64,
+    product_entries: usize,
+    shipped_bytes: u64,
+    archive_member_count: usize,
+) -> anyhow::Result<ConsumerArchiveBudget> {
+    // The input record and the verifier are two entries; signed members add one each.
+    let maximum_entries = product_entries
+        .checked_add(2)
+        .and_then(|count| count.checked_add(archive_member_count))
+        .context("archive entry total overflow")?;
+    let maximum_regular_bytes = product_bytes
+        .checked_add(shipped_bytes)
+        .and_then(|total| total.checked_add(CONSUMER_INPUT_RECORD_ALLOWANCE_BYTES))
+        .context("archive byte total overflow")?;
+    let maximum_framed_bytes = u64::try_from(maximum_entries)
+        .ok()
+        .and_then(|entries| entries.checked_mul(ARCHIVE_FRAMING_BYTES_PER_ENTRY))
+        .and_then(|framing| framing.checked_add(maximum_regular_bytes))
+        .and_then(|total| total.checked_add(ARCHIVE_FRAMING_BYTES_PER_ENTRY))
+        .context("archive framed byte total overflow")?;
+    ConsumerArchiveBudget::new(maximum_entries, maximum_regular_bytes, maximum_framed_bytes)
 }
 
 /// The digests must come from the slot qualification itself realizes: the
@@ -317,6 +405,31 @@ mod tests {
         ensure!(
             require_slot_matches_context(&slot, &context).is_err(),
             "a different slot was accepted"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn archive_budget_holds_the_delivery_and_is_a_valid_budget() -> Result<()> {
+        let budget = archive_budget_for(10_000, 41, 5_000, 3)?;
+        ensure!(budget.maximum_entries == 46, "entries: {budget:?}");
+        ensure!(
+            budget.maximum_regular_bytes == 15_000 + CONSUMER_INPUT_RECORD_ALLOWANCE_BYTES,
+            "regular bytes: {budget:?}"
+        );
+        ensure!(
+            budget.maximum_framed_bytes
+                >= budget.maximum_regular_bytes + 46 * ARCHIVE_FRAMING_BYTES_PER_ENTRY,
+            "framed bytes do not cover per-entry framing: {budget:?}"
+        );
+        budget.validate()?;
+        ensure!(
+            archive_budget_for(u64::MAX, 1, 1, 0).is_err(),
+            "an overflowing delivery produced a budget"
+        );
+        ensure!(
+            archive_budget_for(5 * 1024 * 1024 * 1024, 1, 0, 0).is_err(),
+            "a delivery beyond the finite staging bound produced a budget"
         );
         Ok(())
     }

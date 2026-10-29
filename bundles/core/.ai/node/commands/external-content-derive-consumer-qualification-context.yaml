@@ -1,6 +1,6 @@
-# ryeos:signed:2026-10-19T06:02:17Z:94de8a0c7b41db865cf28a66d097003c3ed13c8c6bf4ddffdbab3f1f7e1f99cc:1HAyC1CrC3NUDS1e0GaDkw/+OfG/tc6I/upW3MNlYc3V7jAMmkrdfm1DnJoNdaR3fLskK9EBStapZGzkeZy0AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-29T06:09:02Z:d958c6e3b4dcaa3ff64bc506b8d64add077caec7e1fa1cec8b1deba17bc85ca2:9dLf2bR/uhrljNbPo6a07HXiVHfkPPmCasUBJcJuEEhZmrg4bw9Gs5zGlz0duI4wmDJWsHIUgw9SctY/01WsDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens: [external-content, derive-consumer-qualification-context]
-description: Derive the consumer qualification context for an exact subject manifest from a signed policy and relationship without writing state
+description: Derive the consumer qualification context for an exact subject manifest from a signed policy and relationship without writing state; the response's consumer_verifier_selections map (scenario id to scenario_source_digest, verifier_artifact_hash and archive_budget) is the content of the file given to snapshot-qualification-compose --consumer-verifiers
 forms:
   - slots:
       - field: policy_ref
@@ -9,6 +9,8 @@ forms:
       - field: subject_manifest_hash
 help:
   usage: ryeos external-content derive-consumer-qualification-context <policy-ref> <relationship-ref> <relationship-name> <subject-manifest-hash>
+  examples:
+    - "ryeos external-content derive-consumer-qualification-context <policy-ref> <relationship-ref> <relationship-name> <subject-manifest-hash> | jq .consumer_verifier_selections > consumer-verifiers.json"
 dispatch:
   kind: execute_ref
   execute: service:external-content/derive-consumer-qualification-context

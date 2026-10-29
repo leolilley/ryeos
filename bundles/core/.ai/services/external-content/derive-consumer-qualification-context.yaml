@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-19T06:02:17Z:b7650d545d6ef3530c09772f329d13f54f460d5c80ba4c14a8fa17a023eb6ead:/UAPoCvsP3RbyXmkG3mwEBP2ZXO9jB0uaIqelE8qIUQeayPLryLLlXtc+G2vgHfo7MuHl5OSKq63JGOla3zZBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-29T06:09:02Z:73f931a6d11c0c660af6ddf06dfac61f01abead45d35ed2c3710439c6ab84116:SDuXcnkwwt6bBxRpZ/mUaRcNtS3L5DTnVRDVAzk61gKxmwpefzxFH6kt2Z5liabzOnI1RrjEbVUcB0onCRVFAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: external-content.derive-consumer-qualification-context
 required_caps: ["ryeos.execute.service.external-content/derive-consumer-qualification-context"]
@@ -7,4 +7,4 @@ schema:
   relationship_ref: string
   relationship_name: string
   subject_manifest_hash: string
-description: Derive the consumer qualification context and consumer execution context from admitted inputs for an exact subject manifest; read-only, requires an admitted operator, and writes no state
+description: Derive the consumer qualification context and consumer execution context from admitted inputs for an exact subject manifest; read-only, requires an admitted operator, and writes no state. The response also carries consumer_verifier_selections, a scenario-id keyed map holding for every remote Worker scenario of the policy the exact protected verifier selection (scenario_source_digest, verifier_artifact_hash, archive_budget) its consumer launch requires; archive_budget is the smallest allowance holding that scenario's delivery plus a fixed input-record and framing allowance, not a daemon-enforced default. Write that map alone as the JSON file passed to snapshot-qualification-compose --consumer-verifiers

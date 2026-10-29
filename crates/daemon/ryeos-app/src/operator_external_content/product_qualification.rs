@@ -3771,6 +3771,74 @@ pub fn prepare_remote_consumer_verifier_from_admitted_sources(
     })
 }
 
+/// What a remote Worker scenario's launch will compare against the installed
+/// protected verifier selection, plus the archive bytes the signed selection
+/// itself ships.
+pub(super) struct RemoteWorkerVerifierFacts {
+    pub scenario_source_digest: String,
+    pub verifier_artifact_hash: String,
+    /// Verifier payload plus every signed archive member.
+    pub shipped_bytes: u64,
+    pub archive_member_count: usize,
+}
+
+/// Resolve, in one checked generation and through the launch's own
+/// preparation, every remote Worker scenario of the policy (those with both
+/// an independent verifier and a consumer Worker request). A scenario whose
+/// sources cannot be resolved refuses the whole call, naming the scenario.
+pub(super) fn remote_worker_verifier_facts(
+    state: &AppState,
+    policy_source: &ProductQualificationPolicySource,
+    subject_manifest_hash: &str,
+) -> anyhow::Result<BTreeMap<String, RemoteWorkerVerifierFacts>> {
+    state.engine.with_checked_bundle_generation(|generation| {
+        let mut facts = BTreeMap::new();
+        for (scenario_id, scenario) in &policy_source.policy.producer_scenarios {
+            if scenario.remote_verifier.is_none() || scenario.consumer_worker_request.is_none() {
+                continue;
+            }
+            let resolve = || -> anyhow::Result<RemoteWorkerVerifierFacts> {
+                let sources = match scenario.recipe_ref.as_deref() {
+                    Some(recipe_ref) => BTreeMap::from([(
+                        scenario_id.clone(),
+                        resolve_bundle_producer_recipe_in_generation(generation, recipe_ref)?
+                            .source_identity()?,
+                    )]),
+                    None => BTreeMap::new(),
+                };
+                let prepared = prepare_remote_consumer_verifier_from_admitted_sources_in_generation(
+                    state,
+                    generation,
+                    policy_source,
+                    &sources,
+                    subject_manifest_hash,
+                    scenario_id,
+                )?;
+                let shipped_bytes = prepared
+                    .archive_members
+                    .values()
+                    .try_fold(prepared.payload.bytes, |total, member| {
+                        total.checked_add(member.bytes)
+                    })
+                    .context("remote verifier shipped byte total overflow")?;
+                Ok(RemoteWorkerVerifierFacts {
+                    scenario_source_digest: prepared.scenario_source_digest.clone(),
+                    verifier_artifact_hash: prepared.payload.identity.content_hash.clone(),
+                    shipped_bytes,
+                    archive_member_count: prepared.archive_members.len(),
+                })
+            };
+            facts.insert(
+                scenario_id.clone(),
+                resolve().with_context(|| {
+                    format!("remote Worker scenario {scenario_id} sources cannot be resolved")
+                })?,
+            );
+        }
+        Ok(facts)
+    })
+}
+
 fn prepare_remote_consumer_verifier_from_admitted_sources_in_generation(
     state: &AppState,
     generation: &ryeos_engine::engine::CheckedEngineGeneration<'_>,
