@@ -139,6 +139,13 @@ pub struct InitOptions {
     /// selected trusted profile as part of this same stopped-node init
     /// transaction. This is never inferred from a mismatch.
     pub replace_node_policy_generation: bool,
+    /// Authorize the offered substrate identity to replace the recorded one
+    /// when only the image digest differs. Valid only together with
+    /// `replace_node_policy_generation` and the confirmation below; never
+    /// inferred from a mismatch.
+    pub replace_substrate_identity: bool,
+    /// Required acknowledgement for `replace_substrate_identity`.
+    pub confirm_substrate_identity_replacement: bool,
     /// Skip preflight verification of source bundles (trust + signatures).
     /// Used in dev/test when source bundles are not yet signed and populated.
     /// DO NOT expose this as a CLI flag — production installs always verify.
@@ -184,8 +191,18 @@ pub struct InitReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub host_class: Option<String>,
     pub substrate_identity: SubstrateIdentity,
+    /// The image digests this initialization moved the substrate identity
+    /// between; present only when a confirmed replacement happened.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub substrate_image_replacement: Option<SubstrateImageReplacement>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub next_steps: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SubstrateImageReplacement {
+    pub previous_image_digest: String,
+    pub new_image_digest: String,
 }
 
 const INIT_COMPLETION_SCHEMA: &str = "ryeos/init-completion/v4";
@@ -317,19 +334,89 @@ fn substrate_identity_path(app_root: &Path) -> PathBuf {
         .join("node/substrate-identity.json")
 }
 
-fn publish_substrate_identity(app_root: &Path, identity: &SubstrateIdentity) -> Result<()> {
+/// Record the offered substrate identity, or prove it equals the record.
+///
+/// With `authorized`, an offered identity whose image digest differs from the
+/// record is accepted when the protocol and host class are those recorded;
+/// the record is then left untouched and the previous identity is returned so
+/// the caller rewrites it once the completion record is invalidated.
+fn publish_substrate_identity(
+    app_root: &Path,
+    identity: &SubstrateIdentity,
+    authorized: bool,
+) -> Result<Option<SubstrateIdentity>> {
     identity.validate()?;
     let path = substrate_identity_path(app_root);
     if path.exists() {
         let current = load_substrate_identity_record(app_root)?;
-        if current != *identity {
-            bail!("refusing to replace the initialized substrate identity");
+        if current == *identity {
+            return Ok(None);
         }
-        return Ok(());
+        if current.protocol != identity.protocol {
+            bail!(
+                "refusing to replace the initialized substrate identity: recorded protocol {} differs from offered protocol {}; a node's substrate protocol does not change",
+                current.protocol,
+                identity.protocol
+            );
+        }
+        if current.host_class != identity.host_class {
+            bail!(
+                "refusing to replace the initialized substrate identity: recorded host class {} differs from offered host class {}; a node's host class does not change",
+                current.host_class.as_deref().unwrap_or("none"),
+                identity.host_class.as_deref().unwrap_or("none")
+            );
+        }
+        if current.image_digest == identity.image_digest {
+            bail!(
+                "refusing to replace the initialized substrate identity: only the node profile differs from the record"
+            );
+        }
+        if !authorized {
+            bail!(
+                "refusing to replace the initialized substrate identity: recorded image digest {} differs from offered image digest {}; moving to the offered image needs --replace-node-policy-generation --confirm-node-policy-generation-replacement --replace-substrate-identity --confirm-substrate-identity-replacement",
+                current.image_digest,
+                identity.image_digest
+            );
+        }
+        return Ok(Some(current));
     }
     let bytes = serde_json::to_vec_pretty(identity)?;
     lillux::atomic_write(&path, &bytes)
-        .map_err(|error| anyhow!("write substrate identity {}: {error}", path.display()))
+        .map_err(|error| anyhow!("write substrate identity {}: {error}", path.display()))?;
+    Ok(None)
+}
+
+/// Replace the recorded substrate identity with the authorized offered one.
+fn replace_substrate_identity_record(app_root: &Path, identity: &SubstrateIdentity) -> Result<()> {
+    identity.validate()?;
+    let path = substrate_identity_path(app_root);
+    let bytes = serde_json::to_vec_pretty(identity)?;
+    lillux::atomic_write(&path, &bytes)
+        .map_err(|error| anyhow!("rewrite substrate identity {}: {error}", path.display()))
+}
+
+/// The substrate-identity replacement flags are valid only as part of the
+/// confirmed policy-generation replacement and only together.
+fn require_substrate_replacement_flags(opts: &InitOptions) -> Result<()> {
+    if !opts.replace_substrate_identity && !opts.confirm_substrate_identity_replacement {
+        return Ok(());
+    }
+    if !(opts.replace_substrate_identity && opts.confirm_substrate_identity_replacement) {
+        bail!(
+            "--replace-substrate-identity and --confirm-substrate-identity-replacement are required together"
+        );
+    }
+    if !opts.replace_node_policy_generation {
+        bail!(
+            "--replace-substrate-identity is valid only together with --replace-node-policy-generation"
+        );
+    }
+    if opts.substrate_identity.is_none() {
+        bail!(
+            "--replace-substrate-identity needs the offered substrate identity (--substrate-image-digest/--substrate-protocol)"
+        );
+    }
+    Ok(())
 }
 
 /// Record the node profile a policy-generation replacement selected in the
@@ -642,8 +729,11 @@ fn run_init_under_lock_on_storage(
         .ensure_protects_app_root(&opts.app_root)
         .context("initialization needs the state lock of the app root it initializes")?;
 
+    require_substrate_replacement_flags(opts)?;
+
     // ── 1. Layout ──
     create_layout(&opts.app_root)?;
+    let mut pending_substrate_replacement: Option<(SubstrateIdentity, SubstrateIdentity)> = None;
     match &opts.substrate_identity {
         Some(identity) => {
             identity.validate()?;
@@ -653,7 +743,12 @@ fn run_init_under_lock_on_storage(
             if identity.host_class != opts.host_class {
                 bail!("substrate identity host-class binding disagrees with initialization");
             }
-            publish_substrate_identity(&opts.app_root, identity)?;
+            pending_substrate_replacement = publish_substrate_identity(
+                &opts.app_root,
+                identity,
+                opts.replace_substrate_identity,
+            )?
+            .map(|previous| (previous, identity.clone()));
         }
         None => {
             let recorded = load_substrate_identity_record(&opts.app_root).context(
@@ -1032,6 +1127,20 @@ fn run_init_under_lock_on_storage(
     {
         rebind_substrate_node_profile(&opts.app_root, opts.node_profile.as_deref())?;
     }
+    // The confirmed image move is recorded here, after the completion record
+    // that binds the old identity digest is gone and before the completion is
+    // sealed again, so no window exists where a valid completion names a
+    // record it does not match.
+    let substrate_image_replacement = match &pending_substrate_replacement {
+        Some((previous, offered)) => {
+            replace_substrate_identity_record(&opts.app_root, offered)?;
+            Some(SubstrateImageReplacement {
+                previous_image_digest: previous.image_digest.clone(),
+                new_image_digest: offered.image_digest.clone(),
+            })
+        }
+        None => None,
+    };
     let mut bundles_installed = Vec::new();
     for (index, name) in plan.install_order.iter().enumerate() {
         progress(
@@ -1301,6 +1410,7 @@ fn run_init_under_lock_on_storage(
         node_profile: opts.node_profile.clone(),
         host_class: opts.host_class.clone(),
         substrate_identity: load_substrate_identity_record(&opts.app_root)?,
+        substrate_image_replacement,
         next_steps,
     })
 }
@@ -2607,6 +2717,8 @@ mod tests {
                 .unwrap(),
             ),
             replace_node_policy_generation: false,
+            replace_substrate_identity: false,
+            confirm_substrate_identity_replacement: false,
             skip_preflight: true,
         }
     }
@@ -2991,6 +3103,8 @@ mod tests {
                 .unwrap(),
             ),
             replace_node_policy_generation: false,
+            replace_substrate_identity: false,
+            confirm_substrate_identity_replacement: false,
             skip_preflight: true,
         };
 
@@ -3356,6 +3470,8 @@ mod tests {
             host_class: Some("local".to_owned()),
             substrate_identity: None,
             replace_node_policy_generation: true,
+            replace_substrate_identity: false,
+            confirm_substrate_identity_replacement: false,
             skip_preflight: true,
         };
         let lock = ryeos_node_runtime::state_lock::StateLock::acquire(
@@ -3409,6 +3525,8 @@ mod tests {
             host_class: Some("local".to_owned()),
             substrate_identity: None,
             replace_node_policy_generation: true,
+            replace_substrate_identity: false,
+            confirm_substrate_identity_replacement: false,
             skip_preflight: true,
         };
         run_init(&replacement).expect("replace policy and exact bundle inventory");
@@ -3476,6 +3594,124 @@ mod tests {
             format!("{refused:#}").contains("disagrees with the class"),
             "got: {refused:#}"
         );
+    }
+
+    fn offered_substrate_identity(
+        digest_nibble: &str,
+        protocol: u32,
+        host_class: &str,
+    ) -> SubstrateIdentity {
+        SubstrateIdentity::new(
+            format!("sha256:{}", digest_nibble.repeat(64)),
+            protocol,
+            Some("full".to_owned()),
+            Some(host_class.to_owned()),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_substrate_image_move_is_refused_without_the_confirmed_flags() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let mut opts = make_opts(&state, &tmp.path().join("home"));
+        run_init(&opts).expect("initial generation");
+        let before = fs::read(substrate_identity_path(&state)).unwrap();
+
+        opts.replace_node_policy_generation = true;
+        opts.substrate_identity = Some(offered_substrate_identity("2", 1, "local"));
+        let error = run_init(&opts).expect_err("an image move needs the flags");
+        let message = format!("{error:#}");
+        assert!(message.contains(&"1".repeat(64)), "{message}");
+        assert!(message.contains(&"2".repeat(64)), "{message}");
+        assert!(
+            message.contains("--replace-substrate-identity")
+                && message.contains("--confirm-substrate-identity-replacement"),
+            "{message}"
+        );
+        assert_eq!(fs::read(substrate_identity_path(&state)).unwrap(), before);
+    }
+
+    #[test]
+    fn a_confirmed_substrate_image_move_rewrites_the_record_and_reseals_the_completion() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let mut opts = make_opts(&state, &tmp.path().join("home"));
+        run_init(&opts).expect("initial generation");
+
+        opts.replace_node_policy_generation = true;
+        opts.replace_substrate_identity = true;
+        opts.confirm_substrate_identity_replacement = true;
+        let offered = offered_substrate_identity("2", 1, "local");
+        opts.substrate_identity = Some(offered.clone());
+        let report = run_init(&opts).expect("confirmed image move");
+        assert_eq!(
+            report.substrate_image_replacement,
+            Some(SubstrateImageReplacement {
+                previous_image_digest: format!("sha256:{}", "1".repeat(64)),
+                new_image_digest: offered.image_digest.clone(),
+            })
+        );
+        assert_eq!(load_substrate_identity_record(&state).unwrap(), offered);
+        assert_eq!(load_verified_substrate_identity(&state).unwrap(), offered);
+        assert!(verify_init_completion(&state).unwrap().is_some());
+    }
+
+    #[test]
+    fn a_confirmed_substrate_replacement_still_refuses_a_protocol_or_host_class_change() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let mut opts = make_opts(&state, &tmp.path().join("home"));
+        run_init(&opts).expect("initial generation");
+        let before = fs::read(substrate_identity_path(&state)).unwrap();
+
+        opts.replace_node_policy_generation = true;
+        opts.replace_substrate_identity = true;
+        opts.confirm_substrate_identity_replacement = true;
+
+        opts.substrate_identity = Some(offered_substrate_identity("2", 2, "local"));
+        let error = run_init(&opts).expect_err("a protocol change is refused");
+        assert!(format!("{error:#}").contains("protocol"), "{error:#}");
+
+        opts.host_class = Some("other".to_owned());
+        opts.substrate_identity = Some(offered_substrate_identity("2", 1, "other"));
+        let error = run_init(&opts).expect_err("a host-class change is refused");
+        assert!(format!("{error:#}").contains("host class"), "{error:#}");
+        assert_eq!(fs::read(substrate_identity_path(&state)).unwrap(), before);
+        assert!(verify_init_completion(&state).unwrap().is_some());
+    }
+
+    #[test]
+    fn the_substrate_replacement_flags_need_each_other_and_the_policy_replacement() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let mut opts = make_opts(&state, &tmp.path().join("home"));
+
+        opts.replace_substrate_identity = true;
+        opts.confirm_substrate_identity_replacement = true;
+        let error = run_init(&opts).expect_err("no policy replacement");
+        assert!(
+            format!("{error:#}").contains("only together with --replace-node-policy-generation"),
+            "{error:#}"
+        );
+
+        opts.replace_node_policy_generation = true;
+        opts.confirm_substrate_identity_replacement = false;
+        let error = run_init(&opts).expect_err("no confirmation");
+        assert!(
+            format!("{error:#}").contains("required together"),
+            "{error:#}"
+        );
+        assert!(!substrate_identity_path(&state).exists());
+
+        opts.confirm_substrate_identity_replacement = true;
+        opts.substrate_identity = None;
+        let error = run_init(&opts).expect_err("no offered identity");
+        assert!(
+            format!("{error:#}").contains("needs the offered substrate identity"),
+            "{error:#}"
+        );
+        assert!(!substrate_identity_path(&state).exists());
     }
 
     #[test]
@@ -3566,6 +3802,8 @@ mod tests {
                 .unwrap(),
             ),
             replace_node_policy_generation: false,
+            replace_substrate_identity: false,
+            confirm_substrate_identity_replacement: false,
             skip_preflight: true,
         };
 
@@ -3599,6 +3837,8 @@ mod tests {
                 .unwrap(),
             ),
             replace_node_policy_generation: false,
+            replace_substrate_identity: false,
+            confirm_substrate_identity_replacement: false,
             skip_preflight: true,
         };
 
@@ -4024,6 +4264,8 @@ typo_field: oops
                 .unwrap(),
             ),
             replace_node_policy_generation: false,
+            replace_substrate_identity: false,
+            confirm_substrate_identity_replacement: false,
             skip_preflight: true,
         };
 

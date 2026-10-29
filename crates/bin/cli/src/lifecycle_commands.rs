@@ -1406,6 +1406,23 @@ struct InitArgs {
     #[arg(long, requires = "replace_node_policy_generation")]
     confirm_node_policy_generation_replacement: bool,
 
+    /// Move the recorded substrate identity to the image named by
+    /// --substrate-image-digest during that replacement. Only the image
+    /// digest may differ from the record.
+    #[arg(
+        long,
+        requires_all = [
+            "replace_node_policy_generation",
+            "substrate_image_digest",
+            "confirm_substrate_identity_replacement"
+        ]
+    )]
+    replace_substrate_identity: bool,
+
+    /// Required acknowledgement for --replace-substrate-identity.
+    #[arg(long, requires = "replace_substrate_identity")]
+    confirm_substrate_identity_replacement: bool,
+
     /// Emit the exact structured initialization report.
     #[arg(long)]
     json: bool,
@@ -1443,6 +1460,8 @@ async fn run_init_command(argv: &[String], console: &crate::tty::Console) -> Res
         host_class: args.host_class,
         substrate_identity,
         replace_node_policy_generation: args.replace_node_policy_generation,
+        replace_substrate_identity: args.replace_substrate_identity,
+        confirm_substrate_identity_replacement: args.confirm_substrate_identity_replacement,
         skip_preflight: false,
     };
 
@@ -1519,6 +1538,15 @@ async fn run_init_command(argv: &[String], console: &crate::tty::Console) -> Res
             crate::tty::Row::key_value("vault", report.vault_pubkey_fingerprint),
             crate::tty::Row::key_value("bundles", report.bundles_installed.join(", ")),
         ];
+        if let Some(replacement) = &report.substrate_image_replacement {
+            status.rows.push(crate::tty::Row::key_value(
+                "substrate image",
+                format!(
+                    "{} -> {}",
+                    replacement.previous_image_digest, replacement.new_image_digest
+                ),
+            ));
+        }
         console.success(&status)?;
     }
     Ok(())
