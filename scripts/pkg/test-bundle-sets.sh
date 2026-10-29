@@ -70,7 +70,7 @@ verify_dev_signed_profile() (
 )
 
 mapfile -t bundle_set_ids < <(ryeos_bundle_set_ids)
-[[ "${bundle_set_ids[*]}" == "full central-host standard standard-central-auth local-inference hosted-workflow bundle-source core core-scheduling core-workflow core-knowledge f5r-controller release-authority" ]]
+[[ "${bundle_set_ids[*]}" == "full central-host standard standard-central-auth local-inference hosted-workflow bundle-source core core-scheduling core-workflow core-knowledge f5r-controller release-authority development" ]]
 # Native node/caller authentication does not require application sessions.
 for set_name in core core-scheduling core-workflow core-knowledge f5r-controller standard local-inference hosted-workflow bundle-source; do
   mapfile -t members < <(ryeos_bundle_set_names "$set_name")
@@ -242,7 +242,7 @@ mapfile -t node_init_profiles < <(ryeos_node_init_profile_names)
 [[ "$(ryeos_node_init_profile_bundle_set contained-workflow)" == "hosted-workflow" ]]
 [[ "$(ryeos_node_init_profile_bundle_set hosted-node)" == "core" ]]
 assert_rejected ryeos_bundle_set_names hosted-node
-[[ "$(ryeos_node_init_profile_bundle_set development)" == "full" ]]
+[[ "$(ryeos_node_init_profile_bundle_set development)" == "development" ]]
 [[ "$(ryeos_node_init_profile_bundle_set release-authority)" == "release-authority" ]]
 assert_rejected ryeos_node_init_profile_bundle_set release-artifacts
 assert_rejected ryeos_node_init_profile_bundle_set unknown

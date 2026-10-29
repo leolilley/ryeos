@@ -714,6 +714,7 @@ no_image_bundle_sets=(
     full
     standard-central-auth
     release-authority
+    development
 )
 while IFS= read -r set_id; do
     listed=0

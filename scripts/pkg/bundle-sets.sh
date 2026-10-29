@@ -22,12 +22,15 @@
 # compiled payloads and is published only when the selected set includes it.
 
 ryeos_bundle_set_ids() {
-  printf '%s\n' full central-host standard standard-central-auth local-inference hosted-workflow bundle-source core core-scheduling core-workflow core-knowledge f5r-controller release-authority
+  printf '%s\n' full central-host standard standard-central-auth local-inference hosted-workflow bundle-source core core-scheduling core-workflow core-knowledge f5r-controller release-authority development
 }
 
 ryeos_bundle_set_names() {
   case "$1" in
     full)            printf '%s\n' core central-auth scheduling knowledge directive graph ryeos-docs environment-qualification web browser ryeos-ui codex opencode ;;
+    # A developer's node: the full distribution plus the Render sandbox adapter,
+    # so a local-class origin can author snapshot bindings and measurements.
+    development)     printf '%s\n' core central-auth scheduling knowledge directive graph ryeos-docs environment-qualification web browser ryeos-ui codex opencode render-sandbox ;;
     central-host)    printf '%s\n' core central-auth scheduling knowledge directive graph ryeos-docs web ;;
     standard)        printf '%s\n' core scheduling knowledge directive graph ryeos-docs ;;
     standard-central-auth) printf '%s\n' core scheduling knowledge directive graph ryeos-docs central-auth ;;
@@ -96,7 +99,7 @@ ryeos_node_init_profile_bundle_set() {
     # The hosted-node profile is the core set under hosted admission policy.
     hosted-node) printf '%s\n' core ;;
     contained-workflow) printf '%s\n' hosted-workflow ;;
-    development) printf '%s\n' full ;;
+    development) printf '%s\n' development ;;
     release-authority) printf '%s\n' release-authority ;;
     *) return 1 ;;
   esac
@@ -198,7 +201,7 @@ ryeos_validate_node_init_profile() {
 
 ryeos_bundle_set_node_init_profile() {
   case "$1" in
-    full|central-host|standard|standard-central-auth|local-inference|hosted-workflow|bundle-source|core|core-scheduling|core-workflow|core-knowledge|f5r-controller|release-authority)
+    full|central-host|standard|standard-central-auth|local-inference|hosted-workflow|bundle-source|core|core-scheduling|core-workflow|core-knowledge|f5r-controller|release-authority|development)
       printf '%s\n' "$1"
       ;;
     *) return 1 ;;
@@ -227,7 +230,7 @@ ryeos_bundle_set_bin_managed_names() {
 ryeos_bundle_set_host_support_bins() {
   case "$1" in
     release-authority) printf '%s\n' ryeos-bundle-publisher ;;
-    full|central-host|standard|standard-central-auth|local-inference|hosted-workflow|bundle-source|core|core-scheduling|core-workflow|core-knowledge|f5r-controller|release-artifacts)
+    full|central-host|standard|standard-central-auth|local-inference|hosted-workflow|bundle-source|core|core-scheduling|core-workflow|core-knowledge|f5r-controller|release-artifacts|development)
       return 0
       ;;
     *) return 1 ;;
