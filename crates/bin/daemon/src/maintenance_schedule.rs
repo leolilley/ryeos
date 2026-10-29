@@ -551,6 +551,7 @@ mod tests {
 
     const POLICY: &str = r#"schema: 5
 offline_native: {}
+remote_offline_operations: []
 offline_reset: null
 schedules:
   - schedule_id: maintenance-gc
@@ -792,6 +793,7 @@ schedules:
             offline_reset: None,
             offline_native: Default::default(),
             schedules: Vec::new(),
+            remote_offline_operations: Vec::new(),
         };
         apply_maintenance_schedules(&node_dir, &id, &trust, &empty).unwrap();
 
@@ -816,6 +818,7 @@ schedules:
             offline_reset: None,
             offline_native: Default::default(),
             schedules: Vec::new(),
+            remote_offline_operations: Vec::new(),
         };
 
         apply_maintenance_schedules(&node_dir, &id, &trust, &empty).unwrap();
@@ -844,6 +847,7 @@ schedules:
             offline_reset: None,
             offline_native: Default::default(),
             schedules: Vec::new(),
+            remote_offline_operations: Vec::new(),
         };
         let schedules = node_dir.join("schedules");
 

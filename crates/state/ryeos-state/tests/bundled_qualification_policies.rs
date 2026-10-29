@@ -67,7 +67,9 @@ fn shipped_codex_consumer_qualification_configs_agree_and_parse() {
     use ryeos_state::external_content::products::producer_recipe::{
         ProducerExecutableSource, ProductProducerRecipe,
     };
-    use ryeos_state::external_execution::admission::REQUIRED_CLAIMS;
+    use ryeos_state::external_execution::admission::{
+        QUALIFICATION_CONTEXT_PARAMETER, QUALIFICATION_CONTEXT_SCHEMA, REQUIRED_CLAIMS,
+    };
 
     let policy = ProductQualificationPolicy::from_value(&codex_config(
         "consumer-qualification-policy.yaml",
@@ -80,17 +82,32 @@ fn shipped_codex_consumer_qualification_configs_agree_and_parse() {
     ))
     .unwrap();
 
-    // The worker edge ships unqualified: it names the policy only once the
-    // derived consumer context has been merged into that policy on a node
-    // holding the captured runtime. The policy must already allow every
-    // claim program admission will require of that edge.
+    // The worker edge names the populated policy and requires exactly the
+    // claims program admission demands of it; the policy allows each of them
+    // and carries the consumer context derived on the node that holds the
+    // captured runtime.
     let worker = relationships
         .select("runtime_to_external_authoring_worker")
         .unwrap();
-    assert!(worker.qualification.policy_ref.is_none());
-    assert!(worker.qualification.required_claims.is_empty());
+    assert_eq!(
+        worker.qualification.policy_ref.as_deref(),
+        Some("config:codex/consumer-qualification-policy")
+    );
+    assert_eq!(worker.qualification.required_claims, REQUIRED_CLAIMS);
     for claim in REQUIRED_CLAIMS {
         assert!(policy.allowed_claims.iter().any(|allowed| allowed == claim));
+    }
+    let context = &policy.verifier_parameters[QUALIFICATION_CONTEXT_PARAMETER];
+    assert_eq!(context["schema"], QUALIFICATION_CONTEXT_SCHEMA);
+    for field in [
+        "profile_hash",
+        "source_binding_hash",
+        "source_content_manifest_hash",
+        "execution_environment_digest",
+        "provider_executable_manifest_hash",
+        "requirement_digest",
+    ] {
+        assert_eq!(context[field].as_str().unwrap().len(), 64, "{field}");
     }
 
     // The qualification verifier's own edge stays unqualified so it can

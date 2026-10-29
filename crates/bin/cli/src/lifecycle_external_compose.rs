@@ -1,21 +1,22 @@
 //! `ryeos node external-execution compose`: offline composition of a
 //! node-signed external placement binding on a stopped node.
 //!
-//! Authorization is filesystem access to the node's keys, as for the other
-//! offline lifecycle verbs. The binding is signed by the node identity, so the
-//! command refuses unless it holds the node's state lock; a running daemon
-//! would otherwise read the section while it is rewritten. Every composition
-//! names a fresh credential generation: the provider secret is stored
-//! separately with `provision-credential`, and a restart loads the binding.
+//! The command is a request builder: it reads its input files and hands the
+//! operation to the offline-operation library, which signs the request with
+//! the node's operator key and applies it under the node's state lock; a
+//! running daemon would otherwise read the section while it is rewritten. The
+//! binding is signed by the node identity. Every composition names a fresh
+//! credential generation, derived from its request: the provider secret is
+//! stored separately with `provision-credential`, and a restart loads the
+//! binding.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail, ensure};
 use clap::Parser;
-use ryeos_app::node_config::sections::external_execution::compose::{
-    ComposeLimits, ComposeReport, ComposeRequest, ComposeTransportRequest, DEFAULT_CAPACITY_GROUP,
-    canonical_backend_id, compose_external_execution_binding,
-};
+use ryeos_app::node_config::sections::external_execution::compose::{ComposeLimits, ComposeReport};
+use ryeos_node::offline_operation::handlers::ComposeArguments;
 use ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram;
 use serde_json::Value;
 
@@ -180,6 +181,11 @@ fn read_optional_document(value: Option<&str>, what: &str) -> Result<Option<Valu
 }
 
 /// Entry point for the registered verb. `argv` excludes the verb words.
+///
+/// The command builds the request: it reads each input file, checks the
+/// flags against each other, and hands the operation to the offline-operation
+/// library, which signs it with this node's operator key and applies it under
+/// the node's state lock.
 pub fn run_external_compose(argv: &[String], console: &crate::tty::Console) -> Result<()> {
     use clap::error::ErrorKind;
     let args = match ExternalComposeArgs::try_parse_from(argv) {
@@ -198,59 +204,75 @@ pub fn run_external_compose(argv: &[String], console: &crate::tty::Console) -> R
         .clone()
         .context("--guest-runtime-manifest-hash is required")?;
     let app_root = ryeos_node::NodeConfig::load_local(args.app_root.clone())?.app_root;
-    // A running daemon holds the state lock, so composition refuses while the
-    // node is up: the live node is the only reader of its own section.
-    let state_lock = ryeos_node_runtime::state_lock::StateLock::acquire(
-        &ryeos_node_runtime::state_lock::default_lock_path(&app_root),
-    )
-    .context("external-execution compose requires the node to be stopped")?;
 
-    let settings: Value = serde_yaml::from_str(&read_text(&args.settings, "settings")?)
+    let mut inputs = BTreeMap::new();
+    let settings_text = read_text(&args.settings, "settings")?;
+    let settings: Value = serde_yaml::from_str(&settings_text)
         .with_context(|| format!("parse settings {}", args.settings.display()))?;
-    let program: AdmittedExternalCandidateProgram = read_json_document(&args.program, "program")?;
-    let limits: ComposeLimits = match &args.limits {
-        Some(path) => read_json_document(path, "limits")?,
-        None => ComposeLimits::default(),
-    };
-    let runtime_qualification = read_optional_document(
-        args.runtime_qualification.as_deref(),
-        "runtime qualification",
-    )?;
-    let runtime_content_qualification = read_optional_document(
-        args.runtime_content_qualification.as_deref(),
-        "runtime content qualification",
-    )?;
-    let transport = match choice {
-        TransportChoice::Https { origin, roots } => ComposeTransportRequest::Https {
-            origin,
-            roots_pem: read_text(&roots, "TLS roots")?,
-        },
+    inputs.insert("settings".to_owned(), settings_text.into_bytes());
+    // Parsed here only to refuse a malformed document before a request is
+    // built; the operation parses the same bytes again.
+    let _: AdmittedExternalCandidateProgram = read_json_document(&args.program, "program")?;
+    inputs.insert("program".to_owned(), read_bytes(&args.program, "program")?);
+    if let Some(path) = &args.limits {
+        let _: ComposeLimits = read_json_document(path, "limits")?;
+        inputs.insert("limits".to_owned(), read_bytes(path, "limits")?);
+    }
+    for (slot, flag, what) in [
+        (
+            "runtime_qualification",
+            args.runtime_qualification.as_deref(),
+            "runtime qualification",
+        ),
+        (
+            "runtime_content_qualification",
+            args.runtime_content_qualification.as_deref(),
+            "runtime content qualification",
+        ),
+    ] {
+        if read_optional_document(flag, what)?.is_some() {
+            let path = flag.context("document flag")?;
+            inputs.insert(slot.to_owned(), read_bytes(Path::new(path), what)?);
+        }
+    }
+    let (origin, owner_workspace_id, private_mailbox_parent, transport) = match choice {
+        TransportChoice::Https { origin, roots } => {
+            inputs.insert("tls_roots".to_owned(), read_bytes(&roots, "TLS roots")?);
+            (Some(origin), None, None, "https")
+        }
         TransportChoice::FileRelay {
             owner_workspace_id,
             private_mailbox_parent,
-        } => ComposeTransportRequest::FileRelay {
-            owner_workspace_id,
-            private_mailbox_parent,
-        },
+        } => (
+            None,
+            Some(owner_workspace_id),
+            Some(private_mailbox_parent),
+            "file-relay",
+        ),
     };
-    let report = compose_external_execution_binding(ComposeRequest {
-        app_root: &app_root,
-        state_lock: &state_lock,
+    let arguments = serde_json::to_value(ComposeArguments {
         id: args.id.clone(),
-        backend: canonical_backend_id(&args.backend).to_owned(),
-        program,
-        transport,
+        backend: args.backend.clone(),
+        transport: transport.to_owned(),
+        origin,
+        owner_workspace_id,
+        private_mailbox_parent,
         account: args.account.clone(),
-        capacity_group: args
-            .capacity_group
-            .clone()
-            .unwrap_or_else(|| DEFAULT_CAPACITY_GROUP.to_owned()),
-        settings,
+        capacity_group: args.capacity_group.clone(),
         guest_runtime_manifest_hash,
-        runtime_qualification,
-        runtime_content_qualification,
-        limits,
     })?;
+    // The request pins what the settings digest must be.
+    let settings_digest = lillux::sha256_hex(lillux::canonical_json(&settings)?.as_bytes());
+    let host = crate::offline_apply::CliHost::new();
+    let applied = host.apply(
+        &app_root,
+        "node.external-execution.compose",
+        arguments,
+        inputs,
+        BTreeMap::from([("settings_digest".to_owned(), settings_digest)]),
+    )?;
+    let report: ComposeReport =
+        serde_json::from_value(applied.result).context("read the composition report")?;
     if args.json {
         crate::tty::write_json(&serde_json::json!({
             "app_root": app_root,
@@ -261,6 +283,11 @@ pub fn run_external_compose(argv: &[String], console: &crate::tty::Console) -> R
     }
     console.status(&compose_banner(&app_root, &report))?;
     Ok(())
+}
+
+fn read_bytes(path: &Path, what: &str) -> Result<Vec<u8>> {
+    lillux::read_regular_file_bounded_no_follow(path, MAX_INPUT_BYTES)
+        .with_context(|| format!("read {what} {}", path.display()))
 }
 
 fn provision_command(app_root: &Path, report: &ComposeReport) -> String {
@@ -314,7 +341,7 @@ mod tests {
     }
 
     #[test]
-    fn compose_refuses_while_the_state_lock_is_held() {
+    fn compose_reads_its_inputs_before_it_touches_the_node() {
         let root = tempfile::tempdir().unwrap();
         let lock_path = ryeos_node_runtime::state_lock::default_lock_path(root.path());
         let held = ryeos_node_runtime::state_lock::StateLock::acquire(&lock_path).unwrap();
@@ -341,11 +368,10 @@ mod tests {
             &"4".repeat(64),
             "--json",
         ]);
+        // The input files are read before the node is touched, so a request
+        // that cannot be built never reaches the lock.
         let error = run_external_compose(&args, &console()).unwrap_err();
-        assert!(
-            format!("{error:#}").contains("requires the node to be stopped"),
-            "{error:#}"
-        );
+        assert!(format!("{error:#}").contains("settings"), "{error:#}");
         assert!(!root.path().join(".ai/node/external_execution").exists());
         drop(held);
     }

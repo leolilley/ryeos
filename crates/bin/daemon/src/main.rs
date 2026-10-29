@@ -29,6 +29,7 @@ use ryeosd::{bootstrap, reconcile, uds};
 mod composition_native;
 #[cfg(feature = "scheduling")]
 mod maintenance_schedule;
+mod offline_host;
 #[cfg(feature = "scheduling")]
 mod standalone_scheduler;
 mod startup;
@@ -3822,6 +3823,32 @@ async fn run(
     if let Some(runtime) = &external_host_runtime {
         runtime.binding().account.require_current_process()?;
         runtime.binding().validate(&selected_app_root)?;
+    }
+    // Signed offline operations come first, before every check that could
+    // refuse this start: several of them repair exactly what those checks
+    // refuse (a restart inhibition, a broken init completion, a capacity
+    // binding). Application takes the node's state lock itself and releases
+    // it before the ordinary start below takes it again. Only the node
+    // controller applies them; the standalone subcommands do not.
+    if cli.command.is_none() {
+        let host = offline_host::DaemonOfflineHost::from_cli(&cli);
+        // Nothing offline operations do may keep the node from starting: an
+        // error here is logged and the ordinary startup checks run next, so a
+        // bad inbox can never make a crash loop.
+        match ryeos_node::offline_operation::apply_pending_offline_operations(
+            &selected_app_root,
+            &host,
+        ) {
+            // Tracing is not running yet; the platform log is standard error.
+            // The facts are printed every start so a node that cannot start
+            // still tells its operator what a request must be signed against.
+            Ok(applied) => {
+                for line in applied.log_lines() {
+                    eprintln!("{line}");
+                }
+            }
+            Err(error) => eprintln!("offline-operations: not applied: {error:#}"),
+        }
     }
     ryeosd::init_shutdown_channel();
 

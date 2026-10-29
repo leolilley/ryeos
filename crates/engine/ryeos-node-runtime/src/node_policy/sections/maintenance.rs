@@ -38,6 +38,17 @@ impl NodePolicySection for NodeMaintenancePolicySection {
     }
 }
 
+/// The authority-bearing offline operations the signed maintenance policy
+/// delegates to remote operators. Absent from the policy means none.
+pub fn remote_offline_operations(
+    snapshot: &crate::node_policy::NodePolicySnapshot,
+) -> anyhow::Result<Vec<String>> {
+    Ok(snapshot
+        .require::<NodeMaintenancePolicy>()?
+        .remote_offline_operations
+        .clone())
+}
+
 /// Check an offline native quota against the bounds the native host owns, so
 /// a policy is refused when it is applied rather than when it is first used.
 pub fn validate_offline_native_quota(
@@ -103,6 +114,41 @@ mod tests {
             }
         }
         assert_eq!(checked, 16, "every shipped offline reset quota is checked");
+    }
+
+    #[test]
+    fn only_the_hosted_controller_profile_delegates_an_offline_operation() {
+        let mut delegating = Vec::new();
+        for (path, policy) in shipped_maintenance_policies() {
+            if !policy.remote_offline_operations.is_empty() {
+                delegating.push((path, policy.remote_offline_operations));
+            }
+        }
+        assert_eq!(delegating.len(), 1, "{delegating:?}");
+        assert!(
+            delegating[0].0.ends_with("f5r-controller.yaml"),
+            "{delegating:?}"
+        );
+        assert_eq!(
+            delegating[0].1,
+            ["node.external-execution.compose".to_owned()]
+        );
+    }
+
+    #[test]
+    fn a_delegation_names_each_operation_once() {
+        let mut policy = shipped_maintenance_policies()
+            .into_iter()
+            .map(|(_, policy)| policy)
+            .next()
+            .expect("a shipped maintenance policy");
+        policy.remote_offline_operations = vec![
+            "node.external-execution.compose".to_owned(),
+            "node.external-execution.compose".to_owned(),
+        ];
+        assert!(policy.validate().is_err());
+        policy.remote_offline_operations = vec!["Node.Compose".to_owned()];
+        assert!(policy.validate().is_err());
     }
 
     #[test]

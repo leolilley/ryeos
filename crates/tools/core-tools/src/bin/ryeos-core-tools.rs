@@ -1778,7 +1778,7 @@ fn run_authorize_client(
         remote_node_origin_site_id,
         allow_semantic_conversion,
     }
-    .into_params(app_root)?)?;
+    .into_params_as_local_operator(app_root)?)?;
 
     if !result.dropped_scopes.is_empty() {
         eprintln!(

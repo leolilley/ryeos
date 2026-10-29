@@ -267,9 +267,9 @@ fn remove_entry(
     }
 }
 
-/// Run the explicit scratch repair. It requires the daemon to be stopped,
-/// holds the node's StateLock, the runtime namespace lock and the exclusive
-/// CAS guard, and is idempotent: a second run finds nothing to remove.
+/// Run the explicit scratch repair, taking the node's state lock for the
+/// call. It requires the daemon to be stopped; a dry run only needs the
+/// existing lock read-only.
 pub fn repair_execution_history_scratch(
     options: &ExecutionHistoryScratchRepairOptions,
 ) -> Result<ExecutionHistoryScratchRepairReport> {
@@ -297,6 +297,21 @@ pub fn repair_execution_history_scratch(
             ))
         }
     })?;
+    repair_execution_history_scratch_locked(options, &state_lock)
+}
+
+/// The scratch repair under a state lock the caller already holds. It also
+/// holds the runtime namespace lock and the exclusive CAS guard, and is
+/// idempotent: a second run finds nothing to remove.
+pub fn repair_execution_history_scratch_locked(
+    options: &ExecutionHistoryScratchRepairOptions,
+    state_lock: &StateLock,
+) -> Result<ExecutionHistoryScratchRepairReport> {
+    let config = Config::load(&ConfigSources {
+        app_root: options.app_root.clone(),
+        ..ConfigSources::default()
+    })
+    .context("load local node configuration for the execution-history scratch repair")?;
     state_lock.ensure_protects_app_root(&config.app_root)?;
     let runtime_state_dir = config.runtime_state_dir();
     let runtime = lillux::PinnedDirectory::open(&runtime_state_dir)?

@@ -367,6 +367,7 @@ mod tests {
                 sandbox_group_id: "sbg-exact".into(),
                 region: "oregon".into(),
                 source_plan: "standard".into(),
+                credential_generation: crate::node_config::sections::external_execution::compose::fresh_credential_generation().unwrap(),
                 limits: ProductionLimits::default(),
             },
             &node.identity,

@@ -1,5 +1,5 @@
 use crate::{HandlerRequest, HandlerRequestEnvelope, HandlerResponse, HandlerResponseEnvelope};
-use std::io::Read;
+use std::io::{Read, Write};
 
 /// Run one handler exchange over stdio: read a single request envelope from
 /// stdin, dispatch it, and write the response envelope to stdout. Returns the
@@ -28,7 +28,17 @@ where
         }
     };
     let response = dispatch(request);
-    match serde_json::to_writer(std::io::stdout(), &HandlerResponseEnvelope::new(response)) {
+    let bytes = match serde_json::to_vec(&HandlerResponseEnvelope::new(response)) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            eprintln!("handler: failed to encode the response: {e}");
+            return 2;
+        }
+    };
+    // The flush is explicit: the one at process exit drops its error, which
+    // would leave a clean exit with no response.
+    let mut stdout = std::io::stdout().lock();
+    match stdout.write_all(&bytes).and_then(|()| stdout.flush()) {
         Ok(()) => 0,
         Err(e) => {
             eprintln!("handler: failed to write stdout: {e}");

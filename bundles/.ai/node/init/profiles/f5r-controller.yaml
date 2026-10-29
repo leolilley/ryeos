@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-28T06:18:02Z:eedff12640b74f4beade78f1988d42eb886922a971fb1d858bdbf9d752b73251:d8od0nXlD21I7kvYuWs3XVWRIi1Ul+jfBwlrIyajo+v9CwmMsR3qVkeOouAhZxft6Pk1C6PfTbvJ9rvvWCmdAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-28T09:17:08Z:a1bf8df1eb97ac7a865c68b52a5028234f9682a84eb84652a6a26fed162c8f3d:SkX1X3+Z+OJwZdxST9IPDEtn2Wpl/pqdw3ZXXawE7NV8Y/3bTTEu+/KvYPl73vryCbgDGmrd8Qs3r5nO2xu3Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Controller of remote Codex authoring leases: runs the Codex app server
 # and the render-sandbox lease adapter, and runs no schedules.
 schema: 1
@@ -231,6 +231,11 @@ policies:
       max_cleanup_steps: 1024
       max_recovery_record_bytes: 2097152
     schedules: []
+    # The origin operator that drives this controller may request external
+    # placement composition through a signed offline operation; no other
+    # authority-bearing offline operation is open to a remote signer.
+    remote_offline_operations:
+      - node.external-execution.compose
   hosted:
     schema: 1
     admission_enabled: false

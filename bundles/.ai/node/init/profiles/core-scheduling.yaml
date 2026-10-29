@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-26T23:53:56Z:79b965ee00468df37c02fe1c385cb82d91f9406f47fc97a1141b9cfe2b12d318:BqSDrEhGtw6uMx48MCpDvfBuJKypfXtmnAUkB6RM93Hi+WLlLfmifJrFaWbDlW/bZ0eAFwU89myqx/TUMwAbAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-28T04:00:46Z:374242f1f35795a78913f084ea99d6819a2e83beed8e9e9fd96b15580c37105f:f8HqV5Hnn0iF5/4H6nYeTtCCvon5rG2MDDNekZ0D0NflC9mJzRneQU6X5UbRsRpzMv7sKcWu/x2c+o00Nba4AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Core plus scheduling.
 schema: 1
 exact_bundles:
@@ -157,6 +157,8 @@ policies:
     schema: 5
     # Process-scoped native envelopes for stopped-node maintenance, keyed by
     # operation class. A class absent here is refused.
+    # No authority-bearing offline operation is open to a remote signer.
+    remote_offline_operations: []
     offline_native:
       external-content-bindings:
         max_native_storage_bytes: 33554432

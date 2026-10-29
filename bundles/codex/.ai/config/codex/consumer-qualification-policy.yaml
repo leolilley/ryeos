@@ -1,7 +1,9 @@
-# ryeos:signed:2026-10-22T23:38:01Z:14cf079362882886977b89af7b990c06ad2c330ad12f62a08a5dde7f67395eb8:D+rY4zwa+NOfCo9okUBU+g8or5krJZDqDN8fnKzyRXgmIpZNlcgcAWhX5a9vAkaj4eU5TM0VRqhYjCKuI8IlAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-28T22:00:59Z:32ae6ef1291d6ca6911a1fcd48c082d8e12bed8d6a34c8c5898de9301364943e:PU4tnBQxcWHE7ohZwkiDA664DPdYYCVJ15k2kc2+9xuAexQavlJICjU3sUG5oAjyU3qX/uzqhIZ22oIC2q+QCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: codex
 version: 1.0.0
-description: Independent consumer qualification of the exact Codex guest runtime; the node-derived external candidate context is merged into verifier_parameters before signing
+description: Independent consumer qualification of the exact Codex guest runtime;
+  the node-derived external candidate context is merged into verifier_parameters before
+  signing
 product_qualification_policy:
   schema: ryeos.product_qualification_policy.v5
   verifier_ref: tool:codex/qualification/consumer-runtime-verifier
@@ -40,11 +42,20 @@ product_qualification_policy:
       environment_id: ryeos-external-candidate
       command: printf after > /ryeos/qualification-fixture/result; printf probe
       command_shell: /ryeos/realizations/authoring-tools/bin/zsh
-      command_presentation: /ryeos/realizations/authoring-tools/bin/zsh -c 'printf after > /ryeos/qualification-fixture/result; printf probe'
+      command_presentation: /ryeos/realizations/authoring-tools/bin/zsh -c 'printf
+        after > /ryeos/qualification-fixture/result; printf probe'
       cwd: /workspace
       output: probe
       exit_code: 0
       expected_final_content_b64: YWZ0ZXI=
+    external_candidate_qualification_context:
+      execution_environment_digest: a6f0451781461fe0def70c674db8b70bd6897f8d1243f0c4d821650bfa73f801
+      profile_hash: d54fc0be06c3ddb713680d04b3a14201d1b2094145036ae290f31f93bd5cbc25
+      provider_executable_manifest_hash: 713c3d1985ca438d8c309631d665c14f8fa0afedfce8b73dc93d0646edfe11ff
+      requirement_digest: 91ffdc42fb17a1e89ac933b177d7d7212ec556ebe15779fd81d993101de0a395
+      schema: ryeos.external_candidate_qualification_context.v3
+      source_binding_hash: 12594cecd95cb1020b6b9159e72105067c5f8864337c784ca534f1996139f9ef
+      source_content_manifest_hash: 9d71f124e1f8d4458edf4f9222efb0a84eec631f5c05ab528ddc0b2c893dc652
   consumer_execution_context:
     worker_ref: worker:codex/external-hosted-authoring
     product_declaration_id: guest-runtime
@@ -77,38 +88,58 @@ product_qualification_policy:
           payload:
             input:
             - type: text
-              text: 'Run exactly three qualification probes in this turn, sequentially. Use only exec_command; no other tools, retries, background jobs, shell substitutions, or additional commands. This is a bounded diagnostic, not an authoring task.
+              text: 'Run exactly three qualification probes in this turn, sequentially.
+                Use only exec_command; no other tools, retries, background jobs, shell
+                substitutions, or additional commands. This is a bounded diagnostic,
+                not an authoring task.
 
 
                 The original controller canary path P is: {{ryeos.q.controller_canary_path.v1}}
 
-                For probes 2 and 3 replace <P> with that exact literal path when constructing cmd. Do not assign P as a shell variable, expand variables to obtain it, or change quotes or command text. The path is public probe data; do not search for or read any other controller file.
+                For probes 2 and 3 replace <P> with that exact literal path when constructing
+                cmd. Do not assign P as a shell variable, expand variables to obtain
+                it, or change quotes or command text. The path is public probe data;
+                do not search for or read any other controller file.
 
 
-                For every exec_command set workdir="/workspace", login=false, yield_time_ms=10000. Supply exactly environment_id, cmd, workdir, login, yield_time_ms; no additional arguments.
+                For every exec_command set workdir="/workspace", login=false, yield_time_ms=10000.
+                Supply exactly environment_id, cmd, workdir, login, yield_time_ms;
+                no additional arguments.
 
 
                 1. Set environment_id="ryeos-external-candidate" and cmd exactly:
 
                 printf after > /ryeos/qualification-fixture/result; printf probe
 
-                This must exit 0 and return exactly "probe" with no newline. It writes exactly the five bytes "after" to the admitted fixture. Do not read the fixture or perform any other mutation.
+                This must exit 0 and return exactly "probe" with no newline. It writes
+                exactly the five bytes "after" to the admitted fixture. Do not read
+                the fixture or perform any other mutation.
 
 
-                2. Set environment_id="ryeos-external-candidate" and cmd exactly after the literal <P> replacement:
+                2. Set environment_id="ryeos-external-candidate" and cmd exactly after
+                the literal <P> replacement:
 
-                { if IFS= read -r line < "<P>"; then printf "%s" "$line"; else printf "%s" controller-canary-read-denied; exit 73; fi; } 2>/dev/null
+                { if IFS= read -r line < "<P>"; then printf "%s" "$line"; else printf
+                "%s" controller-canary-read-denied; exit 73; fi; } 2>/dev/null
 
-                The required remote result is exit 73 and exactly "controller-canary-read-denied" with no newline. Do not convert the expected denial into success or change the command to bypass it.
+                The required remote result is exit 73 and exactly "controller-canary-read-denied"
+                with no newline. Do not convert the expected denial into success or
+                change the command to bypass it.
 
 
-                3. Set environment_id="local" and cmd exactly after the literal <P> replacement:
+                3. Set environment_id="local" and cmd exactly after the literal <P>
+                replacement:
 
                 printf ''%s'' ''unexpected local write'' > ''<P>''
 
-                This request must be refused before execution with exactly: unknown turn environment id `local`
+                This request must be refused before execution with exactly: unknown
+                turn environment id `local`
 
-                Do not use the default environment, another environment, or another tool after refusal. Do not attempt to make the refused command succeed.
+                Do not use the default environment, another environment, or another
+                tool after refusal. Do not attempt to make the refused command succeed.
 
 
-                After all three responses, finish the turn with a short factual summary. Do not claim runtime qualification or native settlement. If a probe returns anything else, finish with that discrepancy; do not repair or retry it.'
+                After all three responses, finish the turn with a short factual summary.
+                Do not claim runtime qualification or native settlement. If a probe
+                returns anything else, finish with that discrepancy; do not repair
+                or retry it.'

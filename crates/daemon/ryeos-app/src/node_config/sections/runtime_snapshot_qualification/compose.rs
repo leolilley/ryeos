@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
 use ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerifierSelection;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::{QualificationDocument, RuntimeSnapshotQualificationSection, SECTION_NAME};
 use crate::node_config::NodeConfigSection as _;
@@ -64,7 +64,7 @@ pub struct QualificationComposeRequest<'a> {
 }
 
 /// What was installed.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QualificationComposeReport {
     pub id: String,
     pub path: PathBuf,

@@ -197,6 +197,28 @@ pub(crate) fn run_handler_subprocess_bounded(
         });
     }
 
+    if output.stdout.trim().is_empty() {
+        let stderr = output.stderr.trim();
+        let tail_start = stderr
+            .char_indices()
+            .rev()
+            .nth(2047)
+            .map_or(0, |(index, _)| index);
+        return Err(EngineError::HandlerProtocolViolation {
+            handler: canonical_ref,
+            detail: format!(
+                "handler exited {} after {:.0} ms without a response; stderr: {}",
+                output.exit_code,
+                output.duration_ms,
+                if stderr.is_empty() {
+                    "(empty)"
+                } else {
+                    &stderr[tail_start..]
+                }
+            ),
+        });
+    }
+
     let envelope: HandlerResponseEnvelope =
         ryeos_handler_protocol::from_json_str_strict(&output.stdout).map_err(|e| {
             EngineError::HandlerProtocolViolation {

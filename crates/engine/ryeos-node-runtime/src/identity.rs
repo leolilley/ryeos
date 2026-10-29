@@ -275,6 +275,55 @@ pub enum WildcardPolicy {
 
 const AUTHORIZED_KEY_SCHEMA_VERSION: u32 = 2;
 
+/// Prefix of every offline-operation scope. An offline operation is
+/// authorized only by a grant that names its exact scope; no wildcard pattern
+/// satisfies one, and no grant may carry a wildcard under this prefix.
+pub const OFFLINE_OPERATION_SCOPE_PREFIX: &str = "ryeos.offline.";
+
+/// Whether `scope` is a wildcard pattern under the offline-operation prefix.
+/// Such a pattern could only ever express "every offline operation", which no
+/// grant may hold.
+pub fn is_offline_scope_wildcard(scope: &str) -> bool {
+    scope.starts_with(OFFLINE_OPERATION_SCOPE_PREFIX) && scope.contains('*')
+}
+
+/// Whether a grant's scopes reach `required` only through a wildcard pattern,
+/// that is, ordinary wildcard matching would admit it although no scope names
+/// it exactly. Offline operations never accept such a grant; this reports the
+/// ones that would have matched.
+pub fn matches_only_by_wildcard(scopes: &[String], required: &str) -> bool {
+    !scopes.iter().any(|scope| scope == required)
+        && scopes
+            .iter()
+            .any(|scope| ryeos_runtime::authorizer::cap_matches(scope, required))
+}
+
+/// Refuse every scope under the offline-operation prefix. Writers that act
+/// for anyone but the node's local operator use this: only the local operator
+/// may put an offline scope into a grant.
+pub fn reject_offline_scopes(scopes: &[String]) -> Result<()> {
+    if let Some(scope) = scopes
+        .iter()
+        .find(|scope| scope.starts_with(OFFLINE_OPERATION_SCOPE_PREFIX))
+    {
+        bail!(
+            "scope `{scope}` is an offline-operation scope; only the node's local operator may grant one"
+        );
+    }
+    Ok(())
+}
+
+/// Refuse any scope that is a wildcard under the offline-operation prefix.
+pub fn reject_offline_scope_wildcards(scopes: &[String]) -> Result<()> {
+    if let Some(scope) = scopes.iter().find(|scope| is_offline_scope_wildcard(scope)) {
+        bail!(
+            "scope `{scope}` is a wildcard under `{OFFLINE_OPERATION_SCOPE_PREFIX}`; \
+             offline operations are granted one exact scope at a time"
+        );
+    }
+    Ok(())
+}
+
 /// Exact capability an admitted source-node key must carry before it may
 /// co-sign a configured operator's forwarded request.
 pub const FORWARDED_OPERATOR_ATTESTATION_SCOPE: &str = "ryeos.attest.request.forwarded-operator";
@@ -679,6 +728,7 @@ fn render_authorized_key_toml_for_subject(
         ryeos_runtime::authorizer::validate_scope_pattern(scope)
             .map_err(|error| anyhow::anyhow!("authorized-key scope is not canonical: {error}"))?;
     }
+    reject_offline_scope_wildcards(scopes)?;
     if fingerprint.len() != 64
         || !fingerprint
             .bytes()
@@ -962,6 +1012,80 @@ pub fn reconcile_authorized_key_toml_scopes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn offline_scope_wildcards_are_recognised_and_refused() {
+        for scope in [
+            "ryeos.offline.*",
+            "ryeos.offline.node.*",
+            "ryeos.offline.node.reset.*",
+        ] {
+            assert!(is_offline_scope_wildcard(scope), "{scope}");
+            assert!(reject_offline_scope_wildcards(&[scope.to_owned()]).is_err());
+        }
+        for scope in [
+            "ryeos.offline.node.allow-restart",
+            "ryeos.execute.service.remote/*",
+            "ryeos.*",
+            "*",
+        ] {
+            assert!(!is_offline_scope_wildcard(scope), "{scope}");
+            reject_offline_scope_wildcards(&[scope.to_owned()]).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_grant_reaches_an_offline_scope_by_wildcard_only_when_none_names_it() {
+        let scope = "ryeos.offline.node.allow-restart";
+        let exact = vec![scope.to_owned()];
+        let wildcard = vec!["*".to_owned()];
+        let both = vec!["*".to_owned(), scope.to_owned()];
+        assert!(!matches_only_by_wildcard(&exact, scope));
+        assert!(matches_only_by_wildcard(&wildcard, scope));
+        assert!(!matches_only_by_wildcard(&both, scope));
+        assert!(!matches_only_by_wildcard(
+            &["ryeos.execute.service.remote/run".to_owned()],
+            scope
+        ));
+    }
+
+    #[test]
+    fn the_grant_writer_refuses_an_offline_wildcard_whatever_the_wildcard_policy() {
+        let key = SigningKey::from_bytes(&[41; 32]);
+        let node = NodeIdentity::from_signing_key(key).unwrap();
+        let client = SigningKey::from_bytes(&[42; 32]);
+        let fingerprint = lillux::signature::compute_fingerprint(&client.verifying_key());
+        let encoded =
+            base64::engine::general_purpose::STANDARD.encode(client.verifying_key().as_bytes());
+        let directory = tempfile::tempdir().unwrap();
+        for wildcard in [WildcardPolicy::Reject, WildcardPolicy::AllowBootstrap] {
+            let error = write_authorized_key_toml(
+                directory.path(),
+                &fingerprint,
+                &encoded,
+                &["ryeos.offline.*".to_owned()],
+                "client",
+                "test",
+                "2026-01-01T00:00:00Z",
+                node.signing_key(),
+                wildcard,
+            )
+            .unwrap_err();
+            assert!(format!("{error:#}").contains("wildcard"), "{error:#}");
+        }
+        write_authorized_key_toml(
+            directory.path(),
+            &fingerprint,
+            &encoded,
+            &["ryeos.offline.node.allow-restart".to_owned()],
+            "client",
+            "test",
+            "2026-01-01T00:00:00Z",
+            node.signing_key(),
+            WildcardPolicy::Reject,
+        )
+        .unwrap();
+    }
 
     #[test]
     fn public_identity_checks_key_and_existing_self_signature() {

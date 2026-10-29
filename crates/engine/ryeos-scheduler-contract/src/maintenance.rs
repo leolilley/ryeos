@@ -23,6 +23,12 @@ pub struct NodeMaintenancePolicy {
     /// class. A class absent from this map is refused; an empty map
     /// disables every stopped-node native consumer.
     pub offline_native: BTreeMap<String, OfflineNativeQuota>,
+    /// Authority-bearing offline operations (by operation id) that a
+    /// `remote_operator` grant may be authorized for on this node. An
+    /// authority-bearing operation changes what the node trusts or runs, so a
+    /// remote signer may not request one unless this signed policy names it.
+    /// An empty list means none (the field is required); the local operator is never governed by this list.
+    pub remote_offline_operations: Vec<String>,
 }
 
 /// Process-scoped native envelope for one stopped-node operation class.
@@ -302,6 +308,14 @@ impl NodeMaintenancePolicy {
                 .validate()
                 .with_context(|| format!("validate offline native quota `{class}`"))?;
         }
+        let mut delegated = HashSet::with_capacity(self.remote_offline_operations.len());
+        for operation in &self.remote_offline_operations {
+            validate_offline_native_class(operation)
+                .context("validate remote offline operation id")?;
+            if !delegated.insert(operation.as_str()) {
+                bail!("node maintenance policy delegates offline operation `{operation}` twice");
+            }
+        }
         let mut schedule_ids = HashSet::with_capacity(self.schedules.len());
         for schedule in &self.schedules {
             schedule.validate().with_context(|| {
@@ -385,6 +399,7 @@ mod tests {
             offline_reset: None,
             offline_native: BTreeMap::new(),
             schedules: vec![schedule.clone(), schedule],
+            remote_offline_operations: Vec::new(),
         };
         assert!(policy.validate().is_err());
     }
@@ -421,10 +436,17 @@ mod tests {
     #[test]
     fn offline_quota_requires_explicit_current_policy_and_every_dimension() {
         let disabled: NodeMaintenancePolicy = serde_json::from_value(
-            serde_json::json!({"schema": 5, "schedules": [], "offline_reset": null, "offline_native": {}}),
+            serde_json::json!({"schema": 5, "schedules": [], "offline_reset": null, "offline_native": {}, "remote_offline_operations": []}),
         )
         .unwrap();
         disabled.validate().unwrap();
+        assert!(
+            serde_json::from_value::<NodeMaintenancePolicy>(serde_json::json!({
+                "schema": 5, "schedules": [], "offline_reset": null, "offline_native": {}
+            }))
+            .is_err(),
+            "remote_offline_operations is required, empty when nothing is delegated"
+        );
         assert!(
             serde_json::from_value::<NodeMaintenancePolicy>(
                 serde_json::json!({"schema": 5, "schedules": [], "offline_native": {}})
@@ -436,6 +458,7 @@ mod tests {
             schedules: vec![],
             offline_reset: Some(quota()),
             offline_native: BTreeMap::new(),
+            remote_offline_operations: Vec::new(),
         };
         enabled.validate().unwrap();
         assert!(
@@ -549,6 +572,7 @@ mod tests {
             schedules: vec![],
             offline_reset: None,
             offline_native: BTreeMap::from([("replay-indexes".to_owned(), native_quota())]),
+            remote_offline_operations: Vec::new(),
         };
         policy.validate().unwrap();
         policy

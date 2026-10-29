@@ -489,6 +489,54 @@ pub fn preflight_existing_policy_generation(
     }
 }
 
+/// Digest of the node policy generation that replacing the node's policy from
+/// the image seed `source_dir` would install. Nothing is written: the trust
+/// the profile is verified under is the node's pinned trust plus the official
+/// publisher and the named trust documents, held in memory. A request builder
+/// pins this digest so the replacement refuses before any change if the seed
+/// would install anything else.
+pub fn prospective_replacement_policy_digest(
+    app_root: &Path,
+    source_dir: &Path,
+    node_profile: &str,
+    host_class: &str,
+    trust_files: &[PathBuf],
+) -> Result<String> {
+    let operator_config_root = app_root.join(ryeos_engine::AI_DIR).join("config");
+    let mut trust = TrustStore::load(None, &operator_config_root)
+        .context("load the node's pinned trust for the replacement profile")?;
+    let official = decode_official_publisher_pubkey()?;
+    let mut extra = vec![ryeos_engine::trust::TrustedSigner {
+        fingerprint: compute_fingerprint(&official),
+        verifying_key: official,
+        label: Some("ryeos-official".to_owned()),
+    }];
+    for trust_file in trust_files {
+        let content = fs::read_to_string(trust_file)
+            .with_context(|| format!("read trust file {}", trust_file.display()))?;
+        let doc = ryeos_engine::trust::PublisherTrustDoc::parse(&content)
+            .map_err(|error| anyhow!("{error}"))?;
+        let verifying_key = doc
+            .decode_verifying_key()
+            .map_err(|error| anyhow!("{error}"))?;
+        extra.push(ryeos_engine::trust::TrustedSigner {
+            fingerprint: compute_fingerprint(&verifying_key),
+            verifying_key,
+            label: Some(doc.owner),
+        });
+    }
+    trust.extend_from(&TrustStore::from_signers(extra));
+    let profile = load_trusted_init_node_profile(source_dir, node_profile, &trust)?;
+    let profile = select_profile_host_class(node_profile, &profile, Some(host_class))?
+        .admit_import_roots(app_root)
+        .context("admit declared external-content import roots")?;
+    let generation = profile.validated_generation(
+        &ryeos_node_runtime::node_policy::NodePolicyTable::new(),
+        Path::new("selected-node-profile"),
+    )?;
+    Ok(generation.digest().to_owned())
+}
+
 pub fn run_init_with_progress(
     opts: &InitOptions,
     mut observe: impl FnMut(&InitProgress) -> Result<()>,
@@ -522,7 +570,60 @@ fn run_init_internal(
 /// have.
 fn run_init_on_storage(
     opts: &InitOptions,
+    ceremony: Option<InitOperatorCeremony>,
+    observe_storage: impl FnOnce(&Path) -> lillux::process_control::RootStorageFacts,
+    observe: impl FnMut(&InitProgress) -> Result<()>,
+) -> Result<InitReport> {
+    require_source_dir(opts)?;
+    // Init is an offline mutation of the same node namespace owned by the
+    // daemon. Acquire the exact operational lock before creating or changing
+    // any app-root entry, and retain it through final completion testimony.
+    let state_lock = ryeos_node_runtime::state_lock::StateLock::acquire(
+        &ryeos_node_runtime::state_lock::default_lock_path(&opts.app_root),
+    )
+    .context("acquire stopped-node authority for initialization")?;
+    run_init_under_lock_on_storage(opts, ceremony, &state_lock, None, observe_storage, observe)
+}
+
+fn require_source_dir(opts: &InitOptions) -> Result<()> {
+    if !opts.source_dir.is_dir() {
+        bail!(
+            "bundle source directory not found: {}\n\
+             \n\
+             If you installed from a package, the default source is /usr/share/ryeos.\n\
+             For development, use: ryeos init --source bundles\n\
+             For Docker, use: ryeos init --source /opt/ryeos",
+            opts.source_dir.display()
+        );
+    }
+    Ok(())
+}
+
+/// Initialization under a stopped-node state lock the caller already holds.
+/// The lock must protect `opts.app_root`. When `expected_policy_generation`
+/// is given, the prospective node policy generation must have exactly that
+/// digest, and the call refuses before any installed bundle or completion
+/// record changes when it does not.
+pub fn run_init_under_lock(
+    opts: &InitOptions,
+    state_lock: &ryeos_node_runtime::state_lock::StateLock,
+    expected_policy_generation: Option<&str>,
+) -> Result<InitReport> {
+    run_init_under_lock_on_storage(
+        opts,
+        None,
+        state_lock,
+        expected_policy_generation,
+        lillux::process_control::RootStorageFacts::observe,
+        |_| Ok(()),
+    )
+}
+
+fn run_init_under_lock_on_storage(
+    opts: &InitOptions,
     mut ceremony: Option<InitOperatorCeremony>,
+    state_lock: &ryeos_node_runtime::state_lock::StateLock,
+    expected_policy_generation: Option<&str>,
     observe_storage: impl FnOnce(&Path) -> lillux::process_control::RootStorageFacts,
     mut observe: impl FnMut(&InitProgress) -> Result<()>,
 ) -> Result<InitReport> {
@@ -536,24 +637,10 @@ fn run_init_on_storage(
     };
     progress(InitPhase::PreparingLayout, None, None, None)?;
     // ── 0. Source exists? ──
-    if !opts.source_dir.is_dir() {
-        bail!(
-            "bundle source directory not found: {}\n\
-             \n\
-             If you installed from a package, the default source is /usr/share/ryeos.\n\
-             For development, use: ryeos init --source bundles\n\
-             For Docker, use: ryeos init --source /opt/ryeos",
-            opts.source_dir.display()
-        );
-    }
-
-    // Init is an offline mutation of the same node namespace owned by the
-    // daemon. Acquire the exact operational lock before creating or changing
-    // any app-root entry, and retain it through final completion testimony.
-    let state_lock = ryeos_node_runtime::state_lock::StateLock::acquire(
-        &ryeos_node_runtime::state_lock::default_lock_path(&opts.app_root),
-    )
-    .context("acquire stopped-node authority for initialization")?;
+    require_source_dir(opts)?;
+    state_lock
+        .ensure_protects_app_root(&opts.app_root)
+        .context("initialization needs the state lock of the app root it initializes")?;
 
     // ── 1. Layout ──
     create_layout(&opts.app_root)?;
@@ -593,7 +680,7 @@ fn run_init_on_storage(
             ..Default::default()
         })
         .context("resolve node bootstrap configuration")?;
-    ryeos_node_runtime::config::seed_bootstrap_config(&bootstrap_config, &state_lock)
+    ryeos_node_runtime::config::seed_bootstrap_config(&bootstrap_config, state_lock)
         .context("seed node bootstrap configuration")?;
     // Operator config root (`<app_root>/.ai/config`) — the single trust
     // source for `ryeos init`. Bundles are never a trust source.
@@ -844,6 +931,14 @@ fn run_init_on_storage(
         .map(|update| update.generation())
         .or(current_node_policy_generation.as_ref())
         .context("init has no complete prospective node policy generation")?;
+    if let Some(expected) = expected_policy_generation
+        && prospective_policy_generation.digest() != expected
+    {
+        bail!(
+            "the policy generation this initialization would install has digest {}, not the {expected} the request pinned; nothing was changed",
+            prospective_policy_generation.digest()
+        );
+    }
     let prospective_records = prospective_bundle_records(&plan, None);
     let prospective_policy = ryeos_node_runtime::node_policy::compile_generation(
         &opts.app_root,
@@ -1141,7 +1236,7 @@ fn run_init_on_storage(
             update,
             &identity,
             &seed_trust_store,
-            &state_lock,
+            state_lock,
         )
         .context("materialize selected node policy generation")?;
     }
@@ -1178,7 +1273,7 @@ fn run_init_on_storage(
     let vault_pubkey_fingerprint = vault_sk.public_key().fingerprint();
     let capacity_issuance = crate::native_capacity::prepare_initial_capacity_binding(
         &opts.app_root,
-        &state_lock,
+        state_lock,
         &user_key,
         user_key_created,
         &node_fp,
@@ -3234,6 +3329,64 @@ mod tests {
             })
             .collect::<std::collections::BTreeMap<_, _>>();
         assert_eq!(after, before, "reinit must not reseed node policy");
+    }
+
+    #[test]
+    fn a_policy_replacement_rerun_after_a_crash_reproduces_the_pinned_generation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let user = tmp.path().join("home");
+        run_init(&make_opts(&state, &user)).expect("initial full generation");
+        let source = workspace_root().join("bundles");
+        let pinned = prospective_replacement_policy_digest(
+            &state,
+            &source,
+            "standard",
+            "local",
+            &[dev_trust_file()],
+        )
+        .expect("the generation the seed would install");
+        let replacement = InitOptions {
+            app_root: state.clone(),
+            bind: None,
+            uds_path: None,
+            source_dir: source,
+            trust_files: vec![dev_trust_file()],
+            node_profile: Some("standard".to_owned()),
+            host_class: Some("local".to_owned()),
+            substrate_identity: None,
+            replace_node_policy_generation: true,
+            skip_preflight: true,
+        };
+        let lock = ryeos_node_runtime::state_lock::StateLock::acquire(
+            &ryeos_node_runtime::state_lock::default_lock_path(&state),
+        )
+        .unwrap();
+        // A pin the seed would not install refuses before anything changes.
+        let before = verify_init_completion(&state).unwrap().unwrap();
+        let wrong = "0".repeat(64);
+        let error = run_init_under_lock(&replacement, &lock, Some(&wrong)).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("nothing was changed"),
+            "{error:#}"
+        );
+        assert_eq!(
+            verify_init_completion(&state)
+                .unwrap()
+                .unwrap()
+                .policy_generation_digest,
+            before.policy_generation_digest
+        );
+
+        run_init_under_lock(&replacement, &lock, Some(&pinned)).expect("replacement");
+        let first = verify_init_completion(&state).unwrap().unwrap();
+        assert_eq!(first.policy_generation_digest, pinned);
+        // The node died before the receipt: the completion is gone and the same
+        // request runs again, to the same generation.
+        invalidate_init_completion(&state).unwrap();
+        run_init_under_lock(&replacement, &lock, Some(&pinned)).expect("rerun");
+        let second = verify_init_completion(&state).unwrap().unwrap();
+        assert_eq!(second.policy_generation_digest, pinned);
     }
 
     #[test]
