@@ -22,17 +22,20 @@
 
 pub mod apply;
 pub mod contract;
+pub mod deliver;
 mod envelope;
 pub mod facts;
 pub mod handlers;
 pub mod host;
 pub mod seed;
+pub mod sign;
 mod store;
 pub mod table;
 
 pub use apply::{
     ApplyOptions, ApplyReport, LocalApplied, LocalDraft, StopReason, apply_local,
     apply_pending_offline_operations, apply_with_options, read_facts, read_ledger,
+    read_node_fingerprint,
 };
 pub use envelope::{WildcardGrant, authorized_keys_dir, local_operator};
 pub use host::{BareHost, ImageSeed, OfflineHost, TypedReport};

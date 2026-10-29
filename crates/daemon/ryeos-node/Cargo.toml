@@ -17,7 +17,6 @@ test-support = []
 ryeos-node-runtime = { workspace = true }
 anyhow = { workspace = true }
 base64 = { workspace = true }
-chrono = { workspace = true }
 dirs = { workspace = true }
 hkdf = { workspace = true }
 hex = { workspace = true }

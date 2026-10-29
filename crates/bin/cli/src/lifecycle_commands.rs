@@ -10,6 +10,9 @@
 //!   - `ryeos node status` — show local node lifecycle status
 //!   - `ryeos node doctor` — offline "why won't it start" checklist
 //!   - `ryeos node offline-operation facts` — print the facts a signed offline-operation request is signed against
+//!   - `ryeos node offline-operation sign` — sign a request against a node's facts, away from the node
+//!   - `ryeos node offline-operation submit` — send a signed request to a running node's route
+//!   - `ryeos node offline-operation list` — show what a node has queued, applied and refused
 //!   - `ryeos node capacity reissue` — open the next native-capacity epoch on a stopped node
 //!   - `ryeos node capacity reanchor` — sign a stopped node's native-capacity account onto the filesystem its data moved to
 //!   - `ryeos node reset execution-history` — explicit offline epoch retirement
@@ -99,6 +102,21 @@ const LOCAL_COMMANDS: &[LocalCommandDescriptor] = &[
     LocalCommandDescriptor {
         tokens: &["node", "offline-operation", "facts"],
         summary: "Print the node facts a signed offline-operation request is signed against; works with the daemon stopped",
+        category: "lifecycle",
+    },
+    LocalCommandDescriptor {
+        tokens: &["node", "offline-operation", "sign"],
+        summary: "Sign an offline-operation request against a node's facts, without the node",
+        category: "lifecycle",
+    },
+    LocalCommandDescriptor {
+        tokens: &["node", "offline-operation", "submit"],
+        summary: "Send a signed offline-operation request to a running node's route; --stop makes the node apply it at once",
+        category: "lifecycle",
+    },
+    LocalCommandDescriptor {
+        tokens: &["node", "offline-operation", "list"],
+        summary: "Show what a node has queued, applied and refused as offline operations",
         category: "lifecycle",
     },
     LocalCommandDescriptor {
@@ -249,6 +267,25 @@ pub async fn try_dispatch(
         }
         ("node", Some("offline-operation")) if argv.get(2).map(String::as_str) == Some("facts") => {
             run_node_offline_operation_facts_command(&argv[3..], console).map_err(map_local_err)?;
+            Ok(true)
+        }
+        ("node", Some("offline-operation")) if argv.get(2).map(String::as_str) == Some("sign") => {
+            crate::lifecycle_offline_operation::run_sign(&argv[3..], console)
+                .map_err(map_local_err)?;
+            Ok(true)
+        }
+        ("node", Some("offline-operation"))
+            if argv.get(2).map(String::as_str) == Some("submit") =>
+        {
+            crate::lifecycle_offline_operation::run_submit(&argv[3..], console)
+                .await
+                .map_err(map_local_err)?;
+            Ok(true)
+        }
+        ("node", Some("offline-operation")) if argv.get(2).map(String::as_str) == Some("list") => {
+            crate::lifecycle_offline_operation::run_list(&argv[3..], console)
+                .await
+                .map_err(map_local_err)?;
             Ok(true)
         }
         ("node", Some("allow-restart")) => {
@@ -1676,6 +1713,7 @@ fn run_node_offline_operation_facts_command(
     if args.json {
         crate::tty::write_json(&serde_json::json!({
             "app_root": app_root,
+            "node_fingerprint": ryeos_node::offline_operation::read_node_fingerprint(&app_root)?,
             "facts": facts,
             "operations": operations.iter().map(|spec| serde_json::json!({
                 "operation": spec.id,
@@ -3612,7 +3650,7 @@ fn render_lifecycle_status(console: &crate::tty::Console, status: &LifecycleStat
 ///
 /// This direct process exit is acceptable for one-shot CLI dispatch. It must be
 /// converted to a returned outcome before extracting an in-process command core.
-fn parse_or_render_help<P: Parser>(
+pub(crate) fn parse_or_render_help<P: Parser>(
     argv: &[String],
     console: &crate::tty::Console,
 ) -> Result<Option<P>> {

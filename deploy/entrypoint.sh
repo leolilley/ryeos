@@ -28,14 +28,31 @@
 # a tight loop, and so an operator can open a shell in the container and clear
 # it while no daemon holds the node's state lock.
 #
-# RYEOS_OPERATOR_HOLD=1 opens an operator window on a host that offers a shell
-# only while the container runs: after first-boot initialization, instead of
-# starting ryeosd, the entrypoint waits with no daemon holding the state lock,
-# so stopped-node `ryeos` commands can run in the platform shell. Touch
-# <app root>/.ai/state/operator-hold-released to continue to the normal start
-# (the marker is removed first), or unset the variable and redeploy. Unset,
-# "0" and "1" are the only accepted values; anything else refuses to start.
-# The hold is not supported with RYEOS_HOST_RUNTIME_BINDING and refuses there.
+# Changes to a stopped node are signed offline operations, applied by ryeosd
+# itself at the top of its startup (policy replacement, policy-apply,
+# external-execution compose, capacity reissue and reanchor, allow-restart and
+# the resets). A running node queues one through its authenticated route; a
+# node that cannot start receives it from the platform: this script, still
+# root and before anything else, copies the request file named by
+# RYEOS_OFFLINE_OPERATION_REQUEST (an absolute path, preferred, or a base64
+# value of at most 64 KiB) and the input files in the directory named by
+# RYEOS_OFFLINE_OPERATION_INPUTS into the node's inbox. The copy verifies and
+# decides nothing: it takes regular files only, names each by the digest of its
+# bytes, never replaces one, copies a given file once, and a failure is logged
+# and does not block the start. The environment never changes node state: the
+# retired variables RYEOS_RESET_NODE_POLICY_GENERATION and
+# RYEOS_EXECUTION_HISTORY_SCHEMA_CUT refuse the start when set.
+#
+# RYEOS_OPERATOR_HOLD=1 stays as break-glass for a host that offers a shell
+# only while the container runs, and no procedure depends on it: after
+# first-boot initialization, instead of starting ryeosd, the entrypoint waits
+# with no daemon holding the state lock, so stopped-node `ryeos` commands can
+# run in the platform shell. A platform whose health check fails during the
+# hold may replace the instance. Touch <app root>/.ai/state/operator-hold-released
+# to continue to the normal start (the marker is removed first), or unset the
+# variable and redeploy. Unset, "0" and "1" are the only accepted values;
+# anything else refuses to start. The hold is not supported with
+# RYEOS_HOST_RUNTIME_BINDING and refuses there.
 
 #
 # Every ryeos command here runs as the image's node account, ryeos
@@ -64,6 +81,9 @@ RESTART_INHIBITED_HOLD_SECONDS=30
 OPERATOR_HOLD_POLL_SECONDS=5
 NODE_UID=10000
 NODE_GID=10000
+OFFLINE_MAX_REQUEST_BYTES=65536
+OFFLINE_MAX_INPUT_BYTES=262144
+OFFLINE_MAX_INPUTS=16
 
 # Print the first entry under `app_root`, the app root itself excluded, whose
 # device number differs from `device`: the root of a mount nested inside the
@@ -144,6 +164,140 @@ log_path_modes() {
   done
 }
 
+# Copy one regular file into the offline-operation inbox under the digest of
+# its bytes, once. A link, a special file, a file past `max_bytes` and a file
+# already delivered are skipped; the inbox never has a file replaced. A marker
+# records each digest delivered so that a platform that passes the same file
+# on every boot copies it once. Verifies nothing: the daemon does that.
+copy_into_offline_inbox() {
+  local source_file="$1"
+  local suffix="$2"
+  local max_bytes="$3"
+  local offline="$4"
+  local size digest incoming
+
+  if [[ -L "$source_file" || ! -f "$source_file" ]]; then
+    echo "[entrypoint] offline operation: $source_file is not a regular file; not delivered" >&2
+    return 1
+  fi
+  size="$(stat -c %s -- "$source_file")" || return 1
+  if [[ "$size" -gt "$max_bytes" ]]; then
+    echo "[entrypoint] offline operation: $source_file is $size bytes, over the $max_bytes limit; not delivered" >&2
+    return 1
+  fi
+  digest="$(sha256sum -- "$source_file" | cut -d' ' -f1)" || return 1
+  if [[ -e "$offline/delivered/$digest.$suffix" || -e "$offline/inbox/$digest.$suffix" ]]; then
+    return 0
+  fi
+  incoming="$offline/inbox/.incoming-$$-$digest"
+  cp -- "$source_file" "$incoming" || return 1
+  chmod 0600 -- "$incoming" || return 1
+  mv -n -- "$incoming" "$offline/inbox/$digest.$suffix" || return 1
+  rm -f -- "$incoming"
+  : > "$offline/delivered/$digest.$suffix"
+  echo "[entrypoint] offline operation: delivered $digest.$suffix"
+}
+
+# Deliver the platform-supplied offline-operation request and inputs into the
+# inbox of an initialized node, as root before the node account takes the
+# tree. Nothing here can stop the start: every failure is logged and the
+# start goes on.
+deliver_offline_operation_request() {
+  local app_root="$1"
+  local offline="$app_root/.ai/state/offline-operations"
+  local request="${RYEOS_OFFLINE_OPERATION_REQUEST:-}"
+  local inputs="${RYEOS_OFFLINE_OPERATION_INPUTS:-}"
+  local staged directory input count=0
+
+  # The root pass delivers and re-executes as the node account, which would
+  # otherwise read the same files again without the access the root pass had.
+  if [[ -n "${RYEOS_OFFLINE_OPERATION_DELIVERED:-}" ]]; then
+    return 0
+  fi
+  if [[ -z "$request" && -z "$inputs" ]]; then
+    return 0
+  fi
+  if [[ -L "$app_root" || ! -f "$app_root/.ai/node/identity/private_key.pem" ]]; then
+    echo "[entrypoint] offline operation: the node is not initialized; nothing delivered" >&2
+    return 0
+  fi
+  for directory in "$app_root/.ai/state" "$offline" "$offline/inbox" "$offline/delivered"; do
+    if [[ -L "$directory" ]]; then
+      echo "[entrypoint] offline operation: $directory is a link; nothing delivered" >&2
+      return 0
+    fi
+    [[ -d "$directory" ]] || mkdir -m 700 -- "$directory" || {
+      echo "[entrypoint] offline operation: $directory could not be created; nothing delivered" >&2
+      return 0
+    }
+  done
+  # Inputs first, so the request is never in the inbox without them.
+  if [[ -n "$inputs" ]]; then
+    if [[ -L "$inputs" || ! -d "$inputs" ]]; then
+      echo "[entrypoint] offline operation: RYEOS_OFFLINE_OPERATION_INPUTS is not a directory" >&2
+    else
+      while IFS= read -r -d '' input; do
+        count=$((count + 1))
+        if [[ "$count" -gt "$OFFLINE_MAX_INPUTS" ]]; then
+          echo "[entrypoint] offline operation: more than $OFFLINE_MAX_INPUTS input files; the rest are not delivered" >&2
+          break
+        fi
+        copy_into_offline_inbox "$input" input "$OFFLINE_MAX_INPUT_BYTES" "$offline" || true
+      done < <(find "$inputs" -maxdepth 1 -mindepth 1 -print0)
+    fi
+  fi
+  if [[ -n "$request" ]]; then
+    if [[ "$request" == /* ]]; then
+      copy_into_offline_inbox "$request" json "$OFFLINE_MAX_REQUEST_BYTES" "$offline" || true
+    else
+      if [[ "${#request}" -gt $((OFFLINE_MAX_REQUEST_BYTES * 2)) ]]; then
+        echo "[entrypoint] offline operation: the request value is over the size limit; not delivered" >&2
+        return 0
+      fi
+      staged="$(mktemp -p "$offline" .request-XXXXXX)" || return 0
+      if printf '%s' "$request" | base64 -d > "$staged" 2>/dev/null; then
+        copy_into_offline_inbox "$staged" json "$OFFLINE_MAX_REQUEST_BYTES" "$offline" || true
+      else
+        echo "[entrypoint] offline operation: RYEOS_OFFLINE_OPERATION_REQUEST is neither an absolute path nor base64; not delivered" >&2
+      fi
+      rm -f -- "$staged"
+    fi
+  fi
+}
+
+# Refuse a start that sets a retired environment route. The environment no
+# longer changes node state: a signed offline operation does, and a variable
+# that silently did nothing would leave the operator believing it had.
+refuse_retired_environment() {
+  if [[ -n "${RYEOS_RESET_NODE_POLICY_GENERATION:-}" ]]; then
+    echo "[entrypoint] RYEOS_RESET_NODE_POLICY_GENERATION no longer exists; replace the policy generation with a signed node.reset.policy-generation offline operation" >&2
+    return 1
+  fi
+  if [[ -n "${RYEOS_EXECUTION_HISTORY_SCHEMA_CUT:-}" ]]; then
+    echo "[entrypoint] RYEOS_EXECUTION_HISTORY_SCHEMA_CUT no longer exists; cut the execution history with a signed node.reset.execution-history offline operation" >&2
+    return 1
+  fi
+}
+
+# Refuse to seed an app root that is not fresh. A node with a completed init
+# or a published policy generation (the markers the daemon treats as
+# initialized) must not be silently re-initialized under this image's profile
+# because its bundle directory went missing. An identity alone is what a first
+# init that died before completion leaves, and it is seeded again.
+require_fresh_app_root() {
+  local app_root="$1"
+  local held
+
+  for held in \
+    "$app_root/.ai/config/onboarding/init-completion.json" \
+    "$app_root/.ai/node/policies"; do
+    if [[ -e "$held" || -L "$held" ]]; then
+      echo "[entrypoint] refusing to start: the installed bundle generation is absent but $held exists. This app root is initialized, so it is not re-seeded from the image; restore the bundle generation, or start a fresh app root" >&2
+      return 1
+    fi
+  done
+}
+
 # Re-execute this script as the node account before any ryeos command. As
 # root: own /data and the app root for the node account (the platform mounts
 # the volume root-owned on every boot, so this is per boot, not per image),
@@ -157,10 +311,12 @@ run_as_node_account() {
   local uid
   uid="$(id -u)"
   if [[ "$uid" == "$NODE_UID" ]]; then
+    deliver_offline_operation_request /data/app
     return 0
   fi
   if [[ "$uid" != 0 ]]; then
     echo "[entrypoint] running as uid $uid (platform-selected), not the image's node account $NODE_UID" >&2
+    deliver_offline_operation_request /data/app
     return 0
   fi
   if [[ -n "${RYEOS_HOST_RUNTIME_BINDING:-}" ]]; then
@@ -172,6 +328,7 @@ run_as_node_account() {
     return 1
   fi
   mkdir -p /data/app
+  deliver_offline_operation_request /data/app
   chown -h "$NODE_UID:$NODE_GID" /data
   hand_app_root_to_node_account /data/app
   echo "[entrypoint] /data handed to the node account $NODE_UID:$NODE_GID; dropping root"
@@ -189,6 +346,7 @@ run_as_node_account() {
     echo "[entrypoint] host refuses capability bounding-set changes; dropping root without clearing the bounding set" >&2
   fi
   export HOME=/data/app
+  export RYEOS_OFFLINE_OPERATION_DELIVERED=1
   exec setpriv --reuid="$NODE_UID" --regid="$NODE_GID" --clear-groups \
     --no-new-privs "${cap_args[@]}" \
     -- "${BASH_SOURCE[0]}" "$@"
@@ -254,6 +412,12 @@ build_ryeos_daemon_args() {
     return 0
   fi
   DAEMON_ARGS=(--app-root "$app_root")
+  # The image seed a signed policy replacement is applied from. The daemon
+  # never reads it from the environment: it arrives as flags, and only for an
+  # image that pins its substrate by digest.
+  if [[ "${RYEOS_SUBSTRATE_IMAGE:-}" =~ @sha256:[0-9a-f]{64}$ ]]; then
+    DAEMON_ARGS+=(--image-seed-root /opt/ryeos --substrate-image-digest "${RYEOS_SUBSTRATE_IMAGE##*@}")
+  fi
 }
 
 # Build the lifecycle argument vector without knowing any distribution or
@@ -297,35 +461,15 @@ build_ryeos_init_args() {
     --substrate-protocol "$RYEOS_SUBSTRATE_PROTOCOL"
   )
   warn_on_changed_host_class "$app_root"
-  case "${RYEOS_RESET_NODE_POLICY_GENERATION:-0}" in
-    0|"")
-      if [[ ! -e "$policy_generation" && ! -L "$policy_generation" ]]; then
-        require_init_host_class || return 1
-        INIT_ARGS+=("${profile_args[@]}" --host-class "$RYEOS_INIT_HOST_CLASS")
-      else
-        echo "[entrypoint] preserving existing signed node policy generation"
-      fi
-      ;;
-    1)
-      if [[ -e "$policy_generation" || -L "$policy_generation" ]]; then
-        echo "[entrypoint] explicitly replacing obsolete signed node policy generation"
-        require_init_host_class || return 1
-        INIT_ARGS+=(
-          "${profile_args[@]}"
-          --host-class "$RYEOS_INIT_HOST_CLASS"
-          --replace-node-policy-generation
-          --confirm-node-policy-generation-replacement
-        )
-      else
-        require_init_host_class || return 1
-        INIT_ARGS+=("${profile_args[@]}" --host-class "$RYEOS_INIT_HOST_CLASS")
-      fi
-      ;;
-    *)
-      echo "[entrypoint] invalid RYEOS_RESET_NODE_POLICY_GENERATION value; use 0 (default) or 1" >&2
-      return 1
-      ;;
-  esac
+  # An absent generation is published from the image seed exactly once. A
+  # present one is never replaced here: replacing it is a signed offline
+  # operation that names the seed's digest.
+  if [[ ! -e "$policy_generation" && ! -L "$policy_generation" ]]; then
+    require_init_host_class || return 1
+    INIT_ARGS+=("${profile_args[@]}" --host-class "$RYEOS_INIT_HOST_CLASS")
+  else
+    echo "[entrypoint] preserving existing signed node policy generation"
+  fi
 }
 
 # The host class an initialized node recorded in its substrate identity, or
@@ -360,27 +504,6 @@ require_init_host_class() {
     echo "[entrypoint] RYEOS_INIT_HOST_CLASS is required to initialize from RYEOS_INIT_NODE_PROFILE; set it to a host class the profile declares (for example local or hosted)" >&2
     return 1
   }
-}
-
-build_execution_history_schema_cut_args() {
-  local app_root="$1"
-  local cut="${RYEOS_EXECUTION_HISTORY_SCHEMA_CUT:-}"
-
-  EXECUTION_HISTORY_SCHEMA_CUT_ARGS=()
-  if [[ -z "$cut" ]]; then
-    return 0
-  fi
-  if [[ ! "$cut" =~ ^([0-9]+):([0-9]+)$ ]] || [[ "${BASH_REMATCH[1]}" == "${BASH_REMATCH[2]}" ]]; then
-    echo "[entrypoint] invalid RYEOS_EXECUTION_HISTORY_SCHEMA_CUT value; use exact distinct epochs FROM:TO" >&2
-    return 1
-  fi
-  EXECUTION_HISTORY_SCHEMA_CUT_ARGS=(
-    node reset execution-history
-    --app-root "$app_root"
-    --confirm
-    --schema-cut-from "${BASH_REMATCH[1]}"
-    --schema-cut-to "${BASH_REMATCH[2]}"
-  )
 }
 
 # Seconds to wait before starting ryeosd: the bounded hold while the node's
@@ -446,6 +569,7 @@ main() {
   local hold_status=0
   operator_hold_requested || hold_status=$?
   [[ "$hold_status" -ne 2 ]] || return 1
+  refuse_retired_environment || return 1
   run_as_node_account "$@"
   effective_bind="$(container_bind)"
 
@@ -466,23 +590,14 @@ main() {
 
   mkdir -p /data
   if [[ ! -e /data/app/.ai/bundles && ! -L /data/app/.ai/bundles ]]; then
+    require_fresh_app_root /data/app || return 1
     echo "[entrypoint] installed bundle generation absent; seeding from substrate image"
     collect_baked_publisher_trust_args /opt/ryeos
     log_path_modes /data/app/.ai/node /data/app/.ai/node/native-capacity
     build_ryeos_init_args /opt/ryeos /data/app "$effective_bind"
     ryeos "${INIT_ARGS[@]}" "${TRUST_ARGS[@]}"
   else
-    if [[ "${RYEOS_RESET_NODE_POLICY_GENERATION:-0}" != 0 && -n "${RYEOS_RESET_NODE_POLICY_GENERATION:-}" ]]; then
-      echo "[entrypoint] node-policy replacement cannot use the first-boot image seed; use an authorized offline operation" >&2
-      return 1
-    fi
     echo "[entrypoint] preserving installed bundle generation; image seed is first-boot only"
-  fi
-
-  build_execution_history_schema_cut_args /data/app
-  if [[ ${#EXECUTION_HISTORY_SCHEMA_CUT_ARGS[@]} -gt 0 ]]; then
-    echo "[entrypoint] applying exact idempotent execution-history schema cut ${RYEOS_EXECUTION_HISTORY_SCHEMA_CUT}"
-    ryeos "${EXECUTION_HISTORY_SCHEMA_CUT_ARGS[@]}"
   fi
 
   hold_for_operator /data/app

@@ -770,6 +770,78 @@ pub fn timestamp_millis() -> i64 {
         .as_millis() as i64
 }
 
+/// Current wall-clock time as whole seconds since the Unix epoch.
+pub fn unix_secs_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+/// The strict inverse of [`iso8601_from_unix_secs`]: accepts exactly the
+/// encoding `iso8601_now` emits (`YYYY-MM-DDTHH:MM:SSZ`, 20 bytes, UTC, no
+/// fractions and no offsets) and nothing else. Calendar fields are validated.
+pub fn unix_secs_from_iso8601(text: &str) -> Option<u64> {
+    let bytes = text.as_bytes();
+    if bytes.len() != 20 {
+        return None;
+    }
+    for (index, expected) in [
+        (4, b'-'),
+        (7, b'-'),
+        (10, b'T'),
+        (13, b':'),
+        (16, b':'),
+        (19, b'Z'),
+    ] {
+        if bytes[index] != expected {
+            return None;
+        }
+    }
+    let field = |from: usize, to: usize| -> Option<u64> {
+        let digits = &bytes[from..to];
+        if !digits.iter().all(u8::is_ascii_digit) {
+            return None;
+        }
+        digits
+            .iter()
+            .try_fold(0_u64, |acc, digit| Some(acc * 10 + u64::from(digit - b'0')))
+    };
+    let year = field(0, 4)?;
+    let month = field(5, 7)?;
+    let day = field(8, 10)?;
+    let hours = field(11, 13)?;
+    let minutes = field(14, 16)?;
+    let seconds = field(17, 19)?;
+    if !(1..=12).contains(&month) || hours > 23 || minutes > 59 || seconds > 59 {
+        return None;
+    }
+    let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    let days_in_month = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        _ if leap => 29,
+        _ => 28,
+    };
+    if day == 0 || day > days_in_month {
+        return None;
+    }
+    let days = u64::try_from(days_from_civil(year as i64, month as u32, day as u32)).ok()?;
+    Some(days * 86400 + hours * 3600 + minutes * 60 + seconds)
+}
+
+/// Days since 1970-01-01 of a proleptic Gregorian date; the inverse of
+/// `civil_from_days`.
+fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = (y - era * 400) as u32;
+    let mp = if month > 2 { month - 3 } else { month + 9 };
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + i64::from(doe) - 719468
+}
+
 fn civil_from_days(days: i64) -> (i32, u32, u32) {
     let z = days + 719468;
     let era = if z >= 0 { z } else { z - 146096 } / 146097;
@@ -818,6 +890,69 @@ pub fn run(action: TimeAction) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn iso8601_parsing_inverts_formatting() {
+        for secs in [
+            0_u64,
+            86_399,
+            86_400,
+            951_782_400,   // 2000-02-29
+            1_709_208_000, // 2024-02-29T12:00:00Z
+            1_761_700_000,
+            4_102_444_800,   // 2100-01-01
+            253_402_300_799, // 9999-12-31T23:59:59Z
+        ] {
+            let text = iso8601_from_unix_secs(secs);
+            assert_eq!(unix_secs_from_iso8601(&text), Some(secs), "{text}");
+        }
+        assert_eq!(unix_secs_from_iso8601("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(
+            unix_secs_from_iso8601("2024-02-29T00:00:00Z"),
+            Some(1_709_164_800)
+        );
+        let now = unix_secs_now();
+        assert_eq!(
+            unix_secs_from_iso8601(&iso8601_from_unix_secs(now)),
+            Some(now)
+        );
+    }
+
+    #[test]
+    fn iso8601_parsing_validates_the_calendar() {
+        assert_eq!(unix_secs_from_iso8601("2023-02-29T00:00:00Z"), None);
+        assert_eq!(unix_secs_from_iso8601("1900-02-29T00:00:00Z"), None);
+        assert!(unix_secs_from_iso8601("2000-02-29T00:00:00Z").is_some());
+        assert_eq!(unix_secs_from_iso8601("2024-13-01T00:00:00Z"), None);
+        assert_eq!(unix_secs_from_iso8601("2024-00-10T00:00:00Z"), None);
+        assert_eq!(unix_secs_from_iso8601("2024-04-31T00:00:00Z"), None);
+        assert_eq!(unix_secs_from_iso8601("2024-04-00T00:00:00Z"), None);
+        assert_eq!(unix_secs_from_iso8601("2024-04-10T24:00:00Z"), None);
+        assert_eq!(unix_secs_from_iso8601("2024-04-10T00:60:00Z"), None);
+        assert_eq!(unix_secs_from_iso8601("2024-04-10T00:00:60Z"), None);
+    }
+
+    #[test]
+    fn iso8601_parsing_accepts_only_the_emitted_encoding() {
+        for text in [
+            "2024-04-10T00:00:00+00:00",
+            "2024-04-10T00:00:00.5Z",
+            "2024-04-10T00:00:00.000Z",
+            "2024-04-10T01:00:00+01:00",
+            "2024-04-10T00:00:00z",
+            "2024-04-10 00:00:00Z",
+            "2024-04-10T00:00:00",
+            "2024-04-10T00:00Z",
+            "",
+            "2024-04-10T00:00:00ZZ",
+            " 2024-04-10T00:00:00Z",
+            "+024-04-10T00:00:00Z",
+            "2024/04/10T00:00:00Z",
+            "2024-04-10T0a:00:00Z",
+            "２０２４-04-10T00:00:00Z",
+        ] {
+            assert_eq!(unix_secs_from_iso8601(text), None, "{text:?}");
+        }
+    }
 
     #[test]
     fn occupancy_clock_exposes_only_the_portable_contract() {

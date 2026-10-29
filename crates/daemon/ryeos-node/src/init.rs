@@ -2581,7 +2581,7 @@ fn ensure_operator_genesis_locked(
     let mut document = serde_json::json!({
         "schema": "ryeos/operator-genesis/v1",
         "operator_fingerprint": operator_fingerprint,
-        "created_at": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        "created_at": lillux::time::iso8601_now(),
         "ceremony_version": "1",
     });
     if let Some(display_name) = profile

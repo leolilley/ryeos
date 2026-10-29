@@ -13,7 +13,6 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
-use chrono::{DateTime, Utc};
 use lillux::crypto::{DecodePrivateKey as _, VerifyingKey};
 use ryeos_engine::roots::RuntimeRoot;
 use ryeos_node_runtime::identity::{
@@ -21,7 +20,9 @@ use ryeos_node_runtime::identity::{
     load_verified_authorized_key, matches_only_by_wildcard,
 };
 
-use super::contract::{CLOCK_SKEW_ALLOWANCE, Refusal, RefusalReason, RequestBody, SignedRequest};
+use super::contract::{
+    CLOCK_SKEW_ALLOWANCE_SECS, Refusal, RefusalReason, RequestBody, SignedRequest,
+};
 use super::facts::MANDATORY_FACTS;
 use super::table::{OperationSpec, lookup, operations};
 
@@ -60,7 +61,8 @@ pub fn local_operator(app_root: &Path) -> anyhow::Result<Option<(String, Verifyi
 pub struct Envelope<'a> {
     pub app_root: &'a Path,
     pub node: &'a NodeIdentity,
-    pub now: DateTime<Utc>,
+    /// Unix seconds, from the caller's Lillux clock.
+    pub now: u64,
     /// Check the request's time window. A continuation of an application that
     /// began inside its window is not checked against the clock again.
     pub enforce_clock: bool,
@@ -258,13 +260,13 @@ impl Envelope<'_> {
         let issued_at = body
             .issued_at()
             .map_err(|e| Refusal::new(RefusalReason::InvalidLifetime, format!("{e:#}")))?;
-        if self.now > not_after {
+        if self.now > not_after.unix_secs() {
             return refuse(
                 RefusalReason::Expired,
                 format!("the request expired at {}", body.not_after),
             );
         }
-        if issued_at > self.now + CLOCK_SKEW_ALLOWANCE {
+        if issued_at.unix_secs() > self.now.saturating_add(CLOCK_SKEW_ALLOWANCE_SECS) {
             return refuse(
                 RefusalReason::FromTheFuture,
                 format!(

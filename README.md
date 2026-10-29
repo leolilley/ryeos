@@ -281,21 +281,32 @@ not use it for release images. See the
 for the complete operator contract.
 
 When an upgrade intentionally changes the signed node-policy schema or the
-image's exact bundle-set profile, stop the old container and opt into the
-one-time clean cut on its persistent volume:
+image's exact bundle-set profile, replace the complete signed policy generation
+with a signed offline operation, `node.reset.policy-generation`. It is applied
+from the new image's seed at the top of the next startup: the request names the
+seed's measured digest, the node profile, the host class and the substrate image
+digest, so a request signed for one image cannot apply on another. Sign it
+against the node's facts and submit it to the running node, which stops and
+starts again to apply it:
 
 ```bash
-docker run -e RYEOS_RESET_NODE_POLICY_GENERATION=1 \
-  -v ryeos-data:/data ghcr.io/leolilley/ryeos-standard:latest
+ryeos node offline-operation facts --json > facts.json   # or GET /offline-operations/facts
+ryeos node offline-operation sign --operation node.reset.policy-generation \
+  --facts facts.json --arguments policy-replace.json --expect policy_generation=<sha256> \
+  --out request.json
+ryeos node offline-operation submit --file request.json --url https://node.example --stop
 ```
 
-The entrypoint asks one locked init to replace the complete signed policy
-generation and align the trusted profile's prospective exact bundle inventory.
-The prior fence is invalidated before mutation and a new signed completion
-fence is written before the daemon starts. It preserves
-identity, trust, vault credentials, execution history, project heads, and all
-other node state. Remove the variable after the successful upgrade; policy
-replacement is never automatic.
+A node that cannot start receives the same request from the platform instead:
+`ryeos node offline-operation sign ... --stage-dir ./stage` writes
+`request.json` and `inputs/`, and `RYEOS_OFFLINE_OPERATION_REQUEST` (a path) and
+`RYEOS_OFFLINE_OPERATION_INPUTS` (a directory) hand them to the entrypoint,
+which copies them into the node's inbox without verifying anything. The node
+verifies and applies them, and leaves a node-signed receipt in a hash-chained
+ledger (`ryeos node offline-operation list`). Hosted nodes trust their platform
+to restart them after an exit; a platform operator who can write the volume can
+still sign as the local operator, which the ledger makes visible and does not
+prevent.
 
 The release gate exercises default-disabled startup and signed execution
 without extra capabilities or an isolation backend. Back up the `ryeos-data`

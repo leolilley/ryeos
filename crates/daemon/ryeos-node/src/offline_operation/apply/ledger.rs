@@ -14,8 +14,8 @@ use ryeos_node_runtime::identity::NodeIdentity;
 use serde_json::Value;
 
 use crate::offline_operation::contract::{
-    CHECKPOINT_SCHEMA, CheckpointBody, MAX_RECEIPT_BYTES, RECEIPT_SCHEMA, ReceiptBody,
-    SignedCheckpoint, SignedReceipt, SignedRequest, genesis_ledger_head,
+    CHECKPOINT_SCHEMA, CanonicalInstant, CheckpointBody, MAX_RECEIPT_BYTES, RECEIPT_SCHEMA,
+    ReceiptBody, SignedCheckpoint, SignedReceipt, SignedRequest, genesis_ledger_head,
 };
 use crate::offline_operation::store::{Store, bounded_names, remove, write_private};
 
@@ -51,12 +51,12 @@ impl LedgerState {
     /// against a head that rotation has since dropped. A head the ledger has
     /// not reached cannot be older than the receipts it retains, so a request
     /// issued before them and pinned to an unknown head names a dropped one.
-    pub fn predates_retained(&self, issued_at: chrono::DateTime<chrono::Utc>) -> bool {
+    pub fn predates_retained(&self, issued_at: CanonicalInstant) -> bool {
         let Some(checkpoint) = &self.checkpoint_recorded_at else {
             return false;
         };
         let reference = self.oldest_recorded_at.as_ref().unwrap_or(checkpoint);
-        crate::offline_operation::contract::parse_instant("recorded_at", reference)
+        CanonicalInstant::parse("recorded_at", reference)
             .is_ok_and(|reference| issued_at <= reference)
     }
 
@@ -201,6 +201,20 @@ impl<'a> Ledger<'a> {
             oldest_recorded_at,
             checkpoint_recorded_at: checkpoint.map(|checkpoint| checkpoint.body.recorded_at),
         })
+    }
+
+    /// The newest `limit` retained receipts, oldest first.
+    pub fn recent(&self, state: &LedgerState, limit: usize) -> Result<Vec<SignedReceipt>> {
+        let sequences: Vec<u64> = self
+            .sequences()?
+            .into_iter()
+            .filter(|sequence| *sequence <= state.last_sequence)
+            .collect();
+        let start = sequences.len().saturating_sub(limit);
+        sequences[start..]
+            .iter()
+            .map(|sequence| self.read_receipt(*sequence))
+            .collect()
     }
 
     /// The retained receipt for `request_digest`, if there is one.
@@ -470,12 +484,20 @@ mod tests {
         assert!(fx.store.ledger_dir().join(CHECKPOINT_FILE).exists());
         // A request issued before the retained receipts and pinned to a head
         // the ledger does not hold names a head rotation dropped.
-        assert!(loaded.predates_retained(chrono::Utc::now() - chrono::Duration::hours(1)));
-        assert!(!loaded.predates_retained(chrono::Utc::now() + chrono::Duration::hours(1)));
+        assert!(loaded.predates_retained(hour_ago()));
+        assert!(!loaded.predates_retained(hour_ahead()));
         // Appending continues the chain across the checkpoint.
         let (next, _) = ledger.append(&loaded, draft(&fx.node, 7)).unwrap();
         assert_eq!(next.body.previous, loaded.head);
         ledger.load().unwrap();
+    }
+
+    fn hour_ago() -> CanonicalInstant {
+        CanonicalInstant::from_unix_secs(lillux::time::unix_secs_now() - 3600)
+    }
+
+    fn hour_ahead() -> CanonicalInstant {
+        CanonicalInstant::from_unix_secs(lillux::time::unix_secs_now() + 3600)
     }
 
     #[test]
@@ -486,7 +508,7 @@ mod tests {
             .append(&ledger.load().unwrap(), draft(&fx.node, 1))
             .unwrap()
             .1;
-        assert!(!state.predates_retained(chrono::Utc::now() - chrono::Duration::hours(1)));
+        assert!(!state.predates_retained(hour_ago()));
     }
 
     #[test]
