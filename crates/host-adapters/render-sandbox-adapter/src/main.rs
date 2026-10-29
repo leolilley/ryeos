@@ -1690,8 +1690,8 @@ fn verify_artifact(
     let digest = authority
         .digest_regular_file_stable_exact(&observation)
         .classed(FailClass::ArtifactDigest)?;
-    if !expected_bytes.is_none_or(|bytes| bytes == observation.size()) || digest != expected_digest
-    {
+    let size_matches = expected_bytes.is_none_or(|bytes| bytes == observation.size());
+    if !(size_matches && digest == expected_digest) {
         return Err(anyhow::anyhow!("lifecycle artifact identity changed")
             .context(FailClass::ArtifactDigest));
     }

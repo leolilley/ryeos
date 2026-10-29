@@ -54,7 +54,7 @@ impl SnapshotProductionSettings {
 
     fn validate_for_intent(&self, intent: &RuntimeSnapshotIntent) -> Result<()> {
         ensure_class!(
-            FailClass::RequestParse,
+            FailClass::SettingsShape,
             self.schema == 1
                 && self.sandbox_group_id == intent.provider_group_id
                 && self.owner_id.len() <= 256
@@ -79,8 +79,9 @@ impl SnapshotProductionSettings {
 /// creation deadline is not reused: it authorized one POST sequence, whereas
 /// this invocation receives a fresh controller-owned observation deadline.
 pub(crate) fn observe_readiness(adapter: &lillux::InheritedDescriptorAuthority) -> Result<()> {
-    let deadline = operation_deadline()?;
-    ensure!(
+    let deadline = operation_deadline().classed(FailClass::Deadline)?;
+    ensure_class!(
+        FailClass::RequestParse,
         [
             LIFECYCLE_BOOTSTRAP_FD_ENV,
             LIFECYCLE_SIGNED_IMPORT_FD_ENV,
@@ -106,7 +107,8 @@ pub(crate) fn observe_readiness(adapter: &lillux::InheritedDescriptorAuthority) 
         "snapshot readiness request is noncanonical or selects another provider"
     );
     verify_artifact(adapter, &request.intent.adapter_artifact_hash, None)?;
-    let spec_bytes = read_sealed_env(LIFECYCLE_PROVIDER_SPEC_FD_ENV, MAX_SPEC_BYTES)?;
+    let spec_bytes = read_sealed_env(LIFECYCLE_PROVIDER_SPEC_FD_ENV, MAX_SPEC_BYTES)
+        .classed(FailClass::SpecDigest)?;
     let captured_spec_digest = std::env::var(LIFECYCLE_PROVIDER_SPEC_SHA256_ENV)
         .context("snapshot observer lacks captured provider spec digest")?;
     ensure!(
@@ -152,8 +154,9 @@ pub(crate) fn observe_readiness(adapter: &lillux::InheritedDescriptorAuthority) 
 /// Only this first-claim invocation may contact Render. Reconciliation must
 /// read retained journal/provider identities and never call this entry again.
 pub(crate) fn operate(adapter: &lillux::InheritedDescriptorAuthority) -> Result<()> {
-    let deadline = operation_deadline()?;
-    ensure!(
+    let deadline = operation_deadline().classed(FailClass::Deadline)?;
+    ensure_class!(
+        FailClass::RequestParse,
         [
             LIFECYCLE_BOOTSTRAP_FD_ENV,
             LIFECYCLE_SIGNED_IMPORT_FD_ENV,
@@ -166,31 +169,42 @@ pub(crate) fn operate(adapter: &lillux::InheritedDescriptorAuthority) -> Result<
     let request_bytes = read_sealed_env(
         LIFECYCLE_REQUEST_FD_ENV,
         MAX_RUNTIME_SNAPSHOT_ADAPTER_REQUEST_BYTES,
-    )?;
+    )
+    .classed(FailClass::RequestParse)?;
     let request: RuntimeSnapshotAdapterRequest =
         ryeos_external_execution_contract::from_json_slice_strict(
             &request_bytes,
             MAX_RUNTIME_SNAPSHOT_ADAPTER_REQUEST_BYTES,
-        )?;
-    request.validate()?;
-    ensure!(
-        ryeos_external_execution_contract::canonical_json(&request)? == request_bytes
+        )
+        .classed(FailClass::RequestParse)?;
+    request.validate().classed(FailClass::RequestParse)?;
+    ensure_class!(
+        FailClass::RequestParse,
+        ryeos_external_execution_contract::canonical_json(&request)
+            .classed(FailClass::RequestParse)?
+            == request_bytes
             && request.intent.provider_id == ADAPTER_ID,
         "snapshot adapter request is noncanonical or selects another provider"
     );
     verify_artifact(adapter, &request.intent.adapter_artifact_hash, None)?;
-    let deadline = request_deadline(request.intent.attempt_deadline_ms, deadline)?;
-    let spec_bytes = read_sealed_env(LIFECYCLE_PROVIDER_SPEC_FD_ENV, MAX_SPEC_BYTES)?;
+    let deadline = request_deadline(request.intent.attempt_deadline_ms, deadline)
+        .classed(FailClass::Deadline)?;
+    let spec_bytes = read_sealed_env(LIFECYCLE_PROVIDER_SPEC_FD_ENV, MAX_SPEC_BYTES)
+        .classed(FailClass::SpecDigest)?;
     let captured_spec_digest = std::env::var(LIFECYCLE_PROVIDER_SPEC_SHA256_ENV)
-        .context("snapshot producer lacks captured provider spec digest")?;
-    ensure!(
+        .context("snapshot producer lacks captured provider spec digest")
+        .classed(FailClass::SpecDigest)?;
+    ensure_class!(
+        FailClass::SpecDigest,
         captured_spec_digest == request.provider_spec_digest
             && lillux::sha256_hex(&spec_bytes) == request.provider_spec_digest,
         "snapshot provider spec changed its exact signed handoff"
     );
-    let spec = SnapshotProductionSpec::parse(&spec_bytes)?;
-    let settings_bytes = read_sealed_env(LIFECYCLE_SETTINGS_FD_ENV, MAX_SETTINGS_BYTES)?;
-    ensure!(
+    let spec = SnapshotProductionSpec::parse(&spec_bytes).classed(FailClass::SpecDigest)?;
+    let settings_bytes = read_sealed_env(LIFECYCLE_SETTINGS_FD_ENV, MAX_SETTINGS_BYTES)
+        .classed(FailClass::SettingsDigest)?;
+    ensure_class!(
+        FailClass::SettingsDigest,
         lillux::sha256_hex(&settings_bytes) == request.intent.settings_digest,
         "snapshot production settings changed"
     );
@@ -198,19 +212,26 @@ pub(crate) fn operate(adapter: &lillux::InheritedDescriptorAuthority) -> Result<
         ryeos_external_execution_contract::from_json_slice_strict(
             &settings_bytes,
             MAX_SETTINGS_BYTES,
-        )?;
-    settings.validate_for(&request)?;
+        )
+        .classed(FailClass::SettingsShape)?;
+    settings
+        .validate_for(&request)
+        .classed(FailClass::SettingsShape)?;
     let creation_intent = creation_intent(&request, &settings);
-    creation_intent.validate()?;
+    creation_intent
+        .validate()
+        .classed(FailClass::RequestParse)?;
     // SAFETY: the trusted runner transferred this exact sealed descriptor
     // once into this single-threaded producer invocation.
     let upload = unsafe { lillux::take_inherited_descriptor_authority(request.upload_descriptor) }
-        .map_err(anyhow::Error::msg)?;
+        .map_err(anyhow::Error::msg)
+        .classed(FailClass::UploadModeOrDigest)?;
     crate::activation_contact::verify_package_before_contact(
         &upload,
         request.upload_bytes,
         &request.upload_sha256,
-    )?;
+    )
+    .classed(FailClass::UploadModeOrDigest)?;
     let network = crate::network_context_from_captured_inputs()?;
     let cancellation = lillux::network::NetworkCancellation::default();
     // Snapshot production runs under Lillux's no-process-creation filter.
@@ -229,7 +250,9 @@ pub(crate) fn operate(adapter: &lillux::InheritedDescriptorAuthority) -> Result<
         deadline,
         &cancellation,
     )?;
-    result.validate_for(&request)?;
+    result
+        .validate_for(&request)
+        .classed(FailClass::CreateStatus)?;
     write_response(&result)
 }
 
@@ -237,7 +260,8 @@ pub(crate) fn operate(adapter: &lillux::InheritedDescriptorAuthority) -> Result<
 /// acknowledgment; it cannot create or qualify a snapshot.
 pub(crate) fn operate_upload(adapter: &lillux::InheritedDescriptorAuthority) -> Result<()> {
     let deadline = operation_deadline().classed(FailClass::Deadline)?;
-    ensure!(
+    ensure_class!(
+        FailClass::RequestParse,
         [
             LIFECYCLE_BOOTSTRAP_FD_ENV,
             LIFECYCLE_SIGNED_IMPORT_FD_ENV,
@@ -349,7 +373,7 @@ pub(crate) fn operate_upload(adapter: &lillux::InheritedDescriptorAuthority) -> 
 pub(crate) fn operate_create(adapter: &lillux::InheritedDescriptorAuthority) -> Result<()> {
     let deadline = operation_deadline()?;
     ensure_class!(
-        FailClass::SourceGetStatusOrShape,
+        FailClass::RequestParse,
         [
             LIFECYCLE_BOOTSTRAP_FD_ENV,
             LIFECYCLE_SIGNED_IMPORT_FD_ENV,
@@ -458,7 +482,8 @@ fn first_snapshot_attempt(
         deadline,
         cancellation,
     )?;
-    let locator = bind_snapshot_locator(request, &creation, settings)?;
+    let locator =
+        bind_snapshot_locator(request, &creation, settings).classed(FailClass::CreateStatus)?;
     Ok(RuntimeSnapshotAdapterResponse::Bound { locator })
 }
 
