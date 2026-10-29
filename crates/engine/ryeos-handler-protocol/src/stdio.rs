@@ -40,7 +40,7 @@ where
     match written {
         Ok(()) => 0,
         Err(e) => {
-            eprintln!("failed to write the handler response to stdout: {e}");
+            eprintln!("handler: failed to write the response to stdout: {e}");
             2
         }
     }
