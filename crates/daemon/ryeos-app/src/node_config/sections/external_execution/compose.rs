@@ -364,7 +364,7 @@ impl ComposeTransportRequest {
 }
 
 /// Host adapter contact inputs and the pinned bounds an operator binding uses.
-fn operator_network_inputs() -> ExternalNetworkInputPolicy {
+pub(crate) fn operator_network_inputs() -> ExternalNetworkInputPolicy {
     ExternalNetworkInputPolicy {
         resolver: ExternalNetworkInputSelection {
             source: "/etc/resolv.conf".into(),
@@ -472,7 +472,7 @@ pub(crate) fn bundle_artifact_facts(
 /// Resolve the signed artifacts of a stopped node's installed bundles
 /// without starting it. Holding the bundle-generation lock keeps the
 /// installed set fixed for the whole read.
-fn resolve_installed_artifacts(
+pub(crate) fn resolve_installed_artifacts(
     app_root: &Path,
 ) -> Result<crate::external_artifacts::ResolvedExternalExecutionArtifacts> {
     let roots = ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf());
@@ -872,7 +872,7 @@ pub(crate) fn publish_signed_document(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     const TEST_SIGNER_KEY: [u8; 32] = [91; 32];
@@ -969,7 +969,7 @@ mod tests {
         format!("-----BEGIN {label}-----\n{body}-----END {label}-----\n")
     }
 
-    fn cert_a() -> String {
+    pub(crate) fn cert_a() -> String {
         pem_block("CERTIFICATE", CERT_A_BODY)
     }
 
@@ -981,7 +981,7 @@ mod tests {
         STANDARD.decode(body.replace('\n', "")).unwrap()
     }
 
-    fn root_pem() -> String {
+    pub(crate) fn root_pem() -> String {
         format!("{}{}", cert_a(), cert_b())
     }
 

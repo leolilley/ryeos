@@ -276,15 +276,26 @@ static OPERATIONS: &[OperationSpec] = &[
         authority_bearing: true,
         local_signer_only: false,
         alone: false,
-        inputs: &[InputSlot {
-            name: "provider_spec",
-            max_bytes: 16 * KIB,
-            required: true,
-        }],
+        inputs: &[
+            InputSlot {
+                name: "provider_spec",
+                max_bytes: 16 * KIB,
+                required: true,
+            },
+            InputSlot {
+                name: "tls_roots",
+                max_bytes: 256 * KIB,
+                required: false,
+            },
+        ],
         preconditions: &[FACT_RUNTIME_SNAPSHOTS, FACT_EXTERNAL_EXECUTION],
         expected_result: &[],
         required_expected_result: &[],
-        validate_request: arguments_of::<handlers::SnapshotComposeArguments>,
+        validate_request: |request| {
+            let arguments: handlers::SnapshotComposeArguments =
+                serde_json::from_value(request.arguments.clone())?;
+            arguments.validate(&request.inputs)
+        },
         handler: Handler::EffectThenReceipt(handlers::snapshot_compose),
         recovery: Recovery {
             record: "the installed production binding's credential generation, derived from the request digest",
