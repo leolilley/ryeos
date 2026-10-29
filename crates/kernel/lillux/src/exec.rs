@@ -2804,6 +2804,20 @@ pub fn configure_inherited_descriptor_authorities(
     configure_inherited_fds(command, authorities)
 }
 
+/// Returns a file that writes to this process's standard output through a
+/// duplicate of descriptor 1.
+///
+/// The standard library's stdout handle treats `EBADF` on write and flush as
+/// success, so a process whose descriptor 1 is closed or invalid appears to
+/// emit its output while nothing is delivered. Duplicating the descriptor
+/// fails with `EBADF` in that state, and writes to the returned file report
+/// real errors.
+pub fn stdout_exclusive_file() -> std::io::Result<std::fs::File> {
+    use std::os::fd::AsFd as _;
+    let owned = std::io::stdout().as_fd().try_clone_to_owned()?;
+    Ok(std::fs::File::from(owned))
+}
+
 /// Ensure a live descriptor is protected from accidental inheritance. The
 /// platform flag manipulation remains inside Lillux.
 #[cfg(unix)]

@@ -3456,6 +3456,7 @@ dependencies = [
 name = "ryeos-handler-protocol"
 version = "0.1.0"
 dependencies = [
+ "lillux",
  "ryeos-effect-contract",
  "serde",
  "serde_json",
