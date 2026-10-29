@@ -10,12 +10,14 @@
 # Idempotent. Safe to re-run.
 #
 # Usage:
-#   ./scripts/populate-bundles.sh --key <pem-path> --owner <label> [--bundle-set full|central-host|standard|standard-central-auth|local-inference|hosted-workflow|bundle-source|core|core-scheduling|core-workflow|core-knowledge|f5r-controller|release-authority|release-artifacts] (--crates "<package ...>" | --all) [--build-profile release|latency-profiling]
+#   ./scripts/populate-bundles.sh --key <pem-path> --owner <label> [--bundle-set full|development|central-host|standard|standard-central-auth|local-inference|hosted-workflow|bundle-source|core|core-scheduling|core-workflow|core-knowledge|f5r-controller|release-authority|release-artifacts] (--crates "<package ...>" | --all) [--build-profile release|latency-profiling]
 #
 # Bundle sets:
 #   full            core + central-auth + scheduling + knowledge + directive + graph +
 #                   ryeos-docs + environment-qualification + web + browser + ryeos-ui +
 #                   codex + opencode (default)
+#   development     full + render-sandbox — a developer's node whose local-class
+#                   origin can author runtime snapshot bindings
 #   central-host    core + central-auth + scheduling + knowledge + directive + graph +
 #                   ryeos-docs + web — workflow node plus the rye/web/search tool and
 #                   app authentication
@@ -103,7 +105,7 @@ if ! command -v openssl >/dev/null 2>&1; then ryeos_term_fail "openssl is requir
 if ! command -v sha256sum >/dev/null 2>&1; then ryeos_term_fail "sha256sum is required"; exit 2; fi
 if ! command -v base64 >/dev/null 2>&1; then ryeos_term_fail "base64 is required"; exit 2; fi
 case "$BUNDLE_SET" in
-  full|central-host|standard|standard-central-auth|local-inference|hosted-workflow|bundle-source|core|core-scheduling|core-workflow|core-knowledge|f5r-controller|release-authority|release-artifacts) ;;
+  full|development|central-host|standard|standard-central-auth|local-inference|hosted-workflow|bundle-source|core|core-scheduling|core-workflow|core-knowledge|f5r-controller|release-authority|release-artifacts) ;;
   *) ryeos_term_fail "invalid --bundle-set: $BUNDLE_SET"; exit 2 ;;
 esac
 
@@ -377,7 +379,7 @@ prepare_bundle_trees() {
     rm -rf "$bundle_dir/.ai/refs"
     rm -f  "$bundle_dir/PUBLISHER_TRUST.toml"
   done
-  if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "release-authority" || "$BUNDLE_SET" == "release-artifacts" ]]; then
+  if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "development" || "$BUNDLE_SET" == "release-authority" || "$BUNDLE_SET" == "release-artifacts" ]]; then
     rm -rf "$LOCAL_INFERENCE/.ai/bin"
     rm -rf "$LOCAL_INFERENCE/.ai/objects"
     rm -rf "$LOCAL_INFERENCE/.ai/refs"
@@ -408,6 +410,19 @@ case "$BUNDLE_SET" in
           ryeos-codex-runtime-verifier \
           ryeos-external-candidate-launcher ryeos-external-candidate-supervisor \
           ryeos-guest-wire-verifier)
+    ;;
+  development)
+    pkgs=(lillux ryeosd ryeos-directive-runtime ryeos-graph-runtime ryeos-knowledge-runtime \
+          ryeos-handler-bins ryeos-parser-bins ryeos-cli ryeos-core-tools ryeos-session-exec ryeos-web-tools ryeos-browser-tools \
+          ryeos-client-terminal ryeos-client-web ryeos-structured-session ryeos-lillux-isolation-adapter \
+          ryeos-external-candidate-connector ryeos-codex-external-configuration \
+          ryeos-external-guest-occurrence-owner \
+          ryeos-external-guest-runtime-producer \
+          ryeos-codex-guest-runtime-producer \
+          ryeos-codex-runtime-verifier \
+          ryeos-external-candidate-launcher ryeos-external-candidate-supervisor \
+          ryeos-guest-wire-verifier \
+          ryeos-external-guest-restoration-verifier ryeos-render-sandbox-lifecycle-adapter)
     ;;
   release-artifacts)
     pkgs=(lillux ryeosd ryeos-directive-runtime ryeos-graph-runtime ryeos-knowledge-runtime \

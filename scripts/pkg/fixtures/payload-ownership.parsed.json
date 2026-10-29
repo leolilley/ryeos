@@ -6,6 +6,7 @@
    {
     "bundle_name": "browser",
     "bundle_sets": [
+     "development",
      "full",
      "release-artifacts"
     ],
@@ -22,6 +23,7 @@
    {
     "bundle_name": "codex",
     "bundle_sets": [
+     "development",
      "f5r-controller",
      "full",
      "hosted-workflow",
@@ -94,6 +96,7 @@
      "core-knowledge",
      "core-scheduling",
      "core-workflow",
+     "development",
      "f5r-controller",
      "full",
      "hosted-workflow",
@@ -197,6 +200,7 @@
     "bundle_name": "directive",
     "bundle_sets": [
      "central-host",
+     "development",
      "full",
      "hosted-workflow",
      "local-inference",
@@ -229,6 +233,7 @@
     "bundle_sets": [
      "central-host",
      "core-workflow",
+     "development",
      "f5r-controller",
      "full",
      "hosted-workflow",
@@ -277,6 +282,7 @@
     "bundle_sets": [
      "central-host",
      "core-knowledge",
+     "development",
      "f5r-controller",
      "full",
      "hosted-workflow",
@@ -319,6 +325,7 @@
    {
     "bundle_name": "render-sandbox",
     "bundle_sets": [
+     "development",
      "f5r-controller",
      "release-artifacts"
     ],
@@ -341,6 +348,7 @@
    {
     "bundle_name": "ryeos-ui",
     "bundle_sets": [
+     "development",
      "full",
      "release-artifacts"
     ],
@@ -364,6 +372,7 @@
     "bundle_name": "web",
     "bundle_sets": [
      "central-host",
+     "development",
      "full",
      "release-artifacts"
     ],
@@ -405,6 +414,7 @@
     "bundle_sets": [
      "central-host",
      "core-scheduling",
+     "development",
      "full",
      "hosted-workflow",
      "local-inference",
