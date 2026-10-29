@@ -100,6 +100,9 @@ jobs:
       - name: Check daemon image init boundaries
         run: ./scripts/ci/test-daemon-image-init-policy.sh
 
+      - name: Check image build cache boundaries
+        run: ./scripts/ci/test-image-build-cache.sh
+
       - name: Check contained OCI product boundaries
         run: |
           python3 tests/development/contained_workflow_packaging.py
