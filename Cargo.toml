@@ -91,6 +91,19 @@ license = "MIT"
 [profile.dev]
 debug = "line-tables-only"
 
+# Every CLI invocation and every daemon start re-verifies the signed node and
+# bundle inventory; at opt-level 0 the signature and hash crates make each
+# call cost tens of seconds on a development origin. Optimize the same
+# cryptographic hot path the test profile does.
+[profile.dev.package.curve25519-dalek]
+opt-level = 3
+
+[profile.dev.package.ed25519-dalek]
+opt-level = 3
+
+[profile.dev.package.sha2]
+opt-level = 3
+
 [profile.release]
 lto = "thin"
 # Keep the symbol table (debuginfo is already absent at debug=0) so a live
