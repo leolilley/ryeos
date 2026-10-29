@@ -381,6 +381,29 @@ impl TestStateStore {
         Arc::clone(&self.lock)
     }
 
+    /// Abandon a Store whose close would not finish in bounded time, for a
+    /// failed test that must report promptly. The native owners are neither
+    /// closed nor dropped: closing waits on the same stalled runtime
+    /// connection that failed the test, and dropping would try to release
+    /// the arena while an alias survives. The thread's shared host is taken
+    /// out of its slot and recorded as leaked, so the slot's destructor at
+    /// thread exit stays quiet instead of panicking inside it. The process
+    /// must not be expected to open another host afterwards.
+    pub fn abandon(self) {
+        let _abandoned = std::mem::ManuallyDrop::new(self);
+        let host = SHARED_HOST.with(|shared| {
+            shared
+                .borrow_mut()
+                .take()
+                .map(|SharedHost { host, stores: _ }| host)
+        });
+        // The Store and its factory alias stay owned by the abandoned
+        // value; only the host is parked.
+        if let Some(host) = host {
+            host.abandon("a failed test abandoned its Store rather than close it");
+        }
+    }
+
     /// Close the Store into the census, reporting a refused close. Like a
     /// daemon exit, attachment admission closes and every in-memory registry
     /// the close audit checks ends: attachments, workers, launch tasks and

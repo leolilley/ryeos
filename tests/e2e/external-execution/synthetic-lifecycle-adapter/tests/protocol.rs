@@ -2443,6 +2443,40 @@ fn serve_production_controller_tls(
     })
 }
 
+/// Refuse a clean run whose fixture controller recorded a connection-level
+/// failure: a request that could not be read, a response that could not be
+/// written, or a connection that could not be set up.
+fn assert_controller_connections_clean(evidence: &Mutex<Vec<String>>) {
+    let evidence = evidence
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let broken: Vec<_> = evidence
+        .iter()
+        .filter(|line| {
+            [
+                "request read failed",
+                "response write failed",
+                "connection setup failed",
+            ]
+            .iter()
+            .any(|prefix| line.starts_with(prefix))
+        })
+        .collect();
+    assert!(
+        broken.is_empty(),
+        "candidate controller connection failures: {broken:#?}"
+    );
+}
+
+/// Append a fixture evidence line, tolerating a lock poisoned by a failed
+/// handler so the original failure is not replaced.
+fn record(evidence: &Mutex<Vec<String>>, line: String) {
+    evidence
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push(line);
+}
+
 fn serve_candidate_controller_tls(
     listener: TcpListener,
     state: Arc<ryeos_app::state::AppState>,
@@ -2460,7 +2494,10 @@ fn serve_candidate_controller_tls(
         // listener alive until the explicit stop signal, with a bounded idle
         // deadline that resets after each authenticated exchange.
         let idle_deadline = Mutex::new(Instant::now() + Duration::from_secs(120));
-        let handled = std::sync::atomic::AtomicUsize::new(0);
+        let handled = AtomicUsize::new(0);
+        // Connections accepted whose handler has not finished; the
+        // controller is idle only when none is in flight.
+        let in_flight = AtomicUsize::new(0);
         // The accept loop only accepts. Each connection performs its TLS
         // handshake and reads its request on its own thread, so a client
         // connecting while another request is being handled is not left in
@@ -2475,11 +2512,19 @@ fn serve_candidate_controller_tls(
                         if stop.load(Ordering::Acquire) {
                             break;
                         }
-                        if Instant::now() >= *idle_deadline.lock().unwrap() {
-                            evidence.lock().unwrap().push(format!(
-                                "controller timed out after {} requests",
-                                handled.load(Ordering::Acquire)
-                            ));
+                        if in_flight.load(Ordering::Acquire) == 0
+                            && Instant::now()
+                                >= *idle_deadline
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        {
+                            record(
+                                &evidence,
+                                format!(
+                                    "controller timed out after {} requests",
+                                    handled.load(Ordering::Acquire)
+                                ),
+                            );
                             break;
                         }
                         std::thread::sleep(Duration::from_millis(5));
@@ -2487,6 +2532,8 @@ fn serve_candidate_controller_tls(
                     }
                     Err(error) => panic!("candidate controller listener failed: {error}"),
                 };
+                in_flight.fetch_add(1, Ordering::AcqRel);
+                let in_flight = &in_flight;
                 let (tls_config, runtime, state, evidence) =
                     (&tls_config, &runtime, &state, &evidence);
                 let (idle_deadline, handled, dispatch_lock) =
@@ -2499,10 +2546,8 @@ fn serve_candidate_controller_tls(
                         .set_nonblocking(false)
                         .and_then(|()| stream.set_read_timeout(Some(Duration::from_secs(5))))
                     {
-                        evidence
-                            .lock()
-                            .unwrap()
-                            .push(format!("connection setup failed: {error}"));
+                        record(evidence, format!("connection setup failed: {error}"));
+                        in_flight.fetch_sub(1, Ordering::AcqRel);
                         return;
                     }
                     let connection = rustls::ServerConnection::new(tls_config.clone()).unwrap();
@@ -2510,15 +2555,15 @@ fn serve_candidate_controller_tls(
                     let request = match read_http_request(&mut tls) {
                         Ok(request) => request,
                         Err(error) => {
-                            evidence
-                                .lock()
-                                .unwrap()
-                                .push(format!("request read failed: {error:#}"));
+                            record(evidence, format!("request read failed: {error:#}"));
+                            in_flight.fetch_sub(1, Ordering::AcqRel);
                             return;
                         }
                     };
                     let result = {
-                        let _serialized = dispatch_lock.lock().unwrap();
+                        let _serialized = dispatch_lock
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
                         dispatch_production_controller_request(runtime, state, &request)
                             // Production start/termination own readiness,
                             // release and completion. The TLS fixture only
@@ -2529,10 +2574,13 @@ fn serve_candidate_controller_tls(
                         Ok(body) => https_json_response("200 OK", &body),
                         Err(error) => {
                             let diagnostic = format!("{error:#}");
-                            evidence.lock().unwrap().push(format!(
-                                "request {} failed: {diagnostic}",
-                                handled.load(Ordering::Acquire) + 1
-                            ));
+                            record(
+                                evidence,
+                                format!(
+                                    "request {} failed: {diagnostic}",
+                                    handled.load(Ordering::Acquire) + 1
+                                ),
+                            );
                             https_json_response(
                                 "500 Internal Server Error",
                                 serde_json::json!({"error":diagnostic})
@@ -2541,14 +2589,19 @@ fn serve_candidate_controller_tls(
                             )
                         }
                     };
-                    if let Err(error) = tls.write_all(&response).and_then(|()| tls.flush()) {
-                        evidence
-                            .lock()
-                            .unwrap()
-                            .push(format!("response write failed: {error}"));
+                    match tls.write_all(&response).and_then(|()| tls.flush()) {
+                        Ok(()) => {
+                            handled.fetch_add(1, Ordering::AcqRel);
+                        }
+                        Err(error) => {
+                            record(evidence, format!("response write failed: {error}"));
+                        }
                     }
-                    handled.fetch_add(1, Ordering::AcqRel);
-                    *idle_deadline.lock().unwrap() = Instant::now() + Duration::from_secs(120);
+                    *idle_deadline
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                        Instant::now() + Duration::from_secs(120);
+                    in_flight.fetch_sub(1, Ordering::AcqRel);
                 });
             }
         });
@@ -3326,12 +3379,14 @@ fn run_production_tls_candidate_with_test_stack(
                     // would hold the failure report for the whole window.
                     // Give them a short grace period, then abandon them.
                     runtime.shutdown_timeout(Duration::from_secs(5));
-                    // The owner is deliberately never closed or dropped: its
-                    // close waits on the same stalled store and would delay
-                    // the panic. Each test runs in its own process, so the
-                    // shared native host it leaves dirty affects no later
-                    // case, and only the temp directory goes uncleaned.
-                    let _abandoned = std::mem::ManuallyDrop::new(store_owner);
+                    // The Store's close waits on the same stalled runtime
+                    // connection, so it is abandoned rather than closed: the
+                    // thread's shared host is parked as leaked, which keeps
+                    // its destructor quiet at thread exit. The tempdir is
+                    // still removed when this closure ends; evidence is what
+                    // the scenario retained with `retain_failed_node` and
+                    // `provider_state.keep()`.
+                    store_owner.abandon();
                     std::panic::resume_unwind(panic)
                 }
             }
@@ -4397,6 +4452,7 @@ async fn run_production_tls_candidate(
                 )
             }
         };
+        assert_controller_connections_clean(&controller_evidence);
         if public["thread"]["status"] != "completed" {
             let retained_node = retain_failed_node(root);
             let retained_provider_state = provider_state.keep();
@@ -4862,6 +4918,7 @@ async fn run_production_tls_candidate(
         .await;
         stop.store(true, Ordering::Release);
         let handled = controller.join().unwrap();
+        assert_controller_connections_clean(&controller_evidence);
         close_test_composition_before_uds_stop(&uds_composition, state.clone(), &uds_server).await;
         uds_server.abort();
         let _ = uds_server.await;
@@ -5077,6 +5134,7 @@ async fn run_production_tls_candidate(
     }
     stop.store(true, Ordering::Release);
     let handled = controller.join().unwrap();
+    assert_controller_connections_clean(&controller_evidence);
     assert!(
         handled >= 5,
         "candidate controller handled only {handled} requests"
