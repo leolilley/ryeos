@@ -904,7 +904,7 @@ fn uncertain(
     }
 }
 
-fn response_matches(
+pub(crate) fn response_matches(
     sandbox: &crate::RenderSandbox,
     projection: &crate::provider_spec::BootstrapCreateProjection,
 ) -> bool {

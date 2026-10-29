@@ -162,6 +162,29 @@ impl RenderContact<'_> {
         })
     }
 
+    /// The credential supplied directly, for the live integration test that
+    /// runs the real contact path without the sealed-descriptor layer.
+    #[cfg(test)]
+    pub(crate) fn with_credential<'a>(
+        network: &'a NetworkContext,
+        provider_spec: &'a ProviderSpec,
+        settings: &'a Settings,
+        occurrence_id: &'a str,
+        deadline: MonotonicDeadline,
+        cancellation: &'a NetworkCancellation,
+        credential: Zeroizing<String>,
+    ) -> RenderContact<'a> {
+        RenderContact {
+            network,
+            provider_spec,
+            settings,
+            occurrence_id,
+            credential,
+            deadline,
+            cancellation,
+        }
+    }
+
     pub(crate) fn mint(
         &self,
         operation: ProxyOperation<'_>,

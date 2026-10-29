@@ -649,7 +649,7 @@ pub(crate) fn parse_consumer_verifier_stream(
     Ok(observation)
 }
 
-fn parse_verifier_stdout(
+pub(crate) fn parse_verifier_stdout(
     body: &[u8],
     maximum_wire: usize,
     maximum_event: usize,

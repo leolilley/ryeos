@@ -1287,6 +1287,9 @@ pub(crate) fn observe_snapshot_available(
 }
 
 #[cfg(test)]
+mod live_render;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use base64::Engine as _;
