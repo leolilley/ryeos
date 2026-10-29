@@ -1074,6 +1074,33 @@ fn reconcile_activation(
             )?,
         });
     }
+    // A supervisor that already ended without a termination request did not
+    // start usefully: report its recorded fate as the adapter failure, so the
+    // daemon's next poll fails with the real cause instead of waiting on a
+    // readiness that can no longer arrive.
+    if let Some(file) = occurrence_root.open_pinned_regular(OsStr::new(TERMINAL_FILE), false)? {
+        let terminal: TerminalRecord = decode_document(&file)?;
+        let terminated = occurrence_root
+            .open_pinned_regular(OsStr::new(TERMINATE_FILE), false)?
+            .is_some();
+        if !terminal.supervisor_success && !terminated {
+            const STDERR_TAIL_BYTES: usize = 4096;
+            let mut start = terminal
+                .supervisor_stderr
+                .len()
+                .saturating_sub(STDERR_TAIL_BYTES);
+            while !terminal.supervisor_stderr.is_char_boundary(start) {
+                start += 1;
+            }
+            bail!(
+                "synthetic supervisor ended before startup completed: exit_code={}; \
+                 timed_out={}; stderr_tail={:?}",
+                terminal.supervisor_exit_code,
+                terminal.supervisor_timed_out,
+                &terminal.supervisor_stderr[start..]
+            );
+        }
+    }
     if let Some(file) = occurrence_root.open_pinned_regular(OsStr::new(READY_FILE), false)? {
         let ready: ReadyRecord = decode_document(&file)?;
         let server = retained

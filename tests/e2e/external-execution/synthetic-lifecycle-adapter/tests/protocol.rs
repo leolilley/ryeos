@@ -2477,6 +2477,57 @@ fn record(evidence: &Mutex<Vec<String>>, line: String) {
         .push(line);
 }
 
+/// Describe what the detached supervisor of every retained occurrence under
+/// the adapter's state root recorded when it ended. The supervisor's fate is
+/// otherwise visible only in its occurrence's terminal record, which nothing
+/// on the daemon side reads while a startup wait is still pending. Read-only
+/// and bounded; every failure to read is itself reported as text.
+fn supervisor_terminal_evidence(provider_state_root: &Path) -> String {
+    const STDERR_TAIL_BYTES: usize = 4096;
+    let entries = match std::fs::read_dir(provider_state_root) {
+        Ok(entries) => entries,
+        Err(error) => return format!("provider state unreadable: {error}"),
+    };
+    let mut lines = Vec::new();
+    for entry in entries.flatten() {
+        let occurrence = entry.path();
+        if !occurrence.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let terminal = occurrence.join("terminal.json");
+        let line = match std::fs::read(&terminal) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                format!("occurrence {name}: no terminal record (supervisor not ended)")
+            }
+            Err(error) => format!("occurrence {name}: terminal record unreadable: {error}"),
+            Ok(bytes) => match serde_json::from_slice::<serde_json::Value>(&bytes) {
+                Err(error) => format!("occurrence {name}: terminal record undecodable: {error}"),
+                Ok(record) => {
+                    let stderr = record["supervisor_stderr"].as_str().unwrap_or("");
+                    let mut start = stderr.len().saturating_sub(STDERR_TAIL_BYTES);
+                    while !stderr.is_char_boundary(start) {
+                        start += 1;
+                    }
+                    format!(
+                        "occurrence {name}: supervisor_exit_code={}; supervisor_timed_out={}; \
+                         supervisor_stderr_tail={:?}",
+                        record["supervisor_exit_code"],
+                        record["supervisor_timed_out"],
+                        &stderr[start..]
+                    )
+                }
+            },
+        };
+        lines.push(line);
+    }
+    if lines.is_empty() {
+        "no retained occurrence directories".to_owned()
+    } else {
+        lines.join("; ")
+    }
+}
+
 fn serve_candidate_controller_tls(
     listener: TcpListener,
     state: Arc<ryeos_app::state::AppState>,
@@ -2495,6 +2546,9 @@ fn serve_candidate_controller_tls(
         // deadline that resets after each authenticated exchange.
         let idle_deadline = Mutex::new(Instant::now() + Duration::from_secs(120));
         let handled = AtomicUsize::new(0);
+        // The request line of every request served, so a stalled run names
+        // which requests arrived instead of only how many.
+        let served = Mutex::new(Vec::<String>::new());
         // Connections accepted whose handler has not finished; the
         // controller is idle only when none is in flight.
         let in_flight = AtomicUsize::new(0);
@@ -2521,8 +2575,11 @@ fn serve_candidate_controller_tls(
                             record(
                                 &evidence,
                                 format!(
-                                    "controller timed out after {} requests",
-                                    handled.load(Ordering::Acquire)
+                                    "controller timed out after {} requests: {:?}",
+                                    handled.load(Ordering::Acquire),
+                                    served
+                                        .lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner)
                                 ),
                             );
                             break;
@@ -2536,8 +2593,8 @@ fn serve_candidate_controller_tls(
                 let in_flight = &in_flight;
                 let (tls_config, runtime, state, evidence) =
                     (&tls_config, &runtime, &state, &evidence);
-                let (idle_deadline, handled, dispatch_lock) =
-                    (&idle_deadline, &handled, &dispatch_lock);
+                let (idle_deadline, handled, dispatch_lock, served) =
+                    (&idle_deadline, &handled, &dispatch_lock, &served);
                 scope.spawn(move || {
                     // An accepted socket may inherit the listener's
                     // non-blocking mode; the handshake needs blocking reads
@@ -2560,6 +2617,17 @@ fn serve_candidate_controller_tls(
                             return;
                         }
                     };
+                    let request_line = String::from_utf8_lossy(
+                        request
+                            .split(|byte| *byte == b'\r')
+                            .next()
+                            .unwrap_or_default(),
+                    )
+                    .into_owned();
+                    served
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(request_line.clone());
                     let result = {
                         let _serialized = dispatch_lock
                             .lock()
@@ -2577,7 +2645,7 @@ fn serve_candidate_controller_tls(
                             record(
                                 evidence,
                                 format!(
-                                    "request {} failed: {diagnostic}",
+                                    "request {} ({request_line}) failed: {diagnostic}",
                                     handled.load(Ordering::Acquire) + 1
                                 ),
                             );
@@ -4428,6 +4496,7 @@ async fn run_production_tls_candidate(
                 // too: controller intent alone cannot prove occurrence death
                 // or recover a lost activation observation. Print paths only,
                 // never the private bootstrap/adapter document contents.
+                let terminal_evidence = supervisor_terminal_evidence(provider_state.path());
                 let retained_provider_state = provider_state.keep();
                 // The dispatch error leads the report: the store reads below
                 // can themselves be refused (an expired runtime deadline is
@@ -4436,6 +4505,7 @@ async fn run_production_tls_candidate(
                 panic!(
                     "public worker dispatch failed: {error:#}; placement={placement}; \
                      retained_node={}; retained_provider_state={}; \
+                     supervisor_terminal={terminal_evidence}; \
                      base_snapshot={base_snapshot_hash}; \
                      controller_evidence={:#?}; \
                      thread={:#?}; session={:#?}; commands={:#?}; \
@@ -4454,10 +4524,11 @@ async fn run_production_tls_candidate(
         assert_controller_connections_clean(&controller_evidence);
         if public["thread"]["status"] != "completed" {
             let retained_node = retain_failed_node(root);
+            let terminal_evidence = supervisor_terminal_evidence(provider_state.path());
             let retained_provider_state = provider_state.keep();
             panic!(
                 "public worker terminal failed; retained_node={}; retained_provider_state={}; \
-                 dispatch={public:#}; controller_evidence={:#?}; commands={:#?}",
+                 supervisor_terminal={terminal_evidence}; dispatch={public:#}; controller_evidence={:#?}; commands={:#?}",
                 retained_node.display(),
                 retained_provider_state.display(),
                 controller_evidence.lock(),
@@ -4889,7 +4960,14 @@ async fn run_production_tls_candidate(
     })
     .await
     .unwrap()
-    .unwrap();
+    .unwrap_or_else(|error| {
+        panic!(
+            "exclusive capsule start failed: {error:#}; supervisor_terminal={}; \
+             controller evidence: {:?}",
+            supervisor_terminal_evidence(provider_state.path()),
+            controller_evidence.lock(),
+        )
+    });
     if scripted_turn || publication == PublicationScenario::StaleBase {
         eprintln!("external fixture: exclusive capsule started");
     }
@@ -4974,8 +5052,9 @@ async fn run_production_tls_candidate(
     .await
     .unwrap_or_else(|error| {
         panic!(
-            "joined session start failed: {error:#}; controller evidence: {:?}; \
-             retained commands: {:#?}",
+            "joined session start failed: {error:#}; supervisor_terminal={}; \
+             controller evidence: {:?}; retained commands: {:#?}",
+            supervisor_terminal_evidence(provider_state.path()),
             controller_evidence.lock(),
             state.state_store.dedicated_session_commands(&placement),
         )
