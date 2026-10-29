@@ -1,6 +1,6 @@
-# ryeos:signed:2026-10-29T06:09:02Z:d958c6e3b4dcaa3ff64bc506b8d64add077caec7e1fa1cec8b1deba17bc85ca2:9dLf2bR/uhrljNbPo6a07HXiVHfkPPmCasUBJcJuEEhZmrg4bw9Gs5zGlz0duI4wmDJWsHIUgw9SctY/01WsDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-29T06:15:08Z:5d43b2ad9aeab7476eb36e5352d4eb40a08e0e84182d5c53466afc43e7aed5e7:LMmDbFYWdhhYsfWIzfYiuo5Vr7OoCpelalL5/e3Eo5C7p3ftxeCvQtiIcv2p3rV5pgYFXYdnC9rJaKUYrh8MAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens: [external-content, derive-consumer-qualification-context]
-description: Derive the consumer qualification context for an exact subject manifest from a signed policy and relationship without writing state; the response's consumer_verifier_selections map (scenario id to scenario_source_digest, verifier_artifact_hash and archive_budget) is the content of the file given to snapshot-qualification-compose --consumer-verifiers
+description: Derive the consumer qualification context for an exact subject manifest from a signed policy and relationship without writing state; the response's consumer_verifier_selections map (scenario id to scenario_source_digest, verifier_artifact_hash and a proposed archive_budget computed from the exact delivery inventory) is the content of the file given to snapshot-qualification-compose --consumer-verifiers
 forms:
   - slots:
       - field: policy_ref
