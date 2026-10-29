@@ -2459,58 +2459,100 @@ fn serve_candidate_controller_tls(
         // A real Codex turn may run between channel frames. Keep the fixture
         // listener alive until the explicit stop signal, with a bounded idle
         // deadline that resets after each authenticated exchange.
-        let mut idle_deadline = Instant::now() + Duration::from_secs(120);
-        let mut handled = 0;
-        loop {
-            let stream = match listener.accept() {
-                Ok((stream, _)) => stream,
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    if stop.load(Ordering::Acquire) {
-                        break;
+        let idle_deadline = Mutex::new(Instant::now() + Duration::from_secs(120));
+        let handled = std::sync::atomic::AtomicUsize::new(0);
+        // The accept loop only accepts. Each connection performs its TLS
+        // handshake and reads its request on its own thread, so a client
+        // connecting while another request is being handled is not left in
+        // the kernel backlog against the supervisor's connect and request
+        // bounds. Only the daemon handler is serialized, behind this lock.
+        let dispatch_lock = Mutex::new(());
+        std::thread::scope(|scope| {
+            loop {
+                let stream = match listener.accept() {
+                    Ok((stream, _)) => stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if stop.load(Ordering::Acquire) {
+                            break;
+                        }
+                        if Instant::now() >= *idle_deadline.lock().unwrap() {
+                            evidence.lock().unwrap().push(format!(
+                                "controller timed out after {} requests",
+                                handled.load(Ordering::Acquire)
+                            ));
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(5));
+                        continue;
                     }
-                    if Instant::now() >= idle_deadline {
+                    Err(error) => panic!("candidate controller listener failed: {error}"),
+                };
+                let (tls_config, runtime, state, evidence) =
+                    (&tls_config, &runtime, &state, &evidence);
+                let (idle_deadline, handled, dispatch_lock) =
+                    (&idle_deadline, &handled, &dispatch_lock);
+                scope.spawn(move || {
+                    // An accepted socket may inherit the listener's
+                    // non-blocking mode; the handshake needs blocking reads
+                    // bounded by the read timeout.
+                    if let Err(error) = stream
+                        .set_nonblocking(false)
+                        .and_then(|()| stream.set_read_timeout(Some(Duration::from_secs(5))))
+                    {
                         evidence
                             .lock()
                             .unwrap()
-                            .push(format!("controller timed out after {handled} requests"));
-                        break;
+                            .push(format!("connection setup failed: {error}"));
+                        return;
                     }
-                    std::thread::sleep(Duration::from_millis(5));
-                    continue;
-                }
-                Err(error) => panic!("candidate controller listener failed: {error}"),
-            };
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
-            let connection = rustls::ServerConnection::new(tls_config.clone()).unwrap();
-            let mut tls = rustls::StreamOwned::new(connection, stream);
-            let request = read_http_request(&mut tls).unwrap();
-            let result = dispatch_production_controller_request(&runtime, &state, &request)
-                // Production start/termination own readiness, release and
-                // completion. The TLS fixture only carries protocol bytes.
-                .map(|(body, _, _)| body);
-            let response = match result {
-                Ok(body) => https_json_response("200 OK", &body),
-                Err(error) => {
-                    let diagnostic = format!("{error:#}");
-                    evidence
-                        .lock()
-                        .unwrap()
-                        .push(format!("request {} failed: {diagnostic}", handled + 1));
-                    https_json_response(
-                        "500 Internal Server Error",
-                        serde_json::json!({"error":diagnostic})
-                            .to_string()
-                            .as_bytes(),
-                    )
-                }
-            };
-            tls.write_all(&response).unwrap();
-            tls.flush().unwrap();
-            handled += 1;
-            idle_deadline = Instant::now() + Duration::from_secs(120);
-        }
+                    let connection = rustls::ServerConnection::new(tls_config.clone()).unwrap();
+                    let mut tls = rustls::StreamOwned::new(connection, stream);
+                    let request = match read_http_request(&mut tls) {
+                        Ok(request) => request,
+                        Err(error) => {
+                            evidence
+                                .lock()
+                                .unwrap()
+                                .push(format!("request read failed: {error:#}"));
+                            return;
+                        }
+                    };
+                    let result = {
+                        let _serialized = dispatch_lock.lock().unwrap();
+                        dispatch_production_controller_request(runtime, state, &request)
+                            // Production start/termination own readiness,
+                            // release and completion. The TLS fixture only
+                            // carries protocol bytes.
+                            .map(|(body, _, _)| body)
+                    };
+                    let response = match result {
+                        Ok(body) => https_json_response("200 OK", &body),
+                        Err(error) => {
+                            let diagnostic = format!("{error:#}");
+                            evidence.lock().unwrap().push(format!(
+                                "request {} failed: {diagnostic}",
+                                handled.load(Ordering::Acquire) + 1
+                            ));
+                            https_json_response(
+                                "500 Internal Server Error",
+                                serde_json::json!({"error":diagnostic})
+                                    .to_string()
+                                    .as_bytes(),
+                            )
+                        }
+                    };
+                    if let Err(error) = tls.write_all(&response).and_then(|()| tls.flush()) {
+                        evidence
+                            .lock()
+                            .unwrap()
+                            .push(format!("response write failed: {error}"));
+                    }
+                    handled.fetch_add(1, Ordering::AcqRel);
+                    *idle_deadline.lock().unwrap() = Instant::now() + Duration::from_secs(120);
+                });
+            }
+        });
+        let handled = handled.load(Ordering::Acquire);
         handled
     })
 }
