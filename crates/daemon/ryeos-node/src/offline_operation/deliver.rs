@@ -592,23 +592,46 @@ mod tests {
 
     #[test]
     fn wildcard_grants_never_satisfy_an_offline_scope() {
+        // A remote operator's grant is written with exact scopes only, so no
+        // wildcard grant exists for the route to match against: the refusal
+        // sits at the grant writer, before any request is delivered.
         let fx = fixture();
         for scopes in [vec!["*"], vec!["ryeos.*"]] {
             let key = lillux::crypto::generate_signing_key();
-            fx.grant(&key, &scopes, WildcardPolicy::AllowBootstrap);
+            let fp = fingerprint(&key);
+            let encoded =
+                base64::engine::general_purpose::STANDARD.encode(key.verifying_key().as_bytes());
+            let scopes: Vec<String> = scopes.iter().map(|s| (*s).to_owned()).collect();
+            let directory = authorized_keys_dir(fx.path());
+            let error = reconcile_authorized_key_toml_scopes(
+                &directory,
+                &fp,
+                &encoded,
+                &scopes,
+                "remote operator",
+                "test",
+                "2026-01-01T00:00:00Z",
+                &fx.node,
+                WildcardPolicy::AllowBootstrap,
+                false,
+                Some(SITE),
+                true,
+            )
+            .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("remote grants require exact, non-wildcard scopes"),
+                "{scopes:?}: {error:#}"
+            );
+            assert!(!directory.join(format!("{fp}.toml")).exists(), "{scopes:?}");
             let mut body = fx.body();
-            body.signer_fingerprint = fingerprint(&key);
-            body.signer_grant_digest = Some(lillux::sha256_hex(
-                &std::fs::read(
-                    authorized_keys_dir(fx.path()).join(format!("{}.toml", fingerprint(&key))),
-                )
-                .unwrap(),
-            ));
+            body.signer_fingerprint = fp;
             body.signer_origin_site_id = Some(SITE.to_owned());
             let request = SignedRequest::sign(body, &key).unwrap();
             assert_eq!(
                 refused(fx.submit(&request)),
-                RefusalReason::ScopeNotGranted,
+                RefusalReason::UnknownSigner,
                 "{scopes:?}"
             );
         }
