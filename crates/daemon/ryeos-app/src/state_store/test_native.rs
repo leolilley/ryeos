@@ -199,6 +199,15 @@ impl lillux_sqlite::OriginalNativeProjectionLeaseAuthority for TestStoreLeaseAut
 /// the shared Store. Dropping it closes the Store into the host's census;
 /// every other `Arc` of the Store must be gone first. It stays on the thread
 /// that opened it.
+/// Stores abandoned by failed tests, kept alive for the rest of the process
+/// so the shared host's arena is never released under a surviving alias.
+static ABANDONED: std::sync::Mutex<
+    Vec<(
+        Option<Arc<StateStore>>,
+        Option<Arc<lillux_sqlite::OriginalNativeFactory>>,
+    )>,
+> = std::sync::Mutex::new(Vec::new());
+
 pub struct TestStateStore {
     // Field order is drop order: the Store closes before the operator lock.
     store: Option<Arc<StateStore>>,
@@ -389,16 +398,20 @@ impl TestStateStore {
     /// out of its slot and recorded as leaked, so the slot's destructor at
     /// thread exit stays quiet instead of panicking inside it. The process
     /// must not be expected to open another host afterwards.
-    pub fn abandon(self) {
-        let _abandoned = std::mem::ManuallyDrop::new(self);
+    pub fn abandon(mut self) {
+        // The Store and its factory alias are parked for the rest of the
+        // process rather than dropped, so no arena release is attempted while
+        // an alias survives; the emptied value then drops without a close.
+        ABANDONED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((self.store.take(), self.factory.take()));
         let host = SHARED_HOST.with(|shared| {
             shared
                 .borrow_mut()
                 .take()
                 .map(|SharedHost { host, stores: _ }| host)
         });
-        // The Store and its factory alias stay owned by the abandoned
-        // value; only the host is parked.
         if let Some(host) = host {
             host.abandon("a failed test abandoned its Store rather than close it");
         }
