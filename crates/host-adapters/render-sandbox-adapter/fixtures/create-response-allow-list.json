@@ -1,6 +1,7 @@
 {
   "createdAt": "2026-10-14T00:00:00Z",
   "id": "sbx-fixture-002",
+  "idleTimeoutSeconds": 900,
   "networkPolicy": {
     "default": "allow-list",
     "rules": [{ "domain": "controller.example.com", "protocol": "https" }],
@@ -8,6 +9,7 @@
   },
   "plan": "standard",
   "region": "oregon",
+  "sandboxGroupId": "sbg-fixture-001",
   "status": "creating",
   "timeoutSeconds": 600
 }

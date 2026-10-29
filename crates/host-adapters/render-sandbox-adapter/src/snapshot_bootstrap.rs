@@ -924,6 +924,7 @@ fn response_matches(
         && sandbox.timeout_seconds == projection.timeout_seconds
         && sandbox.network_policy.matches(&projection.network_policy)
         && sandbox.terminated_at.is_none()
+        && sandbox.provider_attributes_valid()
 }
 
 fn readiness_running_matches(

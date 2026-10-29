@@ -719,6 +719,8 @@ fn validate_snapshot_source(
                 .matches(&crate::provider_spec::EgressPolicy::deny_all())
             && source.region == settings.region
             && source.timeout_seconds > 0
+            && source.sandbox_group_id == settings.sandbox_group_id
+            && source.provider_attributes_valid()
             && DateTime::parse_from_rfc3339(&source.created_at).is_ok()
             && intent
                 .source_created_at
@@ -1489,6 +1491,7 @@ mod tests {
         let mut source = crate::RenderSandbox {
             created_at: intent.source_created_at.clone().unwrap(),
             id: intent.source_occurrence_id.clone(),
+            idle_timeout_seconds: 900,
             network_policy: crate::RenderNetworkPolicy {
                 policy_type: crate::RenderNetworkPolicyType::DenyAll,
                 default: Some(crate::RenderNetworkPolicyType::DenyAll),
@@ -1496,11 +1499,20 @@ mod tests {
             },
             plan: crate::RenderSandboxPlan::Standard,
             region: settings.region.clone(),
+            sandbox_group_id: settings.sandbox_group_id.clone(),
             status: crate::RenderSandboxStatus::Running,
             terminated_at: None,
             timeout_seconds: 900,
         };
         validate_snapshot_source(&source, &intent, &settings).unwrap();
+        source.sandbox_group_id = "sbg-other".into();
+        assert!(validate_snapshot_source(&source, &intent, &settings).is_err());
+        source.sandbox_group_id = settings.sandbox_group_id.clone();
+        source.idle_timeout_seconds = 0;
+        assert!(validate_snapshot_source(&source, &intent, &settings).is_err());
+        source.idle_timeout_seconds = 86_401;
+        assert!(validate_snapshot_source(&source, &intent, &settings).is_err());
+        source.idle_timeout_seconds = 900;
         source.created_at = "2026-09-30T00:00:00Z".into();
         assert!(validate_snapshot_source(&source, &intent, &settings).is_err());
         source.created_at = intent.source_created_at.clone().unwrap();
