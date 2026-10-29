@@ -625,8 +625,12 @@ mod tests {
                 "{scopes:?}: {error:#}"
             );
             assert!(!directory.join(format!("{fp}.toml")).exists(), "{scopes:?}");
+            // A remote body must name a grant digest to parse at all; with a
+            // well-formed one the route reaches the signer lookup and finds
+            // no grant.
             let mut body = fx.body();
             body.signer_fingerprint = fp;
+            body.signer_grant_digest = Some("0".repeat(64));
             body.signer_origin_site_id = Some(SITE.to_owned());
             let request = SignedRequest::sign(body, &key).unwrap();
             assert_eq!(
