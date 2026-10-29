@@ -2605,8 +2605,7 @@ fn serve_candidate_controller_tls(
                 });
             }
         });
-        let handled = handled.load(Ordering::Acquire);
-        handled
+        handled.load(Ordering::Acquire)
     })
 }
 
