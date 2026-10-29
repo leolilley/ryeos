@@ -144,6 +144,11 @@ pub fn seal_guest_owner_snapshot_upload(
     );
     let descriptor =
         lillux::sealed_memfd(c"ryeos-guest-runtime-upload", &bytes).map_err(anyhow::Error::msg)?;
+    // The sandbox lifecycle adapter verifies a read-only owned regular file
+    // before any provider contact, so the sealed upload is handed over 0o400
+    // like every other sealed input given to a sandboxed consumer. Nothing
+    // writes or re-seals the descriptor after this point.
+    descriptor.set_regular_file_mode(0o400)?;
     Ok(GuestOwnerSnapshotUpload {
         descriptor,
         bytes: bytes.len() as u64,
@@ -474,6 +479,52 @@ mod tests {
     use super::*;
     use lillux::crypto::SigningKey;
     use std::os::unix::fs::PermissionsExt as _;
+
+    #[test]
+    fn sealed_upload_descriptor_is_read_only_owned_regular() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin_dir = dir.path().join("bin");
+        std::fs::create_dir(&bin_dir).unwrap();
+        std::fs::set_permissions(&bin_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let root_key = SigningKey::from_bytes(&[43; 32]);
+        let profile =
+            ryeos_external_execution_contract::canonical_json(&GuestOwnerRuntimeProfile {
+                schema: 2,
+                account: lillux::GuestRuntimeAccount::Unix {
+                    uid: 65534,
+                    gid: 65534,
+                },
+                private_source_max_bytes: 32 * 1024 * 1024,
+                private_source_max_inodes: 1024,
+                owner_timeout_seconds: 10,
+            })
+            .unwrap();
+        for (name, mode, body) in [
+            (
+                "bin/ryeos-external-guest-occurrence-owner",
+                0o755,
+                b"owner".to_vec(),
+            ),
+            (
+                "controller-root.hex",
+                0o644,
+                hex::encode(root_key.verifying_key().to_bytes()).into_bytes(),
+            ),
+            ("guest-owner-profile.json", 0o644, profile),
+        ] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, body).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+        }
+        let root = lillux::PinnedDirectory::open(dir.path()).unwrap().unwrap();
+        let manifest = ObservedGuestRuntime::observe(&root).unwrap();
+        let upload =
+            seal_guest_owner_snapshot_upload(&root, manifest.manifest_hash(), 1024).unwrap();
+        upload.descriptor().require_owned_regular().unwrap();
+        let observation = upload.descriptor().regular_file_observation().unwrap();
+        assert_eq!(observation.full_permission_mode().unwrap(), 0o400);
+        assert_eq!(observation.size(), upload.bytes());
+    }
 
     #[test]
     fn materialization_recipe_selects_one_bounded_guest_member() {
