@@ -1,12 +1,16 @@
 //! Composition of one node-signed runtime snapshot production binding.
 //!
-//! The operator names an installed external-execution binding; the provider
-//! backend, account, adapter artifact identity, Render owner, API trust roots
-//! and network inputs are taken from that verified document, so the producer
-//! can never drift from the placement binding it feeds. The operator adds the
-//! snapshot production spec, the sandbox group and the source scope. The
-//! credential generation is fresh on every composition. This module also
-//! holds the signing and publishing steps the qualification composer shares.
+//! The operator either names an installed external-execution binding, from
+//! whose verified document the provider backend, account, adapter artifact
+//! identity, Render owner, API trust roots and network inputs are taken so the
+//! producer can never drift from the placement binding it feeds, or states
+//! backend, account, owner and trust roots outright on a node that places no
+//! sessions. The standalone adapter artifact comes from the installed bundles
+//! and the network inputs are the operator's, exactly as a placement binding
+//! composes them. The operator adds the snapshot production spec, the sandbox
+//! group and the source scope. The credential generation is fresh on every
+//! composition. This module also holds the signing and publishing steps the
+//! qualification composer shares.
 
 use std::path::{Path, PathBuf};
 
@@ -21,8 +25,9 @@ use super::{
 };
 use crate::node_config::NodeConfigSection as _;
 use crate::node_config::sections::external_execution::compose::{
-    ProducerSourceFacts, item_context, load_node_identity, publish_signed_document,
-    read_installed_binding, read_installed_document, sign_node_document, validate_document_id,
+    ProducerSourceFacts, canonical_backend_id, item_context, load_node_identity,
+    operator_network_inputs, parse_tls_root_pem, publish_signed_document, read_installed_binding,
+    read_installed_document, resolve_installed_artifacts, sign_node_document, validate_document_id,
     verify_node_signed,
 };
 
@@ -51,6 +56,41 @@ impl Default for ProductionLimits {
     }
 }
 
+/// Provider facts an operator states for a node that places no sessions and
+/// so has no external-execution binding to take them from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StandaloneProducerFacts {
+    /// Lifecycle backend id; `render` selects render-sandbox-early-access.
+    pub backend: String,
+    /// Provider account label that scopes the credential.
+    pub account: String,
+    /// Provider owner the source Sandbox is created under.
+    pub owner_id: String,
+    /// PEM bundle of the CERTIFICATE roots the provider API is served under.
+    pub roots_pem: String,
+}
+
+/// Where the producer's provider facts come from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProducerFactsSource {
+    /// Installed external-execution binding that supplies backend, account,
+    /// adapter artifact, owner, trust roots and network inputs.
+    ExternalBinding { id: String },
+    /// Facts the operator states; the adapter artifact comes from the
+    /// installed bundles.
+    Standalone(StandaloneProducerFacts),
+}
+
+impl ProducerFactsSource {
+    /// How a report names the source.
+    fn label(&self) -> String {
+        match self {
+            Self::ExternalBinding { id } => format!("external_binding:{id}"),
+            Self::Standalone(_) => "standalone".to_owned(),
+        }
+    }
+}
+
 /// One operator request to compose and install a production binding.
 pub struct ProductionComposeRequest<'a> {
     pub app_root: &'a Path,
@@ -58,9 +98,7 @@ pub struct ProductionComposeRequest<'a> {
     /// it is rewritten.
     pub state_lock: &'a ryeos_node_runtime::state_lock::StateLock,
     pub id: String,
-    /// Installed external-execution binding that supplies backend, account,
-    /// adapter artifact, owner, trust roots and network inputs.
-    pub external_binding_id: String,
+    pub facts_source: ProducerFactsSource,
     /// Bytes of the snapshot production spec the installed adapter carries.
     pub snapshot_spec: Vec<u8>,
     pub sandbox_group_id: String,
@@ -77,6 +115,8 @@ pub struct ProductionComposeRequest<'a> {
 pub struct ProductionComposeReport {
     pub id: String,
     pub path: PathBuf,
+    /// `external_binding:<id>` or `standalone`.
+    pub source: String,
     pub backend: String,
     pub account: String,
     pub provider_group_id: String,
@@ -96,9 +136,50 @@ pub fn compose_runtime_snapshot_production_binding(
         .ensure_protects_app_root(request.app_root)?;
     validate_document_id(&request.id, "runtime snapshot production binding")?;
     let identity = load_node_identity(request.app_root)?;
-    let facts = read_installed_binding(request.app_root, &request.external_binding_id, &identity)?
-        .producer_source_facts();
+    let facts = match &request.facts_source {
+        ProducerFactsSource::ExternalBinding { id } => {
+            read_installed_binding(request.app_root, id, &identity)?.producer_source_facts()
+        }
+        ProducerFactsSource::Standalone(stated) => standalone_source_facts(stated, |backend| {
+            Ok(resolve_installed_artifacts(request.app_root)?
+                .placement_backends
+                .installed_generation(backend)?
+                .backend_artifact_hash)
+        })?,
+    };
     compose_with_facts(request, &identity, facts)
+}
+
+/// The facts a placement binding would have supplied, built from stated ones.
+/// `adapter_artifact_hash` maps the canonical backend id to the artifact hash
+/// of its one installed generation; it runs after the stated values pass
+/// their own checks so a malformed request never reads the bundles.
+fn standalone_source_facts(
+    stated: &StandaloneProducerFacts,
+    adapter_artifact_hash: impl FnOnce(&str) -> Result<String>,
+) -> Result<ProducerSourceFacts> {
+    ensure!(
+        identifier(&stated.owner_id, 256),
+        "owner id must be 1..=256 characters of A-Z a-z 0-9 _ -"
+    );
+    ensure!(
+        identifier_with_dot(&stated.account, 128),
+        "account must be 1..=128 characters of A-Z a-z 0-9 _ - ."
+    );
+    let roots = parse_tls_root_pem(&stated.roots_pem)?;
+    let backend = canonical_backend_id(&stated.backend).to_owned();
+    let adapter_artifact_hash = adapter_artifact_hash(&backend)?;
+    Ok(ProducerSourceFacts {
+        backend,
+        account: stated.account.clone(),
+        adapter_artifact_hash,
+        settings: serde_json::json!({
+            "schema": 1,
+            "owner_id": stated.owner_id,
+            "tls_roots_der_base64": roots,
+        }),
+        network_inputs: operator_network_inputs(),
+    })
 }
 
 pub(crate) fn compose_with_facts(
@@ -177,6 +258,7 @@ pub(crate) fn compose_with_facts(
     document.validate()?;
     let signed = sign_node_document(&serde_yaml::to_string(&document)?, identity)?;
     let installed = admit_signed_production(request.app_root, &request.id, &signed, identity)?;
+    let source = request.facts_source.label();
     let path = publish_signed_document(
         request.app_root,
         SECTION_NAME,
@@ -186,6 +268,7 @@ pub(crate) fn compose_with_facts(
     Ok(ProductionComposeReport {
         id: installed.id.clone(),
         path,
+        source,
         backend: installed.document.backend.clone(),
         account: installed.document.account.clone(),
         provider_group_id: installed.document.provider_group_id.clone(),
@@ -224,6 +307,15 @@ pub fn installed_production_credential_generation(
             .document
             .credential_generation,
     ))
+}
+
+/// Non-empty run of ASCII alphanumerics, `_`, `-` and `.`, at most `max` long.
+fn identifier_with_dot(value: &str, max: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= max
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
 }
 
 /// Non-empty run of ASCII alphanumerics, `_` and `-`, at most `max` long.
@@ -349,7 +441,9 @@ pub(crate) mod tests {
             app_root: node.root.path(),
             state_lock: &node.lock,
             id: id.into(),
-            external_binding_id: "operator".into(),
+            facts_source: ProducerFactsSource::ExternalBinding {
+                id: "operator".into(),
+            },
             snapshot_spec: SPEC.to_vec(),
             sandbox_group_id: "sbg-exact".into(),
             region: "oregon".into(),
@@ -450,6 +544,119 @@ pub(crate) mod tests {
         );
         assert!(validate_document_id("../x", "binding").is_err());
         assert!(validate_document_id(".hidden", "binding").is_err());
+    }
+
+    fn stated() -> StandaloneProducerFacts {
+        StandaloneProducerFacts {
+            backend: "render".into(),
+            account: "render-test".into(),
+            owner_id: "usr-test".into(),
+            roots_pem: crate::node_config::sections::external_execution::compose::tests::root_pem(),
+        }
+    }
+
+    fn standalone_facts() -> ProducerSourceFacts {
+        standalone_source_facts(&stated(), |backend| {
+            assert_eq!(backend, "render-sandbox-early-access");
+            Ok("b".repeat(64))
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn a_standalone_document_equals_the_one_a_binding_with_the_same_facts_yields() {
+        let node = stopped_node();
+        let identity = load_node_identity(node.root.path()).unwrap();
+        let from_stated = standalone_facts();
+        // A placement binding's settings carry more than the producer takes;
+        // only owner and roots reach the document.
+        let mut from_binding = from_stated.clone();
+        from_binding.settings = serde_json::json!({
+            "schema": 2,
+            "owner_id": "usr-test",
+            "plan": "pro",
+            "region": "frankfurt",
+            "snapshot_id": "snp-test",
+            "tls_roots_der_base64": from_stated.settings["tls_roots_der_base64"].clone(),
+        });
+        let generation = fresh_credential_generation().unwrap();
+        let compose = |id: &str, facts: ProducerSourceFacts, source: ProducerFactsSource| {
+            let mut req = request(&node, id);
+            req.credential_generation = generation.clone();
+            req.facts_source = source;
+            let report = compose_with_facts(req, &identity, facts).unwrap();
+            let installed = installed_production_binding(node.root.path(), id, &identity).unwrap();
+            (report, installed.document)
+        };
+        let (binding_report, binding_document) = compose(
+            "via-binding",
+            from_binding,
+            ProducerFactsSource::ExternalBinding {
+                id: "operator".into(),
+            },
+        );
+        let (standalone_report, standalone_document) = compose(
+            "via-stated",
+            from_stated,
+            ProducerFactsSource::Standalone(stated()),
+        );
+        assert_eq!(standalone_document, binding_document);
+        assert_eq!(
+            standalone_report.settings_digest,
+            binding_report.settings_digest
+        );
+        assert_eq!(binding_report.source, "external_binding:operator");
+        assert_eq!(standalone_report.source, "standalone");
+        assert_eq!(standalone_document.backend, "render-sandbox-early-access");
+        assert_eq!(standalone_document.adapter_artifact_hash, "b".repeat(64));
+        assert_eq!(
+            standalone_document.network_inputs,
+            operator_network_inputs()
+        );
+    }
+
+    #[test]
+    fn stated_facts_are_checked_before_the_bundles_are_read() {
+        let refused = |mutate: &dyn Fn(&mut StandaloneProducerFacts)| {
+            let mut facts = stated();
+            mutate(&mut facts);
+            format!(
+                "{:#}",
+                standalone_source_facts(&facts, |_| panic!("the bundles were read")).unwrap_err()
+            )
+        };
+        assert!(refused(&|f| f.owner_id = "".into()).contains("owner id"));
+        assert!(refused(&|f| f.owner_id = "usr test".into()).contains("owner id"));
+        assert!(refused(&|f| f.owner_id = "u".repeat(257)).contains("owner id"));
+        assert!(refused(&|f| f.account = "".into()).contains("account"));
+        assert!(refused(&|f| f.account = "acct name".into()).contains("account"));
+        assert!(refused(&|f| f.account = "a".repeat(129)).contains("account"));
+        assert!(refused(&|f| f.roots_pem = "".into()).contains("no CERTIFICATE block"));
+        assert!(refused(&|f| f.roots_pem = "stray text".into()).contains("only CERTIFICATE"));
+        let message = format!(
+            "{:#}",
+            standalone_source_facts(&stated(), |_| anyhow::bail!("not installed")).unwrap_err()
+        );
+        assert!(message.contains("not installed"), "{message}");
+    }
+
+    #[test]
+    fn a_standalone_request_on_a_node_without_bundles_publishes_nothing() {
+        let node = stopped_node();
+        let mut req = request(&node, "snapshot-producer");
+        req.facts_source = ProducerFactsSource::Standalone(stated());
+        let error = compose_runtime_snapshot_production_binding(req).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("load installed bundle registrations"),
+            "{error:#}"
+        );
+        assert!(
+            !node
+                .root
+                .path()
+                .join(".ai/node/runtime_snapshot_production")
+                .exists()
+        );
     }
 
     #[test]

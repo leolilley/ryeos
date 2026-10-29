@@ -1558,6 +1558,62 @@ pub(super) fn load_runtime_manifest_identity(
     Ok((executable_hash, entry_count, total_bytes))
 }
 
+/// One content entry of a retained product manifest, as the consumer archive
+/// inventory lists it beneath the product root.
+pub(super) struct ProductArchiveMember {
+    pub path: String,
+    pub kind: ryeos_state::objects::ExternalContentManifestEntryKind,
+    pub size: u64,
+    pub target: Option<String>,
+}
+
+/// The exact content entries of one retained product manifest, and the length
+/// of the canonical manifest record the archive ships beside the product.
+pub(super) fn load_product_archive_members(
+    authority: &ryeos_state::PinnedStateAuthority,
+    limits: ryeos_state::object_closure::ObjectClosureLimits,
+    manifest_hash: &str,
+) -> anyhow::Result<(Vec<ProductArchiveMember>, u64)> {
+    let manifest = with_state_guard(authority, |_guard| {
+        ryeos_state::object_closure::load_exact_cas_object_with_cas(
+            &authority.cas_store()?,
+            manifest_hash,
+            limits
+                .max_object_bytes
+                .min(ryeos_state::objects::MAX_LARGE_CONTENT_MANIFEST_BYTES as u64),
+        )
+    })?;
+    let record_bytes = u64::try_from(lillux::canonical_json(&manifest)?.len())?;
+    let members = match manifest.get("kind").and_then(serde_json::Value::as_str) {
+        Some(ryeos_state::objects::EXTERNAL_CONTENT_MANIFEST_KIND) => {
+            ryeos_state::objects::ExternalContentManifestObject::from_value(&manifest)?
+                .entries
+                .into_iter()
+                .map(|entry| ProductArchiveMember {
+                    path: entry.path,
+                    kind: entry.kind,
+                    size: entry.size.unwrap_or(0),
+                    target: entry.target,
+                })
+                .collect()
+        }
+        Some(ryeos_state::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND) => {
+            ryeos_state::objects::ExternalLargeContentManifestObject::from_value(&manifest)?
+                .entries
+                .into_iter()
+                .map(|entry| ProductArchiveMember {
+                    path: entry.path,
+                    kind: entry.kind,
+                    size: entry.size.unwrap_or(0),
+                    target: entry.target,
+                })
+                .collect()
+        }
+        _ => bail!("consumer product has no supported exact manifest"),
+    };
+    Ok((members, record_bytes))
+}
+
 /// Realize the signed runtime product slot against its exact manifest.
 pub(super) fn realize_runtime_slot(
     slot: &ryeos_state::external_content::products::composition::ExternalProductSlotDeclaration,
@@ -3768,6 +3824,107 @@ pub fn prepare_remote_consumer_verifier_from_admitted_sources(
             subject_manifest_hash,
             scenario_id,
         )
+    })
+}
+
+/// Which delivery a remote scenario's launch builds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RemoteVerifierLane {
+    /// Accepted input record, verifier and the retained products.
+    Worker,
+    /// Accepted probe record, verifier and the signed archive members.
+    Probe,
+}
+
+/// What a remote scenario's launch will compare against the installed
+/// protected verifier selection, plus the exact bytes the signed selection
+/// ships.
+pub(super) struct RemoteVerifierFacts {
+    pub lane: RemoteVerifierLane,
+    pub scenario_source_digest: String,
+    pub verifier_artifact_hash: String,
+    pub verifier_bytes: u64,
+    /// Signed extra executables by archive name; shipped only in the probe lane.
+    pub archive_members: BTreeMap<String, u64>,
+}
+
+/// Most scenarios a snapshot qualification binding can select a verifier for.
+const MAX_CONSUMER_VERIFIER_SCENARIOS: usize = 8;
+
+/// Resolve, in one checked generation and through the launch's own
+/// preparation, every scenario of the policy that selects an independent
+/// remote verifier: Worker scenarios (with a consumer Worker request) and
+/// probe scenarios (with a probe input). A scenario whose sources cannot be
+/// resolved refuses the whole call, naming the scenario.
+pub(super) fn remote_verifier_facts(
+    state: &AppState,
+    policy_source: &ProductQualificationPolicySource,
+    subject_manifest_hash: &str,
+) -> anyhow::Result<BTreeMap<String, RemoteVerifierFacts>> {
+    let selecting = policy_source
+        .policy
+        .producer_scenarios
+        .values()
+        .filter(|scenario| scenario.remote_verifier.is_some())
+        .count();
+    if selecting > MAX_CONSUMER_VERIFIER_SCENARIOS {
+        bail!(
+            "qualification policy {} selects a remote verifier in {selecting} scenarios; a snapshot qualification binding admits at most {MAX_CONSUMER_VERIFIER_SCENARIOS}",
+            policy_source.canonical_ref
+        );
+    }
+    state.engine.with_checked_bundle_generation(|generation| {
+        let mut facts = BTreeMap::new();
+        for (scenario_id, scenario) in &policy_source.policy.producer_scenarios {
+            if scenario.remote_verifier.is_none() {
+                continue;
+            }
+            let lane = if scenario.consumer_worker_request.is_some() {
+                RemoteVerifierLane::Worker
+            } else if scenario.remote_probe_input.is_some() {
+                RemoteVerifierLane::Probe
+            } else {
+                bail!(
+                    "remote scenario {scenario_id} has neither a consumer Worker request nor a probe input"
+                );
+            };
+            let resolve = || -> anyhow::Result<RemoteVerifierFacts> {
+                let sources = match scenario.recipe_ref.as_deref() {
+                    Some(recipe_ref) => BTreeMap::from([(
+                        scenario_id.clone(),
+                        resolve_bundle_producer_recipe_in_generation(generation, recipe_ref)?
+                            .source_identity()?,
+                    )]),
+                    None => BTreeMap::new(),
+                };
+                let prepared = prepare_remote_consumer_verifier_from_admitted_sources_in_generation(
+                    state,
+                    generation,
+                    policy_source,
+                    &sources,
+                    subject_manifest_hash,
+                    scenario_id,
+                )?;
+                Ok(RemoteVerifierFacts {
+                    lane,
+                    scenario_source_digest: prepared.scenario_source_digest.clone(),
+                    verifier_artifact_hash: prepared.payload.identity.content_hash.clone(),
+                    verifier_bytes: prepared.payload.bytes,
+                    archive_members: prepared
+                        .archive_members
+                        .iter()
+                        .map(|(name, member)| (name.clone(), member.bytes))
+                        .collect(),
+                })
+            };
+            facts.insert(
+                scenario_id.clone(),
+                resolve().with_context(|| {
+                    format!("remote scenario {scenario_id} sources cannot be resolved")
+                })?,
+            );
+        }
+        Ok(facts)
     })
 }
 

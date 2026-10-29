@@ -12,7 +12,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use clap::Parser;
 use ryeos_app::node_config::sections::runtime_snapshot_production::compose::ProductionComposeReport;
 use ryeos_app::node_config::sections::runtime_snapshot_qualification::compose::QualificationComposeReport;
@@ -27,9 +27,11 @@ const MAX_INPUT_BYTES: u64 = 256 * 1024;
 #[command(
     name = "ryeos node external-execution snapshot-compose",
     about = "Compose and install a node-signed runtime snapshot production binding on a stopped \
-             node. Backend, account, adapter artifact, owner and API trust roots come from the \
-             installed external-execution binding; the credential generation is fresh on every \
-             run. Restart the node to load the binding.",
+             node. Backend, account, owner and provider API trust roots come either from an \
+             installed external-execution binding (--binding) or, on a node that places no \
+             sessions, from --backend, --account, --owner-id and --roots together; the adapter \
+             artifact comes from the installed bundles either way and the credential generation \
+             is fresh on every run. Restart the node to load the binding.",
     no_binary_name = true
 )]
 struct SnapshotComposeArgs {
@@ -37,9 +39,26 @@ struct SnapshotComposeArgs {
     #[arg(long)]
     id: String,
 
-    /// Installed external-execution binding id to take backend, account and trust from.
+    /// Installed external-execution binding id to take backend, account, owner and trust
+    /// from. Exclusive with --backend, --account, --owner-id and --roots.
     #[arg(long)]
-    binding: String,
+    binding: Option<String>,
+
+    /// Lifecycle backend id; `render` selects render-sandbox-early-access.
+    #[arg(long)]
+    backend: Option<String>,
+
+    /// Provider account label that scopes the credential.
+    #[arg(long)]
+    account: Option<String>,
+
+    /// Provider owner id the source Sandbox is created under.
+    #[arg(long)]
+    owner_id: Option<String>,
+
+    /// PEM file of the CERTIFICATE roots the provider API is served under.
+    #[arg(long)]
+    roots: Option<PathBuf>,
 
     /// Snapshot production spec JSON file carried by the installed adapter.
     #[arg(long)]
@@ -124,6 +143,56 @@ struct SnapshotQualificationComposeArgs {
     json: bool,
 }
 
+/// Source of the producer's provider facts with every flag combination
+/// checked, before any file or lock is touched.
+enum FactsChoice {
+    Binding(String),
+    Stated {
+        backend: String,
+        account: String,
+        owner_id: String,
+        roots: PathBuf,
+    },
+}
+
+fn facts_choice(args: &SnapshotComposeArgs) -> Result<FactsChoice> {
+    let stated = [
+        ("--backend", args.backend.is_some()),
+        ("--account", args.account.is_some()),
+        ("--owner-id", args.owner_id.is_some()),
+        ("--roots", args.roots.is_some()),
+    ];
+    if let Some(binding) = &args.binding {
+        ensure!(
+            stated.iter().all(|(_, given)| !given),
+            "--binding supplies backend, account, owner and trust roots; remove --backend, \
+             --account, --owner-id and --roots"
+        );
+        return Ok(FactsChoice::Binding(binding.clone()));
+    }
+    let missing: Vec<&str> = stated
+        .iter()
+        .filter(|(_, given)| !given)
+        .map(|(flag, _)| *flag)
+        .collect();
+    ensure!(
+        missing.len() < stated.len(),
+        "name the provider facts with either --binding or all of --backend, --account, \
+         --owner-id and --roots"
+    );
+    ensure!(
+        missing.is_empty(),
+        "without --binding the provider facts need {} too",
+        missing.join(", ")
+    );
+    Ok(FactsChoice::Stated {
+        backend: args.backend.clone().context("--backend")?,
+        account: args.account.clone().context("--account")?,
+        owner_id: args.owner_id.clone().context("--owner-id")?,
+        roots: args.roots.clone().context("--roots")?,
+    })
+}
+
 fn read_bytes(path: &Path, what: &str) -> Result<Vec<u8>> {
     lillux::read_regular_file_bounded_no_follow(path, MAX_INPUT_BYTES)
         .with_context(|| format!("read {what} {}", path.display()))
@@ -148,15 +217,32 @@ pub fn run_snapshot_compose(argv: &[String], console: &crate::tty::Console) -> R
     let Some(args) = parse_args::<SnapshotComposeArgs>(argv, console)? else {
         return Ok(());
     };
+    let choice = facts_choice(&args)?;
     let app_root = ryeos_node::NodeConfig::load_local(args.app_root.clone())?.app_root;
     let spec = read_bytes(&args.provider_spec, "snapshot production spec")?;
+    let mut inputs = BTreeMap::from([("provider_spec".to_owned(), spec)]);
+    let (binding, backend, account, owner_id) = match choice {
+        FactsChoice::Binding(binding) => (Some(binding), None, None, None),
+        FactsChoice::Stated {
+            backend,
+            account,
+            owner_id,
+            roots,
+        } => {
+            inputs.insert("tls_roots".to_owned(), read_bytes(&roots, "TLS roots")?);
+            (None, Some(backend), Some(account), Some(owner_id))
+        }
+    };
     let host = crate::offline_apply::CliHost::new();
     let applied = host.apply(
         &app_root,
         "node.external-execution.snapshot-compose",
         serde_json::to_value(SnapshotComposeArguments {
             id: args.id.clone(),
-            binding: args.binding.clone(),
+            binding,
+            backend,
+            account,
+            owner_id,
             sandbox_group_id: args.sandbox_group_id.clone(),
             region: args.region.clone(),
             source_plan: args.source_plan.clone(),
@@ -164,7 +250,7 @@ pub fn run_snapshot_compose(argv: &[String], console: &crate::tty::Console) -> R
             maximum_bootstrap_lifetime_seconds: args.maximum_bootstrap_lifetime_seconds,
             maximum_upload_bytes: args.maximum_upload_bytes,
         })?,
-        BTreeMap::from([("provider_spec".to_owned(), spec)]),
+        inputs,
         BTreeMap::new(),
     )?;
     let report: ProductionComposeReport =
@@ -250,6 +336,7 @@ fn production_banner(
     for (key, value) in [
         ("app root", app_root.display().to_string()),
         ("binding", report.path.display().to_string()),
+        ("facts source", report.source.clone()),
         ("backend", report.backend.clone()),
         ("account", report.account.clone()),
         ("sandbox group", report.provider_group_id.clone()),
@@ -334,6 +421,11 @@ mod tests {
         assert_eq!(parsed.sandbox_group_id, "sbg-1");
         assert!(parsed.contact_timeout_seconds.is_none());
         for drop in 0..PRODUCTION.len() / 2 {
+            // The binding is one of two sources of provider facts; the
+            // facts-choice test covers its absence.
+            if PRODUCTION[drop * 2] == "--binding" {
+                continue;
+            }
             let kept: Vec<&str> = PRODUCTION
                 .chunks(2)
                 .enumerate()
@@ -359,6 +451,95 @@ mod tests {
         let parsed = SnapshotComposeArgs::try_parse_from(argv(&budgets)).unwrap();
         assert_eq!(parsed.maximum_upload_bytes, Some(20000));
         assert_eq!(parsed.contact_timeout_seconds, Some(30));
+    }
+
+    const STATED: [&str; 8] = [
+        "--backend",
+        "render",
+        "--account",
+        "acct",
+        "--owner-id",
+        "usr-1",
+        "--roots",
+        "roots.pem",
+    ];
+
+    fn choice_of(extra: &[&str], binding: bool) -> Result<FactsChoice> {
+        let mut parts: Vec<&str> = PRODUCTION.to_vec();
+        if !binding {
+            parts.drain(2..4);
+        }
+        parts.extend_from_slice(extra);
+        facts_choice(&SnapshotComposeArgs::try_parse_from(argv(&parts)).unwrap())
+    }
+
+    #[test]
+    fn provider_facts_come_from_the_binding_alone_or_from_all_four_stated_flags() {
+        match choice_of(&[], true).unwrap() {
+            FactsChoice::Binding(id) => assert_eq!(id, "operator"),
+            FactsChoice::Stated { .. } => panic!("a binding alone selected stated facts"),
+        }
+        match choice_of(&STATED, false).unwrap() {
+            FactsChoice::Stated {
+                backend,
+                account,
+                owner_id,
+                roots,
+            } => {
+                assert_eq!(backend, "render");
+                assert_eq!(account, "acct");
+                assert_eq!(owner_id, "usr-1");
+                assert_eq!(roots, PathBuf::from("roots.pem"));
+            }
+            FactsChoice::Binding(_) => panic!("stated facts selected a binding"),
+        }
+        let refused = |result: Result<FactsChoice>| match result {
+            Ok(_) => panic!("accepted"),
+            Err(error) => format!("{error:#}"),
+        };
+        // Any stated flag beside a binding is a mix.
+        for pair in STATED.chunks(2) {
+            let message = refused(choice_of(pair, true));
+            assert!(message.contains("remove --backend"), "{message}");
+        }
+        // Any missing stated flag, or none at all, is refused by name.
+        for drop in 0..4 {
+            let kept: Vec<&str> = STATED
+                .chunks(2)
+                .enumerate()
+                .filter(|(index, _)| *index != drop)
+                .flat_map(|(_, pair)| pair.iter().copied())
+                .collect();
+            let message = refused(choice_of(&kept, false));
+            assert!(
+                message.contains(&format!("need {} too", STATED[drop * 2])),
+                "{message}"
+            );
+        }
+        let message = refused(choice_of(&[], false));
+        assert!(message.contains("either --binding or all of"), "{message}");
+    }
+
+    #[test]
+    fn a_refused_facts_choice_touches_neither_the_node_nor_the_inputs() {
+        let root = tempfile::tempdir().unwrap();
+        let app_root = root.path().to_str().unwrap();
+        let mut mixed = vec!["--app-root", app_root, "--json", "--account", "acct"];
+        mixed.extend_from_slice(&PRODUCTION);
+        let error = run_snapshot_compose(&argv(&mixed), &console()).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("remove --backend"),
+            "{error:#}"
+        );
+        let mut partial = vec!["--app-root", app_root, "--json", "--backend", "render"];
+        partial.extend_from_slice(&PRODUCTION[..2]);
+        partial.extend_from_slice(&PRODUCTION[4..]);
+        let error = run_snapshot_compose(&argv(&partial), &console()).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("need --account, --owner-id, --roots too"),
+            "{error:#}"
+        );
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
     }
 
     #[test]
@@ -453,6 +634,7 @@ mod tests {
         let report = ProductionComposeReport {
             id: "producer".into(),
             path: PathBuf::from("/srv/node/.ai/node/runtime_snapshot_production/producer.yaml"),
+            source: "standalone".into(),
             backend: "render-sandbox-early-access".into(),
             account: "acct".into(),
             provider_group_id: "sbg-1".into(),

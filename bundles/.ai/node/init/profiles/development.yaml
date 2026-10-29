@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-28T04:00:46Z:1ed852210d6e1bd9094b17de61cb65000a12ed7f0685f3def02a3cb053f33fdb:pMaKWFcORpMTdpZc4tcmpQaddFpq1CBhbDN9HpEiYZ/vF6+zs9alaJCxS4XkZ29t4IdrPh4xpRpG16BgLjtsCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-29T07:24:09Z:67aca6e824fe6d6c6b508d63a04efc7b2dd15819d23b4c274852711a269d4979:VgMHRPhLIJhBB6cAQeCuLpN376hU4tCC9BG/sMkjROSw5A765OHTAtrhQs6jHITmlUG/qZRUp46AB9u02GvCAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - browser
@@ -10,6 +10,7 @@ exact_bundles:
   - graph
   - knowledge
   - opencode
+  - render-sandbox
   - ryeos-docs
   - ryeos-ui
   - scheduling
@@ -136,6 +137,7 @@ policies:
       codex:
         - ryeos.register.command.root.codex
       opencode: []
+      render-sandbox: []
       core:
         - ryeos.register.command.dispatch.direct_execute_item_ref
         - ryeos.register.command.dispatch.local_handler

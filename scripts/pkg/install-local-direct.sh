@@ -58,7 +58,7 @@ Options:
                         (default: .dev-keys/PUBLISHER_DEV.pem)
   --owner LABEL         Owner label for populate-bundles.sh
                         (default: RyeOS Development)
-  --bundle-set SET      Bundle set to populate/install: full, central-host,
+  --bundle-set SET      Bundle set to populate/install: full, development, central-host,
                         standard, standard-central-auth, local-inference,
                         hosted-workflow,
                         bundle-source, core, core-scheduling, core-workflow, core-knowledge, or release-authority.

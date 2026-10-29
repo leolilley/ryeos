@@ -4808,6 +4808,13 @@ async fn run(
                     ext.insert(route_diagnostics);
                     ext.insert(prospective_node_config_validator);
                     ext.insert(node_execution_identity);
+                    // A submitted offline operation that asks for it stops
+                    // the node so the next startup applies the request.
+                    ext.insert(Arc::new(
+                        ryeos_node::offline_operation::deliver::StopForOfflineOperation::new(
+                            ryeosd::request_offline_operation_stop,
+                        ),
+                    ));
                     // Launch admission judges declared node guarantees
                     // against the signed report this daemon recorded and
                     // was admitted on, re-observing what is cheap to.
@@ -5551,7 +5558,11 @@ async fn run(
     let (mut daemon_result, startup_cancelled, startup_failed) = daemon_result;
     let exit_reason = |daemon_result: &Result<()>| {
         if daemon_result.is_ok() || startup_cancelled {
-            "signal"
+            if ryeosd::offline_operation_stop_requested() {
+                "offline_operation_pending"
+            } else {
+                "signal"
+            }
         } else if startup_failed {
             "startup_failed"
         } else {

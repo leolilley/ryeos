@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-19T06:02:17Z:b7650d545d6ef3530c09772f329d13f54f460d5c80ba4c14a8fa17a023eb6ead:/UAPoCvsP3RbyXmkG3mwEBP2ZXO9jB0uaIqelE8qIUQeayPLryLLlXtc+G2vgHfo7MuHl5OSKq63JGOla3zZBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-29T08:16:50Z:2b13ca577bf48337d89c1e06f8af1844b3eb44ac064c39632bc8b982b96bbd33:oT2E3T/oDHMNnsCBuSOmj8l57Glr+PnBB9oDMl0iJ93tuuBwfEo+QYY0XS8ZEf9kP+0KYIqByJ1mH2FfNpdBBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: external-content.derive-consumer-qualification-context
 required_caps: ["ryeos.execute.service.external-content/derive-consumer-qualification-context"]
@@ -7,4 +7,4 @@ schema:
   relationship_ref: string
   relationship_name: string
   subject_manifest_hash: string
-description: Derive the consumer qualification context and consumer execution context from admitted inputs for an exact subject manifest; read-only, requires an admitted operator, and writes no state
+description: "Derive the consumer qualification context and consumer execution context from admitted inputs for an exact subject manifest; read-only, requires an admitted operator, and writes no state. The response also carries consumer_verifier_selections, a scenario-id keyed map with one entry for every policy scenario that selects a remote verifier (Worker and probe scenarios), each holding the scenario_source_digest and verifier_artifact_hash its consumer launch recomputes and requires exactly. Each archive_budget is a proposed allowance, not a daemon selection: it is computed from the exact archive inventory that scenario's delivery builds (retained products and their manifest records for a Worker scenario, signed archive members for a probe scenario) with the accepted input record charged at its contract maximum. The operator signs the allowance into the profile and may choose another that validates. More than 8 verifier-selecting scenarios are refused. Write the consumer_verifier_selections object alone as the JSON file passed to snapshot-qualification-compose --consumer-verifiers"

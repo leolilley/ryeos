@@ -7,18 +7,30 @@
 //! product that qualification itself uses, and emits them as data. It writes no
 //! node state: the staged content publication is dropped unpublished.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use anyhow::{Context as _, bail};
+use ryeos_external_execution_contract::restored_runtime_measurement::{
+    CONSUMER_INPUT_RECORD_NAME, CONSUMER_VERIFIER_REMOTE_NAME, ConsumerArchiveBudget,
+    ConsumerRuntimeVerifierSelection,
+};
+use ryeos_external_execution_contract::staging_package::GuestStagingEntry;
 use ryeos_state::external_content::products::composition::{
     ExternalProductSlotDeclaration, ProductRelationship, ProductRelationships,
 };
 use ryeos_state::external_content::products::qualification::ProductQualificationConsumerExecutionContext;
+use ryeos_state::external_content::qualification_consumer_record::MAX_CONSUMER_INPUT_RECORD_BYTES;
+use ryeos_state::objects::{
+    ExternalContentKind, ExternalContentManifestEntryKind, ExternalContentRealization,
+    ExternalContentRealizationSet,
+};
 use serde::{Deserialize, Serialize};
 
 use super::product_qualification::{
-    AdmittedUseInputs, load_runtime_manifest_identity,
-    prepare_current_bundle_consumer_content_inputs, realize_runtime_slot,
+    AdmittedUseInputs, ProductArchiveMember, RemoteVerifierFacts, RemoteVerifierLane,
+    load_product_archive_members, load_runtime_manifest_identity,
+    prepare_current_bundle_consumer_content_inputs, realize_runtime_slot, remote_verifier_facts,
     require_unguarded_resolution, resolve_consumer_definition_in_generation,
     resolve_current_bundle_qualification_policy,
 };
@@ -57,9 +69,22 @@ impl ConsumerQualificationContextRequest {
     }
 }
 
+/// Size of the tar block every archive header, data run and trailer is
+/// rounded to.
+const TAR_BLOCK_BYTES: u64 = 512;
+
+/// A tar header name or link target longer than this is carried in an extra
+/// GNU long-name member.
+const TAR_INLINE_NAME_BYTES: usize = 100;
+
 /// The emitted document. `verifier_parameters` is the fragment to merge into
 /// the policy's `verifier_parameters`; `consumer_execution_context` is the
-/// signed context the digests were derived under.
+/// signed context the digests were derived under. `consumer_verifier_selections`
+/// maps each scenario id that selects a remote verifier to the protected
+/// selection its consumer launch will require; that object, written alone to
+/// a file, is the `--consumer-verifiers` input of
+/// `snapshot-qualification-compose`. The digests are exact; `archive_budget` is
+/// a proposed allowance for the operator to sign into the profile.
 #[derive(Debug, Clone, Serialize)]
 pub struct ConsumerQualificationContextResponse {
     pub policy_ref: String,
@@ -68,6 +93,7 @@ pub struct ConsumerQualificationContextResponse {
     pub bundle_generation_identity: String,
     pub verifier_parameters: serde_json::Value,
     pub consumer_execution_context: ProductQualificationConsumerExecutionContext,
+    pub consumer_verifier_selections: BTreeMap<String, ConsumerRuntimeVerifierSelection>,
 }
 
 pub async fn derive(
@@ -136,12 +162,40 @@ fn derive_blocking(
         profile: &prepared.worker_source.profile,
         source: &prepared.worker_source.source,
         worker_literals: &prepared.worker_literals,
-        runtime,
+        runtime: runtime.clone(),
         environment: &prepared.environment.realizations,
         executable_search: &prepared.environment.definition.executable_search,
         process_environment: &prepared.environment.definition.process_environment,
     }
     .derive()?;
+    let product_entries = consumer_product_entries(
+        &authority,
+        limits,
+        &ExternalContentRealizationSet::new(
+            prepared
+                .worker_literals
+                .iter()
+                .chain(prepared.environment.realizations.iter())
+                .chain(std::iter::once(&runtime))
+                .cloned()
+                .collect(),
+        )?,
+    )?;
+    let mut consumer_verifier_selections = BTreeMap::new();
+    for (scenario_id, facts) in
+        remote_verifier_facts(state, &policy_source, &request.subject_manifest_hash)?
+    {
+        let archive_budget = archive_budget_for(&product_entries, &facts)
+            .with_context(|| format!("remote scenario {scenario_id} archive budget"))?;
+        consumer_verifier_selections.insert(
+            scenario_id,
+            ConsumerRuntimeVerifierSelection {
+                scenario_source_digest: facts.scenario_source_digest,
+                verifier_artifact_hash: facts.verifier_artifact_hash,
+                archive_budget,
+            },
+        );
+    }
     // Nothing was published: dropping the staged content leaves node state
     // exactly as it was.
     Ok(ConsumerQualificationContextResponse {
@@ -151,7 +205,141 @@ fn derive_blocking(
         bundle_generation_identity: prepared.definitions.bundle_generation_identity.clone(),
         verifier_parameters: qualification_use.parameters()?,
         consumer_execution_context: signed_context,
+        consumer_verifier_selections,
     })
+}
+
+/// The archive entries the Worker delivery adds for the retained products, as
+/// the delivery's own inventory lists them: per product, a root entry (a
+/// directory for a tree), its content entries, and the canonical manifest
+/// record `product-NN-manifest.json`, whose bytes are not in the product's
+/// `total_bytes`. Entry paths and sizes come from the pinned manifests.
+fn consumer_product_entries(
+    authority: &ryeos_state::PinnedStateAuthority,
+    limits: ryeos_state::object_closure::ObjectClosureLimits,
+    realizations: &ExternalContentRealizationSet,
+) -> anyhow::Result<Vec<GuestStagingEntry>> {
+    let mut entries = Vec::new();
+    for (index, realization) in realizations.iter().enumerate() {
+        entries.extend(product_entries(
+            &format!("product-{index:02}"),
+            realization,
+            load_product_archive_members(authority, limits, &realization.manifest_hash)?,
+        ));
+    }
+    Ok(entries)
+}
+
+fn product_entries(
+    name: &str,
+    realization: &ExternalContentRealization,
+    (members, manifest_bytes): (Vec<ProductArchiveMember>, u64),
+) -> Vec<GuestStagingEntry> {
+    let mut entries = Vec::new();
+    match realization.kind {
+        ExternalContentKind::File => entries.push(sized_file(name, realization.total_bytes)),
+        ExternalContentKind::Tree => {
+            entries.push(GuestStagingEntry::Directory {
+                path: name.into(),
+                mode: 0o755,
+            });
+            for member in members {
+                let path = format!("{name}/{}", member.path);
+                entries.push(match member.kind {
+                    ExternalContentManifestEntryKind::File => sized_file(&path, member.size),
+                    ExternalContentManifestEntryKind::Dir => {
+                        GuestStagingEntry::Directory { path, mode: 0o755 }
+                    }
+                    ExternalContentManifestEntryKind::Symlink => GuestStagingEntry::Symlink {
+                        path,
+                        target: member.target.unwrap_or_default(),
+                    },
+                });
+            }
+        }
+    }
+    entries.push(sized_file(&format!("{name}-manifest.json"), manifest_bytes));
+    entries
+}
+
+/// Only the path and size of a regular entry shape the archive; mode and
+/// digest are fixed-width in the tar encoding.
+fn sized_file(path: &str, bytes: u64) -> GuestStagingEntry {
+    GuestStagingEntry::RegularFile {
+        path: path.into(),
+        mode: 0o400,
+        bytes,
+        sha256: "0".repeat(64),
+    }
+}
+
+/// The allowance proposed for one scenario: the exact archive inventory its
+/// delivery builds, with the accepted input record, whose size is only known
+/// per occurrence, charged at its contract maximum. The Worker lane ships the
+/// record, the verifier and the retained products; the probe lane ships the
+/// record, the verifier and the signed archive members. The operator signs
+/// this allowance into the profile; the daemon does not select it.
+fn archive_budget_for(
+    product_entries: &[GuestStagingEntry],
+    facts: &RemoteVerifierFacts,
+) -> anyhow::Result<ConsumerArchiveBudget> {
+    let mut entries = vec![
+        sized_file(
+            CONSUMER_INPUT_RECORD_NAME,
+            MAX_CONSUMER_INPUT_RECORD_BYTES as u64,
+        ),
+        sized_file(CONSUMER_VERIFIER_REMOTE_NAME, facts.verifier_bytes),
+    ];
+    match facts.lane {
+        RemoteVerifierLane::Worker => entries.extend_from_slice(product_entries),
+        RemoteVerifierLane::Probe => entries.extend(
+            facts
+                .archive_members
+                .iter()
+                .map(|(name, bytes)| sized_file(name, *bytes)),
+        ),
+    }
+    let mut regular_bytes = 0u64;
+    for entry in &entries {
+        if let GuestStagingEntry::RegularFile { bytes, .. } = entry {
+            regular_bytes = regular_bytes
+                .checked_add(*bytes)
+                .context("archive regular byte total overflow")?;
+        }
+    }
+    ConsumerArchiveBudget::new(entries.len(), regular_bytes, tar_framed_bytes(&entries)?)
+}
+
+/// Exact length of the tar the consumer archive writer produces for these
+/// entries: a header block per entry, a GNU long-name member for a path or
+/// link target over the inline limit, file data rounded up to whole blocks,
+/// and the two-block trailer.
+fn tar_framed_bytes(entries: &[GuestStagingEntry]) -> anyhow::Result<u64> {
+    let long_member = |name_bytes: usize| -> u64 {
+        if name_bytes > TAR_INLINE_NAME_BYTES {
+            TAR_BLOCK_BYTES + blocks(name_bytes as u64 + 1)
+        } else {
+            0
+        }
+    };
+    let mut total = 2 * TAR_BLOCK_BYTES;
+    for entry in entries {
+        let entry_bytes = TAR_BLOCK_BYTES
+            + long_member(entry.path().len())
+            + match entry {
+                GuestStagingEntry::RegularFile { bytes, .. } => blocks(*bytes),
+                GuestStagingEntry::Directory { .. } => 0,
+                GuestStagingEntry::Symlink { target, .. } => long_member(target.len()),
+            };
+        total = total
+            .checked_add(entry_bytes)
+            .context("archive framed byte total overflow")?;
+    }
+    Ok(total)
+}
+
+fn blocks(bytes: u64) -> u64 {
+    bytes.div_ceil(TAR_BLOCK_BYTES) * TAR_BLOCK_BYTES
 }
 
 /// The digests must come from the slot qualification itself realizes: the
@@ -319,6 +507,131 @@ mod tests {
             "a different slot was accepted"
         );
         Ok(())
+    }
+
+    fn tree_realization(total_bytes: u64) -> ExternalContentRealization {
+        ExternalContentRealization {
+            id: "runtime".into(),
+            kind: ExternalContentKind::Tree,
+            mode: ExternalContentMode::Pinned,
+            manifest_hash: "a".repeat(64),
+            entry_count: 2,
+            total_bytes,
+            mount_root: ExternalContentMountRoot::ExecutionRuntime,
+            mount: "runtime".into(),
+        }
+    }
+
+    fn member(
+        path: &str,
+        kind: ExternalContentManifestEntryKind,
+        size: u64,
+    ) -> ProductArchiveMember {
+        ProductArchiveMember {
+            path: path.into(),
+            kind,
+            size,
+            target: None,
+        }
+    }
+
+    #[test]
+    fn a_tree_product_adds_a_root_entry_and_its_manifest_record() -> Result<()> {
+        let entries = product_entries(
+            "product-00",
+            &tree_realization(700),
+            (
+                vec![
+                    member("bin", ExternalContentManifestEntryKind::Dir, 0),
+                    member("bin/runner", ExternalContentManifestEntryKind::File, 700),
+                ],
+                300,
+            ),
+        );
+        // Two content entries, the tree root, and the manifest record.
+        ensure!(entries.len() == 4, "unexpected entries: {entries:?}");
+        ensure!(entries[0].path() == "product-00", "tree root is not first");
+        ensure!(
+            entries[3].path() == "product-00-manifest.json",
+            "manifest record is not last"
+        );
+        let facts = RemoteVerifierFacts {
+            lane: RemoteVerifierLane::Worker,
+            scenario_source_digest: "b".repeat(64),
+            verifier_artifact_hash: "c".repeat(64),
+            verifier_bytes: 1000,
+            archive_members: BTreeMap::from([("extra".to_owned(), 5000)]),
+        };
+        let budget = archive_budget_for(&entries, &facts)?;
+        ensure!(budget.maximum_entries == 6, "entries: {budget:?}");
+        // Product bytes plus the manifest record, the verifier and the record maximum;
+        // the Worker lane ships no archive members.
+        ensure!(
+            budget.maximum_regular_bytes
+                == 700 + 300 + 1000 + MAX_CONSUMER_INPUT_RECORD_BYTES as u64,
+            "regular bytes: {budget:?}"
+        );
+        // Six headers and the trailer, with data rounded to whole blocks.
+        let expected = 6 * 512
+            + 1024
+            + blocks(MAX_CONSUMER_INPUT_RECORD_BYTES as u64)
+            + blocks(1000)
+            + blocks(700)
+            + blocks(300);
+        ensure!(
+            budget.maximum_framed_bytes == expected,
+            "framed: {budget:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_probe_budget_charges_archive_members_and_no_products() -> Result<()> {
+        let facts = RemoteVerifierFacts {
+            lane: RemoteVerifierLane::Probe,
+            scenario_source_digest: "b".repeat(64),
+            verifier_artifact_hash: "c".repeat(64),
+            verifier_bytes: 1000,
+            archive_members: BTreeMap::from([("extra".to_owned(), 5000)]),
+        };
+        let products = vec![sized_file("product-00", 1 << 40)];
+        let budget = archive_budget_for(&products, &facts)?;
+        ensure!(budget.maximum_entries == 3, "entries: {budget:?}");
+        ensure!(
+            budget.maximum_regular_bytes == 6000 + MAX_CONSUMER_INPUT_RECORD_BYTES as u64,
+            "regular bytes: {budget:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn long_names_and_targets_are_charged_their_long_name_members() -> Result<()> {
+        let short = tar_framed_bytes(&[sized_file("a", 10)])?;
+        let long = tar_framed_bytes(&[sized_file(&"a".repeat(101), 10)])?;
+        // Long-name member: its header plus the name and NUL in one block.
+        ensure!(long == short + 512 + 512, "long name: {long} vs {short}");
+        let link = tar_framed_bytes(&[GuestStagingEntry::Symlink {
+            path: "p/l".into(),
+            target: "t".repeat(101),
+        }])?;
+        ensure!(link == 1024 + 512 + 512 + 512, "long target: {link}");
+        Ok(())
+    }
+
+    #[test]
+    fn an_overflowing_or_unbounded_delivery_has_no_budget() {
+        let facts = RemoteVerifierFacts {
+            lane: RemoteVerifierLane::Worker,
+            scenario_source_digest: "b".repeat(64),
+            verifier_artifact_hash: "c".repeat(64),
+            verifier_bytes: 1,
+            archive_members: BTreeMap::new(),
+        };
+        assert!(archive_budget_for(&[sized_file("product-00", u64::MAX)], &facts).is_err());
+        assert!(
+            archive_budget_for(&[sized_file("product-00", 5 * 1024 * 1024 * 1024)], &facts)
+                .is_err()
+        );
     }
 
     #[test]

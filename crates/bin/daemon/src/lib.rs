@@ -20,9 +20,11 @@ pub use ryeos_scheduler as scheduler;
 
 static SHUTDOWN_TX: OnceCell<tokio::sync::broadcast::Sender<()>> = OnceCell::new();
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
+static OFFLINE_OPERATION_STOP: AtomicBool = AtomicBool::new(false);
 
 pub fn init_shutdown_channel() {
     SHUTDOWN_REQUESTED.store(false, Ordering::Release);
+    OFFLINE_OPERATION_STOP.store(false, Ordering::Release);
     let (shutdown_tx, _) = tokio::sync::broadcast::channel(4);
     let _ = SHUTDOWN_TX.set(shutdown_tx);
 }
@@ -32,6 +34,19 @@ pub fn request_shutdown() {
     if let Some(tx) = SHUTDOWN_TX.get() {
         let _ = tx.send(());
     }
+}
+
+/// A plain operator stop so that the next startup applies the offline
+/// operations queued in the inbox. The exit is orderly and carries its own
+/// marker reason; it inhibits no restart, since the supervisor is expected to
+/// start the next incarnation.
+pub fn request_offline_operation_stop() {
+    OFFLINE_OPERATION_STOP.store(true, Ordering::Release);
+    request_shutdown();
+}
+
+pub fn offline_operation_stop_requested() -> bool {
+    OFFLINE_OPERATION_STOP.load(Ordering::Acquire)
 }
 
 pub fn shutdown_requested() -> bool {

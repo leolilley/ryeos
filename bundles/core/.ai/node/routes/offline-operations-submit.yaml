@@ -1,0 +1,15 @@
+# ryeos:signed:2026-10-28T22:38:56Z:6974fee097190ef9b665f32dc3bd1ae5f97c9c0a5819835a0ecec103bb1e61fa:8EQy2NVylZiPjCrSoaoccFJjLn7J29Tb/L8QKxVkxV1kDvMTOoLYxqjl75sES32/hgmI1F5ACNMcpk8C+xqyCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+id: core/offline-operations-submit
+path: /offline-operations
+methods:
+  - POST
+auth: ryeos_signed
+request:
+  body: json
+limits:
+  body_bytes_max: 4194304
+  timeout_ms: 30000
+  concurrent_max: 1
+response:
+  mode: json
+  source: service:offline-operations/submit

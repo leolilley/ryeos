@@ -73,6 +73,7 @@ pub mod objects_get;
 pub mod objects_has;
 pub mod objects_put;
 pub mod objects_stage_chunk;
+pub mod offline_operations;
 pub mod product_qualification_launch;
 pub mod project_apply_snapshot;
 pub mod project_snapshot_status;
@@ -303,6 +304,9 @@ pub const ALL: &[ServiceDescriptor] = &[
     rebuild::REBUILD_DESCRIPTOR,
     authorize_key::DESCRIPTOR,
     authorize_client::DESCRIPTOR,
+    offline_operations::SUBMIT,
+    offline_operations::FACTS,
+    offline_operations::STATUS,
     #[cfg(feature = "scheduling")]
     scheduler_register::DESCRIPTOR,
     #[cfg(feature = "scheduling")]

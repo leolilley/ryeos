@@ -686,6 +686,24 @@ impl TestNativeHost {
         }
     }
 
+    /// Give up this host without tearing it down, for a failed test whose
+    /// Store cannot be closed in bounded time. The live host is parked in
+    /// the process-wide retained list so its drop stays quiet, and the
+    /// arena is recorded as leaked: it really is still installed, so a
+    /// later host in this process is refused with `reason` instead of
+    /// racing it.
+    pub fn abandon(mut self, reason: &str) {
+        let live = self.live.take().expect("live test host present");
+        self.after_backend.take();
+        *LEAKED.lock().unwrap_or_else(PoisonError::into_inner) =
+            Some(format!("abandoned: {reason}"));
+        RETAINED
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(live);
+        *HOLDER.lock().unwrap_or_else(PoisonError::into_inner) = None;
+    }
+
     /// Tear down this arena and install a fresh one under the same serial
     /// guard, for suites that need more than one envelope of tickets.
     pub fn cycle(&mut self) {

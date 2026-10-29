@@ -11,7 +11,6 @@ use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, bail, ensure};
 use base64::Engine as _;
-use chrono::{DateTime, Duration, Utc};
 use lillux::crypto::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -28,12 +27,12 @@ pub const MAX_RECEIPT_BYTES: u64 = 192 * 1024;
 /// The inbox holds at most this many requests; the rest wait outside it.
 pub const MAX_INBOX_REQUESTS: usize = 16;
 /// Longest a signer may let a request live.
-pub const MAX_REQUEST_LIFETIME: Duration = Duration::hours(24);
+pub const MAX_REQUEST_LIFETIME_SECS: u64 = 24 * 60 * 60;
 /// How long a request lives when its signer names no other lifetime.
-pub const DEFAULT_REQUEST_LIFETIME: Duration = Duration::hours(1);
+pub const DEFAULT_REQUEST_LIFETIME_SECS: u64 = 60 * 60;
 /// How far ahead of this node's clock a request's `issued_at` may be before
 /// it counts as being from the future. Signers and nodes are different hosts.
-pub const CLOCK_SKEW_ALLOWANCE: Duration = Duration::minutes(2);
+pub const CLOCK_SKEW_ALLOWANCE_SECS: u64 = 2 * 60;
 /// Most arguments bytes a request may carry; the request bound already caps
 /// the whole document, this keeps one field from using all of it.
 pub const MAX_ARGUMENT_BYTES: usize = 32 * 1024;
@@ -80,11 +79,30 @@ pub fn decode_signature(encoded: &str) -> Result<Signature> {
     Signature::from_slice(&bytes).context("signature is not an Ed25519 signature")
 }
 
-/// Parse an RFC 3339 instant.
-pub fn parse_instant(field: &str, value: &str) -> Result<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(value)
-        .map(|instant| instant.with_timezone(&Utc))
-        .with_context(|| format!("`{field}` is not an RFC 3339 instant"))
+/// An instant in the one encoding Lillux emits, `YYYY-MM-DDTHH:MM:SSZ`.
+/// Anything else (offsets, fractions, other spellings) is not an instant of
+/// this schema; instants compare by their seconds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct CanonicalInstant(u64);
+
+impl CanonicalInstant {
+    pub fn parse(field: &str, value: &str) -> Result<Self> {
+        lillux::time::unix_secs_from_iso8601(value)
+            .map(Self)
+            .with_context(|| format!("`{field}` is not a canonical UTC instant"))
+    }
+
+    pub fn from_unix_secs(secs: u64) -> Self {
+        Self(secs)
+    }
+
+    pub fn unix_secs(self) -> u64 {
+        self.0
+    }
+
+    pub fn encode(self) -> String {
+        lillux::time::iso8601_from_unix_secs(self.0)
+    }
 }
 
 /// The body of a request: everything the signer commits to.
@@ -159,12 +177,12 @@ impl RequestBody {
         Ok(())
     }
 
-    pub fn issued_at(&self) -> Result<DateTime<Utc>> {
-        parse_instant("issued_at", &self.issued_at)
+    pub fn issued_at(&self) -> Result<CanonicalInstant> {
+        CanonicalInstant::parse("issued_at", &self.issued_at)
     }
 
-    pub fn not_after(&self) -> Result<DateTime<Utc>> {
-        parse_instant("not_after", &self.not_after)
+    pub fn not_after(&self) -> Result<CanonicalInstant> {
+        CanonicalInstant::parse("not_after", &self.not_after)
     }
 
     /// The lifetime window must be positive and within the maximum.
@@ -173,9 +191,9 @@ impl RequestBody {
         let not_after = self.not_after()?;
         ensure!(not_after > issued, "`not_after` is not after `issued_at`");
         ensure!(
-            not_after - issued <= MAX_REQUEST_LIFETIME,
+            not_after.unix_secs() - issued.unix_secs() <= MAX_REQUEST_LIFETIME_SECS,
             "request lifetime exceeds {} hours",
-            MAX_REQUEST_LIFETIME.num_hours()
+            MAX_REQUEST_LIFETIME_SECS / 3600
         );
         Ok(())
     }
@@ -393,6 +411,8 @@ pub enum RefusalReason {
     HandlerFailed,
     /// The handler failed, or the node died inside it, three startups running.
     Stuck,
+    /// The inbox of a running node holds as many requests as it may.
+    InboxFull,
 }
 
 impl RefusalReason {
@@ -423,6 +443,7 @@ impl RefusalReason {
             Self::ExpectedResultMismatch => "expected_result_mismatch",
             Self::HandlerFailed => "handler_failed",
             Self::Stuck => "stuck",
+            Self::InboxFull => "inbox_full",
         }
     }
 }
@@ -622,5 +643,36 @@ mod tests {
             genesis_ledger_head(&"a".repeat(64)),
             genesis_ledger_head(&"b".repeat(64))
         );
+    }
+}
+
+#[cfg(test)]
+mod instant_tests {
+    use super::*;
+
+    #[test]
+    fn an_instant_is_only_the_canonical_encoding() {
+        let at = CanonicalInstant::parse("issued_at", "2026-10-29T01:02:03Z").unwrap();
+        assert_eq!(at.encode(), "2026-10-29T01:02:03Z");
+        assert_eq!(CanonicalInstant::from_unix_secs(at.unix_secs()), at);
+        for text in [
+            "2026-10-29T01:02:03+00:00",
+            "2026-10-29T01:02:03.000Z",
+            "2026-10-29T14:02:03+13:00",
+            "2026-10-29 01:02:03Z",
+            "2026-02-30T01:02:03Z",
+        ] {
+            assert!(
+                CanonicalInstant::parse("issued_at", text).is_err(),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn instants_compare_by_their_seconds() {
+        let earlier = CanonicalInstant::parse("a", "2026-10-29T01:02:03Z").unwrap();
+        let later = CanonicalInstant::parse("b", "2026-10-29T01:02:04Z").unwrap();
+        assert!(earlier < later);
     }
 }

@@ -33,11 +33,11 @@ pub use bundle_set_update::load_current_consumer_publication_policy;
 pub use init::{
     InitCompletionReport, InitOperatorCeremony, InitOperatorProfile, InitOptions, InitPhase,
     InitProgress, InitReport, OfflineInitCompletionSigner, ProspectiveInitCompletion,
-    ProspectiveInitCompletionInput, SubstrateIdentity, load_trusted_init_node_profile,
-    load_verified_substrate_identity, preflight_existing_policy_generation,
-    prepare_bundle_set_init_completion, prepare_prospective_init_completion,
-    prospective_replacement_policy_digest, run_init, run_init_under_lock,
-    run_init_with_operator_ceremony, run_init_with_progress,
+    ProspectiveInitCompletionInput, SubstrateIdentity, SubstrateImageReplacement,
+    load_trusted_init_node_profile, load_verified_substrate_identity,
+    preflight_existing_policy_generation, prepare_bundle_set_init_completion,
+    prepare_prospective_init_completion, prospective_replacement_policy_digest, run_init,
+    run_init_under_lock, run_init_with_operator_ceremony, run_init_with_progress,
     seal_init_completion_after_bundle_registration_change,
     seal_init_completion_after_policy_update, verify_init_completion,
 };

@@ -6,7 +6,6 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use base64::Engine as _;
-use chrono::Duration as ChronoDuration;
 use lillux::crypto::SigningKey;
 use ryeos_node_runtime::identity::{WildcardPolicy, reconcile_authorized_key_toml_scopes};
 use serde_json::{Value, json};
@@ -46,8 +45,12 @@ fn fingerprint(key: &SigningKey) -> String {
     lillux::signature::compute_fingerprint(&key.verifying_key())
 }
 
-fn stamp(offset: ChronoDuration) -> String {
-    (Utc::now() + offset).to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+fn stamp(offset_secs: i64) -> String {
+    lillux::time::iso8601_from_unix_secs(
+        lillux::time::unix_secs_now()
+            .checked_add_signed(offset_secs)
+            .unwrap(),
+    )
 }
 
 impl Fixture {
@@ -81,8 +84,8 @@ impl Fixture {
             inputs: BTreeMap::new(),
             expected_result: BTreeMap::new(),
             precondition,
-            issued_at: stamp(ChronoDuration::seconds(-30)),
-            not_after: stamp(ChronoDuration::hours(1)),
+            issued_at: stamp(-30),
+            not_after: stamp(3600),
         }
     }
 
@@ -588,8 +591,8 @@ fn only_the_local_operator_may_reset_authorization() {
 fn an_expired_request_is_refused() {
     let fx = fixture();
     let mut body = fx.restart_body();
-    body.issued_at = stamp(ChronoDuration::hours(-3));
-    body.not_after = stamp(ChronoDuration::hours(-2));
+    body.issued_at = stamp(-10800);
+    body.not_after = stamp(-7200);
     fx.drop_request(&fx.sign(body));
     fx.run();
     assert_eq!(fx.only_refusal(), RefusalReason::Expired);
@@ -599,8 +602,8 @@ fn an_expired_request_is_refused() {
 fn a_request_from_the_future_is_refused() {
     let fx = fixture();
     let mut body = fx.restart_body();
-    body.issued_at = stamp(ChronoDuration::minutes(30));
-    body.not_after = stamp(ChronoDuration::hours(2));
+    body.issued_at = stamp(1800);
+    body.not_after = stamp(7200);
     fx.drop_request(&fx.sign(body));
     fx.run();
     assert_eq!(fx.only_refusal(), RefusalReason::FromTheFuture);
@@ -610,8 +613,8 @@ fn a_request_from_the_future_is_refused() {
 fn a_lifetime_beyond_a_day_is_refused() {
     let fx = fixture();
     let mut body = fx.restart_body();
-    body.issued_at = stamp(ChronoDuration::minutes(-1));
-    body.not_after = stamp(ChronoDuration::hours(30));
+    body.issued_at = stamp(-60);
+    body.not_after = stamp(108000);
     fx.drop_request(&fx.sign(body));
     fx.run();
     assert_eq!(fx.only_refusal(), RefusalReason::InvalidLifetime);
@@ -721,12 +724,12 @@ fn a_request_in_the_ledger_is_refused_as_a_replay() {
 fn of_two_requests_signed_against_one_head_the_earlier_applies() {
     let fx = fixture();
     let mut early = fx.restart_body();
-    early.issued_at = stamp(ChronoDuration::minutes(-10));
+    early.issued_at = stamp(-600);
     let mut late = fx.restart_body();
-    late.issued_at = stamp(ChronoDuration::minutes(-5));
+    late.issued_at = stamp(-300);
     late.arguments = json!({});
     // Distinct documents: a different lifetime gives a different digest.
-    late.not_after = stamp(ChronoDuration::hours(2));
+    late.not_after = stamp(7200);
     let early = fx.sign(early);
     let late = fx.sign(late);
     fx.drop_request(&late);
@@ -757,8 +760,8 @@ fn a_waiting_request_is_refused_once_it_expires() {
     let mut body = fx.restart_body();
     body.precondition
         .insert("ledger_head".into(), "9".repeat(64));
-    body.issued_at = stamp(ChronoDuration::minutes(-90));
-    body.not_after = stamp(ChronoDuration::minutes(-30));
+    body.issued_at = stamp(-5400);
+    body.not_after = stamp(-1800);
     fx.drop_request(&fx.sign(body));
     fx.run();
     assert_eq!(fx.only_refusal(), RefusalReason::Expired);
@@ -1162,7 +1165,7 @@ fn an_alone_operation_waits_behind_anything_applied_before_it() {
         node: &fx.node,
         store: &fx.store,
         lock: &lock,
-        clock: Utc::now,
+        clock: lillux::time::unix_secs_now,
         bumped: RefCell::new(BTreeMap::new()),
         notes: RefCell::new(Vec::new()),
     };
@@ -1444,8 +1447,8 @@ fn a_continuation_pinned_to_neither_the_current_head_nor_its_receipts_is_refused
 fn a_continuation_is_not_checked_against_the_clock() {
     let fx = fixture();
     let mut body = fx.restart_body();
-    body.issued_at = stamp(ChronoDuration::hours(-3));
-    body.not_after = stamp(ChronoDuration::hours(-2));
+    body.issued_at = stamp(-10800);
+    body.not_after = stamp(-7200);
     let pending = pending_for(&fx, fx.sign(body), Phase::Running);
     fx.store.save_pending(&pending).unwrap();
     assert_eq!(fx.run().applied.len(), 1);
@@ -1546,7 +1549,7 @@ fn a_refused_request_leaves_an_input_another_still_names() {
     stale
         .precondition
         .insert(FACT_POLICY_GENERATION.into(), "7".repeat(64));
-    stale.not_after = stamp(ChronoDuration::hours(2));
+    stale.not_after = stamp(7200);
     fx.drop_request(&fx.sign(stale));
     fx.run();
     assert_eq!(fx.only_refusal(), RefusalReason::PreconditionFailed);

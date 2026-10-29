@@ -177,7 +177,8 @@ mod tests {
     use super::super::{BindingDocument, InstalledExternalExecutionBinding};
     use super::*;
     use crate::node_config::sections::runtime_snapshot_production::compose::{
-        ProductionComposeRequest, ProductionLimits, compose_with_facts, tests as production_tests,
+        ProducerFactsSource, ProductionComposeRequest, ProductionLimits, compose_with_facts,
+        tests as production_tests,
     };
 
     const ID: &str = "fixture-binding";
@@ -362,7 +363,9 @@ mod tests {
                 app_root: node.root.path(),
                 state_lock: &lock,
                 id: ID.into(),
-                external_binding_id: "operator".into(),
+                facts_source: ProducerFactsSource::ExternalBinding {
+                    id: "operator".into(),
+                },
                 snapshot_spec: production_tests::SPEC.to_vec(),
                 sandbox_group_id: "sbg-exact".into(),
                 region: "oregon".into(),

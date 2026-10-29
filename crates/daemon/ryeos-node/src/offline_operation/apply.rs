@@ -22,7 +22,6 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
-use chrono::{DateTime, Utc};
 use ryeos_engine::roots::RuntimeRoot;
 use ryeos_node_runtime::identity::NodeIdentity;
 use ryeos_node_runtime::state_lock::{StateLock, default_lock_path};
@@ -31,8 +30,8 @@ use serde_json::{Value, json};
 pub use ledger::{LEDGER_KEEP, LEDGER_ROTATE_AT, Ledger, LedgerState};
 
 use super::contract::{
-    DEFAULT_REQUEST_LIFETIME, REQUEST_SCHEMA, Refusal, RefusalReason, RequestBody, SignedReceipt,
-    SignedRequest, bound_result,
+    DEFAULT_REQUEST_LIFETIME_SECS, REQUEST_SCHEMA, Refusal, RefusalReason, RequestBody,
+    SignedReceipt, SignedRequest, bound_result,
 };
 use super::envelope::{Envelope, WildcardGrant, wildcard_only_grants};
 use super::facts::{FACT_LEDGER_HEAD, MANDATORY_FACTS, NodeFacts, measure};
@@ -55,7 +54,8 @@ const MAX_ROUNDS: usize = 64;
 pub struct ApplyOptions {
     pub time_budget: Duration,
     pub lock_timeout: Duration,
-    pub clock: fn() -> DateTime<Utc>,
+    /// Unix seconds.
+    pub clock: fn() -> u64,
 }
 
 impl Default for ApplyOptions {
@@ -63,7 +63,7 @@ impl Default for ApplyOptions {
         Self {
             time_budget: DEFAULT_TIME_BUDGET,
             lock_timeout: DEFAULT_LOCK_TIMEOUT,
-            clock: Utc::now,
+            clock: lillux::time::unix_secs_now,
         }
     }
 }
@@ -172,7 +172,7 @@ impl ApplyReport {
     }
 }
 
-fn node_identity(app_root: &Path) -> Result<Option<NodeIdentity>, String> {
+pub(super) fn node_identity(app_root: &Path) -> Result<Option<NodeIdentity>, String> {
     let path = RuntimeRoot::new(app_root.to_path_buf()).node_signing_key_path();
     match lillux::read_optional_regular_file_bounded_no_follow(&path, 64 * 1024) {
         Ok(None) => Ok(None),
@@ -279,7 +279,7 @@ struct Applier<'a> {
     node: &'a NodeIdentity,
     store: &'a Store,
     lock: &'a StateLock,
-    clock: fn() -> DateTime<Utc>,
+    clock: fn() -> u64,
     /// Attempt counts as they stood before this startup began counting, by
     /// canonical request digest: a request is counted once per startup
     /// however many rounds look at it.
@@ -367,7 +367,7 @@ impl<'a> Applier<'a> {
         node: &'a NodeIdentity,
         store: &'a Store,
         lock: &'a StateLock,
-        clock: fn() -> DateTime<Utc>,
+        clock: fn() -> u64,
     ) -> Self {
         Self {
             app_root,
@@ -385,7 +385,7 @@ impl<'a> Applier<'a> {
         self.notes.borrow_mut().push(problem);
     }
 
-    fn now(&self) -> DateTime<Utc> {
+    fn now(&self) -> u64 {
         (self.clock)()
     }
 
@@ -1106,24 +1106,7 @@ impl<'a> Applier<'a> {
         body: &RequestBody,
         ledger_head: &str,
     ) -> std::result::Result<BTreeMap<String, String>, Refusal> {
-        let facts = measure(self.app_root, ledger_head);
-        let mut measured = BTreeMap::new();
-        for fact in MANDATORY_FACTS.iter().chain(spec.preconditions) {
-            let pinned = body.precondition.get(*fact).map(String::as_str);
-            let actual = facts.get(*fact).map(String::as_str);
-            if pinned != actual || actual.is_none() {
-                return Err(Refusal::new(
-                    RefusalReason::PreconditionFailed,
-                    format!(
-                        "fact `{fact}` is {} on this node, not the {} the request was signed against",
-                        actual.unwrap_or("unmeasured"),
-                        pinned.unwrap_or("unpinned")
-                    ),
-                ));
-            }
-            measured.insert((*fact).to_owned(), actual.unwrap_or_default().to_owned());
-        }
-        Ok(measured)
+        check_pins(self.app_root, spec, body, ledger_head)
     }
 
     /// Open each input once, check its size against the slot, hash the
@@ -1275,6 +1258,34 @@ impl<'a> Applier<'a> {
     }
 }
 
+/// Measure every fact the request pins and compare. The facts are measured
+/// from the volume, so a running node and a stopped one answer alike.
+pub(super) fn check_pins(
+    app_root: &Path,
+    spec: &OperationSpec,
+    body: &RequestBody,
+    ledger_head: &str,
+) -> std::result::Result<BTreeMap<String, String>, Refusal> {
+    let facts = measure(app_root, ledger_head);
+    let mut measured = BTreeMap::new();
+    for fact in MANDATORY_FACTS.iter().chain(spec.preconditions) {
+        let pinned = body.precondition.get(*fact).map(String::as_str);
+        let actual = facts.get(*fact).map(String::as_str);
+        if pinned != actual || actual.is_none() {
+            return Err(Refusal::new(
+                RefusalReason::PreconditionFailed,
+                format!(
+                    "fact `{fact}` is {} on this node, not the {} the request was signed against",
+                    actual.unwrap_or("unmeasured"),
+                    pinned.unwrap_or("unpinned")
+                ),
+            ));
+        }
+        measured.insert((*fact).to_owned(), actual.unwrap_or_default().to_owned());
+    }
+    Ok(measured)
+}
+
 /// Step 7: every result fact the request pinned must be what the handler
 /// reported.
 pub(super) fn verify_expected(
@@ -1413,9 +1424,8 @@ pub fn apply_local_with_options(
             inputs: digests,
             expected_result: draft.expected_result,
             precondition,
-            issued_at: now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-            not_after: (now + DEFAULT_REQUEST_LIFETIME)
-                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            issued_at: lillux::time::iso8601_from_unix_secs(now),
+            not_after: lillux::time::iso8601_from_unix_secs(now + DEFAULT_REQUEST_LIFETIME_SECS),
         },
         &operator,
     )?;
@@ -1469,6 +1479,16 @@ pub fn read_facts(app_root: &Path) -> Result<NodeFacts> {
         Err(_) => "unreadable".to_owned(),
     };
     Ok(measure(app_root, &head))
+}
+
+/// The fingerprint of this node's identity key, for the operator who signs a
+/// request for it.
+pub fn read_node_fingerprint(app_root: &Path) -> Result<String> {
+    Ok(node_identity(app_root)
+        .map_err(|error| anyhow!("{error}"))?
+        .context("the node has no identity; it is not initialized")?
+        .fingerprint()
+        .to_owned())
 }
 
 /// The node's ledger chain tip, verified.

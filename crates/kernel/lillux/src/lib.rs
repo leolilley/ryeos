@@ -50,8 +50,8 @@ pub use exec::{
     inherited_descriptor_coordinate, inherited_descriptor_path_for, inherited_duplex_channel_pair,
     protect_descriptor_from_exec, replace_current_process, sealed_executable_memfd,
     sealed_executable_memfd_from_reader, sealed_memfd, sealed_normalized_data_memfd,
-    supervised_launcher_attachment_status_pipe, supervised_launcher_status_pipe,
-    validate_subprocess_limits,
+    stdout_exclusive_file, supervised_launcher_attachment_status_pipe,
+    supervised_launcher_status_pipe, validate_subprocess_limits,
 };
 pub use exec::{
     ForkSensitiveDescriptorLeaseRefused, current_thread_retains_fork_sensitive_descriptors,

@@ -2443,6 +2443,91 @@ fn serve_production_controller_tls(
     })
 }
 
+/// Refuse a clean run whose fixture controller recorded a connection-level
+/// failure: a request that could not be read, a response that could not be
+/// written, or a connection that could not be set up.
+fn assert_controller_connections_clean(evidence: &Mutex<Vec<String>>) {
+    let evidence = evidence
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let broken: Vec<_> = evidence
+        .iter()
+        .filter(|line| {
+            [
+                "request read failed",
+                "response write failed",
+                "connection setup failed",
+            ]
+            .iter()
+            .any(|prefix| line.starts_with(prefix))
+        })
+        .collect();
+    assert!(
+        broken.is_empty(),
+        "candidate controller connection failures: {broken:#?}"
+    );
+}
+
+/// Append a fixture evidence line, tolerating a lock poisoned by a failed
+/// handler so the original failure is not replaced.
+fn record(evidence: &Mutex<Vec<String>>, line: String) {
+    evidence
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push(line);
+}
+
+/// Describe what the detached supervisor of every retained occurrence under
+/// the adapter's state root recorded when it ended. The supervisor's fate is
+/// otherwise visible only in its occurrence's terminal record, which nothing
+/// on the daemon side reads while a startup wait is still pending. Read-only
+/// and bounded; every failure to read is itself reported as text.
+fn supervisor_terminal_evidence(provider_state_root: &Path) -> String {
+    const STDERR_TAIL_BYTES: usize = 4096;
+    let entries = match std::fs::read_dir(provider_state_root) {
+        Ok(entries) => entries,
+        Err(error) => return format!("provider state unreadable: {error}"),
+    };
+    let mut lines = Vec::new();
+    for entry in entries.flatten() {
+        let occurrence = entry.path();
+        if !occurrence.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let terminal = occurrence.join("terminal.json");
+        let line = match std::fs::read(&terminal) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                format!("occurrence {name}: no terminal record (supervisor not ended)")
+            }
+            Err(error) => format!("occurrence {name}: terminal record unreadable: {error}"),
+            Ok(bytes) => match serde_json::from_slice::<serde_json::Value>(&bytes) {
+                Err(error) => format!("occurrence {name}: terminal record undecodable: {error}"),
+                Ok(record) => {
+                    let stderr = record["supervisor_stderr"].as_str().unwrap_or("");
+                    let mut start = stderr.len().saturating_sub(STDERR_TAIL_BYTES);
+                    while !stderr.is_char_boundary(start) {
+                        start += 1;
+                    }
+                    format!(
+                        "occurrence {name}: supervisor_exit_code={}; supervisor_timed_out={}; \
+                         supervisor_stderr_tail={:?}",
+                        record["supervisor_exit_code"],
+                        record["supervisor_timed_out"],
+                        &stderr[start..]
+                    )
+                }
+            },
+        };
+        lines.push(line);
+    }
+    if lines.is_empty() {
+        "no retained occurrence directories".to_owned()
+    } else {
+        lines.join("; ")
+    }
+}
+
 fn serve_candidate_controller_tls(
     listener: TcpListener,
     state: Arc<ryeos_app::state::AppState>,
@@ -2459,59 +2544,136 @@ fn serve_candidate_controller_tls(
         // A real Codex turn may run between channel frames. Keep the fixture
         // listener alive until the explicit stop signal, with a bounded idle
         // deadline that resets after each authenticated exchange.
-        let mut idle_deadline = Instant::now() + Duration::from_secs(120);
-        let mut handled = 0;
-        loop {
-            let stream = match listener.accept() {
-                Ok((stream, _)) => stream,
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    if stop.load(Ordering::Acquire) {
-                        break;
+        let idle_deadline = Mutex::new(Instant::now() + Duration::from_secs(120));
+        let handled = AtomicUsize::new(0);
+        // The request line of every request served, so a stalled run names
+        // which requests arrived instead of only how many.
+        let served = Mutex::new(Vec::<String>::new());
+        // Connections accepted whose handler has not finished; the
+        // controller is idle only when none is in flight.
+        let in_flight = AtomicUsize::new(0);
+        // The accept loop only accepts. Each connection performs its TLS
+        // handshake and reads its request on its own thread, so a client
+        // connecting while another request is being handled is not left in
+        // the kernel backlog against the supervisor's connect and request
+        // bounds. Only the daemon handler is serialized, behind this lock.
+        let dispatch_lock = Mutex::new(());
+        std::thread::scope(|scope| {
+            loop {
+                let stream = match listener.accept() {
+                    Ok((stream, _)) => stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if stop.load(Ordering::Acquire) {
+                            break;
+                        }
+                        if in_flight.load(Ordering::Acquire) == 0
+                            && Instant::now()
+                                >= *idle_deadline
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        {
+                            record(
+                                &evidence,
+                                format!(
+                                    "controller timed out after {} requests: {:?}",
+                                    handled.load(Ordering::Acquire),
+                                    served
+                                        .lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                ),
+                            );
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(5));
+                        continue;
                     }
-                    if Instant::now() >= idle_deadline {
-                        evidence
-                            .lock()
-                            .unwrap()
-                            .push(format!("controller timed out after {handled} requests"));
-                        break;
+                    Err(error) => panic!("candidate controller listener failed: {error}"),
+                };
+                in_flight.fetch_add(1, Ordering::AcqRel);
+                let in_flight = &in_flight;
+                let (tls_config, runtime, state, evidence) =
+                    (&tls_config, &runtime, &state, &evidence);
+                let (idle_deadline, handled, dispatch_lock, served) =
+                    (&idle_deadline, &handled, &dispatch_lock, &served);
+                scope.spawn(move || {
+                    // An accepted socket may inherit the listener's
+                    // non-blocking mode; the handshake needs blocking reads
+                    // bounded by the read timeout.
+                    if let Err(error) = stream
+                        .set_nonblocking(false)
+                        .and_then(|()| stream.set_read_timeout(Some(Duration::from_secs(5))))
+                    {
+                        record(evidence, format!("connection setup failed: {error}"));
+                        in_flight.fetch_sub(1, Ordering::AcqRel);
+                        return;
                     }
-                    std::thread::sleep(Duration::from_millis(5));
-                    continue;
-                }
-                Err(error) => panic!("candidate controller listener failed: {error}"),
-            };
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
-            let connection = rustls::ServerConnection::new(tls_config.clone()).unwrap();
-            let mut tls = rustls::StreamOwned::new(connection, stream);
-            let request = read_http_request(&mut tls).unwrap();
-            let result = dispatch_production_controller_request(&runtime, &state, &request)
-                // Production start/termination own readiness, release and
-                // completion. The TLS fixture only carries protocol bytes.
-                .map(|(body, _, _)| body);
-            let response = match result {
-                Ok(body) => https_json_response("200 OK", &body),
-                Err(error) => {
-                    let diagnostic = format!("{error:#}");
-                    evidence
-                        .lock()
-                        .unwrap()
-                        .push(format!("request {} failed: {diagnostic}", handled + 1));
-                    https_json_response(
-                        "500 Internal Server Error",
-                        serde_json::json!({"error":diagnostic})
-                            .to_string()
-                            .as_bytes(),
+                    let connection = rustls::ServerConnection::new(tls_config.clone()).unwrap();
+                    let mut tls = rustls::StreamOwned::new(connection, stream);
+                    let request = match read_http_request(&mut tls) {
+                        Ok(request) => request,
+                        Err(error) => {
+                            record(evidence, format!("request read failed: {error:#}"));
+                            in_flight.fetch_sub(1, Ordering::AcqRel);
+                            return;
+                        }
+                    };
+                    let request_line = String::from_utf8_lossy(
+                        request
+                            .split(|byte| *byte == b'\r')
+                            .next()
+                            .unwrap_or_default(),
                     )
-                }
-            };
-            tls.write_all(&response).unwrap();
-            tls.flush().unwrap();
-            handled += 1;
-            idle_deadline = Instant::now() + Duration::from_secs(120);
-        }
-        handled
+                    .into_owned();
+                    served
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(request_line.clone());
+                    let result = {
+                        let _serialized = dispatch_lock
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        dispatch_production_controller_request(runtime, state, &request)
+                            // Production start/termination own readiness,
+                            // release and completion. The TLS fixture only
+                            // carries protocol bytes.
+                            .map(|(body, _, _)| body)
+                    };
+                    let response = match result {
+                        Ok(body) => https_json_response("200 OK", &body),
+                        Err(error) => {
+                            let diagnostic = format!("{error:#}");
+                            record(
+                                evidence,
+                                format!(
+                                    "request {} ({request_line}) failed: {diagnostic}",
+                                    handled.load(Ordering::Acquire) + 1
+                                ),
+                            );
+                            https_json_response(
+                                "500 Internal Server Error",
+                                serde_json::json!({"error":diagnostic})
+                                    .to_string()
+                                    .as_bytes(),
+                            )
+                        }
+                    };
+                    match tls.write_all(&response).and_then(|()| tls.flush()) {
+                        Ok(()) => {
+                            handled.fetch_add(1, Ordering::AcqRel);
+                        }
+                        Err(error) => {
+                            record(evidence, format!("response write failed: {error}"));
+                        }
+                    }
+                    *idle_deadline
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                        Instant::now() + Duration::from_secs(120);
+                    in_flight.fetch_sub(1, Ordering::AcqRel);
+                });
+            }
+        });
+        handled.load(Ordering::Acquire)
     })
 }
 
@@ -3273,11 +3435,27 @@ fn run_production_tls_candidate_with_test_stack(
                     publication,
                 ))
             }));
-            drop(runtime);
-            let closed = store_owner.close();
             match outcome {
-                Ok(()) => closed.unwrap(),
-                Err(panic) => std::panic::resume_unwind(panic),
+                Ok(()) => {
+                    drop(runtime);
+                    store_owner.close().unwrap();
+                }
+                Err(panic) => {
+                    // A failed scenario can have tasks parked on a blocking
+                    // call or an expired store deadline; waiting for them
+                    // would hold the failure report for the whole window.
+                    // Give them a short grace period, then abandon them.
+                    runtime.shutdown_timeout(Duration::from_secs(5));
+                    // The Store's close waits on the same stalled runtime
+                    // connection, so it is abandoned rather than closed: the
+                    // thread's shared host is parked as leaked, which keeps
+                    // its destructor quiet at thread exit. The tempdir is
+                    // still removed when this closure ends; evidence is what
+                    // the scenario retained with `retain_failed_node` and
+                    // `provider_state.keep()`.
+                    store_owner.abandon();
+                    std::panic::resume_unwind(panic)
+                }
             }
         })
         .unwrap()
@@ -4318,43 +4496,43 @@ async fn run_production_tls_candidate(
                 // too: controller intent alone cannot prove occurrence death
                 // or recover a lost activation observation. Print paths only,
                 // never the private bootstrap/adapter document contents.
+                let terminal_evidence = supervisor_terminal_evidence(provider_state.path());
                 let retained_provider_state = provider_state.keep();
+                // The dispatch error leads the report: the store reads below
+                // can themselves be refused (an expired runtime deadline is
+                // the usual cause of a stalled dispatch), so each is printed
+                // as the Result it is and none may hide the first error.
                 panic!(
-                    "public worker dispatch failed: {error}; placement={placement}; \
+                    "public worker dispatch failed: {error:#}; placement={placement}; \
                      retained_node={}; retained_provider_state={}; \
+                     supervisor_terminal={terminal_evidence}; \
                      base_snapshot={base_snapshot_hash}; \
+                     controller_evidence={:#?}; \
                      thread={:#?}; session={:#?}; commands={:#?}; \
-                     controller_evidence={:#?}; channel={:#?}; events={:#?}",
+                     channel={:#?}; events={:#?}",
                     retained_node.display(),
                     retained_provider_state.display(),
-                    state.state_store.get_thread(&placement).unwrap(),
-                    state.state_store.dedicated_session(&placement).unwrap(),
-                    state
-                        .state_store
-                        .dedicated_session_commands(&placement)
-                        .unwrap(),
-                    controller_evidence.lock().unwrap(),
+                    controller_evidence.lock(),
+                    state.state_store.get_thread(&placement),
+                    state.state_store.dedicated_session(&placement),
+                    state.state_store.dedicated_session_commands(&placement),
                     state.state_store.external_execution_channel(&placement),
-                    state
-                        .state_store
-                        .latest_thread_events(&placement, 32)
-                        .unwrap(),
+                    state.state_store.latest_thread_events(&placement, 32),
                 )
             }
         };
+        assert_controller_connections_clean(&controller_evidence);
         if public["thread"]["status"] != "completed" {
             let retained_node = retain_failed_node(root);
+            let terminal_evidence = supervisor_terminal_evidence(provider_state.path());
             let retained_provider_state = provider_state.keep();
             panic!(
                 "public worker terminal failed; retained_node={}; retained_provider_state={}; \
-                 dispatch={public:#}; commands={:#?}; controller_evidence={:#?}",
+                 supervisor_terminal={terminal_evidence}; dispatch={public:#}; controller_evidence={:#?}; commands={:#?}",
                 retained_node.display(),
                 retained_provider_state.display(),
-                state
-                    .state_store
-                    .dedicated_session_commands(&placement)
-                    .unwrap(),
-                controller_evidence.lock().unwrap(),
+                controller_evidence.lock(),
+                state.state_store.dedicated_session_commands(&placement),
             );
         }
         assert!(
@@ -4782,7 +4960,14 @@ async fn run_production_tls_candidate(
     })
     .await
     .unwrap()
-    .unwrap();
+    .unwrap_or_else(|error| {
+        panic!(
+            "exclusive capsule start failed: {error:#}; supervisor_terminal={}; \
+             controller evidence: {:?}",
+            supervisor_terminal_evidence(provider_state.path()),
+            controller_evidence.lock(),
+        )
+    });
     if scripted_turn || publication == PublicationScenario::StaleBase {
         eprintln!("external fixture: exclusive capsule started");
     }
@@ -4810,6 +4995,7 @@ async fn run_production_tls_candidate(
         .await;
         stop.store(true, Ordering::Release);
         let handled = controller.join().unwrap();
+        assert_controller_connections_clean(&controller_evidence);
         close_test_composition_before_uds_stop(&uds_composition, state.clone(), &uds_server).await;
         uds_server.abort();
         let _ = uds_server.await;
@@ -4865,13 +5051,12 @@ async fn run_production_tls_candidate(
     )
     .await
     .unwrap_or_else(|error| {
-        let commands = state
-            .state_store
-            .dedicated_session_commands(&placement)
-            .unwrap();
         panic!(
-            "joined session start failed: {error:#}; retained commands: {commands:#?}; controller evidence: {:?}",
-            controller_evidence.lock().unwrap()
+            "joined session start failed: {error:#}; supervisor_terminal={}; \
+             controller evidence: {:?}; retained commands: {:#?}",
+            supervisor_terminal_evidence(provider_state.path()),
+            controller_evidence.lock(),
+            state.state_store.dedicated_session_commands(&placement),
         )
     });
     if scripted_turn || publication == PublicationScenario::StaleBase {
@@ -5027,6 +5212,7 @@ async fn run_production_tls_candidate(
     }
     stop.store(true, Ordering::Release);
     let handled = controller.join().unwrap();
+    assert_controller_connections_clean(&controller_evidence);
     assert!(
         handled >= 5,
         "candidate controller handled only {handled} requests"

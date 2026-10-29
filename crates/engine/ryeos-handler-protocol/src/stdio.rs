@@ -35,14 +35,65 @@ where
             return 2;
         }
     };
-    // The flush is explicit: the one at process exit drops its error, which
-    // would leave a clean exit with no response.
-    let mut stdout = std::io::stdout().lock();
-    match stdout.write_all(&bytes).and_then(|()| stdout.flush()) {
+    let written =
+        lillux::stdout_exclusive_file().and_then(|mut stdout| write_response(&mut stdout, &bytes));
+    match written {
         Ok(()) => 0,
         Err(e) => {
-            eprintln!("handler: failed to write stdout: {e}");
+            eprintln!("handler: failed to write the response to stdout: {e}");
             2
         }
+    }
+}
+
+/// Write the whole response and flush it, surfacing either error. The flush
+/// is explicit: the one at process exit drops its error, which would leave a
+/// clean exit with no response.
+fn write_response(out: &mut impl Write, bytes: &[u8]) -> std::io::Result<()> {
+    out.write_all(bytes)?;
+    out.flush()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::write_response;
+    use std::io::{Error, ErrorKind, Write};
+
+    struct Failing(ErrorKind);
+
+    impl Write for Failing {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(Error::from(self.0))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(Error::from(self.0))
+        }
+    }
+
+    #[test]
+    fn write_failure_is_reported_not_swallowed() {
+        let error = write_response(&mut Failing(ErrorKind::BrokenPipe), b"{}").unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::BrokenPipe);
+    }
+
+    #[test]
+    fn flush_failure_is_reported() {
+        struct FlushFails;
+        impl Write for FlushFails {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Err(Error::from(ErrorKind::BrokenPipe))
+            }
+        }
+        assert!(write_response(&mut FlushFails, b"{}").is_err());
+    }
+
+    #[test]
+    fn successful_write_delivers_all_bytes() {
+        let mut out = Vec::new();
+        write_response(&mut out, b"{\"a\":1}").unwrap();
+        assert_eq!(out, b"{\"a\":1}");
     }
 }

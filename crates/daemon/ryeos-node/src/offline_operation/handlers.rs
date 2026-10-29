@@ -25,8 +25,8 @@ use ryeos_app::node_config::sections::external_execution::compose::{
     installed_binding_credential_generation,
 };
 use ryeos_app::node_config::sections::runtime_snapshot_production::compose::{
-    ProductionComposeRequest, ProductionLimits, compose_runtime_snapshot_production_binding,
-    installed_production_credential_generation,
+    ProducerFactsSource, ProductionComposeRequest, ProductionLimits, StandaloneProducerFacts,
+    compose_runtime_snapshot_production_binding, installed_production_credential_generation,
 };
 use ryeos_app::node_config::sections::runtime_snapshot_qualification::compose::{
     QualificationComposeRequest, QualificationLimits,
@@ -149,13 +149,46 @@ impl ComposeArguments {
 #[serde(deny_unknown_fields)]
 pub struct SnapshotComposeArguments {
     pub id: String,
-    pub binding: String,
+    /// Installed external-execution binding to take the provider facts from;
+    /// exclusive with `backend`, `account`, `owner_id` and the `tls_roots`
+    /// input, which together state them outright.
+    pub binding: Option<String>,
+    pub backend: Option<String>,
+    pub account: Option<String>,
+    pub owner_id: Option<String>,
     pub sandbox_group_id: String,
     pub region: String,
     pub source_plan: String,
     pub contact_timeout_seconds: Option<u32>,
     pub maximum_bootstrap_lifetime_seconds: Option<u32>,
     pub maximum_upload_bytes: Option<u64>,
+}
+
+impl SnapshotComposeArguments {
+    /// Exactly one source of provider facts: the binding alone, or every
+    /// stated fact with the roots input.
+    pub fn validate(&self, inputs: &BTreeMap<String, String>) -> Result<()> {
+        let stated = [
+            self.backend.is_some(),
+            self.account.is_some(),
+            self.owner_id.is_some(),
+            inputs.contains_key("tls_roots"),
+        ];
+        if self.binding.is_some() {
+            ensure!(
+                !stated.contains(&true),
+                "a binding supplies backend, account, owner and trust roots; \
+                 do not state them beside it"
+            );
+        } else {
+            ensure!(
+                !stated.contains(&false),
+                "without a binding the backend, account, owner id and `tls_roots` input must \
+                 all be stated"
+            );
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -281,6 +314,8 @@ pub(super) fn reset_policy_generation(ctx: &HandlerContext<'_>) -> Result<Value>
             host_class: Some(arguments.host_class.clone()),
             substrate_identity: None,
             replace_node_policy_generation: true,
+            replace_substrate_identity: false,
+            confirm_substrate_identity_replacement: false,
             skip_preflight: false,
         },
         ctx.state_lock,
@@ -460,6 +495,16 @@ pub(super) fn external_compose(ctx: &HandlerContext<'_>) -> Result<Value> {
 
 pub(super) fn snapshot_compose(ctx: &HandlerContext<'_>) -> Result<Value> {
     let arguments: SnapshotComposeArguments = ctx.arguments()?;
+    arguments.validate(&ctx.request.inputs)?;
+    let facts_source = match &arguments.binding {
+        Some(id) => ProducerFactsSource::ExternalBinding { id: id.clone() },
+        None => ProducerFactsSource::Standalone(StandaloneProducerFacts {
+            backend: arguments.backend.clone().context("backend")?,
+            account: arguments.account.clone().context("account")?,
+            owner_id: arguments.owner_id.clone().context("owner id")?,
+            roots_pem: utf8(ctx.inputs.require("tls_roots")?, "TLS roots")?.to_owned(),
+        }),
+    };
     let generation = derived_credential_generation(ctx.request_digest);
     if installed_production_credential_generation(ctx.app_root, &arguments.id)?.as_deref()
         == Some(generation.as_str())
@@ -475,7 +520,7 @@ pub(super) fn snapshot_compose(ctx: &HandlerContext<'_>) -> Result<Value> {
         app_root: ctx.app_root,
         state_lock: ctx.state_lock,
         id: arguments.id.clone(),
-        external_binding_id: arguments.binding.clone(),
+        facts_source,
         snapshot_spec: ctx.inputs.require("provider_spec")?.to_vec(),
         sandbox_group_id: arguments.sandbox_group_id.clone(),
         region: arguments.region.clone(),
@@ -757,6 +802,48 @@ mod tests {
     use crate::offline_operation::table::VerifiedInputs;
     use ryeos_node_runtime::state_lock::{StateLock, default_lock_path};
 
+    #[test]
+    fn a_snapshot_compose_names_one_source_of_provider_facts() {
+        let arguments = |binding: Option<&str>, backend: bool, account: bool, owner: bool| {
+            SnapshotComposeArguments {
+                id: "producer".into(),
+                binding: binding.map(str::to_owned),
+                backend: backend.then(|| "render".to_owned()),
+                account: account.then(|| "acct".to_owned()),
+                owner_id: owner.then(|| "usr-1".to_owned()),
+                sandbox_group_id: "sbg-1".into(),
+                region: "oregon".into(),
+                source_plan: "standard".into(),
+                contact_timeout_seconds: None,
+                maximum_bootstrap_lifetime_seconds: None,
+                maximum_upload_bytes: None,
+            }
+        };
+        let none = BTreeMap::new();
+        let roots = BTreeMap::from([("tls_roots".to_owned(), "f".repeat(64))]);
+        assert!(
+            arguments(Some("operator"), false, false, false)
+                .validate(&none)
+                .is_ok()
+        );
+        assert!(arguments(None, true, true, true).validate(&roots).is_ok());
+        let mixed = [
+            arguments(Some("operator"), true, false, false).validate(&none),
+            arguments(Some("operator"), false, false, false).validate(&roots),
+        ];
+        for refused in mixed {
+            assert!(format!("{:#}", refused.unwrap_err()).contains("do not state them beside it"));
+        }
+        let incomplete = [
+            arguments(None, true, true, true).validate(&none),
+            arguments(None, true, true, false).validate(&roots),
+            arguments(None, false, false, false).validate(&none),
+        ];
+        for refused in incomplete {
+            assert!(format!("{:#}", refused.unwrap_err()).contains("must all be stated"));
+        }
+    }
+
     fn workspace_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .ancestors()
@@ -787,6 +874,8 @@ mod tests {
                 .unwrap(),
             ),
             replace_node_policy_generation: false,
+            replace_substrate_identity: false,
+            confirm_substrate_identity_replacement: false,
             skip_preflight: true,
         })
         .expect("initial generation");

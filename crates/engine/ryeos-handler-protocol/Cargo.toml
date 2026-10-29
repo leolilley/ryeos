@@ -5,6 +5,7 @@ edition = "2024"
 license.workspace = true
 
 [dependencies]
+lillux = { workspace = true }
 ryeos-effect-contract = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
