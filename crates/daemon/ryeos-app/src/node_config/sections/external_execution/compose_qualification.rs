@@ -161,7 +161,10 @@ fn check_stated(request: &QualificationBindingRequest<'_>) -> Result<()> {
     policy_item_path(&request.policy_ref)?;
     for (what, value) in [
         ("runtime manifest hash", &request.runtime_manifest_hash),
-        ("guest runtime manifest hash", &request.guest_runtime_manifest_hash),
+        (
+            "guest runtime manifest hash",
+            &request.guest_runtime_manifest_hash,
+        ),
         ("runtime member sha256", &request.runtime_member_sha256),
         ("credential generation", &request.credential_generation),
     ] {

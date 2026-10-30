@@ -221,7 +221,10 @@ fn compose_banner(
         ("requirement digest", report.requirement_digest.clone()),
         ("worker profile", report.worker_profile_hash.clone()),
         ("runtime manifest", report.runtime_manifest_hash.clone()),
-        ("guest-owner manifest", report.guest_runtime_manifest_hash.clone()),
+        (
+            "guest-owner manifest",
+            report.guest_runtime_manifest_hash.clone(),
+        ),
         ("runtime member", report.runtime_member_sha256.clone()),
         ("snapshot", report.snapshot_id.clone()),
         (
