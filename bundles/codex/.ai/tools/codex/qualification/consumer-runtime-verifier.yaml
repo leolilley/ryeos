@@ -1,10 +1,13 @@
-# ryeos:signed:2026-10-30T20:48:22Z:ab6fb95cea68db5949d7b3d6043292ee8382cdaddb0ea0f937a9f1951886e680:KBfZ5RixThNjK43Ly+va/+tYxhgqsaR80C+ZOBLHclZFpNg2HDK86HpN83X7bQaY6jmAGDxyP+ncnJrpY3srDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-30T20:52:33Z:afdb8996919da0b7ada1cc9a03e790c62c1388fa4c230ed70e29777b49cd3e8c:BmmlE51WxJeKa7vUOvrmGp2IRAUtz31Un2q9TwGGJEpHItjmLOM8iO9QhfaNJeYRUyAKeDQp6XdJRFN5/PmNAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: codex/qualification
 version: "1.0.0"
-description: Check the actual Q command and independent diagnostic through restricted daemon callbacks; propose finite claims for issuer corroboration.
+description: Check the actual qualification command and an independent diagnostic through restricted daemon callbacks; propose finite claims for issuer corroboration. Runs as an ordinary node_policy tool, not captured_execution: it produces no filesystem product to capture, it reads only its pinned read-only project root plus its admitted content and product slots, and its authority channel is the daemon callback, which captured execution refuses by rule. Captured execution also requires an enforced isolation lane, while the Codex session it checks runs on the trusted process-group lane.
 executor_id: "@subprocess"
 execution_protocol: protocol:ryeos/core/qualification_consumer_callback
 effects: live
+# node_policy, not captured_execution: captured execution bounds the filesystem products of a tool under enforced
+# isolation and may never hold daemon callback authority. This verifier produces no filesystem product, reads only
+# its pinned read-only project root and admitted mounts, and does all of its work through the callback protocol.
 filesystem_authority: node_policy
 required_caps: []
 external_content:
