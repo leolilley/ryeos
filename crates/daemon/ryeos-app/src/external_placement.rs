@@ -833,6 +833,19 @@ impl ExternalProviderConfigurationRegistry {
         Ok((artifact.artifact_hash.clone(), artifact.artifact_bytes))
     }
 
+    /// The installed signed declaration of one provider, for composing a
+    /// binding that must agree with it.
+    pub(crate) fn declaration_for_provider(
+        &self,
+        provider_declaration_id: &str,
+    ) -> Result<&ryeos_external_execution_contract::ExternalProviderDeclaration> {
+        Ok(self
+            .artifacts
+            .get(provider_declaration_id)
+            .context("external provider declaration is not installed")?
+            .declaration())
+    }
+
     pub(crate) fn qualify(
         &self,
         contract: &ExternalPlacementBackendContract,
@@ -2356,6 +2369,25 @@ pub fn preflight_external_candidate_program(
     Ok((runtime_proof, retained_content))
 }
 
+/// The channel journal bounds a qualification session derives from a signed
+/// transfer budget. Composing a binding and admitting a qualification launch
+/// both apply this, so a binding whose budget the launch would refuse is not
+/// signed.
+pub(crate) fn require_qualification_channel_limits(max_transfer_bytes: u64) -> Result<()> {
+    let channel_max_bytes = max_transfer_bytes.min(64 * 1024 * 1024);
+    let channel_max_frames = u32::try_from(
+        channel_max_bytes
+            .div_ceil(ryeos_state::external_execution::MAX_CHUNK_BYTES as u64)
+            .saturating_mul(4)
+            .clamp(64, 65_536),
+    )?;
+    ryeos_state::external_execution::validate_channel_journal_limits(
+        ryeos_state::external_execution::ExternalExecutionMode::QualificationStructuredSession {},
+        channel_max_frames,
+        channel_max_bytes,
+    )
+}
+
 /// Offline placement admission for the accepted qualification-only Worker.
 /// The caller must authenticate the purpose and product member from the born
 /// root. This checks the current signed node selection and installed
@@ -2385,21 +2417,10 @@ pub(crate) fn preflight_external_qualification_program(
         _ => bail!("qualification program matches multiple signed placement bindings"),
     };
     let contract = binding.backend_contract();
-    let channel_max_bytes = contract.max_transfer_bytes.min(64 * 1024 * 1024);
-    let channel_max_frames = u32::try_from(
-        channel_max_bytes
-            .div_ceil(ryeos_state::external_execution::MAX_CHUNK_BYTES as u64)
-            .saturating_mul(4)
-            .clamp(64, 65_536),
-    )?;
     // Validate before allocation/provider contact, not only when the already
     // contacted occurrence attaches its channel. Earlier traffic cannot use
     // the signed allowance reserved for native Q settlement and capture.
-    ryeos_state::external_execution::validate_channel_journal_limits(
-        ryeos_state::external_execution::ExternalExecutionMode::QualificationStructuredSession {},
-        channel_max_frames,
-        channel_max_bytes,
-    )?;
+    require_qualification_channel_limits(contract.max_transfer_bytes)?;
     state.external_candidate_connectors.qualify(&contract)?;
     let provider = state.external_provider_configurations.qualify(&contract)?;
     let invocation = purpose
@@ -8284,7 +8305,7 @@ fn require_guest_package_artifact_floor(
     )
 }
 
-fn require_guest_package_artifact_floor_bytes(
+pub(crate) fn require_guest_package_artifact_floor_bytes(
     maximum_regular_bytes: u64,
     supervisor_bytes: u64,
     launcher_bytes: u64,

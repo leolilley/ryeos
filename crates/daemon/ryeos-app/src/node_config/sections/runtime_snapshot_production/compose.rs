@@ -83,7 +83,7 @@ pub enum ProducerFactsSource {
 
 impl ProducerFactsSource {
     /// How a report names the source.
-    fn label(&self) -> String {
+    pub(crate) fn label(&self) -> String {
         match self {
             Self::ExternalBinding { id } => format!("external_binding:{id}"),
             Self::Standalone(_) => "standalone".to_owned(),
@@ -136,18 +136,28 @@ pub fn compose_runtime_snapshot_production_binding(
         .ensure_protects_app_root(request.app_root)?;
     validate_document_id(&request.id, "runtime snapshot production binding")?;
     let identity = load_node_identity(request.app_root)?;
-    let facts = match &request.facts_source {
+    let facts = resolve_producer_facts(request.app_root, &identity, &request.facts_source)?;
+    compose_with_facts(request, &identity, facts)
+}
+
+/// The provider facts a source supplies: an installed binding's verified
+/// document, or the stated facts joined with the installed adapter artifact.
+pub(crate) fn resolve_producer_facts(
+    app_root: &Path,
+    identity: &ryeos_node_runtime::identity::NodeIdentity,
+    source: &ProducerFactsSource,
+) -> Result<ProducerSourceFacts> {
+    match source {
         ProducerFactsSource::ExternalBinding { id } => {
-            read_installed_binding(request.app_root, id, &identity)?.producer_source_facts()
+            Ok(read_installed_binding(app_root, id, identity)?.producer_source_facts())
         }
         ProducerFactsSource::Standalone(stated) => standalone_source_facts(stated, |backend| {
-            Ok(resolve_installed_artifacts(request.app_root)?
+            Ok(resolve_installed_artifacts(app_root)?
                 .placement_backends
                 .installed_generation(backend)?
                 .backend_artifact_hash)
-        })?,
-    };
-    compose_with_facts(request, &identity, facts)
+        }),
+    }
 }
 
 /// The facts a placement binding would have supplied, built from stated ones.
@@ -310,7 +320,7 @@ pub fn installed_production_credential_generation(
 }
 
 /// Non-empty run of ASCII alphanumerics, `_`, `-` and `.`, at most `max` long.
-fn identifier_with_dot(value: &str, max: usize) -> bool {
+pub(crate) fn identifier_with_dot(value: &str, max: usize) -> bool {
     !value.is_empty()
         && value.len() <= max
         && value
@@ -319,7 +329,7 @@ fn identifier_with_dot(value: &str, max: usize) -> bool {
 }
 
 /// Non-empty run of ASCII alphanumerics, `_` and `-`, at most `max` long.
-fn identifier(value: &str, max: usize) -> bool {
+pub(crate) fn identifier(value: &str, max: usize) -> bool {
     !value.is_empty()
         && value.len() <= max
         && value

@@ -38,9 +38,9 @@ pub const RENDER_BACKEND_ID: &str = "render-sandbox-early-access";
 pub const DEFAULT_CAPACITY_GROUP: &str = "candidate-workers";
 
 const HTTP_NETWORK_POLICY: &str = "supervisor_pinned_owner_only_candidate_denied_v1";
-const RELAY_NETWORK_POLICY: &str = "controller_file_relay_guest_deny_all_v1";
-const STORAGE_POLICY: &str = "ephemeral_private_candidate_v1";
-const CLEANUP_PROOF: &str = "provider_terminal_occurrence_v1";
+pub(super) const RELAY_NETWORK_POLICY: &str = "controller_file_relay_guest_deny_all_v1";
+pub(super) const STORAGE_POLICY: &str = "ephemeral_private_candidate_v1";
+pub(super) const CLEANUP_PROOF: &str = "provider_terminal_occurrence_v1";
 const MAX_ROOTS_PEM_BYTES: usize = 256 * 1024;
 
 /// Resolve the operator's backend spelling to the installed adapter id.
@@ -377,13 +377,13 @@ pub(crate) fn operator_network_inputs() -> ExternalNetworkInputPolicy {
     }
 }
 
-struct SelectedTransport {
-    selection: ExternalControllerTransportSelection,
-    network_inputs: ExternalNetworkInputPolicy,
-    tls_roots: Vec<String>,
+pub(super) struct SelectedTransport {
+    pub(super) selection: ExternalControllerTransportSelection,
+    pub(super) network_inputs: ExternalNetworkInputPolicy,
+    pub(super) tls_roots: Vec<String>,
 }
 
-fn select_transport(
+pub(super) fn select_transport(
     request: &ComposeTransportRequest,
     settings: &Value,
 ) -> Result<SelectedTransport> {
@@ -469,12 +469,13 @@ pub(crate) fn bundle_artifact_facts(
     })
 }
 
-/// Resolve the signed artifacts of a stopped node's installed bundles
-/// without starting it. Holding the bundle-generation lock keeps the
-/// installed set fixed for the whole read.
-pub(crate) fn resolve_installed_artifacts(
+/// Run `read` over a stopped node's installed bundle roots under the
+/// bundle-generation lock, so the installed set cannot change during the
+/// read. The generation is verified before and after `read` runs.
+pub(crate) fn with_installed_bundles<T>(
     app_root: &Path,
-) -> Result<crate::external_artifacts::ResolvedExternalExecutionArtifacts> {
+    read: impl FnOnce(&[PathBuf], &ryeos_engine::trust::TrustStore, &Path) -> Result<T>,
+) -> Result<T> {
     let roots = ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf());
     let trust = ryeos_engine::trust::TrustStore::load(None, &roots.config())
         .context("load node trust store")?;
@@ -491,10 +492,25 @@ pub(crate) fn resolve_installed_artifacts(
         ryeos_node_runtime::engine_init::VerifiedBundleGeneration::capture(records, &trust)
             .context("capture verified bundle generation")?;
     generation.checked(&trust, || {
-        crate::external_artifacts::resolve_external_execution_artifacts(
+        read(
             &generation.roots(),
             &trust,
             &crate::private_artifact_home::root(&roots.state()),
+        )
+    })
+}
+
+/// Resolve the signed artifacts of a stopped node's installed bundles
+/// without starting it. Holding the bundle-generation lock keeps the
+/// installed set fixed for the whole read.
+pub(crate) fn resolve_installed_artifacts(
+    app_root: &Path,
+) -> Result<crate::external_artifacts::ResolvedExternalExecutionArtifacts> {
+    with_installed_bundles(app_root, |bundle_roots, trust, credential_home| {
+        crate::external_artifacts::resolve_external_execution_artifacts(
+            bundle_roots,
+            trust,
+            credential_home,
         )
     })
 }
