@@ -159,7 +159,9 @@ impl Drop for Guard<'_> {
         let ids = std::mem::take(self.ids.get_mut());
         for id in ids {
             match terminate_post(self.live, &id) {
-                Ok(status) => note(&format!("cleanup terminate POST for {id} returned {status}")),
+                Ok(status) => note(&format!(
+                    "cleanup terminate POST for {id} returned {status}"
+                )),
                 Err(error) => note(&format!(
                     "cleanup terminate POST for {id} failed ({error:#}); terminate it by hand"
                 )),
@@ -173,7 +175,11 @@ impl Drop for Guard<'_> {
 fn track_created(guard: &Guard<'_>, body: &[u8]) {
     let id = serde_json::from_slice::<serde_json::Value>(body)
         .ok()
-        .and_then(|value| value.get("id").and_then(|id| id.as_str().map(str::to_owned)));
+        .and_then(|value| {
+            value
+                .get("id")
+                .and_then(|id| id.as_str().map(str::to_owned))
+        });
     match id {
         Some(id) => guard.track(&id),
         None => note("create response carried no id to track"),
@@ -221,11 +227,7 @@ fn terminate_post(live: &Live, id: &str) -> Result<u16> {
     Ok(api(live, &settings, &url, "POST", None)?.status)
 }
 
-fn get_sandbox_body(
-    live: &Live,
-    settings: &Settings,
-    url: &url::Url,
-) -> Result<(u16, Vec<u8>)> {
+fn get_sandbox_body(live: &Live, settings: &Settings, url: &url::Url) -> Result<(u16, Vec<u8>)> {
     read_response(api(live, settings, url, "GET", None)?)
         .map_err(|()| anyhow!("sandbox GET response was not bounded JSON"))
 }
@@ -237,7 +239,12 @@ fn parse_sandbox(body: &[u8]) -> Result<RenderSandbox> {
     )
 }
 
-fn get_sandbox(live: &Live, settings: &Settings, url: &url::Url, id: &str) -> Result<RenderSandbox> {
+fn get_sandbox(
+    live: &Live,
+    settings: &Settings,
+    url: &url::Url,
+    id: &str,
+) -> Result<RenderSandbox> {
     let (status, body) = get_sandbox_body(live, settings, url)?;
     ensure!(status == 200, "sandbox GET returned status {status}");
     let sandbox = parse_sandbox(&body)?;
@@ -554,8 +561,14 @@ fn run_chain(live: &Live, guard: &Guard<'_>) -> Result<()> {
         network_policy: NetworkPolicy::requested(&projection.network_policy),
         snapshot_id: None,
     })?;
-    let (status, body) = read_response(api(live, &settings, &create_url, "POST", Some(create_body))?)
-        .map_err(|()| anyhow!("source create response was not bounded JSON"))?;
+    let (status, body) = read_response(api(
+        live,
+        &settings,
+        &create_url,
+        "POST",
+        Some(create_body),
+    )?)
+    .map_err(|()| anyhow!("source create response was not bounded JSON"))?;
     track_created(guard, &body);
     ensure!(status == 201, "source create returned status {status}");
     let created = parse_sandbox(&body)?;
