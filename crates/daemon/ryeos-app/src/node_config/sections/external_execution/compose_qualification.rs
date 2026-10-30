@@ -1126,7 +1126,10 @@ mod tests {
             "{error:#}"
         );
 
-        let twice = policy_home(&[("one", document.as_str()), ("two", document.as_str())], true);
+        let twice = policy_home(
+            &[("one", document.as_str()), ("two", document.as_str())],
+            true,
+        );
         let error =
             read_installed_policy_facts(&twice.roots, &twice.trust, POLICY_REF).unwrap_err();
         assert!(
