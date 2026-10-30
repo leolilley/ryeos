@@ -1708,7 +1708,11 @@ pub(in crate::operator_external_content) fn verify_current(
         let current_recipe = state.engine.with_checked_bundle_generation(|generation| {
             super::resolve_bundle_producer_recipe_in_generation(generation, scenario_recipe_ref)
         })?;
-        if current_recipe.source_identity()? != scoped.producer_source {
+        // Retained evidence is re-verified in later daemon processes, whose
+        // bundle generation identity differs; only the signed content identity
+        // of the recipe is comparable across them.
+        let current_source = current_recipe.source_identity()?;
+        if current_source.content_identity() != scoped.producer_source.content_identity() {
             bail!("current scoped qualification recipe source changed");
         }
         super::require_direct_consumer_target(
