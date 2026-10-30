@@ -81,7 +81,7 @@ use ryeos_app::thread_lifecycle::ResolvedExecutionRequest;
 mod subprocess_execution;
 mod subprocess_policy;
 pub(crate) use subprocess_execution::{
-    dispatch_subprocess, validate_direct_result_retention, validate_ordinary_protocol_contract,
+    dispatch_subprocess, validate_direct_protocol_contract, validate_direct_result_retention,
 };
 pub use subprocess_policy::PreparedManagedLaunch;
 pub(crate) use subprocess_policy::strip_binary_ref_prefix;
@@ -4413,7 +4413,7 @@ pub fn launch_contract_applicability(
     item_ref: &str,
     ctx: &ExecutionContext,
 ) -> Result<LaunchContractApplicability, DispatchError> {
-    launch_contract_applicability_with_evidence(item_ref, ctx, None, None)
+    launch_contract_applicability_with_evidence(item_ref, ctx, None, None, None)
 }
 
 /// Classify the launch contract from an already-admitted root and its exact
@@ -4426,6 +4426,11 @@ pub fn launch_contract_applicability_from_admission(
     root_admission: &ryeos_app::thread_lifecycle::RootExecutionAdmission,
 ) -> Result<LaunchContractApplicability, DispatchError> {
     root_admission.validate().map_err(DispatchError::Internal)?;
+    let remote_consumer =
+        ryeos_app::remote_consumer_launch::RemoteConsumerLaunchProof::from_admission(
+            root_admission,
+        )
+        .map_err(DispatchError::Internal)?;
     let admitted_hop_authority = root_admission
         .admitted_request_snapshot()
         .and_then(|snapshot| {
@@ -4438,6 +4443,7 @@ pub fn launch_contract_applicability_from_admission(
         ctx,
         Some(root_admission.verified_subject().clone()),
         admitted_hop_authority,
+        remote_consumer.as_ref(),
     )
 }
 
@@ -4449,6 +4455,7 @@ fn launch_contract_applicability_with_evidence(
         &Path,
         &ryeos_engine::engine::AdmittedRequestAuthoritySnapshot,
     )>,
+    remote_consumer: Option<&ryeos_app::remote_consumer_launch::RemoteConsumerLaunchProof>,
 ) -> Result<LaunchContractApplicability, DispatchError> {
     const MAX_HOPS: usize = 8;
     let mut visited = HashSet::new();
@@ -4504,7 +4511,12 @@ fn launch_contract_applicability_with_evidence(
                 // Applicability, preflight and live dispatch must classify
                 // from the same protocol mechanics, not lifecycle alone.
                 if subprocess_execution::uses_direct_subprocess_plan(protocol) {
-                    validate_ordinary_protocol_contract(protocol, &current.kind)?;
+                    validate_direct_protocol_contract(
+                        protocol,
+                        &current.kind,
+                        remote_consumer,
+                        &current.to_string(),
+                    )?;
                     return Ok(LaunchContractApplicability::NonEnvelope {
                         class: RootDispatchClass::TerminalSubprocess,
                     });
@@ -5718,6 +5730,40 @@ pub fn preflight_root_dispatch(
     state: &AppState,
     launch_timings: Option<&ryeos_app::launch_stage_timings::LaunchStageTimings>,
 ) -> Result<RootDispatchPreflight, DispatchError> {
+    preflight_root_dispatch_with_remote_consumer(
+        item_ref,
+        original_root_kind,
+        params,
+        ref_bindings,
+        product_selections,
+        usage_subject,
+        usage_subject_asserted_by,
+        project_binding,
+        None,
+        ctx,
+        state,
+        launch_timings,
+    )
+}
+
+/// As [`preflight_root_dispatch`], for a launch that carries a typed
+/// remote-consumer proof. Without the proof the qualification callback route
+/// stays refused; with it, only the hop the proof names is admitted.
+pub fn preflight_root_dispatch_with_remote_consumer(
+    item_ref: &str,
+    original_root_kind: &str,
+    params: &Value,
+    ref_bindings: &BTreeMap<String, String>,
+    product_selections:
+        &ryeos_state::external_content::products::composition::ProductSelectionInputs,
+    usage_subject: Option<&ryeos_state::UsageSubject>,
+    usage_subject_asserted_by: Option<&str>,
+    project_binding: &ryeos_app::thread_lifecycle::AdmittedProjectBinding,
+    remote_consumer: Option<&ryeos_app::remote_consumer_launch::RemoteConsumerLaunchProof>,
+    ctx: &ExecutionContext,
+    state: &AppState,
+    launch_timings: Option<&ryeos_app::launch_stage_timings::LaunchStageTimings>,
+) -> Result<RootDispatchPreflight, DispatchError> {
     const MAX_HOPS: usize = 8;
     let mut visited: HashSet<CanonicalRef> = HashSet::new();
     let mut hops: usize = 0;
@@ -5922,7 +5968,12 @@ pub fn preflight_root_dispatch(
                     })?;
                     match subprocess_execution::uses_direct_subprocess_plan(protocol) {
                         true => {
-                            validate_ordinary_protocol_contract(protocol, &hop_ref.kind)?;
+                            validate_direct_protocol_contract(
+                                protocol,
+                                &hop_ref.kind,
+                                remote_consumer,
+                                &hop_ref.to_string(),
+                            )?;
                             require_terminal_executor_id(verified.as_ref(), &hop_ref.to_string())?;
                             // Mirror dispatch_tool_subprocess's FULL pre-thread
                             // admission (declared rejection, signed-manifest-
@@ -6001,7 +6052,7 @@ pub fn preflight_root_dispatch(
                                                 },
                                             ),
                                         };
-                                        let mut target = preflight_root_dispatch(
+                                        let mut target = preflight_root_dispatch_with_remote_consumer(
                                             &target_ref,
                                             target_canonical.kind.as_str(),
                                             &inner_params,
@@ -6010,6 +6061,7 @@ pub fn preflight_root_dispatch(
                                             usage_subject,
                                             usage_subject_asserted_by,
                                             project_binding,
+                                            remote_consumer,
                                             &inner_ctx,
                                             state,
                                             launch_timings,
@@ -6227,8 +6279,43 @@ pub fn preflight_root_dispatch_for_provenance(
     state: &AppState,
     launch_timings: Option<&ryeos_app::launch_stage_timings::LaunchStageTimings>,
 ) -> Result<RootDispatchPreflight, DispatchError> {
+    preflight_root_dispatch_for_provenance_with_remote_consumer(
+        item_ref,
+        original_root_kind,
+        params,
+        ref_bindings,
+        product_selections,
+        usage_subject,
+        usage_subject_asserted_by,
+        project_binding,
+        None,
+        ctx,
+        provenance,
+        state,
+        launch_timings,
+    )
+}
+
+/// As [`preflight_root_dispatch_for_provenance`], for a launch that carries a
+/// typed remote-consumer proof.
+pub fn preflight_root_dispatch_for_provenance_with_remote_consumer(
+    item_ref: &str,
+    original_root_kind: &str,
+    params: &Value,
+    ref_bindings: &BTreeMap<String, String>,
+    product_selections:
+        &ryeos_state::external_content::products::composition::ProductSelectionInputs,
+    usage_subject: Option<&ryeos_state::UsageSubject>,
+    usage_subject_asserted_by: Option<&str>,
+    project_binding: &ryeos_app::thread_lifecycle::AdmittedProjectBinding,
+    remote_consumer: Option<&ryeos_app::remote_consumer_launch::RemoteConsumerLaunchProof>,
+    ctx: &ExecutionContext,
+    provenance: &ryeos_app::execution_provenance::ExecutionProvenance,
+    state: &AppState,
+    launch_timings: Option<&ryeos_app::launch_stage_timings::LaunchStageTimings>,
+) -> Result<RootDispatchPreflight, DispatchError> {
     let Some(scope) = provenance.candidate_evaluation_scope() else {
-        return preflight_root_dispatch(
+        return preflight_root_dispatch_with_remote_consumer(
             item_ref,
             original_root_kind,
             params,
@@ -6237,6 +6324,7 @@ pub fn preflight_root_dispatch_for_provenance(
             usage_subject,
             usage_subject_asserted_by,
             project_binding,
+            remote_consumer,
             ctx,
             state,
             launch_timings,
@@ -6251,7 +6339,7 @@ pub fn preflight_root_dispatch_for_provenance(
             .map_err(DispatchError::Internal)?,
         requested_call: ctx.requested_call.clone(),
     };
-    let mut admitted = preflight_root_dispatch(
+    let mut admitted = preflight_root_dispatch_with_remote_consumer(
         item_ref,
         original_root_kind,
         params,
@@ -6260,6 +6348,7 @@ pub fn preflight_root_dispatch_for_provenance(
         usage_subject,
         usage_subject_asserted_by,
         scope.base_project_binding(),
+        remote_consumer,
         &resolution_ctx,
         state,
         launch_timings,
@@ -6976,6 +7065,7 @@ metadata:
                 "service:example/status",
                 &ctx,
                 Some(admitted),
+                None,
                 None,
             )
             .expect("applicability must consume admitted evidence without reopening the path");

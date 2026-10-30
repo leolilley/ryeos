@@ -2977,8 +2977,19 @@ fn resolved_terminator_protocol<'a>(
     let kind = &resolved.resolved_item.kind;
     let protocol =
         ryeos_app::thread_lifecycle::resolve_direct_terminator_protocol(engine, resolved)?;
-    crate::dispatch::validate_ordinary_protocol_contract(protocol, kind)
-        .map_err(|error| anyhow::anyhow!(error))?;
+    let remote_consumer = resolved
+        .root_admission
+        .as_ref()
+        .map(ryeos_app::remote_consumer_launch::RemoteConsumerLaunchProof::from_admission)
+        .transpose()?
+        .flatten();
+    crate::dispatch::validate_direct_protocol_contract(
+        protocol,
+        kind,
+        remote_consumer.as_ref(),
+        &resolved.resolved_item.canonical_ref.to_string(),
+    )
+    .map_err(|error| anyhow::anyhow!(error))?;
     if protocol.descriptor.stdout.shape
         == ryeos_engine::protocol_vocabulary::StdoutShape::StreamingChunks
     {
