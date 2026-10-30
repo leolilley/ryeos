@@ -1767,6 +1767,7 @@ pub(crate) fn preflight_external_direct_endpoint(
                 state,
                 &binding.backend_contract(),
                 binding.digest(),
+                None,
             )
         },
     )
@@ -1775,11 +1776,22 @@ pub(crate) fn preflight_external_direct_endpoint(
 /// Recheck the current published witness under its actual product owner's
 /// grant and run the exact installed adapter's offline probe before fresh
 /// contact. The signed relationship alone is never a startup permit.
+///
+/// A structured session passes its admitted program, whose runtime lane
+/// decides the content-testimony slot: an activation-sourced session has its
+/// current published acquired-content testimony rechecked (head, revocation
+/// and claims), and a product-sourced session must leave the slot empty. A
+/// start with no program (a direct command) still runs the workload-shape
+/// refusals, so a direct or qualification-only workload can never inherit
+/// structured-session testimony.
 fn require_current_runtime_qualification_for_start(
     state: &AppState,
     contract: &ExternalPlacementBackendContract,
     binding_hash: &str,
+    program: Option<&ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram>,
 ) -> Result<()> {
+    let lane = program.map_or(RuntimeContentLane::Product, RuntimeContentLane::of);
+    let _ = require_current_runtime_content_qualification(state, contract, lane)?;
     let _ = admit_current_runtime_qualification(state, contract, binding_hash)?;
     Ok(())
 }
@@ -5046,6 +5058,7 @@ impl<'a> ExternalPlacementOwner<'a> {
                 self.state,
                 &contract,
                 binding.digest(),
+                None,
             )?;
         }
         let program = AdmittedExternalExecutionProgram::DirectCommand(program.clone());
@@ -5194,6 +5207,7 @@ impl<'a> ExternalPlacementOwner<'a> {
                 self.state,
                 &contract,
                 binding.digest(),
+                None,
             )?;
         }
         let access = binding.credential_access()?;
@@ -5466,6 +5480,7 @@ impl<'a> ExternalPlacementOwner<'a> {
                 self.state,
                 &contract,
                 binding.digest(),
+                Some(program),
             )?;
         }
         // A recovered placement carries the lease request its first
@@ -11294,6 +11309,34 @@ mod tests {
         .unwrap();
         assert!(
             format!("{error:#}").contains("no qualified runtime content selection"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn the_start_path_keeps_the_workload_and_lane_content_refusals() {
+        let root = tempfile::tempdir().unwrap();
+        let (_owner, state) = crate::state::test_support::build(root.path()).unwrap();
+        let mut contract =
+            InstalledExternalExecutionBinding::direct_test_fixture(30).backend_contract();
+        contract.runtime_content_qualification = Some(content_selection_fixture());
+        let error = require_current_runtime_qualification_for_start(&state, &contract, "0", None)
+            .err()
+            .unwrap();
+        assert!(
+            format!("{error:#}").contains("direct workload cannot inherit"),
+            "{error:#}"
+        );
+        let mut session = InstalledExternalExecutionBinding::test_fixture().backend_contract();
+        session.runtime_content_qualification = Some(content_selection_fixture());
+        // The fixture program takes its runtime from a captured product.
+        let product = program();
+        let error =
+            require_current_runtime_qualification_for_start(&state, &session, "0", Some(&product))
+                .err()
+                .unwrap();
+        assert!(
+            format!("{error:#}").contains("carries no acquired-content testimony"),
             "{error:#}"
         );
     }

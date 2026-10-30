@@ -102,10 +102,12 @@ pub fn install_ordinary_runtime_content(
     manifest
 }
 
-/// The signed placement selection a binding carries for these two proofs.
+/// The signed placement selection a binding carries. A product-sourced
+/// session passes no content proof: its runtime authority is its admitted
+/// product selection. Only an activation-sourced session passes one.
 pub fn placement_selection(
     guest: &GuestRuntimeQualification,
-    content: &ActivatedRuntimeQualification,
+    content: Option<&ActivatedRuntimeQualification>,
 ) -> ryeos_app::external_placement::test_support::PlacementQualificationSelection {
     use ryeos_app::external_placement::test_support::{
         ContentRuntimeQualificationSelection, GuestRuntimeQualificationSelection,
@@ -119,7 +121,7 @@ pub fn placement_selection(
             policy_ref: guest.policy_ref.clone(),
             required_claims: guest.required_claims.clone(),
         }),
-        content: Some(ContentRuntimeQualificationSelection {
+        content: content.map(|content| ContentRuntimeQualificationSelection {
             activation_ref: content.activation_ref.clone(),
             coordinate_id: content.coordinate_id.clone(),
             attestation_hash: content.attestation_hash.clone(),

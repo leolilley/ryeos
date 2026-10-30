@@ -1013,7 +1013,11 @@ fn author_activated_runtime_sources(
 }
 
 /// Qualify both runtimes through the production owners and return the node
-/// together with the signed selection a placement binding carries for them.
+/// together with the signed selection a placement binding carries. Every
+/// program these flows admit takes its runtime from a captured product, so
+/// the selection carries the guest proof only; the acquired-content
+/// qualification is still produced and accepted through its production owner
+/// but is never selected into a product-sourced binding.
 async fn qualify_runtime_selection(
     state: ryeos_app::state::AppState,
     inputs: &RuntimeQualificationInputs,
@@ -1035,14 +1039,14 @@ async fn qualify_runtime_selection(
         guest.guest_runtime_manifest_hash,
         inputs.guest_manifest_hash
     );
-    let content = runtime_qualification_placement::activate_and_qualify_runtime(
+    let _content = runtime_qualification_placement::activate_and_qualify_runtime(
         &state,
         runtime_manifest_hash,
         verifier_runtime_manifest_hash,
         runtime_qualification::CONTENT_RUNTIME_CLAIMS,
     )
     .await;
-    let selection = runtime_qualification_placement::placement_selection(&guest, &content);
+    let selection = runtime_qualification_placement::placement_selection(&guest, None);
     let state = match Arc::try_unwrap(state) {
         Ok(state) => state,
         Err(_) => panic!("runtime qualification retained unexpected daemon state ownership"),
