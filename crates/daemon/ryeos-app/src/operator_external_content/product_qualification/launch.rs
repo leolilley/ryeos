@@ -238,7 +238,7 @@ pub fn require_current_policy_matches_prepared(
     )
 }
 
-fn require_invocation_lane(
+pub(crate) fn require_invocation_lane(
     policy: &ProductQualificationPolicySource,
     invocation: Option<&ConsumerVerificationInputSelection>,
 ) -> Result<()> {

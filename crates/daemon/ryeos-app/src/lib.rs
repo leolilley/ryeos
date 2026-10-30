@@ -83,6 +83,7 @@ pub mod qualification_consumer_input;
 mod qualification_consumer_observation;
 pub mod qualification_workspace_custody;
 pub mod recovery_execution_gate;
+pub mod remote_consumer_launch;
 pub mod resolution_cache;
 mod retained_bundle_evidence;
 pub mod retention_exclusion;
