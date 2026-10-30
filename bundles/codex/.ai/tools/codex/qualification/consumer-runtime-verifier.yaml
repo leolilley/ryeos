@@ -1,7 +1,13 @@
-# ryeos:signed:2026-10-30T20:52:33Z:afdb8996919da0b7ada1cc9a03e790c62c1388fa4c230ed70e29777b49cd3e8c:BmmlE51WxJeKa7vUOvrmGp2IRAUtz31Un2q9TwGGJEpHItjmLOM8iO9QhfaNJeYRUyAKeDQp6XdJRFN5/PmNAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-30T21:07:10Z:0944abc174cd3414ac560aea4555f7c556ddad94b220b82e2aef7f814f9f37b8:LyqEhrBsP8DNE6tkfAmSRe8ulgoZIcncWmqc5/F8RH8rxCTpshRqhXGICLqZ8Vz/KGS77PkUtEcMNIH6I/QXBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: codex/qualification
 version: "1.0.0"
-description: Check the actual qualification command and an independent diagnostic through restricted daemon callbacks; propose finite claims for issuer corroboration. Runs as an ordinary node_policy tool, not captured_execution: it produces no filesystem product to capture, it reads only its pinned read-only project root plus its admitted content and product slots, and its authority channel is the daemon callback, which captured execution refuses by rule. Captured execution also requires an enforced isolation lane, while the Codex session it checks runs on the trusted process-group lane.
+description: >-
+  Check the actual qualification command and an independent diagnostic through restricted daemon
+  callbacks; propose finite claims for issuer corroboration. Runs as an ordinary node_policy tool, not
+  captured_execution: it produces no filesystem product to capture, it reads only its pinned read-only
+  project root plus its admitted content and product slots, and its authority channel is the daemon
+  callback, which captured execution refuses by rule. Captured execution also requires an enforced
+  isolation lane, while the Codex session it checks runs on the trusted process-group lane.
 executor_id: "@subprocess"
 execution_protocol: protocol:ryeos/core/qualification_consumer_callback
 effects: live

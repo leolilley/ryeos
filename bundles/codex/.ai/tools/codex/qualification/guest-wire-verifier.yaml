@@ -1,7 +1,17 @@
-# ryeos:signed:2026-10-30T20:52:33Z:a60d4707968db45e108a3293820fc9df17d12e1f97f58f20df320506f93d83c0:LVx3vs6evcfArjyr+vWIWhEGs/LfagpjWPDpGQY1mOmpqkC5cSHAKT7FeX1fg//CXJ4YsnvGTq4ZJI6/ph+RBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-30T21:07:10Z:2a359cd804d41ffa6260c9462000a3158d5f764bdb53ec5f85943d1f9c706267:z3aQ7otyAyDYIaDfWc6X+quHIeS9CIMJFNK6VKkSfJ7oXat+bCLbz1CaWF2Pk8q9LAhtqgdviLywImxoHNTWAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: codex/qualification
 version: "1.0.0"
-description: Prove in a restored guest, under an ephemeral key, that the subject guest owner speaks the pinned guest-inputs and launcher wire schemas; the claim binds the subject's owner executable digest and manifest hash, never the ephemeral probe manifest. The measured owner, supervisor and launcher executables performed the exchange under an ephemeral controller key and test configuration; operation under the real controller key, connection and credentials is proved by a live session, not by this claim. Runs as an ordinary node_policy tool, not captured_execution: it produces no filesystem product to capture, it reads only its pinned read-only project root plus its admitted content and product slots, and its authority channel is the daemon callback, which captured execution refuses by rule. Captured execution also requires an enforced isolation lane, while the Codex session it checks runs on the trusted process-group lane.
+description: >-
+  Prove in a restored guest, under an ephemeral key, that the subject guest owner speaks the pinned
+  guest-inputs and launcher wire schemas; the claim binds the subject's owner executable digest and
+  manifest hash, never the ephemeral probe manifest. The measured owner, supervisor and launcher
+  executables performed the exchange under an ephemeral controller key and test configuration;
+  operation under the real controller key, connection and credentials is proved by a live session, not
+  by this claim. Runs as an ordinary node_policy tool, not captured_execution: it produces no
+  filesystem product to capture, it reads only its pinned read-only project root plus its admitted
+  content and product slots, and its authority channel is the daemon callback, which captured
+  execution refuses by rule. Captured execution also requires an enforced isolation lane, while the
+  Codex session it checks runs on the trusted process-group lane.
 executor_id: "@subprocess"
 execution_protocol: protocol:ryeos/core/qualification_consumer_callback
 effects: live
