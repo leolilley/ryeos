@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-01T01:13:28Z:e27206a68ddfaadd110d470abeade5adcedae4543cdd2436de815e909c189884:7xHJvvTPBZzvYAf9qoqJmgtUwtY2MMTzhAr4BOFyfW9i8w7px8OKLroJ8dV6avXAspYLqtVf7S5PWo3QHcCBDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-30T21:46:42Z:fdd4aa1ea211f7115cab5ee13e94fe95c8741785a5cf145c2969317ec93308b4:gXAknsVqPSG8uG5013sfYDOJXVexY+MKj77E0IEzg2MfGeUfzX5+g+odn8Sd+oR+JSEQjd0PjlOAsGhK8UpXCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: protocol
 name: qualification_consumer_callback
 category: ryeos/core
@@ -17,8 +17,10 @@ env_injections:
   - { name: RYEOSD_THREAD_ID, source: thread_id }
   - { name: RYEOSD_PROJECT_STATE_SCOPE, source: project_state_scope }
   - { name: RYEOSD_THREAD_AUTH_TOKEN, source: thread_auth_token }
+# A qualification verifier runs on the pinned lane: its project is the exact snapshot the subject was captured
+# against, so its project source is a pushed head, as for tool_callback. Remote and detached dispatch stay closed.
 capabilities:
-  allows_pushed_head: false
+  allows_pushed_head: true
   allows_target_site: false
   allows_detached: false
 lifecycle:
