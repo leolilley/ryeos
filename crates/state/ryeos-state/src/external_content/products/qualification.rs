@@ -719,17 +719,21 @@ impl ProductQualificationProducerScenario {
             (None, None) => {}
             _ => bail!("remote verifier producer source differs from signed scenario shape"),
         }
+        // Only the signed-content projection of the producer source is
+        // committed: the Bundle generation identity is process-local, and
+        // this digest is pinned by an operator in one daemon process and
+        // re-derived in a later one.
         // This source identity covers the selected verifier, its archive
         // members, the recipe and the probe input. The full signed policy and
         // accepted purpose separately commit the optional Worker Request.
         canonical_value_digest(&serde_json::json!({
-            "domain": "ryeos.remote-consumer-verifier-source.v2",
+            "domain": "ryeos.remote-consumer-verifier-source.v3",
             "scenario": {
                 "recipe_ref": self.recipe_ref,
                 "remote_verifier": verifier,
                 "remote_probe_input": self.remote_probe_input,
             },
-            "producer_source": source,
+            "producer_source": source.map(ProductProducerRecipeSourceIdentity::content_identity),
         }))
     }
 }
@@ -826,7 +830,32 @@ pub struct ProductProducerRecipeSourceIdentity {
     pub recipe_digest: String,
 }
 
+/// The part of a producer recipe source that is determined by signed
+/// content alone. Unlike the full identity it carries no process-local
+/// Bundle generation, so it is stable across daemon restarts and may be
+/// committed in digests that are persisted and recomputed later.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProductProducerRecipeContentIdentity<'a> {
+    pub canonical_ref: &'a str,
+    pub raw_content_digest: &'a str,
+    pub effective_definition_digest: &'a str,
+    pub publisher_fingerprint: &'a str,
+    pub recipe_digest: &'a str,
+}
+
 impl ProductProducerRecipeSourceIdentity {
+    /// Projection onto signed-content identity, omitting the process-local
+    /// Bundle generation identity.
+    pub fn content_identity(&self) -> ProductProducerRecipeContentIdentity<'_> {
+        ProductProducerRecipeContentIdentity {
+            canonical_ref: &self.canonical_ref,
+            raw_content_digest: &self.raw_content_digest,
+            effective_definition_digest: &self.effective_definition_digest,
+            publisher_fingerprint: &self.publisher_fingerprint,
+            recipe_digest: &self.recipe_digest,
+        }
+    }
+
     pub fn validate(&self) -> anyhow::Result<()> {
         exact_coordinate(
             "producer recipe Bundle generation",

@@ -2004,6 +2004,35 @@ fn remote_verifier_selection_is_signed_distinct_and_source_committed() {
             .remote_verifier_source_digest(Some(&source))
             .unwrap()
     );
+    let mut regenerated = source.clone();
+    regenerated.bundle_generation_identity = "generation-2".into();
+    assert_eq!(
+        scenario
+            .remote_verifier_source_digest(Some(&source))
+            .unwrap(),
+        scenario
+            .remote_verifier_source_digest(Some(&regenerated))
+            .unwrap(),
+        "the process-local generation must not reach the cross-process digest"
+    );
+    let baseline = scenario
+        .remote_verifier_source_digest(Some(&source))
+        .unwrap();
+    for change in 0..4 {
+        let mut changed = source.clone();
+        match change {
+            0 => changed.raw_content_digest = "e".repeat(64),
+            1 => changed.effective_definition_digest = "e".repeat(64),
+            2 => changed.publisher_fingerprint = "e".repeat(64),
+            _ => changed.recipe_digest = "e".repeat(64),
+        }
+        assert_ne!(
+            baseline,
+            scenario
+                .remote_verifier_source_digest(Some(&changed))
+                .unwrap()
+        );
+    }
     let mut wrong_source = source.clone();
     wrong_source.canonical_ref = "config:fixtures/other-recipe".into();
     assert!(
