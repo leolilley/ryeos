@@ -351,6 +351,11 @@ async fn handle_source(
         ));
     }
 
+    let remote_consumer = prepared.remote_consumer_proof().map_err(|error| {
+        HandlerError::BadRequest(format!(
+            "qualification remote consumer scenario refused: {error:#}"
+        ))
+    })?;
     let preflight = crate::routes::launch::preflight_dispatch_launch_off_thread(
         crate::routes::launch::OwnedDispatchPreflight {
             state: state.as_ref().clone(),
@@ -374,6 +379,7 @@ async fn handle_source(
             usage_subject_asserted_by: None,
             launch_timings: None,
             pinned_project_snapshot: pinned_project_snapshot.clone(),
+            remote_consumer,
         },
     )
     .await
