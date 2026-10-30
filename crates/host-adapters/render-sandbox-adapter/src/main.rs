@@ -59,6 +59,23 @@ const MAX_ROOT_BYTES: usize = 64 * 1024;
 const MAX_NETWORK_INPUT_BYTES: usize = 64 * 1024;
 const SETUP_TIMEOUT: Duration = Duration::from_secs(5);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(2);
+/// Fixed part of the wait for a `/files/upload` reply, covering request
+/// handling that does not depend on the upload size.
+const UPLOAD_RESPONSE_WAIT_BASE: Duration = Duration::from_secs(15);
+/// Per-MiB part of the wait for a `/files/upload` reply.
+const UPLOAD_RESPONSE_WAIT_PER_MIB: Duration = Duration::from_secs(2);
+
+/// How long to wait for the first response byte after a file upload body has
+/// been fully sent. Render receives and extracts the whole tar before it
+/// answers, so the silence after transmission is server processing time that
+/// grows with the upload size, not a stalled line. The idle bound still
+/// governs transmission and every later read, and the operation's absolute
+/// deadline caps this wait.
+fn upload_response_wait(upload_bytes: u64) -> Duration {
+    const MIB: u64 = 1024 * 1024;
+    let mebibytes = u32::try_from(upload_bytes.div_ceil(MIB)).unwrap_or(u32::MAX);
+    UPLOAD_RESPONSE_WAIT_BASE.saturating_add(UPLOAD_RESPONSE_WAIT_PER_MIB.saturating_mul(mebibytes))
+}
 const GUEST_OWNER_EXECUTABLE: &str =
     "/ryeos/guest-runtime/bin/ryeos-external-guest-occurrence-owner";
 const SIGNED_IMPORT_REMOTE_PATH: &str = "/ryeos/activation/signed-import.json";

@@ -469,7 +469,7 @@ pub(crate) fn execute(
                 Vec::new(),
                 request.limits,
                 request.cancellation.clone(),
-                request.deadlines.absolute,
+                request.deadlines,
             );
         }
         Some(SendRequestResult::Await100(_)) => {
@@ -559,7 +559,7 @@ pub(crate) fn execute(
         Vec::new(),
         request.limits,
         request.cancellation,
-        request.deadlines.absolute,
+        request.deadlines,
     )
 }
 
@@ -587,6 +587,7 @@ pub fn open_tls_stream(
     }
     if deadlines.setup_timeout.is_zero()
         || deadlines.idle_timeout.is_zero()
+        || deadlines.response_wait.is_zero()
         || deadlines.absolute.has_elapsed()
     {
         return Err(HttpError::before(
@@ -652,6 +653,7 @@ fn validate(request: &HttpRequest) -> Result<(), HttpError> {
     }
     if request.deadlines.setup_timeout.is_zero()
         || request.deadlines.idle_timeout.is_zero()
+        || request.deadlines.response_wait.is_zero()
         || request.deadlines.absolute.has_elapsed()
     {
         return Err(HttpError::before(
@@ -855,8 +857,10 @@ fn receive_response(
     mut incoming: Vec<u8>,
     limits: Limits,
     cancellation: NetworkCancellation,
-    absolute_deadline: MonotonicDeadline,
+    deadlines: Deadlines,
 ) -> Result<HttpResponse, HttpError> {
+    let absolute_deadline = deadlines.absolute;
+    let mut first_byte_seen = false;
     let mut consumed_headers = 0usize;
     let mut buffer = [0u8; IO_BUFFER_BYTES];
     let (head_bytes, head) = loop {
@@ -886,9 +890,18 @@ fn receive_response(
         let capacity = buffer
             .len()
             .min(limits.response_header_bytes.saturating_sub(buffered));
-        let received = stream
-            .read(&mut buffer[..capacity])
+        // Only the wait for the first response byte is peer processing time;
+        // every later read is bounded by the idle timeout again.
+        if !first_byte_seen {
+            stream
+                .sock
+                .override_idle_timeout(Some(deadlines.response_wait));
+        }
+        let read_result = stream.read(&mut buffer[..capacity]);
+        stream.sock.override_idle_timeout(None);
+        let received = read_result
             .map_err(|error| HttpError::ambiguous(error.kind(), "HTTP response read failed"))?;
+        first_byte_seen = true;
         if received == 0 {
             return Err(HttpError::ambiguous(
                 io::ErrorKind::UnexpectedEof,
@@ -1508,6 +1521,167 @@ mod tests {
         );
         assert!(started.elapsed() < StdDuration::from_secs(3));
         peer.join().unwrap();
+    }
+
+    /// Serve one TLS exchange: read the whole request, wait `before_first_byte`,
+    /// send one response byte, wait `after_first_byte`, send the rest. The
+    /// client's outcome is returned.
+    #[cfg(unix)]
+    fn exchange_with_paused_response(
+        deadlines: Deadlines,
+        before_first_byte: std::time::Duration,
+        after_first_byte: std::time::Duration,
+    ) -> Result<HttpResponse, HttpError> {
+        use std::net::TcpListener;
+        use std::time::Duration as StdDuration;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let peer = std::thread::spawn(move || {
+            let (socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(StdDuration::from_secs(10)))
+                .unwrap();
+            let config = rustls::ServerConfig::builder_with_provider(Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![rustls::pki_types::CertificateDer::from(
+                    include_bytes!("../tests/fixtures/test-server.der").to_vec(),
+                )],
+                rustls::pki_types::PrivateKeyDer::Pkcs8(
+                    rustls::pki_types::PrivatePkcs8KeyDer::from(
+                        include_bytes!("../tests/fixtures/test-server-key.der").to_vec(),
+                    ),
+                ),
+            )
+            .unwrap();
+            let connection = rustls::ServerConnection::new(Arc::new(config)).unwrap();
+            let mut tls = rustls::StreamOwned::new(connection, socket);
+            let mut received = Vec::new();
+            while !received.ends_with(b"\r\n\r\nbody") {
+                let mut buffer = [0u8; 1024];
+                let count = tls.read(&mut buffer).unwrap();
+                assert_ne!(count, 0, "client closed before its request ended");
+                received.extend_from_slice(&buffer[..count]);
+            }
+            std::thread::sleep(before_first_byte);
+            let response: &[u8] = b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok";
+            // The client may already have settled; those writes then fail.
+            if tls
+                .write_all(&response[..1])
+                .and_then(|()| tls.flush())
+                .is_err()
+            {
+                return;
+            }
+            std::thread::sleep(after_first_byte);
+            let _ = tls.write_all(&response[1..]).and_then(|()| tls.flush());
+            let _ = tls.read(&mut [0u8; 1]);
+        });
+
+        let network =
+            NetworkContext::from_config_bytes(b"nameserver 127.0.0.1\n", b"127.0.0.1 localhost\n")
+                .unwrap();
+        let mut http_request = request(b"body".to_vec());
+        http_request.url =
+            url::Url::parse(&format!("https://localhost:{port}/paused-response")).unwrap();
+        http_request.tls_roots_der = vec![include_bytes!("../tests/fixtures/test-ca.der").to_vec()];
+        http_request.deadlines = deadlines;
+        let outcome = execute(&network, http_request);
+        peer.join().unwrap();
+        outcome
+    }
+
+    #[cfg(unix)]
+    fn paused_deadlines(absolute: Duration) -> Deadlines {
+        Deadlines::new(
+            Duration::from_secs(2),
+            Duration::from_millis(300),
+            MonotonicDeadline::after(absolute),
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn response_wait_defaults_to_the_idle_bound_and_zero_is_refused() {
+        let deadlines = paused_deadlines(Duration::from_secs(5));
+        assert_eq!(deadlines.response_wait, deadlines.idle_timeout);
+        let mut http_request = request(vec![]);
+        http_request.deadlines = deadlines.with_response_wait(Duration::ZERO);
+        let error = validate(&http_request).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(error.contact_state(), crate::ContactState::NoRequestSent);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_peer_silent_past_idle_but_within_the_response_wait_still_answers() {
+        let deadlines =
+            paused_deadlines(Duration::from_secs(8)).with_response_wait(Duration::from_secs(4));
+        let response = exchange_with_paused_response(
+            deadlines,
+            std::time::Duration::from_millis(900),
+            std::time::Duration::ZERO,
+        )
+        .unwrap();
+        assert_eq!(response.status, 200);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_peer_silent_past_the_response_wait_fails_timed_out() {
+        let deadlines =
+            paused_deadlines(Duration::from_secs(8)).with_response_wait(Duration::from_millis(500));
+        let error = exchange_with_paused_response(
+            deadlines,
+            std::time::Duration::from_millis(1500),
+            std::time::Duration::ZERO,
+        )
+        .err()
+        .expect("a peer silent past the response wait must fail");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(
+            error.contact_state(),
+            crate::ContactState::RequestMayHaveBeenSent
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_stall_after_the_first_response_byte_is_bounded_by_idle_not_the_response_wait() {
+        let deadlines =
+            paused_deadlines(Duration::from_secs(8)).with_response_wait(Duration::from_secs(6));
+        let started = std::time::Instant::now();
+        let error = exchange_with_paused_response(
+            deadlines,
+            std::time::Duration::ZERO,
+            std::time::Duration::from_millis(1500),
+        )
+        .err()
+        .expect("a stall after the first byte must fail");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_absolute_deadline_caps_a_longer_response_wait() {
+        let deadlines = paused_deadlines(Duration::from_millis(1200))
+            .with_response_wait(Duration::from_secs(30));
+        let started = std::time::Instant::now();
+        let error = exchange_with_paused_response(
+            deadlines,
+            std::time::Duration::from_millis(2500),
+            std::time::Duration::ZERO,
+        )
+        .err()
+        .expect("the absolute deadline must end the wait");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
     }
 
     /// Exercise the streaming body with a local TLS peer and captured localhost resolution.

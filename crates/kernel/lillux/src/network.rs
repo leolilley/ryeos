@@ -184,6 +184,7 @@ impl NetworkContext {
             deadline: request_deadline,
             setup_deadline: Some(deadline),
             idle_timeout,
+            idle_override: None,
             cancellation,
             operation: None,
         })
@@ -224,6 +225,7 @@ pub struct NetworkStream {
     deadline: MonotonicDeadline,
     setup_deadline: Option<MonotonicDeadline>,
     idle_timeout: crate::time::Duration,
+    idle_override: Option<crate::time::Duration>,
     cancellation: NetworkCancellation,
     operation: Option<MonotonicDeadline>,
 }
@@ -249,13 +251,22 @@ impl NetworkStream {
     }
 
     fn io_deadline(&self) -> MonotonicDeadline {
-        let bounded = self
-            .effective_deadline()
-            .min(MonotonicDeadline::after(self.idle_timeout));
+        let bounded = self.effective_deadline().min(MonotonicDeadline::after(
+            self.idle_override.unwrap_or(self.idle_timeout),
+        ));
         match self.operation {
             Some(operation) => bounded.min(operation),
             None => bounded,
         }
+    }
+
+    /// Replace the per-I/O idle bound with `wait` for every following I/O, until
+    /// it is replaced or cleared with `None`. This is for the wait between the
+    /// end of a request and the first response byte, which is peer processing
+    /// time rather than line silence. The stream's own deadline still ends
+    /// every I/O, so this can never extend it.
+    pub fn override_idle_timeout(&mut self, wait: Option<crate::time::Duration>) {
+        self.idle_override = wait;
     }
 
     pub fn narrow_deadline(&mut self, deadline: MonotonicDeadline) {
@@ -717,6 +728,43 @@ mod tests {
             io::ErrorKind::ConnectionAborted
         );
         settled.send(()).unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn an_idle_override_widens_one_wait_but_the_absolute_deadline_still_wins() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut peer, _) = listener.accept().unwrap();
+            std::thread::sleep(Duration::from_millis(300));
+            peer.write_all(b"y").unwrap();
+            // Then silent until the client gives up and releases its socket.
+            let _ = peer.read(&mut [0; 1]);
+        });
+        let deadline = MonotonicDeadline::after(Duration::from_millis(900));
+        let mut stream = context("127.0.0.1:53".parse().unwrap())
+            .connect(
+                "127.0.0.1",
+                port,
+                deadline,
+                deadline,
+                Duration::from_millis(100),
+                NetworkCancellation::default(),
+            )
+            .unwrap();
+        stream.complete_setup().unwrap();
+        stream.override_idle_timeout(Some(Duration::from_secs(30)));
+        let mut byte = [0; 1];
+        assert_eq!(stream.read(&mut byte).unwrap(), 1);
+        // The widened bound is capped by the absolute deadline, not 30 s.
+        let start = Instant::now();
+        assert_eq!(
+            stream.read(&mut byte).unwrap_err().kind(),
+            io::ErrorKind::TimedOut
+        );
+        assert!(start.elapsed() < Duration::from_secs(3));
+        drop(stream);
         server.join().unwrap();
     }
 

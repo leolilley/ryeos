@@ -610,7 +610,8 @@ fn send_snapshot_upload(
         tls_roots_der: tls_roots_from_base64(&settings.tls_roots_der_base64)
             .classed(FailClass::SettingsShape)?,
         limits,
-        deadlines: Deadlines::new(SETUP_TIMEOUT, IDLE_TIMEOUT, deadline),
+        deadlines: Deadlines::new(SETUP_TIMEOUT, IDLE_TIMEOUT, deadline)
+            .with_response_wait(crate::upload_response_wait(intent.upload_bytes)),
         cancellation: cancellation.clone(),
     });
     let uploaded = uploaded

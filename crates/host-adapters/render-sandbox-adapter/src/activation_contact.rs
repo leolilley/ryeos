@@ -308,6 +308,10 @@ pub(super) fn proxy_request(
     limits.request_body_bytes = body.exact_len();
     limits.response_body_bytes = response_limit;
     limits.response_body_wire_bytes = response_limit.saturating_mul(2);
+    let mut deadlines = Deadlines::new(SETUP_TIMEOUT, IDLE_TIMEOUT, deadline);
+    if matches!(operation, ProxyOperation::UploadFile { .. }) {
+        deadlines = deadlines.with_response_wait(crate::upload_response_wait(body.exact_len()));
+    }
     Ok(HttpRequest {
         method: token.method,
         url: token.route,
@@ -319,7 +323,7 @@ pub(super) fn proxy_request(
         body,
         tls_roots_der: tls_roots(settings)?,
         limits,
-        deadlines: Deadlines::new(SETUP_TIMEOUT, IDLE_TIMEOUT, deadline),
+        deadlines,
         cancellation: cancellation.clone(),
     })
 }
