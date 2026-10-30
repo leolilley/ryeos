@@ -625,7 +625,25 @@ fn run_chain(live: &Live, guard: &Guard<'_>) -> Result<()> {
         &live.credential,
         live.deadline(),
         &live.cancellation,
-    )?;
+    );
+    let uploaded = match uploaded {
+        Ok(uploaded) => uploaded,
+        Err(error) => {
+            // The transport's message names the failing step only; its I/O kind
+            // tells a timed-out response wait from a closed or reset connection.
+            let kinds: Vec<String> = error
+                .chain()
+                .filter_map(|cause| cause.downcast_ref::<ryeos_http_transport::HttpError>())
+                .map(|http| format!("{:?}", http.kind()))
+                .collect();
+            note(&format!(
+                "upload failed after {} ms; transport error kinds: {}",
+                started.elapsed().as_millis(),
+                kinds.join(", ")
+            ));
+            return Err(error);
+        }
+    };
     note(&format!(
         "uploaded {} bytes, provider status {}, {} ms",
         tar.len(),
