@@ -6518,6 +6518,7 @@ mod tests {
                 witness_hash: "a".repeat(64),
                 witness_source: ryeos_state::external_content::products::transfer::ProductWitnessSource::LocalCapture {},
                 qualification_hash: None,
+                remote_testimony: None,
             },
         }];
         // The registered kind supplies this contract. No kind-name argument

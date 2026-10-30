@@ -563,7 +563,7 @@ fn select_verified_product(
         bail!("resolved product relationship disagrees with the exact signed consumer slot");
     }
     relationship.validate_compatible_product_evidence(evidence)?;
-    let qualification = admit_selected_qualification(
+    let (qualification, remote_testimony) = match admit_selected_qualification(
         state,
         context,
         authority,
@@ -572,7 +572,10 @@ fn select_verified_product(
         &relationship,
         witness,
         project_context_resolver,
-    )?;
+    )? {
+        Some((admitted, retained)) => (Some(admitted), retained),
+        None => (None, None),
+    };
     super::product_qualification::with_state_guard(authority, |guard| {
         ryeos_state::external_content::products::publication::verify_product_manifest_against_bounds(
             authority,
@@ -603,10 +606,19 @@ fn select_verified_product(
             id: slot.id.clone(), kind: slot.kind, manifest_hash: evidence.manifest_hash.clone(),
             mount_root: slot.mount_root, mount: slot.mount.clone(),
         },
+        remote_testimony,
     };
     selection.validate()?;
     Ok(selection)
 }
+
+/// An admitted qualification and, when it is a remote testimony accepted
+/// under local policy, the retained acceptance that lets recovery
+/// re-authenticate it without current grants.
+type AdmittedSelectionQualification = (
+    ryeos_state::external_content::products::composition::AdmittedProductQualification,
+    Option<ryeos_state::objects::RetainedRemoteQualificationTestimony>,
+);
 
 fn admit_selected_qualification(
     state: &AppState,
@@ -619,9 +631,7 @@ fn admit_selected_qualification(
     project_context_resolver: Option<
         &dyn super::product_qualification::QualificationProjectContextResolver,
     >,
-) -> anyhow::Result<
-    Option<ryeos_state::external_content::products::composition::AdmittedProductQualification>,
-> {
+) -> anyhow::Result<Option<AdmittedSelectionQualification>> {
     use super::product_qualification as qualification;
     use ryeos_state::external_content::products::composition::AdmittedProductQualification;
     let (policy_ref, hash) = match (
@@ -632,6 +642,21 @@ fn admit_selected_qualification(
         (Some(policy), Some(hash)) => (policy, hash),
         _ => bail!("product selection must provide exactly its declared qualification proof"),
     };
+    if selector.remote_testimony.is_some() {
+        // The proof is another node's testimony, admitted under local policy.
+        // It is never loaded as, or re-derived into, a local qualification.
+        let (admitted, retained) =
+            super::qualification_testimony::verify_current_remote_selection_testimony(
+                state,
+                context,
+                authority,
+                limits,
+                selector,
+                relationship,
+                product,
+            )?;
+        return Ok(Some((admitted, Some(retained))));
+    }
     let proof = qualification::with_state_guard(authority, |guard| {
         qualification::load_current_qualification(
             state,
@@ -642,69 +667,25 @@ fn admit_selected_qualification(
             hash,
         )
     })?;
-    if proof.evidence.product_witness_hash != product.attestation_hash
-        || proof.evidence.product_coordinate
-            != ProductCaptureCoordinate::from_evidence(&product.evidence)?
-        || proof.evidence.result.subject_manifest_hash != product.evidence.manifest_hash
-    {
-        bail!("qualification does not prove the exact selected product witness and manifest");
-    }
-    let current_policy =
-        qualification::resolve_current_bundle_qualification_policy(state, policy_ref)?;
-    if let Some(consumer_context) = &current_policy.policy.consumer_execution_context {
-        consumer_context.validate_relationship_consumer(&relationship.consumer)?;
-        qualification::require_current_consumer_content_for_selection(
-            state,
-            authority,
-            limits,
-            &current_policy,
-            relationship,
-            &proof.evidence,
-            &product.evidence.manifest_hash,
-        )?;
-        // The shared evidence and execution_evidence::verify_current below
-        // must also rejoin the exact settled Q transcript and enclosing root.
-    }
-    let current_verifier = qualification::resolve_current_bundle_verifier_identity_for_evidence(
+    qualification::verify_loaded_qualification_against_relationship(
         state,
+        context,
         authority,
         limits,
-        context,
-        &current_policy.policy.verifier_ref,
-        &current_policy.policy.verifier_parameters,
-        &proof.evidence,
-        project_context_resolver,
-    )?;
-    proof.evidence.validate_current_policy(
-        &current_policy,
-        &current_verifier.effective_definition_digest,
-        &relationship.qualification.required_claims,
-    )?;
-    proof
-        .evidence
-        .validate_current_artifact(&current_verifier.artifact_identity)?;
-    qualification::execution_evidence::verify_current(
-        state,
-        authority,
-        context,
-        &proof.evidence,
-        &current_verifier,
-        project_context_resolver,
-    )?;
-    // Verifier re-resolution ran unguarded; the accepted proof must still be
-    // the published, unexpired qualification at the end of this admission.
-    qualification::require_qualification_still_current(
-        state,
-        authority,
-        limits,
-        &context.fingerprint,
+        policy_ref,
+        relationship,
         &proof,
-        None,
+        product,
+        false,
+        project_context_resolver,
     )?;
-    Ok(Some(AdmittedProductQualification {
-        attestation_hash: proof.attestation_hash,
-        evidence: proof.evidence,
-    }))
+    Ok(Some((
+        AdmittedProductQualification {
+            attestation_hash: proof.attestation_hash,
+            evidence: proof.evidence,
+        },
+        None,
+    )))
 }
 
 /// A recovered capsule has already admitted source, relationship and testimony.
@@ -758,15 +739,44 @@ pub(super) fn verify_recovered_selections_guarded(
             .get(&selector.declaration_id)
             .context("recovered product consumer lost the sealed selection")?;
         selection.validate()?;
-        if let Some(proof) = &selection.qualification {
-            super::product_qualification::verify_retained_qualification_guarded(
-                state,
-                authority,
-                guard,
-                limits,
-                proof,
-                owner_principal,
-            )?;
+        match (&selection.qualification, &selection.remote_testimony) {
+            (Some(proof), Some(retained)) => {
+                // A remote testimony is authenticated through its retained
+                // acceptance alone: no current grant, policy or clock is
+                // reapplied, and the origin's verifier realization is not in
+                // this node's CAS. The consumer content it names must still
+                // be fully present here.
+                super::qualification_testimony::verify_retained_remote_testimony_guarded(
+                    state,
+                    authority,
+                    guard,
+                    limits,
+                    retained,
+                    proof,
+                    owner_principal,
+                )?;
+                let content =
+                    proof.evidence.consumer_content.as_ref().context(
+                        "recovered remote product testimony carries no consumer content",
+                    )?;
+                super::product_qualification::require_retained_consumer_content_closure(
+                    authority, guard, limits, content,
+                )?;
+                if retained.acceptance.product_source.as_ref() != Some(&selection.witness_source) {
+                    bail!("recovered remote testimony was accepted for a different product source");
+                }
+            }
+            (Some(proof), None) => {
+                super::product_qualification::verify_retained_qualification_guarded(
+                    state,
+                    authority,
+                    guard,
+                    limits,
+                    proof,
+                    owner_principal,
+                )?;
+            }
+            (None, _) => {}
         }
         if selection.witness_hash != selector.witness_hash
             || selection.witness_source != selector.witness_source
@@ -775,6 +785,15 @@ pub(super) fn verify_recovered_selections_guarded(
                 .as_ref()
                 .map(|proof| &proof.attestation_hash)
                 != selector.qualification_hash.as_ref()
+            || selection.remote_testimony.as_ref().map(|retained| {
+                (
+                    &retained.acceptance_hash,
+                    &retained.acceptance.acceptance_policy_ref,
+                )
+            }) != selector
+                .remote_testimony
+                .as_ref()
+                .map(|remote| (&remote.acceptance_hash, &remote.acceptance_policy_ref))
             || selection.owner_principal != owner_principal
             || selection.consumer_source != source
         {
@@ -1047,6 +1066,7 @@ mod tests {
                 witness_hash: "a".repeat(64),
                 witness_source: ryeos_state::external_content::products::transfer::ProductWitnessSource::LocalCapture {},
                 qualification_hash: None,
+                remote_testimony: None,
             }],
             maximum_bytes: 1024,
         }
@@ -1066,7 +1086,7 @@ mod tests {
             json!([{
                 "declaration_id": "runtime", "witness_hash": "a".repeat(64),
                 "witness_source": {"kind":"local_capture"},
-                "qualification_hash": null,
+                "qualification_hash": null, "remote_testimony": null,
             }])
         );
         for field in [

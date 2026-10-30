@@ -22,6 +22,7 @@ pub mod consumer_qualification_context;
 pub mod content_qualification;
 pub mod product_build;
 pub mod product_composition;
+pub mod product_program;
 pub mod product_qualification;
 pub mod product_receipt;
 pub mod products;
@@ -2152,6 +2153,7 @@ mod tests {
                 witness_hash: "f".repeat(64),
                 witness_source: ryeos_state::external_content::products::transfer::ProductWitnessSource::LocalCapture {},
                 qualification_hash: None,
+                remote_testimony: None,
             };
         let selected_bundle = BindRequest {
             product_selections: Some(vec![selection.clone()]),
@@ -2215,6 +2217,7 @@ mod tests {
                         witness_hash: "f".repeat(64),
                         witness_source: ryeos_state::external_content::products::transfer::ProductWitnessSource::LocalCapture {},
                         qualification_hash: None,
+                        remote_testimony: None,
                     }
                 ]),
                 ..bundle.clone()

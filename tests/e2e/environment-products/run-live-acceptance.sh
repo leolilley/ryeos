@@ -196,7 +196,7 @@ run_selected_worker_acceptance() {
   local session_observation_request session_fence session_termination
   local session_status_request candidate_snapshot discard_request
 
-  selection_json=$(python3 -c 'import json,sys; source={"kind":"local_capture"}; print(json.dumps([{"target":{"kind":"content_dependency","binding":"environment"},"selection":{"declaration_id":"distribution","witness_hash":sys.argv[1],"witness_source":source,"qualification_hash":None}},{"target":{"kind":"content_dependency","binding":"environment"},"selection":{"declaration_id":"runtime","witness_hash":sys.argv[2],"witness_source":source,"qualification_hash":sys.argv[3]}}],separators=(",",":")))' \
+  selection_json=$(python3 -c 'import json,sys; source={"kind":"local_capture"}; print(json.dumps([{"target":{"kind":"content_dependency","binding":"environment"},"selection":{"declaration_id":"distribution","witness_hash":sys.argv[1],"witness_source":source,"qualification_hash":None,"remote_testimony":None}},{"target":{"kind":"content_dependency","binding":"environment"},"selection":{"declaration_id":"runtime","witness_hash":sys.argv[2],"witness_source":source,"qualification_hash":sys.argv[3],"remote_testimony":None}}],separators=(",",":")))' \
     "$distribution_witness" "$runtime_witness" "$qualification_hash")
   login_parameters=$(python3 -c 'import json,sys; print(json.dumps({"credential_profile_id":sys.argv[1]},separators=(",",":")))' \
     "$credential_profile")

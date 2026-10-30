@@ -61,6 +61,7 @@ pub async fn export_qualification_testimony(
             match &request.content {
                 None => export_testimony_blocking(
                     &state,
+                    &ctx,
                     &operator,
                     &request.qualification_hash,
                     &request.acceptance_policy_ref,

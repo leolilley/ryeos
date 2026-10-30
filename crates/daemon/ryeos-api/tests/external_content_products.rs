@@ -524,6 +524,7 @@ async fn product_services_refuse_unadmitted_operator_contexts() {
                     witness_hash: fixture.witness_hash.clone(),
                     witness_source: ryeos_state::external_content::products::transfer::ProductWitnessSource::LocalCapture {},
                     qualification_hash: None,
+                    remote_testimony: None,
                 }],
                 maximum_bytes: 4096,
             },
@@ -959,6 +960,7 @@ fn selected_launch_is_target_local_without_erasing_remote_operator_origin() {
         witness_source:
             ryeos_state::external_content::products::transfer::ProductWitnessSource::LocalCapture {},
         qualification_hash: None,
+        remote_testimony: None,
     };
     for target in [
         ProductSelectionTarget::Root {},

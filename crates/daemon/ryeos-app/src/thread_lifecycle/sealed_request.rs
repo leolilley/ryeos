@@ -2723,6 +2723,7 @@ mod authority_tests {
                     witness_hash: "b".repeat(64),
                     witness_source: ryeos_state::external_content::products::transfer::ProductWitnessSource::LocalCapture {},
                     qualification_hash: None,
+                    remote_testimony: None,
                 },
             },
         ];
@@ -2919,7 +2920,7 @@ mod authority_tests {
                 "declaration_id": "runtime",
                 "witness_hash": "a".repeat(64),
                 "witness_source": {"kind": "local_capture"},
-                "qualification_hash": null,
+                "qualification_hash": null, "remote_testimony": null,
             }
             }]))
             .unwrap();

@@ -897,7 +897,7 @@ mod tests {
                 "declaration_id": "runtime",
                 "witness_hash": "a".repeat(64),
                 "witness_source": {"kind": "local_capture"},
-                "qualification_hash": null
+                "qualification_hash": null, "remote_testimony": null
             }],
             "maximum_bytes": 1024
         });
@@ -933,7 +933,7 @@ mod tests {
                 "declaration_id": "runtime",
                 "witness_hash": "a".repeat(64),
                 "witness_source": {"kind": "local_capture"},
-                "qualification_hash": null
+                "qualification_hash": null, "remote_testimony": null
             }],
             "maximum_bytes": 1024
         });

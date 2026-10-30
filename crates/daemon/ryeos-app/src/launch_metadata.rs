@@ -1596,7 +1596,8 @@ mod tests {
                 "declaration_id": "runtime",
                 "witness_hash": "c".repeat(64),
                 "witness_source": {"kind": "local_capture"},
-                "qualification_hash": null
+                "qualification_hash": null,
+                "remote_testimony": null
             }
         }]))
         .unwrap();

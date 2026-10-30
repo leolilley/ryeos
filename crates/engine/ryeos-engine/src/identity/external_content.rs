@@ -1022,7 +1022,7 @@ mod tests {
             },
             "witness_hash":"e".repeat(64),
             "witness_source":{"kind":"local_capture"},
-            "qualification":null,
+            "qualification":null, "remote_testimony":null,
             "witness_coordinate":{"owner_principal":format!("fp:{}","f".repeat(64)),"chain_root_id":"T-root","thread_id":"T-terminal","recipe_binding":"product_recipe","product_name":"runtime"},
             "producer":{"canonical_ref":"graph:fixture/build","effective_definition_digest":"1".repeat(64),"exact_program_hash":"2".repeat(64),"producer_project_snapshot_hash":"3".repeat(64),"launch_authority_digest":"4".repeat(64),"admitted_parameters_digest":ryeos_state::objects::canonical_value_digest(&serde_json::json!({})).unwrap()},
             "owner_principal":format!("fp:{}","f".repeat(64)),

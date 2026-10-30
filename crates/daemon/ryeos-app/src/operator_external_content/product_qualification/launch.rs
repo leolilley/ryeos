@@ -182,6 +182,7 @@ fn selected_root_product_selection(
             witness_hash: witness_hash.to_owned(),
             witness_source: witness_source.clone(),
             qualification_hash: None,
+            remote_testimony: None,
         },
     }
 }

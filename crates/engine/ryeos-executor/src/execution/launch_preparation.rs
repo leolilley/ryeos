@@ -2828,6 +2828,7 @@ mod product_selection_preparation_tests {
             witness_hash: "a".repeat(64),
             witness_source: ryeos_state::external_content::products::transfer::ProductWitnessSource::LocalCapture {},
             qualification_hash: None,
+            remote_testimony: None,
         }
     }
 

@@ -1,0 +1,8 @@
+# ryeos:signed:2026-10-30T04:33:51Z:adddb0b5433e04ed1418ebfa5cca4a692238f54f3166d75028a83c7d883189b9:BxpPa5JP12JlfATzyTSdEUKw/0pIplgD6WdJXqO2JXlrST0bGOhFZE219URSqA4shkDp0JjIxZRJLwLwdgqbBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: external-execution.admit-product-program
+required_caps: ["ryeos.execute.service.external-execution/admit-product-program"]
+schema:
+  consumer_ref: string
+  product_selections: array
+description: Derive the admitted external candidate program of a captured-product worker from the product selections its signed slots require, exactly as launch derives it; read-only, requires an admitted operator, and writes no state

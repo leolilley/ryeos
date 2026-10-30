@@ -532,7 +532,7 @@ mod tests {
                 payload["product_selections"] = serde_json::json!([{
                     "target":{"kind":"content_dependency","binding":"model"},
                     "selection":{"declaration_id":"fixture-model","witness_hash":"ab".repeat(32),
-                        "witness_source":{"kind":"local_capture"},"qualification_hash":null}
+                        "witness_source":{"kind":"local_capture"},"qualification_hash":null, "remote_testimony": null}
                 }]);
                 payload["outbound_principal"] = serde_json::json!("configured_operator");
                 let request: Request = serde_json::from_value(payload).unwrap();
@@ -774,7 +774,7 @@ mod tests {
                     "declaration_id": id,
                     "witness_hash": "ab".repeat(32),
                     "witness_source": {"kind": "local_capture"},
-                    "qualification_hash": null
+                    "qualification_hash": null, "remote_testimony": null
                 }
             })
         };

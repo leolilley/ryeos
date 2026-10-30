@@ -2959,6 +2959,7 @@ mod tests {
                 witness_hash: selection.witness_hash.clone(),
                 witness_source: ProductWitnessSource::LocalCapture {},
                 qualification_hash: None,
+                remote_testimony: None,
             },
         };
         let (mut local, _, _) =

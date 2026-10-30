@@ -4095,6 +4095,7 @@ async fn run_production_tls_candidate(
                 witness_hash: runtime_witness_hash,
                 witness_source: ryeos_state::external_content::products::transfer::ProductWitnessSource::LocalCapture {},
                 qualification_hash: Some(qualification.qualification_hash),
+                remote_testimony: None,
             },
         };
     let state_authority = state.state_store.pinned_state_authority().unwrap();
