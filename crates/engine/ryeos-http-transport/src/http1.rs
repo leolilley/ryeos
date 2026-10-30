@@ -1607,14 +1607,18 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn response_wait_defaults_to_the_idle_bound_and_zero_is_refused() {
+    fn response_wait_defaults_to_the_idle_bound_and_never_narrows_below_it() {
         let deadlines = paused_deadlines(Duration::from_secs(5));
         assert_eq!(deadlines.response_wait, deadlines.idle_timeout);
+        let zero = deadlines.with_response_wait(Duration::ZERO);
+        assert_eq!(zero.response_wait, deadlines.idle_timeout);
+        let narrower = deadlines.with_response_wait(deadlines.idle_timeout / 2);
+        assert_eq!(narrower.response_wait, deadlines.idle_timeout);
+        let wider = deadlines.with_response_wait(deadlines.idle_timeout * 3);
+        assert_eq!(wider.response_wait, deadlines.idle_timeout * 3);
         let mut http_request = request(vec![]);
-        http_request.deadlines = deadlines.with_response_wait(Duration::ZERO);
-        let error = validate(&http_request).unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
-        assert_eq!(error.contact_state(), crate::ContactState::NoRequestSent);
+        http_request.deadlines = zero;
+        assert!(validate(&http_request).is_ok());
     }
 
     #[cfg(unix)]
