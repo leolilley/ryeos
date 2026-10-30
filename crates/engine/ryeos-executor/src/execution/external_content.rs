@@ -45,6 +45,9 @@ pub(crate) struct BoundExternalRealizations {
     /// env (`RYEOS_EXTERNAL_REALIZATIONS`) so a runtime can reference the
     /// identity it executes under without re-observing any content.
     sealed_set_env: String,
+    /// Node-owned runtime view that holds every entry at `<root>/<mount>`;
+    /// present only for the private-runtime-view binding.
+    runtime_view_root: Option<PathBuf>,
     _leases: Vec<fs::File>,
 }
 
@@ -201,6 +204,48 @@ impl BoundExternalRealizations {
 
     pub(crate) fn sealed_set_env(&self) -> &str {
         &self.sealed_set_env
+    }
+
+    /// How the consumer locates the realized roots: a node-owned private view
+    /// is addressed through `RYEOS_EXTERNAL_ROOT`, every other binding uses the
+    /// fixed logical namespace.
+    pub(crate) fn delivery(&self) -> ryeos_state::objects::ExternalRealizationDelivery {
+        match self.binding_mode {
+            ExternalRealizationBinding::PrivateRuntimeView => {
+                ryeos_state::objects::ExternalRealizationDelivery::PrivateDescriptorRoot
+            }
+            _ => ryeos_state::objects::ExternalRealizationDelivery::FixedNamespace,
+        }
+    }
+
+    /// Spawn environment naming a private runtime view and its delivery. Empty
+    /// for every binding that is addressed through the fixed namespace.
+    pub(crate) fn delivery_env_bindings(
+        &self,
+    ) -> anyhow::Result<Vec<ryeos_app::env_contract::EnvBinding>> {
+        let Some(root) = self.runtime_view_root() else {
+            return Ok(Vec::new());
+        };
+        let root = root
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("private runtime view root is not valid UTF-8"))?;
+        Ok(vec![
+            ryeos_app::env_contract::EnvBinding::new(
+                "RYEOS_EXTERNAL_ROOT",
+                root,
+                ryeos_app::env_contract::EnvSourceDetail::EnginePlanEnv,
+            ),
+            ryeos_app::env_contract::EnvBinding::new(
+                "RYEOS_EXTERNAL_DELIVERY",
+                serde_json::to_string(&self.delivery())?,
+                ryeos_app::env_contract::EnvSourceDetail::EnginePlanEnv,
+            ),
+        ])
+    }
+
+    /// Absolute path of the private runtime view, when this binding used one.
+    pub(crate) fn runtime_view_root(&self) -> Option<&Path> {
+        self.runtime_view_root.as_deref()
     }
 
     /// Bind a pre-admitted command coordinate to the exact materialized tree
@@ -1777,6 +1822,8 @@ fn bind_external_realization_set_with(
             })
             .transpose()?,
         sealed_set_env,
+        runtime_view_root: (binding == ExternalRealizationBinding::PrivateRuntimeView)
+            .then(|| project_path.to_path_buf()),
         _leases: leases,
     }))
 }

@@ -3974,6 +3974,7 @@ pub(crate) fn prepare_process_inputs(
     retained_resolution: &ryeos_engine::resolution::ResolutionOutput,
     base_path: &Path,
     source_placement: super::source_closure::SourceMountPlacement,
+    private_runtime_view_realizations: bool,
 ) -> Result<PreparedProcessInputs> {
     // `retained_resolution` is the execution being spawned. For a borrowed
     // child this already materializes/mounts the child's finalized source and
@@ -4142,13 +4143,26 @@ pub(crate) fn prepare_process_inputs(
                 anyhow::bail!("private input delivery has no armed materialization budget")
             }
         };
-        (
+        let external = if private_runtime_view_realizations {
+            // The view lives under the private scratch root, whose lifeline
+            // outlives the process; only its path is handed to the child.
+            let view = super::persistent_session::create_node_owned_runtime_view(&path)?;
+            super::external_content::bind_external_realizations_in_private_runtime_view_with_budget(
+                state,
+                retained_resolution,
+                view.path(),
+                budget,
+            )?
+        } else {
             super::external_content::bind_external_realizations_in_private_workspace_with_budget(
                 state,
                 retained_resolution,
                 &path,
                 budget,
-            )?,
+            )?
+        };
+        (
+            external,
             super::source_closure::bind_source_in_private_workspace_with_budget(
                 state,
                 retained_resolution,
@@ -5261,6 +5275,10 @@ pub async fn run_and_wait(
             &prepared_plan,
             state.isolation.is_enforced(),
         ),
+        super::persistent_session::tool_supports_private_descriptor_realizations(
+            &protocol.descriptor,
+            state.isolation.as_ref(),
+        ),
     )
     .map_err(|error| guard.fail_before_spawn(error))?;
     let wait_bound_external = wait_bound_external.map(Arc::new);
@@ -5364,7 +5382,7 @@ pub async fn run_and_wait(
     )
     .map_err(|error| guard.fail_before_spawn(error))?;
     let ProtocolLaunchEnv {
-        bindings: protocol_env_bindings,
+        bindings: mut protocol_env_bindings,
         callback_token,
         thread_auth_token,
         isolation_daemon_socket_path,
@@ -5389,6 +5407,13 @@ pub async fn run_and_wait(
         wait_remote_consumer_grant,
     )
     .map_err(|error| guard.fail_before_spawn(error))?;
+    if let Some(bound) = wait_bound_external.as_ref() {
+        protocol_env_bindings.extend(
+            bound
+                .delivery_env_bindings()
+                .map_err(|error| guard.fail_before_spawn(error))?,
+        );
+    }
     if let Some(token) = callback_token {
         guard.track_callback_token(token);
     }
@@ -6288,6 +6313,10 @@ pub async fn run_detached(
             &prepared_plan,
             state.isolation.is_enforced(),
         ),
+        super::persistent_session::tool_supports_private_descriptor_realizations(
+            &protocol.descriptor,
+            state.isolation.as_ref(),
+        ),
     )
     .map_err(|error| guard.fail_before_spawn(error))?;
     effective_path = process_path;
@@ -6362,7 +6391,7 @@ pub async fn run_detached(
     }
     let launch_timeout_secs = prepared_plan.timeout_secs;
     let ProtocolLaunchEnv {
-        bindings: protocol_env_bindings,
+        bindings: mut protocol_env_bindings,
         callback_token,
         thread_auth_token,
         isolation_daemon_socket_path,
@@ -6387,6 +6416,13 @@ pub async fn run_detached(
         None,
     )
     .map_err(|error| guard.fail_before_spawn(error))?;
+    if let Some(bound) = bg_bound_external.as_ref() {
+        protocol_env_bindings.extend(
+            bound
+                .delivery_env_bindings()
+                .map_err(|error| guard.fail_before_spawn(error))?,
+        );
+    }
     if let Some(token) = callback_token {
         guard.track_callback_token(token);
     }
@@ -8936,6 +8972,18 @@ async fn run_existing_recovered_thread(
     .map_err(|error| {
         guard.fail_before_spawn(error.context("admitted_execution_closure_invalid"))
     })?;
+    let recovered_private_view_realizations = recovered_direct_protocol(
+        &engine,
+        &admitted_capsule,
+        &params.resolved.resolved_item.kind,
+    )
+    .map(|protocol| {
+        super::persistent_session::tool_supports_private_descriptor_realizations(
+            &protocol.descriptor,
+            state.isolation.as_ref(),
+        )
+    })
+    .map_err(|error| guard.fail_before_spawn(error.context("admitted_protocol_closure_invalid")))?;
     let PreparedProcessInputs {
         path: process_path,
         default_input_cwd,
@@ -8955,6 +9003,7 @@ async fn run_existing_recovered_thread(
             &prepared_plan,
             state.isolation.is_enforced(),
         ),
+        recovered_private_view_realizations,
     )
     .map_err(|error| {
         guard.fail_before_spawn(error.context("recovery_input_materialization_failed"))
@@ -9131,7 +9180,7 @@ async fn run_existing_recovered_thread(
         .get_launch_metadata(&thread_id)?
         .context("recovered direct root has no retained launch metadata")?;
     let ProtocolLaunchEnv {
-        bindings: protocol_env_bindings,
+        bindings: mut protocol_env_bindings,
         callback_token,
         thread_auth_token,
         isolation_daemon_socket_path,
@@ -9169,6 +9218,13 @@ async fn run_existing_recovered_thread(
         )?,
     )
     .map_err(|error| guard.fail_before_spawn(error.context("protocol_contract_failed")))?;
+    if let Some(bound) = bg_external_realizations.as_ref() {
+        protocol_env_bindings.extend(
+            bound
+                .delivery_env_bindings()
+                .map_err(|error| guard.fail_before_spawn(error))?,
+        );
+    }
     if let Some(token) = callback_token {
         guard.track_callback_token(token);
     }

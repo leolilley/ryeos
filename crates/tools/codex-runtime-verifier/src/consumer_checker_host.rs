@@ -22,7 +22,9 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-use crate::consumer_checker_program::{CheckerProgramCustody, prepare_checker_program};
+use crate::consumer_checker_program::{
+    CheckerProgramCustody, RealizationAccess, prepare_checker_program,
+};
 use crate::consumer_checker_projection::{PreparedCheckerInput, decode_checker_response};
 use crate::consumer_record::ConsumerInputRecord;
 use crate::consumer_worker_semantics::CheckedQConversation;
@@ -489,7 +491,8 @@ fn run_transaction(
     cancellation.require_running(deadline)?;
     let contract: FiniteProductContract = original.product_contract()?;
     let root_set = admitted_root_realizations()?;
-    let program = prepare_checker_program(&contract, &root_set)?;
+    let access = RealizationAccess::from_env()?;
+    let program = prepare_checker_program(&contract, &root_set, &access)?;
     cancellation.require_running(deadline)?;
     let prepared =
         acquired.prepare_checker_input(original, program.checker_identity_digest().to_owned())?;
@@ -766,12 +769,8 @@ fn prepare_launch(
         lillux::exec::sealed_memfd(c"ryeos-checker-header", &header).map_err(anyhow::Error::msg)?;
     let header_fd = header.inherited_descriptor().map_err(anyhow::Error::msg)?;
     descriptors.push(header);
-    let library = program
-        .library_directory
-        .verified_read_only_namespace_path()?;
-    let prefix = program
-        .prefix_directory
-        .verified_read_only_namespace_path()?;
+    let library = program.access.directory_path(&program.library_directory)?;
+    let prefix = program.access.directory_path(&program.prefix_directory)?;
     let args = vec![
         "--library-path".to_owned(),
         library

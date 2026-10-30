@@ -302,6 +302,7 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
                 bound.sealed_set_env(),
                 ryeos_app::env_contract::EnvSourceDetail::PerSpawnDaemon,
             ));
+            protocol_bindings.extend(bound.delivery_env_bindings()?);
         }
         if let Some(bound) = &source_closure {
             protocol_bindings.push(ryeos_app::env_contract::EnvBinding::new(

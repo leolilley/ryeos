@@ -7,14 +7,109 @@ use anyhow::{Context as _, Result, ensure};
 use lillux::{PinnedDirectory, PinnedRegularFile};
 use ryeos_state::objects::{
     ExternalContentKind, ExternalContentMode, ExternalContentMountRoot, ExternalContentRealization,
-    ExternalContentRealizationSet, MAX_EXTERNAL_CONTENT_FILE_BYTES, canonical_value_digest,
+    ExternalContentRealizationSet, ExternalRealizationDelivery, MAX_EXTERNAL_CONTENT_FILE_BYTES,
+    canonical_value_digest,
 };
 use std::io::Read as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::finite_product_contract::{
     CheckerMemberSelection, CheckerProgramSelector, FiniteProductContract,
 };
+
+/// Where the admitted runtime realizations are reached. The fixed namespace is
+/// the read-only mount tree of an enforced launch; a private view is a
+/// node-owned directory named by the launch environment, whose entries sit at
+/// `<root>/<mount>` and which carries no read-only-namespace guarantee.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RealizationAccess {
+    private_root: Option<PathBuf>,
+}
+
+impl RealizationAccess {
+    /// The enforced-launch default: fixed read-only namespace.
+    pub(crate) fn fixed_namespace() -> Self {
+        Self { private_root: None }
+    }
+
+    /// Read the optional delivery the launch owner selected. Absence means the
+    /// fixed namespace; a private delivery requires an absolute normalized root.
+    pub(crate) fn from_env() -> Result<Self> {
+        let delivery = optional_env("RYEOS_EXTERNAL_DELIVERY")?;
+        let root = optional_env("RYEOS_EXTERNAL_ROOT")?;
+        Self::from_values(delivery.as_deref(), root.as_deref())
+    }
+
+    fn from_values(delivery: Option<&str>, root: Option<&str>) -> Result<Self> {
+        let Some(delivery) = delivery else {
+            return Ok(Self::fixed_namespace());
+        };
+        let delivery: ExternalRealizationDelivery =
+            serde_json::from_str(delivery).context("decode external realization delivery")?;
+        match delivery {
+            ExternalRealizationDelivery::FixedNamespace => Ok(Self::fixed_namespace()),
+            ExternalRealizationDelivery::PrivateDescriptorRoot => {
+                let root = root.context("private realization delivery requires its root")?;
+                let path = Path::new(root);
+                ensure!(
+                    path.is_absolute()
+                        && path.components().collect::<PathBuf>() == path
+                        && path.as_os_str().as_encoded_bytes()
+                            == path
+                                .components()
+                                .collect::<PathBuf>()
+                                .as_os_str()
+                                .as_encoded_bytes()
+                        && path.components().enumerate().all(|(index, part)| matches!(
+                            (index, part),
+                            (0, std::path::Component::RootDir)
+                                | (1.., std::path::Component::Normal(_))
+                        )),
+                    "private realization root must be an absolute normalized path"
+                );
+                Ok(Self {
+                    private_root: Some(path.to_path_buf()),
+                })
+            }
+        }
+    }
+
+    pub(crate) fn is_private_view(&self) -> bool {
+        self.private_root.is_some()
+    }
+
+    fn root_path(&self, identity: &ExternalContentRealization) -> Result<PathBuf> {
+        match &self.private_root {
+            None => identity.mount_root.destination(None, &identity.mount),
+            Some(root) => {
+                // Validate the logical coordinate exactly as the fixed
+                // namespace does, then re-root it under the private view.
+                identity.mount_root.destination(None, &identity.mount)?;
+                Ok(root.join(&identity.mount))
+            }
+        }
+    }
+
+    /// Path to hand to the checker for an already held pinned location. Under
+    /// the fixed namespace the spelling must still select the held inode through
+    /// read-only mounts; a private view has no such namespace, so the held
+    /// location's own path is used.
+    pub(crate) fn directory_path(&self, directory: &PinnedDirectory) -> Result<PathBuf> {
+        if self.is_private_view() {
+            Ok(directory.path().to_path_buf())
+        } else {
+            directory.verified_read_only_namespace_path()
+        }
+    }
+}
+
+fn optional_env(name: &str) -> Result<Option<String>> {
+    match std::env::var(name) {
+        Ok(value) => Ok(Some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(error) => Err(anyhow::anyhow!("{name} is not valid UTF-8: {error}")),
+    }
+}
 
 /// Opaque retained data/capabilities selected inside an already admitted root.
 /// This owner does not prove applied scope, namespace custody or a child launch.
@@ -32,6 +127,7 @@ pub(crate) struct PreparedCheckerProgram {
     script: PinnedRegularFile,
     script_bytes: Vec<u8>,
     checker_identity_digest: String,
+    access: RealizationAccess,
 }
 
 impl PreparedCheckerProgram {
@@ -54,6 +150,7 @@ impl PreparedCheckerProgram {
             script,
             script_bytes,
             checker_identity_digest,
+            access,
         } = self;
         (
             loader,
@@ -69,6 +166,7 @@ impl PreparedCheckerProgram {
                 _code_root: code_root,
                 _script: script,
                 _checker_identity_digest: checker_identity_digest,
+                access,
             },
         )
     }
@@ -88,6 +186,7 @@ pub(crate) struct CheckerProgramCustody {
     _code_root: PinnedDirectory,
     _script: PinnedRegularFile,
     _checker_identity_digest: String,
+    pub(crate) access: RealizationAccess,
 }
 
 /// Match metadata, never create a purported sealed-set authority wrapper.
@@ -132,18 +231,27 @@ fn select_realizations<'a>(
     Ok((runtime, code))
 }
 
-fn open_root(identity: &ExternalContentRealization) -> Result<PinnedDirectory> {
-    let destination = identity.mount_root.destination(None, &identity.mount)?;
+fn open_root(
+    identity: &ExternalContentRealization,
+    access: &RealizationAccess,
+) -> Result<PinnedDirectory> {
+    let destination = access.root_path(identity)?;
     let root =
         PinnedDirectory::open(&destination)?.context("selected checker tree mount absent")?;
-    ensure!(
-        root.verified_read_only_namespace_path()? == destination,
-        "checker root read-only namespace observation changed"
-    );
+    if !access.is_private_view() {
+        ensure!(
+            root.verified_read_only_namespace_path()? == destination,
+            "checker root read-only namespace observation changed"
+        );
+    }
     Ok(root)
 }
 
-fn open_directory(root: &PinnedDirectory, relative: &str) -> Result<PinnedDirectory> {
+fn open_directory(
+    root: &PinnedDirectory,
+    relative: &str,
+    access: &RealizationAccess,
+) -> Result<PinnedDirectory> {
     ryeos_state::objects::validate_canonical_project_relative_path(relative)?;
     let mut current = root.try_clone()?;
     for component in Path::new(relative).components() {
@@ -156,7 +264,7 @@ fn open_directory(root: &PinnedDirectory, relative: &str) -> Result<PinnedDirect
     }
     let selected = root.path().join(relative);
     ensure!(
-        current.verified_read_only_namespace_path()? == selected,
+        access.directory_path(&current)? == selected,
         "checker runtime directory escaped read-only namespace observation"
     );
     Ok(current)
@@ -165,15 +273,18 @@ fn open_directory(root: &PinnedDirectory, relative: &str) -> Result<PinnedDirect
 fn open_member(
     root: &PinnedDirectory,
     selected: &CheckerMemberSelection,
+    access: &RealizationAccess,
 ) -> Result<PinnedRegularFile> {
     ryeos_state::objects::validate_canonical_project_relative_path(&selected.path)?;
     let member = root
         .open_pinned_regular_descendant(Path::new(&selected.path), false)?
         .context("selected checker member absent")?;
-    ensure!(
-        member.verified_read_only_namespace_path()? == root.path().join(&selected.path),
-        "checker member escaped read-only namespace observation"
-    );
+    if !access.is_private_view() {
+        ensure!(
+            member.verified_read_only_namespace_path()? == root.path().join(&selected.path),
+            "checker member escaped read-only namespace observation"
+        );
+    }
     Ok(member)
 }
 
@@ -236,17 +347,18 @@ fn program_identity(
 pub(crate) fn prepare_checker_program(
     contract: &FiniteProductContract,
     root_realizations: &ExternalContentRealizationSet,
+    access: &RealizationAccess,
 ) -> Result<PreparedCheckerProgram> {
     contract.validate()?;
     let selector = contract.semantic_checker();
     let (runtime, code) = select_realizations(selector, root_realizations)?;
-    let runtime_root = open_root(runtime)?;
-    let code_root = open_root(code)?;
-    let library_directory = open_directory(&runtime_root, &selector.runtime.library_path)?;
-    let prefix_directory = open_directory(&runtime_root, &selector.runtime.prefix_path)?;
-    let loader = open_member(&runtime_root, &selector.runtime.loader)?;
-    let interpreter = open_member(&runtime_root, &selector.runtime.interpreter)?;
-    let script = open_member(&code_root, &selector.code.script)?;
+    let runtime_root = open_root(runtime, access)?;
+    let code_root = open_root(code, access)?;
+    let library_directory = open_directory(&runtime_root, &selector.runtime.library_path, access)?;
+    let prefix_directory = open_directory(&runtime_root, &selector.runtime.prefix_path, access)?;
+    let loader = open_member(&runtime_root, &selector.runtime.loader, access)?;
+    let interpreter = open_member(&runtime_root, &selector.runtime.interpreter, access)?;
+    let script = open_member(&code_root, &selector.code.script, access)?;
     verify_executable(&loader, &selector.runtime.loader)?;
     verify_executable(&interpreter, &selector.runtime.interpreter)?;
     let script_bytes = read_script(&script, &selector.code.script)?;
@@ -264,6 +376,7 @@ pub(crate) fn prepare_checker_program(
         script,
         script_bytes,
         checker_identity_digest,
+        access: access.clone(),
     })
 }
 
@@ -297,6 +410,40 @@ mod tests {
             },
         ])
         .unwrap()
+    }
+
+    #[test]
+    fn private_delivery_roots_realizations_under_the_node_view() {
+        let selector = crate::finite_product_contract::checker_selector_fixture();
+        let root = set(&selector);
+        let (runtime, _) = select_realizations(&selector, &root).unwrap();
+        let private =
+            serde_json::to_string(&ExternalRealizationDelivery::PrivateDescriptorRoot).unwrap();
+        let fixed = serde_json::to_string(&ExternalRealizationDelivery::FixedNamespace).unwrap();
+
+        let access = RealizationAccess::from_values(Some(&private), Some("/node/view")).unwrap();
+        assert!(access.is_private_view());
+        assert_eq!(
+            access.root_path(runtime).unwrap(),
+            Path::new("/node/view/test-checker-runtime")
+        );
+
+        for absent in [
+            RealizationAccess::from_values(None, None).unwrap(),
+            RealizationAccess::from_values(Some(&fixed), Some("/node/view")).unwrap(),
+        ] {
+            assert!(!absent.is_private_view());
+            assert_eq!(
+                absent.root_path(runtime).unwrap(),
+                Path::new("/ryeos/realizations/test-checker-runtime")
+            );
+        }
+
+        assert!(RealizationAccess::from_values(Some(&private), None).is_err());
+        for bad in ["relative/view", "/node/../view", "/node/./view"] {
+            assert!(RealizationAccess::from_values(Some(&private), Some(bad)).is_err());
+        }
+        assert!(RealizationAccess::from_values(Some("\"other\""), Some("/node/view")).is_err());
     }
 
     #[test]

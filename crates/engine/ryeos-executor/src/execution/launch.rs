@@ -6366,6 +6366,7 @@ async fn run_claimed_thread_row_inner(
         resolution,
         project_path,
         super::source_closure::SourceMountPlacement::Project,
+        false,
     )
     .map_err(BuildAndLaunchError::Internal)?;
     let post_publication_timer = launch_timings

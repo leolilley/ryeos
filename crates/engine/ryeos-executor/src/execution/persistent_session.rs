@@ -2816,6 +2816,24 @@ fn supports_private_descriptor_realizations(
     ) && session.cleanup_authority == PersistentSessionCleanupAuthority::TrustedProcessGroup
 }
 
+/// A qualification verifier (a tool whose signed protocol carries a
+/// qualification callback) on a lane the node already trusts for process-group
+/// sessions receives its immutable runtime inputs through a node-owned private
+/// view rather than the project copy. The rule holds only while isolation is
+/// not enforced; enforced isolation delivers them through its own mounts.
+pub(crate) fn tool_supports_private_descriptor_realizations(
+    descriptor: &ryeos_engine::protocols::descriptor::ProtocolDescriptor,
+    isolation: &ryeos_engine::isolation::IsolationRuntime,
+) -> bool {
+    !isolation.is_enforced()
+        && descriptor.qualification_callback.is_some()
+        && isolation
+            .inspection()
+            .process_scope_readiness
+            .trusted_exclusive_session
+            .ready
+}
+
 fn protocol_supports_private_descriptor_realizations(
     descriptor: &ryeos_engine::protocols::descriptor::ProtocolDescriptor,
 ) -> Result<bool> {
@@ -4922,6 +4940,34 @@ fn canonical_hash(value: &Value) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tool_private_realizations_require_callback_protocol_and_trusted_lane() {
+        let body = "kind: protocol\nname: direct\ncategory: test\nabi_version: v1\nstdin: {shape: opaque}\nstdout: {shape: opaque_bytes, mode: terminal}\nenv_injections:\n  - {name: RYE_THREAD_ID, source: thread_id}\ncapabilities: {allows_pushed_head: false, allows_target_site: false, allows_detached: false}\nlifecycle: {mode: managed}\ncallback_channel: none\n";
+        let mut descriptor: ryeos_engine::protocols::descriptor::ProtocolDescriptor =
+            serde_yaml::from_str(body).unwrap();
+        let isolation = ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring();
+        assert!(!isolation.is_enforced());
+        assert!(
+            !isolation
+                .inspection()
+                .process_scope_readiness
+                .trusted_exclusive_session
+                .ready
+        );
+        // No callback authority: never eligible.
+        assert!(!tool_supports_private_descriptor_realizations(
+            &descriptor,
+            &isolation
+        ));
+        // A callback protocol on a node without the trusted lane: not eligible.
+        descriptor.qualification_callback =
+            Some(ryeos_engine::protocols::QualificationCallbackAuthority::RemoteConsumer);
+        assert!(!tool_supports_private_descriptor_realizations(
+            &descriptor,
+            &isolation
+        ));
+    }
 
     fn workspace_output_authority(
         storage: ryeos_state::external_content::products::ProductStorage,
