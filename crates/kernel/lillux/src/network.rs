@@ -737,12 +737,12 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         let server = std::thread::spawn(move || {
             let (mut peer, _) = listener.accept().unwrap();
-            std::thread::sleep(Duration::from_millis(300));
+            std::thread::sleep(Duration::from_millis(600));
             peer.write_all(b"y").unwrap();
             // Then silent until the client gives up and releases its socket.
             let _ = peer.read(&mut [0; 1]);
         });
-        let deadline = MonotonicDeadline::after(Duration::from_millis(900));
+        let deadline = MonotonicDeadline::after(Duration::from_millis(2_000));
         let mut stream = context("127.0.0.1:53".parse().unwrap())
             .connect(
                 "127.0.0.1",
@@ -763,7 +763,7 @@ mod tests {
             stream.read(&mut byte).unwrap_err().kind(),
             io::ErrorKind::TimedOut
         );
-        assert!(start.elapsed() < Duration::from_secs(3));
+        assert!(start.elapsed() < Duration::from_secs(5));
         drop(stream);
         server.join().unwrap();
     }

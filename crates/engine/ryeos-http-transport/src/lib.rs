@@ -161,7 +161,10 @@ impl Deadlines {
     /// the request is fully transmitted. A zero wait is refused when the
     /// request is validated.
     pub fn with_response_wait(mut self, response_wait: Duration) -> Self {
-        self.response_wait = response_wait;
+        // The wait for the first response byte is never narrower than the idle
+        // bound every later read gets, so a small value cannot make a request
+        // stricter before the response than during it.
+        self.response_wait = response_wait.max(self.idle_timeout);
         self
     }
 }
