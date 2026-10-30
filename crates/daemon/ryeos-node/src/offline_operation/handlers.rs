@@ -245,6 +245,10 @@ pub struct QualificationSessionComposeArguments {
     pub policy_ref: String,
     pub provider_declaration_id: String,
     pub runtime_manifest_hash: String,
+    /// Measured guest-owner runtime of the provider snapshot; defaults to the
+    /// runtime manifest when the qualified runtime is the snapshot's owner.
+    #[serde(default)]
+    pub guest_runtime_manifest_hash: Option<String>,
     pub runtime_member_sha256: String,
     pub snapshot_id: String,
     pub plan: String,
@@ -643,6 +647,10 @@ pub(super) fn qualification_session_compose(ctx: &HandlerContext<'_>) -> Result<
         policy_ref: arguments.policy_ref.clone(),
         provider_declaration_id: arguments.provider_declaration_id.clone(),
         runtime_manifest_hash: arguments.runtime_manifest_hash.clone(),
+        guest_runtime_manifest_hash: arguments
+            .guest_runtime_manifest_hash
+            .clone()
+            .unwrap_or_else(|| arguments.runtime_manifest_hash.clone()),
         runtime_member_sha256: arguments.runtime_member_sha256.clone(),
         snapshot_id: arguments.snapshot_id.clone(),
         plan: arguments.plan.clone(),

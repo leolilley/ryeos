@@ -71,10 +71,15 @@ struct QualificationSessionComposeArgs {
     #[arg(long)]
     provider_declaration_id: String,
 
-    /// Manifest hash of the runtime product being qualified; it is also the
-    /// guest runtime manifest the placement stages.
+    /// Manifest hash of the runtime product being qualified.
     #[arg(long)]
     runtime_manifest_hash: String,
+
+    /// Manifest hash of the measured guest-owner runtime the provider snapshot was produced
+    /// from, when the qualified runtime is not itself the snapshot's owner. Defaults to
+    /// --runtime-manifest-hash.
+    #[arg(long)]
+    guest_runtime_manifest_hash: Option<String>,
 
     /// SHA-256 of the executable member inside that runtime product.
     #[arg(long)]
@@ -164,6 +169,7 @@ pub fn run_qualification_session_compose(
             policy_ref: args.policy_ref.clone(),
             provider_declaration_id: args.provider_declaration_id.clone(),
             runtime_manifest_hash: args.runtime_manifest_hash.clone(),
+            guest_runtime_manifest_hash: args.guest_runtime_manifest_hash.clone(),
             runtime_member_sha256: args.runtime_member_sha256.clone(),
             snapshot_id: args.snapshot_id.clone(),
             plan: args.plan.clone(),
@@ -215,6 +221,7 @@ fn compose_banner(
         ("requirement digest", report.requirement_digest.clone()),
         ("worker profile", report.worker_profile_hash.clone()),
         ("runtime manifest", report.runtime_manifest_hash.clone()),
+        ("guest-owner manifest", report.guest_runtime_manifest_hash.clone()),
         ("runtime member", report.runtime_member_sha256.clone()),
         ("snapshot", report.snapshot_id.clone()),
         (
@@ -298,15 +305,19 @@ mod tests {
                 REQUIRED[drop * 2]
             );
         }
-        for extra in [
-            ["--program", "p.json"],
-            ["--guest-runtime-manifest-hash", "h"],
-            ["--settings", "s.json"],
-        ] {
+        for extra in [["--program", "p.json"], ["--settings", "s.json"]] {
             let mut parts = REQUIRED.to_vec();
             parts.extend_from_slice(&extra);
             assert!(QualificationSessionComposeArgs::try_parse_from(argv(&parts)).is_err());
         }
+        // The guest-owner manifest is optional: absent it follows the runtime
+        // manifest (resolved by the offline handler), stated it is carried.
+        let args = QualificationSessionComposeArgs::try_parse_from(argv(&REQUIRED)).unwrap();
+        assert!(args.guest_runtime_manifest_hash.is_none());
+        let mut with_guest = REQUIRED.to_vec();
+        with_guest.extend_from_slice(&["--guest-runtime-manifest-hash", "g"]);
+        let args = QualificationSessionComposeArgs::try_parse_from(argv(&with_guest)).unwrap();
+        assert_eq!(args.guest_runtime_manifest_hash.as_deref(), Some("g"));
     }
 
     #[test]
@@ -361,6 +372,7 @@ mod tests {
             requirement_digest: "a".repeat(64),
             worker_profile_hash: "b".repeat(64),
             runtime_manifest_hash: "c".repeat(64),
+            guest_runtime_manifest_hash: "c".repeat(64),
             runtime_member_sha256: "d".repeat(64),
             snapshot_id: "snp-exact".into(),
             credential_generation: "e".repeat(64),
