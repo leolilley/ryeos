@@ -145,7 +145,7 @@ struct SnapshotQualificationComposeArgs {
 
 /// Source of the producer's provider facts with every flag combination
 /// checked, before any file or lock is touched.
-enum FactsChoice {
+pub(crate) enum FactsChoice {
     Binding(String),
     Stated {
         backend: String,
@@ -156,13 +156,31 @@ enum FactsChoice {
 }
 
 fn facts_choice(args: &SnapshotComposeArgs) -> Result<FactsChoice> {
+    facts_choice_of(
+        &args.binding,
+        &args.backend,
+        &args.account,
+        &args.owner_id,
+        &args.roots,
+    )
+}
+
+/// The provider-facts source named by the shared flags: an installed binding
+/// alone, or all four stated flags.
+pub(crate) fn facts_choice_of(
+    binding: &Option<String>,
+    backend: &Option<String>,
+    account: &Option<String>,
+    owner_id: &Option<String>,
+    roots: &Option<PathBuf>,
+) -> Result<FactsChoice> {
     let stated = [
-        ("--backend", args.backend.is_some()),
-        ("--account", args.account.is_some()),
-        ("--owner-id", args.owner_id.is_some()),
-        ("--roots", args.roots.is_some()),
+        ("--backend", backend.is_some()),
+        ("--account", account.is_some()),
+        ("--owner-id", owner_id.is_some()),
+        ("--roots", roots.is_some()),
     ];
-    if let Some(binding) = &args.binding {
+    if let Some(binding) = binding {
         ensure!(
             stated.iter().all(|(_, given)| !given),
             "--binding supplies backend, account, owner and trust roots; remove --backend, \
@@ -186,19 +204,22 @@ fn facts_choice(args: &SnapshotComposeArgs) -> Result<FactsChoice> {
         missing.join(", ")
     );
     Ok(FactsChoice::Stated {
-        backend: args.backend.clone().context("--backend")?,
-        account: args.account.clone().context("--account")?,
-        owner_id: args.owner_id.clone().context("--owner-id")?,
-        roots: args.roots.clone().context("--roots")?,
+        backend: backend.clone().context("--backend")?,
+        account: account.clone().context("--account")?,
+        owner_id: owner_id.clone().context("--owner-id")?,
+        roots: roots.clone().context("--roots")?,
     })
 }
 
-fn read_bytes(path: &Path, what: &str) -> Result<Vec<u8>> {
+pub(crate) fn read_bytes(path: &Path, what: &str) -> Result<Vec<u8>> {
     lillux::read_regular_file_bounded_no_follow(path, MAX_INPUT_BYTES)
         .with_context(|| format!("read {what} {}", path.display()))
 }
 
-fn parse_args<T: Parser>(argv: &[String], console: &crate::tty::Console) -> Result<Option<T>> {
+pub(crate) fn parse_args<T: Parser>(
+    argv: &[String],
+    console: &crate::tty::Console,
+) -> Result<Option<T>> {
     use clap::error::ErrorKind;
     match T::try_parse_from(argv) {
         Ok(args) => Ok(Some(args)),

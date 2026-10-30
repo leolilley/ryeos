@@ -2261,6 +2261,7 @@ mod tests {
                 witness_hash: "6".repeat(64),
                 witness_source: ryeos_state::external_content::products::transfer::ProductWitnessSource::LocalCapture {},
                 qualification_hash: Some("7".repeat(64)),
+                remote_testimony: None,
             },
         };
         grant

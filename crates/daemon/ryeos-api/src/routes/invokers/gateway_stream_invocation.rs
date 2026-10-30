@@ -541,6 +541,7 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
                 usage_subject_asserted_by: usage_subject_asserted_by.clone(),
                 launch_timings: ctx.launch_timings.clone(),
                 pinned_project_snapshot: None,
+                remote_consumer: None,
             },
         )
         .await;

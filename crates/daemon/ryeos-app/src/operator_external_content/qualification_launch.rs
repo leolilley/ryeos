@@ -169,6 +169,25 @@ impl PreparedQualificationLaunch {
         }
     }
 
+    /// The consumer invocation selectors authenticated before root birth.
+    /// Activated-content launches carry none.
+    pub fn consumer_invocation(
+        &self,
+    ) -> Option<&ryeos_external_execution_contract::restored_runtime_measurement::ConsumerVerificationInputSelection>{
+        match self {
+            Self::CapturedProduct(source) => source.consumer_invocation.as_ref(),
+            Self::ActivatedContent { .. } => None,
+        }
+    }
+
+    /// Typed proof for the executor's launch gates, present exactly when the
+    /// prepared launch consumes a signed remote scenario.
+    pub fn remote_consumer_proof(
+        &self,
+    ) -> Result<Option<crate::remote_consumer_launch::RemoteConsumerLaunchProof>> {
+        crate::remote_consumer_launch::RemoteConsumerLaunchProof::from_prepared(self)
+    }
+
     pub fn policy_source(&self) -> &ProductQualificationPolicySource {
         match self {
             Self::CapturedProduct(source) => &source.policy_source,

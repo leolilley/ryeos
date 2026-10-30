@@ -4720,7 +4720,7 @@ mod tests {
                     "declaration_id": "authoring-runtime",
                     "witness_hash": "ab".repeat(32),
                     "witness_source": {"kind": "local_capture"},
-                    "qualification_hash": null
+                    "qualification_hash": null, "remote_testimony": null
                 }
             },
             {
@@ -4729,7 +4729,7 @@ mod tests {
                     "declaration_id": "authoring-tools",
                     "witness_hash": "cd".repeat(32),
                     "witness_source": {"kind": "local_capture"},
-                    "qualification_hash": "ef".repeat(32)
+                    "qualification_hash": "ef".repeat(32), "remote_testimony": null
                 }
             }
         ]))

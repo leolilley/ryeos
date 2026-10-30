@@ -24,6 +24,10 @@ use ryeos_app::node_config::sections::external_execution::compose::{
     canonical_backend_id, compose_external_execution_binding,
     installed_binding_credential_generation,
 };
+use ryeos_app::node_config::sections::external_execution::compose_qualification::{
+    QualificationBindingRequest, compose_qualification_session_binding,
+    installed_qualification_binding_report,
+};
 use ryeos_app::node_config::sections::runtime_snapshot_production::compose::{
     ProducerFactsSource, ProductionComposeRequest, ProductionLimits, StandaloneProducerFacts,
     compose_runtime_snapshot_production_binding, installed_production_credential_generation,
@@ -41,7 +45,7 @@ use serde_json::{Value, json};
 
 use super::contract::is_digest;
 use super::host::TypedReport;
-use super::table::{HandlerContext, Prepared};
+use super::table::{HandlerContext, Prepared, VerifiedInputs};
 
 // ── Arguments ────────────────────────────────────────────────────────────
 
@@ -168,6 +172,26 @@ impl SnapshotComposeArguments {
     /// Exactly one source of provider facts: the binding alone, or every
     /// stated fact with the roots input.
     pub fn validate(&self, inputs: &BTreeMap<String, String>) -> Result<()> {
+        ProviderFactsArguments {
+            binding: &self.binding,
+            backend: &self.backend,
+            account: &self.account,
+            owner_id: &self.owner_id,
+        }
+        .validate(inputs)
+    }
+}
+
+/// The arguments that name where provider facts come from.
+struct ProviderFactsArguments<'a> {
+    binding: &'a Option<String>,
+    backend: &'a Option<String>,
+    account: &'a Option<String>,
+    owner_id: &'a Option<String>,
+}
+
+impl ProviderFactsArguments<'_> {
+    fn validate(&self, inputs: &BTreeMap<String, String>) -> Result<()> {
         let stated = [
             self.backend.is_some(),
             self.account.is_some(),
@@ -188,6 +212,56 @@ impl SnapshotComposeArguments {
             );
         }
         Ok(())
+    }
+
+    /// The facts source the arguments select, reading the roots input when
+    /// the facts are stated.
+    fn source(&self, inputs: &VerifiedInputs) -> Result<ProducerFactsSource> {
+        Ok(match self.binding {
+            Some(id) => ProducerFactsSource::ExternalBinding { id: id.clone() },
+            None => ProducerFactsSource::Standalone(StandaloneProducerFacts {
+                backend: self.backend.clone().context("backend")?,
+                account: self.account.clone().context("account")?,
+                owner_id: self.owner_id.clone().context("owner id")?,
+                roots_pem: utf8(inputs.require("tls_roots")?, "TLS roots")?.to_owned(),
+            }),
+        })
+    }
+}
+
+/// Compose the qualification-only structured-session binding a consumer
+/// qualification's Worker session is placed under.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QualificationSessionComposeArguments {
+    pub id: String,
+    /// Installed external-execution binding to take the provider facts from;
+    /// exclusive with `backend`, `account`, `owner_id` and the `tls_roots`
+    /// input, which together state them outright.
+    pub binding: Option<String>,
+    pub backend: Option<String>,
+    pub account: Option<String>,
+    pub owner_id: Option<String>,
+    pub policy_ref: String,
+    pub provider_declaration_id: String,
+    pub runtime_manifest_hash: String,
+    pub runtime_member_sha256: String,
+    pub snapshot_id: String,
+    pub plan: String,
+    pub region: String,
+    pub private_mailbox_parent: String,
+    pub capacity_group: Option<String>,
+}
+
+impl QualificationSessionComposeArguments {
+    pub fn validate(&self, inputs: &BTreeMap<String, String>) -> Result<()> {
+        ProviderFactsArguments {
+            binding: &self.binding,
+            backend: &self.backend,
+            account: &self.account,
+            owner_id: &self.owner_id,
+        }
+        .validate(inputs)
     }
 }
 
@@ -496,15 +570,13 @@ pub(super) fn external_compose(ctx: &HandlerContext<'_>) -> Result<Value> {
 pub(super) fn snapshot_compose(ctx: &HandlerContext<'_>) -> Result<Value> {
     let arguments: SnapshotComposeArguments = ctx.arguments()?;
     arguments.validate(&ctx.request.inputs)?;
-    let facts_source = match &arguments.binding {
-        Some(id) => ProducerFactsSource::ExternalBinding { id: id.clone() },
-        None => ProducerFactsSource::Standalone(StandaloneProducerFacts {
-            backend: arguments.backend.clone().context("backend")?,
-            account: arguments.account.clone().context("account")?,
-            owner_id: arguments.owner_id.clone().context("owner id")?,
-            roots_pem: utf8(ctx.inputs.require("tls_roots")?, "TLS roots")?.to_owned(),
-        }),
-    };
+    let facts_source = ProviderFactsArguments {
+        binding: &arguments.binding,
+        backend: &arguments.backend,
+        account: &arguments.account,
+        owner_id: &arguments.owner_id,
+    }
+    .source(ctx.inputs)?;
     let generation = derived_credential_generation(ctx.request_digest);
     if installed_production_credential_generation(ctx.app_root, &arguments.id)?.as_deref()
         == Some(generation.as_str())
@@ -537,6 +609,51 @@ pub(super) fn snapshot_compose(ctx: &HandlerContext<'_>) -> Result<Value> {
                 .maximum_upload_bytes
                 .unwrap_or(defaults.maximum_upload_bytes),
         },
+    })?;
+    Ok(serde_json::to_value(report)?)
+}
+
+pub(super) fn qualification_session_compose(ctx: &HandlerContext<'_>) -> Result<Value> {
+    let arguments: QualificationSessionComposeArguments = ctx.arguments()?;
+    arguments.validate(&ctx.request.inputs)?;
+    let generation = derived_credential_generation(ctx.request_digest);
+    if installed_binding_credential_generation(ctx.app_root, &arguments.id)?.as_deref()
+        == Some(generation.as_str())
+    {
+        return Ok(serde_json::to_value(
+            installed_qualification_binding_report(ctx.app_root, &arguments.id)?,
+        )?);
+    }
+    let facts_source = ProviderFactsArguments {
+        binding: &arguments.binding,
+        backend: &arguments.backend,
+        account: &arguments.account,
+        owner_id: &arguments.owner_id,
+    }
+    .source(ctx.inputs)?;
+    let limits: ComposeLimits = match ctx.inputs.get("limits") {
+        Some(bytes) => read_json(bytes, "limits")?,
+        None => ComposeLimits::default(),
+    };
+    let report = compose_qualification_session_binding(QualificationBindingRequest {
+        app_root: ctx.app_root,
+        state_lock: ctx.state_lock,
+        id: arguments.id.clone(),
+        facts_source,
+        policy_ref: arguments.policy_ref.clone(),
+        provider_declaration_id: arguments.provider_declaration_id.clone(),
+        runtime_manifest_hash: arguments.runtime_manifest_hash.clone(),
+        runtime_member_sha256: arguments.runtime_member_sha256.clone(),
+        snapshot_id: arguments.snapshot_id.clone(),
+        plan: arguments.plan.clone(),
+        region: arguments.region.clone(),
+        private_mailbox_parent: arguments.private_mailbox_parent.clone(),
+        capacity_group: arguments
+            .capacity_group
+            .clone()
+            .unwrap_or_else(|| DEFAULT_CAPACITY_GROUP.to_owned()),
+        credential_generation: generation,
+        limits,
     })?;
     Ok(serde_json::to_value(report)?)
 }

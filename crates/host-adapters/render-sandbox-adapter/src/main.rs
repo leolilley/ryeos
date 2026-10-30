@@ -3,6 +3,7 @@
 //! validation contract and RyeOS bootstrap mapping are not established.
 
 mod activation_contact;
+mod fail_class;
 mod lease;
 mod provider_spec;
 mod proxy_route;
@@ -58,6 +59,23 @@ const MAX_ROOT_BYTES: usize = 64 * 1024;
 const MAX_NETWORK_INPUT_BYTES: usize = 64 * 1024;
 const SETUP_TIMEOUT: Duration = Duration::from_secs(5);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(2);
+/// Fixed part of the wait for a `/files/upload` reply, covering request
+/// handling that does not depend on the upload size.
+const UPLOAD_RESPONSE_WAIT_BASE: Duration = Duration::from_secs(15);
+/// Per-MiB part of the wait for a `/files/upload` reply.
+const UPLOAD_RESPONSE_WAIT_PER_MIB: Duration = Duration::from_secs(2);
+
+/// How long to wait for the first response byte after a file upload body has
+/// been fully sent. Render receives and extracts the whole tar before it
+/// answers, so the silence after transmission is server processing time that
+/// grows with the upload size, not a stalled line. The idle bound still
+/// governs transmission and every later read, and the operation's absolute
+/// deadline caps this wait.
+fn upload_response_wait(upload_bytes: u64) -> Duration {
+    const MIB: u64 = 1024 * 1024;
+    let mebibytes = u32::try_from(upload_bytes.div_ceil(MIB)).unwrap_or(u32::MAX);
+    UPLOAD_RESPONSE_WAIT_BASE.saturating_add(UPLOAD_RESPONSE_WAIT_PER_MIB.saturating_mul(mebibytes))
+}
 const GUEST_OWNER_EXECUTABLE: &str =
     "/ryeos/guest-runtime/bin/ryeos-external-guest-occurrence-owner";
 const SIGNED_IMPORT_REMOTE_PATH: &str = "/ryeos/activation/signed-import.json";
@@ -245,15 +263,41 @@ struct RenderSandbox {
     #[serde(rename = "createdAt")]
     created_at: String,
     id: String,
+    #[serde(rename = "idleTimeoutSeconds")]
+    idle_timeout_seconds: u32,
     #[serde(rename = "networkPolicy")]
     network_policy: RenderNetworkPolicy,
     plan: RenderSandboxPlan,
     region: String,
+    #[serde(rename = "sandboxGroupId")]
+    sandbox_group_id: String,
     status: RenderSandboxStatus,
     #[serde(rename = "terminatedAt", default)]
     terminated_at: Option<String>,
     #[serde(rename = "timeoutSeconds")]
     timeout_seconds: u32,
+}
+
+/// The longest idle timeout the adapter accepts from the provider: one day.
+const MAX_IDLE_TIMEOUT_SECONDS: u32 = 86_400;
+
+impl RenderSandbox {
+    /// The provider-assigned attributes that no request field pins: a positive
+    /// idle timeout within one day and a well-formed sandbox group id. The
+    /// idle timeout is independent of `timeoutSeconds` (the live service
+    /// reports 900 for a 600 second lifetime).
+    fn provider_attributes_valid(&self) -> bool {
+        (1..=MAX_IDLE_TIMEOUT_SECONDS).contains(&self.idle_timeout_seconds)
+            && valid_sandbox_group_id(&self.sandbox_group_id)
+    }
+}
+
+fn valid_sandbox_group_id(value: &str) -> bool {
+    value.starts_with("sbg-")
+        && value.len() <= 256
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
 }
 
 #[derive(Serialize)]
@@ -332,10 +376,16 @@ impl Drop for SignalCancellation {
 }
 
 fn main() {
-    if run().is_err() {
-        // Never forward provider text, credentials, URLs, or settings to stderr.
-        let _ = writeln!(std::io::stderr(), "render lifecycle adapter failed closed");
-        std::process::exit(1);
+    if let Err(error) = run() {
+        // Never forward provider text, credentials, URLs, or settings to stderr:
+        // only the compile-time class word and its stable exit code leave.
+        let class = fail_class::FailClass::of(&error);
+        let _ = writeln!(
+            std::io::stderr(),
+            "render lifecycle adapter failed closed: {}",
+            class.word()
+        );
+        std::process::exit(class.exit_code());
     }
 }
 
@@ -1128,6 +1178,7 @@ fn create_response_matches(
         && sandbox.network_policy.matches(&projection.network_policy)
         && sandbox.timeout_seconds == projection.timeout_seconds
         && sandbox.region == projection.region
+        && sandbox.provider_attributes_valid()
 }
 
 fn exact_terminal_timestamp<'a>(
@@ -1147,6 +1198,7 @@ fn exact_terminal_timestamp<'a>(
         || sandbox.plan != expected_plan
         || sandbox.region != settings.region
         || !sandbox.network_policy.matches(expected_policy)
+        || !sandbox.provider_attributes_valid()
     {
         return None;
     }
@@ -1398,6 +1450,11 @@ fn observe_termination_with_network(
 }
 
 fn network_context_from_captured_inputs() -> Result<NetworkContext> {
+    use fail_class::{Classify as _, FailClass};
+    network_context_from_captured_inputs_inner().classed(FailClass::NetInputs)
+}
+
+fn network_context_from_captured_inputs_inner() -> Result<NetworkContext> {
     let resolver = read_sealed_env(LIFECYCLE_RESOLVER_FD_ENV, MAX_NETWORK_INPUT_BYTES)?;
     let hosts = read_sealed_env(LIFECYCLE_HOSTS_FD_ENV, MAX_NETWORK_INPUT_BYTES)?;
     let resolver_digest =
@@ -1504,7 +1561,8 @@ fn tls_roots(settings: &Settings) -> Result<Vec<Vec<u8>>> {
 }
 
 fn read_credential() -> Result<Zeroizing<String>> {
-    ryeos_remote_lease_core::read_credential("Render")
+    use fail_class::{Classify as _, FailClass};
+    ryeos_remote_lease_core::read_credential("Render").classed(FailClass::CredentialFormat)
 }
 
 fn send_api_request<S: RenderApiSettings>(
@@ -1667,13 +1725,21 @@ fn verify_artifact(
     expected_digest: &str,
     expected_bytes: Option<u64>,
 ) -> Result<LifecycleArtifactInspection> {
-    authority.require_owned_executable()?;
-    let observation = authority.regular_file_observation()?;
-    ensure!(
-        expected_bytes.is_none_or(|bytes| bytes == observation.size())
-            && authority.digest_regular_file_stable_exact(&observation)? == expected_digest,
-        "lifecycle artifact identity changed"
-    );
+    use fail_class::{Classify as _, FailClass};
+    authority
+        .require_owned_executable()
+        .classed(FailClass::ArtifactDigest)?;
+    let observation = authority
+        .regular_file_observation()
+        .classed(FailClass::ArtifactDigest)?;
+    let digest = authority
+        .digest_regular_file_stable_exact(&observation)
+        .classed(FailClass::ArtifactDigest)?;
+    let size_matches = expected_bytes.is_none_or(|bytes| bytes == observation.size());
+    if !(size_matches && digest == expected_digest) {
+        return Err(anyhow::anyhow!("lifecycle artifact identity changed")
+            .context(FailClass::ArtifactDigest));
+    }
     Ok(LifecycleArtifactInspection {
         descriptor: authority
             .inherited_descriptor()
@@ -2360,6 +2426,38 @@ mod offline_fixture_tests {
                 &provider_spec::EgressPolicy::deny_all()
             ),
             None
+        );
+    }
+
+    #[test]
+    fn live_sandbox_shapes_with_idle_timeout_and_group_parse_and_bind() {
+        let created = br#"{"createdAt":"2026-10-29T23:16:50Z","id":"sbx-18p4gdbht7ogae00c739p3070","idleTimeoutSeconds":900,"networkPolicy":{"default":"deny-all","type":"deny-all"},"plan":"starter","region":"oregon","sandboxGroupId":"sbg-damv59p42hec73ck8b7g","status":"creating","terminatedAt":null,"timeoutSeconds":600}"#;
+        let running = br#"{"createdAt":"2026-10-29T23:16:50Z","id":"sbx-18p4gdbht7ogae00c739p3070","idleTimeoutSeconds":900,"networkPolicy":{"default":"deny-all","type":"deny-all"},"plan":"starter","region":"oregon","sandboxGroupId":"sbg-damv59p42hec73ck8b7g","status":"running","terminatedAt":null,"timeoutSeconds":600}"#;
+        let mut projection = create_projection();
+        projection.plan = PlanValue::Starter;
+        let sandbox = accepted_create_response(201, created, &projection).unwrap();
+        assert_eq!(sandbox.idle_timeout_seconds, 900);
+        assert_eq!(sandbox.sandbox_group_id, "sbg-damv59p42hec73ck8b7g");
+        let polled: RenderSandbox =
+            from_json_slice_strict(running, usize::try_from(MAX_API_RESPONSE_BYTES).unwrap())
+                .unwrap();
+        assert_eq!(polled.status, RenderSandboxStatus::Running);
+        let mut altered: serde_json::Value = serde_json::from_slice(created).unwrap();
+        altered["idleTimeoutSeconds"] = serde_json::json!(0);
+        assert!(
+            accepted_create_response(201, &serde_json::to_vec(&altered).unwrap(), &projection)
+                .is_none()
+        );
+        altered["idleTimeoutSeconds"] = serde_json::json!(900);
+        altered["sandboxGroupId"] = serde_json::json!("other");
+        assert!(
+            accepted_create_response(201, &serde_json::to_vec(&altered).unwrap(), &projection)
+                .is_none()
+        );
+        altered.as_object_mut().unwrap().remove("sandboxGroupId");
+        assert!(
+            accepted_create_response(201, &serde_json::to_vec(&altered).unwrap(), &projection)
+                .is_none()
         );
     }
 }

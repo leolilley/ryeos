@@ -126,7 +126,7 @@ class Run:
             "declaration_id": name,
             "witness_hash": ASSERT.require_hash("product witness", products[name]["witness_hash"]),
             "witness_source": {"kind": "local_capture"},
-            "qualification_hash": None,
+            "qualification_hash": None, "remote_testimony": None,
         } for name in sorted(products)]
         request = {
             "consumer_ref": verifier_ref,
@@ -173,7 +173,7 @@ class Run:
             "selections": [{"declaration_id": "subject",
                 "witness_hash": products["subject"]["witness_hash"],
                 "witness_source": {"kind": "local_capture"},
-                "qualification_hash": qualification_hash}],
+                "qualification_hash": qualification_hash, "remote_testimony": None}],
             "maximum_bytes": 128,
         }
         final = self.command(f"{label}-compose-qualified-consumer",
@@ -211,7 +211,7 @@ class Run:
             raise SystemExit("authored workflow did not accept the exact two named products")
         selections = [{"declaration_id": name, "witness_hash": products[name]["witness_hash"],
                        "witness_source": {"kind": "local_capture"},
-                       "qualification_hash": None} for name in sorted(products)]
+                       "qualification_hash": None, "remote_testimony": None} for name in sorted(products)]
         composed = result["verifier_composition"]
         bindings = {declaration: binding["manifest_hash"]
                     for binding in composed["bindings"]
@@ -240,7 +240,7 @@ class Run:
         if (consumer["selections"] != [{
                 "declaration_id": "subject", "witness_hash": products["subject"]["witness_hash"],
                 "witness_source": {"kind": "local_capture"},
-                "qualification_hash": qualification}]
+                "qualification_hash": qualification, "remote_testimony": None}]
             or len(consumer["bindings"]) != 1
             or consumer["bindings"][0]["manifest_hash"] != expected["subject"]):
             raise SystemExit("workflow did not finish qualification-gated consumer composition")

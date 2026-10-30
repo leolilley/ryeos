@@ -845,6 +845,7 @@ fn environment_selection(
             witness_hash: selected.product_witness_hash.clone(),
             witness_source: ryeos_state::external_content::products::transfer::ProductWitnessSource::LocalCapture {},
             qualification_hash: Some(selected.qualification_attestation_hash.clone()),
+            remote_testimony: None,
         },
     }
 }
@@ -1835,6 +1836,7 @@ async fn calibrate_signed_bundle(
             witness_hash: build_product.witness_hash.clone(),
             witness_source: ryeos_state::external_content::products::transfer::ProductWitnessSource::LocalCapture {},
             qualification_hash: None,
+            remote_testimony: None,
         },
     });
     let selections = ryeos_state::external_content::products::composition::canonicalize_product_selection_inputs(selections)?;
@@ -1910,6 +1912,7 @@ async fn calibrate_signed_bundle(
                 witness_hash: capture_product.witness_hash.clone(),
                 witness_source: ryeos_state::external_content::products::transfer::ProductWitnessSource::LocalCapture {},
                 qualification_hash: None,
+                remote_testimony: None,
             },
             });
             selections
@@ -2097,6 +2100,7 @@ async fn calibrate_substrate(
                 witness_hash: product.witness_hash.clone(),
                 witness_source: ryeos_state::external_content::products::transfer::ProductWitnessSource::LocalCapture {},
                 qualification_hash: None,
+                remote_testimony: None,
             },
             });
             selections
@@ -2942,6 +2946,7 @@ fn substrate_qualify_handler(
                 witness_hash: request.substrate_product_witness.clone(),
                 witness_source: ryeos_state::external_content::products::transfer::ProductWitnessSource::LocalCapture {},
                 qualification_hash: None,
+                remote_testimony: None,
             },
         });
         let result = run_protected_release_qualifier_from_generation(
@@ -3171,6 +3176,7 @@ fn core_seed_capture_handler(
                 witness_hash: request.selected_product_witness,
                 witness_source: ryeos_state::external_content::products::transfer::ProductWitnessSource::LocalCapture {},
                 qualification_hash: None,
+                remote_testimony: None,
             },
         });
         let selections = ryeos_state::external_content::products::composition::canonicalize_product_selection_inputs(selections)?;
@@ -3275,6 +3281,7 @@ fn core_seed_qualify_handler(
                 witness_hash: request.signed_product_witness.clone(),
                 witness_source: ryeos_state::external_content::products::transfer::ProductWitnessSource::LocalCapture {},
                 qualification_hash: None,
+                remote_testimony: None,
             },
         });
         let result = run_protected_release_qualifier_from_generation(
@@ -3661,6 +3668,7 @@ fn generation_capture_handler(
                 witness_hash: request.selected_product_witness.clone(),
                 witness_source: ryeos_state::external_content::products::transfer::ProductWitnessSource::LocalCapture {},
                 qualification_hash: None,
+                remote_testimony: None,
             },
         });
         let selections = ryeos_state::external_content::products::composition::canonicalize_product_selection_inputs(selections)?;
@@ -3823,6 +3831,7 @@ fn generation_qualify_handler(
                 witness_hash: request.signed_product_witness.clone(),
                 witness_source: ryeos_state::external_content::products::transfer::ProductWitnessSource::LocalCapture {},
                 qualification_hash: None,
+                remote_testimony: None,
             },
         });
         let result = run_protected_release_qualifier_from_generation(

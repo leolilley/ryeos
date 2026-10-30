@@ -2312,13 +2312,14 @@ fn admit_session_capsule(
                 ryeos_app::external_placement::preflight_external_candidate_program(
                     state, program,
                 )?;
-            if let Some(prepared) = &prepared_runtime_content {
-                ensure!(
-                    prepared == &content,
-                    "activated runtime testimony changed between program preparation and capsule admission"
-                );
-            }
-            (guest, Some(content))
+            // Both sides are absent for a product-sourced runtime and present
+            // for an activation-sourced one, so the comparison also refuses a
+            // lane that disagrees with what preparation produced.
+            ensure!(
+                prepared_runtime_content == content,
+                "runtime content testimony changed between program preparation and capsule admission"
+            );
+            (guest, content)
         } else {
             validate_session_process_control(state, session)?;
             (None, None)

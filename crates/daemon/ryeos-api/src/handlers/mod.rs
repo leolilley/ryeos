@@ -54,6 +54,7 @@ pub mod external_content_release;
 pub mod external_content_scrub;
 pub mod external_execution_candidate_program;
 pub mod external_execution_channel;
+pub mod external_execution_product_program;
 pub mod federated_follow;
 pub mod federation_capabilities;
 pub mod federation_heads_list;
@@ -228,6 +229,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     external_content_release::DESCRIPTOR,
     external_content_scrub::DESCRIPTOR,
     external_execution_candidate_program::DESCRIPTOR,
+    external_execution_product_program::DESCRIPTOR,
     external_execution_channel::DESCRIPTOR,
     external_execution_channel::EXCHANGE_DESCRIPTOR,
     trace_branch::DESCRIPTOR,

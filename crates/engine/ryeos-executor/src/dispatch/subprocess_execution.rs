@@ -48,6 +48,36 @@ pub(super) fn uses_direct_subprocess_plan(
     direct_protocol_route(protocol).is_some()
 }
 
+fn qualification_route_refusal(kind: &str) -> DispatchError {
+    DispatchError::SchemaMisconfigured {
+        kind: kind.to_owned(),
+        detail: "qualification opaque callback requires a remote-consumer launch proof naming this item and the composition-retained native custody; selected route remains refused".into(),
+    }
+}
+
+/// Admission for a direct subprocess hop. The qualification callback route is
+/// admitted only when the launch proof names this exact hop; the exact wire
+/// match that selected the route is its shape check, since its managed
+/// lifecycle is outside the ordinary shapes. Every other route takes the
+/// ordinary contract unchanged, with or without a proof. A proof is necessary,
+/// not sufficient: the runner still requires the born-root custody before it
+/// mints any callback authority.
+pub(crate) fn validate_direct_protocol_contract(
+    protocol: &ryeos_engine::protocols::VerifiedProtocol,
+    kind: &str,
+    proof: Option<&ryeos_app::remote_consumer_launch::RemoteConsumerLaunchProof>,
+    hop_ref: &str,
+) -> Result<(), DispatchError> {
+    if direct_protocol_route(protocol) == Some(DirectProtocolRoute::QualificationOpaqueCallback) {
+        return if proof.is_some_and(|proof| proof.authorizes(hop_ref)) {
+            Ok(())
+        } else {
+            Err(qualification_route_refusal(kind))
+        };
+    }
+    validate_ordinary_protocol_contract(protocol, kind)
+}
+
 /// Enforce the one ordinary-subprocess wire contract everywhere admission can
 /// happen. Keeping this check shared prevents accepted preflight from minting
 /// a thread that the runner later rejects for protocol shape.
@@ -58,10 +88,7 @@ pub(crate) fn validate_ordinary_protocol_contract(
     use ryeos_engine::protocol_vocabulary::{LifecycleMode, StdinShape, StdoutMode, StdoutShape};
 
     if direct_protocol_route(protocol) == Some(DirectProtocolRoute::QualificationOpaqueCallback) {
-        return Err(DispatchError::SchemaMisconfigured {
-            kind: kind.to_owned(),
-            detail: "qualification opaque callback requires original bound provenance and composition-retained native custody; selected route remains refused".into(),
-        });
+        return Err(qualification_route_refusal(kind));
     }
 
     let terminal = protocol.descriptor.lifecycle.mode == LifecycleMode::DetachedOk
@@ -326,7 +353,19 @@ pub(crate) async fn dispatch_subprocess(
             .await
         }
         true => {
-            validate_ordinary_protocol_contract(protocol, &current_ref.kind)?;
+            let remote_consumer = request
+                .root_admission
+                .as_ref()
+                .map(ryeos_app::remote_consumer_launch::RemoteConsumerLaunchProof::from_admission)
+                .transpose()
+                .map_err(DispatchError::Internal)?
+                .flatten();
+            validate_direct_protocol_contract(
+                protocol,
+                &current_ref.kind,
+                remote_consumer.as_ref(),
+                &current_ref.to_string(),
+            )?;
             Box::pin(dispatch_tool_subprocess(
                 current_ref,
                 thread_profile,
@@ -1281,6 +1320,7 @@ mod runner_error_tests {
 #[cfg(test)]
 mod direct_protocol_tests {
     use super::*;
+    use ryeos_app::remote_consumer_launch::RemoteConsumerLaunchProof;
     use ryeos_engine::{
         protocol_vocabulary::{EnvInjection, EnvInjectionSource, StdinShape},
         protocols::VerifiedProtocol,
@@ -1311,8 +1351,7 @@ mod direct_protocol_tests {
         assert!(validate_ordinary_protocol_contract(&protocol, "fixture").is_err());
     }
 
-    #[test]
-    fn exact_qualification_wire_is_direct_but_unconditionally_refused() {
+    fn qualification() -> VerifiedProtocol {
         let mut protocol = streaming();
         protocol.descriptor = serde_yaml::from_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -1321,19 +1360,61 @@ mod direct_protocol_tests {
         .unwrap();
         // Canonical label cannot determine the mechanics or grant readiness.
         protocol.canonical_ref = "protocol:fixture/unrelated-label".into();
+        protocol
+    }
+
+    #[test]
+    fn exact_qualification_wire_is_direct_and_refused_without_matching_proof() {
+        let mut protocol = qualification();
         assert_eq!(
             direct_protocol_route(&protocol),
             Some(DirectProtocolRoute::QualificationOpaqueCallback)
         );
         assert!(uses_direct_subprocess_plan(&protocol));
+        // The ordinary validator refuses for every caller that holds no proof.
         let error = validate_ordinary_protocol_contract(&protocol, "tool").unwrap_err();
         assert!(error.to_string().contains("selected route remains refused"));
+        // The direct validator refuses without a proof or with a foreign one.
+        let hop = "tool:fixture/verifier";
+        assert!(validate_direct_protocol_contract(&protocol, "tool", None, hop).is_err());
+        let foreign = RemoteConsumerLaunchProof::for_tests("scenario", "tool:fixture/other");
+        let error =
+            validate_direct_protocol_contract(&protocol, "tool", Some(&foreign), hop).unwrap_err();
+        assert!(error.to_string().contains("selected route remains refused"));
+        // A matching proof admits exactly the hop it names.
+        let proof = RemoteConsumerLaunchProof::for_tests("scenario", hop);
+        validate_direct_protocol_contract(&protocol, "tool", Some(&proof), hop).unwrap();
+        // Managed classification and the retained-root gate keep refusing.
         assert!(classify_managed_protocol(&protocol, "tool").is_err());
+        assert!(crate::dispatch::validate_admitted_direct_protocol(&protocol, "tool").is_err());
         protocol.descriptor.qualification_callback = None;
         assert_eq!(direct_protocol_route(&protocol), None);
         protocol.descriptor.qualification_callback =
             Some(ryeos_engine::protocols::QualificationCallbackAuthority::ScopedProducer);
         assert_eq!(direct_protocol_route(&protocol), None);
+    }
+
+    #[test]
+    fn proof_does_not_widen_other_routes() {
+        let proof = RemoteConsumerLaunchProof::for_tests("scenario", "tool:fixture/verifier");
+        let mut protocol = streaming();
+        validate_direct_protocol_contract(
+            &protocol,
+            "fixture",
+            Some(&proof),
+            "tool:fixture/verifier",
+        )
+        .unwrap();
+        protocol.descriptor.stdin.shape = StdinShape::ParametersJson;
+        assert!(
+            validate_direct_protocol_contract(
+                &protocol,
+                "fixture",
+                Some(&proof),
+                "tool:fixture/verifier",
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -1362,6 +1443,17 @@ mod direct_protocol_tests {
             Some(DirectProtocolRoute::Ordinary)
         );
         assert!(validate_ordinary_protocol_contract(&changed, "tool").is_err());
+        // A proof naming the hop cannot launder a near-miss wire.
+        let proof = RemoteConsumerLaunchProof::for_tests("scenario", "tool:fixture/verifier");
+        assert!(
+            validate_direct_protocol_contract(
+                &changed,
+                "tool",
+                Some(&proof),
+                "tool:fixture/verifier"
+            )
+            .is_err()
+        );
     }
 
     #[test]

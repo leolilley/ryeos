@@ -274,7 +274,7 @@ then
   exit 65
 fi
 
-compose_request=$(python3 -c 'import json,sys; print(json.dumps({"consumer_ref":"config:test/runtime-consumer","project_context":{"snapshot_hash":sys.argv[1]},"selections":[{"declaration_id":"distribution","witness_hash":sys.argv[2],"witness_source":{"kind":"received","acceptance_hash":sys.argv[3]},"qualification_hash":None},{"declaration_id":"runtime","witness_hash":sys.argv[4],"witness_source":{"kind":"received","acceptance_hash":sys.argv[5]},"qualification_hash":sys.argv[6]}],"maximum_bytes":32768},separators=(",",":")))' "$receiver_snapshot" "$distribution_witness" "$distribution_acceptance" "$runtime_witness" "$runtime_acceptance" "$qualification_hash")
+compose_request=$(python3 -c 'import json,sys; print(json.dumps({"consumer_ref":"config:test/runtime-consumer","project_context":{"snapshot_hash":sys.argv[1]},"selections":[{"declaration_id":"distribution","witness_hash":sys.argv[2],"witness_source":{"kind":"received","acceptance_hash":sys.argv[3]},"qualification_hash":None,"remote_testimony":None},{"declaration_id":"runtime","witness_hash":sys.argv[4],"witness_source":{"kind":"received","acceptance_hash":sys.argv[5]},"qualification_hash":sys.argv[6],"remote_testimony":None}],"maximum_bytes":32768},separators=(",",":")))' "$receiver_snapshot" "$distribution_witness" "$distribution_acceptance" "$runtime_witness" "$runtime_acceptance" "$qualification_hash")
 run_receiver "$evidence_dir/09-composition.json" external-content \
   compose-product "$compose_request"
 mapfile -t composition < <(python3 "$assert_response" received-composition \

@@ -72,8 +72,10 @@ pub const CONTENT_LANE_REDERIVATIONS: &[&str] = &[
 ];
 
 /// Facts the receiver takes on the attester's word, recorded in the acceptance
-/// so it never reads as re-derived. The product lane asserts nothing.
-pub const PRODUCT_LANE_ASSERTIONS: &[&str] = &[];
+/// so it never reads as re-derived. The product lane takes the origin
+/// verifier's realization on the attester's word: that realization is not in
+/// the receiver's content store, so the receiver cannot re-derive it.
+pub const PRODUCT_LANE_ASSERTIONS: &[&str] = &["verifier_realization"];
 /// The content lane's activation name cannot be derived from the evidence; the
 /// receiver joins it to its own binding and re-prepares against its own
 /// activation at every use.
@@ -877,9 +879,31 @@ fn require_issue_time_within_policy(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A valid product-lane acceptance record received under `acceptance_hash`.
+    pub(crate) fn product_acceptance_evidence(
+        acceptance_hash: &str,
+    ) -> RemoteQualificationAcceptanceEvidence {
+        let f = fixture();
+        RemoteQualificationAcceptanceEvidence {
+            schema: REMOTE_QUALIFICATION_ACCEPTANCE_EVIDENCE_SCHEMA.into(),
+            lane: QualificationLane::Product,
+            testimony: f.testimony.clone(),
+            product_source: Some(ProductWitnessSource::Received {
+                acceptance_hash: acceptance_hash.into(),
+            }),
+            acceptance_policy_ref: ACCEPTANCE_REF.into(),
+            acceptance_policy_digest: f.policy.digest().unwrap(),
+            attester_verifying_key: f.attester.verifying_key().to_bytes(),
+            origin_node_verifying_key: f.node.verifying_key().to_bytes(),
+            accepted_claims: f.body.asserted_claims.clone(),
+            rederived: QualificationLane::Product.rederived(),
+            asserted: QualificationLane::Product.asserted(),
+        }
+    }
 
     struct KeySigner(lillux::crypto::SigningKey, String);
 
@@ -1262,6 +1286,10 @@ mod tests {
         let mut over_asserting = evidence.clone();
         over_asserting.asserted.push("activation_ref".into());
         assert!(over_asserting.validate().is_err());
+        assert_eq!(evidence.asserted, vec!["verifier_realization".to_owned()]);
+        let mut unasserted = evidence.clone();
+        unasserted.asserted.clear();
+        assert!(unasserted.validate().is_err());
         let mut wrong_lane = evidence.clone();
         wrong_lane.lane = QualificationLane::Content;
         assert!(wrong_lane.validate().is_err());

@@ -280,6 +280,7 @@ fn seed_auxiliary_qualification_in_context(
             witness_hash: witness_hash.clone(),
             witness_source: ProductWitnessSource::LocalCapture {},
             qualification_hash: None,
+            remote_testimony: None,
         };
         let admission = crate::thread_lifecycle::preflight_root_execution(
             crate::thread_lifecycle::ResolveRootExecutionParams {
@@ -1147,6 +1148,91 @@ fn published_auxiliary_fixture_passes_current_qualification_consumption() -> Res
     Ok(())
 }
 
+#[test]
+fn shared_admission_check_admits_the_published_proof_and_refuses_another_product() -> Result<()> {
+    use crate::operator_external_content::product_receipt::{
+        ProductSourceVerification, load_product_source,
+    };
+    let fixture = fixture()?;
+    let (hash, evidence) = seed_auxiliary_qualification(&fixture)?;
+    let authority = fixture.state.state_store.pinned_state_authority()?;
+    let limits = fixture
+        .state
+        .node_policy
+        .require::<NodeObjectClosurePolicy>()?
+        .closure_limits()?;
+    let (proof, product) = with_state_guard(&authority, |guard| {
+        let proof = load_current_qualification(
+            &fixture.state,
+            &authority,
+            guard,
+            limits,
+            &fixture.context.fingerprint,
+            &hash,
+        )?;
+        let product = load_product_source(
+            &fixture.state,
+            &authority,
+            guard,
+            limits,
+            &fixture.context.fingerprint,
+            &evidence.product_witness_hash,
+            &evidence.witness_source,
+            ProductSourceVerification::Fresh,
+        )?;
+        Ok((proof, product))
+    })?;
+    let relationship = relationship(
+        "runtime_to_verifier",
+        "auxiliary",
+        "subject",
+        Some(AUX_POLICY),
+    );
+    verify_loaded_qualification_against_relationship(
+        &fixture.state,
+        &fixture.context,
+        &authority,
+        limits,
+        AUX_POLICY,
+        &relationship,
+        &proof,
+        &product,
+        true,
+        None,
+    )?;
+    let mut other = product.clone();
+    other.evidence.manifest_hash = "9".repeat(64);
+    let error = verify_loaded_qualification_against_relationship(
+        &fixture.state,
+        &fixture.context,
+        &authority,
+        limits,
+        AUX_POLICY,
+        &relationship,
+        &proof,
+        &other,
+        false,
+        None,
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("exact selected product witness and manifest")
+    );
+    // The export check serves only policies with a consumer context; this
+    // policy has none, so the runtime-snapshot route owns it.
+    let error =
+        verify_current_product_qualification_for_export(&fixture.state, &fixture.context, &proof)
+            .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("requires a consumer execution context")
+    );
+    Ok(())
+}
+
 #[derive(Clone)]
 struct SnapshotLease {
     snapshot: String,
@@ -1337,6 +1423,7 @@ fn pinned_fixture(fixture: &Fixture) -> Result<PinnedFixture> {
                 witness_hash: qualified.product_witness_hash,
                 witness_source: ProductWitnessSource::LocalCapture {},
                 qualification_hash: Some(qualification_hash),
+                remote_testimony: None,
             },
         }],
     };

@@ -182,6 +182,7 @@ fn selected_root_product_selection(
             witness_hash: witness_hash.to_owned(),
             witness_source: witness_source.clone(),
             qualification_hash: None,
+            remote_testimony: None,
         },
     }
 }
@@ -238,7 +239,7 @@ pub fn require_current_policy_matches_prepared(
     )
 }
 
-fn require_invocation_lane(
+pub(crate) fn require_invocation_lane(
     policy: &ProductQualificationPolicySource,
     invocation: Option<&ConsumerVerificationInputSelection>,
 ) -> Result<()> {

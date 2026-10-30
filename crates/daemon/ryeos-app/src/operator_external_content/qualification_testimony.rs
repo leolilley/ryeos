@@ -13,7 +13,8 @@ use anyhow::{Context as _, bail, ensure};
 use ryeos_node_runtime::identity::{AuthorizedKeyPrincipalClass, NodeIdentity};
 use ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy;
 use ryeos_state::external_content::products::composition::{
-    AdmittedProductQualification, ProductRelationshipQualification,
+    AdmittedProductQualification, ProductRelationship, ProductRelationshipQualification,
+    ProductSelection,
 };
 use ryeos_state::external_content::products::publication::{
     ProductCaptureCoordinate, VerifiedProductWitness,
@@ -45,9 +46,12 @@ use ryeos_state::{CasMutationGuard, PinnedStateAuthority};
 
 use super::content_qualification::{load_current_qualified_content, prepare_source};
 use super::product_qualification::{
-    load_current_qualification, require_unguarded_resolution,
+    CurrentVerifierContent, CurrentVerifierContext, load_current_qualification,
+    require_current_consumer_content_for_remote_selection, require_unguarded_resolution,
     resolve_consumer_definition_in_generation, resolve_current_bundle_qualification_policy,
-    verify_current_external_runtime_qualification, with_state_guard,
+    resolve_current_bundle_verifier_identity_against_admitted,
+    verify_current_external_runtime_qualification, verify_current_product_qualification_for_export,
+    with_state_guard,
 };
 use super::product_receipt::{ProductSourceVerification, load_product_source};
 use crate::handler_context::HandlerContext;
@@ -110,6 +114,7 @@ pub(crate) struct VerifiedRemoteRuntimeContentTestimony {
 /// verification, so a stale proof is refused rather than exported.
 pub fn export_testimony_blocking(
     state: &AppState,
+    context: &HandlerContext,
     operator: &NodeIdentity,
     qualification_hash: &str,
     acceptance_policy_ref: &str,
@@ -133,20 +138,38 @@ pub fn export_testimony_blocking(
             qualification_hash,
         )
     })?;
-    let binding = ExternalRuntimeQualificationBinding {
-        attestation_hash: qualification_hash.to_owned(),
-        owner_principal: owner_principal.clone(),
-        qualification: ProductRelationshipQualification {
-            policy_ref: Some(witness.evidence.policy_source.canonical_ref.clone()),
-            required_claims: witness.evidence.result.claims.clone(),
-        },
-        remote_testimony: None,
+    // A policy with a consumer context cannot be checked as a runtime
+    // snapshot; its qualification is re-verified the way product selection
+    // admits it. Both routes refuse unless the origin would itself select the
+    // exact proof now.
+    let current = if witness
+        .evidence
+        .policy_source
+        .policy
+        .consumer_execution_context
+        .is_some()
+    {
+        ensure!(
+            context.fingerprint == owner_principal,
+            "product qualification testimony export requires the configured operator"
+        );
+        verify_current_product_qualification_for_export(state, context, &witness)?
+    } else {
+        let binding = ExternalRuntimeQualificationBinding {
+            attestation_hash: qualification_hash.to_owned(),
+            owner_principal: owner_principal.clone(),
+            qualification: ProductRelationshipQualification {
+                policy_ref: Some(witness.evidence.policy_source.canonical_ref.clone()),
+                required_claims: witness.evidence.result.claims.clone(),
+            },
+            remote_testimony: None,
+        };
+        verify_current_external_runtime_qualification(
+            state,
+            &binding,
+            &witness.evidence.result.subject_manifest_hash,
+        )?
     };
-    let current = verify_current_external_runtime_qualification(
-        state,
-        &binding,
-        &witness.evidence.result.subject_manifest_hash,
-    )?;
     ensure!(
         current.attestation_hash == witness.attestation_hash
             && current.evidence == witness.evidence,
@@ -525,6 +548,188 @@ pub(crate) fn verify_current_remote_runtime_testimony(
     })
 }
 
+/// Fresh product-selection check for a remote testimony accepted under local
+/// policy. It re-reads the selecting operator's current attester grant, the
+/// published acceptance, the receiver's acceptance policy and the origin's
+/// qualification policy, and re-admits the testimony. It never runs the
+/// origin's verifier, never re-derives the origin's execution and never
+/// publishes anything: what only the origin could observe stays the origin's
+/// testimony, returned unmodified beside the retained acceptance that lets
+/// recovery re-authenticate it without current grants.
+///
+/// What the receiver can establish without the origin's execution is done
+/// here: the selected product is the received product the testimony proves,
+/// the current signed relationship and policy still accept the testimony's
+/// claims, the verifier is the identity this node resolves for it, and the
+/// consumer content the origin qualified is, apart from node-local cache
+/// identity, the content this node would run. `context` is the selecting
+/// operator's admitted authority and must be the testimony's attester.
+pub(crate) fn verify_current_remote_selection_testimony(
+    state: &AppState,
+    context: &HandlerContext,
+    authority: &PinnedStateAuthority,
+    limits: ObjectClosureLimits,
+    selector: &ProductSelection,
+    relationship: &ProductRelationship,
+    product: &VerifiedProductWitness,
+) -> anyhow::Result<(
+    AdmittedProductQualification,
+    RetainedRemoteQualificationTestimony,
+)> {
+    selector.validate()?;
+    let remote = selector
+        .remote_testimony
+        .as_ref()
+        .context("product selection names no remote testimony")?;
+    let (Some(policy_ref), Some(qualification_hash)) = (
+        relationship.qualification.policy_ref.as_deref(),
+        selector.qualification_hash.as_deref(),
+    ) else {
+        bail!("a remote product testimony requires a signed qualification policy and its hash");
+    };
+    require_unguarded_resolution("remote product testimony selection check")?;
+    let owner_principal = product.evidence.owner_principal.as_str();
+    ensure!(
+        owner_principal == context.fingerprint,
+        "the remote product testimony's attester is not the selecting operator"
+    );
+    let grant = current_attester_grant(state, owner_principal)?;
+    let acceptance_policy = resolve_acceptance_policy(state, &remote.acceptance_policy_ref)?;
+    acceptance_policy.require_lane(QualificationLane::Product)?;
+    let origin_policy = resolve_current_bundle_qualification_policy(state, policy_ref)?;
+    let (loaded, accepted_product) = with_state_guard(authority, |guard| {
+        read_published_acceptance(
+            state,
+            authority,
+            guard,
+            limits,
+            owner_principal,
+            &remote.acceptance_hash,
+        )
+    })?;
+    ensure!(
+        loaded.evidence.acceptance_policy_ref == remote.acceptance_policy_ref,
+        "remote qualification acceptance was made under a different policy"
+    );
+    ensure!(
+        loaded.evidence.lane == QualificationLane::Product,
+        "remote qualification acceptance is not a product acceptance"
+    );
+    acceptance_policy
+        .require_unchanged_since_acceptance(&loaded.evidence.acceptance_policy_digest)?;
+    let accepted_product =
+        accepted_product.context("remote product acceptance has no received product")?;
+    ensure!(
+        accepted_product.attestation_hash == product.attestation_hash,
+        "remote qualification acceptance names a different received product"
+    );
+    // The live grant keys re-verify the testimony: a rotated or revoked
+    // attester or origin node key stops selection here even though the
+    // retained keys still verify.
+    let origin_node_key = loaded.evidence.origin_node_key()?;
+    require_current_origin_node_grant(state, &origin_node_key, &grant.origin_site_id)?;
+    let live = verify_remote_qualification_testimony(
+        &loaded.evidence.testimony,
+        &grant.key,
+        &origin_node_key,
+    )?;
+    let evidence = live.evidence.product()?;
+    ensure!(
+        live.testimony.issuer == context.fingerprint,
+        "the remote product testimony's attester is not the selecting operator"
+    );
+    ensure!(
+        live.body.qualification_attestation_hash == qualification_hash,
+        "remote product testimony differs from the selected qualification"
+    );
+    require_selected_source_is_accepted(&selector.witness_source, &loaded.evidence)?;
+    require_received_product_join(product, evidence)?;
+    require_origin_policy(
+        &live.evidence,
+        &origin_policy,
+        &relationship.qualification.required_claims,
+    )?;
+    admit(
+        &acceptance_policy,
+        &remote.acceptance_policy_ref,
+        &live,
+        &grant.origin_site_id,
+        policy_ref,
+        &relationship.qualification.required_claims,
+        &lillux::time::iso8601_now(),
+    )?;
+    require_testimony_consumer_content(evidence)?;
+    if let Some(consumer_context) = &origin_policy.policy.consumer_execution_context {
+        consumer_context.validate_relationship_consumer(&relationship.consumer)?;
+    }
+    relationship.validate_compatible_product_evidence(&product.evidence)?;
+    // The verifier is resolved, never run: the digests the origin recorded
+    // must be what this node's installed signed verifier resolves to.
+    // Resolved without the origin's sealed launch capsule, which this node
+    // never holds: the verifier Tool is resolved from the installed signed
+    // bundle by ref and parameters alone, as a content qualification does.
+    let current_verifier = resolve_current_bundle_verifier_identity_against_admitted(
+        state,
+        authority,
+        context,
+        &origin_policy.policy.verifier_ref,
+        &origin_policy.policy.verifier_parameters,
+        CurrentVerifierContext {
+            content: CurrentVerifierContent::Root(None),
+            logical_project_root: None,
+            binding_subject_authority: None,
+            sealed_request: None,
+            project_context_resolver: None,
+            pinned_admission: None,
+        },
+        None,
+    )?;
+    ensure!(
+        current_verifier.artifact_identity == evidence.verifier.artifact_identity
+            && current_verifier.effective_definition_digest
+                == evidence.verifier.effective_definition_digest,
+        "remote product testimony names a verifier this node does not resolve"
+    );
+    require_current_consumer_content_for_remote_selection(
+        state,
+        authority,
+        limits,
+        &origin_policy,
+        relationship,
+        evidence,
+        &product.evidence.manifest_hash,
+    )?;
+    // The acceptance and its product must still be the same after the
+    // unguarded resolution above.
+    let (current, current_product) = with_state_guard(authority, |guard| {
+        read_published_acceptance(
+            state,
+            authority,
+            guard,
+            limits,
+            owner_principal,
+            &remote.acceptance_hash,
+        )
+    })?;
+    ensure!(
+        current.hash == loaded.hash
+            && current_product.map(|current| current.attestation_hash)
+                == Some(product.attestation_hash.clone()),
+        "remote qualification acceptance changed while its policy was re-resolved"
+    );
+    let admitted = AdmittedProductQualification {
+        attestation_hash: live.body.qualification_attestation_hash.clone(),
+        evidence: evidence.clone(),
+    };
+    Ok((
+        admitted,
+        RetainedRemoteQualificationTestimony {
+            acceptance_hash: loaded.hash,
+            acceptance: loaded.evidence,
+        },
+    ))
+}
+
 /// Fresh launch check for a content binding that selects a remote testimony.
 /// It re-reads the attester's current grant, the published acceptance, the
 /// receiver's acceptance policy and the origin's qualification policy, and
@@ -820,6 +1025,33 @@ fn require_origin_policy(
                 .validate_claims_for(&current.policy, required_claims)
         }
     }
+}
+
+/// The selection must name the received product the acceptance recorded, not
+/// any other source of the same witness.
+fn require_selected_source_is_accepted(
+    selected: &ProductWitnessSource,
+    accepted: &RemoteQualificationAcceptanceEvidence,
+) -> anyhow::Result<()> {
+    ensure!(
+        matches!(selected, ProductWitnessSource::Received { .. })
+            && accepted.product_source.as_ref() == Some(selected),
+        "remote product testimony was accepted for a different product source"
+    );
+    Ok(())
+}
+
+/// A product testimony is usable for selection only when it carries the
+/// consumer content it qualified, because that content is what the receiver
+/// compares against its own preparation.
+fn require_testimony_consumer_content(
+    evidence: &ProductQualificationEvidence,
+) -> anyhow::Result<&ryeos_state::external_content::products::qualification::ProductQualificationConsumerContentIdentity>
+{
+    evidence
+        .consumer_content
+        .as_ref()
+        .context("remote product testimony carries no consumer content")
 }
 
 fn require_received_product_join(
@@ -1380,5 +1612,198 @@ mod tests {
         let error =
             verify_current_remote_runtime_testimony(&state, &binding, &"4".repeat(64)).unwrap_err();
         assert!(error.to_string().contains("grant was revoked"));
+    }
+    fn selection_fixture_product(owner: &str) -> VerifiedProductWitness {
+        use ryeos_state::external_content::products::*;
+        let declaration = ProductDeclaration {
+            name: "runtime".into(),
+            source: ProductSource::RetainedProject {},
+            path: "products/runtime".into(),
+            shape: ProductShape::Tree,
+            storage: ProductStorage::Content,
+            required: true,
+            bounds: ProductBounds {
+                maximum_entries: 4,
+                maximum_depth: 2,
+                maximum_file_bytes: 1024,
+                maximum_total_bytes: 1024,
+            },
+            expected_manifest_hash: None,
+        };
+        let declarations = ProductDeclarations {
+            schema: PRODUCT_DECLARATIONS_SCHEMA.into(),
+            output_roots: vec![],
+            products: vec![declaration.clone()],
+        };
+        let producer = ProductProducerAdmission {
+            canonical_ref: "graph:fixtures/build".into(),
+            effective_definition_digest: "1".repeat(64),
+            exact_program_hash: "2".repeat(64),
+            producer_project_snapshot_hash: "3".repeat(64),
+            launch_authority_digest: "4".repeat(64),
+            admitted_parameters_digest: canonical_value_digest(&serde_json::json!({})).unwrap(),
+        };
+        let evidence = ProductCaptureEvidence {
+            schema: PRODUCT_CAPTURE_EVIDENCE_SCHEMA,
+            owner_principal: owner.to_owned(),
+            chain_root_id: "T-fixture-root".into(),
+            thread_id: "T-fixture-terminal".into(),
+            admitted_launch_capsule_hash: "5".repeat(64),
+            root_producer: producer.clone(),
+            producer,
+            result_project_snapshot_hash: "6".repeat(64),
+            workspace_output_capture_hash: None,
+            producer_partition_identity: None,
+            recipe_binding: "product_recipe".into(),
+            recipe_purpose: ProductRecipePurpose::GeneralProductV1,
+            recipe_ref: "config:fixtures/products".into(),
+            recipe_raw_content_digest: "7".repeat(64),
+            declarations_hash: declarations.content_hash().unwrap(),
+            declarations,
+            relationships:
+                ryeos_state::external_content::products::composition::ProductRelationships::empty(),
+            declaration,
+            capture_policy_digest: "8".repeat(64),
+            manifest_hash: "9".repeat(64),
+            manifest_kind: ryeos_state::objects::EXTERNAL_CONTENT_MANIFEST_KIND.into(),
+            entry_count: 1,
+            total_bytes: 1,
+        };
+        let signer = KeySigner::new(11);
+        let attestation = evidence
+            .sign_attestation(&signer, "2026-10-20T00:00:00Z".into())
+            .unwrap();
+        VerifiedProductWitness {
+            coordinate_id: "c".repeat(64),
+            attestation_hash: canonical_value_digest(&attestation.to_value()).unwrap(),
+            attestation,
+            evidence,
+        }
+    }
+
+    fn selection_fixture_relationship(policy_ref: Option<&str>) -> ProductRelationship {
+        use ryeos_state::external_content::products::composition::{
+            ProductRelationshipConsumer, ProductRelationshipProducer,
+            ProductRelationshipRequiredProduct,
+        };
+        use ryeos_state::external_content::products::{
+            ProductBounds, ProductShape, ProductStorage,
+        };
+        ProductRelationship {
+            name: "runtime_to_worker".into(),
+            producer: ProductRelationshipProducer {
+                canonical_ref: "graph:fixtures/build".into(),
+                recipe_binding: "product_recipe".into(),
+                product_name: "runtime".into(),
+                parameters: serde_json::json!({}),
+            },
+            consumer: ProductRelationshipConsumer {
+                canonical_ref: "config:fixtures/worker".into(),
+                declaration_id: "runtime".into(),
+            },
+            required_product: ProductRelationshipRequiredProduct {
+                shape: ProductShape::Tree,
+                storage: ProductStorage::Content,
+                bounds: ProductBounds {
+                    maximum_entries: 4,
+                    maximum_depth: 2,
+                    maximum_file_bytes: 1024,
+                    maximum_total_bytes: 1024,
+                },
+            },
+            qualification: ProductRelationshipQualification {
+                policy_ref: policy_ref.map(str::to_owned),
+                required_claims: vec!["render_snapshot_v1".into()],
+            },
+        }
+    }
+
+    #[test]
+    fn selection_check_refuses_without_a_testimony_a_policy_the_attester_or_a_grant() {
+        let root = tempfile::tempdir().unwrap();
+        let (_owner, state) = crate::state::test_support::build(root.path()).unwrap();
+        let authority = state.state_store.pinned_state_authority().unwrap();
+        // The fixture node has no compiled closure policy; the refusals under
+        // test fire before any closure traversal needs real bounds.
+        let limits = ryeos_state::object_closure::ObjectClosureLimits::default();
+        let owner = format!("fp:{}", "9".repeat(64));
+        let context = HandlerContext::new(owner.clone(), vec![], true);
+        let product = selection_fixture_product(&owner);
+        let acceptance_hash = "3".repeat(64);
+        let mut selector = ProductSelection {
+            declaration_id: "runtime".into(),
+            witness_hash: product.attestation_hash.clone(),
+            witness_source: ProductWitnessSource::Received {
+                acceptance_hash: acceptance_hash.clone(),
+            },
+            qualification_hash: Some("2".repeat(64)),
+            remote_testimony: None,
+        };
+        let relationship = selection_fixture_relationship(Some("config:fixtures/qualification"));
+        let check = |context: &HandlerContext,
+                     selector: &ProductSelection,
+                     relationship: &ProductRelationship| {
+            verify_current_remote_selection_testimony(
+                &state,
+                context,
+                &authority,
+                limits,
+                selector,
+                relationship,
+                &product,
+            )
+            .unwrap_err()
+            .to_string()
+        };
+        assert!(check(&context, &selector, &relationship).contains("names no remote testimony"));
+        selector.remote_testimony = Some(
+            ryeos_state::external_content::products::composition::ProductSelectionRemoteTestimony {
+                acceptance_hash,
+                acceptance_policy_ref: ACCEPTANCE_REF.into(),
+            },
+        );
+        let unqualified = selection_fixture_relationship(None);
+        assert!(
+            check(&context, &selector, &unqualified)
+                .contains("requires a signed qualification policy")
+        );
+        let stranger = HandlerContext::new(format!("fp:{}", "1".repeat(64)), vec![], true);
+        assert!(
+            check(&stranger, &selector, &relationship)
+                .contains("attester is not the selecting operator")
+        );
+        // Without a current node-signed grant for the selecting operator,
+        // nothing about the testimony is consulted.
+        assert!(check(&context, &selector, &relationship).contains("grant was revoked"));
+    }
+
+    #[test]
+    fn selection_requires_the_accepted_product_source_and_the_consumer_content() {
+        let f = fixture();
+        let accepted = ProductWitnessSource::Received {
+            acceptance_hash: "a".repeat(64),
+        };
+        require_selected_source_is_accepted(&accepted, &f.evidence).unwrap();
+        for other in [
+            ProductWitnessSource::Received {
+                acceptance_hash: "b".repeat(64),
+            },
+            ProductWitnessSource::LocalCapture {},
+        ] {
+            assert!(
+                require_selected_source_is_accepted(&other, &f.evidence)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("different product source")
+            );
+        }
+        let mut local_only = f.evidence.clone();
+        local_only.product_source = None;
+        assert!(require_selected_source_is_accepted(&accepted, &local_only).is_err());
+        // The fixture qualification was produced without a consumer context.
+        let verified = f.evidence.verify().unwrap();
+        let error =
+            require_testimony_consumer_content(verified.evidence.product().unwrap()).unwrap_err();
+        assert!(error.to_string().contains("no consumer content"));
     }
 }

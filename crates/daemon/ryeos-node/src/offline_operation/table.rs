@@ -272,6 +272,38 @@ static OPERATIONS: &[OperationSpec] = &[
         },
     },
     OperationSpec {
+        id: "node.external-execution.qualification-session-compose",
+        authority_bearing: true,
+        local_signer_only: false,
+        alone: false,
+        inputs: &[
+            InputSlot {
+                name: "tls_roots",
+                max_bytes: 256 * KIB,
+                required: false,
+            },
+            InputSlot {
+                name: "limits",
+                max_bytes: 256 * KIB,
+                required: false,
+            },
+        ],
+        preconditions: &[FACT_EXTERNAL_EXECUTION],
+        expected_result: &[],
+        required_expected_result: &[],
+        validate_request: |request| {
+            let arguments: handlers::QualificationSessionComposeArguments =
+                serde_json::from_value(request.arguments.clone())?;
+            arguments.validate(&request.inputs)
+        },
+        handler: Handler::EffectThenReceipt(handlers::qualification_session_compose),
+        recovery: Recovery {
+            record: "the installed binding's credential generation, derived from the request digest",
+            rerun: Rerun::RecognisesRecordedDigest,
+            why: "a qualification binding already installed under the id with the derived generation is the effect of this request and is reported as installed",
+        },
+    },
+    OperationSpec {
         id: "node.external-execution.snapshot-compose",
         authority_bearing: true,
         local_signer_only: false,
@@ -544,6 +576,7 @@ mod tests {
             "node.reset.policy-generation",
             "node.policy-apply",
             "node.external-execution.compose",
+            "node.external-execution.qualification-session-compose",
             "node.external-execution.snapshot-compose",
             "node.external-execution.snapshot-qualification-compose",
             "node.capacity.reissue",
@@ -557,7 +590,7 @@ mod tests {
         ] {
             assert!(lookup(id).is_some(), "{id}");
         }
-        assert_eq!(operations().len(), 13);
+        assert_eq!(operations().len(), 14);
     }
 
     #[test]
@@ -589,6 +622,7 @@ mod tests {
                 "node.reset.policy-generation",
                 "node.policy-apply",
                 "node.external-execution.compose",
+                "node.external-execution.qualification-session-compose",
                 "node.external-execution.snapshot-compose",
                 "node.external-execution.snapshot-qualification-compose",
                 "node.reset.authorization",

@@ -38,9 +38,9 @@ pub const RENDER_BACKEND_ID: &str = "render-sandbox-early-access";
 pub const DEFAULT_CAPACITY_GROUP: &str = "candidate-workers";
 
 const HTTP_NETWORK_POLICY: &str = "supervisor_pinned_owner_only_candidate_denied_v1";
-const RELAY_NETWORK_POLICY: &str = "controller_file_relay_guest_deny_all_v1";
-const STORAGE_POLICY: &str = "ephemeral_private_candidate_v1";
-const CLEANUP_PROOF: &str = "provider_terminal_occurrence_v1";
+pub(super) const RELAY_NETWORK_POLICY: &str = "controller_file_relay_guest_deny_all_v1";
+pub(super) const STORAGE_POLICY: &str = "ephemeral_private_candidate_v1";
+pub(super) const CLEANUP_PROOF: &str = "provider_terminal_occurrence_v1";
 const MAX_ROOTS_PEM_BYTES: usize = 256 * 1024;
 
 /// Resolve the operator's backend spelling to the installed adapter id.
@@ -120,14 +120,15 @@ pub(crate) struct ComposeInputs<'a> {
     pub(crate) limits: ComposeLimits,
 }
 
-/// A runtime content qualification is the structured session's testimony
-/// that its runtime content is compatible; launch loads it by activation,
-/// coordinate and attestation and checks it against the session's runtime
-/// manifest, whichever lane the program's runtime came from. A program
+/// A runtime content qualification is acquired-content testimony for an
+/// activation-sourced runtime; launch loads it by activation, coordinate and
+/// attestation and checks it against the session's runtime manifest. A program
 /// derived from activated content was itself derived from that testimony, so
 /// it must be present and must name the exact coordinate and attestation the
-/// program carries; otherwise a binding that launch would reject on its
-/// selection identity would be signed.
+/// program carries. A product-sourced program carries none: its runtime
+/// authority is its admitted product selection, and launch refuses the slot
+/// there. Either mismatch is refused here so that a binding launch would reject
+/// is never signed.
 fn require_content_qualification_pairing(
     program: &AdmittedExternalCandidateProgram,
     qualification: Option<&ExternalRuntimeContentQualificationBinding>,
@@ -137,6 +138,10 @@ fn require_content_qualification_pairing(
         ..
     } = &program.runtime_source
     else {
+        ensure!(
+            qualification.is_none(),
+            "a product-sourced program carries no runtime content qualification"
+        );
         return Ok(());
     };
     let qualification = qualification
@@ -377,13 +382,13 @@ pub(crate) fn operator_network_inputs() -> ExternalNetworkInputPolicy {
     }
 }
 
-struct SelectedTransport {
-    selection: ExternalControllerTransportSelection,
-    network_inputs: ExternalNetworkInputPolicy,
-    tls_roots: Vec<String>,
+pub(super) struct SelectedTransport {
+    pub(super) selection: ExternalControllerTransportSelection,
+    pub(super) network_inputs: ExternalNetworkInputPolicy,
+    pub(super) tls_roots: Vec<String>,
 }
 
-fn select_transport(
+pub(super) fn select_transport(
     request: &ComposeTransportRequest,
     settings: &Value,
 ) -> Result<SelectedTransport> {
@@ -469,12 +474,13 @@ pub(crate) fn bundle_artifact_facts(
     })
 }
 
-/// Resolve the signed artifacts of a stopped node's installed bundles
-/// without starting it. Holding the bundle-generation lock keeps the
-/// installed set fixed for the whole read.
-pub(crate) fn resolve_installed_artifacts(
+/// Run `read` over a stopped node's installed bundle roots under the
+/// bundle-generation lock, so the installed set cannot change during the
+/// read. The generation is verified before and after `read` runs.
+pub(crate) fn with_installed_bundles<T>(
     app_root: &Path,
-) -> Result<crate::external_artifacts::ResolvedExternalExecutionArtifacts> {
+    read: impl FnOnce(&[PathBuf], &ryeos_engine::trust::TrustStore, &Path) -> Result<T>,
+) -> Result<T> {
     let roots = ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf());
     let trust = ryeos_engine::trust::TrustStore::load(None, &roots.config())
         .context("load node trust store")?;
@@ -491,10 +497,25 @@ pub(crate) fn resolve_installed_artifacts(
         ryeos_node_runtime::engine_init::VerifiedBundleGeneration::capture(records, &trust)
             .context("capture verified bundle generation")?;
     generation.checked(&trust, || {
-        crate::external_artifacts::resolve_external_execution_artifacts(
+        read(
             &generation.roots(),
             &trust,
             &crate::private_artifact_home::root(&roots.state()),
+        )
+    })
+}
+
+/// Resolve the signed artifacts of a stopped node's installed bundles
+/// without starting it. Holding the bundle-generation lock keeps the
+/// installed set fixed for the whole read.
+pub(crate) fn resolve_installed_artifacts(
+    app_root: &Path,
+) -> Result<crate::external_artifacts::ResolvedExternalExecutionArtifacts> {
+    with_installed_bundles(app_root, |bundle_roots, trust, credential_home| {
+        crate::external_artifacts::resolve_external_execution_artifacts(
+            bundle_roots,
+            trust,
+            credential_home,
         )
     })
 }
@@ -1153,23 +1174,38 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_captured_product_program_carries_a_content_qualification_as_session_testimony() {
+    fn a_captured_product_program_refuses_a_content_qualification() {
+        let program = program();
+        let error = refusal(compose_with_content(
+            &program,
+            Some(content_qualification()),
+        ));
+        assert!(
+            format!("{error:#}")
+                .contains("product-sourced program carries no runtime content qualification"),
+            "{error:#}"
+        );
         let node = stopped_node();
         let mut request = compose_request(&node, "render");
         request.runtime_content_qualification = Some(content_qualification_value());
         let resolved =
             installed_artifacts(&node, Some(PROVIDER_ID), vec![lifecycle(&"d".repeat(64))]);
-        let report = compose_with_resolver(request, |_| Ok(resolved)).unwrap();
-        let identity = ryeos_node_runtime::identity::NodeIdentity::load(
-            &node.root.path().join(".ai/node/identity/private_key.pem"),
-        )
-        .unwrap();
-        let signed = std::fs::read_to_string(&report.path).unwrap();
-        let loaded =
-            admit_signed_binding(node.root.path(), BINDING_ID, &signed, &identity).unwrap();
-        assert_eq!(
-            loaded.document.runtime_content_qualification,
-            Some(content_qualification())
+        let error = refusal(compose_with_resolver(request, |_| Ok(resolved)));
+        assert!(
+            format!("{error:#}")
+                .contains("product-sourced program carries no runtime content qualification"),
+            "{error:#}"
+        );
+        assert!(!binding_path(&node).exists());
+        compose_with_content(&program, None).unwrap();
+    }
+
+    #[test]
+    fn an_activated_content_program_still_refuses_an_absent_content_qualification() {
+        let error = refusal(compose_with_content(&content_program(), None));
+        assert!(
+            format!("{error:#}").contains("requires a runtime content qualification"),
+            "{error:#}"
         );
     }
 
@@ -1202,6 +1238,7 @@ pub(crate) mod tests {
     fn a_remote_content_testimony_selection_is_signed_through_composition() {
         let node = stopped_node();
         let mut request = compose_request(&node, "render");
+        request.program = content_program();
         let mut selected = content_qualification_value();
         selected["remote_testimony"] = serde_json::json!({
             "acceptance_hash": "8".repeat(64),

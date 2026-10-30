@@ -722,7 +722,7 @@ mod policy_invariant_tests {
         extra.as_array_mut().unwrap().push(json!({
             "target":{"kind":"root"},
             "selection":{"declaration_id":"unexpected", "witness_hash":"6".repeat(64),
-                "witness_source":{"kind":"local_capture"}, "qualification_hash":null}
+                "witness_source":{"kind":"local_capture"}, "qualification_hash":null, "remote_testimony":null}
         }));
         assert!(
             require_non_core_selections(&extra, &environment, &native, true, &build_witness,)
@@ -1418,6 +1418,7 @@ fn expected_non_core_selections(
                     witness_hash: selected.product_witness_hash.clone(),
                     witness_source: ProductWitnessSource::LocalCapture {},
                     qualification_hash: Some(selected.qualification_attestation_hash.clone()),
+                    remote_testimony: None,
                 },
             }
         };
@@ -1430,6 +1431,7 @@ fn expected_non_core_selections(
                 witness_hash: build_witness.to_owned(),
                 witness_source: ProductWitnessSource::LocalCapture {},
                 qualification_hash: None,
+                remote_testimony: None,
             },
         });
     } else if matches!(

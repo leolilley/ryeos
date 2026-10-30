@@ -1873,7 +1873,7 @@ mod tests {
                 "declaration_id": "runtime",
                 "witness_hash": "a".repeat(64),
                 "witness_source": {"kind":"local_capture"},
-                "qualification_hash": null,
+                "qualification_hash": null, "remote_testimony": null,
             }
         }]);
         let encoded = serde_json::to_string(&selector).unwrap();
@@ -2280,7 +2280,7 @@ mod tests {
             "declaration_id":"runtime",
             "witness_hash":"a".repeat(64),
             "witness_source":{"kind":"local_capture"},
-            "qualification_hash":null
+            "qualification_hash":null, "remote_testimony": null
         }]);
         let selections_arg = selections.to_string();
         let product_owner = format!("fp:{}", "b".repeat(64));

@@ -370,6 +370,7 @@ pub(crate) fn preflight_dispatch_launch(
         usage_subject_asserted_by,
         launch_timings,
         pinned_project_snapshot: None,
+        remote_consumer: None,
     })
 }
 
@@ -393,6 +394,7 @@ struct BorrowedDispatchPreflight<'a> {
     usage_subject_asserted_by: Option<&'a str>,
     launch_timings: Option<&'a ryeos_app::launch_stage_timings::LaunchStageTimings>,
     pinned_project_snapshot: Option<&'a str>,
+    remote_consumer: Option<&'a ryeos_app::remote_consumer_launch::RemoteConsumerLaunchProof>,
 }
 
 fn preflight_dispatch_launch_core(
@@ -468,7 +470,7 @@ fn preflight_dispatch_launch_core(
         request.provenance,
     )
     .map_err(DispatchError::Internal)?;
-    ryeos_executor::dispatch::preflight_root_dispatch_for_provenance(
+    ryeos_executor::dispatch::preflight_root_dispatch_for_provenance_with_remote_consumer(
         request.item_ref.as_str(),
         request.item_ref.kind(),
         request.parameters,
@@ -477,6 +479,7 @@ fn preflight_dispatch_launch_core(
         request.usage_subject,
         request.usage_subject_asserted_by,
         &project_binding,
+        request.remote_consumer,
         &exec_ctx,
         request.provenance,
         request.state,
@@ -506,6 +509,9 @@ pub(crate) struct OwnedDispatchPreflight {
     /// Internal daemon-only marker for protected pinned qualification. It is
     /// never sourced from the public launch request or a project path.
     pub pinned_project_snapshot: Option<String>,
+    /// Typed proof that this launch is a remote-consumer qualification
+    /// verifier. Only the protected qualification launch sets it.
+    pub remote_consumer: Option<ryeos_app::remote_consumer_launch::RemoteConsumerLaunchProof>,
 }
 
 /// Keep verified resolution/composition off the async HTTP executor. Every
@@ -542,6 +548,7 @@ pub(crate) async fn preflight_dispatch_launch_off_thread(
             usage_subject_asserted_by: request.usage_subject_asserted_by.as_deref(),
             launch_timings: request.launch_timings.as_ref(),
             pinned_project_snapshot: request.pinned_project_snapshot.as_deref(),
+            remote_consumer: request.remote_consumer.as_ref(),
         })
     })
     .await

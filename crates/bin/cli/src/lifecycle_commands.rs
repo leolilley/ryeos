@@ -26,6 +26,7 @@
 //!   - `ryeos node host setup` — one-time administrator-owned host association
 //!   - `ryeos node external-execution compose` — compose and install a node-signed external placement binding on a stopped node
 //!   - `ryeos node external-execution provision-credential` — provision the placement credential an installed binding names into the node vault
+//!   - `ryeos node external-execution qualification-session-compose` — compose and install the node-signed qualification-only session binding on a stopped node
 //!   - `ryeos node external-execution snapshot-compose` — compose and install a node-signed runtime snapshot production binding on a stopped node
 //!   - `ryeos node external-execution snapshot-qualification-compose` — compose and install a node-signed snapshot qualification binding on a stopped node
 //!
@@ -142,6 +143,15 @@ const LOCAL_COMMANDS: &[LocalCommandDescriptor] = &[
     LocalCommandDescriptor {
         tokens: &["node", "external-execution", "provision-credential"],
         summary: "Store the placement credential for an installed binding, read from stdin",
+        category: "lifecycle",
+    },
+    LocalCommandDescriptor {
+        tokens: &[
+            "node",
+            "external-execution",
+            "qualification-session-compose",
+        ],
+        summary: "Compose and sign a stopped node's qualification-only session placement binding",
         category: "lifecycle",
     },
     LocalCommandDescriptor {
@@ -311,6 +321,16 @@ pub async fn try_dispatch(
             if argv.get(2).map(String::as_str) == Some("provision-credential") =>
         {
             crate::lifecycle_external_credential::run_external_provision_credential(
+                &argv[3..],
+                console,
+            )
+            .map_err(map_local_err)?;
+            Ok(true)
+        }
+        ("node", Some("external-execution"))
+            if argv.get(2).map(String::as_str) == Some("qualification-session-compose") =>
+        {
+            crate::lifecycle_external_qualification_compose::run_qualification_session_compose(
                 &argv[3..],
                 console,
             )

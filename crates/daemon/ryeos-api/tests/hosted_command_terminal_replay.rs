@@ -1342,6 +1342,74 @@ async fn command_progress_recovery_preserves_the_exact_crash_frontier() {
 }
 
 #[tokio::test]
+async fn fenced_worker_command_settles_from_testimony_without_replaying_observations() {
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
+    let root = "T-fenced-enrollment";
+    let pending = seed_pending_turn_fixture(&state, root, false);
+    let result = json!({
+        "events":[],
+        "session_observations":[{
+            "kind":"credential_enrollment_started",
+            "login_id":"login-fenced",
+            "ttl_seconds":60,
+        }],
+    });
+    append_final_turn_batch(
+        &state,
+        root,
+        pending.sequence,
+        &pending.request_digest,
+        &result,
+    );
+    state
+        .state_store
+        .fence_abandoned_worker_process(&pending.worker_instance_id, root, 1, "reaped")
+        .unwrap();
+    let session_before = state.state_store.dedicated_session(root).unwrap().unwrap();
+    assert!(session_before.worker_instance_id.is_none());
+    assert!(session_before.worker_boot_epoch.is_none());
+    let profile_before = state
+        .state_store
+        .credential_profile(&session_before.credential_profile_id)
+        .unwrap()
+        .unwrap();
+
+    ryeos_app::dedicated_session_service::reconcile_command_outboxes(&state).unwrap();
+
+    let command = state
+        .state_store
+        .dedicated_session_command(root, pending.sequence)
+        .unwrap()
+        .unwrap();
+    assert_eq!(command.state, "completed");
+    assert_eq!(
+        command.result.as_ref().unwrap()["recovered_from_root_chain"],
+        true
+    );
+    let session_after = state.state_store.dedicated_session(root).unwrap().unwrap();
+    assert_eq!(session_after.state, session_before.state);
+    assert!(session_after.worker_instance_id.is_none());
+    assert!(session_after.worker_boot_epoch.is_none());
+    let profile_after = state
+        .state_store
+        .credential_profile(&session_before.credential_profile_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(profile_after.state, profile_before.state);
+    assert_eq!(
+        profile_after.active_login_id,
+        profile_before.active_login_id
+    );
+    assert_eq!(profile_after.login_epoch, profile_before.login_epoch);
+    assert_eq!(
+        profile_after.authority_revision,
+        profile_before.authority_revision
+    );
+    // A second pass finds no unsettled command and stays quiet.
+    ryeos_app::dedicated_session_service::reconcile_command_outboxes(&state).unwrap();
+}
+
+#[tokio::test]
 async fn command_progress_recovery_refuses_a_conflicting_final_start() {
     let (_tmp, _state_owner, state) = test_state::build_test_state();
     let root = "T-progress-conflicting-final";

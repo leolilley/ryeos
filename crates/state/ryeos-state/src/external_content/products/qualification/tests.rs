@@ -1329,6 +1329,7 @@ fn subject_selection(evidence: &ProductQualificationEvidence) -> ResolvedExterna
         witness_source: evidence.witness_source.clone(),
         witness_coordinate: evidence.product_coordinate.clone(),
         qualification: None,
+        remote_testimony: None,
         producer: ProductProducerAdmission {
             canonical_ref: producer.canonical_ref,
             effective_definition_digest: "9".repeat(64),
@@ -2004,6 +2005,35 @@ fn remote_verifier_selection_is_signed_distinct_and_source_committed() {
             .remote_verifier_source_digest(Some(&source))
             .unwrap()
     );
+    let mut regenerated = source.clone();
+    regenerated.bundle_generation_identity = "generation-2".into();
+    assert_eq!(
+        scenario
+            .remote_verifier_source_digest(Some(&source))
+            .unwrap(),
+        scenario
+            .remote_verifier_source_digest(Some(&regenerated))
+            .unwrap(),
+        "the process-local generation must not reach the cross-process digest"
+    );
+    let baseline = scenario
+        .remote_verifier_source_digest(Some(&source))
+        .unwrap();
+    for change in 0..4 {
+        let mut changed = source.clone();
+        match change {
+            0 => changed.raw_content_digest = "e".repeat(64),
+            1 => changed.effective_definition_digest = "e".repeat(64),
+            2 => changed.publisher_fingerprint = "e".repeat(64),
+            _ => changed.recipe_digest = "e".repeat(64),
+        }
+        assert_ne!(
+            baseline,
+            scenario
+                .remote_verifier_source_digest(Some(&changed))
+                .unwrap()
+        );
+    }
     let mut wrong_source = source.clone();
     wrong_source.canonical_ref = "config:fixtures/other-recipe".into();
     assert!(
@@ -2981,4 +3011,34 @@ fn probe_execution_needs_no_q_transcript_without_a_consumer_context() {
         .unwrap()
         .remote_probe_input = None;
     assert!(no_input.validate().is_err());
+}
+
+#[test]
+fn portable_consumer_identity_ignores_only_the_generation_identity() {
+    let base = consumer_launch_purpose_fixture().consumer_content.unwrap();
+    let mut other_node = base.clone();
+    other_node.definitions.bundle_generation_identity = "generation-2".into();
+    assert_ne!(base, other_node);
+    assert_eq!(base.portable(), other_node.portable());
+    assert_eq!(
+        base.portable().digest().unwrap(),
+        other_node.portable().digest().unwrap()
+    );
+
+    let mut profile = base.clone();
+    profile.worker_profile_hash = "9".repeat(64);
+    let mut runtime = base.clone();
+    runtime.runtime_realization.manifest_hash = "9".repeat(64);
+    let mut worker_definition = base.clone();
+    worker_definition
+        .definitions
+        .worker
+        .effective_definition_digest = "9".repeat(64);
+    for changed in [profile, runtime, worker_definition] {
+        assert_ne!(base.portable(), changed.portable());
+        assert_ne!(
+            base.portable().digest().unwrap(),
+            changed.portable().digest().unwrap()
+        );
+    }
 }

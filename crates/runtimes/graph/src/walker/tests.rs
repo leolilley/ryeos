@@ -4068,6 +4068,7 @@ config:
               witness_hash: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
               witness_source: {kind: local_capture}
               qualification_hash: null
+              remote_testimony: null
         params: {}
       next: {type: unconditional, to: done}
     done: {node_type: return}
@@ -4693,6 +4694,7 @@ config:
               witness_hash: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
               witness_source: {kind: local_capture}
               qualification_hash: null
+              remote_testimony: null
         params:
           value: "${job.value}"
           run: "${run.graph_run_id}"

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-10-16T09:33:55Z:ddb3ccdfc99b55b34175115ff7acefb7db509f9be2564ccaa903cd7b6137951d:tIn04hP9iVjBexp6aZjbI06RPzPYCO9iIbgBASrI1OR+gtz9sjPBMOF5ZSwU1teVdjsmLURm0eaIZ9Rmg7p5Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-30T04:44:55Z:945aba132617ea53d47bbe06385ead5017f953c8b455c4a80b8da3f4690fc053:/RP0U2meQomG4DNqBKJ7NO0dd3R3MTDLF1OSLMcL34dNDEFLIxqoso0mPq0VhTBk/G8XM8FoT+rtCi+f4uWaAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "remote-development-and-qualification"
@@ -215,6 +215,7 @@ target_product_selections:
       witness_hash: <destination-compose-product-witness-hash>
       witness_source: {kind: local_capture}
       qualification_hash: <destination-qualification-hash-or-null>
+      remote_testimony: null
 ```
 
 The RyeOS development worker also requires exact `workload_execution` entries

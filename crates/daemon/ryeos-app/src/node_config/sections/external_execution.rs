@@ -18,6 +18,7 @@ use crate::node_config::{
 };
 
 pub mod compose;
+pub mod compose_qualification;
 pub mod provision;
 
 pub const SECTION_NAME: &str = "external_execution";

@@ -1734,7 +1734,7 @@ mod consumer_authority_tests {
                     "recipe_binding": "product_recipe",
                     "product_name": "runtime"
                 },
-                "qualification": null,
+                "qualification": null, "remote_testimony": null,
                 "producer": {
                     "canonical_ref": "graph:fixture/build",
                     "effective_definition_digest": "5".repeat(64),

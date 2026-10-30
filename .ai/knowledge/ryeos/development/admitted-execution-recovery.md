@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-10-10T21:07:25Z:28e298d17d3aa7401f1d0984728cdd0284dd2ccafdbfec5fcfde8ef04b9a61ca:JSKTdmOds6BqffGzFn5Ek/jUn6lhOSQ3ILntfjDqXu/avyZpLMcR4ZyDgjDUEDJn9EcITfgaouF/EMZeA1maBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-30T04:33:51Z:eb90835953c1a2e589f977bcd9f8847aaa469e5e414d9ff2b90dc6c776f192ae:TCkziKfCxcd3HJqu0Svm3uzY0mFNx4YXBhehEyb9P+qbbtpYq2k3TUD0+bt+nqqe4u9IIJkdSDE+yVSkSus0Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "admitted-execution-recovery"
@@ -103,6 +103,10 @@ as operational qualification.
 
 An external structured-session binding selects acquired runtime compatibility
 through its separate, required-nullable `runtime_content_qualification` slot.
+The slot is for activation-sourced runtimes only. A product-sourced session
+leaves it empty (composition, placement and recovery refuse it there): its
+runtime compatibility is its admitted product selection, which carries the
+same required claims.
 The selection names an exact activation, immutable qualification coordinate
 and attestation, owner, and finite required claims; fresh placement must rejoin
 that testimony to the session runtime manifest. This is separate from the

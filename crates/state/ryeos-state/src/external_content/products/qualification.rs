@@ -180,6 +180,50 @@ pub struct ProductQualificationConsumerContentIdentity {
     pub runtime_member: ProductQualificationConsumerRuntimeMemberIdentity,
 }
 
+/// A consumer content identity with the generation identity removed. The
+/// generation identity is an operational cache identity of one node (it
+/// hashes local bundle roots and caches), not signed content, so comparisons
+/// between nodes omit it; local admission keeps the whole identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortableConsumerContentIdentity {
+    #[serde(deserialize_with = "crate::objects::deserialize_required_nullable")]
+    pub qualification_use:
+        Option<crate::external_execution::admission::ExternalCandidateQualificationUse>,
+    pub definitions: PortableConsumerDefinitionIdentity,
+    pub declaration_authority: QualificationConsumerDeclarationAuthority,
+    pub worker_source: EffectiveSourceClosureProjection,
+    pub worker_profile_hash: String,
+    pub worker_preselection_effective_definition_digest: String,
+    pub worker_literals: ExternalContentRealizationSet,
+    pub runtime_realization: crate::objects::ExternalContentRealization,
+    pub environment_realized_effective_definition_digest: String,
+    pub environment_realizations: ExternalContentRealizationSet,
+    pub executable_search: Vec<ExecutableSearchPathEntry>,
+    pub process_environment: BTreeMap<String, SessionProcessEnvironmentValue>,
+    pub runtime_member: ProductQualificationConsumerRuntimeMemberIdentity,
+}
+
+/// Signed definition coordinates of a consumer, without the node-local
+/// bundle generation identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortableConsumerDefinitionIdentity {
+    pub worker: ProductQualificationBundleDefinitionIdentity,
+    pub environment: ProductQualificationBundleDefinitionIdentity,
+    pub worker_execution: ProductQualificationBundleDefinitionIdentity,
+}
+
+impl PortableConsumerContentIdentity {
+    /// Digest of the portable identity, comparable across nodes.
+    pub fn digest(&self) -> anyhow::Result<String> {
+        canonical_value_digest(&serde_json::json!({
+            "domain": "ryeos.portable-consumer-content-identity.v1",
+            "identity": serde_json::to_value(self)?,
+        }))
+    }
+}
+
 /// Source-specific signed declaration selection. Authentication belongs to
 /// admission; this retained value cannot grant qualification by itself.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -264,6 +308,53 @@ impl ProductQualificationConsumerRuntimeMemberIdentity {
 }
 
 impl ProductQualificationConsumerContentIdentity {
+    /// The identity without the node-local generation identity, for
+    /// comparisons between nodes. Everything else is kept exactly.
+    pub fn portable(&self) -> PortableConsumerContentIdentity {
+        let Self {
+            qualification_use,
+            definitions,
+            declaration_authority,
+            worker_source,
+            worker_profile_hash,
+            worker_preselection_effective_definition_digest,
+            worker_literals,
+            runtime_realization,
+            environment_realized_effective_definition_digest,
+            environment_realizations,
+            executable_search,
+            process_environment,
+            runtime_member,
+        } = self;
+        let ProductQualificationConsumerDefinitionIdentity {
+            bundle_generation_identity: _,
+            worker,
+            environment,
+            worker_execution,
+        } = definitions;
+        PortableConsumerContentIdentity {
+            qualification_use: qualification_use.clone(),
+            definitions: PortableConsumerDefinitionIdentity {
+                worker: worker.clone(),
+                environment: environment.clone(),
+                worker_execution: worker_execution.clone(),
+            },
+            declaration_authority: declaration_authority.clone(),
+            worker_source: worker_source.clone(),
+            worker_profile_hash: worker_profile_hash.clone(),
+            worker_preselection_effective_definition_digest:
+                worker_preselection_effective_definition_digest.clone(),
+            worker_literals: worker_literals.clone(),
+            runtime_realization: runtime_realization.clone(),
+            environment_realized_effective_definition_digest:
+                environment_realized_effective_definition_digest.clone(),
+            environment_realizations: environment_realizations.clone(),
+            executable_search: executable_search.clone(),
+            process_environment: process_environment.clone(),
+            runtime_member: runtime_member.clone(),
+        }
+    }
+
     pub fn validate_for(
         &self,
         context: &ProductQualificationConsumerExecutionContext,
@@ -719,17 +810,21 @@ impl ProductQualificationProducerScenario {
             (None, None) => {}
             _ => bail!("remote verifier producer source differs from signed scenario shape"),
         }
+        // Only the signed-content projection of the producer source is
+        // committed: the Bundle generation identity is process-local, and
+        // this digest is pinned by an operator in one daemon process and
+        // re-derived in a later one.
         // This source identity covers the selected verifier, its archive
         // members, the recipe and the probe input. The full signed policy and
         // accepted purpose separately commit the optional Worker Request.
         canonical_value_digest(&serde_json::json!({
-            "domain": "ryeos.remote-consumer-verifier-source.v2",
+            "domain": "ryeos.remote-consumer-verifier-source.v3",
             "scenario": {
                 "recipe_ref": self.recipe_ref,
                 "remote_verifier": verifier,
                 "remote_probe_input": self.remote_probe_input,
             },
-            "producer_source": source,
+            "producer_source": source.map(ProductProducerRecipeSourceIdentity::content_identity),
         }))
     }
 }
@@ -826,7 +921,32 @@ pub struct ProductProducerRecipeSourceIdentity {
     pub recipe_digest: String,
 }
 
+/// The part of a producer recipe source that is determined by signed
+/// content alone. Unlike the full identity it carries no process-local
+/// Bundle generation, so it is stable across daemon restarts and may be
+/// committed in digests that are persisted and recomputed later.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProductProducerRecipeContentIdentity<'a> {
+    pub canonical_ref: &'a str,
+    pub raw_content_digest: &'a str,
+    pub effective_definition_digest: &'a str,
+    pub publisher_fingerprint: &'a str,
+    pub recipe_digest: &'a str,
+}
+
 impl ProductProducerRecipeSourceIdentity {
+    /// Projection onto signed-content identity, omitting the process-local
+    /// Bundle generation identity.
+    pub fn content_identity(&self) -> ProductProducerRecipeContentIdentity<'_> {
+        ProductProducerRecipeContentIdentity {
+            canonical_ref: &self.canonical_ref,
+            raw_content_digest: &self.raw_content_digest,
+            effective_definition_digest: &self.effective_definition_digest,
+            publisher_fingerprint: &self.publisher_fingerprint,
+            recipe_digest: &self.recipe_digest,
+        }
+    }
+
     pub fn validate(&self) -> anyhow::Result<()> {
         exact_coordinate(
             "producer recipe Bundle generation",

@@ -742,13 +742,13 @@ def composed(
             "declaration_id": "distribution",
             "witness_hash": distribution_witness,
             "witness_source": distribution_source,
-            "qualification_hash": None,
+            "qualification_hash": None, "remote_testimony": None,
         },
         {
             "declaration_id": "runtime",
             "witness_hash": runtime_witness,
             "witness_source": runtime_source,
-            "qualification_hash": qualification,
+            "qualification_hash": qualification, "remote_testimony": None,
         },
     ]:
         fail("composition returned a different exact product selection batch")

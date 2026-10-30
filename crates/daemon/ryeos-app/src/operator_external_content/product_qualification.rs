@@ -160,26 +160,30 @@ pub struct MeasuredQualificationAuthority {
 }
 
 #[derive(Clone, Copy)]
-enum CurrentVerifierContent<'a> {
+pub(in crate::operator_external_content) enum CurrentVerifierContent<'a> {
     Root(Option<&'a ResolvedExternalProductSelections>),
     Inherited(&'a ExternalContentRealizationSet),
 }
 
 #[derive(Clone, Copy)]
-struct CurrentVerifierContext<'a> {
-    content: CurrentVerifierContent<'a>,
-    logical_project_root: Option<&'a std::path::Path>,
+pub(in crate::operator_external_content) struct CurrentVerifierContext<'a> {
+    pub(in crate::operator_external_content) content: CurrentVerifierContent<'a>,
+    pub(in crate::operator_external_content) logical_project_root: Option<&'a std::path::Path>,
     /// Binding identity belongs to the authority sealed at verifier admission.
     /// A Bundle-owned executable can still have generation-scoped product
     /// bindings when its relationship Configs came from a pinned project.
-    binding_subject_authority: Option<&'a ryeos_engine::contracts::SubjectResolutionAuthority>,
+    pub(in crate::operator_external_content) binding_subject_authority:
+        Option<&'a ryeos_engine::contracts::SubjectResolutionAuthority>,
     /// Exact sealed launch request owning project and engine authority.
-    sealed_request: Option<&'a crate::thread_lifecycle::SealedRootExecutionRequest>,
-    project_context_resolver: Option<&'a dyn QualificationProjectContextResolver>,
+    pub(in crate::operator_external_content) sealed_request:
+        Option<&'a crate::thread_lifecycle::SealedRootExecutionRequest>,
+    pub(in crate::operator_external_content) project_context_resolver:
+        Option<&'a dyn QualificationProjectContextResolver>,
     /// Fresh selected-slot launch has already passed normal dispatch
     /// preflight. Re-resolve current D1/D2 against that exact retained pinned
     /// admission rather than inventing a projectless context.
-    pinned_admission: Option<&'a QualificationPinnedAdmissionContext<'a>>,
+    pub(in crate::operator_external_content) pinned_admission:
+        Option<&'a QualificationPinnedAdmissionContext<'a>>,
 }
 
 pub struct QualificationPinnedAdmissionContext<'a> {
@@ -1056,7 +1060,7 @@ fn prove_unguarded(
     Ok(evidence)
 }
 
-fn require_retained_consumer_content_closure(
+pub(in crate::operator_external_content) fn require_retained_consumer_content_closure(
     authority: &ryeos_state::PinnedStateAuthority,
     guard: &ryeos_state::CasMutationGuard,
     limits: ryeos_state::object_closure::ObjectClosureLimits,
@@ -2018,6 +2022,66 @@ pub(in crate::operator_external_content) fn require_current_consumer_content_for
     evidence: &ProductQualificationEvidence,
     subject_manifest_hash: &str,
 ) -> anyhow::Result<()> {
+    let (retained, current) = prepare_current_consumer_content_for_selection(
+        state,
+        authority,
+        limits,
+        policy_source,
+        relationship,
+        evidence,
+        subject_manifest_hash,
+    )?;
+    if current != *retained {
+        bail!("current consumer source, environment or runtime member changed");
+    }
+    Ok(())
+}
+
+/// The same check for a qualification another node produced. The retained
+/// identity carries the origin's node-local bundle generation identity, which
+/// cannot equal this node's, so the comparison covers every signed and
+/// derived field except that one.
+pub(in crate::operator_external_content) fn require_current_consumer_content_for_remote_selection(
+    state: &AppState,
+    authority: &ryeos_state::PinnedStateAuthority,
+    limits: ryeos_state::object_closure::ObjectClosureLimits,
+    policy_source: &ProductQualificationPolicySource,
+    relationship: &ryeos_state::external_content::products::composition::ProductRelationship,
+    evidence: &ProductQualificationEvidence,
+    subject_manifest_hash: &str,
+) -> anyhow::Result<()> {
+    let (retained, current) = prepare_current_consumer_content_for_selection(
+        state,
+        authority,
+        limits,
+        policy_source,
+        relationship,
+        evidence,
+        subject_manifest_hash,
+    )?;
+    if current.portable() != retained.portable() {
+        bail!(
+            "current consumer source, environment or runtime member differs from the remote testimony"
+        );
+    }
+    Ok(())
+}
+
+/// The retained content of the evidence, after its closure is confirmed in
+/// this node's CAS, and the content this node prepares today for the same
+/// relationship aligned to the selected runtime member.
+fn prepare_current_consumer_content_for_selection<'a>(
+    state: &AppState,
+    authority: &ryeos_state::PinnedStateAuthority,
+    limits: ryeos_state::object_closure::ObjectClosureLimits,
+    policy_source: &ProductQualificationPolicySource,
+    relationship: &ryeos_state::external_content::products::composition::ProductRelationship,
+    evidence: &'a ProductQualificationEvidence,
+    subject_manifest_hash: &str,
+) -> anyhow::Result<(
+    &'a ProductQualificationConsumerContentIdentity,
+    ProductQualificationConsumerContentIdentity,
+)> {
     let retained = evidence
         .consumer_content
         .as_ref()
@@ -2041,10 +2105,7 @@ pub(in crate::operator_external_content) fn require_current_consumer_content_for
         limits,
         subject_manifest_hash,
     )?;
-    if current.retained_identity()? != *retained {
-        bail!("current consumer source, environment or runtime member changed");
-    }
-    Ok(())
+    Ok((retained, current.retained_identity()?))
 }
 
 pub(super) fn prepare_current_bundle_consumer_worker_literals(
@@ -4354,6 +4415,7 @@ fn current_root_selection_inputs(
                     .qualification
                     .as_ref()
                     .map(|proof| proof.attestation_hash.clone()),
+                remote_testimony: None,
             },
         })
         .collect();
@@ -4394,7 +4456,7 @@ fn current_verifier_binding_subject_authority<'a>(
 /// excluded exclusive CAS owners, never ordinary publishers, and anything an
 /// exclusive owner removes or changes in the gap is refused by the caller's
 /// guarded re-read rather than accepted from this function's earlier view.
-fn resolve_current_bundle_verifier_identity_against_admitted(
+pub(in crate::operator_external_content) fn resolve_current_bundle_verifier_identity_against_admitted(
     state: &AppState,
     authority: &ryeos_state::PinnedStateAuthority,
     context: &HandlerContext,
@@ -5032,6 +5094,224 @@ pub(crate) fn load_current_qualification_with_key(
     Ok(witness)
 }
 
+/// Every check a published local qualification must pass against today's
+/// signed relationship before a product selection may rely on it: the proof
+/// names the exact selected product and manifest, the current signed policy
+/// still accepts it, a policy with a consumer context still matches the
+/// current consumer content, the current verifier identity is the proof's,
+/// the verifier's recorded execution still verifies, and the proof is still
+/// the published, unexpired qualification at the end.
+///
+/// Callers must not hold a CAS guard: this re-resolves signed definitions and
+/// the verifier, and confines its own state reads to short guarded segments.
+/// `recheck_product` additionally re-reads the product fresh in the final
+/// segment, for callers that load it fresh themselves.
+pub(in crate::operator_external_content) fn verify_loaded_qualification_against_relationship(
+    state: &AppState,
+    context: &HandlerContext,
+    authority: &ryeos_state::PinnedStateAuthority,
+    limits: ryeos_state::object_closure::ObjectClosureLimits,
+    policy_ref: &str,
+    relationship: &ryeos_state::external_content::products::composition::ProductRelationship,
+    proof: &VerifiedQualificationWitness,
+    product: &ryeos_state::external_content::products::publication::VerifiedProductWitness,
+    recheck_product: bool,
+    project_context_resolver: Option<&dyn QualificationProjectContextResolver>,
+) -> anyhow::Result<()> {
+    if proof.evidence.product_witness_hash != product.attestation_hash
+        || proof.evidence.product_coordinate
+            != ProductCaptureCoordinate::from_evidence(&product.evidence)?
+        || proof.evidence.result.subject_manifest_hash != product.evidence.manifest_hash
+    {
+        bail!("qualification does not prove the exact selected product witness and manifest");
+    }
+    let current_policy = resolve_current_bundle_qualification_policy(state, policy_ref)?;
+    if let Some(consumer_context) = &current_policy.policy.consumer_execution_context {
+        consumer_context.validate_relationship_consumer(&relationship.consumer)?;
+        require_current_consumer_content_for_selection(
+            state,
+            authority,
+            limits,
+            &current_policy,
+            relationship,
+            &proof.evidence,
+            &product.evidence.manifest_hash,
+        )?;
+        // The shared evidence and execution_evidence::verify_current below
+        // must also rejoin the exact settled Q transcript and enclosing root.
+    }
+    let current_verifier = resolve_current_bundle_verifier_identity_for_evidence(
+        state,
+        authority,
+        limits,
+        context,
+        &current_policy.policy.verifier_ref,
+        &current_policy.policy.verifier_parameters,
+        &proof.evidence,
+        project_context_resolver,
+    )?;
+    proof.evidence.validate_current_policy(
+        &current_policy,
+        &current_verifier.effective_definition_digest,
+        &relationship.qualification.required_claims,
+    )?;
+    proof
+        .evidence
+        .validate_current_artifact(&current_verifier.artifact_identity)?;
+    execution_evidence::verify_current(
+        state,
+        authority,
+        context,
+        &proof.evidence,
+        &current_verifier,
+        project_context_resolver,
+    )?;
+    // Verifier re-resolution ran unguarded; the accepted proof must still be
+    // the published, unexpired qualification at the end of this admission.
+    require_qualification_still_current(
+        state,
+        authority,
+        limits,
+        &context.fingerprint,
+        proof,
+        recheck_product.then_some(product),
+    )
+}
+
+/// Origin-side export check for a qualification whose policy carries a
+/// consumer execution context. The runtime-snapshot check refuses such a
+/// policy by design, so the proof is instead re-verified exactly as product
+/// selection admits it: the product is loaded fresh, the signed relationship
+/// the evidence was captured under is resolved today and must still name the
+/// policy's consumer and this policy, and the full admission checks run
+/// against it. Export therefore signs only what the origin would itself
+/// select on now.
+///
+/// Callers must not hold a CAS guard.
+pub(crate) fn verify_current_product_qualification_for_export(
+    state: &AppState,
+    context: &HandlerContext,
+    witness: &VerifiedQualificationWitness,
+) -> anyhow::Result<VerifiedQualificationWitness> {
+    let evidence = &witness.evidence;
+    let consumer_context = evidence
+        .policy_source
+        .policy
+        .consumer_execution_context
+        .as_ref()
+        .context("product qualification export check requires a consumer execution context")?;
+    let retained = evidence
+        .consumer_content
+        .as_ref()
+        .context("consumer qualification evidence has no retained content")?;
+    let relationship_ref = retained
+        .declaration_authority
+        .captured_relationship()?
+        .canonical_ref
+        .clone();
+    let policy_ref = evidence.policy_source.canonical_ref.clone();
+    let owner_principal = &context.fingerprint;
+    crate::operator_authority::require_admitted_operator(state, context)?;
+    let limits = state
+        .node_policy
+        .require::<NodeObjectClosurePolicy>()?
+        .closure_limits()?;
+    require_unguarded_resolution("product qualification export check")?;
+    let authority = state.state_store.pinned_state_authority()?;
+    let (proof, product) = with_state_guard(&authority, |guard| {
+        let proof = load_current_qualification(
+            state,
+            &authority,
+            guard,
+            limits,
+            owner_principal,
+            &witness.attestation_hash,
+        )?;
+        let product = super::product_receipt::load_product_source(
+            state,
+            &authority,
+            guard,
+            limits,
+            owner_principal,
+            &proof.evidence.product_witness_hash,
+            &proof.evidence.witness_source,
+            super::product_receipt::ProductSourceVerification::Fresh,
+        )?;
+        Ok((proof, product))
+    })?;
+    if proof.attestation_hash != witness.attestation_hash || proof.evidence != witness.evidence {
+        bail!("qualification changed while the origin re-verified it");
+    }
+    let relationship = resolve_current_consumer_relationship(
+        state,
+        &relationship_ref,
+        consumer_context,
+        &policy_ref,
+    )?;
+    // Selection also requires the product to fit today's relationship and
+    // bounds; export refuses what the origin would no longer select.
+    relationship.validate_compatible_product_evidence(&product.evidence)?;
+    with_state_guard(&authority, |guard| {
+        ryeos_state::external_content::products::publication::verify_product_manifest_against_bounds(
+            &authority,
+            &product.evidence,
+            &relationship.required_product.bounds,
+            limits,
+            guard,
+        )
+    })?;
+    verify_loaded_qualification_against_relationship(
+        state,
+        context,
+        &authority,
+        limits,
+        &policy_ref,
+        &relationship,
+        &proof,
+        &product,
+        true,
+        None,
+    )?;
+    Ok(proof)
+}
+
+/// The one signed relationship entry in the named Config that selects the
+/// policy's consumer under exactly this qualification policy. Absence or
+/// ambiguity refuses: a relationship is never chosen by position or by name
+/// alone.
+fn resolve_current_consumer_relationship(
+    state: &AppState,
+    relationship_ref: &str,
+    consumer_context: &ryeos_state::external_content::products::qualification::ProductQualificationConsumerExecutionContext,
+    policy_ref: &str,
+) -> anyhow::Result<ryeos_state::external_content::products::composition::ProductRelationship> {
+    let relationships = state.engine.with_checked_bundle_generation(|generation| {
+        let authored =
+            resolve_consumer_definition_in_generation(generation, relationship_ref, "config")?;
+        ryeos_state::external_content::products::composition::ProductRelationships::from_value(
+            authored
+                .composed
+                .composed
+                .get("product_relationships")
+                .context("product relationship Config has no relationships")?
+                .clone(),
+        )
+    })?;
+    let mut matching = relationships.relationships.into_iter().filter(|candidate| {
+        candidate.qualification.policy_ref.as_deref() == Some(policy_ref)
+            && consumer_context
+                .validate_relationship_consumer(&candidate.consumer)
+                .is_ok()
+    });
+    let selected = matching
+        .next()
+        .context("no signed product relationship selects this consumer under this policy")?;
+    if matching.next().is_some() {
+        bail!("more than one signed product relationship selects this consumer under this policy");
+    }
+    Ok(selected)
+}
+
 /// Reuse ordinary product-selection admission for a node-signed external
 /// runtime binding. The binding names an owner and policy, but neither may
 /// manufacture a verified request context: the current node-signed operator
@@ -5550,6 +5830,7 @@ mod tests {
                 mount_root: ExternalContentMountRoot::ExecutionRuntime,
                 mount: "qualification/subject".to_owned(),
             },
+            remote_testimony: None,
         }
     }
 
@@ -5890,6 +6171,7 @@ mod tests {
                 witness_hash: selected.witness_hash.clone(),
                 witness_source: selected.witness_source.clone(),
                 qualification_hash: None,
+                remote_testimony: None,
             },
         };
         let subject = "subject";
@@ -5963,6 +6245,7 @@ mod tests {
                 witness_hash: selected.witness_hash.clone(),
                 witness_source: selected.witness_source.clone(),
                 qualification_hash: None,
+                remote_testimony: None,
             },
         };
         let inputs = [selector(&subject), selector(&auxiliary)];

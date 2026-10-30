@@ -132,12 +132,18 @@ pub struct Deadlines {
     pub setup_timeout: Duration,
     /// Maximum silence for one underlying network I/O operation.
     pub idle_timeout: Duration,
+    /// Maximum wait from the end of request transmission to the first response
+    /// byte. It is peer processing time, not line silence, and applies to
+    /// nothing else: once a response byte arrives, reads return to the idle
+    /// bound. It never extends the absolute deadline.
+    pub response_wait: Duration,
     /// Absolute request deadline. Progress never extends it.
     pub absolute: MonotonicDeadline,
 }
 
 impl Deadlines {
-    /// Construct a deadline policy from Lillux clock authorities.
+    /// Construct a deadline policy from Lillux clock authorities. The response
+    /// wait equals the idle bound.
     pub fn new(
         setup_timeout: Duration,
         idle_timeout: Duration,
@@ -146,8 +152,20 @@ impl Deadlines {
         Self {
             setup_timeout,
             idle_timeout,
+            response_wait: idle_timeout,
             absolute,
         }
+    }
+
+    /// The same policy with a longer wait for the first response byte after
+    /// the request is fully transmitted. A zero wait is refused when the
+    /// request is validated.
+    pub fn with_response_wait(mut self, response_wait: Duration) -> Self {
+        // The wait for the first response byte is never narrower than the idle
+        // bound every later read gets, so a small value cannot make a request
+        // stricter before the response than during it.
+        self.response_wait = response_wait.max(self.idle_timeout);
+        self
     }
 }
 

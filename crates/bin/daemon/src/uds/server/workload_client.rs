@@ -920,6 +920,7 @@ mod tests {
             witness_hash: "a".repeat(64),
             witness_source: ryeos_state::external_content::products::transfer::ProductWitnessSource::LocalCapture {},
             qualification_hash: Some("b".repeat(64)),
+            remote_testimony: None,
         };
         let inputs = vec![ProductSelectionInput {
             target: ProductSelectionTarget::WorkloadExecution {
