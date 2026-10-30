@@ -18,8 +18,12 @@
 //! digest and Worker profile hash from the signed policy the installed bundles
 //! carry, the executable, adapter and connector identities from the verified
 //! bundles, and the configuration destination from the installed provider
-//! declaration. The runtime manifest also names the guest runtime the
-//! placement stages, so one stated value fills both fields.
+//! declaration. The runtime manifest names the runtime product the Worker
+//! runs; the guest-owner manifest names the measured runtime the provider
+//! snapshot was produced from, which the placement compares with the
+//! snapshot's record. They coincide only when the qualified runtime is itself
+//! the snapshot's owner, so the second is stated separately and defaults to
+//! the first.
 
 use std::path::{Path, PathBuf};
 
@@ -73,6 +77,11 @@ pub struct QualificationBindingRequest<'a> {
     /// Manifest hash of the runtime product being qualified; it is also the
     /// guest runtime manifest the placement stages.
     pub runtime_manifest_hash: String,
+    /// Manifest hash of the measured guest-owner runtime the provider snapshot
+    /// was produced from; the placement refuses a binding whose value differs
+    /// from the snapshot operation's. Equal to the runtime manifest only when
+    /// the qualified runtime is the snapshot's owner.
+    pub guest_runtime_manifest_hash: String,
     /// SHA-256 of the executable member inside that runtime product.
     pub runtime_member_sha256: String,
     /// Provider snapshot the sandbox is restored from.
@@ -100,6 +109,7 @@ pub struct QualificationBindingReport {
     pub requirement_digest: String,
     pub worker_profile_hash: String,
     pub runtime_manifest_hash: String,
+    pub guest_runtime_manifest_hash: String,
     pub runtime_member_sha256: String,
     pub snapshot_id: String,
     pub credential_generation: String,
@@ -151,6 +161,10 @@ fn check_stated(request: &QualificationBindingRequest<'_>) -> Result<()> {
     policy_item_path(&request.policy_ref)?;
     for (what, value) in [
         ("runtime manifest hash", &request.runtime_manifest_hash),
+        (
+            "guest runtime manifest hash",
+            &request.guest_runtime_manifest_hash,
+        ),
         ("runtime member sha256", &request.runtime_member_sha256),
         ("credential generation", &request.credential_generation),
     ] {
@@ -333,7 +347,7 @@ fn qualification_binding_document(
         backend_artifact_bytes: artifacts.backend_artifact_bytes,
         supervisor_artifact_hash: artifacts.supervisor_artifact_hash,
         supervisor_artifact_bytes: artifacts.supervisor_artifact_bytes,
-        guest_runtime_manifest_hash: request.runtime_manifest_hash.clone(),
+        guest_runtime_manifest_hash: request.guest_runtime_manifest_hash.clone(),
         runtime_qualification: None,
         runtime_content_qualification: None,
         launcher_artifact_hash: artifacts.launcher_artifact_hash,
@@ -377,6 +391,7 @@ fn report_of(
         requirement_digest: session.requirement_digest.clone(),
         worker_profile_hash: session.worker_profile_hash.clone(),
         runtime_manifest_hash: session.runtime_manifest_hash.clone(),
+        guest_runtime_manifest_hash: installed.document.guest_runtime_manifest_hash.clone(),
         runtime_member_sha256: session.runtime_member_sha256.clone(),
         snapshot_id: installed
             .document
@@ -653,6 +668,7 @@ mod tests {
             policy_ref: "config:codex/consumer-qualification-policy".into(),
             provider_declaration_id: PROVIDER_ID.into(),
             runtime_manifest_hash: "c".repeat(64),
+            guest_runtime_manifest_hash: "9".repeat(64),
             runtime_member_sha256: "e".repeat(64),
             snapshot_id: "snp-exact".into(),
             plan: "standard".into(),
@@ -713,7 +729,8 @@ mod tests {
         assert_eq!(document.max_export_bytes, 0);
         assert!(document.runtime_qualification.is_none());
         assert!(document.runtime_content_qualification.is_none());
-        assert_eq!(document.guest_runtime_manifest_hash, "c".repeat(64));
+        assert_eq!(document.guest_runtime_manifest_hash, "9".repeat(64));
+        assert_eq!(report.guest_runtime_manifest_hash, "9".repeat(64));
         assert_eq!(document.network_policy, RELAY_NETWORK_POLICY);
         assert_eq!(document.settings_schema_digest, SETTINGS_SCHEMA);
         assert_eq!(document.settings["owner_id"], "usr-test");
@@ -781,6 +798,10 @@ mod tests {
         assert!(refused(&|r| r.policy_ref = "config:policy".into()).contains("policy reference"));
         assert!(
             refused(&|r| r.runtime_manifest_hash = "X".repeat(64))
+                .contains("runtime manifest hash must be"),
+        );
+        assert!(
+            refused(&|r| r.guest_runtime_manifest_hash = "X".repeat(64))
                 .contains("runtime manifest hash")
         );
         assert!(
