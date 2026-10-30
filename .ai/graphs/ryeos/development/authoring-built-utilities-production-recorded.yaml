@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-23T07:06:45Z:661a02d04f4373843c8cbafd8d1ac7cafd0f65153733d8c4e3c5224b621c954a:XrkxZhivKGOltt7iCfR/Rrj/spvocjKAaKVxMj2+RLDXd1OiLCggrhiBdaOjqR62YbqoVJCLWJVDwKo6XA5oAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-30T04:44:55Z:402b67ebbb000ab8df44619c45d209ab277bf11cb992512b06f112e8fc0eb32d:CjHq+wGXWip+xr7/qFMluDfE0zMbmZo/pmhnNKbxII1PNb58DNeDN5b9Cs2yGlvWGdLu2dkugnlgzuWauipDBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.0.0"
 category: ryeos/development
 description: Reuse or run the exact retained authoring utility build
@@ -18,11 +18,12 @@ config:
     properties:
       build_support_selection:
         type: object
-        required: [declaration_id, witness_hash, qualification_hash, witness_source]
+        required: [declaration_id, witness_hash, qualification_hash, witness_source, remote_testimony]
         properties:
           declaration_id: {type: string, enum: [authoring-build-support]}
           witness_hash: {type: string, pattern: "^[0-9a-f]{64}$"}
           qualification_hash: {type: "null"}
+          remote_testimony: {type: [object, "null"]}
           witness_source:
             oneOf:
               - type: object
@@ -39,11 +40,12 @@ config:
         additionalProperties: false
       platform_selection:
         type: object
-        required: [declaration_id, witness_hash, qualification_hash, witness_source]
+        required: [declaration_id, witness_hash, qualification_hash, witness_source, remote_testimony]
         properties:
           declaration_id: {type: string, enum: [platform]}
           witness_hash: {type: string, pattern: "^[0-9a-f]{64}$"}
           qualification_hash: {type: string, pattern: "^[0-9a-f]{64}$"}
+          remote_testimony: {type: [object, "null"]}
           witness_source:
             oneOf:
               - type: object

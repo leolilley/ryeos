@@ -120,7 +120,7 @@ where
 
 /// Derive the program from already admitted selections. Synchronous: it
 /// resolves signed definitions, which starts handler processes.
-pub fn derive_program(
+pub(crate) fn derive_program(
     state: &AppState,
     request: &ProductProgramRequest,
     selections: &ResolvedExternalProductSelections,

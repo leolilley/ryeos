@@ -716,7 +716,8 @@ impl ResolvedExternalProductSelection {
                 validate_hash("admitted product qualification", &proof.attestation_hash)?;
                 proof.evidence.validate()?;
                 if proof.evidence.product_witness_hash != self.witness_hash
-                    || proof.evidence.witness_source != self.witness_source
+                    || (self.remote_testimony.is_none()
+                        && proof.evidence.witness_source != self.witness_source)
                     || proof.evidence.product_coordinate != self.witness_coordinate
                     || &proof.evidence.policy_source.canonical_ref != policy_ref
                     || proof.evidence.result.subject_manifest_hash != self.manifest_hash
@@ -1431,16 +1432,12 @@ mod tests {
         let received = |hash: &String| super::super::transfer::ProductWitnessSource::Received {
             acceptance_hash: hash.clone(),
         };
+        // The origin's evidence keeps its local-capture source; only the
+        // selection's source is the receiver's admission.
         let with_source = |source: super::super::transfer::ProductWitnessSource| {
             let mut remote = selection.clone();
             remote.remote_testimony = Some(retained.clone());
-            remote.witness_source = source.clone();
-            remote
-                .qualification
-                .as_mut()
-                .unwrap()
-                .evidence
-                .witness_source = source;
+            remote.witness_source = source;
             remote
         };
         with_source(received(&acceptance)).validate().unwrap();

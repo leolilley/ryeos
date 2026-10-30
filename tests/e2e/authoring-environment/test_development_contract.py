@@ -501,7 +501,7 @@ class DevelopmentEnvironmentTests(unittest.TestCase):
                     value = schema["properties"][parameter]
                     self.assertEqual(value["required"], [
                         "declaration_id", "witness_hash", "qualification_hash",
-                        "witness_source"])
+                        "witness_source", "remote_testimony"])
                     self.assertEqual(value["properties"]["declaration_id"]["enum"],
                                      [declaration])
                     if declaration == "platform":

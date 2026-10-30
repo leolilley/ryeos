@@ -48,10 +48,12 @@ config:
             witness_hash: "${result.products[0].witness_hash}"
             witness_source: {kind: local_capture}
             qualification_hash: null
+            remote_testimony: null
           - declaration_id: subject
             witness_hash: "${result.products[1].witness_hash}"
             witness_source: {kind: local_capture}
             qualification_hash: null
+            remote_testimony: null
       next: {type: unconditional, to: compose_verifier}
     compose_verifier:
       node_type: action
@@ -130,6 +132,7 @@ config:
               witness_hash: "${state.selections[1].witness_hash}"
               witness_source: "${state.selections[1].witness_source}"
               qualification_hash: "${state.qualification.qualification_hash}"
+              remote_testimony: null
           maximum_bytes: 128
       assign:
         consumer_composition: "${result}"

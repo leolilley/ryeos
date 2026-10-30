@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-08T14:41:32Z:3ed5269e748782f5ab8420bc4f20d55f87a68909e3b9ebaf60d687389aea9b75:ZWzydpH31F5EfYz8D0SZsx4ICNweraX/PVTnRyk8afxaQwTqBoxDP9nlXL1NEMxL7lwOuAYBl2N+DRhSyHyQAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-30T04:44:55Z:3f26d30fe1d7ee42367efb2e90a23ecfd90f950ae0da956533244835cfd17002:ETfE/sp+2LDq3Op0tsG3BM0wwUiwCPt/xUaHn2skS9jUaCwiDWBfqzmXJiMC8TvPb0aAn2M78xy3e/fXS9RnDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.0.0"
 category: ryeos/development
 description: Reuse or run the exact retained authoring-environment producer
@@ -19,11 +19,12 @@ config:
     properties:
       assembly_inputs_selection:
         type: object
-        required: [declaration_id, witness_hash, qualification_hash, witness_source]
+        required: [declaration_id, witness_hash, qualification_hash, witness_source, remote_testimony]
         properties:
           declaration_id: {type: string, enum: [assembly-inputs]}
           witness_hash: {type: string, pattern: "^[0-9a-f]{64}$"}
           qualification_hash: {type: "null"}
+          remote_testimony: {type: [object, "null"]}
           witness_source:
             oneOf:
               - type: object
@@ -40,11 +41,12 @@ config:
         additionalProperties: false
       built_utilities_selection:
         type: object
-        required: [declaration_id, witness_hash, qualification_hash, witness_source]
+        required: [declaration_id, witness_hash, qualification_hash, witness_source, remote_testimony]
         properties:
           declaration_id: {type: string, enum: [built-utilities]}
           witness_hash: {type: string, pattern: "^[0-9a-f]{64}$"}
           qualification_hash: {type: "null"}
+          remote_testimony: {type: [object, "null"]}
           witness_source:
             oneOf:
               - type: object

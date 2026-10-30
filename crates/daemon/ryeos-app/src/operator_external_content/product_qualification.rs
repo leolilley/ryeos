@@ -5248,6 +5248,18 @@ pub(crate) fn verify_current_product_qualification_for_export(
         consumer_context,
         &policy_ref,
     )?;
+    // Selection also requires the product to fit today's relationship and
+    // bounds; export refuses what the origin would no longer select.
+    relationship.validate_compatible_product_evidence(&product.evidence)?;
+    with_state_guard(&authority, |guard| {
+        ryeos_state::external_content::products::publication::verify_product_manifest_against_bounds(
+            &authority,
+            &product.evidence,
+            &relationship.required_product.bounds,
+            limits,
+            guard,
+        )
+    })?;
     verify_loaded_qualification_against_relationship(
         state,
         context,
