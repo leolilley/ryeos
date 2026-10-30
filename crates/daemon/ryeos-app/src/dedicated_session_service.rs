@@ -2099,6 +2099,54 @@ pub fn reconcile_command_outboxes(state: &AppState) -> Result<()> {
                 {
                     let observation_limit = command_observation_limit(&record.command_kind)?;
                     validate_session_observation_cardinality(&canonical_batch, observation_limit)?;
+                    if current_session(state, &record.placement_thread_id)?
+                        .worker_instance_id
+                        .is_none()
+                    {
+                        // The command's worker epoch was fenced before this
+                        // settlement, so no worker is attached to receive its
+                        // lifecycle observations. Replaying them could
+                        // resurrect authority for a dead epoch, and one
+                        // historical session must not become a node-wide
+                        // startup outage. The appendable root still gets the
+                        // true settled fact, and only the command row is
+                        // repaired; the session row is left untouched.
+                        append_recovered_command_fact_once(
+                            state,
+                            &session,
+                            "hosted_command.settled",
+                            record.command_sequence,
+                            &record.request_digest,
+                            record.worker_boot_epoch,
+                            json!({
+                                "schema":1,
+                                "origin":"daemon_observed_io",
+                                "worker_boot_epoch":record.worker_boot_epoch,
+                                "response_digest":response_digest,
+                                "succeeded":true,
+                                "recovered":true,
+                            }),
+                        )?;
+                        state
+                            .state_store
+                            .settle_terminal_recovered_dedicated_command(
+                                &record.placement_thread_id,
+                                record.command_sequence,
+                                record.worker_boot_epoch,
+                                &json!({
+                                    "redacted":true,
+                                    "response_digest":response_digest,
+                                    "recovered_from_root_chain":true,
+                                }),
+                            )?;
+                        tracing::warn!(
+                            placement_thread_id = %record.placement_thread_id,
+                            command_sequence = record.command_sequence,
+                            "hosted command settled from testimony after its worker was fenced"
+                        );
+                        notify_projection_change(&record.placement_thread_id);
+                        continue;
+                    }
                     let remaining = command_batch_after_progress(
                         state,
                         &session,
