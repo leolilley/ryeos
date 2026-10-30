@@ -120,14 +120,15 @@ pub(crate) struct ComposeInputs<'a> {
     pub(crate) limits: ComposeLimits,
 }
 
-/// A runtime content qualification is the structured session's testimony
-/// that its runtime content is compatible; launch loads it by activation,
-/// coordinate and attestation and checks it against the session's runtime
-/// manifest, whichever lane the program's runtime came from. A program
+/// A runtime content qualification is acquired-content testimony for an
+/// activation-sourced runtime; launch loads it by activation, coordinate and
+/// attestation and checks it against the session's runtime manifest. A program
 /// derived from activated content was itself derived from that testimony, so
 /// it must be present and must name the exact coordinate and attestation the
-/// program carries; otherwise a binding that launch would reject on its
-/// selection identity would be signed.
+/// program carries. A product-sourced program carries none: its runtime
+/// authority is its admitted product selection, and launch refuses the slot
+/// there. Either mismatch is refused here so that a binding launch would reject
+/// is never signed.
 fn require_content_qualification_pairing(
     program: &AdmittedExternalCandidateProgram,
     qualification: Option<&ExternalRuntimeContentQualificationBinding>,
@@ -137,6 +138,10 @@ fn require_content_qualification_pairing(
         ..
     } = &program.runtime_source
     else {
+        ensure!(
+            qualification.is_none(),
+            "a product-sourced program carries no runtime content qualification"
+        );
         return Ok(());
     };
     let qualification = qualification
@@ -1169,23 +1174,38 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_captured_product_program_carries_a_content_qualification_as_session_testimony() {
+    fn a_captured_product_program_refuses_a_content_qualification() {
+        let program = program();
+        let error = refusal(compose_with_content(
+            &program,
+            Some(content_qualification()),
+        ));
+        assert!(
+            format!("{error:#}")
+                .contains("product-sourced program carries no runtime content qualification"),
+            "{error:#}"
+        );
         let node = stopped_node();
         let mut request = compose_request(&node, "render");
         request.runtime_content_qualification = Some(content_qualification_value());
         let resolved =
             installed_artifacts(&node, Some(PROVIDER_ID), vec![lifecycle(&"d".repeat(64))]);
-        let report = compose_with_resolver(request, |_| Ok(resolved)).unwrap();
-        let identity = ryeos_node_runtime::identity::NodeIdentity::load(
-            &node.root.path().join(".ai/node/identity/private_key.pem"),
-        )
-        .unwrap();
-        let signed = std::fs::read_to_string(&report.path).unwrap();
-        let loaded =
-            admit_signed_binding(node.root.path(), BINDING_ID, &signed, &identity).unwrap();
-        assert_eq!(
-            loaded.document.runtime_content_qualification,
-            Some(content_qualification())
+        let error = refusal(compose_with_resolver(request, |_| Ok(resolved)));
+        assert!(
+            format!("{error:#}")
+                .contains("product-sourced program carries no runtime content qualification"),
+            "{error:#}"
+        );
+        assert!(!binding_path(&node).exists());
+        compose_with_content(&program, None).unwrap();
+    }
+
+    #[test]
+    fn an_activated_content_program_still_refuses_an_absent_content_qualification() {
+        let error = refusal(compose_with_content(&content_program(), None));
+        assert!(
+            format!("{error:#}").contains("requires a runtime content qualification"),
+            "{error:#}"
         );
     }
 
@@ -1218,6 +1238,7 @@ pub(crate) mod tests {
     fn a_remote_content_testimony_selection_is_signed_through_composition() {
         let node = stopped_node();
         let mut request = compose_request(&node, "render");
+        request.program = content_program();
         let mut selected = content_qualification_value();
         selected["remote_testimony"] = serde_json::json!({
             "acceptance_hash": "8".repeat(64),

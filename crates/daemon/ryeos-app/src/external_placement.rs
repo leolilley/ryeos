@@ -1815,14 +1815,43 @@ impl CurrentRuntimeContentQualification {
     }
 }
 
-/// Acquired session-runtime compatibility does not substitute for the separate
-/// guest-owner snapshot proof. Missing testimony is not an activation permit.
-/// A binding that selects a remote testimony is checked against the local
-/// acceptance of it; it never falls back to, or is mistaken for, a local
+/// Which source a structured session's runtime came from, as far as the
+/// content-testimony slot is concerned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimeContentLane {
+    /// The runtime is an admitted product selection; its compatibility claims
+    /// ride that selection and the slot stays empty.
+    Product,
+    /// The runtime is activated acquired content; the slot carries its
+    /// acquired-content testimony.
+    Activation,
+}
+
+impl RuntimeContentLane {
+    fn of(
+        program: &ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram,
+    ) -> Self {
+        use ryeos_state::external_execution::admission::ExternalCandidateRuntimeSource;
+        match program.runtime_source {
+            ExternalCandidateRuntimeSource::CapturedProduct { .. } => Self::Product,
+            ExternalCandidateRuntimeSource::ActivatedContent { .. } => Self::Activation,
+        }
+    }
+}
+
+/// The current acquired-content testimony a structured session rests on. The
+/// slot carries testimony for activation-sourced runtimes only: a
+/// product-sourced session (`RuntimeContentLane::Product`) must leave it empty
+/// and yields `None`, because its runtime authority is its admitted product
+/// selection. Acquired-runtime compatibility does not substitute for the
+/// separate guest-owner snapshot proof. Missing testimony is not an activation
+/// permit. A binding that selects a remote testimony is checked against the
+/// local acceptance of it; it never falls back to, or is mistaken for, a local
 /// published qualification.
 fn require_current_runtime_content_qualification(
     state: &AppState,
     contract: &ExternalPlacementBackendContract,
+    lane: RuntimeContentLane,
 ) -> Result<Option<CurrentRuntimeContentQualification>> {
     let session = match &contract.workload {
         crate::node_config::sections::external_execution::ExternalWorkloadBinding::StructuredSession(session) => session,
@@ -1837,6 +1866,13 @@ fn require_current_runtime_content_qualification(
             return Ok(None);
         }
     };
+    if lane == RuntimeContentLane::Product {
+        ensure!(
+            contract.runtime_content_qualification.is_none(),
+            "a product-sourced structured session carries no acquired-content testimony; its runtime authority is its admitted product selection"
+        );
+        return Ok(None);
+    }
     let selected = contract
         .runtime_content_qualification
         .as_ref()
@@ -1958,7 +1994,6 @@ fn admit_current_runtime_qualification(
     binding_hash: &str,
 ) -> Result<Option<ryeos_state::objects::RetainedExternalRuntimeQualification>> {
     require_ordinary_guest_wire_support_selection(contract)?;
-    require_current_runtime_content_qualification(state, contract)?;
     let qualification = contract
         .runtime_qualification
         .as_ref()
@@ -2035,6 +2070,78 @@ fn require_retained_session_runtime_qualification(
     binding: &RetainedExternalExecutionBinding,
 ) -> Result<()> {
     let contract = binding.backend_contract();
+    let program = capsule
+        .external_candidate
+        .as_ref()
+        .context("external session capsule has no admitted candidate program")?;
+    program.verify_runtime_authority(
+        capsule.retained_product_selections.as_ref(),
+        capsule
+            .retained_external_runtime_content_qualification
+            .as_ref(),
+    )?;
+    let lane = RuntimeContentLane::of(program);
+    if lane == RuntimeContentLane::Product {
+        require_product_sourced_retention(
+            capsule
+                .retained_external_runtime_content_qualification
+                .is_some(),
+            capsule.retained_product_selections.is_some(),
+        )?;
+        ensure!(
+            contract.runtime_content_qualification.is_none(),
+            "a product-sourced session binding carries no content qualification selection"
+        );
+    } else {
+        require_retained_session_content_testimony(state, capsule, binding, &contract)?;
+    }
+    let Some(retained) = match_retained_session_runtime_qualification(
+        capsule.retained_external_runtime_qualification.as_ref(),
+        &contract,
+        binding.digest(),
+    )?
+    else {
+        return Ok(());
+    };
+    let source = verify_retained_runtime_proof(state, retained)?;
+    crate::operator_runtime_snapshot::verify_probe_snapshot_locator(
+        state,
+        &retained.proof,
+        &source,
+        &contract.backend,
+        &retained.owner_principal,
+    )?;
+    state.external_placement_backends.verify_runtime_probe(
+        &contract,
+        &RuntimeProbeInput::from_product(&retained.proof),
+        &source,
+        binding.digest(),
+    )
+}
+
+/// What a retained product-sourced session must and must not carry: its
+/// runtime authority is the admitted product selection, never acquired-content
+/// testimony.
+fn require_product_sourced_retention(has_content: bool, has_selections: bool) -> Result<()> {
+    ensure!(
+        !has_content,
+        "a product-sourced session retains no acquired-content testimony"
+    );
+    ensure!(
+        has_selections,
+        "a product-sourced session retains its admitted product selection"
+    );
+    Ok(())
+}
+
+/// The activation-sourced half of retained session qualification: the
+/// retained acquired-content testimony must match the signed binding.
+fn require_retained_session_content_testimony(
+    state: &AppState,
+    capsule: &ryeos_state::objects::AdmittedPersistentSessionCapsule,
+    binding: &RetainedExternalExecutionBinding,
+    contract: &ExternalPlacementBackendContract,
+) -> Result<()> {
     let content = capsule
         .retained_external_runtime_content_qualification
         .as_ref()
@@ -2064,29 +2171,7 @@ fn require_retained_session_runtime_qualification(
         &content.evidence.purpose.policy_source.policy,
         &selected.required_claims,
     )?;
-    verify_retained_runtime_content(state, content)?;
-    let Some(retained) = match_retained_session_runtime_qualification(
-        capsule.retained_external_runtime_qualification.as_ref(),
-        &contract,
-        binding.digest(),
-    )?
-    else {
-        return Ok(());
-    };
-    let source = verify_retained_runtime_proof(state, retained)?;
-    crate::operator_runtime_snapshot::verify_probe_snapshot_locator(
-        state,
-        &retained.proof,
-        &source,
-        &contract.backend,
-        &retained.owner_principal,
-    )?;
-    state.external_placement_backends.verify_runtime_probe(
-        &contract,
-        &RuntimeProbeInput::from_product(&retained.proof),
-        &source,
-        binding.digest(),
-    )
+    verify_retained_runtime_content(state, content)
 }
 
 /// Recovery validates only the capsule's historical CAS-owned witness. First
@@ -2105,16 +2190,28 @@ pub fn verify_retained_external_candidate_capsule(
             .retained_external_runtime_content_qualification
             .as_ref(),
     )?;
-    let content = capsule
-        .retained_external_runtime_content_qualification
-        .as_ref()
-        .context("external candidate capsule has no retained content testimony")?;
-    program.require_content_qualification(&content.evidence)?;
-    ensure!(
-        content.runtime_manifest_hash == program.runtime_manifest_hash,
-        "external candidate content proof differs from admitted runtime"
-    );
-    verify_retained_runtime_content(state, content)?;
+    match RuntimeContentLane::of(program) {
+        RuntimeContentLane::Activation => {
+            let content = capsule
+                .retained_external_runtime_content_qualification
+                .as_ref()
+                .context("external candidate capsule has no retained content testimony")?;
+            program.require_content_qualification(&content.evidence)?;
+            ensure!(
+                content.runtime_manifest_hash == program.runtime_manifest_hash,
+                "external candidate content proof differs from admitted runtime"
+            );
+            verify_retained_runtime_content(state, content)?;
+        }
+        RuntimeContentLane::Product => {
+            require_product_sourced_retention(
+                capsule
+                    .retained_external_runtime_content_qualification
+                    .is_some(),
+                capsule.retained_product_selections.is_some(),
+            )?;
+        }
+    }
     if let Some(retained) = capsule.retained_external_runtime_qualification.as_ref() {
         verify_retained_runtime_proof(state, retained)?;
     }
@@ -2331,24 +2428,32 @@ pub fn preflight_external_candidate_program(
     program: &ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram,
 ) -> Result<(
     Option<ryeos_state::objects::RetainedExternalRuntimeQualification>,
-    ryeos_state::objects::RetainedExternalRuntimeContentQualification,
+    Option<ryeos_state::objects::RetainedExternalRuntimeContentQualification>,
 )> {
     let binding = select_binding(&state.node_config.external_execution, program)?;
     let contract = binding.backend_contract();
     let runtime_proof = admit_current_runtime_qualification(state, &contract, binding.digest())?;
-    let content = require_current_runtime_content_qualification(state, &contract)?
-        .context("external candidate has no authenticated runtime content")?;
-    program.require_content_qualification(&content.evidence)?;
-    let selected = contract
-        .runtime_content_qualification
-        .as_ref()
-        .context("external candidate has no signed content selection")?;
-    let retained_content = content.into_retained(
-        binding.digest().to_owned(),
-        program.runtime_manifest_hash.clone(),
-        selected.activation_ref.clone(),
-    );
-    retained_content.validate()?;
+    let retained_content = match require_current_runtime_content_qualification(
+        state,
+        &contract,
+        RuntimeContentLane::of(program),
+    )? {
+        None => None,
+        Some(content) => {
+            program.require_content_qualification(&content.evidence)?;
+            let selected = contract
+                .runtime_content_qualification
+                .as_ref()
+                .context("external candidate has no signed content selection")?;
+            let retained_content = content.into_retained(
+                binding.digest().to_owned(),
+                program.runtime_manifest_hash.clone(),
+                selected.activation_ref.clone(),
+            );
+            retained_content.validate()?;
+            Some(retained_content)
+        }
+    };
     preflight_external_candidate_dependencies(
         &state.node_config.external_execution,
         &state.external_candidate_connectors,
@@ -2532,8 +2637,12 @@ pub fn prepare_content_candidate_program(
         _ => bail!("multiple signed placement bindings select this activated runtime"),
     };
     let contract = binding.backend_contract();
-    let qualified = require_current_runtime_content_qualification(state, &contract)?
-        .context("signed activated-runtime binding has no authenticated content proof")?;
+    let qualified = require_current_runtime_content_qualification(
+        state,
+        &contract,
+        RuntimeContentLane::Activation,
+    )?
+    .context("signed activated-runtime binding has no authenticated content proof")?;
     let selected = contract
         .runtime_content_qualification
         .as_ref()
@@ -9395,9 +9504,19 @@ pub mod test_support {
         let contract = retained.backend_contract();
         // A binding that selects runtime proofs yields the same retained
         // testimony the ordinary session admission seals into its capsule.
+        if RuntimeContentLane::of(&program) == RuntimeContentLane::Product {
+            ensure!(
+                contract.runtime_content_qualification.is_none(),
+                "a product-sourced composed fixture carries no acquired-content testimony"
+            );
+        }
         if let Some(selected) = contract.runtime_content_qualification.as_ref() {
-            let published = require_current_runtime_content_qualification(state, &contract)?
-                .context("composed fixture content selection has no authenticated content")?;
+            let published = require_current_runtime_content_qualification(
+                state,
+                &contract,
+                RuntimeContentLane::of(&program),
+            )?
+            .context("composed fixture content selection has no authenticated content")?;
             program.require_content_qualification(&published.evidence)?;
             capsule.retained_external_runtime_content_qualification =
                 Some(published.into_retained(
@@ -11116,6 +11235,84 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    fn content_selection_fixture()
+    -> crate::node_config::sections::external_execution::ExternalRuntimeContentQualificationBinding
+    {
+        crate::node_config::sections::external_execution::ExternalRuntimeContentQualificationBinding {
+            activation_ref: "config:codex/runtime-activation".into(),
+            coordinate_id: "1".repeat(64),
+            attestation_hash: "2".repeat(64),
+            owner_principal: format!("fp:{}", "3".repeat(64)),
+            required_claims: vec!["runtime_compatible".into()],
+            remote_testimony: None,
+        }
+    }
+
+    #[test]
+    fn a_product_sourced_session_admits_no_content_testimony() {
+        let root = tempfile::tempdir().unwrap();
+        let (_owner, state) = crate::state::test_support::build(root.path()).unwrap();
+        let mut contract = InstalledExternalExecutionBinding::test_fixture().backend_contract();
+        contract.runtime_content_qualification = None;
+        assert!(
+            require_current_runtime_content_qualification(
+                &state,
+                &contract,
+                RuntimeContentLane::Product
+            )
+            .unwrap()
+            .is_none()
+        );
+        contract.runtime_content_qualification = Some(content_selection_fixture());
+        let error = require_current_runtime_content_qualification(
+            &state,
+            &contract,
+            RuntimeContentLane::Product,
+        )
+        .err()
+        .unwrap();
+        assert!(
+            format!("{error:#}").contains("carries no acquired-content testimony"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn an_activation_sourced_session_still_requires_content_testimony() {
+        let root = tempfile::tempdir().unwrap();
+        let (_owner, state) = crate::state::test_support::build(root.path()).unwrap();
+        let mut contract = InstalledExternalExecutionBinding::test_fixture().backend_contract();
+        contract.runtime_content_qualification = None;
+        let error = require_current_runtime_content_qualification(
+            &state,
+            &contract,
+            RuntimeContentLane::Activation,
+        )
+        .err()
+        .unwrap();
+        assert!(
+            format!("{error:#}").contains("no qualified runtime content selection"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn a_retained_product_sourced_session_carries_selections_and_no_content() {
+        require_product_sourced_retention(false, true).unwrap();
+        assert!(require_product_sourced_retention(true, true).is_err());
+        assert!(require_product_sourced_retention(false, false).is_err());
+    }
+
+    #[test]
+    fn the_lane_follows_the_programs_runtime_source() {
+        let program = program();
+        let expected = match program.runtime_source {
+            ryeos_state::external_execution::admission::ExternalCandidateRuntimeSource::CapturedProduct { .. } => RuntimeContentLane::Product,
+            _ => RuntimeContentLane::Activation,
+        };
+        assert_eq!(RuntimeContentLane::of(&program), expected);
     }
 
     #[test]
