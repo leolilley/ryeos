@@ -34,7 +34,7 @@ class GuestWireProbeSourceTests(unittest.TestCase):
         self.assertEqual(tool["execution_protocol"],
                          "protocol:ryeos/core/qualification_consumer_callback")
         self.assertEqual(tool["effects"], "live")
-        self.assertEqual(tool["filesystem_authority"], "captured_execution")
+        self.assertEqual(tool["filesystem_authority"], "node_policy")
         self.assertEqual(tool["required_caps"], [])
         self.assertEqual(tool["external_product_slots"], [{
             "id": "subject",

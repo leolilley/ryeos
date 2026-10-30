@@ -1,11 +1,11 @@
-# ryeos:signed:2026-10-28T22:00:59Z:3ee077f737131d4f5856b6e1dc7206c548e5c3ffe5eab4fb9ba7eea1850d7d34:3kzt3fkTD0Nxu3el42LvLWLR3J+yMwHuKNpTlAxw8KKTQC8yew6hh2NqiIT69teM0YFBi4I8K9VanvLCSRsNCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-30T20:48:22Z:ab6fb95cea68db5949d7b3d6043292ee8382cdaddb0ea0f937a9f1951886e680:KBfZ5RixThNjK43Ly+va/+tYxhgqsaR80C+ZOBLHclZFpNg2HDK86HpN83X7bQaY6jmAGDxyP+ncnJrpY3srDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: codex/qualification
 version: "1.0.0"
 description: Check the actual Q command and independent diagnostic through restricted daemon callbacks; propose finite claims for issuer corroboration.
 executor_id: "@subprocess"
 execution_protocol: protocol:ryeos/core/qualification_consumer_callback
 effects: live
-filesystem_authority: captured_execution
+filesystem_authority: node_policy
 required_caps: []
 external_content:
   # Pinned musl CPython tree that runs the semantic checker; its members are
