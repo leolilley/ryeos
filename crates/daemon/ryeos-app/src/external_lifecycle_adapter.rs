@@ -2036,7 +2036,8 @@ impl ExternalPlacementBackend for ExecutableExternalPlacementBackend {
         let bootstrap_sha256 = lillux::sha256_hex(&bootstrap_bytes);
         let bootstrap_file =
             lillux::sealed_memfd(c"ryeos-external-guest-bootstrap", &bootstrap_bytes)
-                .map_err(anyhow::Error::msg)?;
+                .map_err(anyhow::Error::msg)
+                .context("seal the guest bootstrap")?;
         let expected = GuestStagingExpected {
             inputs: guest_inputs.projection(),
             activation_request_digest,

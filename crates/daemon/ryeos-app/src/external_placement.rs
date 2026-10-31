@@ -7894,8 +7894,12 @@ impl ExternalPlacementReconciliation {
             // leaves that authority with its owner.
             let native_journal = self
                 .native_journal
-                .envelope(&self.contract, current.reservation.timeout_seconds)?;
-            let package_parent = self.state_store.external_guest_package_parent()?;
+                .envelope(&self.contract, current.reservation.timeout_seconds)
+                .context("seal the activation's native journal envelope")?;
+            let package_parent = self
+                .state_store
+                .external_guest_package_parent()
+                .context("open the guest package parent")?;
             let guest_runtime = if self.backend.stages_guest_runtime_upload() {
                 let binding = self.runtime_upload.as_ref().context(
                     "external provider stages its guest runtime but no upload source is installed",
@@ -7919,7 +7923,11 @@ impl ExternalPlacementReconciliation {
                         bail!("a direct thread has no guest runtime to stage")
                     }
                 };
-                Some(binding.produce(&self.contract, basis)?)
+                Some(
+                    binding
+                        .produce(&self.contract, basis)
+                        .context("produce the staged guest runtime upload")?,
+                )
             } else {
                 None
             };
@@ -7939,7 +7947,8 @@ impl ExternalPlacementReconciliation {
                 &package_parent,
                 deadline,
                 native_journal,
-            )?;
+            )
+            .context("prepare the first supervisor activation")?;
             if activation.import_authorization.is_some() {
                 let assignment = self.state_store.author_external_guest_assignment(
                     &current.reservation,
@@ -8564,7 +8573,9 @@ fn supervisor_activation(
     validate_external_placement_program(program, reservation, contract)?;
     program.validate_guest_inputs(guest_inputs.projection())?;
     let supervisor_runtime_hash = program.runtime_manifest_hash()?.to_owned();
-    let guest_input_identity = guest_inputs.identity_digest()?;
+    let guest_input_identity = guest_inputs
+        .identity_digest()
+        .context("derive the guest input identity")?;
     ensure!(
         guest_inputs.projection().base_snapshot.snapshot_hash == reservation.base_snapshot_hash,
         "external supervisor guest inputs changed the reserved base snapshot"
@@ -8632,7 +8643,8 @@ fn supervisor_activation(
         &activation_request_digest,
         package_parent,
         deadline,
-    )?;
+    )
+    .context("prepare the guest package")?;
     let delivery = guest_package.commitment().clone();
     let intent = ExternalSupervisorActivationIntent {
         schema: 3,
