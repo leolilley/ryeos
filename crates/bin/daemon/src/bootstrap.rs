@@ -606,7 +606,8 @@ const COMPILED_FEATURES: [(&str, bool); 6] = [
     ("scheduling", cfg!(feature = "scheduling")),
 ];
 
-fn compiled_features() -> Vec<String> {
+/// The optional Cargo features this binary was compiled with, in table order.
+pub fn compiled_features() -> Vec<String> {
     COMPILED_FEATURES
         .iter()
         .filter(|(_, compiled)| *compiled)
