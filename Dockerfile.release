@@ -445,6 +445,93 @@ RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/r
     cp /build/target-cache/release/ryeosd /build/target/standard/ryeosd && \
     cp /build/target-cache/release/ryeos /build/target/standard/ryeos
 
+FROM composition-publication AS central-host-pair
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+ARG BUNDLE_BUILD_PROFILE=release
+ARG CARGO_BUILD_JOBS
+RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/registry,sharing=locked,from=dependency-build,source=/usr/local/cargo/registry \
+    --mount=type=cache,id=ryeos-release-cargo-git,target=/usr/local/cargo/git,sharing=locked,from=dependency-build,source=/usr/local/cargo/git \
+    --mount=type=cache,id=ryeos-release-cargo-target,target=/build/target-cache,sharing=locked,from=dependency-build,source=/build/target-cache \
+    if [ -z "${CARGO_BUILD_JOBS:-}" ]; then unset CARGO_BUILD_JOBS; fi && \
+    source scripts/pkg/bundle-sets.sh && \
+    features=() && \
+    for package in ryeosd ryeos-cli; do \
+      selected="$(ryeos_bundle_set_cargo_features central-host "$package")" && \
+      if [ -n "$selected" ]; then features+=("$selected"); fi; \
+    done && \
+    case "$BUNDLE_BUILD_PROFILE" in \
+      release) ;; \
+      latency-profiling) features+=(ryeosd/latency-profiling) ;; \
+      *) exit 2 ;; \
+    esac && \
+    feature_args=() && \
+    if [ "${#features[@]}" -gt 0 ]; then \
+      feature_args=(--features "$(IFS=,; printf '%s' "${features[*]}")"); \
+    fi && \
+    RYEOS_EXACT_BUILD_PROVENANCE=1 CARGO_TARGET_DIR=/build/target-cache \
+    cargo build --release --locked --no-default-features -p ryeosd -p ryeos-cli "${feature_args[@]}" && \
+    mkdir -p /build/target/central-host && \
+    cp /build/target-cache/release/ryeosd /build/target/central-host/ryeosd && \
+    cp /build/target-cache/release/ryeos /build/target/central-host/ryeos
+
+FROM composition-publication AS local-inference-pair
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+ARG BUNDLE_BUILD_PROFILE=release
+ARG CARGO_BUILD_JOBS
+RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/registry,sharing=locked,from=dependency-build,source=/usr/local/cargo/registry \
+    --mount=type=cache,id=ryeos-release-cargo-git,target=/usr/local/cargo/git,sharing=locked,from=dependency-build,source=/usr/local/cargo/git \
+    --mount=type=cache,id=ryeos-release-cargo-target,target=/build/target-cache,sharing=locked,from=dependency-build,source=/build/target-cache \
+    if [ -z "${CARGO_BUILD_JOBS:-}" ]; then unset CARGO_BUILD_JOBS; fi && \
+    source scripts/pkg/bundle-sets.sh && \
+    features=() && \
+    for package in ryeosd ryeos-cli; do \
+      selected="$(ryeos_bundle_set_cargo_features local-inference "$package")" && \
+      if [ -n "$selected" ]; then features+=("$selected"); fi; \
+    done && \
+    case "$BUNDLE_BUILD_PROFILE" in \
+      release) ;; \
+      latency-profiling) features+=(ryeosd/latency-profiling) ;; \
+      *) exit 2 ;; \
+    esac && \
+    feature_args=() && \
+    if [ "${#features[@]}" -gt 0 ]; then \
+      feature_args=(--features "$(IFS=,; printf '%s' "${features[*]}")"); \
+    fi && \
+    RYEOS_EXACT_BUILD_PROVENANCE=1 CARGO_TARGET_DIR=/build/target-cache \
+    cargo build --release --locked --no-default-features -p ryeosd -p ryeos-cli "${feature_args[@]}" && \
+    mkdir -p /build/target/local-inference && \
+    cp /build/target-cache/release/ryeosd /build/target/local-inference/ryeosd && \
+    cp /build/target-cache/release/ryeos /build/target/local-inference/ryeos
+
+FROM composition-publication AS hosted-workflow-pair
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+ARG BUNDLE_BUILD_PROFILE=release
+ARG CARGO_BUILD_JOBS
+RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/registry,sharing=locked,from=dependency-build,source=/usr/local/cargo/registry \
+    --mount=type=cache,id=ryeos-release-cargo-git,target=/usr/local/cargo/git,sharing=locked,from=dependency-build,source=/usr/local/cargo/git \
+    --mount=type=cache,id=ryeos-release-cargo-target,target=/build/target-cache,sharing=locked,from=dependency-build,source=/build/target-cache \
+    if [ -z "${CARGO_BUILD_JOBS:-}" ]; then unset CARGO_BUILD_JOBS; fi && \
+    source scripts/pkg/bundle-sets.sh && \
+    features=() && \
+    for package in ryeosd ryeos-cli; do \
+      selected="$(ryeos_bundle_set_cargo_features hosted-workflow "$package")" && \
+      if [ -n "$selected" ]; then features+=("$selected"); fi; \
+    done && \
+    case "$BUNDLE_BUILD_PROFILE" in \
+      release) ;; \
+      latency-profiling) features+=(ryeosd/latency-profiling) ;; \
+      *) exit 2 ;; \
+    esac && \
+    feature_args=() && \
+    if [ "${#features[@]}" -gt 0 ]; then \
+      feature_args=(--features "$(IFS=,; printf '%s' "${features[*]}")"); \
+    fi && \
+    RYEOS_EXACT_BUILD_PROVENANCE=1 CARGO_TARGET_DIR=/build/target-cache \
+    cargo build --release --locked --no-default-features -p ryeosd -p ryeos-cli "${feature_args[@]}" && \
+    mkdir -p /build/target/hosted-workflow && \
+    cp /build/target-cache/release/ryeosd /build/target/hosted-workflow/ryeosd && \
+    cp /build/target-cache/release/ryeos /build/target/hosted-workflow/ryeos
+
 FROM ${CONTAINED_PUBLICATION_STAGE} AS contained-publication
 
 FROM scratch AS bundle-artifact
@@ -527,8 +614,8 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
 
 FROM workflow-runtime AS ryeos-local-inference
-COPY --from=composition-publication /build/target/release/ryeosd           /usr/local/bin/ryeosd
-COPY --from=composition-publication /build/target/release/ryeos            /usr/local/bin/ryeos
+COPY --from=local-inference-pair /build/target/local-inference/ryeosd /usr/local/bin/ryeosd
+COPY --from=local-inference-pair /build/target/local-inference/ryeos  /usr/local/bin/ryeos
 COPY --from=composition-publication /build/target/release/ryeos-core-tools /usr/local/bin/ryeos-core-tools
 COPY --from=composition-publication /build/bundles/.ai             /opt/ryeos/.ai
 COPY --from=composition-publication /build/bundles/core            /opt/ryeos/core
@@ -561,8 +648,8 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
 
 FROM workflow-runtime AS ryeos-central-host
-COPY --from=composition-publication /build/target/release/ryeosd           /usr/local/bin/ryeosd
-COPY --from=composition-publication /build/target/release/ryeos            /usr/local/bin/ryeos
+COPY --from=central-host-pair /build/target/central-host/ryeosd /usr/local/bin/ryeosd
+COPY --from=central-host-pair /build/target/central-host/ryeos  /usr/local/bin/ryeos
 COPY --from=composition-publication /build/target/release/ryeos-core-tools /usr/local/bin/ryeos-core-tools
 COPY --from=composition-publication /build/bundles/.ai                   /opt/ryeos/.ai
 COPY --from=composition-publication /build/bundles/core                  /opt/ryeos/core
@@ -716,8 +803,8 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
 
 FROM hosted-runtime AS ryeos-hosted-workflow
-COPY --from=composition-publication /build/target/release/ryeosd           /usr/local/bin/ryeosd
-COPY --from=composition-publication /build/target/release/ryeos            /usr/local/bin/ryeos
+COPY --from=hosted-workflow-pair /build/target/hosted-workflow/ryeosd /usr/local/bin/ryeosd
+COPY --from=hosted-workflow-pair /build/target/hosted-workflow/ryeos  /usr/local/bin/ryeos
 COPY --from=composition-publication /build/target/release/ryeos-core-tools /usr/local/bin/ryeos-core-tools
 COPY --from=composition-publication /build/bundles/.ai          /opt/ryeos/.ai
 COPY --from=composition-publication /build/bundles/core         /opt/ryeos/core
