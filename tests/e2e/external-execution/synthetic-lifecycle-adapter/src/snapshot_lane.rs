@@ -1102,6 +1102,7 @@ pub(crate) fn qualify_snapshot_verify(
             eprintln!("synthetic restored verifier refused: {error:#}");
             RestoredVerifierAdapterResponse::Uncertain {
                 operation_id: request.intent.operation_id.clone(),
+                reason: None,
             }
         }
     };

@@ -693,6 +693,9 @@ pub enum RestoredVerifierAdapterResponse {
     },
     Uncertain {
         operation_id: String,
+        /// Diagnostic only; never alters the uncertain outcome.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<crate::UncertaintyReason>,
     },
 }
 
@@ -708,11 +711,17 @@ impl RestoredVerifierAdapterResponse {
                 observation.validate_for_intent(&request.intent)?;
                 observation.verify_evidence_bytes(&canonical_json(evidence)?)?;
             }
-            Self::Uncertain { operation_id } => {
+            Self::Uncertain {
+                operation_id,
+                reason,
+            } => {
                 ensure!(
                     operation_id == &request.intent.operation_id,
                     "uncertain verifier result changed its durable attempt"
                 );
+                if let Some(reason) = reason {
+                    reason.validate()?;
+                }
             }
         }
         ensure!(

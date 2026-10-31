@@ -887,17 +887,84 @@ fn create_qualification_occurrence_checked(
                     .state_store
                     .bind_snapshot_qualification_occurrence(&occurrence)
             }
-            RuntimeSnapshotQualificationAdapterResponse::Uncertain { .. } => state
-                .state_store
-                .quarantine_snapshot_qualification_attempt(&request.intent.operation_id),
+            RuntimeSnapshotQualificationAdapterResponse::Uncertain { reason, .. } => {
+                quarantine_qualification(
+                    state,
+                    &request.intent.operation_id,
+                    &uncertainty_text(reason.as_ref()),
+                )
+            }
         },
         Err(error) => {
-            state
-                .state_store
-                .quarantine_snapshot_qualification_attempt(&request.intent.operation_id)?;
+            quarantine_qualification(
+                state,
+                &request.intent.operation_id,
+                &contact_error_text(&error),
+            )?;
             Err(error)
         }
     }
+}
+
+const MAX_QUARANTINE_REASON_BYTES: usize = 512;
+
+fn bounded_text(text: &str) -> String {
+    let mut end = text.len().min(MAX_QUARANTINE_REASON_BYTES);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_owned()
+}
+
+/// The logged reason for an adapter `uncertain` result.
+fn uncertainty_text(
+    reason: Option<&ryeos_external_execution_contract::UncertaintyReason>,
+) -> String {
+    match reason {
+        Some(reason) => bounded_text(&format!("{}: {}", reason.class.as_str(), reason.detail)),
+        None => "adapter reported uncertain without a reason".to_owned(),
+    }
+}
+
+/// The logged reason for a contact that failed with an error.
+fn contact_error_text(error: &anyhow::Error) -> String {
+    bounded_text(&format!("contact error: {error}"))
+}
+
+fn quarantine_qualification(
+    state: &AppState,
+    operation_id: &str,
+    reason: &str,
+) -> Result<SnapshotQualificationRecord> {
+    let record = state
+        .state_store
+        .quarantine_snapshot_qualification_attempt(operation_id)?;
+    tracing::warn!(
+        operation_id,
+        from = "attempt_pending",
+        to = "quarantined",
+        reason,
+        "snapshot qualification create attempt quarantined"
+    );
+    Ok(record)
+}
+
+fn quarantine_verifier(
+    state: &AppState,
+    operation_id: &str,
+    reason: &str,
+) -> Result<RestoredVerifierAttemptRecord> {
+    let record = state
+        .state_store
+        .quarantine_restored_verifier_attempt(operation_id)?;
+    tracing::warn!(
+        operation_id,
+        from = "attempt_pending",
+        to = "quarantined",
+        reason,
+        "restored verifier attempt quarantined"
+    );
+    Ok(record)
 }
 
 /// Execute one independently admitted verifier inside the exact restored
@@ -1077,20 +1144,26 @@ fn verify_qualification_occurrence_under_contact_gate(
                     .state_store
                     .bind_restored_verifier_observation(&observation)
             }
-            RestoredVerifierAdapterResponse::Uncertain { .. } => state
-                .state_store
-                .quarantine_restored_verifier_attempt(&request.intent.operation_id),
+            RestoredVerifierAdapterResponse::Uncertain { reason, .. } => quarantine_verifier(
+                state,
+                &request.intent.operation_id,
+                &uncertainty_text(reason.as_ref()),
+            ),
             RestoredVerifierAdapterResponse::ConsumerObserved { .. } => {
-                state
-                    .state_store
-                    .quarantine_restored_verifier_attempt(&request.intent.operation_id)?;
+                quarantine_verifier(
+                    state,
+                    &request.intent.operation_id,
+                    "owner measurement contact returned consumer evidence",
+                )?;
                 anyhow::bail!("owner measurement contact returned consumer evidence")
             }
         },
         Err(error) => {
-            state
-                .state_store
-                .quarantine_restored_verifier_attempt(&request.intent.operation_id)?;
+            quarantine_verifier(
+                state,
+                &request.intent.operation_id,
+                &contact_error_text(&error),
+            )?;
             Err(error)
         }
     }
@@ -1639,9 +1712,11 @@ fn verify_consumer_occurrence_with_callback(
                 });
             };
             if deadline.has_elapsed() {
-                state
-                    .state_store
-                    .quarantine_restored_verifier_attempt(&intent.operation_id)?;
+                quarantine_verifier(
+                    state,
+                    &intent.operation_id,
+                    "consumer original deadline expired after contact claim",
+                )?;
                 anyhow::bail!("consumer original deadline expired after contact claim");
             }
             let attempted = state
@@ -1670,27 +1745,33 @@ fn verify_consumer_occurrence_with_callback(
                         match retained {
                             Ok(record) => Ok(record),
                             Err(error) => {
-                                state
-                                    .state_store
-                                    .quarantine_restored_verifier_attempt(&intent.operation_id)?;
+                                quarantine_verifier(
+                                    state,
+                                    &intent.operation_id,
+                                    &contact_error_text(&error),
+                                )?;
                                 Err(error)
                             }
                         }
                     }
-                    RestoredVerifierAdapterResponse::Uncertain { .. } => state
-                        .state_store
-                        .quarantine_restored_verifier_attempt(&intent.operation_id),
+                    RestoredVerifierAdapterResponse::Uncertain { reason, .. } => {
+                        quarantine_verifier(
+                            state,
+                            &intent.operation_id,
+                            &uncertainty_text(reason.as_ref()),
+                        )
+                    }
                     RestoredVerifierAdapterResponse::Observed { .. } => {
-                        state
-                            .state_store
-                            .quarantine_restored_verifier_attempt(&intent.operation_id)?;
+                        quarantine_verifier(
+                            state,
+                            &intent.operation_id,
+                            "consumer contact returned owner measurement",
+                        )?;
                         anyhow::bail!("consumer contact returned owner measurement")
                     }
                 },
                 Err(error) => {
-                    state
-                        .state_store
-                        .quarantine_restored_verifier_attempt(&intent.operation_id)?;
+                    quarantine_verifier(state, &intent.operation_id, &contact_error_text(&error))?;
                     Err(error)
                 }
             }
@@ -3145,6 +3226,23 @@ fn retained_snapshot_parent(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn quarantine_reason_text_is_bounded_and_names_the_class() {
+        use ryeos_external_execution_contract::{UncertaintyClass, UncertaintyReason};
+        let reason = UncertaintyReason::new(UncertaintyClass::RunStatus, "run status 500");
+        assert_eq!(
+            super::uncertainty_text(Some(&reason)),
+            "run_status: run status 500"
+        );
+        assert_eq!(
+            super::uncertainty_text(None),
+            "adapter reported uncertain without a reason"
+        );
+        let error = anyhow::anyhow!("{}", "é".repeat(2000));
+        let text = super::contact_error_text(&error);
+        assert!(text.len() <= 512 && text.starts_with("contact error: é"));
+    }
+
     use super::*;
     use base64::Engine as _;
     use ryeos_external_execution_contract::restored_runtime_measurement::{

@@ -188,7 +188,7 @@ pub(crate) fn create_restored_sandbox(
         &selected,
         &cancellation,
     ) {
-        Ok(response) => match crate::read_response(response) {
+        Ok(response) => match crate::contact_failure::read_classified(response) {
             Ok((status, body)) => match crate::accepted_create_response(status, &body, &projection)
             {
                 Some(sandbox) => RuntimeSnapshotQualificationAdapterResponse::OccurrenceBound {
@@ -202,14 +202,21 @@ pub(crate) fn create_restored_sandbox(
                 },
                 None => RuntimeSnapshotQualificationAdapterResponse::Uncertain {
                     operation_id: request.intent.operation_id.clone(),
+                    reason: Some(crate::contact_failure::create_rejection(status, &body)),
                 },
             },
-            Err(()) => RuntimeSnapshotQualificationAdapterResponse::Uncertain {
+            Err(reason) => RuntimeSnapshotQualificationAdapterResponse::Uncertain {
                 operation_id: request.intent.operation_id.clone(),
+                reason: Some(reason),
             },
         },
-        Err(_) => RuntimeSnapshotQualificationAdapterResponse::Uncertain {
+        Err(error) => RuntimeSnapshotQualificationAdapterResponse::Uncertain {
             operation_id: request.intent.operation_id.clone(),
+            reason: Some(crate::contact_failure::reason_of(
+                &error,
+                ryeos_external_execution_contract::UncertaintyClass::Transport,
+                "create request failed",
+            )),
         },
     };
     result.validate_for(&request)?;
@@ -294,8 +301,9 @@ pub(crate) fn run_restored_verifier(adapter: &lillux::InheritedDescriptorAuthori
         deadline,
         &cancellation,
     )
-    .unwrap_or_else(|_| RestoredVerifierAdapterResponse::Uncertain {
+    .unwrap_or_else(|error| RestoredVerifierAdapterResponse::Uncertain {
         operation_id: request.intent.operation_id.clone(),
+        reason: Some(crate::contact_failure::contact_reason(&error)),
     });
     result.validate_for(&request)?;
     crate::write_response_bounded(

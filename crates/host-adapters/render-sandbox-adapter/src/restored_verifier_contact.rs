@@ -16,8 +16,11 @@ use ryeos_external_execution_contract::restored_runtime_measurement::{
 };
 use ryeos_http_transport::RequestBodySource;
 
+use ryeos_external_execution_contract::UncertaintyClass;
+
 use crate::Settings;
 use crate::activation_contact::RenderContact;
+use crate::contact_failure::{classified, failure, response_detail};
 use crate::provider_spec::ProviderSpec;
 use crate::proxy_route::ProxyOperation;
 
@@ -85,73 +88,104 @@ pub(crate) fn first_contact(
         &request.occurrence.occurrence_id,
         deadline,
         cancellation,
-    )?;
+    )
+    .map_err(|error| classified(error, UncertaintyClass::Validation, "contact setup failed"))?;
     let upload_operation = ProxyOperation::UploadFile {
         remote_path: &upload_directory,
     };
-    let upload_token = contact.mint(upload_operation, None)?;
+    let upload_token = contact.mint(upload_operation, None).map_err(|error| {
+        classified(
+            error,
+            UncertaintyClass::TokenMint,
+            "upload token mint failed",
+        )
+    })?;
     let upload_execution_id = upload_token.execution_id.clone();
-    let upload_response = contact.send_proxy(
-        upload_token,
-        upload_operation,
-        RequestBodySource::from_inherited_regular_file(
-            upload.clone(),
-            request.upload_bytes,
-            request.upload_sha256.clone(),
-        ),
-        "application/x-tar",
-        "application/json",
-        MAX_UPLOAD_RESPONSE_BYTES,
-    )?;
-    ensure!(
-        (200..300).contains(&upload_response.status),
-        "restored verifier tar upload did not succeed"
-    );
+    let upload_response = contact
+        .send_proxy(
+            upload_token,
+            upload_operation,
+            RequestBodySource::from_inherited_regular_file(
+                upload.clone(),
+                request.upload_bytes,
+                request.upload_sha256.clone(),
+            ),
+            "application/x-tar",
+            "application/json",
+            MAX_UPLOAD_RESPONSE_BYTES,
+        )
+        .map_err(|error| classified(error, UncertaintyClass::Transport, "tar upload failed"))?;
+    if !(200..300).contains(&upload_response.status) {
+        let detail = response_detail(upload_response.status, upload_response.body);
+        return Err(failure(
+            UncertaintyClass::UploadStatus,
+            &format!("tar upload {detail}"),
+        ));
+    }
     let mut upload_body = Vec::new();
     upload_response
         .body
         .take(MAX_UPLOAD_RESPONSE_BYTES + 1)
-        .read_to_end(&mut upload_body)?;
-    ensure!(
-        upload_body.len() as u64 <= MAX_UPLOAD_RESPONSE_BYTES,
-        "restored verifier upload response exceeds bound"
-    );
+        .read_to_end(&mut upload_body)
+        .map_err(|error| read_failure(&error, "upload response"))?;
+    if upload_body.len() as u64 > MAX_UPLOAD_RESPONSE_BYTES {
+        return Err(failure(
+            UncertaintyClass::StreamBound,
+            "upload response exceeds its bound",
+        ));
+    }
 
     let run_operation = ProxyOperation::RunStream;
-    let run_token = contact.mint(run_operation, Some(&command))?;
+    let run_token = contact
+        .mint(run_operation, Some(&command))
+        .map_err(|error| classified(error, UncertaintyClass::TokenMint, "run token mint failed"))?;
     let run_execution_id = run_token.execution_id.clone();
     let run_body = canonical_json(&serde_json::json!({ "command": command }))?;
-    let run_response = contact.send_proxy(
-        run_token,
-        run_operation,
-        RequestBodySource::from_bytes(run_body),
-        "application/json",
-        "text/event-stream",
-        run_response_bound,
-    )?;
-    ensure!(
-        run_response.status == 200
-            && run_response
-                .headers
-                .iter()
-                .filter(|header| header.name.eq_ignore_ascii_case("content-type"))
-                .count()
-                == 1
-            && run_response.headers.iter().any(|header| {
-                header.name.eq_ignore_ascii_case("content-type")
-                    && header.value() == b"text/event-stream"
-            }),
-        "restored verifier run did not return an exact event stream"
-    );
+    let run_response = contact
+        .send_proxy(
+            run_token,
+            run_operation,
+            RequestBodySource::from_bytes(run_body),
+            "application/json",
+            "text/event-stream",
+            run_response_bound,
+        )
+        .map_err(|error| classified(error, UncertaintyClass::Transport, "run request failed"))?;
+    if run_response.status != 200 {
+        let detail = response_detail(run_response.status, run_response.body);
+        return Err(failure(
+            UncertaintyClass::RunStatus,
+            &format!("run {detail}"),
+        ));
+    }
+    let exact_event_stream = run_response
+        .headers
+        .iter()
+        .filter(|header| header.name.eq_ignore_ascii_case("content-type"))
+        .count()
+        == 1
+        && run_response.headers.iter().any(|header| {
+            header.name.eq_ignore_ascii_case("content-type")
+                && header.value() == b"text/event-stream"
+        });
+    if !exact_event_stream {
+        return Err(failure(
+            UncertaintyClass::ContentType,
+            "run status 200 without exactly one text/event-stream content type",
+        ));
+    }
     let mut stream = Vec::new();
     run_response
         .body
         .take(run_response_bound + 1)
-        .read_to_end(&mut stream)?;
-    ensure!(
-        stream.len() as u64 <= run_response_bound,
-        "restored verifier stream exceeds bound"
-    );
+        .read_to_end(&mut stream)
+        .map_err(|error| read_failure(&error, "run stream"))?;
+    if stream.len() as u64 > run_response_bound {
+        return Err(failure(
+            UncertaintyClass::StreamBound,
+            "run stream exceeds its bound",
+        ));
+    }
     let result = match &request.intent.purpose {
         RemoteVerificationPurpose::OwnerMeasurement { .. } => {
             let parsed = crate::snapshot_qualification::parse_restored_verifier_stream(
@@ -160,7 +194,14 @@ pub(crate) fn first_contact(
                 &request.source_intent,
                 &request.locator,
                 &request.readiness,
-            )?;
+            )
+            .map_err(|error| {
+                classified(
+                    error,
+                    UncertaintyClass::Parse,
+                    "owner verifier stream did not parse",
+                )
+            })?;
             RestoredVerifierAdapterResponse::Observed {
                 observation: Box::new(RestoredVerifierAdapterObservation {
                     schema: 1,
@@ -182,7 +223,14 @@ pub(crate) fn first_contact(
                 &challenge,
                 deadline,
                 cancellation,
-            )?;
+            )
+            .map_err(|error| {
+                classified(
+                    error,
+                    UncertaintyClass::Parse,
+                    "consumer verifier stream did not parse",
+                )
+            })?;
             RestoredVerifierAdapterResponse::ConsumerObserved {
                 observation: Box::new(ConsumerVerifierAdapterObservation {
                     schema: 1,
@@ -202,6 +250,27 @@ pub(crate) fn first_contact(
             }
         }
     };
-    result.validate_for(request)?;
+    result.validate_for(request).map_err(|error| {
+        classified(
+            error,
+            UncertaintyClass::Validation,
+            "verifier response failed validation",
+        )
+    })?;
     Ok(result)
+}
+
+/// A body read that failed: a timeout stays a timeout, a transport-refused
+/// body is a bound or framing refusal, anything else is transport.
+fn read_failure(error: &std::io::Error, what: &str) -> anyhow::Error {
+    if error.kind() == std::io::ErrorKind::TimedOut {
+        failure(UncertaintyClass::Timeout, &format!("{what} read timed out"))
+    } else if ryeos_http_transport::is_response_refusal(error) {
+        failure(
+            UncertaintyClass::StreamBound,
+            &format!("{what} refused by the transport"),
+        )
+    } else {
+        failure(UncertaintyClass::Transport, &format!("{what} read failed"))
+    }
 }

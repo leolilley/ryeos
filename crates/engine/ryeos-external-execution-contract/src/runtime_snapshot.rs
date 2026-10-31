@@ -889,6 +889,9 @@ pub enum RuntimeSnapshotQualificationAdapterResponse {
     },
     Uncertain {
         operation_id: String,
+        /// Diagnostic only; never alters the uncertain outcome.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<crate::UncertaintyReason>,
     },
 }
 
@@ -897,10 +900,18 @@ impl RuntimeSnapshotQualificationAdapterResponse {
         request.validate()?;
         match self {
             Self::OccurrenceBound { occurrence } => occurrence.validate_for(&request.intent)?,
-            Self::Uncertain { operation_id } => ensure!(
-                operation_id == &request.intent.operation_id,
-                "uncertain qualification result changed durable attempt"
-            ),
+            Self::Uncertain {
+                operation_id,
+                reason,
+            } => {
+                ensure!(
+                    operation_id == &request.intent.operation_id,
+                    "uncertain qualification result changed durable attempt"
+                );
+                if let Some(reason) = reason {
+                    reason.validate()?;
+                }
+            }
         }
         Ok(())
     }

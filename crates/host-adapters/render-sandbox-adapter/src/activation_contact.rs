@@ -229,10 +229,19 @@ impl RenderContact<'_> {
             self.settings,
             self.cancellation,
         )?;
-        ensure!(
-            response.status == 201 && has_json_content_type(&response.headers),
-            "Render token mint did not return the exact JSON success shape"
-        );
+        if response.status != 201 {
+            let detail = crate::contact_failure::response_detail(response.status, response.body);
+            return Err(crate::contact_failure::failure(
+                ryeos_external_execution_contract::UncertaintyClass::TokenMint,
+                &format!("token mint {detail}"),
+            ));
+        }
+        if !has_json_content_type(&response.headers) {
+            return Err(crate::contact_failure::failure(
+                ryeos_external_execution_contract::UncertaintyClass::ContentType,
+                "token mint status 201 without an exact JSON content type",
+            ));
+        }
         let mut bytes = Zeroizing::new(Vec::new());
         response
             .body

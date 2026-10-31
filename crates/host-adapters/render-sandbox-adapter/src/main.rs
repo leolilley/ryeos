@@ -3,6 +3,7 @@
 //! validation contract and RyeOS bootstrap mapping are not established.
 
 mod activation_contact;
+mod contact_failure;
 mod fail_class;
 mod lease;
 mod provider_spec;

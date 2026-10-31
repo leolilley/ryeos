@@ -23,6 +23,8 @@ pub mod restored_runtime_measurement;
 pub mod runtime_snapshot;
 pub mod runtime_snapshot_bootstrap;
 pub mod staging_package;
+pub mod uncertainty_reason;
+pub use uncertainty_reason::{MAX_UNCERTAINTY_DETAIL_BYTES, UncertaintyClass, UncertaintyReason};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
