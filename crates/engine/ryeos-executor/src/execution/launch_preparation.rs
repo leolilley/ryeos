@@ -1448,7 +1448,12 @@ pub(crate) fn project_effective_ref_bindings(
         if declaration.required && !effective.contains_key(name) {
             return Err(preparation_error_with_binding(
                 "ref_binding_required",
-                format!("required ref binding `{name}` is missing"),
+                format!(
+                    "required ref binding `{name}` is missing; pass \
+                     `--ref-binding {name}=<item ref>` on the CLI (or `ref_bindings` \
+                     `{{\"{name}\": \"<item ref>\"}}` in the request); a directive's \
+                     `model` binding is the directive's own ref"
+                ),
                 LaunchPrepareErrorClass::Caller,
                 Some(name.clone()),
             ));

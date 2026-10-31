@@ -5291,6 +5291,7 @@ owner = "RyeOS Development"
             ("openrouter", "anthropic/claude-sonnet-4.6"),
             ("zai", "glm-5.2"),
             ("zen", "gpt-5.4-nano"),
+            ("google", "gemma-4-31b-it"),
             ("local-openai", "local-test-model"),
         ] {
             let snapshot = resolve(provider, model);
@@ -6102,6 +6103,28 @@ owner = "RyeOS Development"
             content.iter().any(|b| b["type"] == "tool_use"),
             "must contain at least one tool_use block"
         );
+    }
+
+    #[test]
+    fn bundled_google_gemma_body_carries_no_thinking_config() {
+        // Google rejects thinking settings for gemma-* models, so the Google
+        // provider must never send a thinkingConfig.
+        let snapshot = resolve("google", "gemma-4-31b-it");
+        let body = build_golden_body(
+            &snapshot,
+            &canonical_transcript_with_tool_call(),
+            &canonical_tool_schemas(),
+            None,
+        );
+        assert!(
+            body.pointer("/generationConfig/thinkingConfig").is_none(),
+            "Gemma body must omit thinkingConfig; got: {body}"
+        );
+        assert!(
+            body["tools"][0]["functionDeclarations"].is_array(),
+            "Google body must wrap tools in functionDeclarations; got: {body}"
+        );
+        assert!(snapshot.provider.pricing.is_none(), "route is unpriced, not free");
     }
 
     #[test]
