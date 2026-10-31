@@ -262,10 +262,14 @@ async fn handle_source(
             .map_err(|error| {
                 HandlerError::Internal(format!("resolve pinned qualification snapshot: {error}"))
             })?;
-            let policy = ExecutionPolicy::local_pinned_snapshot_read_only(
+            // A qualification verifier and the guest it starts may not inherit any
+            // project or operator environment: the guest's inputs are exactly its
+            // admitted output-free read-only pinned root, as on the projectless lane.
+            let mut policy = ExecutionPolicy::local_pinned_snapshot_read_only(
                 ExecutionResponse::Accepted,
                 snapshot_hash,
             );
+            policy.environment = ryeos_app::execution_policy::ExecutionEnvironmentPolicy::None;
             let contract = crate::routes::response_modes::execute_mode::resolve_execution_contract(
                 &policy,
                 &source,
