@@ -360,9 +360,18 @@ pub fn recheck_mounted_guest_content(
                 manifest_bytes,
                 ..
             } => {
-                let source = root
-                    .open_inherited_mount_entry(OsStr::new(&name))?
-                    .context("staged guest product disappeared")?;
+                // A directory keeps its mount-entry descriptor: traversal
+                // reopens `.` relative to it. A regular file needs a data
+                // descriptor; the mount-entry form refuses reads.
+                let source = match input.kind {
+                    GuestMountKind::Directory => {
+                        root.open_inherited_mount_entry(OsStr::new(&name))?
+                    }
+                    GuestMountKind::RegularFile => {
+                        root.open_inherited_regular(OsStr::new(&name), false)?
+                    }
+                }
+                .context("staged guest product disappeared")?;
                 let manifest_name = format!("record-{record_index:02}");
                 let manifest = root
                     .open_inherited_regular(OsStr::new(&manifest_name), false)?
@@ -509,4 +518,84 @@ fn read_staged_record(
         "staged guest record digest changed"
     );
     Ok(bytes)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    use ryeos_external_execution_contract::{
+        EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA, GuestBaseSnapshotInput, GuestMountAccess,
+        GuestMountInput, GuestMountRole, GuestWorkspaceView,
+    };
+
+    use super::*;
+
+    /// A file-kind product is staged as `input-NN` beside its manifest
+    /// `record-NN`. The recheck must read the file through a data descriptor;
+    /// a mount-entry descriptor refuses reads.
+    #[test]
+    fn rechecks_a_staged_file_product() {
+        let stage = tempfile::tempdir().unwrap();
+        let content = b"exact file product bytes".to_vec();
+        let staged_file = stage.path().join("input-00");
+        std::fs::write(&staged_file, &content).unwrap();
+        std::fs::set_permissions(&staged_file, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let manifest = ryeos_state::objects::ExternalContentManifestObject {
+            schema: ryeos_state::objects::EXTERNAL_CONTENT_TREE_SCHEMA.into(),
+            kind: ryeos_state::objects::EXTERNAL_CONTENT_MANIFEST_KIND.into(),
+            entries: vec![ryeos_state::objects::ExternalContentManifestEntry {
+                path: ryeos_state::objects::FILE_REALIZATION_ENTRY_PATH.into(),
+                kind: ryeos_state::objects::ExternalContentManifestEntryKind::File,
+                mode: Some(0o755),
+                blob_hash: Some(lillux::sha256_hex(&content)),
+                size: Some(content.len() as u64),
+                target: None,
+            }],
+            entry_count: 1,
+            total_bytes: content.len() as u64,
+        };
+        let manifest_bytes = lillux::canonical_json(&serde_json::to_value(&manifest).unwrap())
+            .unwrap()
+            .into_bytes();
+        std::fs::write(stage.path().join("record-00"), &manifest_bytes).unwrap();
+        let root = lillux::PinnedDirectory::open(stage.path())
+            .unwrap()
+            .unwrap();
+        let retained = ExternalGuestInputProjection {
+            workspace_view: GuestWorkspaceView::FullSnapshot,
+            schema: EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA,
+            base_snapshot: GuestBaseSnapshotInput {
+                descriptor: 56,
+                snapshot_hash: "a".repeat(64),
+                closure_digest: "b".repeat(64),
+                object_count: 3,
+                blob_count: 0,
+                total_bytes: 0,
+            },
+            workspace_outputs: None,
+            inputs: vec![GuestMountInput {
+                role: GuestMountRole::Product,
+                authority_id: "codex".into(),
+                descriptor: 65,
+                destination: "/workspace/codex".into(),
+                kind: GuestMountKind::RegularFile,
+                access: GuestMountAccess::ReadOnly,
+                normalized_mode: Some(0o755),
+                content_authority: GuestMountContentAuthority::ProductManifest {
+                    manifest_kind: GuestProductManifestKind::Content,
+                    manifest_hash: lillux::sha256_hex(&manifest_bytes),
+                    manifest_descriptor: 66,
+                    manifest_bytes: manifest_bytes.len() as u64,
+                },
+                bytes: content.len() as u64,
+            }],
+            executable_search: Vec::new(),
+            environment: BTreeMap::new(),
+        };
+        recheck_mounted_guest_content(&root, &retained).unwrap();
+        std::fs::write(&staged_file, b"replaced").unwrap();
+        assert!(recheck_mounted_guest_content(&root, &retained).is_err());
+    }
 }
