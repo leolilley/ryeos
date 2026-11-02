@@ -565,7 +565,8 @@ fn stage_guest_package_in_private_root<R: Read>(
     for links in product_symlinks.values() {
         ryeos_state::objects::validate_internal_symlink_graph(links.iter().copied())?;
     }
-    for entry in &manifest.entries {
+    let plan = manifest.payload_plan();
+    for (index, entry) in manifest.entries.iter().enumerate() {
         let path = entry.path();
         let (parent_path, child_name) = match path.rsplit_once('/') {
             Some((parent_path, name)) => (Some(parent_path), name),
@@ -577,14 +578,34 @@ fn stage_guest_package_in_private_root<R: Read>(
                 let created = directory.create_child(OsStr::new(child_name), 0o700)?;
                 created.set_mode(*mode)?;
             }
-            GuestStagingEntry::RegularFile { mode, .. } => {
-                ensure!(
-                    stream.next_file().is_some_and(|next| next.path() == path),
-                    "guest staging file order changed"
-                );
+            GuestStagingEntry::RegularFile {
+                mode,
+                bytes,
+                sha256,
+                ..
+            } => {
                 let mut file =
                     directory.open_regular_create(OsStr::new(child_name), true, true, 0o600)?;
-                stream.copy_next_file(&mut file)?;
+                match plan.origin(index) {
+                    None => {
+                        ensure!(
+                            stream.next_file().is_some_and(|next| next.path() == path),
+                            "guest staging file order changed"
+                        );
+                        stream.copy_next_file(&mut file)?;
+                    }
+                    // Identical content crossed the wire once; take it from
+                    // the earlier staged file and prove the same bytes again.
+                    Some(origin) => {
+                        copy_staged_payload(stage, manifest.entries[origin].path(), &mut file)?;
+                        let (digest, _) =
+                            lillux::digest_open_regular_file_stable_exact(&file, *bytes)?;
+                        ensure!(
+                            digest == *sha256,
+                            "guest staging shared payload changed its bytes"
+                        );
+                    }
+                }
                 lillux::set_open_regular_file_mode(&file, *mode)?;
                 file.sync_all()?;
             }
@@ -622,6 +643,24 @@ fn stage_guest_package_in_private_root<R: Read>(
     sidecar.sync_all()?;
     stage.sync_tree_with_symlinks_bounded(staging_budget(), 4096)?;
     Ok((manifest, base))
+}
+
+/// Copy one already staged regular file into `file`, both reached through
+/// the retained stage root. The caller re-verifies the written digest.
+fn copy_staged_payload(
+    stage: &lillux::PinnedDirectory,
+    origin: &str,
+    file: &mut std::fs::File,
+) -> Result<()> {
+    let (parent_path, name) = match origin.rsplit_once('/') {
+        Some((parent_path, name)) => (Some(parent_path), name),
+        None => (None, origin),
+    };
+    let source = open_staged_parent(stage, parent_path)?
+        .open_regular(OsStr::new(name), false)?
+        .context("guest staging shared payload origin disappeared")?;
+    std::io::copy(&mut &source, file)?;
+    Ok(())
 }
 
 /// Reopen each component through the retained root descriptor. Holding one
@@ -959,7 +998,9 @@ mod tests {
         let mut entries = directory_entries;
         entries.extend(file_entries);
         let mut bootstrap = b"boot".to_vec();
-        let config = b"cfg".to_vec();
+        // The configuration carries the launcher's bytes: identical content
+        // crosses the wire once and is materialized twice with its own modes.
+        let config = b"start".to_vec();
         let launcher = b"start".to_vec();
         let supervisor = b"runrun".to_vec();
         let product_manifest_object = ryeos_state::objects::ExternalContentManifestObject {
