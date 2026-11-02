@@ -372,7 +372,7 @@ fn run(
         supervisor_sha256: &manifest.supervisor_sha256,
         launcher_sha256: &manifest.launcher_sha256,
         maximum_regular_bytes: manifest.total_regular_bytes,
-        maximum_framed_bytes: manifest.framed_bytes()? + 128,
+        maximum_framed_bytes: manifest.framed_bytes_bound()? + 128,
     };
     let mut writer = GuestStagingStreamWriter::new(Vec::new(), manifest.clone(), &expected)?;
     while let Some(entry) = writer.next_file() {

@@ -1482,10 +1482,13 @@ impl PreparedGuestPrivateInputs {
         state_root.require_disjoint_directory_tree(&self.private_parent)?;
         state_root.require_disjoint_directory_tree(imported.root())?;
         let relay_mailbox = if bootstrap.controller.relay().is_ok() {
+            // The mailbox lives inside this occurrence's own directory, which
+            // the signed parent and the occurrence name together address.
             let parent = &self.content._installed.owner.occurrence;
             ensure!(
                 parent.path()
-                    == std::path::Path::new(&bootstrap.controller.relay()?.private_mailbox_parent,),
+                    == std::path::Path::new(&bootstrap.controller.relay()?.private_mailbox_parent)
+                        .join(&bootstrap.occurrence_id),
                 "signed relay mailbox parent differs from original occurrence root"
             );
             // Q inputs admit only ProductManifest and PrivateScratch. Their

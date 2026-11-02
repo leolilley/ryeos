@@ -138,8 +138,8 @@ pub fn prepare_private_guest_package(
         let observation = payload.observation()?;
         let bytes = observation.size();
         ensure!(
-            bytes == manifest.framed_bytes()? && bytes <= expected.maximum_framed_bytes,
-            "private guest package length changed"
+            bytes <= manifest.framed_bytes_bound()? && bytes <= expected.maximum_framed_bytes,
+            "private guest package length exceeds its bound"
         );
         let sha256 = payload.digest_stable_exact(&observation)?;
         require_time(deadline)?;
@@ -386,7 +386,7 @@ pub(crate) fn write_guest_package<W: Write>(
         entries,
     };
     ensure!(
-        manifest.framed_bytes()? <= expected.maximum_framed_bytes,
+        manifest.framed_bytes_bound()? <= expected.maximum_framed_bytes,
         "guest package exceeds admitted framed byte bound"
     );
     let mut stream = GuestStagingStreamWriter::new(output, manifest.clone(), expected)?;
