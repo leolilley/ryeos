@@ -667,8 +667,11 @@ impl ExternalSupervisorBootstrap {
         Ok(())
     }
 
-    /// Lexical occurrence coordinate only. A later installed relay owner must
-    /// pin and prove this private directory before any provider transfer.
+    /// Lexical occurrence coordinate only: the signed mailbox parent holds one
+    /// directory per occurrence, named by the occurrence, and the mailbox is a
+    /// child of that occurrence directory. The guest owner proves the
+    /// occurrence directory is its own before any provider transfer; the
+    /// controller addresses the same path on the provider.
     pub fn relay_mailbox_root(&self) -> Result<String> {
         self.validate()?;
         let relay = self.controller.relay()?;
@@ -679,7 +682,10 @@ impl ExternalSupervisorBootstrap {
             "occurrence_id": self.occurrence_id,
             "execution_binding_hash": self.execution_binding_hash,
         }))?;
-        Ok(format!("{}/{}", relay.private_mailbox_parent, child))
+        Ok(format!(
+            "{}/{}/{}",
+            relay.private_mailbox_parent, self.occurrence_id, child
+        ))
     }
 
     pub fn canonical_bytes(&self) -> Result<Vec<u8>> {
