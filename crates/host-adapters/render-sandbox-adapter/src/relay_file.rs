@@ -62,9 +62,11 @@ fn validate_bootstrap(
 
 pub(super) fn operate() -> Result<()> {
     let enclosing_deadline = operation_deadline().classed(FailClass::Deadline)?;
+    // The relay runs under the no-process-creation limit, where every clone
+    // is refused, threads included. Like the other operations under that
+    // limit it installs no signal listener: its deadline bounds every
+    // contact, and the runner ends an overrunning process itself.
     let cancellation = NetworkCancellation::default();
-    let _signal_cancellation =
-        super::SignalCancellation::install(cancellation.clone()).classed(FailClass::RelayInput)?;
     let request_bytes = read_sealed_env(LIFECYCLE_REQUEST_FD_ENV, MAX_RELAY_REQUEST_BYTES)
         .classed(FailClass::RelayInput)?;
     let request: RelayFileAdapterRequest =
