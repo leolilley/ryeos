@@ -1,9 +1,9 @@
 //! Dedicated, one-shot owner below the existing external Worker workflow.
 //!
 //! A qualified guest snapshot must install this executable and the exact
-//! controller-root/profile tree. The Render adapter has not yet qualified
-//! that snapshot or proved this process survives a lost run stream; it must
-//! remain fail-closed until those separate gates are complete.
+//! controller-root/profile tree. Until a lifecycle adapter has qualified that
+//! snapshot and proved this process survives a lost run stream, it must
+//! remain fail-closed.
 
 use std::ffi::OsStr;
 use std::path::Path;
@@ -65,7 +65,7 @@ fn open_private_root(path: &str) -> Result<lillux::PinnedDirectory> {
 }
 
 fn admissible_inbound_mode(mode: u32) -> bool {
-    // Render's file upload API does not specify the resulting mode. The
+    // A host's file delivery need not specify the resulting mode. The
     // enclosing activation directory is owner-private; group/other read
     // bits do not grant traversal, while any non-owner write bit would add
     // an unnecessary mutation path before the signed-byte import.
@@ -94,11 +94,13 @@ fn read_signed_import(activation: &lillux::PinnedDirectory) -> Result<Vec<u8>> {
     .map_err(anyhow::Error::msg)
 }
 
-/// Render starts the exact owner executable as the Sandbox administrator.
-/// Before any guest work, give only the two mutable private roots and their
+/// The host starts the exact owner executable as its administrator. Before
+/// any guest work, give only the two mutable private roots and their
 /// already-uploaded exact files to the signed non-root account, then discard
 /// administrator credentials irreversibly. Immutable runtime members remain
-/// root-owned and readable but not writable by that account.
+/// root-owned and readable but not writable by that account: `/ryeos` and the
+/// runtime root may arrive administrator-private, so both are delegated
+/// read-only traversal first, and root keeps every mutation.
 fn prepare_non_root_owner() -> Result<()> {
     let runtime_root = lillux::PinnedDirectory::open(Path::new(RUNTIME_ROOT))?
         .context("guest owner runtime root is absent before account transition")?;
@@ -115,6 +117,8 @@ fn prepare_non_root_owner() -> Result<()> {
     account.grant_private_directory(&activation)?;
     let ryeos_root = lillux::PinnedDirectory::open(Path::new("/ryeos"))?
         .context("guest owner namespace root is absent")?;
+    account.grant_readonly_host_directory(&ryeos_root)?;
+    account.grant_readonly_host_directory(&runtime_root)?;
     let occurrences = ryeos_root.open_or_create_child(OsStr::new("occurrences"), 0o700)?;
     account.grant_private_directory(&occurrences)?;
     account.drop_current_process()?;
