@@ -1158,7 +1158,7 @@ impl ExternalGuestPackageDeliveryCommitment {
             self.regular_bytes > 0
                 && self.regular_bytes <= contract.max_guest_package_regular_bytes
                 && self.framed_bytes <= contract.max_guest_package_framed_bytes
-                && self.framed_bytes >= self.regular_bytes.saturating_add(20),
+                && self.framed_bytes > 20,
             "external guest package delivery exceeds retained binding budget"
         );
         Ok(())
@@ -4255,11 +4255,16 @@ pub(crate) mod tests {
         let mut changed = delivery.clone();
         changed.regular_bytes += 1;
         assert!(changed.validate_for(&activation, &contract).is_err());
+        // The wire carries deduplicated, compressed payloads: it may be far
+        // shorter than the materialized bytes, but never without its header.
         let mut changed = delivery.clone();
-        changed.framed_bytes = changed.regular_bytes + 19;
+        changed.framed_bytes = 20;
         assert!(changed.validate_for(&activation, &contract).is_err());
+        let mut changed = delivery.clone();
+        changed.framed_bytes = 21;
+        assert!(changed.validate_for(&activation, &contract).is_ok());
         let mut changed = delivery;
-        changed.framed_bytes += 1;
+        changed.framed_bytes = contract.max_guest_package_framed_bytes + 1;
         assert!(changed.validate_for(&activation, &contract).is_err());
     }
 

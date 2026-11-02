@@ -1255,7 +1255,7 @@ impl LifecycleGuestPackageDelivery {
         ensure!(
             self.descriptor > 2
                 && self.regular_bytes > 0
-                && self.framed_bytes >= self.regular_bytes.saturating_add(20)
+                && self.framed_bytes > 20
                 && self.framed_bytes <= 4 * 1024 * 1024 * 1024,
             "guest package delivery coordinate is invalid"
         );
