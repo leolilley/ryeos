@@ -2325,6 +2325,17 @@ fn remove_flat_directory_generation(
 }
 
 impl PinnedRegularFile {
+    /// Hand this exact inode's descriptor to a fork-closed lock, registered
+    /// while the caller still holds the lease it took before opening. A lock
+    /// held on it then never needs the fork window closed.
+    #[cfg(unix)]
+    pub fn into_fork_closed_lock(
+        self,
+        lease: &crate::exec::ForkSensitiveDescriptorLease,
+    ) -> crate::locks::ForkClosedLockFile {
+        crate::locks::ForkClosedLockFile::register(self.file, lease)
+    }
+
     /// Open one exact bounded byte stream whose digest must match an
     /// independently admitted upload identity. The stream must be consumed
     /// and finished before its bytes can be treated as staged input.

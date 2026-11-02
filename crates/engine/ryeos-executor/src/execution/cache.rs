@@ -9,7 +9,6 @@ use std::ffi::OsStr;
 use std::fs;
 use std::io::{Read as _, Write as _};
 #[cfg(unix)]
-use std::os::fd::AsRawFd as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
@@ -59,7 +58,7 @@ pub struct GenerationConstruction {
     root: lillux::PinnedDirectory,
     generation: String,
     kind: MaterializationCacheKind,
-    _lock: lillux::PinnedRegularFile,
+    _lock: lillux::locks::ForkClosedLockFile,
 }
 
 /// One-shot unlink operation; the caller must invoke it INSIDE its current pin
@@ -136,7 +135,7 @@ pub struct VerifiedContentFile {
     parent: lillux::secure_fs::PinnedDirectory,
     name: std::ffi::OsString,
     path: PathBuf,
-    _build_lock: fs::File,
+    _build_lock: lillux::locks::ForkClosedLockFile,
 }
 
 impl VerifiedContentFile {
@@ -283,12 +282,13 @@ impl MaterializationCache {
         let target_name = target
             .file_name()
             .ok_or_else(|| anyhow::anyhow!("content cache path has no filename"))?;
-        let build_lock =
-            parent.open_regular_create(OsStr::new(".build.lock"), true, false, 0o600)?;
-        #[cfg(unix)]
-        if unsafe { libc::flock(build_lock.as_raw_fd(), libc::LOCK_EX) } != 0 {
-            return Err(std::io::Error::last_os_error().into());
-        }
+        let lease = lillux::try_retain_fork_sensitive_descriptors()?;
+        let build_lock = lillux::locks::ForkClosedLockFile::register(
+            parent.open_regular_create(OsStr::new(".build.lock"), true, false, 0o600)?,
+            &lease,
+        );
+        drop(lease);
+        build_lock.lock_exclusive()?;
         // Reuse is permitted only after hashing the opened regular file and
         // checking its exact size, mode, and content address. No filesystem
         // metadata or process-local observation cache stands in for that
@@ -442,7 +442,11 @@ impl MaterializationCache {
         validate_canonical_hash("materialization snapshot hash", generation)?;
         let root = self.pinned_root()?;
         let locks = root.open_or_create_child(OsStr::new(".locks"), 0o700)?;
-        let lock = locks.open_pinned_regular_create(OsStr::new(generation), true, false, 0o600)?;
+        let lease = lillux::try_retain_fork_sensitive_descriptors()?;
+        let lock = locks
+            .open_pinned_regular_create(OsStr::new(generation), true, false, 0o600)?
+            .into_fork_closed_lock(&lease);
+        drop(lease);
         if nonblocking {
             if !lock.try_lock_exclusive()? {
                 return Ok(None);
@@ -869,15 +873,11 @@ impl MaterializationCache {
                             .create(true)
                             .truncate(false)
                             .open(&lock_path)?;
-                        #[cfg(unix)]
-                        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) }
-                            != 0
-                        {
-                            let error = std::io::Error::last_os_error();
-                            if error.kind() == std::io::ErrorKind::WouldBlock {
-                                continue;
-                            }
-                            return Err(error.into());
+                        let lease = lillux::try_retain_fork_sensitive_descriptors()?;
+                        let file = lillux::locks::ForkClosedLockFile::register(file, &lease);
+                        drop(lease);
+                        if !file.try_lock_exclusive()? {
+                            continue;
                         }
                         Some(file)
                     };
@@ -936,7 +936,7 @@ impl MaterializationCache {
 
 enum ExistingLock {
     Absent,
-    Acquired(fs::File),
+    Acquired(lillux::locks::ForkClosedLockFile),
     Busy,
 }
 
@@ -948,13 +948,11 @@ fn try_existing_exclusive_lock(path: &Path) -> Result<ExistingLock> {
         }
         Err(error) => return Err(error.into()),
     };
-    #[cfg(unix)]
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-        let error = std::io::Error::last_os_error();
-        if error.kind() == std::io::ErrorKind::WouldBlock {
-            return Ok(ExistingLock::Busy);
-        }
-        return Err(error.into());
+    let lease = lillux::try_retain_fork_sensitive_descriptors()?;
+    let file = lillux::locks::ForkClosedLockFile::register(file, &lease);
+    drop(lease);
+    if !file.try_lock_exclusive()? {
+        return Ok(ExistingLock::Busy);
     }
     Ok(ExistingLock::Acquired(file))
 }

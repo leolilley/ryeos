@@ -138,7 +138,9 @@ pub(in crate::operator_external_content) fn with_state_guard<T>(
 pub(in crate::operator_external_content) fn require_unguarded_resolution(
     phase: &str,
 ) -> anyhow::Result<()> {
-    if lillux::current_thread_retains_fork_sensitive_descriptors() {
+    if lillux::current_thread_retains_fork_sensitive_descriptors()
+        || ryeos_state::recovery::cas_mutation_guard_held_on_current_thread()
+    {
         bail!(
             "{phase} refused: the calling thread retains a CAS mutation guard or other fork-sensitive descriptor authority, and this phase starts handler processes; resolve before acquiring the guard"
         );

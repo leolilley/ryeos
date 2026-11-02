@@ -4901,7 +4901,9 @@ impl From<ForkSensitiveDescriptorLeaseRefused> for String {
 /// deadline.
 ///
 /// Acquire this before opening or locking descriptor-backed authority and keep
-/// it until those descriptors/locks have been released. Acquisition is
+/// it until those descriptors/locks have been released. A descriptor registered
+/// as fork-child-close (see `locks::ForkClosedLockFile`) needs it only through
+/// its registration. Acquisition is
 /// intentionally unaffected by poisoning: the barrier protects process
 /// topology, not data whose consistency could be invalidated by a panic.
 ///

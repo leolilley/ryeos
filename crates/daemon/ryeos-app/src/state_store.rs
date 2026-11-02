@@ -1952,17 +1952,13 @@ fn persist_credential_profile_authority_locked(inner: &Inner, profile_id: &str) 
     Ok(())
 }
 
-/// StateStore guard paired with Lillux's fork-sensitive descriptor lease.
-///
-/// Authoritative state operations may acquire per-chain flocks beneath the
-/// store mutex. Retaining the shared lease for the entire mutex scope prevents
-/// a direct attachment child from forking with any such transient lock in its
-/// descriptor table. The order is always descriptor lease, then StateStore
-/// mutex.
+/// StateStore guard. Holding it never closes the node's fork window: the
+/// chain, head, large-object and CAS locks taken beneath the store mutex are
+/// closed in every direct-attachment fork child before its pre-exec hold and
+/// release explicitly on drop, so a long hold here stalls no process creation.
 struct StateStoreGuard<'a> {
     store_mutex: &'a Mutex<Inner>,
     inner: std::sync::MutexGuard<'a, Inner>,
-    _fork_sensitive_descriptors: lillux::ForkSensitiveDescriptorLease,
     acquired_at: lillux::time::MonotonicTimer,
     caller: &'static std::panic::Location<'static>,
 }
@@ -2691,7 +2687,6 @@ fn in_process_stop_refusal_locked(
 struct StateMutationPermit {
     cas_guard: ryeos_state::CasMutationGuard,
     _write_permit: WritePermit,
-    _fork_sensitive_descriptors: lillux::ForkSensitiveDescriptorLease,
 }
 
 impl StateMutationPermit {
@@ -9131,7 +9126,6 @@ impl StateStore {
     pub fn verify_projection_generation(
         &self,
     ) -> Result<ryeos_state::rebuild::ProjectionVerificationReport> {
-        let _fork_sensitive_descriptors = lillux::try_retain_fork_sensitive_descriptors()?;
         let _cas_guard = self
             .state_authority
             .acquire_exclusive_guard(!self.read_only)?;
@@ -9155,7 +9149,6 @@ impl StateStore {
                 "projection rebuild is available only in the authored offline rebuild bootstrap mode"
             );
         }
-        let _fork_sensitive_descriptors = lillux::try_retain_fork_sensitive_descriptors()?;
         let cas_guard = self.state_authority.acquire_exclusive_guard(true)?;
         let _write_permit = self
             .write_barrier
@@ -10305,7 +10298,6 @@ impl StateStore {
     fn lock(&self) -> Result<StateStoreGuard<'_>> {
         let started = lillux::time::MonotonicTimer::start();
         let caller = std::panic::Location::caller();
-        let fork_sensitive_descriptors = lillux::try_retain_fork_sensitive_descriptors()?;
         let inner = cooperate_while_blocking(|| {
             self.inner
                 .lock()
@@ -10317,21 +10309,17 @@ impl StateStore {
         }
         Ok(StateStoreGuard {
             store_mutex: &self.inner,
-            _fork_sensitive_descriptors: fork_sensitive_descriptors,
             inner,
             acquired_at: lillux::time::MonotonicTimer::start(),
             caller,
         })
     }
 
-    /// Bound BOTH original descriptor lease and StateStore mutex acquisition.
-    /// The returned guard preserves the original descriptor-before-store order.
+    /// Bound the StateStore mutex acquisition by the caller's original deadline.
     #[track_caller]
     fn lock_until(&self, deadline: lillux::time::MonotonicDeadline) -> Result<StateStoreGuard<'_>> {
         let started = lillux::time::MonotonicTimer::start();
         let caller = std::panic::Location::caller();
-        let fork_sensitive_descriptors = lillux::retain_fork_sensitive_descriptors_until(deadline)
-            .context("original StateStore deadline waiting for descriptor lease")?;
         let inner = cooperate_while_blocking(|| {
             loop {
                 if deadline.has_elapsed() {
@@ -10361,7 +10349,6 @@ impl StateStore {
         }
         Ok(StateStoreGuard {
             store_mutex: &self.inner,
-            _fork_sensitive_descriptors: fork_sensitive_descriptors,
             inner,
             acquired_at: lillux::time::MonotonicTimer::start(),
             caller,
@@ -10526,14 +10513,12 @@ impl StateStore {
         if self.read_only {
             bail!("state store is open for strict read-only verification");
         }
-        let fork_sensitive_descriptors = lillux::try_retain_fork_sensitive_descriptors()?;
         let cas_guard = self.state_authority.acquire_shared_guard()?;
         let write_permit = self
             .write_barrier
             .acquire_with_timeout(crate::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
             .map_err(|e| anyhow!("cannot acquire write permit: {e}"))?;
         Ok(StateMutationPermit {
-            _fork_sensitive_descriptors: fork_sensitive_descriptors,
             cas_guard,
             _write_permit: write_permit,
         })
@@ -10547,14 +10532,12 @@ impl StateStore {
         if self.read_only {
             bail!("state store is open for strict read-only verification");
         }
-        let fork_sensitive_descriptors = lillux::try_retain_fork_sensitive_descriptors()?;
         let cas_guard = self.state_authority.acquire_shared_guard()?;
         let write_permit = self
             .write_barrier
             .acquire_with_timeout(crate::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
             .map_err(|e| anyhow!("cannot acquire GC inspection permit: {e}"))?;
         Ok(StateMutationPermit {
-            _fork_sensitive_descriptors: fork_sensitive_descriptors,
             cas_guard,
             _write_permit: write_permit,
         })
@@ -10568,14 +10551,12 @@ impl StateStore {
         if self.read_only && !self.allow_projection_rebuild {
             bail!("state store is open for strict read-only verification");
         }
-        let fork_sensitive_descriptors = lillux::try_retain_fork_sensitive_descriptors()?;
         let cas_guard = self.state_authority.acquire_shared_guard()?;
         let write_permit = self
             .write_barrier
             .acquire_with_timeout(crate::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
             .map_err(|e| anyhow!("cannot acquire recovery cleanup permit: {e}"))?;
         Ok(StateMutationPermit {
-            _fork_sensitive_descriptors: fork_sensitive_descriptors,
             cas_guard,
             _write_permit: write_permit,
         })
@@ -32249,7 +32230,10 @@ mod tests {
     }
 
     #[test]
-    fn direct_attachment_fork_waits_for_state_store_descriptor_scope() {
+    fn direct_attachment_fork_proceeds_while_the_state_store_is_held() {
+        // A held StateStore closes no fork window: the locks taken beneath
+        // it are closed in every fork child, so a long hold must not stall
+        // process creation on other threads.
         let store_owner = test_store();
         let store = Arc::clone(store_owner.store());
         let guard = store.lock().expect("hold state store");
@@ -32268,21 +32252,14 @@ mod tests {
                 inherited_fd_mappings: Vec::new(),
                 supervised_status: None,
             })
-            .expect("spawn after state store scope quiesces");
+            .expect("spawn while the state store is held");
             sender.send(pending).expect("publish pending process");
         });
 
-        assert!(
-            receiver
-                .recv_timeout(std::time::Duration::from_millis(100))
-                .is_err(),
-            "direct child forked while the StateStore descriptor scope was retained"
-        );
-        drop(guard);
-
         let pending = receiver
             .recv_timeout(std::time::Duration::from_secs(2))
-            .expect("direct fork resumes after StateStore scope");
+            .expect("direct fork proceeds while the StateStore is held");
+        drop(guard);
         pending.abort_and_reap().expect("abort held test target");
         worker.join().expect("spawn worker");
     }

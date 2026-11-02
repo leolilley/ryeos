@@ -4,7 +4,6 @@
 //! All writes are protected by file locks and validated against the signed head ref.
 
 use std::collections::BTreeMap;
-use std::fs::File;
 use std::path::Path;
 
 use anyhow::{Context, anyhow};
@@ -280,8 +279,9 @@ pub(crate) fn thread_append_anchor_matches_under_lock(
 
 /// File lock for a chain.
 pub struct ChainLock {
-    /// Held only for RAII; Drop releases the file lock via closed fd.
-    _lock_file: File,
+    /// Held only for RAII; the registered lock releases on drop and is
+    /// closed in every fork child before its pre-exec hold.
+    _lock_file: lillux::locks::ForkClosedLockFile,
     /// Pins the exact chain directory in which the lock was acquired.
     lock_directory: lillux::PinnedDirectory,
     /// Retains the exact refs-root ancestor when the owner already has one.
@@ -418,6 +418,7 @@ impl ChainLock {
         create_if_missing: bool,
     ) -> anyhow::Result<Self> {
         let lock_name = std::ffi::OsStr::new("lock");
+        let fork_sensitive_descriptors = lillux::try_retain_fork_sensitive_descriptors()?;
         let lock_file = if create_if_missing {
             let file = lock_directory
                 .open_regular_create(lock_name, true, false, 0o600)
@@ -430,15 +431,12 @@ impl ChainLock {
                 .ok_or_else(|| anyhow!("chain lock anchor is absent"))?
         };
 
-        // Acquire exclusive flock on Unix
-        #[cfg(unix)]
-        {
-            use std::os::unix::io::AsRawFd;
-            let ret = unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX) };
-            if ret != 0 {
-                anyhow::bail!("flock failed: {}", std::io::Error::last_os_error());
-            }
-        }
+        let lock_file =
+            lillux::locks::ForkClosedLockFile::register(lock_file, &fork_sensitive_descriptors);
+        drop(fork_sensitive_descriptors);
+        lock_file
+            .lock_exclusive()
+            .map_err(|error| anyhow!("flock failed: {error}"))?;
 
         Ok(ChainLock {
             _lock_file: lock_file,

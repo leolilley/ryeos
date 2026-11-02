@@ -1064,7 +1064,10 @@ fn verifier_resolution_refuses_under_a_held_guard_and_succeeds_without_one() -> 
         pinned_admission: None,
     };
     let guard = authority.acquire_shared_guard()?;
-    assert!(lillux::current_thread_retains_fork_sensitive_descriptors());
+    // The guard is visible to phase admission, yet holding it no longer
+    // closes the node's process-creation window.
+    assert!(ryeos_state::recovery::cas_mutation_guard_held_on_current_thread());
+    assert!(!lillux::current_thread_retains_fork_sensitive_descriptors());
     let refused = resolve_current_bundle_verifier_identity_against_admitted(
         &fixture.state,
         &authority,
@@ -1082,7 +1085,7 @@ fn verifier_resolution_refuses_under_a_held_guard_and_succeeds_without_one() -> 
         "{refused}"
     );
     drop(guard);
-    assert!(!lillux::current_thread_retains_fork_sensitive_descriptors());
+    assert!(!ryeos_state::recovery::cas_mutation_guard_held_on_current_thread());
     let current = resolve_current_bundle_verifier_identity_against_admitted(
         &fixture.state,
         &authority,

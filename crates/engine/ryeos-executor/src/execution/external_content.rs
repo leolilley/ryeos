@@ -28,6 +28,14 @@ fn realization_mount_authority(
     }
 }
 
+/// A lease kept alive for a spawned process: an open cache-generation
+/// descriptor, or a large-object store lock that is closed in every fork
+/// child and released only when this value drops.
+pub(crate) enum RetainedLease {
+    Generation(fs::File),
+    LargeObject(lillux::locks::ForkClosedLockFile),
+}
+
 /// Descriptor-pinned materializations and their exact cache-generation
 /// leases. This value must live until the spawned process exits.
 pub(crate) struct BoundExternalRealizations {
@@ -48,7 +56,7 @@ pub(crate) struct BoundExternalRealizations {
     /// Node-owned runtime view that holds every entry at `<root>/<mount>`;
     /// present only for the private-runtime-view binding.
     runtime_view_root: Option<PathBuf>,
-    _leases: Vec<fs::File>,
+    _leases: Vec<RetainedLease>,
 }
 
 // Count admission precedes decoding, quadratic canonical-set validation, and
@@ -334,7 +342,7 @@ impl BoundExternalRealizations {
     ) -> (
         Vec<ryeos_engine::isolation::IsolationReadOnlyMountAuthority>,
         String,
-        Vec<fs::File>,
+        Vec<RetainedLease>,
     ) {
         (self.mounts, self.sealed_set_env, self._leases)
     }
@@ -344,7 +352,7 @@ impl BoundExternalRealizations {
     ) -> (
         RealizedExternalContentSet,
         Vec<lillux::InheritedDescriptorAuthority>,
-        Vec<fs::File>,
+        Vec<RetainedLease>,
     ) {
         (self.realized, self.guest_sources, self._leases)
     }
@@ -428,7 +436,7 @@ struct MaterializedExternalGeneration {
     root: lillux::PinnedDirectory,
     source_path: PathBuf,
     source: lillux::InheritedDescriptorAuthority,
-    leases: Vec<fs::File>,
+    leases: Vec<RetainedLease>,
 }
 
 impl MaterializedExternalGeneration {
@@ -616,8 +624,11 @@ impl ExternalMaterializationCache {
         let manifest_hash = closure.manifest_hash();
         let root = lillux::PinnedDirectory::open_or_create(&self.root)?;
         let locks = root.open_or_create_child(OsStr::new(".locks"), 0o700)?;
-        let lock =
-            locks.open_pinned_regular_create(OsStr::new(manifest_hash), true, false, 0o600)?;
+        let lease = lillux::try_retain_fork_sensitive_descriptors()?;
+        let lock = locks
+            .open_pinned_regular_create(OsStr::new(manifest_hash), true, false, 0o600)?
+            .into_fork_closed_lock(&lease);
+        drop(lease);
         lock.lock_exclusive()?;
 
         let generation = match root.open_child_directory(OsStr::new(manifest_hash))? {
@@ -672,7 +683,7 @@ impl ExternalMaterializationCache {
             root: generation,
             source_path,
             source,
-            leases: vec![lease_lifeline],
+            leases: vec![RetainedLease::Generation(lease_lifeline)],
         })
     }
 
@@ -723,8 +734,11 @@ impl ExternalMaterializationCache {
 
         let root = lillux::PinnedDirectory::open_or_create(&self.root)?;
         let locks = root.open_or_create_child(OsStr::new(".locks"), 0o700)?;
-        let lock =
-            locks.open_pinned_regular_create(OsStr::new(manifest_hash), true, false, 0o600)?;
+        let lease = lillux::try_retain_fork_sensitive_descriptors()?;
+        let lock = locks
+            .open_pinned_regular_create(OsStr::new(manifest_hash), true, false, 0o600)?
+            .into_fork_closed_lock(&lease);
+        drop(lease);
         lock.lock_exclusive()?;
 
         let generation = match root.open_child_directory(OsStr::new(manifest_hash))? {
@@ -793,10 +807,10 @@ impl ExternalMaterializationCache {
             }
         };
         let mut retained_leases = Vec::with_capacity(large_sources.len() + 1);
-        retained_leases.push(generation_lease_lifeline);
+        retained_leases.push(RetainedLease::Generation(generation_lease_lifeline));
         for leased in large_sources.into_values() {
             let (_, _, lease) = leased.into_parts();
-            retained_leases.push(lease);
+            retained_leases.push(RetainedLease::LargeObject(lease));
         }
         drop(lock);
         Ok(MaterializedExternalGeneration {

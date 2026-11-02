@@ -27,7 +27,7 @@ pub(crate) struct PreparedProductInputs {
     pub manifest_authorities: Vec<lillux::InheritedDescriptorAuthority>,
     /// Retain until consumers finish, or acknowledge an exact private copy.
     /// An open directory alone does not prevent cache retirement of children.
-    pub leases: Vec<std::fs::File>,
+    pub leases: Vec<super::external_content::RetainedLease>,
     pub destinations: BTreeMap<String, String>,
 }
 

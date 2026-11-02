@@ -7971,7 +7971,9 @@ pub fn preflight_root_execution(
     // authority, such as a CAS mutation guard, can never start that process,
     // so refuse at this entry rather than deep inside a composer. Callers must
     // resolve first and take their guard afterwards.
-    if lillux::current_thread_retains_fork_sensitive_descriptors() {
+    if lillux::current_thread_retains_fork_sensitive_descriptors()
+        || ryeos_state::recovery::cas_mutation_guard_held_on_current_thread()
+    {
         bail!(
             "root execution preflight refused: the calling thread retains fork-sensitive descriptor authority (such as a CAS mutation guard) and resolution must start handler processes"
         );
