@@ -489,9 +489,11 @@ impl ExecutableExternalPlacementBackend {
         admitted_adapter_request: Option<&[u8]>,
         deadline: lillux::time::MonotonicDeadline,
     ) -> Result<ExternalLifecycleObservation<LifecycleAdapterResponse>> {
-        let deadline = deadline.min(lillux::time::MonotonicDeadline::after(
-            lillux::time::Duration::from_secs(u64::from(contract.contact_timeout_seconds)),
-        ));
+        let deadline = adapter_operation_deadline(
+            matches!(request, LifecycleAdapterRequest::ActivateSupervisor { .. }),
+            deadline,
+            contract.contact_timeout_seconds,
+        );
         ensure!(
             !deadline.has_elapsed(),
             "external lifecycle contact deadline expired"
@@ -2768,9 +2770,41 @@ fn artifact_bytes(artifact: &ryeos_engine::binary_resolver::CapturedExecutable) 
     Ok(bytes)
 }
 
+/// Bound one adapter operation. A provider round trip is capped by the
+/// contact timeout. The first supervisor activation also delivers the guest
+/// package, whose transfer can outlast any contact; it keeps the deadline the
+/// caller derived from the reservation's startup budget.
+fn adapter_operation_deadline(
+    delivers_guest_package: bool,
+    deadline: lillux::time::MonotonicDeadline,
+    contact_timeout_seconds: u32,
+) -> lillux::time::MonotonicDeadline {
+    if delivers_guest_package {
+        return deadline;
+    }
+    deadline.min(lillux::time::MonotonicDeadline::after(
+        lillux::time::Duration::from_secs(u64::from(contact_timeout_seconds)),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn package_delivery_keeps_the_startup_budget_while_contacts_stay_bounded() {
+        let startup =
+            lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(600));
+        let contact = adapter_operation_deadline(false, startup, 30);
+        assert!(contact.remaining() <= lillux::time::Duration::from_secs(30));
+        let delivery = adapter_operation_deadline(true, startup, 30);
+        assert!(delivery.remaining() > lillux::time::Duration::from_secs(500));
+        let short = lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(5));
+        assert!(
+            adapter_operation_deadline(true, short, 30).remaining()
+                <= lillux::time::Duration::from_secs(5)
+        );
+    }
 
     fn opened(path: &std::path::Path) -> lillux::InheritedDescriptorAuthority {
         let resolved = lillux::canonicalize_existing_path(path).unwrap();
