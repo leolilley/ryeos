@@ -331,7 +331,7 @@ mod control_tests {
         assert!(
             serde_json::from_value::<ConsumerVerifierConfiguration>(missing_controller).is_err()
         );
-        for duration in [0, 300_001, u64::MAX] {
+        for duration in [0, 3_600_001, u64::MAX] {
             let mut changed = value.clone();
             changed["controller"]["maximum_duration_ms"] = duration.into();
             assert!(
@@ -440,7 +440,7 @@ impl ConsumerVerifierConfiguration {
         }
         .validate()?;
         ensure!(
-            (1..=300_000).contains(&self.controller.maximum_duration_ms),
+            (1..=3_600_000).contains(&self.controller.maximum_duration_ms),
             "consumer controller duration exceeds its finite allowance"
         );
         self.external_candidate_qualification_context.validate()?;

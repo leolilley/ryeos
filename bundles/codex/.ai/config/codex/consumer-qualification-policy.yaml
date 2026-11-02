@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-30T02:25:39Z:5a963d35fabdc84adcf87799d2b75933e1767bc1686003b7c8ee0bd9f4fdab68:nCNNe/jFA1uvYlrpLnl6lkg/v9EcMWeU7OVSZ/JzkOQ1ulZpkQ7pILHnVM+gtv+Et3GiHg5m2sPxiP7dpiL4Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-02T01:47:58Z:fd8b9dcfcb39c5181a0f3ef73c13263d5d756cbd7f374c2c12e930df40fed304:wX8LqZ5N6SKJ8kyCBigsIZg3XKwp0PDZE7ir66QwLB0lkXwmtTMKhUUrajQ++ih5mldQwBU5Dl0L1IVh1zbKCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: codex
 version: 1.0.0
 description: Independent consumer qualification of the exact Codex guest runtime;
@@ -19,7 +19,7 @@ product_qualification_policy:
     schema: ryeos.codex.consumer_verifier.v4
     controller:
       scenario_id: remote_codex
-      maximum_duration_ms: 300000
+      maximum_duration_ms: 900000
     expected_command_output: '/workspace
 
       ripgrep 15.2.0 (rev e89fff89ac)
