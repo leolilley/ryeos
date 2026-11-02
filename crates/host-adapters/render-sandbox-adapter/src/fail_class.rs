@@ -30,6 +30,8 @@ pub(crate) enum FailClass {
     RelayTransport,
     RelayStatus,
     RelayResponse,
+    RelayInput,
+    RelayBody,
     Other,
 }
 
@@ -58,6 +60,8 @@ impl FailClass {
             Self::RelayTransport => 21,
             Self::RelayStatus => 22,
             Self::RelayResponse => 23,
+            Self::RelayInput => 24,
+            Self::RelayBody => 25,
         }
     }
 
@@ -85,6 +89,8 @@ impl FailClass {
             Self::RelayTransport => "relay_transport",
             Self::RelayStatus => "relay_status",
             Self::RelayResponse => "relay_response",
+            Self::RelayInput => "relay_input",
+            Self::RelayBody => "relay_body",
         }
     }
 
@@ -158,6 +164,8 @@ mod tests {
             FailClass::RelayTransport,
             FailClass::RelayStatus,
             FailClass::RelayResponse,
+            FailClass::RelayInput,
+            FailClass::RelayBody,
             FailClass::Other,
         ];
         let mut codes: Vec<i32> = all.iter().map(|class| class.exit_code()).collect();

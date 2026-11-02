@@ -189,7 +189,7 @@ impl<'a> RenderRelayFileContact<'a> {
         let operation = ProxyOperation::UploadFile {
             remote_path: self.remote_path,
         };
-        let token = self.mint(operation)?;
+        let token = self.mint(operation).classed(FailClass::RelayContact)?;
         let request = proxy_request(
             self.settings,
             self.occurrence_id,
@@ -201,7 +201,8 @@ impl<'a> RenderRelayFileContact<'a> {
             MAX_UPLOAD_RESPONSE_BYTES,
             self.deadline,
             self.cancellation,
-        )?;
+        )
+        .classed(FailClass::ProxyRoute)?;
         let response = HttpClient::new(self.network.clone())
             .execute(request)
             .map_err(anyhow::Error::from)
@@ -233,7 +234,7 @@ impl<'a> RenderRelayFileContact<'a> {
         let operation = ProxyOperation::DownloadFile {
             remote_path: self.remote_path,
         };
-        let token = self.mint(operation)?;
+        let token = self.mint(operation).classed(FailClass::RelayContact)?;
         let request = proxy_request(
             self.settings,
             self.occurrence_id,
@@ -245,7 +246,8 @@ impl<'a> RenderRelayFileContact<'a> {
             maximum_file_bytes + 1,
             self.deadline,
             self.cancellation,
-        )?;
+        )
+        .classed(FailClass::ProxyRoute)?;
         let response = HttpClient::new(self.network.clone())
             .execute(request)
             .map_err(anyhow::Error::from)
@@ -261,20 +263,26 @@ impl<'a> RenderRelayFileContact<'a> {
             response.status == 200,
             "Render relay file read is absent or ambiguous"
         );
-        let mut bytes = Vec::new();
-        response
-            .body
-            .take(maximum_file_bytes + 1)
-            .read_to_end(&mut bytes)?;
-        ensure!(
-            !bytes.is_empty() && bytes.len() as u64 <= maximum_file_bytes,
-            "Render relay file read is empty or exceeds bound"
-        );
-        let value: serde_json::Value = serde_json::from_slice(&bytes)?;
-        ensure!(
-            ryeos_external_execution_contract::canonical_json(&value)? == bytes,
-            "Render relay file is not complete canonical JSON"
-        );
+        let bytes = (|| -> Result<Vec<u8>> {
+            let mut bytes = Vec::new();
+            response
+                .body
+                .take(maximum_file_bytes + 1)
+                .read_to_end(&mut bytes)?;
+            ensure!(
+                !bytes.is_empty() && bytes.len() as u64 <= maximum_file_bytes,
+                "Render relay file read is empty or exceeds bound"
+            );
+            // The guest publishes its mailbox files with lillux canonical
+            // JSON; accept exactly that form.
+            let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+            ensure!(
+                lillux::canonical_json(&value)?.as_bytes() == bytes.as_slice(),
+                "Render relay file is not complete canonical JSON"
+            );
+            Ok(bytes)
+        })()
+        .classed(FailClass::RelayBody)?;
         Ok(RenderRelayDownload::Downloaded(bytes))
     }
 }

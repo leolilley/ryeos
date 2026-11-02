@@ -61,10 +61,12 @@ fn validate_bootstrap(
 }
 
 pub(super) fn operate() -> Result<()> {
-    let enclosing_deadline = operation_deadline()?;
+    let enclosing_deadline = operation_deadline().classed(FailClass::Deadline)?;
     let cancellation = NetworkCancellation::default();
-    let _signal_cancellation = super::SignalCancellation::install(cancellation.clone())?;
-    let request_bytes = read_sealed_env(LIFECYCLE_REQUEST_FD_ENV, MAX_RELAY_REQUEST_BYTES)?;
+    let _signal_cancellation =
+        super::SignalCancellation::install(cancellation.clone()).classed(FailClass::RelayInput)?;
+    let request_bytes = read_sealed_env(LIFECYCLE_REQUEST_FD_ENV, MAX_RELAY_REQUEST_BYTES)
+        .classed(FailClass::RelayInput)?;
     let request: RelayFileAdapterRequest =
         from_json_slice_strict(&request_bytes, MAX_RELAY_REQUEST_BYTES)
             .classed(FailClass::RelayRequest)?;
@@ -76,7 +78,8 @@ pub(super) fn operate() -> Result<()> {
     let bootstrap_bytes = read_sealed_env(
         LIFECYCLE_BOOTSTRAP_FD_ENV,
         MAX_EXTERNAL_SUPERVISOR_BOOTSTRAP_BYTES,
-    )?;
+    )
+    .classed(FailClass::RelayInput)?;
     let bootstrap: ExternalSupervisorBootstrap =
         from_json_slice_strict(&bootstrap_bytes, MAX_EXTERNAL_SUPERVISOR_BOOTSTRAP_BYTES)
             .classed(FailClass::RelayRequest)?;
@@ -92,7 +95,8 @@ pub(super) fn operate() -> Result<()> {
     // The relay moves only mailbox files: its path is derived from the
     // sealed bootstrap and upload bytes arrive on their own sealed
     // descriptor, so a lease's admitted request grants it nothing.
-    ensure!(
+    ensure_class!(
+        FailClass::RelayInput,
         std::env::var_os(LEASE_ADMISSION_FD_ENV).is_none(),
         "relay file received a lease admission descriptor ({LEASE_ADMISSION_FD_ENV}) it never \
          reads"
@@ -102,8 +106,11 @@ pub(super) fn operate() -> Result<()> {
     let provider_spec_bytes = read_sealed_env(
         LIFECYCLE_PROVIDER_SPEC_FD_ENV,
         usize::try_from(MAX_LIFECYCLE_PROVIDER_SPEC_BYTES)?,
-    )?;
-    let provider_spec_sha256 = std::env::var(LIFECYCLE_PROVIDER_SPEC_SHA256_ENV)?;
+    )
+    .classed(FailClass::RelayInput)?;
+    let provider_spec_sha256 = std::env::var(LIFECYCLE_PROVIDER_SPEC_SHA256_ENV)
+        .map_err(anyhow::Error::from)
+        .classed(FailClass::RelayInput)?;
     let schema_digest = lillux::sha256_hex(include_bytes!("../fixtures/settings.schema.json"));
     let (provider_spec, _) =
         parse_provider_spec_bytes(&provider_spec_bytes, &provider_spec_sha256, &schema_digest)
@@ -116,16 +123,23 @@ pub(super) fn operate() -> Result<()> {
     provider_spec
         .relay_file_download_route()
         .classed(FailClass::SpecDigest)?;
-    let settings_bytes = read_sealed_env(LIFECYCLE_SETTINGS_FD_ENV, MAX_SETTINGS_BYTES)?;
+    let settings_bytes = read_sealed_env(LIFECYCLE_SETTINGS_FD_ENV, MAX_SETTINGS_BYTES)
+        .classed(FailClass::RelayInput)?;
     ensure_class!(
         FailClass::SettingsDigest,
         lillux::sha256_hex(&settings_bytes) == request.settings_digest,
         "relay settings changed their signed identity"
     );
     let settings_value: serde_json::Value =
-        from_json_slice_strict(&settings_bytes, MAX_SETTINGS_BYTES)?;
-    ensure!(
-        lillux::canonical_json(&settings_value)?.as_bytes() == settings_bytes,
+        from_json_slice_strict(&settings_bytes, MAX_SETTINGS_BYTES)
+            .classed(FailClass::SettingsShape)?;
+    ensure_class!(
+        FailClass::SettingsShape,
+        lillux::canonical_json(&settings_value)
+            .map_err(anyhow::Error::from)
+            .classed(FailClass::SettingsShape)?
+            .as_bytes()
+            == settings_bytes,
         "relay settings are noncanonical"
     );
     let settings: Settings = serde_json::from_value(settings_value)
@@ -142,33 +156,36 @@ pub(super) fn operate() -> Result<()> {
                 .owner_workspace_id,
         "relay Render owner differs from original signed workspace"
     );
-    let upload_bytes = match request.effect {
-        RelayFileEffect::UploadOnce => {
-            let bytes = read_sealed_env(
-                LIFECYCLE_RELAY_UPLOAD_FD_ENV,
-                request.maximum_file_bytes as usize,
-            )?;
-            ensure!(
-                request.expected_bytes == Some(bytes.len() as u64)
-                    && request.expected_sha256.as_deref()
-                        == Some(lillux::sha256_hex(&bytes).as_str()),
-                "relay upload changed its committed byte identity"
-            );
-            let value: serde_json::Value = serde_json::from_slice(&bytes)?;
-            ensure!(
-                lillux::canonical_json(&value)?.as_bytes() == bytes,
-                "relay upload is not canonical JSON"
-            );
-            Some(bytes)
-        }
-        RelayFileEffect::Download => {
-            ensure!(
-                std::env::var_os(LIFECYCLE_RELAY_UPLOAD_FD_ENV).is_none(),
-                "relay download received upload authority"
-            );
-            None
-        }
-    };
+    let upload_bytes = (|| -> Result<Option<Vec<u8>>> {
+        Ok(match request.effect {
+            RelayFileEffect::UploadOnce => {
+                let bytes = read_sealed_env(
+                    LIFECYCLE_RELAY_UPLOAD_FD_ENV,
+                    request.maximum_file_bytes as usize,
+                )?;
+                ensure!(
+                    request.expected_bytes == Some(bytes.len() as u64)
+                        && request.expected_sha256.as_deref()
+                            == Some(lillux::sha256_hex(&bytes).as_str()),
+                    "relay upload changed its committed byte identity"
+                );
+                let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+                ensure!(
+                    lillux::canonical_json(&value)?.as_bytes() == bytes,
+                    "relay upload is not canonical JSON"
+                );
+                Some(bytes)
+            }
+            RelayFileEffect::Download => {
+                ensure!(
+                    std::env::var_os(LIFECYCLE_RELAY_UPLOAD_FD_ENV).is_none(),
+                    "relay download received upload authority"
+                );
+                None
+            }
+        })
+    })()
+    .classed(FailClass::RelayInput)?;
     let network = network_context_from_captured_inputs()?;
     let mut contact = RenderRelayFileContact::new(
         &network,
