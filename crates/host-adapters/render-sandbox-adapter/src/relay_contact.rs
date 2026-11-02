@@ -6,6 +6,7 @@
 //! reconciliation is a bounded GET of the same immutable file slot. Neither
 //! transfer completion nor a provider token is supervisor channel evidence.
 
+use crate::fail_class::{Classify as _, FailClass, ensure_class};
 use std::io::Read as _;
 
 use anyhow::{Result, ensure};
@@ -145,8 +146,10 @@ impl<'a> RenderRelayFileContact<'a> {
             self.deadline,
             self.settings,
             self.cancellation,
-        )?;
-        ensure!(
+        )
+        .classed(FailClass::RelayTransport)?;
+        ensure_class!(
+            FailClass::TokenStatus,
             response.status == 201 && has_json_content_type(&response.headers),
             "Render relay token mint did not return exact JSON success"
         );
@@ -166,6 +169,7 @@ impl<'a> RenderRelayFileContact<'a> {
             operation,
             lillux::time::timestamp_millis(),
         )
+        .classed(FailClass::ProxyRoute)
     }
 
     /// One possible upload. A 2xx reply only reports a provider transport
@@ -198,8 +202,12 @@ impl<'a> RenderRelayFileContact<'a> {
             self.deadline,
             self.cancellation,
         )?;
-        let response = HttpClient::new(self.network.clone()).execute(request)?;
-        ensure!(
+        let response = HttpClient::new(self.network.clone())
+            .execute(request)
+            .map_err(anyhow::Error::from)
+            .classed(FailClass::RelayTransport)?;
+        ensure_class!(
+            FailClass::RelayStatus,
             (200..300).contains(&response.status),
             "Render relay file upload did not return transport success"
         );
@@ -238,14 +246,18 @@ impl<'a> RenderRelayFileContact<'a> {
             self.deadline,
             self.cancellation,
         )?;
-        let response = HttpClient::new(self.network.clone()).execute(request)?;
+        let response = HttpClient::new(self.network.clone())
+            .execute(request)
+            .map_err(anyhow::Error::from)
+            .classed(FailClass::RelayTransport)?;
         // Render's SDK names a missing-path error but does not document the
         // raw file-route status. Keep this exact 404 as a bounded pending
         // observation until an installed missing-file probe establishes it.
         if response.status == 404 {
             return Ok(RenderRelayDownload::HttpNotFound);
         }
-        ensure!(
+        ensure_class!(
+            FailClass::RelayStatus,
             response.status == 200,
             "Render relay file read is absent or ambiguous"
         );

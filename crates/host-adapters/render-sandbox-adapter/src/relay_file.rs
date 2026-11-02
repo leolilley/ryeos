@@ -1,6 +1,7 @@
 //! Exact sealed relay file effect. The daemon owns the durable claim and this
 //! adapter reports only provider transport; no channel meaning is inferred.
 
+use crate::fail_class::{Classify as _, FailClass, ensure_class};
 use anyhow::{Result, ensure};
 use base64::Engine as _;
 use lillux::network::NetworkCancellation;
@@ -65,9 +66,11 @@ pub(super) fn operate() -> Result<()> {
     let _signal_cancellation = super::SignalCancellation::install(cancellation.clone())?;
     let request_bytes = read_sealed_env(LIFECYCLE_REQUEST_FD_ENV, MAX_RELAY_REQUEST_BYTES)?;
     let request: RelayFileAdapterRequest =
-        from_json_slice_strict(&request_bytes, MAX_RELAY_REQUEST_BYTES)?;
-    ensure!(
-        request.canonical_bytes()? == request_bytes,
+        from_json_slice_strict(&request_bytes, MAX_RELAY_REQUEST_BYTES)
+            .classed(FailClass::RelayRequest)?;
+    ensure_class!(
+        FailClass::RelayRequest,
+        request.canonical_bytes().classed(FailClass::RelayRequest)? == request_bytes,
         "relay file request is noncanonical"
     );
     let bootstrap_bytes = read_sealed_env(
@@ -75,12 +78,17 @@ pub(super) fn operate() -> Result<()> {
         MAX_EXTERNAL_SUPERVISOR_BOOTSTRAP_BYTES,
     )?;
     let bootstrap: ExternalSupervisorBootstrap =
-        from_json_slice_strict(&bootstrap_bytes, MAX_EXTERNAL_SUPERVISOR_BOOTSTRAP_BYTES)?;
-    ensure!(
-        bootstrap.canonical_bytes()? == bootstrap_bytes,
+        from_json_slice_strict(&bootstrap_bytes, MAX_EXTERNAL_SUPERVISOR_BOOTSTRAP_BYTES)
+            .classed(FailClass::RelayRequest)?;
+    ensure_class!(
+        FailClass::RelayRequest,
+        bootstrap
+            .canonical_bytes()
+            .classed(FailClass::RelayRequest)?
+            == bootstrap_bytes,
         "relay original bootstrap is noncanonical"
     );
-    validate_bootstrap(&request, &bootstrap)?;
+    validate_bootstrap(&request, &bootstrap).classed(FailClass::RelayRequest)?;
     // The relay moves only mailbox files: its path is derived from the
     // sealed bootstrap and upload bytes arrive on their own sealed
     // descriptor, so a lease's admitted request grants it nothing.
@@ -89,7 +97,8 @@ pub(super) fn operate() -> Result<()> {
         "relay file received a lease admission descriptor ({LEASE_ADMISSION_FD_ENV}) it never \
          reads"
     );
-    let deadline = request_deadline(request.deadline_ms, enclosing_deadline)?;
+    let deadline =
+        request_deadline(request.deadline_ms, enclosing_deadline).classed(FailClass::Deadline)?;
     let provider_spec_bytes = read_sealed_env(
         LIFECYCLE_PROVIDER_SPEC_FD_ENV,
         usize::try_from(MAX_LIFECYCLE_PROVIDER_SPEC_BYTES)?,
@@ -97,13 +106,19 @@ pub(super) fn operate() -> Result<()> {
     let provider_spec_sha256 = std::env::var(LIFECYCLE_PROVIDER_SPEC_SHA256_ENV)?;
     let schema_digest = lillux::sha256_hex(include_bytes!("../fixtures/settings.schema.json"));
     let (provider_spec, _) =
-        parse_provider_spec_bytes(&provider_spec_bytes, &provider_spec_sha256, &schema_digest)?;
+        parse_provider_spec_bytes(&provider_spec_bytes, &provider_spec_sha256, &schema_digest)
+            .classed(FailClass::SpecDigest)?;
     // Routes alone are shared with other signed operations. The relay needs
     // its own explicit selection before reading settings or network inputs.
-    provider_spec.relay_file_upload_route()?;
-    provider_spec.relay_file_download_route()?;
+    provider_spec
+        .relay_file_upload_route()
+        .classed(FailClass::SpecDigest)?;
+    provider_spec
+        .relay_file_download_route()
+        .classed(FailClass::SpecDigest)?;
     let settings_bytes = read_sealed_env(LIFECYCLE_SETTINGS_FD_ENV, MAX_SETTINGS_BYTES)?;
-    ensure!(
+    ensure_class!(
+        FailClass::SettingsDigest,
         lillux::sha256_hex(&settings_bytes) == request.settings_digest,
         "relay settings changed their signed identity"
     );
@@ -113,10 +128,18 @@ pub(super) fn operate() -> Result<()> {
         lillux::canonical_json(&settings_value)?.as_bytes() == settings_bytes,
         "relay settings are noncanonical"
     );
-    let settings: Settings = serde_json::from_value(settings_value)?;
-    validate_settings(&settings)?;
-    ensure!(
-        settings.owner_id == bootstrap.controller.relay()?.owner_workspace_id,
+    let settings: Settings = serde_json::from_value(settings_value)
+        .map_err(|_| anyhow::anyhow!("relay settings are invalid"))
+        .classed(FailClass::SettingsShape)?;
+    validate_settings(&settings).classed(FailClass::SettingsShape)?;
+    ensure_class!(
+        FailClass::SettingsShape,
+        settings.owner_id
+            == bootstrap
+                .controller
+                .relay()
+                .classed(FailClass::RelayRequest)?
+                .owner_workspace_id,
         "relay Render owner differs from original signed workspace"
     );
     let upload_bytes = match request.effect {
@@ -155,7 +178,8 @@ pub(super) fn operate() -> Result<()> {
         &request.remote_path,
         deadline,
         &cancellation,
-    )?;
+    )
+    .classed(FailClass::RelayContact)?;
     let request_digest = lillux::sha256_hex(&request_bytes);
     let response = match request.effect {
         RelayFileEffect::UploadOnce => {
@@ -180,6 +204,9 @@ pub(super) fn operate() -> Result<()> {
             },
         },
     };
-    response.validate_for(&request, &lillux::sha256_hex(&request_bytes))?;
+    response
+        .validate_for(&request, &lillux::sha256_hex(&request_bytes))
+        .classed(FailClass::RelayResponse)?;
     write_response_bounded(&response, MAX_RELAY_RESPONSE_BYTES - 1)
+        .classed(FailClass::RelayResponse)
 }
