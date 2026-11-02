@@ -1039,10 +1039,10 @@ impl ExternalPlacementBackend for ExecutableExternalPlacementBackend {
         claim: ClaimedRelayFileContact,
         deadline: lillux::time::MonotonicDeadline,
     ) -> Result<ExternalLifecycleObservation<RelayFileAdapterResponse>> {
-        let record = claim.record();
+        let intent = &claim.record().intent;
         let step = format!(
             "relay the {:?} {:?} file (sequence {})",
-            record.kind, record.direction, record.sequence
+            intent.kind, intent.direction, intent.sequence
         );
         self.invoke_relay_file(contract, credential, bootstrap, claim, deadline)
             .with_context(|| step)
