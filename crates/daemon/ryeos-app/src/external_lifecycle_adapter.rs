@@ -1039,7 +1039,13 @@ impl ExternalPlacementBackend for ExecutableExternalPlacementBackend {
         claim: ClaimedRelayFileContact,
         deadline: lillux::time::MonotonicDeadline,
     ) -> Result<ExternalLifecycleObservation<RelayFileAdapterResponse>> {
+        let record = claim.record();
+        let step = format!(
+            "relay the {:?} {:?} file (sequence {})",
+            record.kind, record.direction, record.sequence
+        );
         self.invoke_relay_file(contract, credential, bootstrap, claim, deadline)
+            .with_context(|| step)
     }
 
     fn lifecycle_escrow_capture(&self) -> Result<Option<LifecycleEscrowCapture<'_>>> {
@@ -1125,6 +1131,7 @@ impl ExternalPlacementBackend for ExecutableExternalPlacementBackend {
         deadline: lillux::time::MonotonicDeadline,
     ) -> Result<Vec<u8>> {
         self.invoke_await_lease_ready(request, ready_frame, report_frame, deadline)
+            .context("await the guest's lease readiness")
     }
 
     fn artifact_hash(&self) -> &str {
