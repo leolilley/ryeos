@@ -440,7 +440,7 @@ pub(crate) fn recover_ticketed_guest_import(
         expected.maximum_regular_bytes,
     )?;
     ensure!(
-        manifest.framed_bytes()? == ticket.framed_bytes
+        ticket.framed_bytes <= manifest.framed_bytes_bound()?
             && manifest.total_regular_bytes == ticket.regular_bytes,
         "recovered guest manifest contradicts retained package bounds"
     );
@@ -900,7 +900,7 @@ mod tests {
             supervisor_sha256: &manifest.supervisor_sha256,
             launcher_sha256: &manifest.launcher_sha256,
             maximum_regular_bytes: manifest.total_regular_bytes,
-            maximum_framed_bytes: manifest.framed_bytes().unwrap(),
+            maximum_framed_bytes: manifest.framed_bytes_bound().unwrap(),
         };
         let mut stream =
             GuestStagingStreamWriter::new(Vec::new(), manifest.clone(), &expected).unwrap();
@@ -1293,7 +1293,7 @@ mod tests {
             supervisor_sha256: &manifest.supervisor_sha256,
             launcher_sha256: &manifest.launcher_sha256,
             maximum_regular_bytes: manifest.total_regular_bytes,
-            maximum_framed_bytes: manifest.framed_bytes().unwrap() + 128,
+            maximum_framed_bytes: manifest.framed_bytes_bound().unwrap() + 128,
         };
         let mut stream =
             GuestStagingStreamWriter::new(Vec::new(), manifest.clone(), &expected).unwrap();
@@ -3204,7 +3204,7 @@ mod tests {
         .unwrap();
         assert!(format!("{size_error:#}").contains("budget"));
         let short_frame = GuestStagingExpected {
-            maximum_framed_bytes: produced_manifest.framed_bytes().unwrap() - 1,
+            maximum_framed_bytes: produced_manifest.framed_bytes_bound().unwrap() - 1,
             ..produced_expected
         };
         assert!(

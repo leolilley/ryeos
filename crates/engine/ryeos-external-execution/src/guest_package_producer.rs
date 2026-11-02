@@ -111,7 +111,9 @@ pub fn prepare_private_guest_package(
     parent
         .require_owner_private_directory()
         .context("guest package parent")?;
-    let owner = parent.try_clone().context("retain the guest package parent")?;
+    let owner = parent
+        .try_clone()
+        .context("retain the guest package parent")?;
     let (name, root) = parent
         .create_unique_child("guest-package", 0o700)
         .context("create the private guest package directory")?;
@@ -124,7 +126,9 @@ pub fn prepare_private_guest_package(
             output, inputs, bootstrap, supervisor, launcher, expected, deadline,
         )?;
         lillux::set_open_regular_file_mode(&output, 0o400)?;
-        output.sync_all().context("sync the guest package payload")?;
+        output
+            .sync_all()
+            .context("sync the guest package payload")?;
         drop(output);
         root.sync_tree_bounded(lillux::DirectoryTraversalBudget::new(1, 1))
             .context("sync the guest package directory")?;
@@ -134,8 +138,8 @@ pub fn prepare_private_guest_package(
         let observation = payload.observation()?;
         let bytes = observation.size();
         ensure!(
-            bytes == manifest.framed_bytes()? && bytes <= expected.maximum_framed_bytes,
-            "private guest package length changed"
+            bytes <= manifest.framed_bytes_bound()? && bytes <= expected.maximum_framed_bytes,
+            "private guest package length exceeds its bound"
         );
         let sha256 = payload.digest_stable_exact(&observation)?;
         require_time(deadline)?;
@@ -382,7 +386,7 @@ pub(crate) fn write_guest_package<W: Write>(
         entries,
     };
     ensure!(
-        manifest.framed_bytes()? <= expected.maximum_framed_bytes,
+        manifest.framed_bytes_bound()? <= expected.maximum_framed_bytes,
         "guest package exceeds admitted framed byte bound"
     );
     let mut stream = GuestStagingStreamWriter::new(output, manifest.clone(), expected)?;
