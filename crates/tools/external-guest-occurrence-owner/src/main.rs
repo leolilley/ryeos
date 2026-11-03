@@ -5,15 +5,17 @@
 //! snapshot and proved this process survives a lost run stream, it must
 //! remain fail-closed.
 //!
-//! Stdout carries only the contract's one startup report line: held once the
-//! supervisor is released, or the closed step word that refused. Stderr keeps
-//! the full error for local diagnosis and is never relayed.
+//! Stdout carries only the contract's startup report lines: the phase as each
+//! step begins (repeated while a long step makes progress), then held once
+//! the supervisor is released, or the closed step word that refused. Stderr
+//! keeps the full error for local diagnosis and is never relayed.
 
 use std::ffi::OsStr;
 use std::io::Write as _;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use anyhow::{Context as _, Result, ensure};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -23,7 +25,7 @@ use ryeos_external_execution_contract::guest_import_authorization::{
     MAX_GUEST_IMPORT_AUTHORIZATION_BYTES, MAX_SIGNED_GUEST_OCCURRENCE_ASSIGNMENT_BYTES,
 };
 use ryeos_external_execution_contract::guest_owner_report::{
-    GuestOwnerRefusal as Step, GuestOwnerReport, RefusedAt as _,
+    GuestOwnerReport, GuestOwnerStep as Step, RefusedAt as _,
 };
 
 const RUNTIME_ROOT: &str = "/ryeos/guest-runtime";
@@ -33,6 +35,13 @@ const IMPORT_NAME: &str = "signed-import.json";
 const PACKAGE_NAME: &str = "guest-package";
 const POLL_INTERVAL: lillux::time::Duration = lillux::time::Duration::from_millis(50);
 const CLEANUP_TIMEOUT: lillux::time::Duration = lillux::time::Duration::from_secs(30);
+/// A long step's progress points repeat its phase at most this often.
+const PHASE_REPEAT_MS: u64 = 10_000;
+const NO_PHASE: usize = usize::MAX;
+
+static PHASE: AtomicUsize = AtomicUsize::new(NO_PHASE);
+static LAST_REPORT_MS: AtomicU64 = AtomicU64::new(0);
+static CLOCK: OnceLock<lillux::time::MonotonicTimer> = OnceLock::new();
 
 fn decode_assignment_argument(
     args: impl IntoIterator<Item = std::ffi::OsString>,
@@ -145,14 +154,45 @@ fn transition_to_non_root_owner() -> Result<()> {
     Ok(())
 }
 
+fn now_ms() -> u64 {
+    CLOCK
+        .get_or_init(lillux::time::MonotonicTimer::start)
+        .elapsed_millis()
+}
+
 fn report(report: GuestOwnerReport) {
+    #[cfg(test)]
+    tests::REPORTS.with(|reports| reports.borrow_mut().push(report));
     let mut stdout = std::io::stdout().lock();
     let _ = stdout
         .write_all(report.line().as_bytes())
         .and_then(|()| stdout.flush());
+    LAST_REPORT_MS.store(now_ms(), Ordering::Relaxed);
+}
+
+/// Report the step being entered; it stays current until the next one.
+fn enter(step: Step) {
+    PHASE.store(step as usize, Ordering::Relaxed);
+    report(GuestOwnerReport::Phase(step));
+}
+
+fn phase_repeat_due(last_report_ms: u64, now_ms: u64) -> bool {
+    now_ms.saturating_sub(last_report_ms) >= PHASE_REPEAT_MS
+}
+
+/// Lillux progress beacon: called synchronously at natural progress points
+/// inside long steps (upload bytes, staged entries, copied and digested
+/// files), so a silent step still repeats its phase on this one thread.
+fn progress_beacon() {
+    if phase_repeat_due(LAST_REPORT_MS.load(Ordering::Relaxed), now_ms())
+        && let Some(step) = Step::ALL.get(PHASE.load(Ordering::Relaxed)).copied()
+    {
+        report(GuestOwnerReport::Phase(step));
+    }
 }
 
 fn run(assignment_bytes: &[u8]) -> Result<()> {
+    enter(Step::RuntimeRoot);
     let mut runtime = (|| -> Result<_> {
         let runtime_root = lillux::PinnedDirectory::open(Path::new(RUNTIME_ROOT))?
             .context("qualified guest runtime root is absent")?;
@@ -161,6 +201,7 @@ fn run(assignment_bytes: &[u8]) -> Result<()> {
         Ok(runtime)
     })()
     .refused_at(Step::RuntimeRoot)?;
+    enter(Step::PrivateRoots);
     let (activation, occurrences) = (|| -> Result<_> {
         let activation = open_private_root(ACTIVATION_ROOT)?;
         let occurrences = open_private_root(OCCURRENCES_ROOT)?;
@@ -170,13 +211,16 @@ fn run(assignment_bytes: &[u8]) -> Result<()> {
         Ok((activation, occurrences))
     })()
     .refused_at(Step::PrivateRoots)?;
+    enter(Step::ImportRead);
     let import_bytes = read_signed_import(&activation)?;
+    enter(Step::ImportVerify);
     let admitted = runtime
         .verify_import_documents(&import_bytes, assignment_bytes)
         .refused_at(Step::ImportVerify)?;
     admitted
         .require_fresh_admission()
         .refused_at(Step::AdmissionExpired)?;
+    enter(Step::PackageIdentity);
     let upload = (|| -> Result<_> {
         let upload = activation
             .open_pinned_regular(OsStr::new(PACKAGE_NAME), false)?
@@ -189,6 +233,7 @@ fn run(assignment_bytes: &[u8]) -> Result<()> {
         Ok(upload)
     })()
     .refused_at(Step::PackageIdentity)?;
+    enter(Step::OccurrenceRoot);
     let mut occurrence = (|| -> Result<_> {
         let occurrence =
             occurrences.create_child(OsStr::new(&admitted.authorization().occurrence_id), 0o700)?;
@@ -200,11 +245,13 @@ fn run(assignment_bytes: &[u8]) -> Result<()> {
     let lifetime = lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(
         u64::from(runtime.profile().owner_timeout_seconds),
     ));
+    enter(Step::PrivateSourceEntry);
     let source = lillux::sandbox::enter_linux_private_source_filesystem(limits)
         .map_err(anyhow::Error::msg)
         .refused_at(Step::PrivateSourceEntry)?;
     // Every mount has a new identity in the private namespace just entered.
     // Re-anchor the two roots carried across it before any recheck.
+    enter(Step::PathRebind);
     runtime
         .rebind_in_current_mount_namespace()
         .and_then(|()| occurrence.rebind_in_current_mount_namespace())
@@ -219,9 +266,12 @@ fn run(assignment_bytes: &[u8]) -> Result<()> {
         source,
         lifetime,
         Some(ready_boot_inputs),
+        &mut enter,
     )?;
+    enter(Step::MountPreparation);
     held.mount_preparation_receipt()
         .refused_at(Step::MountPreparation)?;
+    enter(Step::SignalRegistration);
     let cancelling = Arc::new(AtomicBool::new(false));
     // Provider stream loss is not a cancellation. Retain this occurrence on
     // SIGHUP and wait for the original supervisor/channel outcome.
@@ -234,6 +284,7 @@ fn run(assignment_bytes: &[u8]) -> Result<()> {
         Ok(())
     })()
     .refused_at(Step::SignalRegistration)?;
+    enter(Step::Release);
     let mut released = held.release_once().refused_at(Step::Release)?;
     report(GuestOwnerReport::Held);
     loop {
@@ -286,7 +337,10 @@ fn run(assignment_bytes: &[u8]) -> Result<()> {
 }
 
 fn owner() -> Result<()> {
+    lillux::progress::install_beacon(progress_beacon);
+    enter(Step::AssignmentArgument);
     let assignment = decode_assignment_argument(std::env::args_os().skip(1))?;
+    enter(Step::AccountTransition);
     prepare_non_root_owner()?;
     run(&assignment)
 }
@@ -303,6 +357,85 @@ fn main() {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt as _;
+
+    thread_local! {
+        pub(super) static REPORTS: std::cell::RefCell<Vec<GuestOwnerReport>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    fn take_reports() -> Vec<GuestOwnerReport> {
+        REPORTS.with(|reports| std::mem::take(&mut *reports.borrow_mut()))
+    }
+
+    #[test]
+    fn phases_are_reported_on_entry_and_repeat_only_after_the_interval() {
+        take_reports();
+        if !Path::new(RUNTIME_ROOT).exists() {
+            assert_eq!(
+                Step::of(&run(b"assignment").unwrap_err()),
+                Step::RuntimeRoot
+            );
+            assert_eq!(
+                take_reports(),
+                vec![GuestOwnerReport::Phase(Step::RuntimeRoot)]
+            );
+        }
+        assert!(!phase_repeat_due(5_000, 5_000));
+        assert!(!phase_repeat_due(5_000, 5_000 + PHASE_REPEAT_MS - 1));
+        assert!(phase_repeat_due(5_000, 5_000 + PHASE_REPEAT_MS));
+        assert!(!phase_repeat_due(9_000, 1_000));
+    }
+
+    #[test]
+    fn owner_phases_follow_startup_order() {
+        // `owner` enters the first two before `run`, which enters the rest in
+        // source order; the library enters stage through held_prepare
+        // between path_rebind and mount_preparation.
+        let entered = [
+            Step::AssignmentArgument,
+            Step::AccountTransition,
+            Step::RuntimeRoot,
+            Step::PrivateRoots,
+            Step::ImportRead,
+            Step::ImportVerify,
+            Step::PackageIdentity,
+            Step::OccurrenceRoot,
+            Step::PrivateSourceEntry,
+            Step::PathRebind,
+            Step::Stage,
+            Step::Install,
+            Step::LaunchPreparation,
+            Step::HeldPrepare,
+            Step::MountPreparation,
+            Step::SignalRegistration,
+            Step::Release,
+        ];
+        assert!(
+            entered
+                .windows(2)
+                .all(|pair| (pair[0] as usize) < (pair[1] as usize))
+        );
+        let source = include_str!("main.rs");
+        let positions: Vec<usize> = entered
+            .iter()
+            .filter(|step| {
+                !matches!(
+                    step,
+                    Step::AssignmentArgument
+                        | Step::AccountTransition
+                        | Step::Stage
+                        | Step::Install
+                        | Step::LaunchPreparation
+                        | Step::HeldPrepare
+                )
+            })
+            .map(|step| {
+                let needle = format!("enter(Step::{step:?});");
+                source.find(&needle).unwrap_or_else(|| panic!("{needle}"))
+            })
+            .collect();
+        assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+    }
 
     #[test]
     fn inbound_file_mode_allows_only_owner_writes_inside_private_activation_root() {

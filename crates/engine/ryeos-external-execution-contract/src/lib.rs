@@ -1309,6 +1309,10 @@ pub enum LifecycleAdapterResponse {
     SupervisorPending {
         operation_id: String,
         activation_request_digest: String,
+        /// What first activation saw of the guest owner, when the adapter
+        /// reads its run stream. Reconciliation never carries one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        guest_owner: Option<guest_owner_report::GuestOwnerActivationReport>,
     },
     OccurrenceTerminal {
         operation_id: String,
@@ -1673,12 +1677,18 @@ impl LifecycleAdapterResponse {
                 | LifecycleAdapterRequest::ReconcileSupervisorActivation { activation, .. },
                 Self::SupervisorPending {
                     activation_request_digest,
+                    guest_owner,
                     ..
                 },
             ) => {
                 ensure!(
                     activation_request_digest == &activation.activation_request_digest,
                     "activation response changed its request identity"
+                );
+                ensure!(
+                    guest_owner.is_none()
+                        || matches!(request, LifecycleAdapterRequest::ActivateSupervisor { .. }),
+                    "activation reconciliation carried a guest owner report"
                 );
                 Ok(())
             }

@@ -10,7 +10,7 @@ use std::ffi::OsStr;
 use std::path::PathBuf;
 
 use anyhow::{Context as _, Result, ensure};
-use ryeos_external_execution_contract::guest_owner_report::{GuestOwnerRefusal, RefusedAt as _};
+use ryeos_external_execution_contract::guest_owner_report::{GuestOwnerStep, RefusedAt as _};
 use ryeos_external_execution_contract::guest_supervisor_descriptors::{
     GuestSupervisorDescriptorPlan, SUPERVISOR_BOOTSTRAP_FD, SUPERVISOR_CANDIDATE_RUNTIME_FD,
     SUPERVISOR_EXECUTABLE_FD, SUPERVISOR_LAUNCHER_FD, SUPERVISOR_MOUNTED_CONTROL_DESCRIPTORS,
@@ -422,7 +422,8 @@ pub struct HeldGuestMountedSandbox {
 /// created never grants a replacement import or launch.
 ///
 /// `ready_boot_inputs` is present only for a leased guest: the verified
-/// activation inputs its Ready must name, in order.
+/// activation inputs its Ready must name, in order. `on_phase` is told as
+/// each long step begins, so the owner can report where it is.
 ///
 /// The result is held, not running or Ready. Its caller must inspect Lillux's
 /// mount receipt, release exactly once, join the authenticated supervisor
@@ -436,8 +437,9 @@ pub fn prepare_authorized_held_guest_supervisor_once(
     source: lillux::sandbox::LinuxPrivateSourceFilesystem,
     import_deadline: lillux::time::MonotonicDeadline,
     ready_boot_inputs: Option<Vec<String>>,
+    on_phase: &mut dyn FnMut(GuestOwnerStep),
 ) -> Result<HeldGuestMountedSandbox> {
-    use GuestOwnerRefusal as Step;
+    use GuestOwnerStep as Step;
     (|| -> Result<_> {
         ensure!(
             source.limits() == installed_runtime.profile().private_source_limits(),
@@ -477,12 +479,15 @@ pub fn prepare_authorized_held_guest_supervisor_once(
     let inputs = &authority.guest_inputs;
     let owner = GuestOccurrenceOwner::begin_authorized(occurrence, verified)
         .refused_at(Step::OccurrenceRoot)?;
+    on_phase(Step::Stage);
     let staged = owner
         .stage_uploaded_once(upload, source, &context, inputs, import_deadline)
         .refused_at(Step::Stage)?;
+    on_phase(Step::Install);
     let installed = staged
         .install_base_once(&context, inputs)
         .refused_at(Step::Install)?;
+    on_phase(Step::LaunchPreparation);
     let committed = (|| -> Result<_> {
         let prepared = installed
             .prepare_content_for_adoption(&context, inputs)?
@@ -497,6 +502,7 @@ pub fn prepare_authorized_held_guest_supervisor_once(
         prepared.commit_outer_launch_intent(&context, inputs)
     })()
     .refused_at(Step::LaunchPreparation)?;
+    on_phase(Step::HeldPrepare);
     committed
         .prepare_mounted_sandbox_request(&context, inputs)
         .and_then(|request| request.prepare_held_in_dedicated_owner())

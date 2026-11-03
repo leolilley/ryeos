@@ -383,7 +383,8 @@ fn main() {
         let class = fail_class::FailClass::of(&error);
         let _ = writeln!(
             std::io::stderr(),
-            "render lifecycle adapter failed closed: {class}"
+            "render lifecycle adapter failed closed: {}",
+            class.word()
         );
         std::process::exit(class.exit_code());
     }
@@ -744,11 +745,11 @@ fn operate() -> Result<()> {
             // Once this call begins, any stage may have reached Render.
             // Even a complete run response is not authenticated Ready;
             // every transport outcome remains Pending for the original
-            // supervisor channel to settle. Only the guest owner's own
-            // refusal or exit before held fails the contact, as its closed
-            // contract outcome. Reconciliation never calls this one-shot
-            // sequence again.
-            let contact = activation_contact::first_activation_contact(
+            // supervisor channel to settle. The guest owner's closed report
+            // rides along as testimony for the controller to record; a
+            // contact that failed before the run stream carries none.
+            // Reconciliation never calls this one-shot sequence again.
+            let guest_owner = activation_contact::first_activation_contact(
                 &network,
                 &provider_spec,
                 &settings,
@@ -758,18 +759,12 @@ fn operate() -> Result<()> {
                 &input.package,
                 deadline,
                 &cancellation,
-            );
-            if let Err(error) = contact
-                && matches!(
-                    fail_class::FailClass::of(&error),
-                    fail_class::FailClass::GuestOwner(_)
-                )
-            {
-                return Err(error);
-            }
+            )
+            .ok();
             LifecycleAdapterResponse::SupervisorPending {
                 operation_id: common.operation_id.clone(),
                 activation_request_digest: activation.activation_request_digest.clone(),
+                guest_owner,
             }
         }
         LifecycleAdapterRequest::ReconcileSupervisorActivation {
@@ -777,6 +772,7 @@ fn operate() -> Result<()> {
         } => LifecycleAdapterResponse::SupervisorPending {
             operation_id: common.operation_id.clone(),
             activation_request_digest: activation.activation_request_digest.clone(),
+            guest_owner: None,
         },
         LifecycleAdapterRequest::Terminate {
             common,

@@ -575,6 +575,7 @@ fn run(
             source,
             lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(30)),
             None,
+            &mut |_| {},
         )?
     };
     let receipt = held.mount_preparation_receipt()?;
