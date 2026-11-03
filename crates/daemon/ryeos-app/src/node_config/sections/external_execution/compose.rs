@@ -86,6 +86,52 @@ impl Default for ComposeLimits {
     }
 }
 
+/// Refuse a binding whose largest admitted package the snapshot's guest owner
+/// cannot stage. The owner's profile is read from the node's content store by
+/// the guest runtime manifest hash; a node that does not hold that manifest
+/// cannot be checked here, and the activation check covers it. The binding
+/// bounds no entry count, so only the byte ceilings are checked at this point.
+pub(crate) fn require_guest_owner_stages_largest_package(
+    app_root: &Path,
+    guest_runtime_manifest_hash: &str,
+    limits: &ComposeLimits,
+    owner_runtime_required: bool,
+) -> Result<()> {
+    let cas = lillux::CasStore::new(
+        ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf())
+            .state()
+            .join("cas"),
+    );
+    let Some(profile) =
+        ryeos_external_execution::guest_import_authorization::GuestOwnerRuntimeProfile::from_cas(
+            &cas,
+            guest_runtime_manifest_hash,
+        )?
+    else {
+        ensure!(
+            !owner_runtime_required,
+            "the binding's guest owner runtime {guest_runtime_manifest_hash} is not in this \
+             node's content store, so its staging capacity cannot be checked"
+        );
+        return Ok(());
+    };
+    profile
+        .require_stages_package(
+            limits.max_guest_package_framed_bytes,
+            limits.max_guest_package_regular_bytes,
+            0,
+        )
+        .with_context(|| {
+            format!(
+                "the snapshot's guest owner cannot stage the largest package this binding admits \
+                 (framed {} bytes, regular {} bytes; owner private source {} bytes)",
+                limits.max_guest_package_framed_bytes,
+                limits.max_guest_package_regular_bytes,
+                profile.private_source_max_bytes
+            )
+        })
+}
+
 /// Artifact identities taken from the installed, verified bundles.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BundleArtifactFacts {
@@ -593,6 +639,12 @@ pub(crate) fn compose_with_resolver(
                 .context("invalid runtime content qualification")
         })
         .transpose()?;
+    require_guest_owner_stages_largest_package(
+        request.app_root,
+        &request.guest_runtime_manifest_hash,
+        &request.limits,
+        false,
+    )?;
     let resolved = resolve(request.app_root)?;
     let artifacts = bundle_artifact_facts(
         &resolved,

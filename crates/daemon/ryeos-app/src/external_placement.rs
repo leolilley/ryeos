@@ -1139,6 +1139,19 @@ impl ExternalSupervisorActivation {
         Ok(())
     }
 
+    /// Size, regular bytes and entry count of the prepared package.
+    fn prepared_guest_package_extent(&self) -> Option<(u64, u64, u64)> {
+        match self.guest_package.as_ref()? {
+            SupervisorGuestPackage::Prepared { package, .. } => Some((
+                package.bytes(),
+                package.manifest().total_regular_bytes,
+                package.manifest().entries.len() as u64,
+            )),
+            #[cfg(test)]
+            SupervisorGuestPackage::Fixture(_) => None,
+        }
+    }
+
     fn discard_guest_package(&mut self) -> Result<()> {
         // The runtime tar is a sealed in-memory descriptor; dropping it is
         // its whole cleanup.
@@ -7949,6 +7962,19 @@ impl ExternalPlacementReconciliation {
                 native_journal,
             )
             .context("prepare the first supervisor activation")?;
+            if let (Some(binding), Some((framed, regular, entries))) = (
+                self.runtime_upload.as_ref(),
+                activation.prepared_guest_package_extent(),
+            ) && let Err(error) =
+                binding.require_owner_stages_package(&self.contract, framed, regular, entries)
+            {
+                if let Err(cleanup) = activation.discard_guest_package() {
+                    return Err(error.context(format!(
+                        "guest owner capacity refusal also failed package cleanup: {cleanup:#}"
+                    )));
+                }
+                return Err(error);
+            }
             if activation.import_authorization.is_some() {
                 let assignment = self.state_store.author_external_guest_assignment(
                     &current.reservation,
@@ -8634,17 +8660,18 @@ fn supervisor_activation(
         backend.stages_guest_runtime_upload() == guest_runtime.is_some(),
         "external activation guest runtime upload differs from the provider's declaration"
     );
-    let guest_package = backend.prepare_guest_package(
-        contract,
-        reservation,
-        occurrence,
-        &bootstrap,
-        &guest_inputs,
-        &activation_request_digest,
-        package_parent,
-        deadline,
-    )
-    .context("prepare the guest package")?;
+    let guest_package = backend
+        .prepare_guest_package(
+            contract,
+            reservation,
+            occurrence,
+            &bootstrap,
+            &guest_inputs,
+            &activation_request_digest,
+            package_parent,
+            deadline,
+        )
+        .context("prepare the guest package")?;
     let delivery = guest_package.commitment().clone();
     let intent = ExternalSupervisorActivationIntent {
         schema: 3,

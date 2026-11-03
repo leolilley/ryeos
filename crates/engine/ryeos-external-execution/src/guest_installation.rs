@@ -449,7 +449,7 @@ pub fn prepare_authorized_held_guest_supervisor_once(
         .authorization()
         .ticket
         .framed_bytes
-        .checked_sub(20)
+        .checked_sub(crate::guest_import_authorization::GUEST_PACKAGE_FRAME_OVERHEAD_BYTES)
         .context("guest package has no bounded staged-content floor")?;
     ensure!(
         stage_bytes <= source.limits().max_bytes,

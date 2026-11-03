@@ -263,6 +263,14 @@ pub(crate) fn compose_with_inputs(
         artifacts.supervisor_artifact_bytes,
         artifacts.launcher_artifact_bytes,
     )?;
+    // A qualification session names the snapshot's own guest owner, produced
+    // on this node: its absence is a broken binding, not an unknown capacity.
+    super::compose::require_guest_owner_stages_largest_package(
+        request.app_root,
+        &request.guest_runtime_manifest_hash,
+        &limits,
+        true,
+    )?;
     crate::external_placement::require_qualification_channel_limits(limits.max_transfer_bytes)?;
     let transport = select_transport(
         &ComposeTransportRequest::FileRelay {
@@ -550,6 +558,7 @@ mod tests {
         lock: ryeos_node_runtime::state_lock::StateLock,
         connector: PathBuf,
         adapter: PathBuf,
+        owner_runtime: String,
     }
 
     fn stopped_node() -> StoppedNode {
@@ -566,12 +575,50 @@ mod tests {
         installed::write_executable(&connector, b"connector executable bytes");
         let adapter = root.path().join("configuration-adapter");
         installed::write_executable(&adapter, b"configuration adapter executable bytes");
+        let owner_runtime = store_guest_owner_runtime(root.path(), 4 * 1024 * 1024 * 1024);
         StoppedNode {
             root,
             lock,
             connector,
             adapter,
+            owner_runtime,
         }
+    }
+
+    /// A guest owner runtime manifest holding only its profile, stored where
+    /// compose reads it; its private source holds the largest default package.
+    fn store_guest_owner_runtime(root: &std::path::Path, private_source_max_bytes: u64) -> String {
+        use ryeos_state::objects::{
+            EXTERNAL_CONTENT_MANIFEST_KIND, EXTERNAL_CONTENT_TREE_SCHEMA,
+            ExternalContentManifestEntry, ExternalContentManifestEntryKind,
+            ExternalContentManifestObject,
+        };
+        let cas = lillux::CasStore::new(
+            ryeos_engine::roots::RuntimeRoot::new(root.to_path_buf())
+                .state()
+                .join("cas"),
+        );
+        let profile = format!(
+            r#"{{"account":{{"gid":65534,"implementation":"unix","uid":65534}},"owner_timeout_seconds":600,"private_source_max_bytes":{private_source_max_bytes},"private_source_max_inodes":4096,"schema":2}}"#
+        );
+        let profile = profile.as_bytes();
+        let blob = cas.store_blob(profile).unwrap();
+        let manifest = ExternalContentManifestObject {
+            schema: EXTERNAL_CONTENT_TREE_SCHEMA.to_owned(),
+            kind: EXTERNAL_CONTENT_MANIFEST_KIND.to_owned(),
+            entries: vec![ExternalContentManifestEntry {
+                path: "guest-owner-profile.json".to_owned(),
+                kind: ExternalContentManifestEntryKind::File,
+                mode: Some(0o644),
+                blob_hash: Some(blob),
+                size: Some(profile.len() as u64),
+                target: None,
+            }],
+            entry_count: 1,
+            total_bytes: profile.len() as u64,
+        };
+        cas.store_object(&serde_json::to_value(&manifest).unwrap())
+            .unwrap()
     }
 
     fn identity(node: &StoppedNode) -> ryeos_node_runtime::identity::NodeIdentity {
@@ -668,7 +715,7 @@ mod tests {
             policy_ref: "config:codex/consumer-qualification-policy".into(),
             provider_declaration_id: PROVIDER_ID.into(),
             runtime_manifest_hash: "c".repeat(64),
-            guest_runtime_manifest_hash: "9".repeat(64),
+            guest_runtime_manifest_hash: node.owner_runtime.clone(),
             runtime_member_sha256: "e".repeat(64),
             snapshot_id: "snp-exact".into(),
             plan: "standard".into(),
@@ -729,8 +776,8 @@ mod tests {
         assert_eq!(document.max_export_bytes, 0);
         assert!(document.runtime_qualification.is_none());
         assert!(document.runtime_content_qualification.is_none());
-        assert_eq!(document.guest_runtime_manifest_hash, "9".repeat(64));
-        assert_eq!(report.guest_runtime_manifest_hash, "9".repeat(64));
+        assert_eq!(document.guest_runtime_manifest_hash, node.owner_runtime);
+        assert_eq!(report.guest_runtime_manifest_hash, node.owner_runtime);
         assert_eq!(document.network_policy, RELAY_NETWORK_POLICY);
         assert_eq!(document.settings_schema_digest, SETTINGS_SCHEMA);
         assert_eq!(document.settings["owner_id"], "usr-test");
@@ -774,6 +821,28 @@ mod tests {
         let loaded =
             admit_signed_binding(node.root.path(), BINDING_ID, &signed, &identity).unwrap();
         assert_eq!(loaded.document.max_export_bytes, 0);
+    }
+
+    #[test]
+    fn a_guest_owner_that_cannot_stage_the_largest_package_is_refused() {
+        let node = stopped_node();
+        let small = store_guest_owner_runtime(node.root.path(), 32 * 1024 * 1024);
+        let refused = format!(
+            "{:#}",
+            compose(&node, |r| r.guest_runtime_manifest_hash = small.clone()).unwrap_err()
+        );
+        assert!(
+            refused.contains("cannot stage the largest package this binding admits"),
+            "{refused}"
+        );
+        let absent = format!(
+            "{:#}",
+            compose(&node, |r| r.guest_runtime_manifest_hash = "a".repeat(64)).unwrap_err()
+        );
+        assert!(
+            absent.contains("is not in this node's content store"),
+            "{absent}"
+        );
     }
 
     #[test]
