@@ -703,7 +703,9 @@ pub struct ProcessScopeConfiguration {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "implementation", rename_all = "snake_case", deny_unknown_fields)]
 enum BackendConfiguration {
-    LinuxCgroupV2 { parent: std::path::PathBuf },
+    LinuxCgroupV2 {
+        parent: std::path::PathBuf,
+    },
     /// Marker retained inside a recovery record for descendant containment by
     /// the execution's own PID-namespace init. There is no provider to open
     /// and nothing to allocate: the containment exists only once a held
@@ -1335,7 +1337,8 @@ impl ProcessScopeProvider {
         let configuration_digest = configuration.digest()?;
         match &configuration.backend {
             BackendConfiguration::PidNamespaceInit {} => Err(
-                "PID-namespace containment has no provider; it is bound by a held launch".to_owned(),
+                "PID-namespace containment has no provider; it is bound by a held launch"
+                    .to_owned(),
             ),
             BackendConfiguration::LinuxCgroupV2 { parent } => {
                 #[cfg(target_os = "linux")]
@@ -1782,6 +1785,18 @@ impl ProcessScopeRecovery {
         }
     }
 
+    /// Whether this containment can hold a stable tree for a workspace
+    /// observation. A PID-namespace init contains and settles descendants
+    /// but cannot freeze them.
+    pub fn supports_quiescence(&self) -> bool {
+        !matches!(self.backend, BackendRecovery::PidNamespaceInit { .. })
+    }
+
+    /// Why this containment cannot quiesce, or `None` when it can.
+    pub fn quiescence_refusal(&self) -> Option<&'static str> {
+        (!self.supports_quiescence()).then_some(PID_NAMESPACE_NO_QUIESCENCE)
+    }
+
     pub fn quiesce(&self, timeout: Duration) -> Result<QuiescedProcessScope, String> {
         let timeout = timeout.min(self.control_timeout);
         let started = std::time::Instant::now();
@@ -1837,8 +1852,7 @@ impl ProcessScopeRecovery {
             ) => {
                 if !valid_boot_id(boot_id) || *init_pid <= 1 || *init_start_time_ticks == 0 {
                     return Err(
-                        "PID-namespace containment record has no bound init incarnation"
-                            .to_owned(),
+                        "PID-namespace containment record has no bound init incarnation".to_owned(),
                     );
                 }
                 Ok(())
@@ -1964,10 +1978,6 @@ fn valid_boot_id(value: &str) -> bool {
 
 const PID_NAMESPACE_NO_QUIESCENCE: &str = "PID-namespace containment cannot quiesce: namespace membership is not an atomic writer freeze, so a caller needing a stable tree must refuse this containment";
 
-fn unbound_pid_namespace() -> String {
-    "PID-namespace containment is not yet bound to a launched init".to_owned()
-}
-
 #[cfg(target_os = "linux")]
 impl PidNamespaceBinding {
     fn is_empty(&self) -> Result<bool, String> {
@@ -2053,9 +2063,9 @@ impl ProcessScope {
                     },
                 },
             },
-            backend: ScopeBackend::PidNamespaceInit(std::sync::Arc::new(
-                std::sync::OnceLock::new(),
-            )),
+            backend: ScopeBackend::PidNamespaceInit(
+                std::sync::Arc::new(std::sync::OnceLock::new()),
+            ),
             launch_available: true,
         }
     }
@@ -2063,7 +2073,10 @@ impl ProcessScope {
     /// Whether this containment is the PID-namespace init mechanism rather
     /// than a cgroup scope.
     pub fn is_pid_namespace_init(&self) -> bool {
-        matches!(self.recovery.backend, BackendRecovery::PidNamespaceInit { .. })
+        matches!(
+            self.recovery.backend,
+            BackendRecovery::PidNamespaceInit { .. }
+        )
     }
 
     /// The durable record, once the held launch has bound it. Cgroup scopes
@@ -2071,9 +2084,7 @@ impl ProcessScope {
     pub fn bound_recovery(&self) -> Option<&ProcessScopeRecovery> {
         match &self.backend {
             #[cfg(target_os = "linux")]
-            ScopeBackend::PidNamespaceInit(slot) => {
-                slot.get().map(|binding| &binding.recovery)
-            }
+            ScopeBackend::PidNamespaceInit(slot) => slot.get().map(|binding| &binding.recovery),
             _ => Some(&self.recovery),
         }
     }
@@ -2099,9 +2110,9 @@ impl ProcessScope {
             #[cfg(target_os = "linux")]
             ScopeBackend::LinuxCgroupV2(scope) => scope.install_resource_limits(limits),
             #[cfg(target_os = "linux")]
-            ScopeBackend::PidNamespaceInit(_) => Err(
-                "PID-namespace containment carries no scope-wide resource limits".to_owned(),
-            ),
+            ScopeBackend::PidNamespaceInit(_) => {
+                Err("PID-namespace containment carries no scope-wide resource limits".to_owned())
+            }
             #[cfg(not(target_os = "linux"))]
             _ => Err("process scope resource limits are unavailable on this OS".to_owned()),
         };
@@ -2122,9 +2133,9 @@ impl ProcessScope {
             #[cfg(target_os = "linux")]
             ScopeBackend::LinuxCgroupV2(scope) => scope.clone_kill_descriptor(),
             #[cfg(target_os = "linux")]
-            ScopeBackend::PidNamespaceInit(_) => Err(
-                "hard occupancy enforcement requires a cgroup scope kill authority".to_owned(),
-            ),
+            ScopeBackend::PidNamespaceInit(_) => {
+                Err("hard occupancy enforcement requires a cgroup scope kill authority".to_owned())
+            }
             #[cfg(not(target_os = "linux"))]
             _ => Err("process-scope lifetime enforcement is unavailable".to_owned()),
         }
@@ -2181,10 +2192,11 @@ impl ProcessScope {
             #[cfg(target_os = "linux")]
             ScopeBackend::LinuxCgroupV2(scope) => scope.is_empty(),
             #[cfg(target_os = "linux")]
-            ScopeBackend::PidNamespaceInit(slot) => slot
-                .get()
-                .ok_or_else(unbound_pid_namespace)?
-                .is_empty(),
+            // Unbound means the launch never reached its pre-release hold
+            // boundary: target code has not run, so nothing was contained.
+            ScopeBackend::PidNamespaceInit(slot) => {
+                slot.get().map_or(Ok(true), PidNamespaceBinding::is_empty)
+            }
             #[cfg(not(target_os = "linux"))]
             _ => Err("process scope observation is unavailable on this OS".to_owned()),
         }
@@ -2211,8 +2223,10 @@ impl ProcessScope {
             #[cfg(target_os = "linux")]
             ScopeBackend::PidNamespaceInit(_) => {
                 let _ = (timeout, barrier);
-                Err("PID-namespace containment is qualified by its host probe, not a scope probe"
-                    .to_owned())
+                Err(
+                    "PID-namespace containment is qualified by its host probe, not a scope probe"
+                        .to_owned(),
+                )
             }
             #[cfg(not(target_os = "linux"))]
             _ => {
@@ -2335,8 +2349,7 @@ impl ProcessScope {
             #[cfg(target_os = "linux")]
             ScopeBackend::PidNamespaceInit(slot) => slot
                 .get()
-                .ok_or_else(unbound_pid_namespace)?
-                .terminate_and_wait(timeout),
+                .map_or(Ok(()), |binding| binding.terminate_and_wait(timeout)),
             #[cfg(not(target_os = "linux"))]
             _ => {
                 let _ = timeout;
@@ -2379,8 +2392,7 @@ impl ProcessScope {
             #[cfg(target_os = "linux")]
             ScopeBackend::PidNamespaceInit(slot) => slot
                 .get()
-                .ok_or_else(unbound_pid_namespace)?
-                .wait_empty(timeout),
+                .map_or(Ok(()), |binding| binding.wait_empty(timeout)),
             #[cfg(not(target_os = "linux"))]
             _ => {
                 let _ = timeout;
@@ -3056,7 +3068,8 @@ mod tests {
             .wait_empty(Duration::ZERO)
             .unwrap();
         let mut wrong = recovery.clone();
-        let BackendConfiguration::LinuxCgroupV2 { parent, .. } = &mut wrong.configuration.backend else {
+        let BackendConfiguration::LinuxCgroupV2 { parent, .. } = &mut wrong.configuration.backend
+        else {
             panic!("cgroup fixture");
         };
         *parent = "/another/delegation".into();
@@ -3199,5 +3212,185 @@ fn readonly_delivery_grant_preserves_read_and_executable_modes() {
                 .unwrap(),
             b"exact"
         );
+    }
+}
+
+#[cfg(test)]
+#[cfg(target_os = "linux")]
+mod pid_namespace_containment {
+    use super::*;
+    use crate::process_control::pid_namespace::test_fixture;
+
+    #[test]
+    fn unbound_containment_is_not_durable_and_vacuously_settled() {
+        let scope = ProcessScope::pid_namespace_init();
+        assert!(scope.is_pid_namespace_init());
+        assert!(scope.bound_recovery().is_none());
+        // The placeholder fails validation, so it can never be persisted
+        // or used to recover.
+        assert!(scope.recovery().validate().is_err());
+        // Unbound means the held launch never reached its pre-release
+        // boundary: target code has not run, so there is nothing to
+        // contain and settlement is vacuously complete.
+        assert!(scope.is_empty().unwrap());
+        scope.terminate_and_wait(Duration::from_secs(1)).unwrap();
+        scope.wait_empty(Duration::from_secs(1)).unwrap();
+    }
+
+    #[test]
+    fn containment_has_no_provider_and_no_quiescence() {
+        let configuration = ProcessScopeConfiguration {
+            version: SCOPE_CONFIGURATION_VERSION,
+            backend: BackendConfiguration::PidNamespaceInit {},
+        };
+        assert!(ProcessScopeProvider::open(&configuration).is_err());
+        let scope = ProcessScope::pid_namespace_init();
+        assert!(
+            scope
+                .quiesce(Duration::from_secs(1))
+                .unwrap_err()
+                .contains("cannot quiesce")
+        );
+        assert!(
+            scope
+                .recover_quiesced(Duration::from_secs(1))
+                .unwrap_err()
+                .contains("cannot quiesce")
+        );
+    }
+
+    fn recovery_for(pid: u32, boot_id: String, start: u64) -> ProcessScopeRecovery {
+        ProcessScopeRecovery {
+            version: SCOPE_RECOVERY_VERSION,
+            configuration: ProcessScopeConfiguration {
+                version: SCOPE_CONFIGURATION_VERSION,
+                backend: BackendConfiguration::PidNamespaceInit {},
+            },
+            control_timeout: Duration::from_secs(5),
+            backend: BackendRecovery::PidNamespaceInit {
+                boot_id,
+                init_pid: pid,
+                init_start_time_ticks: start,
+                namespace: crate::process_control::PidNamespaceIdentity {
+                    device: 1,
+                    inode: 2,
+                },
+            },
+        }
+    }
+
+    #[test]
+    fn recovery_record_round_trips_and_binds_the_exact_process() {
+        let boot = crate::process_control::linux::read_boot_id().unwrap();
+        let recovery = recovery_for(4242, boot.clone(), 77);
+        recovery.validate().unwrap();
+        let json = serde_json::to_value(&recovery).unwrap();
+        assert_eq!(
+            json["configuration"]["backend"]["implementation"],
+            "pid_namespace_init"
+        );
+        assert_eq!(json["backend"]["implementation"], "pid_namespace_init");
+        let back: ProcessScopeRecovery = serde_json::from_value(json).unwrap();
+        assert_eq!(back, recovery);
+        let identity = |pid, start| crate::ExactProcessIdentity {
+            boot_id: boot.clone(),
+            target_pid: pid,
+            target_start_time_ticks: start,
+            group_leader_pid: 2,
+            group_leader_start_time_ticks: 3,
+        };
+        recovery.validate_for_process(&identity(4242, 77)).unwrap();
+        // A reused PID, another birth, or another boot is another process.
+        assert!(recovery.validate_for_process(&identity(4243, 77)).is_err());
+        assert!(recovery.validate_for_process(&identity(4242, 78)).is_err());
+        let mut other_boot = identity(4242, 77);
+        other_boot.boot_id = "00000000-0000-0000-0000-000000000000".to_owned();
+        assert!(recovery.validate_for_process(&other_boot).is_err());
+        // An unbound record (no init incarnation) is refused outright.
+        assert!(recovery_for(0, boot.clone(), 77).validate().is_err());
+        assert!(recovery_for(4242, boot, 0).validate().is_err());
+        assert!(recovery_for(4242, String::new(), 77).validate().is_err());
+        // The record is never an allocation and has nothing to retire.
+        recovery.retire_after_settlement().unwrap();
+    }
+
+    #[test]
+    fn recovery_of_an_exited_init_settles_as_empty_and_other_boot_ends() {
+        let boot = crate::process_control::linux::read_boot_id().unwrap();
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let start = crate::process_control::linux::read_process_stat(pid)
+            .map(|stat| stat.start_time_ticks)
+            .unwrap_or(1);
+        child.wait().unwrap();
+        let recovery = recovery_for(pid.max(2), boot, start.max(1));
+        assert!(recovery.is_empty(Duration::from_secs(1)).unwrap());
+        recovery.wait_empty(Duration::from_secs(1)).unwrap();
+        recovery.terminate_and_wait(Duration::from_secs(1)).unwrap();
+        assert!(
+            recovery
+                .quiesce(Duration::from_secs(1))
+                .unwrap_err()
+                .contains("cannot quiesce")
+        );
+        let other = recovery_for(
+            pid.max(2),
+            "00000000-0000-0000-0000-000000000000".to_owned(),
+            start.max(1),
+        );
+        assert!(other.is_empty(Duration::from_secs(1)).unwrap());
+        other.terminate_and_wait(Duration::from_secs(1)).unwrap();
+    }
+
+    #[test]
+    #[ignore = "native Linux namespace qualification; uses host util-linux only as a test fixture"]
+    fn restart_recovers_the_exact_init_and_terminates_every_descendant() {
+        let fixture = test_fixture::spawn();
+        let detached_fd = crate::process_control::linux::open_pidfd(fixture.detached).unwrap();
+        let nested_fd = crate::process_control::linux::open_pidfd(fixture.nested).unwrap();
+        // Bind exactly as a held launch does, then persist and forget.
+        let binding = bind_pid_namespace_init(fixture.init_pid, Duration::from_secs(5)).unwrap();
+        let persisted = serde_json::to_string(&binding.recovery).unwrap();
+        assert!(!binding.is_empty().unwrap());
+        drop(binding);
+        // "Restart": only the persisted record remains.
+        let recovery: ProcessScopeRecovery = serde_json::from_str(&persisted).unwrap();
+        assert!(!recovery.is_empty(Duration::from_secs(1)).unwrap());
+        let recovered = recovery.recover(Duration::from_secs(1)).unwrap();
+        assert!(recovered.bound_recovery().is_some());
+        recovered
+            .terminate_and_wait(Duration::from_secs(5))
+            .unwrap();
+        recovered.wait_empty(Duration::ZERO).unwrap();
+        assert!(recovered.is_empty().unwrap());
+        // Every escaped descendant is gone, not merely the init.
+        crate::process_control::linux::wait_pidfd_exit(
+            std::os::fd::AsRawFd::as_raw_fd(&detached_fd),
+            std::time::Instant::now(),
+        )
+        .unwrap();
+        crate::process_control::linux::wait_pidfd_exit(
+            std::os::fd::AsRawFd::as_raw_fd(&nested_fd),
+            std::time::Instant::now(),
+        )
+        .unwrap();
+        assert!(recovery.is_empty(Duration::from_secs(1)).unwrap());
+    }
+
+    #[test]
+    #[ignore = "native Linux namespace qualification; uses host util-linux only as a test fixture"]
+    fn a_live_init_in_another_namespace_is_refused_not_recovered() {
+        let fixture = test_fixture::spawn();
+        let boot = crate::process_control::linux::read_boot_id().unwrap();
+        let start = crate::process_control::linux::read_process_stat(fixture.init_pid)
+            .unwrap()
+            .start_time_ticks;
+        // Right incarnation, wrong recorded namespace identity.
+        let recovery = recovery_for(fixture.init_pid, boot, start);
+        let error = recovery.recover(Duration::from_secs(1)).unwrap_err();
+        assert!(error.contains("recorded namespace init"), "{error}");
     }
 }

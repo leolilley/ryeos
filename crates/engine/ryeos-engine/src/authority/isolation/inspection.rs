@@ -28,6 +28,82 @@ pub struct ProcessScopeReadiness {
     pub pooled_requests: ProtocolProcessControlReadiness,
     pub exclusive_session: ProtocolProcessControlReadiness,
     pub trusted_exclusive_session: ProtocolProcessControlReadiness,
+    /// Which mechanisms this node has qualified to contain and settle every
+    /// descendant of an execution, including those that leave its process
+    /// group. Derived from qualified facts, never from configuration alone.
+    pub descendant_containment: DescendantContainmentReadiness,
+}
+
+/// Result of the host's PID-namespace containment qualification probe.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PidNamespaceContainmentQualification {
+    pub qualified: bool,
+    /// Why the mechanism is or is not qualified; always set.
+    pub detail: String,
+}
+
+impl PidNamespaceContainmentQualification {
+    pub fn not_probed(reason: impl Into<String>) -> Self {
+        Self {
+            qualified: false,
+            detail: reason.into(),
+        }
+    }
+
+    /// Run the host probe: a disposable private namespace whose detached,
+    /// double-forked and nested descendants must all die with its init.
+    pub fn probe() -> Self {
+        match lillux::process_control::probe_pid_namespace_containment() {
+            lillux::process_control::ProbeOutcome::Allowed => Self {
+                qualified: true,
+                detail: "a retained namespace init contained and settled setsid, double-fork \
+                         and nested PID namespace descendants in a disposable probe"
+                    .to_owned(),
+            },
+            other => Self {
+                qualified: false,
+                detail: format!("PID-namespace containment probe: {other:?}"),
+            },
+        }
+    }
+}
+
+/// The mechanisms by which this node can retain authority over every
+/// descendant of one execution.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct DescendantContainmentReadiness {
+    /// A qualified cgroup scope provider (termination and recovery).
+    pub cgroup_scope: bool,
+    pub pid_namespace: PidNamespaceContainmentQualification,
+    /// The node policy accepts the trusted process-group lane. This is a
+    /// weaker guarantee that lets a descendant escape and is never an
+    /// automatic fallback.
+    pub trusted_process_group: bool,
+}
+
+/// The strongest guarantee answering a declared descendant requirement.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DescendantContainmentGuarantee {
+    CgroupScope,
+    PidNamespaceInit,
+    /// Weaker: trusted controller process-group session, no escape proof.
+    TrustedProcessGroup,
+}
+
+impl DescendantContainmentReadiness {
+    /// A guarantee which contains and settles descendants that leave the
+    /// process group, from qualified facts. Preference is stable: a
+    /// qualified cgroup scope, then the PID-namespace init.
+    pub fn enforced_guarantee(&self) -> Option<DescendantContainmentGuarantee> {
+        if self.cgroup_scope {
+            Some(DescendantContainmentGuarantee::CgroupScope)
+        } else if self.pid_namespace.qualified {
+            Some(DescendantContainmentGuarantee::PidNamespaceInit)
+        } else {
+            None
+        }
+    }
 }
 
 impl ProcessScopeReadiness {
@@ -39,7 +115,12 @@ impl ProcessScopeReadiness {
         trusted_process_group_sessions: bool,
         authority_digest: Option<String>,
         qualified_capabilities: BTreeSet<lillux::ProcessScopeCapability>,
+        pid_namespace: PidNamespaceContainmentQualification,
     ) -> Self {
+        let cgroup_scope = matches!(policy, IsolationProcessScopePolicy::Required { .. })
+            && authority_digest.is_some()
+            && qualified_capabilities.contains(&lillux::ProcessScopeCapability::Termination)
+            && qualified_capabilities.contains(&lillux::ProcessScopeCapability::Recovery);
         let (authority, ready, reason) = match (&policy, authority_digest.is_some()) {
             (IsolationProcessScopePolicy::Unconfigured {}, false) => (
                 ProcessScopeAuthorityStatus::Absent,
@@ -76,6 +157,11 @@ impl ProcessScopeReadiness {
             authority,
             authority_digest,
             qualified_capabilities,
+            descendant_containment: DescendantContainmentReadiness {
+                cgroup_scope,
+                pid_namespace,
+                trusted_process_group: trusted_process_group_sessions,
+            },
             ordinary_subprocess: ProtocolProcessControlReadiness {
                 ready: true,
                 reason: ProcessControlReadinessReason::NotRequired,
@@ -243,6 +329,7 @@ mod tests {
             false,
             Some(format!("sha256:{}", "a".repeat(64))),
             BTreeSet::new(),
+            PidNamespaceContainmentQualification::not_probed("test"),
         );
         assert_eq!(
             readiness.authority,
@@ -268,6 +355,7 @@ mod tests {
             false,
             None,
             BTreeSet::new(),
+            PidNamespaceContainmentQualification::not_probed("test"),
         );
         assert_eq!(readiness.authority, ProcessScopeAuthorityStatus::Absent);
         assert!(!readiness.exclusive_session.ready);
@@ -285,6 +373,7 @@ mod tests {
             false,
             Some(format!("sha256:{}", "b".repeat(64))),
             complete_capabilities(),
+            PidNamespaceContainmentQualification::not_probed("test"),
         );
         assert_eq!(readiness.authority, ProcessScopeAuthorityStatus::Qualified);
         assert!(readiness.exclusive_session.ready);
@@ -327,6 +416,7 @@ mod tests {
             false,
             digest.clone(),
             without_freeze.clone(),
+            PidNamespaceContainmentQualification::not_probed("test"),
         );
         assert!(ready.exclusive_session.ready);
         let mut with_freeze = floor();
@@ -337,6 +427,7 @@ mod tests {
             false,
             digest,
             without_freeze,
+            PidNamespaceContainmentQualification::not_probed("test"),
         );
         assert_eq!(
             refused.exclusive_session.reason,
@@ -352,6 +443,7 @@ mod tests {
             true,
             None,
             BTreeSet::new(),
+            PidNamespaceContainmentQualification::not_probed("test"),
         );
         assert!(readiness.trusted_exclusive_session.ready);
         assert_eq!(

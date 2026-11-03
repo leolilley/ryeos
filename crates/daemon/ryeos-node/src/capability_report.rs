@@ -198,6 +198,12 @@ pub struct SignedNodeCapabilityReport {
     pub signature: String,
 }
 
+/// Capability names of descendant containment by retained PID-namespace init.
+pub const PID_NAMESPACE_TERMINATION: &str = "termination:pid_namespace";
+pub const PID_NAMESPACE_RECOVERY: &str = "recovery:pid_namespace";
+pub const PID_NAMESPACE_QUIESCENCE: &str = "quiescence:pid_namespace";
+const PID_NAMESPACE_PROVIDER: &str = "pid_namespace_init";
+
 /// Inputs from the running node that the host facts cannot know.
 pub struct ReportInputs<'a> {
     pub app_root: &'a Path,
@@ -250,6 +256,7 @@ impl NodeCapabilityReport {
             inputs.host_runtime_provider,
             host.gvisor(),
         );
+        add_pid_namespace_containment(&mut view, inputs.isolation, host.gvisor());
         add_provider_environment(&mut view, inputs.provider_environment);
         add_credential_home(&mut view, &credential_home, established.as_deref());
         let mut capacity = BTreeMap::new();
@@ -644,6 +651,38 @@ fn add_scope_capabilities(
             }),
         );
     }
+}
+
+/// Descendant containment by the execution's retained PID-namespace init.
+/// Provided only when the enforced runtime's disposable probe showed that a
+/// setsid'd, double-forked and nested-namespace descendant all die with the
+/// init and the init's exit settles them. Quiescence is explicitly never
+/// provided: namespace membership is not an atomic writer freeze.
+fn add_pid_namespace_containment(
+    view: &mut HostCapabilities,
+    isolation: &ryeos_engine::isolation::IsolationInspection,
+    gvisor: bool,
+) {
+    let containment = &isolation
+        .process_scope_readiness
+        .descendant_containment
+        .pid_namespace;
+    let source = if gvisor {
+        ProofSource::ProviderAttested
+    } else {
+        ProofSource::Measured
+    };
+    for name in [PID_NAMESPACE_TERMINATION, PID_NAMESPACE_RECOVERY] {
+        if containment.qualified {
+            view.provide(name, source.clone(), PID_NAMESPACE_PROVIDER, containment.detail.clone());
+        } else {
+            view.refuse(name, containment.detail.clone());
+        }
+    }
+    view.refuse(
+        PID_NAMESPACE_QUIESCENCE,
+        "a retained PID-namespace init terminates and settles descendants but cannot freeze them",
+    );
 }
 
 /// Grade the provider-delivered environment. The node cannot observe where

@@ -920,6 +920,13 @@ pub fn quiesce_exact_process_group(
     qualified: &std::collections::BTreeSet<lillux::ProcessScopeCapability>,
     timeout: lillux::time::Duration,
 ) -> Result<lillux::QuiescedProcesses> {
+    if let Some(refusal) = identity
+        .process_scope
+        .as_ref()
+        .and_then(lillux::ProcessScopeRecovery::quiescence_refusal)
+    {
+        bail!("{refusal}");
+    }
     if identity.process_scope.is_some() {
         require_scope_quiescence_qualified(qualified)?;
     }
@@ -951,6 +958,13 @@ pub fn recover_quiesced_execution(
     timeout: lillux::time::Duration,
 ) -> Result<lillux::QuiescedProcesses> {
     validate_execution_process_identity_shape(identity)?;
+    if let Some(refusal) = identity
+        .process_scope
+        .as_ref()
+        .and_then(lillux::ProcessScopeRecovery::quiescence_refusal)
+    {
+        bail!("{refusal}");
+    }
     if let Some(scope) = &identity.process_scope {
         return scope
             .recover_quiesced(timeout)

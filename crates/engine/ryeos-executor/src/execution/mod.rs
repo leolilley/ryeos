@@ -2183,6 +2183,21 @@ fn require_bound_scopes_quiescence_qualified(
     identities: &[ryeos_app::process::ExecutionProcessIdentity],
     qualified: &std::collections::BTreeSet<lillux::ProcessScopeCapability>,
 ) -> Result<()> {
+    // A PID-namespace-contained execution can be terminated and settled but
+    // never frozen, whatever the node qualified for cgroup scopes.
+    if let Some((scoped, refusal)) = identities.iter().find_map(|identity| {
+        identity
+            .process_scope
+            .as_ref()
+            .and_then(lillux::ProcessScopeRecovery::quiescence_refusal)
+            .map(|refusal| (identity, refusal))
+    }) {
+        anyhow::bail!(
+            "workspace quiescence refused before any process group was stopped: the execution \
+             with process group leader {} cannot be quiesced: {refusal}",
+            scoped.group_leader_pid
+        );
+    }
     match identities
         .iter()
         .find(|identity| identity.process_scope.is_some())

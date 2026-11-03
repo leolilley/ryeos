@@ -253,7 +253,9 @@ pub(super) fn recover_init(
         {
             Ok(RecoveredInit::Gone)
         }
-        _ => Err("recorded namespace init is live but is not the recorded namespace init".to_owned()),
+        _ => {
+            Err("recorded namespace init is live but is not the recorded namespace init".to_owned())
+        }
     }
 }
 
@@ -312,7 +314,14 @@ pub fn probe_pid_namespace_containment() -> super::host_capability::ProbeOutcome
     let witnessed = match fork_guard.witness_creation("PID namespace containment probe creation") {
         Ok(witnessed) => witnessed,
         Err(error) => {
-            close_all(&[report[0], report[1], ready[0], ready[1], lifeline[0], lifeline[1]]);
+            close_all(&[
+                report[0],
+                report[1],
+                ready[0],
+                ready[1],
+                lifeline[0],
+                lifeline[1],
+            ]);
             return unobservable(format!("creation witness for probe: {error}"));
         }
     };
@@ -321,7 +330,14 @@ pub fn probe_pid_namespace_containment() -> super::host_capability::ProbeOutcome
     let wrapper = unsafe { libc::fork() };
     if wrapper < 0 {
         let error = std::io::Error::last_os_error();
-        close_all(&[report[0], report[1], ready[0], ready[1], lifeline[0], lifeline[1]]);
+        close_all(&[
+            report[0],
+            report[1],
+            ready[0],
+            ready[1],
+            lifeline[0],
+            lifeline[1],
+        ]);
         return unobservable(format!("fork probe wrapper: {error}"));
     }
     if wrapper == 0 {
@@ -372,7 +388,9 @@ unsafe fn probe_wrapper(
         libc::close(lifeline[0]);
         libc::setpgid(0, 0);
         if libc::unshare(libc::CLONE_NEWUSER | libc::CLONE_NEWPID) != 0 {
-            let code = std::io::Error::last_os_error().raw_os_error().unwrap_or(255);
+            let code = std::io::Error::last_os_error()
+                .raw_os_error()
+                .unwrap_or(255);
             libc::_exit(code.clamp(1, 250));
         }
         let init = libc::fork();
@@ -562,13 +580,16 @@ fn probe_observe(
     }
     let pinned = (|| -> Result<PinnedPidNamespace, String> {
         let pidfd = linux::open_pidfd(init_pid)?;
-        let identity = super::capture_exact_process_identity_from_pidfd(init_pid, None, pidfd.as_fd())?;
+        let identity =
+            super::capture_exact_process_identity_from_pidfd(init_pid, None, pidfd.as_fd())?;
         PinnedPidNamespace::pin(&identity)
     })();
     let pinned = match pinned {
         Ok(pinned) => pinned,
         Err(error) => {
-            return refused(format!("pin the namespace init of a private namespace: {error}"));
+            return refused(format!(
+                "pin the namespace init of a private namespace: {error}"
+            ));
         }
     };
     if let Err(error) = pinned.terminate_and_wait(Duration::from_secs(5)) {
@@ -705,7 +726,10 @@ mod tests {
             // A host that forbids unprivileged user namespaces cannot run
             // the probe; the mechanism is then simply not qualified there.
             ProbeOutcome::Refused { errno, reason }
-                if matches!(errno, libc::EPERM | libc::EINVAL | libc::ENOSPC | libc::EACCES) =>
+                if matches!(
+                    errno,
+                    libc::EPERM | libc::EINVAL | libc::ENOSPC | libc::EACCES
+                ) =>
             {
                 eprintln!("skipped: private namespaces refused here: {reason}");
             }
@@ -820,5 +844,73 @@ mod tests {
         );
         assert!(!owner.contains_pid(detached).unwrap());
         assert!(!owner.contains_pid(nested).unwrap());
+    }
+}
+
+/// Test-only construction of a disposable namespace with a detached and a
+/// nested descendant. Host util-linux is fixture construction, not a launch
+/// dependency or a substitute for the native probe.
+#[cfg(test)]
+pub(super) mod test_fixture {
+    use super::*;
+    use std::io::{BufRead, BufReader};
+    use std::os::unix::process::CommandExt;
+    use std::process::{Child, Command, Stdio};
+
+    pub(in crate::process_control) struct NamespaceFixture {
+        pub(in crate::process_control) wrapper: Child,
+        pub(in crate::process_control) init_pid: u32,
+        pub(in crate::process_control) detached: u32,
+        pub(in crate::process_control) nested: u32,
+    }
+
+    impl Drop for NamespaceFixture {
+        fn drop(&mut self) {
+            let _ = self.wrapper.kill();
+            let _ = self.wrapper.wait();
+        }
+    }
+
+    pub(in crate::process_control) fn children(pid: u32) -> Vec<u32> {
+        std::fs::read_to_string(format!("/proc/{pid}/task/{pid}/children"))
+            .unwrap()
+            .split_whitespace()
+            .map(|pid| pid.parse().unwrap())
+            .collect()
+    }
+
+    pub(in crate::process_control) fn spawn() -> NamespaceFixture {
+        let mut wrapper = Command::new("unshare")
+            .args([
+                "--user", "--map-root-user", "--pid", "--fork", "--kill-child=KILL",
+                "/bin/sh", "-c",
+                "setsid unshare --pid --fork --kill-child=KILL /bin/sh -c 'echo ready; exec sleep 60' & wait",
+            ])
+            .process_group(0)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let output = wrapper.stdout.take().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let mut line = String::new();
+            let result = BufReader::new(output).read_line(&mut line).map(|_| line);
+            let _ = tx.send(result);
+        });
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(5)).unwrap().unwrap(),
+            "ready\n"
+        );
+        reader.join().unwrap();
+        let init_pid = children(wrapper.id())[0];
+        let detached = children(init_pid)[0];
+        let nested = children(detached)[0];
+        NamespaceFixture {
+            wrapper,
+            init_pid,
+            detached,
+            nested,
+        }
     }
 }
