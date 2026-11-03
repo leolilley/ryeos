@@ -77,7 +77,7 @@ const LAUNCH_INTENT: &str = "guest-supervisor-launch-intent.json";
 const SUPERVISOR_STATE: &str = "supervisor-state";
 const ATTACH_REQUEST: &str = "attach.request.json";
 pub(crate) const MAX_STDERR_BYTES: usize = 256 * 1024;
-const MAX_PLAN_BYTES: u64 = 64 * 1024;
+const MAX_PLAN_BYTES: u64 = 1024 * 1024;
 pub(crate) const POLL_INTERVAL: lillux::time::Duration = lillux::time::Duration::from_millis(10);
 /// The owner's own cancelled-occurrence settlement window, plus slack.
 const OWNER_CLEANUP: lillux::time::Duration = lillux::time::Duration::from_secs(45);
@@ -120,6 +120,9 @@ pub struct GuestStartRehearsalRequest<'a> {
     /// A real candidate program and the mounts its inputs name. When set,
     /// `product` and `file_products` are not delivered.
     pub candidate: Option<RehearsalCandidate<'a>>,
+    /// Answer the attach request as the controller would and observe the
+    /// supervisor until its first exchange frame or its exit.
+    pub answer_attach: bool,
 }
 
 /// A candidate program and the guest inputs a controller delivered with it.
@@ -248,6 +251,18 @@ pub struct GuestStartRehearsalPhases {
     pub total_ms: u64,
 }
 
+/// The supervisor after the rehearsal answered its attach request as the
+/// controller would: either it published its first exchange frame, or it
+/// stopped first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GuestStartRehearsalAfterAttach {
+    /// Attach publication to the delivered response.
+    pub response_ms: u64,
+    /// Response delivery to the first exchange request, if one appeared.
+    pub first_exchange_ms: Option<u64>,
+    pub outcome: String,
+}
+
 /// What the package carried, for judging the owner's profile ceilings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GuestStartRehearsalPackage {
@@ -264,6 +279,9 @@ pub enum GuestStartRehearsalOutcome {
         attach_budget_ms: u64,
         within_budget: bool,
         package: GuestStartRehearsalPackage,
+        /// What followed the rehearsal's own attach response, when it gave one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after_attach: Option<GuestStartRehearsalAfterAttach>,
         /// How the owner ended after the rehearsal asked it to cancel.
         owner_cleanup: String,
         owner_stderr: String,
@@ -311,6 +329,18 @@ pub(crate) struct HostPlan {
     pub(crate) attach_budget_ms: u64,
     pub(crate) owner_deadline_ms: u64,
     pub(crate) package: GuestStartRehearsalPackage,
+    /// Rehearsal-only controller authority for answering the attach request.
+    pub(crate) answer_attach: Option<AttachAnswer>,
+}
+
+/// The rehearsal's own controller key and sealed bootstrap, never a node's.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AttachAnswer {
+    controller_key_hex: String,
+    bootstrap_b64: String,
+    uid: u32,
+    gid: u32,
 }
 
 fn digest_of(label: &str, run: &str) -> String {
@@ -1079,6 +1109,17 @@ fn prepare(
         attach_budget_ms,
         owner_deadline_ms,
         package: package_extent,
+        answer_attach: if request.answer_attach {
+            let lillux::GuestRuntimeAccount::Unix { uid, gid } = request.profile.account;
+            Some(AttachAnswer {
+                controller_key_hex: hex::encode(controller_key.to_bytes()),
+                bootstrap_b64: STANDARD.encode(&bootstrap_bytes),
+                uid,
+                gid,
+            })
+        } else {
+            None
+        },
     };
     write_file(work, PLAN_NAME, &serde_json::to_vec(&plan)?, 0o600)?;
     Ok(Prepared { plan })
@@ -1430,6 +1471,11 @@ fn observe_owner(plan: &HostPlan) -> Result<GuestStartRehearsalOutcome> {
     }
     let reached_count = times.iter().take_while(|slot| slot.is_some()).count();
     if reached_count == times.len() {
+        let after_attach = plan.answer_attach.as_ref().map(|answer| {
+            answer_and_observe(plan, answer, &mut owner, &mut |slice| {
+                drain(&mut captured, slice)
+            })
+        });
         let cleanup = settle_owner(&mut owner, &mut |slice| drain(&mut captured, slice));
         let attach_budget_ms = plan.attach_budget_ms;
         let attach_window = phases.release_ms.unwrap_or(0) + phases.attach_ms.unwrap_or(0);
@@ -1439,6 +1485,7 @@ fn observe_owner(plan: &HostPlan) -> Result<GuestStartRehearsalOutcome> {
             phases,
             attach_budget_ms,
             package: plan.package.clone(),
+            after_attach,
             owner_cleanup: cleanup,
             owner_stderr: String::from_utf8_lossy(&captured).into_owned(),
         });
@@ -1470,6 +1517,131 @@ fn observe_owner(plan: &HostPlan) -> Result<GuestStartRehearsalOutcome> {
         package: Some(plan.package.clone()),
         owner_stderr: String::from_utf8_lossy(&captured).into_owned(),
     })
+}
+
+/// Time the supervisor has after the attach response to publish its first
+/// exchange frame.
+const AFTER_ATTACH_WINDOW: lillux::time::Duration = lillux::time::Duration::from_secs(180);
+
+fn answer_and_observe(
+    plan: &HostPlan,
+    answer: &AttachAnswer,
+    owner: &mut lillux::subordinate_process::SubordinateProcess,
+    drain: &mut dyn FnMut(lillux::time::Duration),
+) -> GuestStartRehearsalAfterAttach {
+    let started = std::time::Instant::now();
+    if let Err(error) = answer_attach(plan, answer) {
+        return GuestStartRehearsalAfterAttach {
+            response_ms: elapsed_ms(started, std::time::Instant::now()),
+            first_exchange_ms: None,
+            outcome: format!("the rehearsal could not answer the attach request: {error:#}"),
+        };
+    }
+    let answered = std::time::Instant::now();
+    let exchange = format!("{}/exchange-00001.request.json", plan.mailbox_root);
+    let deadline = lillux::time::MonotonicDeadline::after(AFTER_ATTACH_WINDOW);
+    let outcome = loop {
+        if present(&exchange) {
+            break (
+                Some(elapsed_ms(answered, std::time::Instant::now())),
+                "the supervisor published its first exchange frame".to_owned(),
+            );
+        }
+        match owner.try_exit() {
+            Ok(Some(exit)) => {
+                drain(lillux::time::Duration::from_millis(500));
+                break (
+                    None,
+                    format!(
+                        "the owner exited with {:?} before any exchange frame",
+                        exit.code
+                    ),
+                );
+            }
+            Ok(None) if deadline.has_elapsed() => {
+                break (
+                    None,
+                    "no exchange frame within the observation window".to_owned(),
+                );
+            }
+            Ok(None) => drain(POLL_INTERVAL),
+            Err(error) => break (None, format!("owner exit observation failed: {error}")),
+        }
+    };
+    GuestStartRehearsalAfterAttach {
+        response_ms: elapsed_ms(started, answered),
+        first_exchange_ms: outcome.0,
+        outcome: outcome.1,
+    }
+}
+
+/// Build and deliver the attach response a controller would: the channel
+/// binding over the sealed bootstrap, signed by the rehearsal's own key.
+fn answer_attach(plan: &HostPlan, answer: &AttachAnswer) -> Result<()> {
+    use ryeos_state::external_execution::transport::{
+        EXTERNAL_CHANNEL_TRANSPORT_SCHEMA, ExternalChannelAttachRequest,
+        ExternalChannelAttachResponse, ExternalRelayResponseEnvelope, ExternalRelayResponseKind,
+    };
+    let key_bytes: [u8; 32] = hex::decode(&answer.controller_key_hex)?
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("rehearsal controller key has the wrong length"))?;
+    let controller_key = lillux::crypto::SigningKey::from_bytes(&key_bytes);
+    let bootstrap: ExternalSupervisorBootstrap =
+        serde_json::from_slice(&STANDARD.decode(&answer.bootstrap_b64)?)?;
+    let request_bytes = std::fs::read(format!("{}/{ATTACH_REQUEST}", plan.mailbox_root))?;
+    let request: ExternalChannelAttachRequest = serde_json::from_slice(&request_bytes)?;
+    request.validate_for_bootstrap(&bootstrap)?;
+    let issued_at_ms = lillux::time::timestamp_millis();
+    let execution_deadline_ms =
+        issued_at_ms + i64::from(bootstrap.execution_timeout_seconds) * 1_000;
+    let max_bytes = bootstrap.channel_max_bytes;
+    let binding = ryeos_state::external_execution::ExecutionChannelBinding {
+        schema: ryeos_state::external_execution::EXECUTION_CHANNEL_BINDING_SCHEMA,
+        execution_mode: bootstrap.candidate_program.execution_mode(),
+        placement_thread_id: bootstrap.placement_thread_id.clone(),
+        allocation_request_digest: bootstrap.allocation_request_digest.clone(),
+        occurrence_id: bootstrap.occurrence_id.clone(),
+        admitted_capsule_hash: bootstrap.admitted_capsule_hash.clone(),
+        base_snapshot_hash: bootstrap.base_snapshot_hash.clone(),
+        execution_binding_hash: bootstrap.execution_binding_hash.clone(),
+        supervisor_runtime_hash: bootstrap.supervisor_runtime_hash.clone(),
+        candidate_program_digest: bootstrap.candidate_program.digest()?,
+        channel_nonce: lillux::sha256_hex(&lillux::crypto::generate_random_bytes::<32>()),
+        owner_public_key: bootstrap.owner_public_key.clone(),
+        supervisor_public_key: request.supervisor_public_key.clone(),
+        issued_at_ms,
+        execution_deadline_ms,
+        expires_at_ms: execution_deadline_ms
+            + i64::from(bootstrap.post_execution_timeout_seconds) * 1_000,
+        candidate_export_max_bytes: bootstrap.candidate_export_max_bytes,
+        max_frames: u32::try_from(
+            max_bytes
+                .div_ceil(ryeos_state::external_execution::MAX_CHUNK_BYTES as u64)
+                .saturating_mul(4)
+                .clamp(64, 65_536),
+        )?,
+        max_bytes,
+    };
+    binding.validate()?;
+    let response = ExternalChannelAttachResponse {
+        schema: EXTERNAL_CHANNEL_TRANSPORT_SCHEMA,
+        binding_digest: binding.digest()?,
+        binding,
+    };
+    let envelope = ExternalRelayResponseEnvelope::sign(
+        &bootstrap,
+        ExternalRelayResponseKind::Attach,
+        &lillux::sha256_hex(&request_bytes),
+        None,
+        &response,
+        &controller_key,
+    )?;
+    crate::guest_relay_loopback::deliver_owned(
+        &format!("{}/attach.response.json", plan.mailbox_root),
+        &envelope.canonical_bytes()?,
+        answer.uid,
+        answer.gid,
+    )
 }
 
 /// Ask the owner to cancel, as a lost controller would, then force it.

@@ -6,9 +6,13 @@
 //! `RYEOS_GUEST_START_REHEARSAL_BINDING=<binding id>` rehearses that node's
 //! installed products (read-only) and prints the outcome;
 //! `RYEOS_GUEST_START_REHEARSAL_OWNER` substitutes a candidate owner build
-//! for the installed owner executable, and
+//! for the installed owner executable (`..._SUPERVISOR` and `..._LAUNCHER`
+//! likewise for those), and
 //! `RYEOS_GUEST_START_REHEARSAL_BASE_SNAPSHOT=<hash>` delivers that project
 //! snapshot from the node's CAS as the base;
+//! `RYEOS_GUEST_START_REHEARSAL_RETAINED=<dump>` rehearses a placement's
+//! retained candidate and inputs instead, and with
+//! `RYEOS_GUEST_START_REHEARSAL_ANSWER_ATTACH=1` answers its attach request;
 //! `RYEOS_GUEST_START_REHEARSAL_FILE_PRODUCT=<manifest hash>` also mounts
 //! that single-file large-content product. Otherwise the
 //! synthetic cases run, with executables from
@@ -244,8 +248,15 @@ fn node_selection(app: &Path, binding: &str, inputs: &Path) -> Result<NodeSelect
             None => member(&format!("bin/{OWNER}"), "owner")?,
         },
         profile,
-        supervisor: find_bundle_member(app, SUPERVISOR, &field("supervisor_artifact_hash")?)?,
-        launcher: find_bundle_member(app, LAUNCHER, &field("launcher_artifact_hash")?)?,
+        // A candidate supervisor build may stand in for the installed one.
+        supervisor: match std::env::var_os("RYEOS_GUEST_START_REHEARSAL_SUPERVISOR") {
+            Some(path) => PathBuf::from(path),
+            None => find_bundle_member(app, SUPERVISOR, &field("supervisor_artifact_hash")?)?,
+        },
+        launcher: match std::env::var_os("RYEOS_GUEST_START_REHEARSAL_LAUNCHER") {
+            Some(path) => PathBuf::from(path),
+            None => find_bundle_member(app, LAUNCHER, &field("launcher_artifact_hash")?)?,
+        },
         product_member: (file.path, source, file.mode.unwrap_or(0o755)),
         _product_lease: lease,
         product_manifest_record,
@@ -440,6 +451,7 @@ fn rehearse_retained(
             executable_search: guest_inputs.executable_search.clone(),
             limits: serde_json::from_value(bootstrap.clone())?,
         }),
+        answer_attach: std::env::var_os("RYEOS_GUEST_START_REHEARSAL_ANSWER_ATTACH").is_some(),
     })
 }
 
@@ -498,6 +510,7 @@ fn rehearse_node(app: &Path, binding: &str) -> Result<GuestStartRehearsalOutcome
         work_parent: &work_parent(),
         host_executable: &std::env::current_exe()?,
         candidate: None,
+        answer_attach: false,
     })
 }
 
@@ -556,6 +569,7 @@ fn rehearse_synthetic(
         work_parent: &work_parent(),
         host_executable: &std::env::current_exe()?,
         candidate: None,
+        answer_attach: false,
     })
 }
 

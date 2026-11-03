@@ -158,6 +158,7 @@ impl GuestRelayLoopbackHost {
                     regular_bytes: 0,
                     entries: 0,
                 },
+                answer_attach: None,
             };
             write_file(&work, PLAN_NAME, &serde_json::to_vec(&plan)?, 0o600)?;
             Ok(())
@@ -526,6 +527,41 @@ fn split(path: &str) -> Result<(lillux::PinnedDirectory, &OsStr)> {
     Ok((directory, name))
 }
 
+/// Deliver one new mailbox file owned by `uid`/`gid` with mode `0600`. Owner
+/// and mode are set before the name appears, so the guest never observes a
+/// file it cannot read.
+pub(crate) fn deliver_owned(path: &str, bytes: &[u8], uid: u32, gid: u32) -> Result<()> {
+    ensure!(
+        !bytes.is_empty() && bytes.len() as u64 <= MAX_RELAY_FILE_BYTES,
+        "loopback relay upload is empty or too large"
+    );
+    let (directory, name) = split(path)?;
+    ensure!(
+        directory.open_pinned_regular(name, false)?.is_none(),
+        "loopback relay slot {path} already holds a file"
+    );
+    let staging = format!(
+        ".loopback-delivery-{}",
+        hex::encode(lillux::crypto::generate_random_bytes::<8>())
+    );
+    let mut file = directory.open_regular_create(OsStr::new(&staging), true, true, 0o600)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    drop(file);
+    let staged = directory
+        .open_pinned_regular(OsStr::new(&staging), false)?
+        .context("loopback staged upload vanished")?;
+    lillux::ControllerAccount::unix(uid, gid).grant_private_file(&staged)?;
+    directory
+        .rename_regular_child_noreplace_atomic(
+            OsStr::new(&staging),
+            name,
+            &staged.try_clone_descriptor()?,
+        )
+        .map_err(anyhow::Error::from)?;
+    Ok(())
+}
+
 fn handle(request: Request) -> Result<Message> {
     match request {
         Request::Download { path } => {
@@ -546,38 +582,7 @@ fn handle(request: Request) -> Result<Message> {
             uid,
             gid,
         } => {
-            let bytes = STANDARD.decode(bytes_base64)?;
-            ensure!(
-                !bytes.is_empty() && bytes.len() as u64 <= MAX_RELAY_FILE_BYTES,
-                "loopback relay upload is empty or too large"
-            );
-            let (directory, name) = split(&path)?;
-            ensure!(
-                directory.open_pinned_regular(name, false)?.is_none(),
-                "loopback relay slot {path} already holds a file"
-            );
-            // Owner and mode are set before the name appears, so the guest
-            // never observes a file it cannot read.
-            let staging = format!(
-                ".loopback-delivery-{}",
-                hex::encode(lillux::crypto::generate_random_bytes::<8>())
-            );
-            let mut file =
-                directory.open_regular_create(OsStr::new(&staging), true, true, 0o600)?;
-            file.write_all(&bytes)?;
-            file.sync_all()?;
-            drop(file);
-            let staged = directory
-                .open_pinned_regular(OsStr::new(&staging), false)?
-                .context("loopback staged upload vanished")?;
-            lillux::ControllerAccount::unix(uid, gid).grant_private_file(&staged)?;
-            directory
-                .rename_regular_child_noreplace_atomic(
-                    OsStr::new(&staging),
-                    name,
-                    &staged.try_clone_descriptor()?,
-                )
-                .map_err(anyhow::Error::from)?;
+            deliver_owned(&path, &STANDARD.decode(bytes_base64)?, uid, gid)?;
             Ok(Message::Uploaded)
         }
         Request::Stop => bail!("stop is handled by the serve loop"),
