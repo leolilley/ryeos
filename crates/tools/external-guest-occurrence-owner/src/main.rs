@@ -28,7 +28,7 @@ use ryeos_external_execution_contract::guest_owner_report::{
 
 const RUNTIME_ROOT: &str = "/ryeos/guest-runtime";
 const ACTIVATION_ROOT: &str = "/ryeos/activation";
-const OCCURRENCES_ROOT: &str = "/ryeos/occurrences";
+const OCCURRENCES_ROOT: &str = ryeos_external_execution_contract::GUEST_OCCURRENCES_ROOT;
 const IMPORT_NAME: &str = "signed-import.json";
 const PACKAGE_NAME: &str = "guest-package";
 const POLL_INTERVAL: lillux::time::Duration = lillux::time::Duration::from_millis(50);

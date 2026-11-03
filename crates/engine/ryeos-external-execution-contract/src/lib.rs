@@ -37,6 +37,11 @@ use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 use zeroize::Zeroize as _;
 
+/// Where the guest occurrence owner creates one private root per occurrence.
+/// A relay mailbox lives inside its occurrence's root, so a relay binding's
+/// private mailbox parent is exactly this path.
+pub const GUEST_OCCURRENCES_ROOT: &str = "/ryeos/occurrences";
+
 pub const LIFECYCLE_ADAPTER_PROTOCOL: &str = "ryeos.external-execution.lifecycle-adapter.v2";
 pub const PROVIDER_DECLARATION_PROTOCOL: &str = "ryeos.external-execution.provider-declaration.v2";
 pub const PROVIDER_CONFIGURATION_PROTOCOL: &str =

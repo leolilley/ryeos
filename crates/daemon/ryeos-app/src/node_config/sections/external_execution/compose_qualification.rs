@@ -720,7 +720,8 @@ mod tests {
             snapshot_id: "snp-exact".into(),
             plan: "standard".into(),
             region: "oregon".into(),
-            private_mailbox_parent: "/run/ryeos/private-relay".into(),
+            private_mailbox_parent: ryeos_external_execution_contract::GUEST_OCCURRENCES_ROOT
+                .into(),
             capacity_group: "qualification-workers".into(),
             credential_generation: super::super::compose::fresh_credential_generation().unwrap(),
             limits: ComposeLimits::default(),
@@ -901,6 +902,10 @@ mod tests {
         );
         assert!(
             refused(&|r| r.private_mailbox_parent = "/run/../x".into()).contains("mailbox parent")
+        );
+        assert!(
+            refused(&|r| r.private_mailbox_parent = "/run/ryeos/private-relay".into())
+                .contains("guest owner's occurrence root")
         );
         assert!(refused(&|r| r.limits.max_active = 0).contains("limits"));
         assert!(!published(&node));

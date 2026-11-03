@@ -464,6 +464,12 @@ pub(super) fn select_transport(
             private_mailbox_parent,
         } => {
             ensure!(
+                private_mailbox_parent == ryeos_external_execution_contract::GUEST_OCCURRENCES_ROOT,
+                "a file-relay mailbox parent must be the guest owner's occurrence root `{}`, \
+                 where each relay mailbox lives; got `{private_mailbox_parent}`",
+                ryeos_external_execution_contract::GUEST_OCCURRENCES_ROOT
+            );
+            ensure!(
                 settings.get("owner_id").and_then(Value::as_str)
                     == Some(owner_workspace_id.as_str()),
                 "file-relay settings owner_id must equal the owner workspace id"
@@ -1084,7 +1090,8 @@ pub(crate) mod tests {
     fn relay() -> ComposeTransportRequest {
         ComposeTransportRequest::FileRelay {
             owner_workspace_id: "render-owner".into(),
-            private_mailbox_parent: "/run/ryeos/private-relay".into(),
+            private_mailbox_parent: ryeos_external_execution_contract::GUEST_OCCURRENCES_ROOT
+                .into(),
         }
     }
 
