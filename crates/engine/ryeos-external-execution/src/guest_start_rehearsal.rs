@@ -60,11 +60,11 @@ use crate::guest_runtime_product::{OWNER_NAME, produce_guest_owner_runtime};
 /// finds it set at startup is the rehearsal host and runs nothing else.
 pub const REHEARSAL_HOST_ENV: &str = "RYEOS_GUEST_START_REHEARSAL_HOST";
 
-const PLAN_NAME: &str = "plan.json";
-const RUNTIME_NAME: &str = "runtime";
-const ACTIVATION_NAME: &str = "activation";
-const IMPORT_NAME: &str = "signed-import.json";
-const PACKAGE_NAME: &str = "guest-package";
+pub(crate) const PLAN_NAME: &str = "plan.json";
+pub(crate) const RUNTIME_NAME: &str = "runtime";
+pub(crate) const ACTIVATION_NAME: &str = "activation";
+pub(crate) const IMPORT_NAME: &str = "signed-import.json";
+pub(crate) const PACKAGE_NAME: &str = "guest-package";
 const PLACEMENT_ID: &str = "T-guest-start-rehearsal";
 const PRODUCT_MOUNT: &str = "runtime";
 const PRODUCT_DESTINATION: &str = "/runtime/product";
@@ -73,9 +73,9 @@ const INSTALL_INTENT: &str = "guest-base-install-intent.json";
 const LAUNCH_INTENT: &str = "guest-supervisor-launch-intent.json";
 const SUPERVISOR_STATE: &str = "supervisor-state";
 const ATTACH_REQUEST: &str = "attach.request.json";
-const MAX_STDERR_BYTES: usize = 256 * 1024;
+pub(crate) const MAX_STDERR_BYTES: usize = 256 * 1024;
 const MAX_PLAN_BYTES: u64 = 64 * 1024;
-const POLL_INTERVAL: lillux::time::Duration = lillux::time::Duration::from_millis(10);
+pub(crate) const POLL_INTERVAL: lillux::time::Duration = lillux::time::Duration::from_millis(10);
 /// The owner's own cancelled-occurrence settlement window, plus slack.
 const OWNER_CLEANUP: lillux::time::Duration = lillux::time::Duration::from_secs(45);
 /// Host directories the enclosure carries; `/ryeos` and `/tmp` are its own.
@@ -241,24 +241,35 @@ impl GuestStartRehearsalOutcome {
     }
 }
 
+/// What the enclosed host does once the owner is started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum HostMode {
+    /// Observe the owner until the supervisor publishes its attach request.
+    AttachProbe,
+    /// Serve the controller's relay file moves until it asks to stop.
+    RelayLoopback,
+}
+
 /// Everything the host needs besides the work directory's files.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct HostPlan {
-    occurrence_id: String,
-    mailbox_root: String,
-    runtime_manifest_hash: String,
-    assignment_b64: String,
-    attach_budget_ms: u64,
-    owner_deadline_ms: u64,
-    package: GuestStartRehearsalPackage,
+pub(crate) struct HostPlan {
+    pub(crate) mode: HostMode,
+    pub(crate) occurrence_id: String,
+    pub(crate) mailbox_root: String,
+    pub(crate) runtime_manifest_hash: String,
+    pub(crate) assignment_b64: String,
+    pub(crate) attach_budget_ms: u64,
+    pub(crate) owner_deadline_ms: u64,
+    pub(crate) package: GuestStartRehearsalPackage,
 }
 
 fn digest_of(label: &str, run: &str) -> String {
     lillux::sha256_hex(format!("ryeos.guest-start-rehearsal.{run}.{label}").as_bytes())
 }
 
-fn write_file(
+pub(crate) fn write_file(
     directory: &lillux::PinnedDirectory,
     name: &str,
     bytes: &[u8],
@@ -275,7 +286,7 @@ fn write_file(
 }
 
 /// Stream an open source into a new exact-mode file of `directory`.
-fn copy_file(
+pub(crate) fn copy_file(
     directory: &lillux::PinnedDirectory,
     name: &str,
     source: &lillux::PinnedRegularFile,
@@ -303,7 +314,7 @@ fn open_source(path: &Path, what: &str) -> Result<lillux::PinnedRegularFile> {
 }
 
 /// Copy a product directory tree with its exact modes.
-fn copy_tree(
+pub(crate) fn copy_tree(
     source: &lillux::PinnedDirectory,
     target: &lillux::PinnedDirectory,
     budget: &mut u64,
@@ -786,6 +797,7 @@ fn prepare(
     copy_file(&activation, PACKAGE_NAME, package.payload(), 0o600)?;
     package.discard()?;
     let plan = HostPlan {
+        mode: HostMode::AttachProbe,
         occurrence_id,
         mailbox_root,
         runtime_manifest_hash,
@@ -799,7 +811,7 @@ fn prepare(
 }
 
 /// Refuse where the host cannot create the enclosure the owner needs.
-fn host_refusal(profile: &GuestOwnerRuntimeProfile, work_parent: &Path) -> Option<String> {
+pub(crate) fn host_refusal(profile: &GuestOwnerRuntimeProfile, work_parent: &Path) -> Option<String> {
     let facts = lillux::process_control::HostFacts::observe(0, work_parent);
     if !facts.unshare_user_pid_mount.allowed() {
         return Some(format!(
@@ -922,7 +934,7 @@ pub fn run_rehearsal_host_if_requested() {
     std::process::exit(0);
 }
 
-fn report(outcome: &GuestStartRehearsalOutcome) {
+pub(crate) fn report(outcome: &GuestStartRehearsalOutcome) {
     match serde_json::to_string(outcome) {
         Ok(line) => println!("{line}"),
         Err(error) => eprintln!("rehearsal outcome is not serializable: {error}"),
@@ -961,10 +973,21 @@ fn host(work_path: &Path) -> Result<GuestStartRehearsalOutcome> {
     let spec = enclosure_spec(uid, gid, plan.package.framed_bytes);
     let mut outcome = None;
     let entered = lillux::root_enclosure::run_in_root_enclosure(&spec, || {
-        let result = enclosed(&plan, &runtime, &import, &package);
-        report(&result.unwrap_or_else(|error| {
-            GuestStartRehearsalOutcome::refused(GuestStartRehearsalStep::Prepare, format!("{error:#}"))
-        }));
+        let laid_out = lay_out(&plan, &runtime, &import, &package);
+        match plan.mode {
+            HostMode::AttachProbe => {
+                let result = laid_out.and_then(|()| observe_owner(&plan));
+                report(&result.unwrap_or_else(|error| {
+                    GuestStartRehearsalOutcome::refused(
+                        GuestStartRehearsalStep::Prepare,
+                        format!("{error:#}"),
+                    )
+                }));
+            }
+            HostMode::RelayLoopback => {
+                crate::guest_relay_loopback::serve_enclosed(&plan, laid_out);
+            }
+        }
         0
     });
     match entered {
@@ -978,13 +1001,13 @@ fn host(work_path: &Path) -> Result<GuestStartRehearsalOutcome> {
     outcome.context("rehearsal host has no outcome")
 }
 
-/// Lay out `/ryeos` as a sandbox host would, start the owner and observe it.
-fn enclosed(
+/// Lay out `/ryeos` as a sandbox host would.
+fn lay_out(
     plan: &HostPlan,
     runtime: &lillux::PinnedDirectory,
     import: &lillux::PinnedRegularFile,
     package: &lillux::PinnedRegularFile,
-) -> Result<GuestStartRehearsalOutcome> {
+) -> Result<()> {
     let root = lillux::PinnedDirectory::open(Path::new("/"))?.context("enclosure root is absent")?;
     let ryeos = root.create_child(OsStr::new("ryeos"), 0o700)?;
     let installed = ryeos.create_child(OsStr::new("guest-runtime"), 0o700)?;
@@ -1021,7 +1044,7 @@ fn enclosed(
     copy_file(&activation, IMPORT_NAME, import, 0o600)?;
     copy_file(&activation, PACKAGE_NAME, package, 0o600)?;
     ryeos.set_mode(0o750)?;
-    observe_owner(plan)
+    Ok(())
 }
 
 fn present(path: &str) -> bool {
@@ -1034,6 +1057,24 @@ fn non_empty_directory(path: &str) -> bool {
 
 fn elapsed_ms(start: std::time::Instant, at: std::time::Instant) -> u64 {
     u64::try_from(at.saturating_duration_since(start).as_millis()).unwrap_or(u64::MAX)
+}
+
+/// Start the installed owner exactly as a sandbox host starts it.
+pub(crate) fn spawn_owner(
+    plan: &HostPlan,
+) -> Result<lillux::subordinate_process::SubordinateProcess> {
+    lillux::subordinate_process::SubordinateProcess::spawn(
+        lillux::subordinate_process::SubordinateProcessRequest {
+            cmd: format!("/ryeos/guest-runtime/bin/{OWNER_NAME}"),
+            argv0: None,
+            args: vec!["--assignment-b64".into(), plan.assignment_b64.clone()],
+            cwd: "/".into(),
+            envs: Vec::new(),
+            limits: None,
+            inherited_fds: Vec::new(),
+        },
+    )
+    .map_err(anyhow::Error::msg)
 }
 
 fn observe_owner(plan: &HostPlan) -> Result<GuestStartRehearsalOutcome> {
@@ -1054,18 +1095,7 @@ fn observe_owner(plan: &HostPlan) -> Result<GuestStartRehearsalOutcome> {
         }
     };
     let start = std::time::Instant::now();
-    let mut owner = lillux::subordinate_process::SubordinateProcess::spawn(
-        lillux::subordinate_process::SubordinateProcessRequest {
-            cmd: format!("/ryeos/guest-runtime/bin/{OWNER_NAME}"),
-            argv0: None,
-            args: vec!["--assignment-b64".into(), plan.assignment_b64.clone()],
-            cwd: "/".into(),
-            envs: Vec::new(),
-            limits: None,
-            inherited_fds: Vec::new(),
-        },
-    )
-    .map_err(anyhow::Error::msg)?;
+    let mut owner = spawn_owner(plan)?;
     let _stdout = owner.take_output().map_err(anyhow::Error::msg)?;
     let mut stderr = owner.take_error().map_err(anyhow::Error::msg)?;
     let mut captured = Vec::new();
@@ -1152,7 +1182,7 @@ fn observe_owner(plan: &HostPlan) -> Result<GuestStartRehearsalOutcome> {
 }
 
 /// Ask the owner to cancel, as a lost controller would, then force it.
-fn settle_owner(
+pub(crate) fn settle_owner(
     owner: &mut lillux::subordinate_process::SubordinateProcess,
     drain: &mut dyn FnMut(lillux::time::Duration),
 ) -> String {
