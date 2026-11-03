@@ -1573,8 +1573,9 @@ pub(super) fn validate_transfers(conn: &Connection) -> Result<()> {
                 && matches!(
                     &allocation.reservation.owner,
                     ExternalAllocationOwner::QualificationCandidate(_)
+                        | ExternalAllocationOwner::DedicatedSession(_)
                 ),
-            "external relay journal changed its Q allocation owner"
+            "external relay journal changed its relay allocation owner"
         );
     }
     validate_applications(conn)?;
@@ -1656,10 +1657,11 @@ fn validate_applications(conn: &Connection) -> Result<()> {
                 && matches!(
                     &allocation.reservation.owner,
                     ExternalAllocationOwner::QualificationCandidate(_)
+                        | ExternalAllocationOwner::DedicatedSession(_)
                 )
                 && created > 0
                 && updated >= created,
-            "external relay application changed its accepted Q request"
+            "external relay application changed its accepted relay request"
         );
         if phase == "applying" {
             ensure!(
