@@ -3927,6 +3927,103 @@ pub fn inspect_external_session_controller_transport(
     }
 }
 
+/// While a guest request is missing, look for the guest owner's report on
+/// every Nth miss, so the extra file reads stay a small fraction of the
+/// polling the signed schedule already does. The report slot has its own
+/// bounded read allowance; once that is spent or a read fails, the miss
+/// simply stands and the signed deadline remains the backstop.
+const OWNER_REPORT_POLL_EVERY_MISSES: u32 = 4;
+
+fn owner_report_check_due(misses: u32) -> bool {
+    misses % OWNER_REPORT_POLL_EVERY_MISSES == 0
+}
+
+/// The supervisor exit a mailbox file reports, when it is exactly this
+/// occurrence's canonical report. Anything else is logged and ignored: the
+/// file is the guest's own text and carries no authority.
+fn owner_report_exit(
+    placement: &str,
+    bytes: &[u8],
+    bootstrap: &ryeos_state::external_execution::transport::ExternalSupervisorBootstrap,
+) -> Option<ryeos_external_execution_contract::guest_owner_report::GuestSupervisorExit> {
+    let digest = bootstrap.digest().ok()?;
+    owner_report_exit_for(
+        placement,
+        bytes,
+        &bootstrap.occurrence_id,
+        &bootstrap.allocation_request_digest,
+        &digest,
+    )
+}
+
+fn owner_report_exit_for(
+    placement: &str,
+    bytes: &[u8],
+    occurrence_id: &str,
+    allocation_request_digest: &str,
+    bootstrap_digest: &str,
+) -> Option<ryeos_external_execution_contract::guest_owner_report::GuestSupervisorExit> {
+    use ryeos_external_execution_contract::guest_owner_report::GuestOwnerReportFile;
+    match GuestOwnerReportFile::decode_for(
+        bytes,
+        occurrence_id,
+        allocation_request_digest,
+        bootstrap_digest,
+    ) {
+        Ok(exit) => Some(exit),
+        Err(error) => {
+            tracing::warn!(placement, error = %error, "external guest owner report refused");
+            None
+        }
+    }
+}
+
+fn fail_on_guest_owner_report(state: &AppState, placement: &str, misses: u32) -> Result<()> {
+    use crate::runtime_db::external_execution::{RelayDirection, RelayKind};
+    use ryeos_external_execution_contract::guest_owner_report::GuestOwnerActivationReport;
+    if !owner_report_check_due(misses) {
+        return Ok(());
+    }
+    let accepted = match contact_ordinary_external_relay_transfer(
+        state,
+        placement,
+        RelayKind::OwnerReport,
+        0,
+        RelayDirection::GuestToController,
+        None,
+    ) {
+        Ok(ExternalRelayFileContactProgress::Accepted(record)) => record,
+        Ok(_) => return Ok(()),
+        Err(error) => {
+            tracing::debug!(placement, error = %error, "external guest owner report not read");
+            return Ok(());
+        }
+    };
+    let protected = recover_ordinary_external_relay_bootstrap(state, placement)?;
+    let Some(exit) = accepted
+        .canonical_bytes
+        .as_deref()
+        .and_then(|bytes| owner_report_exit(placement, bytes, protected.bootstrap()))
+    else {
+        return Ok(());
+    };
+    let last_phase = state
+        .state_store
+        .external_guest_owner_report(placement)
+        .and_then(|report| report.last_phase());
+    let report = GuestOwnerActivationReport::Held {
+        last_phase,
+        supervisor_exit: Some(exit),
+    };
+    // The tail is the guest's own untrusted text: log it and show it in the
+    // error, never act on it.
+    tracing::info!(placement, %report, "external guest owner reported its released supervisor ended");
+    state
+        .state_store
+        .note_external_guest_owner_report(placement, report);
+    bail!("the released guest supervisor ended before the relay completed")
+}
+
 pub fn advance_external_session_relay_step(
     state: &AppState,
     placement: &str,
@@ -3952,6 +4049,7 @@ pub fn advance_external_session_relay_step(
                 record.phase == RelayTransferPhase::Reading,
                 "ordinary relay missing request lost its bounded read claim"
             );
+            fail_on_guest_owner_report(state, placement, record.read_attempts)?;
             Ok(ExternalSessionRelayStepProgress::GuestRequestPending(
                 ExternalSessionRelayPending {
                     read_attempts: record.read_attempts,
@@ -4549,6 +4647,9 @@ fn contact_external_relay_transfer(
                 .as_deref()
                 .context("accepted relay request has no exact digest")?;
             let (response_kind, binding_digest) = match kind {
+                crate::runtime_db::external_execution::RelayKind::OwnerReport => {
+                    bail!("the guest owner report never receives a controller response")
+                }
                 crate::runtime_db::external_execution::RelayKind::Attach => {
                     (ExternalRelayResponseKind::Attach, None)
                 }
@@ -4681,6 +4782,14 @@ fn contact_external_relay_transfer(
             ..
         } => {
             let bytes = STANDARD.decode(bytes_base64)?;
+            if kind == crate::runtime_db::external_execution::RelayKind::OwnerReport
+                && owner_report_exit(placement, &bytes, bootstrap).is_none()
+            {
+                // The file is the guest's own text. A report that is not
+                // exactly this occurrence's is never retained; the slot stays
+                // open for a later read.
+                return Ok(ExternalRelayFileContactProgress::PendingHttpNotFound(claimed_record));
+            }
             Ok(ExternalRelayFileContactProgress::Accepted(
                 state.state_store.accept_external_relay_readback(&intent, &bytes)?,
             ))
@@ -14214,6 +14323,67 @@ mod tests {
             .is_err()
         );
         require_timely_lifecycle_observation(false, test_startup_deadline()).unwrap();
+    }
+
+    #[test]
+    fn owner_report_is_read_on_a_bounded_cadence_and_only_when_exactly_ours() {
+        use ryeos_external_execution_contract::guest_owner_report::{
+            GuestOwnerReportFile, GuestSupervisorExit, GuestSupervisorStatus,
+        };
+        let due: Vec<u32> = (1..=16)
+            .filter(|miss| owner_report_check_due(*miss))
+            .collect();
+        assert_eq!(due, [4, 8, 12, 16]);
+        let (occurrence, allocation, bootstrap) = ("sbx-a", "a".repeat(64), "b".repeat(64));
+        let exit = GuestSupervisorExit::from_raw_tail(
+            GuestSupervisorStatus::Code(126),
+            b"launcher refused",
+        );
+        let good = GuestOwnerReportFile::new(occurrence, &allocation, &bootstrap, exit.clone())
+            .canonical_bytes()
+            .unwrap();
+        assert_eq!(
+            owner_report_exit_for("T", &good, occurrence, &allocation, &bootstrap),
+            Some(exit)
+        );
+        // Wrong identity, malformed and non-canonical files are all ignored.
+        for (bytes, occ, alloc, boot) in [
+            (
+                good.clone(),
+                "sbx-b",
+                allocation.as_str(),
+                bootstrap.as_str(),
+            ),
+            (
+                good.clone(),
+                occurrence,
+                "c".repeat(64).leak() as &str,
+                bootstrap.as_str(),
+            ),
+            (
+                good.clone(),
+                occurrence,
+                allocation.as_str(),
+                "c".repeat(64).leak() as &str,
+            ),
+            (
+                b"{\"exit\":".to_vec(),
+                occurrence,
+                allocation.as_str(),
+                bootstrap.as_str(),
+            ),
+            (
+                String::from_utf8(good.clone())
+                    .unwrap()
+                    .replace(',', ", ")
+                    .into_bytes(),
+                occurrence,
+                allocation.as_str(),
+                bootstrap.as_str(),
+            ),
+        ] {
+            assert_eq!(owner_report_exit_for("T", &bytes, occ, alloc, boot), None);
+        }
     }
 
     #[test]

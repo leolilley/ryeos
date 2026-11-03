@@ -13,7 +13,7 @@ use ryeos_state::external_execution::transport::{
 pub(in crate::runtime_db) const JOURNAL_SQL: &str = r#"
 CREATE TABLE external_execution_relay_transfer (
     placement_thread_id TEXT NOT NULL REFERENCES external_execution_allocation(placement_thread_id),
-    kind TEXT NOT NULL CHECK (kind IN ('attach','exchange')),
+    kind TEXT NOT NULL CHECK (kind IN ('attach','exchange','owner_report')),
     sequence INTEGER NOT NULL CHECK (sequence BETWEEN 0 AND 65536),
     direction TEXT NOT NULL CHECK (direction IN ('guest_to_controller','controller_to_guest')),
     remote_path TEXT NOT NULL UNIQUE,
@@ -110,6 +110,10 @@ impl RelayDirection {
 pub(crate) enum RelayKind {
     Attach,
     Exchange,
+    /// The guest owner's report of how its released supervisor ended. One
+    /// guest-to-controller slot, read on a bounded cadence while other slots
+    /// wait; it never carries an application or a controller response.
+    OwnerReport,
 }
 
 impl RelayKind {
@@ -117,7 +121,30 @@ impl RelayKind {
         match self {
             Self::Attach => "attach",
             Self::Exchange => "exchange",
+            Self::OwnerReport => "owner_report",
         }
+    }
+
+    pub(crate) fn file_kind(self) -> ryeos_external_execution_contract::relay_file::RelayFileKind {
+        use ryeos_external_execution_contract::relay_file::RelayFileKind;
+        match self {
+            Self::Attach => RelayFileKind::Attach,
+            Self::Exchange => RelayFileKind::Exchange,
+            Self::OwnerReport => RelayFileKind::OwnerReport,
+        }
+    }
+
+    fn file_name(self, direction: RelayDirection, sequence: u32) -> Result<String> {
+        use ryeos_external_execution_contract::relay_file::RelayFileDirection;
+        self.file_kind()
+            .file_name(
+                match direction {
+                    RelayDirection::GuestToController => RelayFileDirection::GuestToController,
+                    RelayDirection::ControllerToGuest => RelayFileDirection::ControllerToGuest,
+                },
+                sequence,
+            )
+            .context("external relay kind does not flow in this direction")
     }
 }
 
@@ -155,24 +182,15 @@ impl RelayTransferIntent {
         bootstrap.validate()?;
         let relay = bootstrap.controller.relay()?;
         ensure!(
-            (kind == RelayKind::Attach && sequence == 0)
-                || (kind == RelayKind::Exchange && (1..=relay.maximum_frames).contains(&sequence)),
+            kind.file_kind().accepts_sequence(sequence)
+                && (kind != RelayKind::Exchange || sequence <= relay.maximum_frames),
             "external relay transfer exceeds signed frame sequence"
         );
         ensure!(
             outbound.is_some() == (direction == RelayDirection::ControllerToGuest),
             "external relay transfer direction changed its expected bytes"
         );
-        let name = match (kind, direction) {
-            (RelayKind::Attach, RelayDirection::GuestToController) => "attach.request.json".into(),
-            (RelayKind::Attach, RelayDirection::ControllerToGuest) => "attach.response.json".into(),
-            (RelayKind::Exchange, RelayDirection::GuestToController) => {
-                format!("exchange-{sequence:05}.request.json")
-            }
-            (RelayKind::Exchange, RelayDirection::ControllerToGuest) => {
-                format!("exchange-{sequence:05}.response.json")
-            }
-        };
+        let name = kind.file_name(direction, sequence)?;
         let mailbox_root = bootstrap.relay_mailbox_root()?;
         let intent = Self {
             schema: 1,
@@ -225,20 +243,10 @@ impl RelayTransferIntent {
             "external relay placement or occurrence is invalid"
         );
         ensure!(
-            (self.kind == RelayKind::Attach && self.sequence == 0)
-                || (self.kind == RelayKind::Exchange && (1..=65_536).contains(&self.sequence)),
+            self.kind.file_kind().accepts_sequence(self.sequence),
             "external relay transfer sequence is invalid"
         );
-        let name = match (self.kind, self.direction) {
-            (RelayKind::Attach, RelayDirection::GuestToController) => "attach.request.json".into(),
-            (RelayKind::Attach, RelayDirection::ControllerToGuest) => "attach.response.json".into(),
-            (RelayKind::Exchange, RelayDirection::GuestToController) => {
-                format!("exchange-{:05}.request.json", self.sequence)
-            }
-            (RelayKind::Exchange, RelayDirection::ControllerToGuest) => {
-                format!("exchange-{:05}.response.json", self.sequence)
-            }
-        };
+        let name = self.kind.file_name(self.direction, self.sequence)?;
         ensure!(
             self.mailbox_root.starts_with('/')
                 && !self.mailbox_root.starts_with("//")
@@ -505,7 +513,7 @@ fn require_live_ordinary_session_allocation(
     let relay = contract.controller_transport.relay()?;
     let expected_deadline = match (intent.kind, intent.direction) {
         (RelayKind::Attach, _) => activation.attachment_deadline_ms,
-        (RelayKind::Exchange, _) => activation
+        (RelayKind::Exchange | RelayKind::OwnerReport, _) => activation
             .attachment_deadline_ms
             .checked_add(i64::from(activation.execution_timeout_seconds) * 1_000)
             .and_then(|deadline| {
@@ -614,7 +622,9 @@ fn require_live_relay_bootstrap(
 
 fn require_preceding_transfer(conn: &Connection, intent: &RelayTransferIntent) -> Result<()> {
     let predecessor = match (intent.kind, intent.direction, intent.sequence) {
-        (RelayKind::Attach, RelayDirection::GuestToController, 0) => return Ok(()),
+        (RelayKind::Attach | RelayKind::OwnerReport, RelayDirection::GuestToController, 0) => {
+            return Ok(());
+        }
         (kind, RelayDirection::ControllerToGuest, sequence) => (
             kind.as_str(),
             sequence,
@@ -685,6 +695,9 @@ fn verify_relay_application_response(
         &bootstrap.placement_thread_id,
     )?;
     match kind {
+        RelayKind::OwnerReport => {
+            anyhow::bail!("the guest owner report has no semantic application")
+        }
         RelayKind::Attach => {
             let request: ExternalChannelAttachRequest = serde_json::from_slice(&request_bytes)?;
             request.validate_for_bootstrap(bootstrap)?;
@@ -1837,6 +1850,77 @@ mod tests {
                     "UPDATE external_execution_relay_transfer SET phase='reserved'
                      WHERE placement_thread_id='placement'",
                     [],
+                )
+                .is_err()
+            );
+            Ok(())
+        });
+    }
+
+    fn owner_report_intent() -> RelayTransferIntent {
+        let root = format!("/ryeos/occurrences/sbx-a/{}", "a".repeat(64));
+        RelayTransferIntent {
+            schema: 1,
+            placement_thread_id: "placement".into(),
+            occurrence_id: "sbx-a".into(),
+            allocation_request_digest: "b".repeat(64),
+            bootstrap_digest: "c".repeat(64),
+            remote_path: format!("{root}/owner-report.json"),
+            mailbox_root: root,
+            kind: RelayKind::OwnerReport,
+            sequence: 0,
+            direction: RelayDirection::GuestToController,
+            maximum_file_bytes: 1024,
+            expected_sha256: None,
+            expected_bytes: None,
+            deadline_ms: 1,
+            retention_budget_bytes: 4096,
+        }
+    }
+
+    #[test]
+    fn owner_report_slot_is_one_guest_to_controller_file() {
+        owner_report_intent().validate().unwrap();
+        let mut sequenced = owner_report_intent();
+        sequenced.sequence = 1;
+        assert!(sequenced.validate().is_err());
+        let mut renamed = owner_report_intent();
+        renamed.remote_path = renamed
+            .remote_path
+            .replace("owner-report", "attach.request");
+        assert!(renamed.validate().is_err());
+        let mut inbound = owner_report_intent();
+        inbound.direction = RelayDirection::ControllerToGuest;
+        inbound.expected_sha256 = Some("d".repeat(64));
+        inbound.expected_bytes = Some(2);
+        assert!(inbound.validate().is_err());
+    }
+
+    #[test]
+    fn journal_admits_the_owner_report_kind() {
+        crate::runtime_db::test_native::with_transient(|conn| {
+            conn.execute_batch(
+                "CREATE TABLE external_execution_allocation (placement_thread_id TEXT PRIMARY KEY);",
+            )
+            .unwrap();
+            conn.execute_batch(JOURNAL_SQL).unwrap();
+            conn.execute(
+                "INSERT INTO external_execution_allocation VALUES('placement')",
+                [],
+            )
+            .unwrap();
+            let intent = owner_report_intent();
+            conn.execute(
+                "INSERT INTO external_execution_relay_transfer VALUES(
+                    'placement','owner_report',0,'guest_to_controller',?1,?2,'reserved',0,NULL,NULL,NULL,1,1)",
+                params![intent.remote_path, canonical(&intent).unwrap()],
+            )
+            .unwrap();
+            assert!(
+                conn.execute(
+                    "INSERT INTO external_execution_relay_transfer VALUES(
+                        'placement','other',0,'guest_to_controller','/x',?1,'reserved',0,NULL,NULL,NULL,1,1)",
+                    params![canonical(&intent).unwrap()],
                 )
                 .is_err()
             );

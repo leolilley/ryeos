@@ -9,9 +9,11 @@
 //! keeps supervising the released supervisor and writes one more line when it
 //! exits: `{"guest_owner":"supervisor_exit","status":{"code":N},"stderr_tail":"..."}`
 //! (or `{"signal":N}`), carrying a bounded, sanitized tail of the supervisor's
-//! standard error. That tail is untrusted text for logs only; nothing may
-//! parse it for authority. Provider stream framing stays with the adapter;
-//! this module sees only the owner's stdout bytes.
+//! standard error. Nothing waits on that line: the controller learns the same
+//! facts from the report file the owner writes into the relay mailbox. The
+//! tail is untrusted text for logs only; nothing may parse it for authority.
+//! Provider stream framing stays with the adapter; this module sees only the
+//! owner's stdout bytes.
 
 use std::fmt;
 
@@ -319,15 +321,12 @@ pub enum GuestOwnerTerminal {
 
 /// Bounded accumulator over the owner's stdout as delivered in arbitrary
 /// chunks. Every complete line must be a report; phases are remembered and
-/// the first terminal line ends the report. Bytes after it are never examined
-/// here; the rest of the chunk that completed it is kept for a caller that
-/// goes on to read what follows a `held` line.
+/// the first terminal line ends the report. Bytes after it are never examined.
 #[derive(Debug, Default)]
 pub struct GuestOwnerStdout {
     pending: String,
     lines: u32,
     last_phase: Option<GuestOwnerStep>,
-    after_terminal: String,
 }
 
 impl GuestOwnerStdout {
@@ -338,11 +337,6 @@ impl GuestOwnerStdout {
     /// The most recent phase line seen.
     pub fn last_phase(&self) -> Option<GuestOwnerStep> {
         self.last_phase
-    }
-
-    /// The part of the chunk after the terminal line, unexamined.
-    pub fn after_terminal(&self) -> &str {
-        &self.after_terminal
     }
 
     /// Append one chunk. Returns the terminal report once its line is complete.
@@ -367,12 +361,8 @@ impl GuestOwnerStdout {
             self.pending.clear();
             match report {
                 GuestOwnerReport::Phase(step) => self.last_phase = Some(step),
-                GuestOwnerReport::Held => {
-                    self.after_terminal = chunk[end + 1..].to_owned();
-                    return Ok(Some(GuestOwnerTerminal::Held));
-                }
+                GuestOwnerReport::Held => return Ok(Some(GuestOwnerTerminal::Held)),
                 GuestOwnerReport::Refused(step) => {
-                    self.after_terminal = chunk[end + 1..].to_owned();
                     return Ok(Some(GuestOwnerTerminal::Refused(step)));
                 }
                 GuestOwnerReport::SupervisorExit(_) => {
@@ -384,52 +374,76 @@ impl GuestOwnerStdout {
     }
 }
 
-/// Bounded accumulator over the owner's stdout after its `held` line. The
-/// supervisor shares the owner's stdout, so anything may follow; only the
-/// first exact supervisor exit line is taken, and every other line is dropped
-/// without being kept.
-#[derive(Debug, Default)]
-pub struct GuestOwnerPostHeldStdout {
-    pending: String,
-    discarding: bool,
-    lines: u32,
+/// The most bytes the owner's report file may hold.
+pub const MAX_GUEST_OWNER_REPORT_FILE_BYTES: usize = 16 * 1024;
+
+/// The file the owner writes into the occurrence's relay mailbox once its
+/// released supervisor has exited. It names the occurrence it belongs to so
+/// a controller can refuse a file from any other. The exit text inside is the
+/// guest's own and untrusted: for logs and error display only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuestOwnerReportFile {
+    pub schema: u32,
+    pub occurrence_id: String,
+    pub allocation_request_digest: String,
+    pub bootstrap_digest: String,
+    pub exit: GuestSupervisorExit,
 }
 
-impl GuestOwnerPostHeldStdout {
-    pub fn new() -> Self {
-        Self::default()
+impl GuestOwnerReportFile {
+    pub fn new(
+        occurrence_id: &str,
+        allocation_request_digest: &str,
+        bootstrap_digest: &str,
+        exit: GuestSupervisorExit,
+    ) -> Self {
+        Self {
+            schema: 1,
+            occurrence_id: occurrence_id.to_owned(),
+            allocation_request_digest: allocation_request_digest.to_owned(),
+            bootstrap_digest: bootstrap_digest.to_owned(),
+            exit,
+        }
     }
 
-    /// Append one chunk. Returns the supervisor exit once its line is complete.
-    pub fn push(&mut self, mut chunk: &str) -> Option<GuestSupervisorExit> {
-        loop {
-            let end = chunk.find('\n');
-            let taken = &chunk[..end.unwrap_or(chunk.len())];
-            if !self.discarding {
-                if self.pending.len().saturating_add(taken.len())
-                    > MAX_GUEST_SUPERVISOR_EXIT_LINE_BYTES
-                {
-                    self.discarding = true;
-                    self.pending.clear();
-                } else {
-                    self.pending.push_str(taken);
-                }
-            }
-            let end = end?;
-            self.lines = self.lines.saturating_add(1);
-            let line = std::mem::take(&mut self.pending);
-            let discarded = std::mem::take(&mut self.discarding);
-            if self.lines > MAX_GUEST_OWNER_REPORT_LINES {
-                return None;
-            }
-            if !discarded
-                && let Ok(GuestOwnerReport::SupervisorExit(exit)) =
-                    GuestOwnerReport::parse_line(&line)
-            {
-                return Some(exit);
-            }
-            chunk = &chunk[end + 1..];
-        }
+    /// The exact canonical bytes of the file.
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>> {
+        self.exit.validate()?;
+        let bytes = crate::canonical_json(self)?;
+        ensure!(
+            bytes.len() <= MAX_GUEST_OWNER_REPORT_FILE_BYTES,
+            "guest owner report file exceeds its bound"
+        );
+        Ok(bytes)
+    }
+
+    /// Decode a file read from the mailbox, refusing anything that is not the
+    /// exact canonical report for this occurrence, allocation and bootstrap.
+    pub fn decode_for(
+        bytes: &[u8],
+        occurrence_id: &str,
+        allocation_request_digest: &str,
+        bootstrap_digest: &str,
+    ) -> Result<GuestSupervisorExit> {
+        ensure!(
+            bytes.len() <= MAX_GUEST_OWNER_REPORT_FILE_BYTES,
+            "guest owner report file exceeds its bound"
+        );
+        let file: Self = serde_json::from_slice(bytes)
+            .map_err(|_| anyhow::anyhow!("guest owner report file is not exact"))?;
+        ensure!(
+            file.schema == 1
+                && file.occurrence_id == occurrence_id
+                && file.allocation_request_digest == allocation_request_digest
+                && file.bootstrap_digest == bootstrap_digest,
+            "guest owner report file names a different occurrence"
+        );
+        ensure!(
+            file.canonical_bytes()? == bytes,
+            "guest owner report file is not canonical"
+        );
+        Ok(file.exit)
     }
 }
 
@@ -439,9 +453,9 @@ impl GuestOwnerPostHeldStdout {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
 pub enum GuestOwnerActivationReport {
-    /// The supervisor was released. `supervisor_exit` is present only when
-    /// the owner also reported the supervisor's end while the adapter was
-    /// still reading; its absence proves nothing about the supervisor.
+    /// The supervisor was released. `supervisor_exit` is present only once
+    /// the controller has read the owner's mailbox report of its end; its
+    /// absence proves nothing about the supervisor.
     Held {
         last_phase: Option<GuestOwnerStep>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -613,7 +627,6 @@ mod tests {
             Some(GuestOwnerTerminal::Held)
         );
         assert_eq!(stdout.last_phase(), Some(GuestOwnerStep::Stage));
-        assert_eq!(stdout.after_terminal(), "trailing garbage\n");
         let mut stdout = GuestOwnerStdout::new();
         let refused = format!(
             "{}{}",
@@ -775,23 +788,6 @@ mod tests {
     }
 
     #[test]
-    fn post_held_accumulator_takes_only_the_first_exact_exit() {
-        let line = GuestOwnerReport::SupervisorExit(exit(7, "cause")).line();
-        let mut stdout = GuestOwnerPostHeldStdout::new();
-        assert_eq!(stdout.push("supervisor noise\n{\"guest"), None);
-        assert_eq!(stdout.push(&"y".repeat(20_000)), None);
-        assert_eq!(stdout.push("\n"), None);
-        assert_eq!(stdout.push(&line[..40]), None, "a split line stays pending");
-        assert_eq!(stdout.push(&line[40..]), Some(exit(7, "cause")));
-        let mut stdout = GuestOwnerPostHeldStdout::new();
-        let refused = GuestOwnerReport::Refused(GuestOwnerStep::SupervisorExit).line();
-        assert_eq!(
-            stdout.push(&format!("{refused}{line}")),
-            Some(exit(7, "cause"))
-        );
-    }
-
-    #[test]
     fn held_report_carries_its_supervisor_exit() {
         let report = GuestOwnerActivationReport::Held {
             last_phase: Some(GuestOwnerStep::Release),
@@ -825,6 +821,29 @@ mod tests {
             .unwrap(),
             "{\"outcome\":\"held\",\"last_phase\":null}"
         );
+    }
+
+    #[test]
+    fn owner_report_file_binds_its_occurrence_and_is_canonical() {
+        let id = ("sbx-a", "a".repeat(64), "b".repeat(64));
+        let file = GuestOwnerReportFile::new(&id.0, &id.1, &id.2, exit(126, "launcher refused"));
+        let bytes = file.canonical_bytes().unwrap();
+        assert_eq!(
+            GuestOwnerReportFile::decode_for(&bytes, &id.0, &id.1, &id.2).unwrap(),
+            exit(126, "launcher refused")
+        );
+        assert!(GuestOwnerReportFile::decode_for(&bytes, "sbx-b", &id.1, &id.2).is_err());
+        assert!(GuestOwnerReportFile::decode_for(&bytes, &id.0, &"c".repeat(64), &id.2).is_err());
+        assert!(GuestOwnerReportFile::decode_for(&bytes, &id.0, &id.1, &"c".repeat(64)).is_err());
+        let spaced = String::from_utf8(bytes.clone())
+            .unwrap()
+            .replace(",\"exit", ", \"exit");
+        assert!(GuestOwnerReportFile::decode_for(spaced.as_bytes(), &id.0, &id.1, &id.2).is_err());
+        let extra = String::from_utf8(bytes)
+            .unwrap()
+            .replacen('{', "{\"x\":1,", 1);
+        assert!(GuestOwnerReportFile::decode_for(extra.as_bytes(), &id.0, &id.1, &id.2).is_err());
+        assert!(GuestOwnerReportFile::decode_for(b"{", &id.0, &id.1, &id.2).is_err());
     }
 
     #[test]

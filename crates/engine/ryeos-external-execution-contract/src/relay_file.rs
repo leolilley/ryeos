@@ -38,7 +38,37 @@ pub fn require_relay_occurrence_id(id: &str) -> Result<()> {
 pub enum RelayFileKind {
     Attach,
     Exchange,
+    /// The guest owner's typed report of how its released supervisor ended.
+    /// It is written once by the owner and flows only guest to controller.
+    OwnerReport,
 }
+
+impl RelayFileKind {
+    /// The sole mailbox filename for this slot, or none when the kind does
+    /// not flow in that direction.
+    pub fn file_name(self, direction: RelayFileDirection, sequence: u32) -> Option<String> {
+        use RelayFileDirection::{ControllerToGuest, GuestToController};
+        Some(match (self, direction) {
+            (Self::Attach, GuestToController) => "attach.request.json".to_owned(),
+            (Self::Attach, ControllerToGuest) => "attach.response.json".to_owned(),
+            (Self::Exchange, GuestToController) => format!("exchange-{sequence:05}.request.json"),
+            (Self::Exchange, ControllerToGuest) => format!("exchange-{sequence:05}.response.json"),
+            (Self::OwnerReport, GuestToController) => OWNER_REPORT_FILE_NAME.to_owned(),
+            (Self::OwnerReport, ControllerToGuest) => return None,
+        })
+    }
+
+    /// Whether `sequence` is a valid slot number for this kind.
+    pub fn accepts_sequence(self, sequence: u32) -> bool {
+        match self {
+            Self::Attach | Self::OwnerReport => sequence == 0,
+            Self::Exchange => (1..=65_536).contains(&sequence),
+        }
+    }
+}
+
+/// The mailbox filename of the guest owner's report.
+pub const OWNER_REPORT_FILE_NAME: &str = "owner-report.json";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -132,24 +162,13 @@ impl RelayFileAdapterRequest {
             "relay occurrence identity is invalid"
         );
         ensure!(
-            (self.kind == RelayFileKind::Attach && self.sequence == 0)
-                || (self.kind == RelayFileKind::Exchange && (1..=65_536).contains(&self.sequence)),
+            self.kind.accepts_sequence(self.sequence),
             "relay sequence is invalid"
         );
-        let name = match (self.kind, self.direction) {
-            (RelayFileKind::Attach, RelayFileDirection::GuestToController) => {
-                "attach.request.json".to_owned()
-            }
-            (RelayFileKind::Attach, RelayFileDirection::ControllerToGuest) => {
-                "attach.response.json".to_owned()
-            }
-            (RelayFileKind::Exchange, RelayFileDirection::GuestToController) => {
-                format!("exchange-{:05}.request.json", self.sequence)
-            }
-            (RelayFileKind::Exchange, RelayFileDirection::ControllerToGuest) => {
-                format!("exchange-{:05}.response.json", self.sequence)
-            }
-        };
+        let name = self
+            .kind
+            .file_name(self.direction, self.sequence)
+            .ok_or_else(|| anyhow::anyhow!("relay kind does not flow in this direction"))?;
         ensure!(
             self.mailbox_root.starts_with('/')
                 && !self.mailbox_root.starts_with("//")
@@ -359,6 +378,36 @@ mod tests {
         assert!(download.validate().is_err());
         download.delivery_account = None;
         download.validate().unwrap();
+    }
+
+    #[test]
+    fn owner_report_is_a_guest_to_controller_download_only() {
+        let mut report = upload();
+        report.kind = RelayFileKind::OwnerReport;
+        report.direction = RelayFileDirection::GuestToController;
+        report.remote_path = format!("{}/owner-report.json", report.mailbox_root);
+        report.expected_sha256 = None;
+        report.expected_bytes = None;
+        report.effect = RelayFileEffect::Download;
+        report.delivery_account = None;
+        report.validate().unwrap();
+        let mut sequenced = report.clone();
+        sequenced.sequence = 1;
+        assert!(sequenced.validate().is_err());
+        let mut named = report.clone();
+        named.remote_path = format!("{}/attach.request.json", named.mailbox_root);
+        assert!(named.validate().is_err());
+        let mut inbound = report;
+        inbound.direction = RelayFileDirection::ControllerToGuest;
+        inbound.remote_path = format!("{}/owner-report.json", inbound.mailbox_root);
+        inbound.expected_sha256 = Some("e".repeat(64));
+        inbound.expected_bytes = Some(10);
+        inbound.effect = RelayFileEffect::UploadOnce;
+        inbound.delivery_account = Some(RelayDeliveryAccount::Unix {
+            uid: 65534,
+            gid: 65534,
+        });
+        assert!(inbound.validate().is_err());
     }
 
     #[test]

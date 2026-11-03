@@ -9,7 +9,8 @@
 //! step begins (repeated while a long step makes progress), then held once
 //! the supervisor is released, or the closed step word that refused. After
 //! held the owner keeps supervising and reports the supervisor's end with a
-//! bounded, sanitized tail of the supervisor's own stderr. Its own stderr
+//! bounded, sanitized tail of the supervisor's own stderr, both on stdout and
+//! as one file in the occurrence's relay mailbox. Its own stderr
 //! keeps the full error for local diagnosis and is never relayed.
 
 use std::ffi::OsStr;
@@ -316,10 +317,15 @@ fn run(assignment_bytes: &[u8]) -> Result<()> {
         };
         if let Some(exit) = natural {
             let tail = supervisor_stderr.finish(STDERR_GRACE);
-            report(GuestOwnerReport::SupervisorExit(supervisor_exit_report(
-                exit.termination(),
-                &tail,
-            )));
+            let ended = supervisor_exit_report(exit.termination(), &tail);
+            // The mailbox file is the controller's in-band copy; failing to
+            // write it must not change how this owner settles.
+            if let Some(sink) = released.report_sink()
+                && let Err(error) = sink.publish(ended.clone())
+            {
+                eprintln!("guest owner could not publish its supervisor report: {error:#}");
+            }
+            report(GuestOwnerReport::SupervisorExit(ended));
             ensure!(
                 exit.target_reported_success(),
                 anyhow::anyhow!(

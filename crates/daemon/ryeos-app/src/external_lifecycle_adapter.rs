@@ -13,7 +13,7 @@ use ryeos_external_execution::lifecycle_adapter::{
 use ryeos_external_execution_contract::relay_file::{
     LIFECYCLE_RELAY_UPLOAD_FD_ENV, MAX_RELAY_RESPONSE_BYTES, RELAY_FILE_PROTOCOL,
     RelayDeliveryAccount, RelayFileAdapterRequest, RelayFileAdapterResponse, RelayFileDirection,
-    RelayFileEffect, RelayFileKind,
+    RelayFileEffect,
 };
 use ryeos_external_execution_contract::restored_runtime_measurement::{
     MAX_RESTORED_VERIFIER_ADAPTER_REQUEST_BYTES, MAX_RESTORED_VERIFIER_ADAPTER_RESPONSE_BYTES,
@@ -68,7 +68,7 @@ use crate::node_config::sections::external_execution::ExternalPlacementBackendCo
 use crate::runtime_db::external_execution::{
     ClaimedRelayFileContact, ExternalAllocationOccurrence, ExternalAllocationReservation,
     ExternalGuestPackageDeliveryCommitment, ExternalSupervisorActivationIntent,
-    ExternalTerminationIntent, RelayDirection, RelayKind, RelayTransferPhase,
+    ExternalTerminationIntent, RelayDirection, RelayTransferPhase,
 };
 use crate::vault::placement::PlacementCredential;
 
@@ -1027,10 +1027,7 @@ pub(crate) fn relay_file_adapter_request(
         allocation_request_digest: intent.allocation_request_digest.clone(),
         bootstrap_digest: intent.bootstrap_digest.clone(),
         mailbox_root: intent.mailbox_root.clone(),
-        kind: match intent.kind {
-            RelayKind::Attach => RelayFileKind::Attach,
-            RelayKind::Exchange => RelayFileKind::Exchange,
-        },
+        kind: intent.kind.file_kind(),
         sequence: intent.sequence,
         direction: match intent.direction {
             RelayDirection::GuestToController => RelayFileDirection::GuestToController,
