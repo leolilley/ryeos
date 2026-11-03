@@ -198,8 +198,12 @@ fn run(assignment_bytes: &[u8]) -> Result<()> {
         if let Some(exit) = natural {
             ensure!(
                 exit.target_reported_success(),
-                "guest supervisor exited without successful applied native launch: {:?}",
-                exit.termination().exit()
+                "guest supervisor exited without successful applied native launch: {:?}{}",
+                exit.termination().exit(),
+                exit.termination()
+                    .launch_failure()
+                    .map(|failure| format!("; launch failure: {}", failure.diagnostic()))
+                    .unwrap_or_default()
             );
             // The controller must independently join its authenticated
             // supervisor transcript and frozen export. This exit is only
