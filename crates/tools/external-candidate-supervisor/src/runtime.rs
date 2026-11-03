@@ -2744,6 +2744,74 @@ mod tests {
     }
 
     #[test]
+    fn fresh_roots_judge_freshness_with_the_declared_tolerance_for_a_skewed_guest_clock() {
+        let now = lillux::time::timestamp_millis();
+        // `offset` is where the controller's deadline stands relative to this
+        // guest's wall clock: positive means the guest clock is behind the
+        // controller's, negative that it is ahead by that much.
+        for (offset_ms, fresh) in [
+            (3_600_000, true),
+            (60_000, true),
+            (-30_000, true),
+            (-58_000, true),
+            (-62_000, false),
+            (-94_000, false),
+            (-3_600_000, false),
+        ] {
+            let root = private_root();
+            let original = bootstrap("skewed-guest", now + offset_ms);
+            let outcome = with_test_native(|_host, native| {
+                match ProtectedSupervisorState::open_or_create(
+                    pinned(root.path()),
+                    original,
+                    native,
+                ) {
+                    Ok(state) => {
+                        assert!(state.clock_anchor.is_current_boot());
+                        let anchor = state.clock_anchor.clone();
+                        state.close_journals(native).unwrap();
+                        Ok(anchor)
+                    }
+                    Err(error) => Err(format!("{error:#}")),
+                }
+            });
+            match (fresh, outcome) {
+                (true, Ok(_)) => {}
+                (false, Err(message)) => assert!(
+                    message.contains("s past the controller's attachment deadline; declared skew tolerance 60 s; guest clock trust: "),
+                    "{message}"
+                ),
+                (expected_fresh, other) => {
+                    panic!("offset {offset_ms}: expected fresh={expected_fresh}, got {other:?}")
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_clock_anchor_is_retained_with_the_state_root_and_read_back_on_recovery() {
+        let root = private_root();
+        let original = bootstrap("anchored-clock", lillux::time::timestamp_millis() + 60_000);
+        let original_bytes = original.canonical_bytes().unwrap();
+        with_test_native(|_host, native| {
+            let state =
+                ProtectedSupervisorState::open_or_create(pinned(root.path()), original, native)
+                    .unwrap();
+            let first = state.clock_anchor.clone();
+            state.close_journals(native).unwrap();
+            lillux::time::sleep(lillux::time::Duration::from_millis(5));
+            let incoming = serde_json::from_slice(&original_bytes).unwrap();
+            let recovered =
+                ProtectedSupervisorState::open_or_create(pinned(root.path()), incoming, native)
+                    .unwrap();
+            // A restart reuses the first anchor, which precedes any
+            // publication; capturing afresh would lengthen every window.
+            assert_eq!(recovered.clock_anchor, first);
+            recovered.close_journals(native).unwrap();
+        });
+    }
+
+    #[test]
     fn exact_prelaunch_state_anchor_recovers_without_new_authority() {
         let root = private_root();
         let deadline = lillux::time::timestamp_millis() + 60_000;
