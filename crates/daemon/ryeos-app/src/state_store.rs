@@ -24837,16 +24837,26 @@ impl StateStore {
     /// retained. The returned set is derived from complete projection state;
     /// callers reconstruct the canonical envelope from the signed snapshot and
     /// re-enter `reserve_remote_follow_terminal_delivery` idempotently.
+    /// The scan takes the store per terminal row, never across the whole
+    /// history, so live operations and shutdown interleave with it; terminal
+    /// rows do not change. It stops once shutdown closes process admission:
+    /// the rows it did not reach are rescanned by the next start.
     pub fn remote_follow_terminal_recovery_candidates(
         &self,
     ) -> Result<Vec<(String, String, String)>> {
-        let g = self.lock()?;
         let rows = queries::list_threads_by_status(
-            g.state_db.projection(),
+            self.lock()?.state_db.projection(),
             &["completed", "failed", "cancelled", "killed", "timed_out"],
         )?;
         let mut candidates = Vec::new();
         for row in rows {
+            if !self
+                .process_attachment_admission_open
+                .load(Ordering::Acquire)
+            {
+                break;
+            }
+            let g = self.lock()?;
             if queries::continuation_successor(g.state_db.projection(), &row.thread_id)?.is_some() {
                 continue;
             }
