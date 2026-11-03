@@ -28,6 +28,7 @@ use ryeos_external_execution_contract::{ExternalGuestInputProjection, GuestMount
 use ryeos_state::external_execution::guest_journal::{
     GuestJournalStoreIdentity, LiveGuestJournal, PreparedGuestJournal, ReservedGuestJournal,
 };
+use ryeos_state::external_execution::guest_window::GuestChannelWindow;
 use ryeos_state::external_execution::native_journal::settle_journal_refusal;
 use ryeos_state::external_execution::supervisor_journal::{
     AttachedExternalSupervisorJournal, ExternalSupervisorJournalRecovery,
@@ -107,6 +108,11 @@ struct ExternalSupervisorStateAnchor {
     /// native host, because the retained bootstrap itself can only be read
     /// through a journal open that host must already fund.
     native_journal: ExternalSupervisorNativeEnvelope,
+    /// This host's clock reading taken before the first attachment request of
+    /// this occurrence could be published. Every channel window is measured
+    /// from it, because the controller issues the binding after that instant.
+    /// A restart reads it back; one on another boot cannot prove it.
+    clock_anchor: lillux::time::LocalClockAnchor,
 }
 
 enum RetainedSupervisorJournal {
@@ -229,6 +235,7 @@ enum SupervisorRootOrigin {
     /// created; relay captures its mailbox when the journal is created.
     Fresh {
         network_inputs: Option<ExternalCapturedNetworkInputs>,
+        clock_anchor: lillux::time::LocalClockAnchor,
     },
     /// A retained root whose anchor already matched its exact identity.
     Anchored(ExternalSupervisorStateAnchor),
@@ -238,6 +245,7 @@ struct ProtectedSupervisorState {
     state_root: lillux::PinnedDirectory,
     _state_lock: lillux::PinnedDirectoryLock,
     guest_directory: lillux::PinnedDirectory,
+    clock_anchor: lillux::time::LocalClockAnchor,
     journal: Option<RetainedSupervisorJournal>,
     /// Reserved guest inode awaiting launch intent. It takes no native ticket
     /// but keeps the host's factory alive, so it ends before the host does.
@@ -718,6 +726,12 @@ impl LockedSupervisorRoot {
             .context("external supervisor state root already has a live owner")?;
         state_lock.ensure_protects(&state_root)?;
         if state_root.entry_names()?.is_empty() {
+            // Taken before anything is published: the controller issues the
+            // binding after this instant, so windows measured from it can
+            // only end before the controller's own.
+            let clock_anchor = lillux::time::LocalClockAnchor::capture()
+                .map_err(anyhow::Error::msg)
+                .context("capture the guest clock anchor")?;
             bootstrap.validate_at(lillux::time::timestamp_millis())?;
             // Only HTTP samples target-local network files, before this fresh
             // root gains any entry. Relay captures the original pinned mailbox
@@ -737,7 +751,10 @@ impl LockedSupervisorRoot {
                 state_lock,
                 outer_directory,
                 guest_directory,
-                origin: SupervisorRootOrigin::Fresh { network_inputs },
+                origin: SupervisorRootOrigin::Fresh {
+                    network_inputs,
+                    clock_anchor,
+                },
             });
         }
         require_state_entries(&state_root)?;
@@ -817,8 +834,11 @@ impl ProtectedSupervisorState {
             origin,
         } = root;
         let native_journal = bootstrap.native_journal;
-        let journal = match origin {
-            SupervisorRootOrigin::Fresh { network_inputs } => {
+        let (journal, clock_anchor) = match origin {
+            SupervisorRootOrigin::Fresh {
+                network_inputs,
+                clock_anchor,
+            } => {
                 let created = match (network_inputs, relay_mailbox) {
                     (None, Some(mailbox)) => PreparedExternalSupervisorJournal::create_relay(
                         outer_directory,
@@ -847,6 +867,7 @@ impl ProtectedSupervisorState {
                         state_root_identity: state_root.identity()?,
                         outer_store_identity: journal.store_identity().clone(),
                         native_journal,
+                        clock_anchor: clock_anchor.clone(),
                     };
                     let anchor_bytes = canonical_anchor(&anchor)?;
                     state_root.atomic_write_if_same(
@@ -865,7 +886,7 @@ impl ProtectedSupervisorState {
                         journal.close(),
                     ));
                 }
-                RetainedSupervisorJournal::Prepared(journal)
+                (RetainedSupervisorJournal::Prepared(journal), clock_anchor)
             }
             SupervisorRootOrigin::Anchored(anchor) => {
                 let recovered = ExternalSupervisorJournalRecovery::open(
@@ -894,13 +915,14 @@ impl ProtectedSupervisorState {
                         journal.close(),
                     ));
                 }
-                journal
+                (journal, anchor.clock_anchor)
             }
         };
         Ok(Self {
             state_root,
             _state_lock: state_lock,
             guest_directory,
+            clock_anchor,
             journal: Some(journal),
             guest_reservation: None,
         })
@@ -964,6 +986,7 @@ impl ProtectedSupervisorState {
             state_root,
             _state_lock: state_lock,
             guest_directory,
+            clock_anchor: _,
             journal,
             guest_reservation,
         } = self;
@@ -1075,7 +1098,7 @@ impl LiveExternalCandidateSupervisor {
             state.guest_directory.entry_names()?.is_empty(),
             "pre-launch recovery found an abandoned guest reservation"
         );
-        let mut transport = match state
+        let (mut transport, window) = match state
             .journal
             .as_ref()
             .context("external supervisor state lost its retained journal")?
@@ -1088,6 +1111,7 @@ impl LiveExternalCandidateSupervisor {
                         prepared.attachment_request(),
                         prepared.captured_network_inputs()?,
                     )?;
+                    let window = GuestChannelWindow::derive(&state.clock_anchor, &binding)?;
                     // Selecting the carrier contacts nothing. Its outcome is
                     // held until the attached binding is durable, so a failed
                     // selection still recovers from the attached stage and
@@ -1098,11 +1122,12 @@ impl LiveExternalCandidateSupervisor {
                             prepared.supervisor_signing_key(),
                             &binding,
                             inputs,
+                            &window,
                             Some(transport),
                         )
                     });
                     state.record_binding(binding, None, native)?;
-                    selected?
+                    (selected?, window)
                 }
                 ExternalSupervisorTransportCapture::Relay(capture) => {
                     let mut mailbox = adopt_relay_mailbox(
@@ -1125,18 +1150,32 @@ impl LiveExternalCandidateSupervisor {
                         deadline,
                     )?;
                     let binding = authenticated.binding().clone();
+                    let window = GuestChannelWindow::derive(&state.clock_anchor, &binding)?;
                     state.record_binding(binding, Some(authenticated.response_digest()), native)?;
-                    AttachedExternalExecutionTransport::from(mailbox.into_attached(authenticated)?)
+                    (
+                        AttachedExternalExecutionTransport::from(
+                            mailbox.into_attached(authenticated, window.clone())?,
+                        ),
+                        window,
+                    )
                 }
             },
             RetainedSupervisorJournal::Attached(attached) => match attached.transport_capture() {
-                ExternalSupervisorTransportCapture::Http(_) => select_exchange_transport(
-                    attached.bootstrap(),
-                    attached.supervisor_signing_key(),
-                    attached.binding(),
-                    attached.captured_network_inputs()?,
-                    None,
-                )?,
+                ExternalSupervisorTransportCapture::Http(_) => {
+                    let window =
+                        GuestChannelWindow::derive(&state.clock_anchor, attached.binding())?;
+                    (
+                        select_exchange_transport(
+                            attached.bootstrap(),
+                            attached.supervisor_signing_key(),
+                            attached.binding(),
+                            attached.captured_network_inputs()?,
+                            &window,
+                            None,
+                        )?,
+                        window,
+                    )
+                }
                 ExternalSupervisorTransportCapture::Relay(capture) => {
                     let mailbox = adopt_relay_mailbox(
                         attached.bootstrap(),
@@ -1152,12 +1191,18 @@ impl LiveExternalCandidateSupervisor {
                             attached.bootstrap().controller.relay()?.poll_deadline_ms,
                         )),
                     );
-                    AttachedExternalExecutionTransport::from(mailbox.reconnect_retained(
-                        attached.attachment_request(),
-                        attached.binding(),
-                        &attached.relay_attach_response_digest()?,
-                        deadline,
-                    )?)
+                    let window =
+                        GuestChannelWindow::derive(&state.clock_anchor, attached.binding())?;
+                    (
+                        AttachedExternalExecutionTransport::from(mailbox.reconnect_retained(
+                            attached.attachment_request(),
+                            attached.binding(),
+                            &attached.relay_attach_response_digest()?,
+                            window.clone(),
+                            deadline,
+                        )?),
+                        window,
+                    )
                 }
             },
             RetainedSupervisorJournal::Launched(_) | RetainedSupervisorJournal::LaunchIntent(_) => {
@@ -1172,27 +1217,7 @@ impl LiveExternalCandidateSupervisor {
             &attached.bootstrap().candidate_program,
             &execution_guest_inputs,
         )?;
-        let now_ms = lillux::time::timestamp_millis();
-        let execution_remaining_ms = attached
-            .binding()
-            .execution_deadline_ms
-            .checked_sub(now_ms)
-            .context("external execution deadline already elapsed")?;
-        let expiry_remaining_ms = attached
-            .binding()
-            .expires_at_ms
-            .checked_sub(now_ms)
-            .context("external channel deadline already elapsed")?;
-        ensure!(
-            execution_remaining_ms > 0 && expiry_remaining_ms > execution_remaining_ms,
-            "external channel has no bounded execution and cleanup window"
-        );
-        let execution_deadline = lillux::time::MonotonicDeadline::after(
-            lillux::time::Duration::from_millis(u64::try_from(execution_remaining_ms)?),
-        );
-        let expiry_deadline = lillux::time::MonotonicDeadline::after(
-            lillux::time::Duration::from_millis(u64::try_from(expiry_remaining_ms)?),
-        );
+        let (execution_deadline, expiry_deadline) = window.monotonic_pair();
         let prepared = prepare_launcher_subprocess_request(
             &launcher,
             &candidate_runtime,
@@ -1200,7 +1225,7 @@ impl LiveExternalCandidateSupervisor {
             workspace_outputs.as_ref(),
             &runtime_mounts,
             &spec,
-            expiry_deadline.remaining().as_secs_f64(),
+            &window,
         )?;
         ensure!(
             prepared.measured_launcher_digest() == attached.bootstrap().launcher_artifact_hash,
@@ -1216,6 +1241,7 @@ impl LiveExternalCandidateSupervisor {
             &prepared.authority,
             &prepared.bootstrap_digest,
             attached.binding().clone(),
+            window.clone(),
             native.factory,
             native.destination(),
         )
@@ -1253,6 +1279,7 @@ impl LiveExternalCandidateSupervisor {
                 runtime.binding(),
                 runtime.ready_frame().as_bytes(),
                 report.as_bytes(),
+                &window,
                 expiry_deadline,
             )
         {
@@ -1332,10 +1359,11 @@ fn lease_handshake<T: ExternalExecutionChannelTransport>(
     binding: &ExecutionChannelBinding,
     ready: &[u8],
     report: &[u8],
+    window: &GuestChannelWindow,
     deadline: lillux::time::MonotonicDeadline,
 ) -> Result<()> {
     let ready_frame =
-        SignedExecutionFrame::decode_and_verify(ready, binding, lillux::time::timestamp_millis())?;
+        SignedExecutionFrame::decode_and_verify_in_guest_window(ready, binding, window)?;
     ensure!(
         ready_frame.frame().sequence == 1
             && matches!(
@@ -1345,7 +1373,7 @@ fn lease_handshake<T: ExternalExecutionChannelTransport>(
         "a leased guest starts from a Ready that names its boot"
     );
     let report_frame =
-        SignedExecutionFrame::decode_and_verify(report, binding, lillux::time::timestamp_millis())?;
+        SignedExecutionFrame::decode_and_verify_in_guest_window(report, binding, window)?;
     ensure!(
         report_frame.frame().sequence == 2
             && matches!(
@@ -1381,7 +1409,8 @@ pub fn lease_handshake_for_test<T: ExternalExecutionChannelTransport>(
     report: &[u8],
     deadline: lillux::time::MonotonicDeadline,
 ) -> Result<()> {
-    lease_handshake(transport, binding, ready, report, deadline)
+    let window = GuestChannelWindow::starting_now_for_single_clock_harness(binding)?;
+    lease_handshake(transport, binding, ready, report, &window, deadline)
 }
 
 /// One exchange of exactly `wire`, retried unchanged while the outcome is
@@ -2916,10 +2945,10 @@ mod tests {
                 state.guest_directory.try_clone().unwrap(),
                 &authority,
                 &launcher_digest,
-                expected_binding,
+                expected_binding.clone(),
+                ryeos_state::external_execution::guest_window::GuestChannelWindow::starting_now_for_single_clock_harness(&expected_binding).unwrap(),
                 native.factory,
-                native.destination(),
-            )
+                native.destination())
             .unwrap();
             let launch = attached
                 .begin_launch(
@@ -3096,6 +3125,7 @@ mod tests {
             &frames.binding,
             &frames.ready,
             &frames.report,
+            &ryeos_state::external_execution::guest_window::GuestChannelWindow::starting_now_for_single_clock_harness(&frames.binding).unwrap(),
             handshake_deadline(),
         )
         .unwrap();
@@ -3121,6 +3151,7 @@ mod tests {
             &frames.binding,
             &frames.ready,
             &frames.report,
+            &ryeos_state::external_execution::guest_window::GuestChannelWindow::starting_now_for_single_clock_harness(&frames.binding).unwrap(),
             handshake_deadline(),
         )
         .unwrap_err();
@@ -3143,6 +3174,7 @@ mod tests {
             &frames.binding,
             &frames.ready,
             &frames.report,
+            &ryeos_state::external_execution::guest_window::GuestChannelWindow::starting_now_for_single_clock_harness(&frames.binding).unwrap(),
             handshake_deadline(),
         )
         .unwrap_err();

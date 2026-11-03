@@ -321,10 +321,10 @@ impl LiveInheritedExternalCandidateSupervisor {
     /// Advance with another truthful acknowledgement of the same retained peer;
     /// this consumes the existing signed transcript budget and grants no input.
     pub fn author_idle_poll(&mut self, previous_poll: &[u8]) -> Result<Vec<u8>> {
-        let previous = SignedExecutionFrame::decode_and_verify(
+        let previous = SignedExecutionFrame::decode_and_verify_in_guest_window(
             previous_poll,
             self.binding(),
-            lillux::time::timestamp_millis(),
+            self.supervisor.journal().window(),
         )?;
         let ExecutionChannelPayload::Acknowledge {
             peer_frame_sequence,
@@ -390,10 +390,10 @@ impl LiveInheritedExternalCandidateSupervisor {
     /// A partial protocol write returns a signed `claimed` acknowledgement;
     /// the caller must continue this same frame locally until `applied`.
     pub fn dispatch_owner_frame(&mut self, wire: &[u8]) -> Result<ExternalOwnerFrameDispatch> {
-        let verified = SignedExecutionFrame::decode_and_verify(
+        let verified = SignedExecutionFrame::decode_and_verify_in_guest_window(
             wire,
             self.supervisor.journal().binding(),
-            lillux::time::timestamp_millis(),
+            self.supervisor.journal().window(),
         )?;
         ensure!(
             verified.frame().direction
@@ -1590,8 +1590,9 @@ pub fn serve_native_candidate_launcher(
     authority: ryeos_state::PinnedStateAuthority,
     bootstrap_digest: String,
     expected_binding: ExecutionChannelBinding,
-    deadline: lillux::time::MonotonicDeadline,
+    window: ryeos_state::external_execution::guest_window::GuestChannelWindow,
 ) -> Result<()> {
+    let deadline = window.expiry_monotonic();
     let result = (|| -> Result<()> {
         let stdout = BoundedCandidateExecutionOutput::new(protocol_output, maximum_output_bytes)?;
         let mut output = match expected_binding.execution_mode {
@@ -1670,10 +1671,10 @@ pub fn serve_native_candidate_launcher(
             )?;
             match message {
                 LauncherMessage::Apply { schema, frame_json } if schema == PROTOCOL_SCHEMA => {
-                    let decoded = SignedExecutionFrame::decode_and_verify(
+                    let decoded = SignedExecutionFrame::decode_and_verify_in_guest_window(
                         frame_json.as_bytes(),
                         &expected_binding,
-                        lillux::time::timestamp_millis(),
+                        &window,
                     )?;
                     let digest = decoded.digest().to_owned();
                     if matches!(

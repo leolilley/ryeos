@@ -414,10 +414,10 @@ fn fixed_source_descriptors_cannot_start_mounted_supervisor() {
         guest,
         &authority,
         &launch_digest,
-        binding,
+        binding.clone(),
+        ryeos_state::external_execution::guest_window::GuestChannelWindow::starting_now_for_single_clock_harness(&binding).unwrap(),
         host.factory(),
-        host.destination(),
-    )
+        host.destination())
     .unwrap();
     let launch = attached
         .begin_launch(

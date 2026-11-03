@@ -21,6 +21,7 @@ pub mod admission;
 pub mod connector;
 pub mod export;
 pub mod guest_journal;
+pub mod guest_window;
 pub mod journal;
 pub mod native_journal;
 pub mod qualification_controller_canary;
@@ -744,10 +745,45 @@ impl SignedExecutionFrame {
         Ok(Self { frame, signature })
     }
 
+    /// Verify a frame against the controller's wall clock. Only the node that
+    /// issued the binding may use this form: it compares the binding's
+    /// absolute times with `now_ms`, which is meaningful only on the clock
+    /// that wrote them. A guest uses [`Self::decode_and_verify_in_guest_window`].
     pub fn decode_and_verify(
         bytes: &[u8],
         binding: &ExecutionChannelBinding,
         now_ms: i64,
+    ) -> Result<AuthenticatedExecutionFrame> {
+        Self::decode_and_verify_within(bytes, binding, || {
+            ensure!(
+                now_ms >= binding.issued_at_ms && now_ms < binding.expires_at_ms,
+                "external channel is outside its admitted lifetime"
+            );
+            Ok(())
+        })
+    }
+
+    /// Verify a frame on a guest. The channel lifetime is the guest's local
+    /// window, not the binding's absolute times, so a skewed guest wall clock
+    /// neither admits an expired channel nor refuses a live one.
+    pub fn decode_and_verify_in_guest_window(
+        bytes: &[u8],
+        binding: &ExecutionChannelBinding,
+        window: &guest_window::GuestChannelWindow,
+    ) -> Result<AuthenticatedExecutionFrame> {
+        Self::decode_and_verify_within(bytes, binding, || {
+            ensure!(
+                !window.expiry_elapsed(),
+                "external channel is outside its admitted lifetime"
+            );
+            Ok(())
+        })
+    }
+
+    fn decode_and_verify_within(
+        bytes: &[u8],
+        binding: &ExecutionChannelBinding,
+        require_lifetime: impl FnOnce() -> Result<()>,
     ) -> Result<AuthenticatedExecutionFrame> {
         ensure!(
             bytes.len() <= MAX_FRAME_BYTES,
@@ -756,10 +792,7 @@ impl SignedExecutionFrame {
         let signed: Self =
             serde_json::from_slice(bytes).context("decode external execution frame")?;
         validate_frame(&signed.frame, binding)?;
-        ensure!(
-            now_ms >= binding.issued_at_ms && now_ms < binding.expires_at_ms,
-            "external channel is outside its admitted lifetime"
-        );
+        require_lifetime()?;
         let canonical = lillux::canonical_json(&serde_json::to_value(&signed)?)?;
         ensure!(
             canonical.as_bytes() == bytes,
@@ -1877,5 +1910,139 @@ mod tests {
         let mut bad = binding;
         bad.max_bytes = u64::MAX;
         assert!(bad.validate().is_err());
+    }
+
+    /// A binding as the controller issued it at `issued_at_ms` on its own
+    /// clock, with the usual execution and cleanup window lengths.
+    fn binding_issued_at(issued_at_ms: i64) -> (ExecutionChannelBinding, SigningKey, SigningKey) {
+        let (mut binding, owner, supervisor) = binding();
+        binding.issued_at_ms = issued_at_ms;
+        binding.execution_deadline_ms = issued_at_ms + 100_000;
+        binding.expires_at_ms = issued_at_ms + 200_000;
+        (binding, owner, supervisor)
+    }
+
+    fn owner_release_wire(binding: &ExecutionChannelBinding, owner: &SigningKey) -> String {
+        let signed = SignedExecutionFrame::sign(frame(binding), binding, owner).unwrap();
+        lillux::canonical_json(&serde_json::to_value(signed).unwrap()).unwrap()
+    }
+
+    /// Guest wall clocks this far from the controller's, in both directions,
+    /// and far beyond any plausible tolerance.
+    const SKEWS_MS: [i64; 5] = [-3_600_000, -60_000, 0, 60_000, 3_600_000];
+
+    #[test]
+    fn guest_window_lengths_do_not_depend_on_controller_absolute_times() {
+        let guest_wall_ms = lillux::time::timestamp_millis();
+        for skew in SKEWS_MS {
+            // The controller's clock differs from the guest's by `skew`.
+            let (binding, _, _) = binding_issued_at(guest_wall_ms + skew);
+            let anchor = lillux::time::LocalClockAnchor::capture().unwrap();
+            let window = guest_window::GuestChannelWindow::derive(&anchor, &binding).unwrap();
+            let execution = window.execution_remaining();
+            let expiry = window.expiry_remaining();
+            assert!(
+                execution <= lillux::time::Duration::from_secs(100)
+                    && execution > lillux::time::Duration::from_secs(99),
+                "skew {skew}: execution {execution:?}"
+            );
+            assert!(
+                expiry <= lillux::time::Duration::from_secs(200)
+                    && expiry > lillux::time::Duration::from_secs(199),
+                "skew {skew}: expiry {expiry:?}"
+            );
+            assert!(!window.execution_elapsed() && !window.expiry_elapsed());
+        }
+    }
+
+    #[test]
+    fn guest_frame_verification_follows_the_local_window_not_the_wall_clock() {
+        let guest_wall_ms = lillux::time::timestamp_millis();
+        for skew in SKEWS_MS {
+            let (binding, owner, _) = binding_issued_at(guest_wall_ms + skew);
+            let wire = owner_release_wire(&binding, &owner);
+            let window =
+                guest_window::GuestChannelWindow::starting_now_for_single_clock_harness(&binding)
+                    .unwrap();
+            SignedExecutionFrame::decode_and_verify_in_guest_window(
+                wire.as_bytes(),
+                &binding,
+                &window,
+            )
+            .unwrap();
+            // The controller form, fed the guest's wall clock, is what a
+            // skewed pair of machines used to trip over.
+            let by_wall_clock =
+                SignedExecutionFrame::decode_and_verify(wire.as_bytes(), &binding, guest_wall_ms);
+            assert_eq!(
+                by_wall_clock.is_ok(),
+                skew <= 0 && skew > -200_000,
+                "skew {skew}"
+            );
+        }
+    }
+
+    #[test]
+    fn guest_frame_verification_refuses_once_the_local_window_elapsed() {
+        let (binding, owner, _) = binding_issued_at(lillux::time::timestamp_millis());
+        let wire = owner_release_wire(&binding, &owner);
+        let window = guest_window::GuestChannelWindow::from_handed_down(
+            lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_millis(20)),
+            lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_millis(40)),
+        )
+        .unwrap();
+        SignedExecutionFrame::decode_and_verify_in_guest_window(wire.as_bytes(), &binding, &window)
+            .unwrap();
+        lillux::time::sleep(lillux::time::Duration::from_millis(60));
+        assert!(window.execution_elapsed() && window.expiry_elapsed());
+        let refusal = SignedExecutionFrame::decode_and_verify_in_guest_window(
+            wire.as_bytes(),
+            &binding,
+            &window,
+        )
+        .err()
+        .unwrap();
+        assert!(
+            format!("{refusal:#}").contains("admitted lifetime"),
+            "{refusal:#}"
+        );
+    }
+
+    #[test]
+    fn guest_window_is_refused_for_an_old_anchor_another_boot_and_an_inverted_handoff() {
+        let (binding, _, _) = binding_issued_at(lillux::time::timestamp_millis());
+        let now = lillux::time::LocalClockAnchor::capture().unwrap();
+
+        let mut aged = now.coordinate().clone();
+        aged.tick_ns -= 201_000 * 1_000_000;
+        let refusal = guest_window::GuestChannelWindow::derive(
+            &lillux::time::LocalClockAnchor::from_retained(aged).unwrap(),
+            &binding,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{refusal:#}").contains("already elapsed"),
+            "{refusal:#}"
+        );
+
+        let mut other_boot = now.coordinate().clone();
+        other_boot.incarnation_digest = lillux::sha256_hex(b"another boot");
+        let refusal = guest_window::GuestChannelWindow::derive(
+            &lillux::time::LocalClockAnchor::from_retained(other_boot).unwrap(),
+            &binding,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{refusal:#}").contains("earlier boot"),
+            "{refusal:#}"
+        );
+
+        assert!(
+            guest_window::GuestChannelWindow::from_handed_down(
+                lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(9)),
+                lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(1)),
+            )
+            .is_err()
+        );
     }
 }

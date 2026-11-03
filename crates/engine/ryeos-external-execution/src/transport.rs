@@ -1273,10 +1273,10 @@ mod tests {
                 &authority,
                 &"9".repeat(64),
                 binding.clone(),
+                ryeos_state::external_execution::guest_window::GuestChannelWindow::starting_now_for_single_clock_harness(&binding).unwrap(),
                 host.factory(),
                 host.destination(),
-                &ryeos_state::external_execution::native_journal::testing::census(&host),
-            )
+                &ryeos_state::external_execution::native_journal::testing::census(&host))
             .unwrap();
             let occurrence = LauncherOccurrenceEvidence::from_held_launcher(
                 lillux::ExactProcessIdentity {
@@ -1437,10 +1437,10 @@ mod tests {
                 &authority,
                 &"5".repeat(64),
                 binding.clone(),
+                ryeos_state::external_execution::guest_window::GuestChannelWindow::starting_now_for_single_clock_harness(&binding).unwrap(),
                 host.factory(),
                 host.destination(),
-                &ryeos_state::external_execution::native_journal::testing::census(&host),
-            )
+                &ryeos_state::external_execution::native_journal::testing::census(&host))
             .unwrap();
             let occurrence = LauncherOccurrenceEvidence::from_held_launcher(
                 lillux::ExactProcessIdentity {

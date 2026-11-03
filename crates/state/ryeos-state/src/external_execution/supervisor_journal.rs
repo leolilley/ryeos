@@ -1970,10 +1970,10 @@ mod tests {
             guest_directory,
             &authority,
             &launcher_digest,
-            expected_binding,
+            expected_binding.clone(),
+            crate::external_execution::guest_window::GuestChannelWindow::starting_now_for_single_clock_harness(&expected_binding).unwrap(),
             host.factory(),
-            host.destination(),
-        )
+            host.destination())
         .unwrap();
         let launch = attached
             .begin_launch(
@@ -2042,9 +2042,9 @@ mod tests {
             &authority,
             &launcher_digest,
             expected_binding.clone(),
+            crate::external_execution::guest_window::GuestChannelWindow::starting_now_for_single_clock_harness(&expected_binding).unwrap(),
             host.factory(),
-            host.destination(),
-        )
+            host.destination())
         .unwrap();
         let anchored_guest = reservation.store_identity().clone();
         let launch = attached

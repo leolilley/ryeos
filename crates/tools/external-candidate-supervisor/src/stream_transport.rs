@@ -77,6 +77,7 @@ pub fn connect_external_execution_stream(
     supervisor_signing_key: &lillux::crypto::SigningKey,
     binding: &ExecutionChannelBinding,
     network_inputs: &ExternalCapturedNetworkInputs,
+    window: &ryeos_state::external_execution::guest_window::GuestChannelWindow,
 ) -> Result<AttachedExternalExecutionStream> {
     bootstrap.validate_attached_binding(
         binding,
@@ -99,12 +100,11 @@ pub fn connect_external_execution_stream(
                 .context("decode admitted external TLS root")
         })
         .collect::<Result<Vec<_>>>()?;
-    let now = lillux::time::timestamp_millis();
-    let remaining_ms = binding
-        .expires_at_ms
-        .checked_sub(now)
-        .filter(|remaining| *remaining > 0)
-        .context("external channel stream binding has already expired")?;
+    let lifetime = window.expiry_remaining();
+    ensure!(
+        !lifetime.is_zero(),
+        "external channel stream window has already elapsed"
+    );
     assemble(
         StreamEndpoint {
             network,
@@ -117,7 +117,7 @@ pub fn connect_external_execution_stream(
             setup_timeout: Duration::from_millis(u64::from(http.connect_timeout_ms)),
             request_timeout: Duration::from_millis(u64::from(http.request_timeout_ms)),
             maximum_response_bytes: http.maximum_response_bytes,
-            lifetime: Duration::from_millis(u64::try_from(remaining_ms)?),
+            lifetime,
         },
     )
 }

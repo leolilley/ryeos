@@ -163,10 +163,10 @@ impl<L: ExternalCandidateLauncherClient> SerializedExternalCandidateSupervisor<L
     /// executable application for it. The shared journal reconciles the exact
     /// supervisor frame state named by the signed payload.
     pub fn record_owner_acknowledgement(&self, wire: &[u8]) -> Result<bool> {
-        let verified = ryeos_state::external_execution::SignedExecutionFrame::decode_and_verify(
+        let verified = ryeos_state::external_execution::SignedExecutionFrame::decode_and_verify_in_guest_window(
             wire,
             self.journal.binding(),
-            lillux::time::timestamp_millis(),
+            self.journal.window(),
         )?;
         ensure!(
             verified.frame().direction == ChannelDirection::OwnerToSupervisor
@@ -424,10 +424,10 @@ impl<L: ExternalCandidateLauncherClient> SerializedExternalCandidateSupervisor<L
             self.pending_protocol.is_none(),
             "quiescence cannot overtake pending protocol input"
         );
-        let quiesce = ryeos_state::external_execution::SignedExecutionFrame::decode_and_verify(
+        let quiesce = ryeos_state::external_execution::SignedExecutionFrame::decode_and_verify_in_guest_window(
             wire,
             self.journal.binding(),
-            lillux::time::timestamp_millis(),
+            self.journal.window(),
         )?;
         let capture = match self.journal.record_and_claim(wire)? {
             GuestApplicationClaim::New(token) => {
@@ -552,10 +552,10 @@ impl<L: ExternalCandidateLauncherClient> SerializedExternalCandidateSupervisor<L
                 && program.digest()? == self.journal.binding().candidate_program_digest,
             "qualification completion cannot overtake a live protocol application"
         );
-        let completion = ryeos_state::external_execution::SignedExecutionFrame::decode_and_verify(
+        let completion = ryeos_state::external_execution::SignedExecutionFrame::decode_and_verify_in_guest_window(
             wire,
             self.journal.binding(),
-            lillux::time::timestamp_millis(),
+            self.journal.window(),
         )?;
         let fresh = match self.journal.record_and_claim(wire)? {
             GuestApplicationClaim::New(token) => {
@@ -818,10 +818,10 @@ mod tests {
             &authority,
             &bootstrap_digest,
             binding.clone(),
+            ryeos_state::external_execution::guest_window::GuestChannelWindow::starting_now_for_single_clock_harness(&binding).unwrap(),
             state.host().factory(),
             state.host().destination(),
-            &ryeos_state::external_execution::native_journal::testing::census(state.host()),
-        )
+            &ryeos_state::external_execution::native_journal::testing::census(state.host()))
         .unwrap();
         let occurrence = LauncherOccurrenceEvidence::from_held_launcher(
             lillux::ExactProcessIdentity {
@@ -1083,10 +1083,10 @@ mod tests {
             &authority,
             &"f".repeat(64),
             binding.clone(),
+            ryeos_state::external_execution::guest_window::GuestChannelWindow::starting_now_for_single_clock_harness(&binding).unwrap(),
             state.host().factory(),
             state.host().destination(),
-            &ryeos_state::external_execution::native_journal::testing::census(state.host()),
-        )
+            &ryeos_state::external_execution::native_journal::testing::census(state.host()))
         .unwrap();
         let occurrence = LauncherOccurrenceEvidence::from_held_launcher(
             lillux::ExactProcessIdentity {
