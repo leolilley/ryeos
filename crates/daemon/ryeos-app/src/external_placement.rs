@@ -3474,6 +3474,7 @@ pub fn attach_external_execution_channel(
         );
         return Ok(existing);
     }
+    controller_clock::require_for_new_windows(state)?;
     let nonce = lillux::crypto::generate_random_bytes::<32>();
     let binding = build_external_execution_channel_binding(
         &allocation.reservation,
@@ -5575,6 +5576,7 @@ impl<'a> ExternalPlacementOwner<'a> {
                 prior.reservation.startup_deadline_ms,
             )
         } else {
+            controller_clock::require_for_new_windows(&*self.state)?;
             let now = lillux::time::timestamp_millis();
             (
                 now,
@@ -5912,6 +5914,7 @@ impl<'a> ExternalPlacementOwner<'a> {
             );
             expected
         } else {
+            controller_clock::require_for_new_windows(&*self.state)?;
             let now = lillux::time::timestamp_millis();
             let contact_deadline_ms = now
                 .checked_add(i64::from(contract.contact_timeout_seconds) * 1_000)
@@ -6354,6 +6357,7 @@ pub fn prepare_external_qualification_start_for_invocation<'a>(
         "admitted_adapter_request_base64": &admitted_adapter_request_base64,
     }))?;
     let startup_budget_ms = qualification_startup_budget_ms(&contract)?;
+    controller_clock::require_for_new_windows(state)?;
     let now = lillux::time::timestamp_millis();
     let reservation = ExternalAllocationReservation {
         schema: EXTERNAL_ALLOCATION_RESERVATION_SCHEMA,
@@ -8864,6 +8868,7 @@ mod channel_stream_admission_tests;
 #[cfg(test)]
 mod lease_ready_loopback_tests;
 
+mod controller_clock;
 mod lease_lifecycle;
 mod lease_ready_gate;
 pub(crate) use lease_lifecycle::admit_turn_on_external_lease;

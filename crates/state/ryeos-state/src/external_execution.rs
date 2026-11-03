@@ -211,12 +211,15 @@ pub struct SupervisorReadyBoot {
     /// Digests of the activation inputs the supervisor verified on this boot
     /// before reporting ready, in the order the owner delivered them.
     pub verified_input_digests: Vec<String>,
-    /// Wall-clock time the supervisor became ready.
+    /// The guest's own wall-clock reading when the supervisor became ready.
+    /// It is the guest's testimony on a clock the controller cannot vouch
+    /// for, so it is informational: no window is checked against it, and the
+    /// controller's authoritative Ready time is its own clock at receipt.
     pub ready_at_ms: i64,
 }
 
 impl SupervisorReadyBoot {
-    fn validate(&self, binding: &ExecutionChannelBinding) -> Result<()> {
+    fn validate(&self) -> Result<()> {
         boot_id(&self.boot_id)?;
         ensure!(
             !self.verified_input_digests.is_empty()
@@ -227,8 +230,8 @@ impl SupervisorReadyBoot {
             hash(digest)?;
         }
         ensure!(
-            self.ready_at_ms >= binding.issued_at_ms && self.ready_at_ms < binding.expires_at_ms,
-            "supervisor Ready time is outside the channel lifetime"
+            self.ready_at_ms > 0,
+            "supervisor Ready time is not a positive wall-clock reading"
         );
         Ok(())
     }
@@ -554,7 +557,7 @@ impl ExecutionChannelPayload {
                     "supervisor readiness changed admitted inputs"
                 );
                 if let Some(boot) = boot {
-                    boot.validate(binding)?;
+                    boot.validate()?;
                 }
             }
             CapabilityReport {
@@ -1764,17 +1767,14 @@ mod tests {
             vec!["1".repeat(64); MAX_READY_VERIFIED_INPUTS + 1];
         let mut bad_digest = ready_boot();
         bad_digest.verified_input_digests = vec!["X".repeat(64)];
-        let mut before_issue = ready_boot();
-        before_issue.ready_at_ms = 0;
-        let mut after_expiry = ready_boot();
-        after_expiry.ready_at_ms = binding.expires_at_ms;
+        let mut no_reading = ready_boot();
+        no_reading.ready_at_ms = 0;
         for boot in [
             malformed,
             empty_inputs,
             too_many_inputs,
             bad_digest,
-            before_issue,
-            after_expiry,
+            no_reading,
         ] {
             assert!(
                 SignedExecutionFrame::sign(
@@ -1784,6 +1784,23 @@ mod tests {
                 )
                 .is_err()
             );
+        }
+    }
+
+    #[test]
+    fn ready_time_is_the_guests_testimony_not_a_window_check() {
+        let (binding, _, supervisor) = binding();
+        // A guest clock far before issue or far after expiry is still a valid
+        // Ready: the controller decides timing on its own clock.
+        for ready_at_ms in [1, binding.expires_at_ms, binding.expires_at_ms + 3_600_000] {
+            let mut boot = ready_boot();
+            boot.ready_at_ms = ready_at_ms;
+            SignedExecutionFrame::sign(
+                supervisor_frame(&binding, 1, ready_with(&binding, Some(boot))),
+                &binding,
+                &supervisor,
+            )
+            .unwrap();
         }
     }
 
