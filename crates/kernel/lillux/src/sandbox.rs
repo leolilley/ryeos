@@ -309,7 +309,7 @@ pub struct TmpfsLimits {
 }
 
 impl TmpfsLimits {
-    fn validate(&self) -> Result<(), String> {
+    pub(crate) fn validate(&self) -> Result<(), String> {
         if self.size_bytes == 0 || self.size_bytes > MAX_ROOT_OVERLAY_TMPFS_BYTES {
             return Err("root overlay tmpfs size must be non-zero and bounded".into());
         }

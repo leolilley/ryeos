@@ -17,6 +17,7 @@ pub mod loopback;
 pub mod network;
 pub mod platform;
 pub mod process_control;
+pub mod root_enclosure;
 pub mod sandbox;
 pub mod secure_fs;
 pub mod signature;
