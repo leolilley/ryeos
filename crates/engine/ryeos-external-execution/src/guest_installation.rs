@@ -10,6 +10,7 @@ use std::ffi::OsStr;
 use std::path::PathBuf;
 
 use anyhow::{Context as _, Result, ensure};
+use ryeos_external_execution_contract::guest_owner_report::{GuestOwnerRefusal, RefusedAt as _};
 use ryeos_external_execution_contract::guest_supervisor_descriptors::{
     GuestSupervisorDescriptorPlan, SUPERVISOR_BOOTSTRAP_FD, SUPERVISOR_CANDIDATE_RUNTIME_FD,
     SUPERVISOR_EXECUTABLE_FD, SUPERVISOR_LAUNCHER_FD, SUPERVISOR_MOUNTED_CONTROL_DESCRIPTORS,
@@ -436,45 +437,70 @@ pub fn prepare_authorized_held_guest_supervisor_once(
     import_deadline: lillux::time::MonotonicDeadline,
     ready_boot_inputs: Option<Vec<String>>,
 ) -> Result<HeldGuestMountedSandbox> {
-    ensure!(
-        source.limits() == installed_runtime.profile().private_source_limits(),
-        "private source limits differ from exact installed guest-owner profile"
-    );
-    installed_runtime.require_disjoint_directory_tree(occurrence)?;
-    installed_runtime.require_disjoint_directory_tree(source.root())?;
-    let verified =
-        installed_runtime.verify_import_documents(signed_import_bytes, signed_assignment_bytes)?;
-    verified.require_fresh_admission()?;
-    let stage_bytes = verified
-        .authorization()
-        .ticket
-        .framed_bytes
-        .checked_sub(crate::guest_import_authorization::GUEST_PACKAGE_FRAME_OVERHEAD_BYTES)
-        .context("guest package has no bounded staged-content floor")?;
-    ensure!(
-        stage_bytes <= source.limits().max_bytes,
-        "guest package cannot fit the installed private-source ceiling"
-    );
+    use GuestOwnerRefusal as Step;
+    (|| -> Result<_> {
+        ensure!(
+            source.limits() == installed_runtime.profile().private_source_limits(),
+            "private source limits differ from exact installed guest-owner profile"
+        );
+        Ok(())
+    })()
+    .refused_at(Step::PrivateSourceEntry)?;
+    installed_runtime
+        .require_disjoint_directory_tree(occurrence)
+        .refused_at(Step::OccurrenceRoot)?;
+    installed_runtime
+        .require_disjoint_directory_tree(source.root())
+        .refused_at(Step::PrivateSourceEntry)?;
+    let verified = installed_runtime
+        .verify_import_documents(signed_import_bytes, signed_assignment_bytes)
+        .refused_at(Step::ImportVerify)?;
+    verified
+        .require_fresh_admission()
+        .refused_at(Step::AdmissionExpired)?;
+    (|| -> Result<_> {
+        let stage_bytes = verified
+            .authorization()
+            .ticket
+            .framed_bytes
+            .checked_sub(crate::guest_import_authorization::GUEST_PACKAGE_FRAME_OVERHEAD_BYTES)
+            .context("guest package has no bounded staged-content floor")?;
+        ensure!(
+            stage_bytes <= source.limits().max_bytes,
+            "guest package cannot fit the installed private-source ceiling"
+        );
+        Ok(())
+    })()
+    .refused_at(Step::PrivateSourceCeiling)?;
     let authority = verified.authorization().clone();
     let context = authority.context();
     let inputs = &authority.guest_inputs;
-    let owner = GuestOccurrenceOwner::begin_authorized(occurrence, verified)?;
-    let staged = owner.stage_uploaded_once(upload, source, &context, inputs, import_deadline)?;
-    let installed = staged.install_base_once(&context, inputs)?;
-    let prepared = installed
-        .prepare_content_for_adoption(&context, inputs)?
-        .create_private_scratch_once(&context, inputs)?
-        .prepare_launch_artifacts_once(&context, inputs)?
-        .prepare_supervisor_request(
-            &context,
-            inputs,
-            installed_runtime.profile().owner_timeout_seconds(),
-        )?;
-    let prepared = prepared.with_ready_boot_inputs(&context, inputs, ready_boot_inputs)?;
-    let committed = prepared.commit_outer_launch_intent(&context, inputs)?;
+    let owner = GuestOccurrenceOwner::begin_authorized(occurrence, verified)
+        .refused_at(Step::OccurrenceRoot)?;
+    let staged = owner
+        .stage_uploaded_once(upload, source, &context, inputs, import_deadline)
+        .refused_at(Step::Stage)?;
+    let installed = staged
+        .install_base_once(&context, inputs)
+        .refused_at(Step::Install)?;
+    let committed = (|| -> Result<_> {
+        let prepared = installed
+            .prepare_content_for_adoption(&context, inputs)?
+            .create_private_scratch_once(&context, inputs)?
+            .prepare_launch_artifacts_once(&context, inputs)?
+            .prepare_supervisor_request(
+                &context,
+                inputs,
+                installed_runtime.profile().owner_timeout_seconds(),
+            )?;
+        let prepared = prepared.with_ready_boot_inputs(&context, inputs, ready_boot_inputs)?;
+        prepared.commit_outer_launch_intent(&context, inputs)
+    })()
+    .refused_at(Step::LaunchPreparation)?;
     committed
-        .prepare_mounted_sandbox_request(&context, inputs)?
-        .prepare_held_in_dedicated_owner()
+        .prepare_mounted_sandbox_request(&context, inputs)
+        .and_then(|request| request.prepare_held_in_dedicated_owner())
+        .refused_at(Step::HeldPrepare)
 }
 
 /// The sole released native supervisor attempt. Applied launch is still only
