@@ -498,10 +498,11 @@ fn validate_authorities(inputs: &ExternalCandidateSupervisorInputs) -> Result<()
     );
     let mut directory_inputs: Vec<lillux::PinnedDirectory> = Vec::new();
     let mut content_records = inputs.content_records.iter();
-    for (mount, projection) in inputs
+    for (index, (mount, projection)) in inputs
         .runtime_mounts
         .iter()
         .zip(&inputs.execution_guest_inputs.inputs)
+        .enumerate()
     {
         ensure!(
             mount.inherited_descriptor().map_err(anyhow::Error::msg)? == projection.descriptor,
@@ -516,9 +517,27 @@ fn validate_authorities(inputs: &ExternalCandidateSupervisorInputs) -> Result<()
                 inputs
                     .candidate_runtime
                     .require_disjoint_directory_tree(&pinned)?;
-                inputs
-                    .candidate_private_parent
-                    .require_disjoint_directory_tree(&pinned)?;
+                if matches!(
+                    projection.content_authority,
+                    ryeos_external_execution_contract::GuestMountContentAuthority::PrivateScratch { .. }
+                ) {
+                    // Private scratch is the owner's indexed child of the
+                    // candidate private parent, never a tree beside it.
+                    let sealed = inputs
+                        .candidate_private_parent
+                        .open_child_directory(std::ffi::OsStr::new(&format!(
+                            "guest-scratch-{index:02}"
+                        )))?
+                        .context("external guest private scratch is absent")?;
+                    ensure!(
+                        sealed.identity()? == pinned.identity()?,
+                        "external guest private scratch is not its sealed private-parent child"
+                    );
+                } else {
+                    inputs
+                        .candidate_private_parent
+                        .require_disjoint_directory_tree(&pinned)?;
+                }
                 if let Some(mailbox) = inputs.relay_mailbox.as_ref() {
                     mailbox.require_disjoint_directory_tree(&pinned)?;
                 }
