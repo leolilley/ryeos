@@ -882,6 +882,7 @@ mod tests {
             capabilities: [LifecycleCapability::ExactAllocationReconciliation]
                 .into_iter()
                 .collect(),
+            relay_scope_setting: None,
         }
     }
 

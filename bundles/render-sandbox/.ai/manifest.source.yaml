@@ -26,3 +26,4 @@ external_lifecycle_adapters:
       - authoritative_no_occurrence
       - exact_terminal_observation
       - controller_file_relay
+    relay_scope_setting: owner_id

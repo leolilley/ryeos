@@ -146,6 +146,7 @@ pub(crate) struct BundleArtifactFacts {
     pub(crate) configuration_adapter_artifact_bytes: u64,
     pub(crate) connector_artifact_hash: String,
     pub(crate) connector_artifact_bytes: u64,
+    pub(crate) relay_scope_setting: Option<String>,
 }
 
 /// Everything one binding document is made from.
@@ -223,6 +224,11 @@ pub(super) fn compose_binding_document(inputs: ComposeInputs<'_>) -> Result<Bind
         artifacts,
         limits,
     } = inputs;
+    super::require_relay_scope(
+        &controller_transport,
+        artifacts.relay_scope_setting.as_deref(),
+        &settings,
+    )?;
     program.validate()?;
     require_content_qualification_pairing(program, runtime_content_qualification.as_ref())?;
     controller_transport.validate()?;
@@ -515,6 +521,7 @@ pub(crate) fn bundle_artifact_facts(
         configuration_adapter_artifact_bytes,
         connector_artifact_hash,
         connector_artifact_bytes,
+        relay_scope_setting: generation.relay_scope_setting,
     })
 }
 
@@ -1069,6 +1076,7 @@ pub(crate) mod tests {
             configuration_adapter_artifact_bytes: 4096,
             connector_artifact_hash: "f".repeat(64),
             connector_artifact_bytes: 4096,
+            relay_scope_setting: Some("owner_id".into()),
         }
     }
 
@@ -1598,6 +1606,49 @@ pub(crate) mod tests {
         assert_eq!(
             http.tls_root_bundle_digest,
             external_tls_root_bundle_digest(&forward).unwrap()
+        );
+    }
+
+    #[test]
+    fn relay_scope_must_equal_the_setting_the_adapter_declares() {
+        let program = program();
+        // `relay()` names workspace `render-owner`; the declared key is `owner_id`.
+        compose(&program, &relay(), relay_settings()).unwrap();
+        for settings in [
+            serde_json::json!({"owner_id": "other"}),
+            serde_json::json!({}),
+            serde_json::json!({"workspace": "render-owner"}),
+        ] {
+            let error = refusal(compose(&program, &relay(), settings));
+            assert!(
+                error.to_string().contains("relay scope setting differs"),
+                "{error}"
+            );
+        }
+        // An adapter that declares no scope key cannot be composed over a relay.
+        let selected = select_transport(&relay()).unwrap();
+        let error = refusal(compose_binding_document(ComposeInputs {
+            program: &program,
+            controller_transport: selected.selection,
+            provider_network_inputs: selected.network_inputs,
+            tls_roots_der_base64: Vec::new(),
+            backend: RENDER_BACKEND_ID.into(),
+            account: "a".into(),
+            capacity_group: DEFAULT_CAPACITY_GROUP.into(),
+            credential_generation: "a".repeat(64),
+            settings: relay_settings(),
+            guest_runtime_manifest_hash: "4".repeat(64),
+            runtime_qualification: None,
+            runtime_content_qualification: None,
+            artifacts: BundleArtifactFacts {
+                relay_scope_setting: None,
+                ..facts()
+            },
+            limits: ComposeLimits::default(),
+        }));
+        assert!(
+            error.to_string().contains("no relay scope setting"),
+            "{error}"
         );
     }
 

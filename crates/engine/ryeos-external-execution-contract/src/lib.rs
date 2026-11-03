@@ -901,6 +901,11 @@ pub struct ExternalLifecycleAdapterDeclaration {
     pub snapshot_production_spec: Option<LifecycleProviderSpecIdentity>,
     pub settings_schema_digest: String,
     pub capabilities: BTreeSet<LifecycleCapability>,
+    /// The adapter-settings key whose string value must equal the relay
+    /// selection's workspace scope. Present exactly when the adapter declares
+    /// `controller_file_relay`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_scope_setting: Option<String>,
 }
 
 /// Bundle-relative identity of the closed provider behavior specification
@@ -988,6 +993,22 @@ impl ExternalLifecycleAdapterDeclaration {
             !self.capabilities.is_empty(),
             "external lifecycle adapter declares no capabilities"
         );
+        match &self.relay_scope_setting {
+            Some(key) => {
+                bounded_identifier(key, 64, "external lifecycle relay scope setting")?;
+                ensure!(
+                    self.capabilities
+                        .contains(&LifecycleCapability::ControllerFileRelay),
+                    "a relay scope setting needs the controller file relay capability"
+                );
+            }
+            None => ensure!(
+                !self
+                    .capabilities
+                    .contains(&LifecycleCapability::ControllerFileRelay),
+                "the controller file relay capability needs a relay scope setting"
+            ),
+        }
         Ok(())
     }
 }
@@ -2762,8 +2783,24 @@ mod tests {
                 LifecycleCapability::ExactAllocationReconciliation,
                 LifecycleCapability::AuthoritativeNoOccurrence,
             ]),
+            relay_scope_setting: None,
         };
         lifecycle.validate().unwrap();
+        let mut relaying = lifecycle.clone();
+        relaying
+            .capabilities
+            .insert(LifecycleCapability::ControllerFileRelay);
+        assert!(relaying.validate().is_err(), "relay needs a scope setting");
+        relaying.relay_scope_setting = Some("workspace_id".into());
+        relaying.validate().unwrap();
+        let mut stray = lifecycle.clone();
+        stray.relay_scope_setting = Some("workspace_id".into());
+        assert!(
+            stray.validate().is_err(),
+            "scope setting needs the capability"
+        );
+        relaying.relay_scope_setting = Some("a b".into());
+        assert!(relaying.validate().is_err());
         let mut with_verifier = lifecycle.clone();
         with_verifier.restoration_verifier =
             Some("ryeos-external-guest-restoration-verifier".into());

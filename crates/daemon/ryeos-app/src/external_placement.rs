@@ -158,6 +158,11 @@ pub(crate) trait ExternalPlacementBackend: Send + Sync + std::fmt::Debug {
     fn supervisor_artifact(&self) -> (&str, u64);
     fn launcher_artifact(&self) -> (&str, u64);
     fn settings_schema_digest(&self) -> &str;
+    /// The adapter-settings key that must equal a file-relay selection's
+    /// workspace scope. `None` for an adapter that declares no relay.
+    fn relay_scope_setting(&self) -> Option<&str> {
+        None
+    }
     fn preflight_runtime_snapshot(
         &self,
         _binding: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
@@ -1193,6 +1198,7 @@ pub(crate) struct InstalledLifecycleGeneration {
     pub(crate) supervisor_artifact_bytes: u64,
     pub(crate) launcher_artifact_hash: String,
     pub(crate) launcher_artifact_bytes: u64,
+    pub(crate) relay_scope_setting: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -1497,6 +1503,7 @@ impl ExternalPlacementBackendRegistry {
             supervisor_artifact_bytes: supervisor_bytes,
             launcher_artifact_hash: launcher_hash.to_owned(),
             launcher_artifact_bytes: launcher_bytes,
+            relay_scope_setting: backend.relay_scope_setting().map(str::to_owned),
         })
     }
 
@@ -1705,6 +1712,11 @@ impl ExternalPlacementBackendRegistry {
             )
         {
             required.insert(LifecycleCapability::ControllerFileRelay);
+            crate::node_config::sections::external_execution::require_relay_scope(
+                &contract.controller_transport,
+                backend.relay_scope_setting(),
+                &contract.settings,
+            )?;
         }
         // This is inherent to the admitted cleanup proof. Reconciliation is
         // optional: an unknown outcome may remain quarantined with its capacity
@@ -10595,6 +10607,10 @@ mod tests {
             "3333333333333333333333333333333333333333333333333333333333333333"
         }
 
+        fn relay_scope_setting(&self) -> Option<&str> {
+            Some("owner_id")
+        }
+
         fn qualify_offline(
             &self,
             _contract: &ExternalPlacementBackendContract,
@@ -10800,6 +10816,10 @@ mod tests {
 
         fn settings_schema_digest(&self) -> &str {
             "3333333333333333333333333333333333333333333333333333333333333333"
+        }
+
+        fn relay_scope_setting(&self) -> Option<&str> {
+            Some("owner_id")
         }
 
         fn qualify_offline(
@@ -12179,6 +12199,7 @@ mod tests {
                     poll_deadline_ms: 30_000,
                 },
             );
+        contract.settings = serde_json::json!({"owner_id": "workspace-a"});
         let credential = credential(&binding);
         let base = BTreeSet::from([
             LifecycleCapability::SupervisorActivation,
@@ -12213,6 +12234,18 @@ mod tests {
             })])
             .unwrap();
         registry.qualify(&contract, &credential, &admitted).unwrap();
+        // The relay's workspace scope must equal the setting the adapter names.
+        contract.settings = serde_json::json!({"owner_id": "other"});
+        let error = registry
+            .qualify(&contract, &credential, &admitted)
+            .err()
+            .expect("a mismatched relay scope must be refused");
+        assert!(
+            error.to_string().contains("relay scope setting differs"),
+            "{error:#}"
+        );
+        contract.settings = serde_json::json!({});
+        assert!(registry.qualify(&contract, &credential, &admitted).is_err());
     }
 
     #[test]

@@ -1183,6 +1183,10 @@ impl ExternalPlacementBackend for ExecutableExternalPlacementBackend {
         &self.declaration.settings_schema_digest
     }
 
+    fn relay_scope_setting(&self) -> Option<&str> {
+        self.declaration.relay_scope_setting.as_deref()
+    }
+
     fn preflight_runtime_snapshot(
         &self,
         binding: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,

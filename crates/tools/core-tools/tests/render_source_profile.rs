@@ -26,6 +26,7 @@ fn render_source_declaration_commits_exact_profile_and_bounded_capability_ceilin
         declaration.settings_schema_digest,
         lillux::sha256_hex(settings)
     );
+    assert_eq!(declaration.relay_scope_setting.as_deref(), Some("owner_id"));
     let capabilities = serde_json::to_value(&declaration.capabilities).unwrap();
     let capabilities: BTreeSet<&str> = capabilities
         .as_array()

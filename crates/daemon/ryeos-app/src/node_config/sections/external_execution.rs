@@ -562,6 +562,27 @@ impl BindingDocument {
     }
 }
 
+/// A file-relay selection moves files for exactly one workspace scope, and the
+/// adapter's settings name that scope under a key its signed declaration
+/// states. Refuse a selection whose scope differs from the settings, or whose
+/// adapter states no key, so a mismatch is caught before any provider contact.
+/// Other transports carry no scope.
+pub(crate) fn require_relay_scope(
+    transport: &ExternalControllerTransportSelection,
+    scope_setting: Option<&str>,
+    settings: &Value,
+) -> Result<()> {
+    let ExternalControllerTransportSelection::ControllerFileRelay(relay) = transport else {
+        return Ok(());
+    };
+    let key = scope_setting.context("the adapter declares no relay scope setting")?;
+    ensure!(
+        settings.get(key).and_then(Value::as_str) == Some(relay.owner_workspace_id.as_str()),
+        "the adapter's relay scope setting differs from the file relay workspace"
+    );
+    Ok(())
+}
+
 /// Exact non-secret adapter contract projected from the signed binding. A
 /// backend may narrow implementation behavior but may not replace any field.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1021,6 +1042,7 @@ impl RetainedExternalExecutionBinding {
                 configuration_adapter_artifact_bytes,
                 connector_artifact_hash,
                 connector_artifact_bytes,
+                relay_scope_setting: None,
             },
             limits: compose::ComposeLimits {
                 max_active: 1,

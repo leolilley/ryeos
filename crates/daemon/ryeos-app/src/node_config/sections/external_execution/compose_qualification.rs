@@ -321,6 +321,11 @@ fn qualification_binding_document(
         provider_configuration_destination,
         limits,
     } = parts;
+    super::require_relay_scope(
+        &transport.selection,
+        artifacts.relay_scope_setting.as_deref(),
+        &settings,
+    )?;
     let document = BindingDocument {
         kind: "node".into(),
         schema: QUALIFICATION_BINDING_SCHEMA,

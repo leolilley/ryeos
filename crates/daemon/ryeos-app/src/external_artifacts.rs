@@ -942,6 +942,7 @@ mod tests {
             capabilities: [LifecycleCapability::ExactAllocationReconciliation]
                 .into_iter()
                 .collect(),
+            relay_scope_setting: None,
         };
         let manifest = ryeos_bundle::manifest::BundleManifest {
             name: "render-sandbox".to_owned(),
