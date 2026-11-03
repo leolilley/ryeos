@@ -517,6 +517,21 @@ pub fn journalled_frame_kinds(state: &AppState) -> Result<Vec<(String, String)>>
     })
 }
 
+/// Relay transfers the controller's journal accepted, as kind, sequence and
+/// direction, in journal order.
+pub fn accepted_relay_transfers(state: &AppState) -> Result<Vec<(String, u32, String)>> {
+    state.state_store.with_runtime_sql_for_test(|connection| {
+        let mut statement = connection.prepare(
+            "SELECT kind, sequence, direction FROM external_execution_relay_transfer
+              WHERE phase='accepted' ORDER BY rowid",
+        )?;
+        let accepted = statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(accepted)
+    })
+}
+
 /// What a loopback session starts from. Paths are copied before use.
 pub struct GuestRelayLoopbackSetup<'a> {
     /// The backend the composed binding names; the loopback stands in for it.
@@ -761,11 +776,15 @@ pub fn compose_guest_relay_loopback_session(
             }],
         )?);
 
-    let capsule =
+    let mut capsule =
         ryeos_state::external_execution::admission::test_support::qualified_external_candidate_capsule(
             setup.requirement.clone(),
             &inputs.product_manifest_hash,
         )?;
+    // Startup covers producing and staging the real guest package and the
+    // owner's whole install; the fixture's ten seconds cover neither.
+    capsule.lifecycle.ready_timeout_ms = 300_000;
+    capsule.validate()?;
     let placement = test_support::bind_composed_external_session(
         state,
         capsule,

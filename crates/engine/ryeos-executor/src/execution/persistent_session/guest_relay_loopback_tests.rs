@@ -28,7 +28,7 @@ use serde::Serialize;
 use anyhow::{Context as _, Result};
 use ryeos_app::external_placement::guest_relay_loopback::{
     GuestRelayLoopbackContact, GuestRelayLoopbackFault, GuestRelayLoopbackSetup,
-    compose_guest_relay_loopback_session, journalled_frame_kinds,
+    accepted_relay_transfers, compose_guest_relay_loopback_session, journalled_frame_kinds,
 };
 use ryeos_external_execution::guest_import_authorization::GuestOwnerRuntimeProfile;
 use ryeos_external_execution::guest_start_rehearsal::{
@@ -54,7 +54,8 @@ enum LoopbackStep {
     Activation,
     /// The guest's attach request, read by the controller.
     AttachRequest,
-    /// The controller's attach response, delivered to the mailbox.
+    /// The controller's attach response, delivered to the mailbox and its
+    /// readback accepted by the controller's journal.
     AttachResponse,
     /// The guest's first exchange frame, read by the controller.
     ChannelBound,
@@ -176,11 +177,22 @@ fn run_loopback(setup: &GuestRelayLoopbackSetup<'_>, root: &Path) -> Result<Loop
     let timings = LoopbackTimings {
         activation_ms: backend.activated_at_ms(),
         attach_request_ms: first(&contacts, RelayFileKind::Attach, RelayFileEffect::Download),
-        attach_response_ms: first(
-            &contacts,
-            RelayFileKind::Attach,
-            RelayFileEffect::UploadOnce,
-        ),
+        // The response is complete when its readback is accepted, not when
+        // its upload was sent.
+        attach_response_ms: accepted_relay_transfers(&state)?
+            .iter()
+            .any(|(kind, _, direction)| kind == "attach" && direction == "controller_to_guest")
+            .then(|| {
+                contacts
+                    .iter()
+                    .rev()
+                    .find(|contact| {
+                        contact.kind == RelayFileKind::Attach
+                            && contact.effect == RelayFileEffect::Download
+                    })
+                    .map(|contact| contact.at_ms)
+            })
+            .flatten(),
         channel_bound_ms: first(
             &contacts,
             RelayFileKind::Exchange,
