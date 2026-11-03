@@ -6542,7 +6542,7 @@ impl ProcessAwaitingAttachment {
     pub fn scope_recovery(&self) -> Option<&crate::ProcessScopeRecovery> {
         self.process_scope
             .as_ref()
-            .map(crate::ProcessScope::recovery)
+            .and_then(crate::ProcessScope::bound_recovery)
     }
     /// Exact PID reported while the child was held after session creation.
     pub fn pid(&self) -> u32 {
@@ -7546,7 +7546,7 @@ impl RunningProcess {
     pub fn scope_recovery(&self) -> Option<&crate::ProcessScopeRecovery> {
         self.process_scope
             .as_ref()
-            .map(crate::ProcessScope::recovery)
+            .and_then(crate::ProcessScope::bound_recovery)
     }
     /// Observe raw stdout from its first byte, including bytes already captured
     /// before this call. Available once, after the attachment/release boundary.

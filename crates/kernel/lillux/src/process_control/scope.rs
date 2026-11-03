@@ -704,6 +704,11 @@ pub struct ProcessScopeConfiguration {
 #[serde(tag = "implementation", rename_all = "snake_case", deny_unknown_fields)]
 enum BackendConfiguration {
     LinuxCgroupV2 { parent: std::path::PathBuf },
+    /// Marker retained inside a recovery record for descendant containment by
+    /// the execution's own PID-namespace init. There is no provider to open
+    /// and nothing to allocate: the containment exists only once a held
+    /// launch has bound its init, so a policy can never author this value.
+    PidNamespaceInit {},
 }
 
 /// Prepared namespace allocation, retained by the caller's existing launch
@@ -759,6 +764,16 @@ enum BackendRecovery {
         directory: crate::PinnedDirectoryIdentity,
         name: String,
     },
+    /// The exact init of the execution's private PID namespace. The kernel
+    /// ends the namespace with its init, so termination, recovery and
+    /// settlement of every descendant (including `setsid` and nested-namespace
+    /// escapees) are decided by that one incarnation. No quiescence.
+    PidNamespaceInit {
+        boot_id: String,
+        init_pid: u32,
+        init_start_time_ticks: u64,
+        namespace: super::PidNamespaceIdentity,
+    },
 }
 
 /// Opened, node-local provider of exact process scopes. Opening never installs
@@ -802,6 +817,17 @@ pub struct ProcessScopeLaunchError {
 enum ScopeBackend {
     #[cfg(target_os = "linux")]
     LinuxCgroupV2(std::sync::Arc<super::cgroup::ProcessCgroup>),
+    /// Bound exactly once, when the held launch has reported its init.
+    #[cfg(target_os = "linux")]
+    PidNamespaceInit(std::sync::Arc<std::sync::OnceLock<PidNamespaceBinding>>),
+}
+
+/// The retained init of a bound PID-namespace containment. `init` is `None`
+/// only for a recovered record whose init is proved gone.
+#[derive(Debug)]
+struct PidNamespaceBinding {
+    init: Option<super::PinnedPidNamespace>,
+    recovery: ProcessScopeRecovery,
 }
 
 /// A completed kernel barrier. Exclusive workspace owners must consume it by
@@ -994,7 +1020,9 @@ impl ProcessScopeConfiguration {
         super::require_administrator().map_err(|error| error.to_string())?;
         #[cfg(target_os = "linux")]
         {
-            let BackendConfiguration::LinuxCgroupV2 { parent } = &self.backend;
+            let BackendConfiguration::LinuxCgroupV2 { parent } = &self.backend else {
+                return Err("controller operations require a cgroup delegation".to_owned());
+            };
             if parent != std::path::Path::new("/sys/fs/cgroup") {
                 return Err(
                     "OCI controller delegation has a noncanonical container path".to_owned(),
@@ -1043,7 +1071,9 @@ impl ProcessScopeConfiguration {
         account.validate()?;
         #[cfg(target_os = "linux")]
         {
-            let BackendConfiguration::LinuxCgroupV2 { parent } = &self.backend;
+            let BackendConfiguration::LinuxCgroupV2 { parent } = &self.backend else {
+                return Err("controller operations require a cgroup delegation".to_owned());
+            };
             let AccountBackend::Unix { uid, .. } = account.0;
             super::cgroup::require_controller_tree_empty(parent, uid)
         }
@@ -1063,7 +1093,9 @@ impl ProcessScopeConfiguration {
         account.validate()?;
         #[cfg(target_os = "linux")]
         {
-            let BackendConfiguration::LinuxCgroupV2 { parent } = &self.backend;
+            let BackendConfiguration::LinuxCgroupV2 { parent } = &self.backend else {
+                return Err("controller operations require a cgroup delegation".to_owned());
+            };
             let AccountBackend::Unix { uid, .. } = account.0;
             super::cgroup::require_current_process_in_controller(parent, uid)
         }
@@ -1193,7 +1225,9 @@ impl ProcessScopeConfiguration {
             // Retain the exact selected directory across provisioning and
             // credential drop. Reopening cwd.path() here would discard the
             // caller's host association check if its parent were renamed.
-            let BackendConfiguration::LinuxCgroupV2 { parent } = &self.backend;
+            let BackendConfiguration::LinuxCgroupV2 { parent } = &self.backend else {
+                return Err("controller operations require a cgroup delegation".to_owned());
+            };
             let AccountBackend::Unix { uid, gid } = account.0;
             // Derive transport from the verified file, never reopen its original
             // pathname after provisioning or credential drop. Use the existing
@@ -1280,6 +1314,7 @@ impl ProcessScopeConfiguration {
                     );
                 }
             }
+            BackendConfiguration::PidNamespaceInit {} => {}
         }
         Ok(())
     }
@@ -1299,6 +1334,9 @@ impl ProcessScopeProvider {
     pub fn open(configuration: &ProcessScopeConfiguration) -> Result<Self, String> {
         let configuration_digest = configuration.digest()?;
         match &configuration.backend {
+            BackendConfiguration::PidNamespaceInit {} => Err(
+                "PID-namespace containment has no provider; it is bound by a held launch".to_owned(),
+            ),
             BackendConfiguration::LinuxCgroupV2 { parent } => {
                 #[cfg(target_os = "linux")]
                 {
@@ -1499,6 +1537,8 @@ impl ProcessScopeProvider {
                     launch_available: false,
                 })
             }
+            #[cfg(target_os = "linux")]
+            _ => Err("retained scope names another provider backend".to_owned()),
             #[cfg(not(target_os = "linux"))]
             _ => {
                 let _ = timeout;
@@ -1518,6 +1558,8 @@ impl ProcessScopeProvider {
             (ProviderBackend::LinuxCgroupV2(parent), ScopeBackend::LinuxCgroupV2(scope)) => {
                 parent.retire_empty(scope.identity(), timeout.saturating_sub(started.elapsed()))
             }
+            #[cfg(target_os = "linux")]
+            _ => Err("retained scope names another provider backend".to_owned()),
             #[cfg(not(target_os = "linux"))]
             _ => Err("process scope retirement is unavailable on this OS".to_owned()),
         }
@@ -1535,7 +1577,10 @@ impl ProcessScopeProvider {
             let ProviderBackend::LinuxCgroupV2(parent) = &self.backend;
             let BackendRecovery::LinuxCgroupV2 {
                 parent: expected, ..
-            } = &recovery.backend;
+            } = &recovery.backend
+            else {
+                return Err("retained scope names another provider backend".to_owned());
+            };
             if parent.identity()? != *expected {
                 return Err("retained scope names another provider incarnation".to_owned());
             }
@@ -1665,6 +1710,8 @@ impl ProcessScopeRecovery {
                     && parent == expected_parent
                     && name == expected_name
             }
+            // A PID-namespace containment is never allocated ahead of launch.
+            _ => false,
         }
     }
     /// Original admitted per-operation ceiling; not the worker lifetime or a
@@ -1680,6 +1727,10 @@ impl ProcessScopeRecovery {
     /// this interpretation of a missing scope.
     pub fn retire_after_settlement(&self) -> Result<(), String> {
         if self.host_lifetime_ended()? {
+            return Ok(());
+        }
+        if matches!(self.backend, BackendRecovery::PidNamespaceInit { .. }) {
+            // No resource was created, so nothing remains to retire.
             return Ok(());
         }
         let provider = ProcessScopeProvider::open(&self.configuration)?;
@@ -1699,6 +1750,8 @@ impl ProcessScopeRecovery {
                 directory: *directory,
                 name: name.clone(),
             }),
+            #[cfg(target_os = "linux")]
+            _ => Err("retained scope names another provider backend".to_owned()),
             #[cfg(not(target_os = "linux"))]
             _ => Err("process scope retirement is unavailable on this OS".to_owned()),
         }
@@ -1714,6 +1767,17 @@ impl ProcessScopeRecovery {
         process.validate()?;
         match &self.backend {
             BackendRecovery::LinuxCgroupV2 { boot_id, .. } if *boot_id == process.boot_id => Ok(()),
+            BackendRecovery::PidNamespaceInit {
+                boot_id,
+                init_pid,
+                init_start_time_ticks,
+                ..
+            } if *boot_id == process.boot_id
+                && *init_pid == process.target_pid
+                && *init_start_time_ticks == process.target_start_time_ticks =>
+            {
+                Ok(())
+            }
             _ => Err("process attachment and scope name different host lifetimes".to_owned()),
         }
     }
@@ -1762,6 +1826,24 @@ impl ProcessScopeRecovery {
                 }
                 validate_allocation_name(name)
             }
+            (
+                BackendConfiguration::PidNamespaceInit {},
+                BackendRecovery::PidNamespaceInit {
+                    boot_id,
+                    init_pid,
+                    init_start_time_ticks,
+                    ..
+                },
+            ) => {
+                if !valid_boot_id(boot_id) || *init_pid <= 1 || *init_start_time_ticks == 0 {
+                    return Err(
+                        "PID-namespace containment record has no bound init incarnation"
+                            .to_owned(),
+                    );
+                }
+                Ok(())
+            }
+            _ => Err("process scope recovery contradicts its retained provider".to_owned()),
         }
     }
 
@@ -1771,6 +1853,35 @@ impl ProcessScopeRecovery {
     /// same-named replacement, and cannot be used to launch another process.
     pub fn recover(&self, timeout: Duration) -> Result<ProcessScope, String> {
         self.validate()?;
+        #[cfg(target_os = "linux")]
+        if let BackendRecovery::PidNamespaceInit {
+            boot_id,
+            init_pid,
+            init_start_time_ticks,
+            namespace,
+        } = &self.backend
+        {
+            let _ = timeout;
+            let init = match super::pid_namespace::recover_init(
+                boot_id,
+                *init_pid,
+                *init_start_time_ticks,
+                *namespace,
+            )? {
+                super::pid_namespace::RecoveredInit::Live(pinned) => Some(pinned),
+                super::pid_namespace::RecoveredInit::Gone => None,
+            };
+            let slot = std::sync::OnceLock::new();
+            let _ = slot.set(PidNamespaceBinding {
+                init,
+                recovery: self.clone(),
+            });
+            return Ok(ProcessScope {
+                recovery: self.clone(),
+                backend: ScopeBackend::PidNamespaceInit(std::sync::Arc::new(slot)),
+                launch_available: false,
+            });
+        }
         ProcessScopeProvider::open(&self.configuration)?.recover(self, timeout)
     }
 
@@ -1810,6 +1921,10 @@ impl ProcessScopeRecovery {
                 directory: _,
                 name: _,
             } => scope_generation_ended(boot_id, *cgroup_enclosure, &self.configuration, parent),
+            #[cfg(target_os = "linux")]
+            BackendRecovery::PidNamespaceInit { boot_id, .. } => {
+                Ok(super::linux::read_boot_id()? != *boot_id)
+            }
             #[cfg(not(target_os = "linux"))]
             _ => Err("process scope lifetime observation is unavailable on this OS".to_owned()),
         }
@@ -1847,7 +1962,122 @@ fn valid_boot_id(value: &str) -> bool {
         })
 }
 
+const PID_NAMESPACE_NO_QUIESCENCE: &str = "PID-namespace containment cannot quiesce: namespace membership is not an atomic writer freeze, so a caller needing a stable tree must refuse this containment";
+
+fn unbound_pid_namespace() -> String {
+    "PID-namespace containment is not yet bound to a launched init".to_owned()
+}
+
+#[cfg(target_os = "linux")]
+impl PidNamespaceBinding {
+    fn is_empty(&self) -> Result<bool, String> {
+        match &self.init {
+            None => Ok(true),
+            Some(init) => init.init_exited(),
+        }
+    }
+
+    fn wait_empty(&self, timeout: Duration) -> Result<(), String> {
+        match &self.init {
+            None => Ok(()),
+            Some(init) => init.wait_for_exit(timeout),
+        }
+    }
+
+    fn terminate_and_wait(&self, timeout: Duration) -> Result<(), String> {
+        match &self.init {
+            None => Ok(()),
+            Some(init) => init.terminate_and_wait(timeout),
+        }
+    }
+}
+
+/// Pin the held target as the exact init of its private PID namespace and
+/// derive the durable recovery record. Refuses a target that is not PID 1 of
+/// a namespace excluding this process.
+#[cfg(target_os = "linux")]
+fn bind_pid_namespace_init(
+    pid: u32,
+    control_timeout: Duration,
+) -> Result<PidNamespaceBinding, String> {
+    use std::os::fd::AsFd as _;
+    let pidfd = super::linux::open_pidfd(pid)?;
+    let identity = super::capture_exact_process_identity_from_pidfd(pid, None, pidfd.as_fd())?;
+    let init = super::PinnedPidNamespace::pin(&identity)?;
+    let recovery = ProcessScopeRecovery {
+        version: SCOPE_RECOVERY_VERSION,
+        configuration: ProcessScopeConfiguration {
+            version: SCOPE_CONFIGURATION_VERSION,
+            backend: BackendConfiguration::PidNamespaceInit {},
+        },
+        control_timeout,
+        backend: BackendRecovery::PidNamespaceInit {
+            boot_id: identity.boot_id,
+            init_pid: pid,
+            init_start_time_ticks: identity.target_start_time_ticks,
+            namespace: init.identity(),
+        },
+    };
+    recovery.validate()?;
+    Ok(PidNamespaceBinding {
+        init: Some(init),
+        recovery,
+    })
+}
+
 impl ProcessScope {
+    /// Containment by the launched target's own PID-namespace init. The
+    /// held launch binds the init and exposes the durable record through
+    /// its attachment; there is no resource to allocate or journal before
+    /// launch. Control only terminates, observes and recovers; it cannot
+    /// quiesce.
+    #[cfg(target_os = "linux")]
+    pub fn pid_namespace_init() -> Self {
+        Self {
+            // Unbound placeholder: fails validation, so it can never be
+            // persisted or recovered. The bound record is `bound_recovery`.
+            recovery: ProcessScopeRecovery {
+                version: SCOPE_RECOVERY_VERSION,
+                configuration: ProcessScopeConfiguration {
+                    version: SCOPE_CONFIGURATION_VERSION,
+                    backend: BackendConfiguration::PidNamespaceInit {},
+                },
+                control_timeout: super::pid_namespace::PID_NAMESPACE_CONTROL_TIMEOUT,
+                backend: BackendRecovery::PidNamespaceInit {
+                    boot_id: String::new(),
+                    init_pid: 0,
+                    init_start_time_ticks: 0,
+                    namespace: super::PidNamespaceIdentity {
+                        device: 0,
+                        inode: 0,
+                    },
+                },
+            },
+            backend: ScopeBackend::PidNamespaceInit(std::sync::Arc::new(
+                std::sync::OnceLock::new(),
+            )),
+            launch_available: true,
+        }
+    }
+
+    /// Whether this containment is the PID-namespace init mechanism rather
+    /// than a cgroup scope.
+    pub fn is_pid_namespace_init(&self) -> bool {
+        matches!(self.recovery.backend, BackendRecovery::PidNamespaceInit { .. })
+    }
+
+    /// The durable record, once the held launch has bound it. Cgroup scopes
+    /// are always bound at allocation.
+    pub fn bound_recovery(&self) -> Option<&ProcessScopeRecovery> {
+        match &self.backend {
+            #[cfg(target_os = "linux")]
+            ScopeBackend::PidNamespaceInit(slot) => {
+                slot.get().map(|binding| &binding.recovery)
+            }
+            _ => Some(&self.recovery),
+        }
+    }
+
     /// Install and read back scope-wide limits while this exact reservation is
     /// still empty. A failure grants no weaker launch path; the owner must
     /// retire the unlaunched reservation through its durable journal.
@@ -1868,6 +2098,10 @@ impl ProcessScope {
         let result = match &self.backend {
             #[cfg(target_os = "linux")]
             ScopeBackend::LinuxCgroupV2(scope) => scope.install_resource_limits(limits),
+            #[cfg(target_os = "linux")]
+            ScopeBackend::PidNamespaceInit(_) => Err(
+                "PID-namespace containment carries no scope-wide resource limits".to_owned(),
+            ),
             #[cfg(not(target_os = "linux"))]
             _ => Err("process scope resource limits are unavailable on this OS".to_owned()),
         };
@@ -1887,6 +2121,10 @@ impl ProcessScope {
         match &self.backend {
             #[cfg(target_os = "linux")]
             ScopeBackend::LinuxCgroupV2(scope) => scope.clone_kill_descriptor(),
+            #[cfg(target_os = "linux")]
+            ScopeBackend::PidNamespaceInit(_) => Err(
+                "hard occupancy enforcement requires a cgroup scope kill authority".to_owned(),
+            ),
             #[cfg(not(target_os = "linux"))]
             _ => Err("process-scope lifetime enforcement is unavailable".to_owned()),
         }
@@ -1897,6 +2135,27 @@ impl ProcessScope {
         match &self.backend {
             #[cfg(target_os = "linux")]
             ScopeBackend::LinuxCgroupV2(scope) => scope.require_member(pid, timeout),
+            #[cfg(target_os = "linux")]
+            ScopeBackend::PidNamespaceInit(slot) => {
+                let binding = match slot.get() {
+                    Some(binding) => binding,
+                    None => {
+                        let bound = bind_pid_namespace_init(pid, self.recovery.control_timeout)?;
+                        // A concurrent binder would have raced on the same
+                        // held target; the first binding wins and is checked
+                        // below.
+                        let _ = slot.set(bound);
+                        slot.get().ok_or("PID-namespace containment did not bind")?
+                    }
+                };
+                match &binding.init {
+                    Some(init) if init.init_pid() == pid && !init.init_exited()? => Ok(()),
+                    _ => Err(
+                        "held target is not the live PID-namespace init this containment retains"
+                            .to_owned(),
+                    ),
+                }
+            }
             #[cfg(not(target_os = "linux"))]
             _ => Err("process scope membership is unavailable on this OS".to_owned()),
         }
@@ -1910,6 +2169,10 @@ impl ProcessScope {
             return Err("process scope has already authorized contact".to_owned());
         }
         self.launch_available = false;
+        if matches!(self.backend, ScopeBackend::PidNamespaceInit(_)) {
+            // No resource was ever created: there is nothing to retire.
+            return Ok(());
+        }
         ProcessScopeProvider::open(&self.recovery.configuration)?.retire(&self.recovery, timeout)
     }
 
@@ -1917,6 +2180,11 @@ impl ProcessScope {
         match &self.backend {
             #[cfg(target_os = "linux")]
             ScopeBackend::LinuxCgroupV2(scope) => scope.is_empty(),
+            #[cfg(target_os = "linux")]
+            ScopeBackend::PidNamespaceInit(slot) => slot
+                .get()
+                .ok_or_else(unbound_pid_namespace)?
+                .is_empty(),
             #[cfg(not(target_os = "linux"))]
             _ => Err("process scope observation is unavailable on this OS".to_owned()),
         }
@@ -1940,6 +2208,12 @@ impl ProcessScope {
         match &self.backend {
             #[cfg(target_os = "linux")]
             ScopeBackend::LinuxCgroupV2(scope) => scope.probe_lifecycle(timeout, barrier),
+            #[cfg(target_os = "linux")]
+            ScopeBackend::PidNamespaceInit(_) => {
+                let _ = (timeout, barrier);
+                Err("PID-namespace containment is qualified by its host probe, not a scope probe"
+                    .to_owned())
+            }
             #[cfg(not(target_os = "linux"))]
             _ => {
                 let _ = (timeout, barrier);
@@ -1959,6 +2233,10 @@ impl ProcessScope {
                 #[cfg(target_os = "linux")]
                 ScopeBackend::LinuxCgroupV2(scope) => {
                     ScopeBackend::LinuxCgroupV2(std::sync::Arc::clone(scope))
+                }
+                #[cfg(target_os = "linux")]
+                ScopeBackend::PidNamespaceInit(slot) => {
+                    ScopeBackend::PidNamespaceInit(std::sync::Arc::clone(slot))
                 }
                 #[cfg(not(target_os = "linux"))]
                 _ => unreachable!("no process scope is implemented on this OS"),
@@ -2000,8 +2278,11 @@ impl ProcessScope {
             })
         }
     }
+    /// The allocation-time record of a cgroup scope. A PID-namespace
+    /// containment returns an unbound placeholder before its launch; use
+    /// [`Self::bound_recovery`] for durable evidence.
     pub fn recovery(&self) -> &ProcessScopeRecovery {
-        &self.recovery
+        self.bound_recovery().unwrap_or(&self.recovery)
     }
 
     // Wiring stays inside Lillux's existing subprocess lifecycle. Do not make
@@ -2013,6 +2294,10 @@ impl ProcessScope {
         match &self.backend {
             #[cfg(target_os = "linux")]
             ScopeBackend::LinuxCgroupV2(scope) => scope.configure_command(command),
+            // The namespace is created by the sandbox boundary itself; there
+            // is nothing to attach the launcher to.
+            #[cfg(target_os = "linux")]
+            ScopeBackend::PidNamespaceInit(_) => Ok(()),
             #[cfg(not(target_os = "linux"))]
             _ => {
                 let _ = command;
@@ -2029,6 +2314,11 @@ impl ProcessScope {
                 control_timeout: self.recovery.control_timeout,
                 backend: QuiescedBackend::LinuxCgroupV2(scope.freeze(timeout)?),
             }),
+            #[cfg(target_os = "linux")]
+            ScopeBackend::PidNamespaceInit(_) => {
+                let _ = timeout;
+                Err(PID_NAMESPACE_NO_QUIESCENCE.to_owned())
+            }
             #[cfg(not(target_os = "linux"))]
             _ => {
                 let _ = timeout;
@@ -2042,6 +2332,11 @@ impl ProcessScope {
         match &self.backend {
             #[cfg(target_os = "linux")]
             ScopeBackend::LinuxCgroupV2(scope) => scope.terminate_and_wait(timeout),
+            #[cfg(target_os = "linux")]
+            ScopeBackend::PidNamespaceInit(slot) => slot
+                .get()
+                .ok_or_else(unbound_pid_namespace)?
+                .terminate_and_wait(timeout),
             #[cfg(not(target_os = "linux"))]
             _ => {
                 let _ = timeout;
@@ -2063,6 +2358,11 @@ impl ProcessScope {
                 control_timeout: self.recovery.control_timeout,
                 backend: QuiescedBackend::LinuxCgroupV2(scope.recover_freeze(timeout)?),
             }),
+            #[cfg(target_os = "linux")]
+            ScopeBackend::PidNamespaceInit(_) => {
+                let _ = timeout;
+                Err(PID_NAMESPACE_NO_QUIESCENCE.to_owned())
+            }
             #[cfg(not(target_os = "linux"))]
             _ => {
                 let _ = timeout;
@@ -2076,6 +2376,11 @@ impl ProcessScope {
         match &self.backend {
             #[cfg(target_os = "linux")]
             ScopeBackend::LinuxCgroupV2(scope) => scope.wait_empty(timeout),
+            #[cfg(target_os = "linux")]
+            ScopeBackend::PidNamespaceInit(slot) => slot
+                .get()
+                .ok_or_else(unbound_pid_namespace)?
+                .wait_empty(timeout),
             #[cfg(not(target_os = "linux"))]
             _ => {
                 let _ = timeout;
@@ -2674,7 +2979,9 @@ mod tests {
         recovery.retire_after_settlement().unwrap();
         recovery.retire_after_settlement().unwrap();
         assert!(recovery.is_empty(Duration::from_secs(5)).is_err());
-        let BackendRecovery::LinuxCgroupV2 { name, .. } = &recovery.backend;
+        let BackendRecovery::LinuxCgroupV2 { name, .. } = &recovery.backend else {
+            panic!("cgroup fixture");
+        };
         let replacement = provider.reserve(name, Duration::from_secs(5)).unwrap();
         assert!(
             recovery.retire_after_settlement().is_err(),
@@ -2749,10 +3056,14 @@ mod tests {
             .wait_empty(Duration::ZERO)
             .unwrap();
         let mut wrong = recovery.clone();
-        let BackendConfiguration::LinuxCgroupV2 { parent, .. } = &mut wrong.configuration.backend;
+        let BackendConfiguration::LinuxCgroupV2 { parent, .. } = &mut wrong.configuration.backend else {
+            panic!("cgroup fixture");
+        };
         *parent = "/another/delegation".into();
         assert!(provider.recover(&wrong, Duration::from_secs(5)).is_err());
-        let BackendRecovery::LinuxCgroupV2 { boot_id, .. } = &mut wrong.backend;
+        let BackendRecovery::LinuxCgroupV2 { boot_id, .. } = &mut wrong.backend else {
+            panic!("cgroup fixture");
+        };
         *boot_id = "00000000-0000-4000-8000-000000000000".to_owned();
         wrong.configuration = recovery.configuration.clone();
         assert!(provider.recover(&wrong, Duration::from_secs(5)).is_err());

@@ -23,11 +23,12 @@ pub const CONTROLLER_MEMLOCK_CEILING_BYTES: u64 = 256 * 1024 * 1024;
 pub const CONTROLLER_NOFILE_SOFT_CEILING: u64 = 65_536;
 mod host_capability;
 mod oci_lifecycle;
-// This is the diagnostic witness that a namespace can outlive a process
-// group. It is not a second production lifecycle backend: membership scans
-// cannot provide the kernel freeze barrier required by workspace capture.
-#[cfg(all(test, target_os = "linux"))]
+// Descendant containment by retained PID-namespace init: termination,
+// recovery and settlement without a cgroup, and explicitly no quiescence.
+#[cfg(target_os = "linux")]
 mod pid_namespace;
+#[cfg(target_os = "linux")]
+pub use pid_namespace::{PidNamespaceIdentity, PinnedPidNamespace, probe_pid_namespace_containment};
 mod scope;
 pub use host_capability::{
     ACCOUNTING, CapabilityEvidence, CapabilityRequirement, CapabilityRequirementSpec, CgroupFacts,
