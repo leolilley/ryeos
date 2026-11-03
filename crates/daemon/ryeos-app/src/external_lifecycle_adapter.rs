@@ -68,7 +68,7 @@ use crate::node_config::sections::external_execution::ExternalPlacementBackendCo
 use crate::runtime_db::external_execution::{
     ClaimedRelayFileContact, ExternalAllocationOccurrence, ExternalAllocationReservation,
     ExternalGuestPackageDeliveryCommitment, ExternalSupervisorActivationIntent,
-    ExternalTerminationIntent, RelayDirection, RelayTransferPhase,
+    ExternalTerminationIntent, RelayDirection, RelayTransferPhase, RelayTransferRecord,
 };
 use crate::vault::placement::PlacementCredential;
 
@@ -979,6 +979,27 @@ impl ExecutableExternalPlacementBackend {
     }
 }
 
+/// Whether `record` is the durable state its contact effect requires. The
+/// unjournaled owner-report download carries a claim of one read attempt.
+fn relay_contact_claim_is_durable(record: &RelayTransferRecord, effect: RelayFileEffect) -> bool {
+    let intent = &record.intent;
+    match effect {
+        RelayFileEffect::UploadOnce => {
+            intent.direction == RelayDirection::ControllerToGuest
+                && record.phase == RelayTransferPhase::UploadPossible
+                && record.read_attempts == 0
+        }
+        RelayFileEffect::Download => {
+            (intent.direction == RelayDirection::GuestToController
+                && record.phase == RelayTransferPhase::Reading
+                && record.read_attempts > 0)
+                || (intent.direction == RelayDirection::ControllerToGuest
+                    && record.phase == RelayTransferPhase::UploadPossible
+                    && record.read_attempts > 0)
+        }
+    }
+}
+
 /// The exact relay-file request for one durable contact claim on the original
 /// sealed bootstrap. Every relay-file transport receives this request.
 pub(crate) fn relay_file_adapter_request(
@@ -1001,19 +1022,7 @@ pub(crate) fn relay_file_adapter_request(
         "claimed relay differs from original signed placement"
     );
     ensure!(
-        match claim.effect() {
-            RelayFileEffect::UploadOnce =>
-                intent.direction == RelayDirection::ControllerToGuest
-                    && record.phase == RelayTransferPhase::UploadPossible
-                    && record.read_attempts == 0,
-            RelayFileEffect::Download =>
-                (intent.direction == RelayDirection::GuestToController
-                    && record.phase == RelayTransferPhase::Reading
-                    && record.read_attempts > 0)
-                    || (intent.direction == RelayDirection::ControllerToGuest
-                        && record.phase == RelayTransferPhase::UploadPossible
-                        && record.read_attempts > 0),
-        },
+        relay_contact_claim_is_durable(record, claim.effect()),
         "relay adapter received no durable contact claim"
     );
     let claim_effect = claim.effect();
@@ -2827,6 +2836,34 @@ fn adapter_operation_deadline(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_unjournaled_owner_report_download_is_a_durable_claim_for_the_adapter() {
+        use crate::runtime_db::external_execution::{RelayKind, RelayTransferIntent};
+        let root = format!("/ryeos/occurrences/sbx-a/{}", "a".repeat(64));
+        let claim = ClaimedRelayFileContact::unjournaled_download(RelayTransferIntent {
+            schema: 1,
+            placement_thread_id: "placement".into(),
+            occurrence_id: "sbx-a".into(),
+            allocation_request_digest: "b".repeat(64),
+            bootstrap_digest: "c".repeat(64),
+            remote_path: format!("{root}/owner-report.json"),
+            mailbox_root: root,
+            kind: RelayKind::OwnerReport,
+            sequence: 0,
+            direction: RelayDirection::GuestToController,
+            maximum_file_bytes: 1024,
+            expected_sha256: None,
+            expected_bytes: None,
+            deadline_ms: 1,
+            retention_budget_bytes: 4096,
+        })
+        .unwrap();
+        assert!(relay_contact_claim_is_durable(
+            claim.record(),
+            claim.effect()
+        ));
+    }
 
     #[test]
     fn package_delivery_keeps_the_startup_budget_while_contacts_stay_bounded() {

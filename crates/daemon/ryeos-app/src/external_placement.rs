@@ -4106,7 +4106,11 @@ fn fail_on_guest_owner_report(
         Ok(Some(exit)) => exit,
         Ok(None) => return Ok(()),
         Err(error) => {
-            tracing::debug!(placement, error = %error, "external guest owner report not read");
+            tracing::warn!(
+                placement,
+                error = %format!("{error:#}"),
+                "external guest owner report not read"
+            );
             return Ok(());
         }
     };

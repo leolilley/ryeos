@@ -348,7 +348,9 @@ impl ClaimedRelayFileContact {
             record: RelayTransferRecord {
                 intent,
                 phase: RelayTransferPhase::Reading,
-                read_attempts: 0,
+                // The adapter takes only a claimed read; this one is claimed
+                // for exactly the single attempt it is about to make.
+                read_attempts: 1,
                 observed_sha256: None,
                 observed_bytes: None,
                 canonical_bytes: None,
