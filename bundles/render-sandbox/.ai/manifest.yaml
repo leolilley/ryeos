@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-15T01:15:37Z:345b9b02be4d5165f6654f9b250e37fbcd7d9b914b2317fcdff9700e05d1b0ce:IkgNd1jGmecdO2fLr8w8D99gjsp+PDeTcxfaAv6heJf6v1fTARgGMsxVcnB91HjajBqgVyC9t7YTmnE3K2GWDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-03T12:23:53Z:af76bc549753044cc0725d3ced8cbcaae459bc3cadc6987ca9c774acee90ba3f:FiNGxI07JG40GbEsEN6H5WPmKcsmXSw/KAXQNw+kBJLRQgdFQugnpcs4QAcQHDKW5Lx3NVgS/R6TqdW7EGoxCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: render-sandbox
 version: 0.1.0
 description: Early-access Render Sandbox lifecycle adapter with qualified-guest one-shot startup, retained file relay and a controller-relayed guest channel; reconciliation remains pending
@@ -27,3 +27,5 @@ external_lifecycle_adapters:
   - supervisor_activation
   - authoritative_no_occurrence
   - exact_terminal_observation
+  - controller_file_relay
+  relay_scope_setting: owner_id
