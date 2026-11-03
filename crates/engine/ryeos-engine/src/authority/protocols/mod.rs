@@ -18,7 +18,7 @@ pub use builder::{
 };
 pub use descriptor::{
     PersistentSessionChannel, PersistentSessionCleanupAuthority, PersistentSessionFraming,
-    PersistentSessionProtocol, ProtocolDescriptor, QualificationCallbackAuthority,
+    CapturedCompatibleCallback, PersistentSessionProtocol, ProtocolDescriptor, QualificationCallbackAuthority,
     validate_method_runtime_protocol, validate_persistent_session_protocol,
 };
 pub use registry::{

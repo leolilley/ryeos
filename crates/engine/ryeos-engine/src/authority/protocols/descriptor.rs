@@ -54,6 +54,16 @@ pub struct ProtocolDescriptor {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub qualification_callback: Option<QualificationCallbackAuthority>,
 
+    /// Declares that this qualification callback protocol is the one class of
+    /// daemon callback a `captured_execution` tool may receive. The class is
+    /// valid only for a qualification callback whose method surface is closed
+    /// and named here by digest; the daemon admits it only when that digest
+    /// equals the digest of the surface it actually issues for the declared
+    /// `qualification_callback` authority. Absent means captured execution
+    /// refuses every callback and thread-auth credential on this protocol.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub captured_compatible_callback: Option<CapturedCompatibleCallback>,
+
     /// Optional bidirectional request/response channel carried independently
     /// of stdio. Absence means this is an ordinary one-shot protocol.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -73,6 +83,16 @@ pub struct ProtocolDescriptor {
 pub enum QualificationCallbackAuthority {
     ScopedProducer,
     RemoteConsumer,
+}
+
+/// Binding of a captured-compatible callback protocol to its exact closed
+/// runtime-method surface.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CapturedCompatibleCallback {
+    /// Lowercase SHA-256 identity of the closed callback method surface the
+    /// daemon issues for this protocol's `qualification_callback` authority.
+    pub surface_digest: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -504,6 +524,7 @@ mod tests {
             },
             callback_channel: CallbackChannel::Http,
             qualification_callback: None,
+            captured_compatible_callback: None,
             session: None,
             execution_evidence: None,
         }
@@ -537,6 +558,7 @@ mod tests {
             },
             callback_channel: CallbackChannel::None,
             qualification_callback: None,
+            captured_compatible_callback: None,
             session: Some(PersistentSessionProtocol {
                 process_mode: mode,
                 cleanup_authority,
