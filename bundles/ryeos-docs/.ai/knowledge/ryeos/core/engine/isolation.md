@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-19T00:12:54Z:498f4c9aa9be3815a7a89174341a770326793f0f29fd196ebd57973586357f15:zWtmtFP89aUFrrUkcF1bY/qmzm3dBCc0D+XBxk/dG13N1qUKFrbPT4yvgKoPUBWXIgDa/u7p794f18rpmIPRAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-03T23:31:47Z:4076700cb4c8098bb54371b79a4f377c563ca76dba82d4b035b31973e58155b7:ZIuhu+oNjsV1jqXg7l75odYnLg0WHCgfOdjdwKGzzr09CxnOevkCYt6ZdnCx8fp0gcbzJMjd4UkdrYIgVQbICw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/engine
@@ -36,8 +36,19 @@ fallback.
 Signed execution-kind projections retain filesystem and network ceilings in
 the admitted plan. `captured_execution` and `isolated` are irreversible
 restrictions: a parent, restart, or current node default cannot widen them.
-Captured execution excludes ambient system, bundle, trust, callback and parent
-environment authority. Host-environment templates are denied during plan
+Captured execution excludes ambient system, bundle, trust and parent
+environment authority, and refuses daemon callback and thread-auth credentials
+except on one protocol class. A protocol may declare
+`captured_compatible_callback` with the digest of a closed callback
+method surface. The registry accepts the declaration only on a qualification
+callback protocol with managed HTTP callbacks, a bounded single-call evidence
+projector, no session and no remote or detached dispatch. Admission then
+requires the declared digest to equal the digest of the surface the daemon
+itself issues for the protocol's qualification authority; any other callback
+protocol, including an ordinary tool callback, stays refused. The thread-auth
+credential only pairs with the callback bearer and never authorizes a method
+outside that bearer's closed surface, so the class grants no project-write,
+dispatch, authoring, publishing or secret authority. Host-environment templates are denied during plan
 compilation, not merely filtered from the final process environment. These
 restrictions require enforced isolation; disabled mode refuses them.
 

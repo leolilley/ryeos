@@ -1453,18 +1453,18 @@ impl PreparedItemPlan {
             if !isolation.is_enforced() {
                 bail!("captured execution requires enforced isolation before admission");
             }
-            if protocol.descriptor.callback_channel
+            let callback_authority = protocol.descriptor.callback_channel
                 != ryeos_engine::protocol_vocabulary::CallbackChannel::None
                 || protocol.descriptor.env_injections.iter().any(|injection| {
                     matches!(
-                    injection.source,
-                    ryeos_engine::protocol_vocabulary::EnvInjectionSource::CallbackSocketPath
-                        | ryeos_engine::protocol_vocabulary::EnvInjectionSource::CallbackToken
-                        | ryeos_engine::protocol_vocabulary::EnvInjectionSource::ThreadAuthToken
-                )
-                })
-            {
-                bail!("captured execution cannot receive daemon callback or thread-auth authority");
+                        injection.source,
+                        ryeos_engine::protocol_vocabulary::EnvInjectionSource::CallbackSocketPath
+                            | ryeos_engine::protocol_vocabulary::EnvInjectionSource::CallbackToken
+                            | ryeos_engine::protocol_vocabulary::EnvInjectionSource::ThreadAuthToken
+                    )
+                });
+            if callback_authority {
+                admit_captured_compatible_callback(&protocol.descriptor)?;
             }
         }
         if !external
@@ -2185,6 +2185,35 @@ impl PreparedItemPlan {
             spawned,
         })
     }
+}
+
+/// A captured-execution tool may hold callback and thread-auth credentials
+/// only on a protocol that declares the captured-compatible class and whose
+/// declared surface digest equals the closed surface the daemon issues for
+/// the protocol's qualification authority. Ordinary tool callbacks, and a
+/// declaration naming any other surface, stay refused.
+pub(crate) fn admit_captured_compatible_callback(
+    descriptor: &ryeos_engine::protocols::ProtocolDescriptor,
+) -> Result<()> {
+    let refused =
+        || anyhow!("captured execution cannot receive daemon callback or thread-auth authority");
+    let class = descriptor
+        .captured_compatible_callback
+        .as_ref()
+        .ok_or_else(refused)?;
+    let authority = descriptor.qualification_callback.ok_or_else(refused)?;
+    let issued =
+        crate::callback_token::CallbackRuntimeMethodSurface::for_qualification_authority(authority)
+            .exact_surface_digest()?;
+    if class.surface_digest != issued
+        || descriptor.callback_channel != ryeos_engine::protocol_vocabulary::CallbackChannel::Http
+        || descriptor.capabilities.allows_target_site
+        || descriptor.capabilities.allows_detached
+        || descriptor.session.is_some()
+    {
+        return Err(refused());
+    }
+    Ok(())
 }
 
 fn validate_admitted_direct_executor_binding(
@@ -3725,6 +3754,106 @@ pub fn spawn_item(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn captured_callback_protocol(
+        digest: &str,
+        class: bool,
+        qualification: &str,
+    ) -> ryeos_engine::protocols::ProtocolDescriptor {
+        let class_yaml = if class {
+            format!("captured_compatible_callback:\n  surface_digest: {digest}\n")
+        } else {
+            String::new()
+        };
+        let qualification_yaml = if qualification.is_empty() {
+            String::new()
+        } else {
+            format!("qualification_callback: {qualification}\n")
+        };
+        serde_yaml::from_str(&format!(
+            "kind: protocol\nname: t\ncategory: ryeos/core\nabi_version: v1\nstdin:\n  shape: opaque\nstdout:\n  shape: opaque_bytes\n  mode: terminal\nenv_injections:\n  - {{ name: RYEOSD_SOCKET_PATH, source: callback_socket_path }}\n  - {{ name: RYEOSD_CALLBACK_TOKEN, source: callback_token }}\n  - {{ name: RYEOSD_THREAD_AUTH_TOKEN, source: thread_auth_token }}\ncapabilities:\n  allows_pushed_head: true\n  allows_target_site: false\n  allows_detached: false\nlifecycle:\n  mode: managed\ncallback_channel: http\n{qualification_yaml}{class_yaml}"
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn captured_execution_admits_callback_only_on_the_declared_closed_surface() {
+        use crate::callback_token::CallbackRuntimeMethodSurface as Surface;
+        let remote = Surface::qualification_remote_consumer()
+            .exact_surface_digest()
+            .unwrap();
+        let scoped = Surface::qualification_scoped_producer()
+            .exact_surface_digest()
+            .unwrap();
+        assert_ne!(remote, scoped);
+        // The declared class on the surface the daemon issues is admitted.
+        admit_captured_compatible_callback(&captured_callback_protocol(
+            &remote,
+            true,
+            "remote_consumer",
+        ))
+        .unwrap();
+        // An ordinary tool callback protocol is refused.
+        assert!(
+            admit_captured_compatible_callback(&captured_callback_protocol(&remote, false, ""))
+                .is_err()
+        );
+        // A class declared without qualification authority is refused.
+        assert!(
+            admit_captured_compatible_callback(&captured_callback_protocol(&remote, true, ""))
+                .is_err()
+        );
+        // A declared surface that is not the issued one is refused, as is a stale
+        // or arbitrary digest and the other authority's surface.
+        assert!(
+            admit_captured_compatible_callback(&captured_callback_protocol(
+                &scoped,
+                true,
+                "remote_consumer"
+            ))
+            .is_err()
+        );
+        assert!(
+            admit_captured_compatible_callback(&captured_callback_protocol(
+                &"0".repeat(64),
+                true,
+                "remote_consumer"
+            ))
+            .is_err()
+        );
+        // Surface equality follows the authority: the scoped digest admits only
+        // under the scoped authority.
+        admit_captured_compatible_callback(&captured_callback_protocol(
+            &scoped,
+            true,
+            "scoped_producer",
+        ))
+        .unwrap();
+        // Remote or detached capability reopens refusal.
+        let mut detached = captured_callback_protocol(&remote, true, "remote_consumer");
+        detached.capabilities.allows_detached = true;
+        assert!(admit_captured_compatible_callback(&detached).is_err());
+    }
+
+    #[test]
+    fn shipped_qualification_protocols_declare_the_captured_class_only_where_fitting() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../bundles/core/.ai/protocols/ryeos/core");
+        let load = |name: &str| -> ryeos_engine::protocols::ProtocolDescriptor {
+            serde_yaml::from_str(&std::fs::read_to_string(dir.join(name)).unwrap()).unwrap()
+        };
+        // The remote-consumer protocol names exactly the surface the daemon issues.
+        let consumer = load("qualification_consumer_callback.yaml");
+        assert!(consumer.captured_compatible_callback.is_some());
+        admit_captured_compatible_callback(&consumer).unwrap();
+        // The scoped-producer surface drives a daemon-owned process and stays outside the class.
+        let scoped = load("qualification_scoped_callback.yaml");
+        assert!(scoped.captured_compatible_callback.is_none());
+        assert!(admit_captured_compatible_callback(&scoped).is_err());
+        // Ordinary tool callbacks stay refused.
+        let tool_callback = load("tool_callback.yaml");
+        assert!(admit_captured_compatible_callback(&tool_callback).is_err());
+    }
 
     #[test]
     fn item_spawn_failure_retains_only_boundary_proved_settlement() {
