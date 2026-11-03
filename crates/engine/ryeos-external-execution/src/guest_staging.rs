@@ -2627,24 +2627,37 @@ mod tests {
             )
             .join("supervisor")
         );
-        assert_eq!(mounted_request.mounts.len(), 3);
+        assert_eq!(mounted_request.mounts.len(), 4);
         assert_eq!(
             mounted_request.mounts[0].access,
             lillux::LinuxSandboxMountAccess::ReadOnly
         );
+        // The private parent is the sole writable mount, at its fixed path.
         assert_eq!(
             mounted_request.mounts[1].destination,
-            std::path::PathBuf::from("/etc/resolv.conf")
+            std::path::PathBuf::from(
+                ryeos_external_execution_contract::guest_supervisor_descriptors::SUPERVISOR_PRIVATE_PARENT_MOUNT_DESTINATION
+            )
+        );
+        assert_eq!(
+            mounted_request.mounts[1].access,
+            lillux::LinuxSandboxMountAccess::Writable
         );
         assert_eq!(
             mounted_request.mounts[2].destination,
+            std::path::PathBuf::from("/etc/resolv.conf")
+        );
+        assert_eq!(
+            mounted_request.mounts[3].destination,
             std::path::PathBuf::from("/etc/hosts")
         );
         assert!(
             mounted_request
                 .mounts
                 .iter()
-                .all(|mount| { mount.access == lillux::LinuxSandboxMountAccess::ReadOnly })
+                .enumerate()
+                .all(|(index, mount)| index == 1
+                    || mount.access == lillux::LinuxSandboxMountAccess::ReadOnly)
         );
         assert_eq!(
             mounted_request

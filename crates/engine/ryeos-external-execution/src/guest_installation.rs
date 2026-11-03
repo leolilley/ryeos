@@ -15,7 +15,8 @@ use ryeos_external_execution_contract::guest_supervisor_descriptors::{
     GuestSupervisorDescriptorPlan, SUPERVISOR_BOOTSTRAP_FD, SUPERVISOR_CANDIDATE_RUNTIME_FD,
     SUPERVISOR_EXECUTABLE_FD, SUPERVISOR_LAUNCHER_FD, SUPERVISOR_MOUNTED_CONTROL_DESCRIPTORS,
     SUPERVISOR_MOUNTED_RELAY_CONTROL_DESCRIPTORS, SUPERVISOR_PRIVATE_PARENT_FD,
-    SUPERVISOR_RELAY_MAILBOX_FD, SUPERVISOR_STAGE_MOUNT_DESTINATION, SUPERVISOR_STATE_ROOT_FD,
+    SUPERVISOR_PRIVATE_PARENT_MOUNT_DESTINATION, SUPERVISOR_RELAY_MAILBOX_FD,
+    SUPERVISOR_STAGE_MOUNT_DESTINATION, SUPERVISOR_STATE_ROOT_FD,
     fixed_guest_supervisor_descriptor_plan,
 };
 use ryeos_external_execution_contract::staging_package::{
@@ -396,6 +397,7 @@ pub struct CommittedGuestSupervisorLaunchIntent {
 pub struct PreparedGuestMountedSandbox {
     _committed: CommittedGuestSupervisorLaunchIntent,
     _source_copy: lillux::InheritedDescriptorAuthority,
+    _private_mount: lillux::InheritedDescriptorAuthority,
     _controls: Vec<lillux::InheritedDescriptorAuthority>,
     _network_inputs: Vec<lillux::InheritedDescriptorAuthority>,
     request: lillux::LinuxSandboxRequest,
@@ -410,6 +412,7 @@ pub struct HeldGuestMountedSandbox {
     held: lillux::sandbox::HeldPrivateSourceSandboxProcess,
     _committed: CommittedGuestSupervisorLaunchIntent,
     _source_copy: lillux::InheritedDescriptorAuthority,
+    _private_mount: lillux::InheritedDescriptorAuthority,
     _controls: Vec<lillux::InheritedDescriptorAuthority>,
     _network_inputs: Vec<lillux::InheritedDescriptorAuthority>,
     request: lillux::LinuxSandboxRequest,
@@ -517,6 +520,7 @@ pub struct ReleasedGuestMountedSandbox {
     held: lillux::sandbox::HeldPrivateSourceSandboxProcess,
     _committed: CommittedGuestSupervisorLaunchIntent,
     _source_copy: lillux::InheritedDescriptorAuthority,
+    _private_mount: lillux::InheritedDescriptorAuthority,
     _controls: Vec<lillux::InheritedDescriptorAuthority>,
     _network_inputs: Vec<lillux::InheritedDescriptorAuthority>,
     expected_launch: lillux::LinuxSandboxAppliedLaunchCommitments,
@@ -609,6 +613,7 @@ impl HeldGuestMountedSandbox {
             held: self.held,
             _committed: self._committed,
             _source_copy: self._source_copy,
+            _private_mount: self._private_mount,
             _controls: self._controls,
             _network_inputs: self._network_inputs,
             expected_launch,
@@ -727,6 +732,33 @@ fn check_applied_supervisor_receipt(
             && receipt.matches_post_release_mounts(expected_mounts)
             && receipt.owned_child_pid == child_pid,
         "released supervisor applied target or mounts differ from committed request"
+    );
+    Ok(())
+}
+
+/// The held supervisor's view admits read-only stage and network inputs and
+/// exactly one writable mount: the private parent at its fixed destination.
+fn require_held_supervisor_mounts(mounts: &[lillux::LinuxSandboxMount]) -> Result<()> {
+    let writable: Vec<_> = mounts
+        .iter()
+        .filter(|mount| mount.access == lillux::LinuxSandboxMountAccess::Writable)
+        .collect();
+    ensure!(
+        writable.len() == 1
+            && writable[0].destination
+                == std::path::Path::new(SUPERVISOR_PRIVATE_PARENT_MOUNT_DESTINATION),
+        "held supervisor admits only its private parent as a writable mount"
+    );
+    ensure!(
+        mounts
+            .iter()
+            .filter(|mount| {
+                mount.destination
+                    == std::path::Path::new(SUPERVISOR_PRIVATE_PARENT_MOUNT_DESTINATION)
+            })
+            .count()
+            == 1,
+        "held supervisor private parent is mounted more than once"
     );
     Ok(())
 }
@@ -959,12 +991,28 @@ impl CommittedGuestSupervisorLaunchIntent {
             channels.iter().all(|(fd, _)| *fd != source_fd),
             "sealed source descriptor entered supervisor control channels"
         );
-        let mut mounts = vec![lillux::LinuxSandboxMount {
-            source_fd,
-            destination: PathBuf::from(SUPERVISOR_STAGE_MOUNT_DESTINATION),
-            access: lillux::LinuxSandboxMountAccess::ReadOnly,
-            layer: 0,
-        }];
+        let private_mount = artifacts
+            .private
+            .private_parent
+            .inherited_descriptor_authority()?
+            .duplicate_at_or_above(60)
+            .map_err(anyhow::Error::msg)?;
+        let mut mounts = vec![
+            lillux::LinuxSandboxMount {
+                source_fd,
+                destination: PathBuf::from(SUPERVISOR_STAGE_MOUNT_DESTINATION),
+                access: lillux::LinuxSandboxMountAccess::ReadOnly,
+                layer: 0,
+            },
+            lillux::LinuxSandboxMount {
+                source_fd: private_mount
+                    .inherited_descriptor()
+                    .map_err(anyhow::Error::msg)?,
+                destination: PathBuf::from(SUPERVISOR_PRIVATE_PARENT_MOUNT_DESTINATION),
+                access: lillux::LinuxSandboxMountAccess::Writable,
+                layer: 0,
+            },
+        ];
         for (source, destination) in network_inputs.iter().zip(network_destinations) {
             mounts.push(lillux::LinuxSandboxMount {
                 source_fd: source.inherited_descriptor().map_err(anyhow::Error::msg)?,
@@ -998,9 +1046,11 @@ impl CommittedGuestSupervisorLaunchIntent {
             aggregate_limits: None,
             target_limits: None,
         };
+        require_held_supervisor_mounts(&request.mounts)?;
         Ok(PreparedGuestMountedSandbox {
             _committed: self,
             _source_copy: source_copy,
+            _private_mount: private_mount,
             _controls: controls,
             _network_inputs: network_inputs,
             request,
@@ -1046,6 +1096,7 @@ impl PreparedGuestMountedSandbox {
             held,
             _committed: self._committed,
             _source_copy: self._source_copy,
+            _private_mount: self._private_mount,
             _controls: self._controls,
             _network_inputs: self._network_inputs,
             request: self.request,
@@ -2848,6 +2899,44 @@ mod recovery_binding_tests {
             )
             .unwrap(),
             hosts_bytes
+        );
+    }
+
+    #[test]
+    fn held_supervisor_admits_only_its_private_parent_writable() {
+        let mount = |destination: &str, access| lillux::LinuxSandboxMount {
+            source_fd: 60,
+            destination: PathBuf::from(destination),
+            access,
+            layer: 0,
+        };
+        use lillux::LinuxSandboxMountAccess::{ReadOnly, Writable};
+        let stage = mount(SUPERVISOR_STAGE_MOUNT_DESTINATION, ReadOnly);
+        let private = mount(SUPERVISOR_PRIVATE_PARENT_MOUNT_DESTINATION, Writable);
+        require_held_supervisor_mounts(&[stage.clone(), private.clone()]).unwrap();
+        assert!(require_held_supervisor_mounts(std::slice::from_ref(&stage)).is_err());
+        assert!(
+            require_held_supervisor_mounts(&[
+                stage.clone(),
+                private.clone(),
+                mount("/ryeos/elsewhere", Writable),
+            ])
+            .is_err()
+        );
+        assert!(
+            require_held_supervisor_mounts(&[
+                stage.clone(),
+                mount(SUPERVISOR_PRIVATE_PARENT_MOUNT_DESTINATION, ReadOnly),
+            ])
+            .is_err()
+        );
+        assert!(
+            require_held_supervisor_mounts(&[
+                stage,
+                private.clone(),
+                mount(SUPERVISOR_PRIVATE_PARENT_MOUNT_DESTINATION, ReadOnly),
+            ])
+            .is_err()
         );
     }
 
