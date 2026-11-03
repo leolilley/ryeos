@@ -902,6 +902,7 @@ impl RetainedExternalExecutionBinding {
                     connect_timeout_ms: 5_000,
                     request_timeout_ms: 10_000,
                     maximum_response_bytes: 1024 * 1024,
+                    max_clock_skew_ms: None,
                     network_inputs: provider_network_inputs,
                 },
             ),
@@ -1519,6 +1520,7 @@ mod workload_binding_tests {
                 maximum_frames: 1024,
                 poll_interval_ms: 1000,
                 poll_deadline_ms: 30_000,
+                max_clock_skew_ms: None,
             },
         );
         document

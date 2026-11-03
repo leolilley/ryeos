@@ -3265,6 +3265,7 @@ fn composed_controller_attachment_on(
         connect_timeout_ms: 1_000,
         request_timeout_ms: 2_000,
         maximum_response_bytes: 64 * 1024,
+        max_clock_skew_ms: None,
         network_inputs: ExternalNetworkInputPolicy {
             resolver: ExternalNetworkInputSelection {
                 source: "/etc/resolv.conf".into(),
@@ -4334,6 +4335,7 @@ async fn run_production_tls_candidate(
         connect_timeout_ms: 1_000,
         request_timeout_ms: 2_000,
         maximum_response_bytes: 64 * 1024,
+        max_clock_skew_ms: None,
         network_inputs: ExternalNetworkInputPolicy {
             resolver: ExternalNetworkInputSelection {
                 source: "/etc/resolv.conf".into(),
@@ -6317,6 +6319,7 @@ fn exercise_activation_fault(fault: &str) {
             connect_timeout_ms: 1_000,
             request_timeout_ms: 5_000,
             maximum_response_bytes: 64 * 1024,
+            max_clock_skew_ms: None,
             network_inputs: ExternalNetworkInputPolicy {
                 resolver: ExternalNetworkInputSelection {
                     source: "/etc/resolv.conf".into(),

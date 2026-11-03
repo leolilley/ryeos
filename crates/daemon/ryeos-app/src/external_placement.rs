@@ -9199,6 +9199,7 @@ fn sign_guest_import_ticket(
         guest_runtime_manifest_hash: contract.guest_runtime_manifest_hash.clone(),
         attachment_deadline_ms: intent.attachment_deadline_ms,
         admission_deadline_ms: intent.attachment_deadline_ms,
+        max_clock_skew_ms: contract.controller_transport.declared_max_clock_skew_ms(),
         nonce_sha256: lillux::sha256_hex(&lillux::crypto::generate_random_bytes::<32>()),
         ticket,
         guest_inputs: inputs.clone(),
@@ -12423,6 +12424,7 @@ mod tests {
                     maximum_frames: 1024,
                     poll_interval_ms: 1000,
                     poll_deadline_ms: 30_000,
+                    max_clock_skew_ms: None,
                 },
             );
         contract.settings = serde_json::json!({"owner_id": "workspace-a"});

@@ -6,6 +6,7 @@
 //! ambient path; its exact bounded contents are supplied out of band by the
 //! controller that admitted the adapter.
 
+pub mod clock_skew;
 pub mod guest_import_authorization;
 pub mod guest_owner_report;
 pub mod guest_supervisor_descriptors;

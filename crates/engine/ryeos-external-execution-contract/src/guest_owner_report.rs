@@ -160,7 +160,96 @@ pub const MAX_GUEST_SUPERVISOR_STDERR_TAIL_BYTES: usize = 4096;
 /// The longest accepted supervisor exit line, excluding its newline: the tail
 /// at its bound with every byte escaped, plus the fixed framing.
 pub const MAX_GUEST_SUPERVISOR_EXIT_LINE_BYTES: usize =
-    2 * MAX_GUEST_SUPERVISOR_STDERR_TAIL_BYTES + 256;
+    2 * MAX_GUEST_SUPERVISOR_STDERR_TAIL_BYTES + 512;
+
+/// What a guest knows about its own wall clock, as the kernel reports it.
+/// This mirrors the host clock-trust query without depending on the host
+/// layer: the contract carries only the report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum GuestClockTrust {
+    Synced {
+        maximum_error_us: u64,
+        estimated_error_us: u64,
+    },
+    Unsynchronized,
+    Unknown,
+}
+
+impl fmt::Display for GuestClockTrust {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Synced {
+                maximum_error_us, ..
+            } => write!(
+                formatter,
+                "synchronized (maximum error {maximum_error_us} us)"
+            ),
+            Self::Unsynchronized => formatter.write_str("unsynchronized"),
+            Self::Unknown => formatter.write_str("unknown"),
+        }
+    }
+}
+
+/// The most skew, in either direction, a report may claim: one day.
+pub const MAX_GUEST_OBSERVED_SKEW_MS: i64 = 86_400_000;
+
+/// The marker the supervisor writes to its standard error once it holds its
+/// binding, followed by the signed millisecond difference between the guest's
+/// wall clock at that moment and the controller's issue time of the binding.
+/// The difference includes delivery delay, so it bounds skew only from above
+/// when the guest is ahead.
+pub const GUEST_CLOCK_SKEW_MARKER: &str = "ryeos-guest-clock skew_ms=";
+
+/// The owner's account of the guest clock when the supervisor ended. For logs
+/// and diagnosis only: it grants no authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuestClockReport {
+    pub trust: GuestClockTrust,
+    /// Guest wall clock at the attach response minus the controller's
+    /// `issued_at_ms`, when the supervisor's marker survived in its tail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_skew_ms: Option<i64>,
+}
+
+impl GuestClockReport {
+    fn validate(&self) -> Result<()> {
+        ensure!(
+            self.observed_skew_ms
+                .is_none_or(|ms| ms.unsigned_abs() <= MAX_GUEST_OBSERVED_SKEW_MS as u64),
+            "guest clock report skew exceeds its bound"
+        );
+        Ok(())
+    }
+
+    /// Find the newest supervisor marker in raw standard-error bytes.
+    pub fn observed_skew_from_stderr(raw: &[u8]) -> Option<i64> {
+        let text = String::from_utf8_lossy(raw);
+        let rest = &text[text.rfind(GUEST_CLOCK_SKEW_MARKER)? + GUEST_CLOCK_SKEW_MARKER.len()..];
+        let end = rest
+            .char_indices()
+            .find(|(index, character)| {
+                !(character.is_ascii_digit() || (*index == 0 && *character == '-'))
+            })
+            .map_or(rest.len(), |(index, _)| index);
+        let skew: i64 = rest[..end].parse().ok()?;
+        (skew.unsigned_abs() <= MAX_GUEST_OBSERVED_SKEW_MS as u64).then_some(skew)
+    }
+}
+
+impl fmt::Display for GuestClockReport {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "guest clock trust: {}", self.trust)?;
+        if let Some(skew) = self.observed_skew_ms {
+            write!(
+                formatter,
+                "; guest wall clock {skew} ms from the controller's issue time at attach"
+            )?;
+        }
+        Ok(())
+    }
+}
 
 /// The released supervisor's end, as the owner observed it. The tail is
 /// untrusted text for logging only.
@@ -169,6 +258,10 @@ pub const MAX_GUEST_SUPERVISOR_EXIT_LINE_BYTES: usize =
 pub struct GuestSupervisorExit {
     pub status: GuestSupervisorStatus,
     pub stderr_tail: String,
+    /// The owner's account of the guest clock. Absent in reports that carry
+    /// none, which keeps their canonical bytes as they were.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clock: Option<GuestClockReport>,
 }
 
 impl GuestSupervisorExit {
@@ -195,10 +288,19 @@ impl GuestSupervisorExit {
         Self {
             status,
             stderr_tail: text,
+            clock: None,
         }
     }
 
+    pub fn with_clock(mut self, clock: GuestClockReport) -> Self {
+        self.clock = Some(clock);
+        self
+    }
+
     fn validate(&self) -> Result<()> {
+        if let Some(clock) = &self.clock {
+            clock.validate()?;
+        }
         ensure!(
             self.stderr_tail.len() <= MAX_GUEST_SUPERVISOR_STDERR_TAIL_BYTES
                 && !self.stderr_tail.chars().any(char::is_control),
@@ -214,6 +316,7 @@ impl GuestSupervisorExit {
                 guest_owner: "supervisor_exit",
                 status: self.status,
                 stderr_tail: &self.stderr_tail,
+                clock: self.clock.as_ref(),
             })
             .expect("supervisor exit line serializes")
         )
@@ -229,6 +332,7 @@ impl GuestSupervisorExit {
         let exit = Self {
             status: parsed.status,
             stderr_tail: parsed.stderr_tail,
+            clock: parsed.clock,
         };
         exit.validate()?;
         ensure!(
@@ -244,6 +348,8 @@ struct SupervisorExitLine<'a> {
     guest_owner: &'static str,
     status: GuestSupervisorStatus,
     stderr_tail: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    clock: Option<&'a GuestClockReport>,
 }
 
 #[derive(Deserialize)]
@@ -252,6 +358,8 @@ struct OwnedSupervisorExitLine {
     guest_owner: String,
     status: GuestSupervisorStatus,
     stderr_tail: String,
+    #[serde(default)]
+    clock: Option<GuestClockReport>,
 }
 
 /// One complete owner report line.
@@ -497,6 +605,17 @@ impl GuestOwnerActivationReport {
     }
 }
 
+struct ClockNote<'a>(Option<&'a GuestClockReport>);
+
+impl fmt::Display for ClockNote<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            Some(clock) => write!(formatter, " ({clock})"),
+            None => Ok(()),
+        }
+    }
+}
+
 struct LastPhase(Option<GuestOwnerStep>);
 
 impl fmt::Display for LastPhase {
@@ -518,8 +637,9 @@ impl fmt::Display for GuestOwnerActivationReport {
             } if exit.stderr_tail.is_empty() => {
                 write!(
                     formatter,
-                    "guest owner held; supervisor exited {}",
-                    exit.status
+                    "guest owner held; supervisor exited {}{}",
+                    exit.status,
+                    ClockNote(exit.clock.as_ref())
                 )
             }
             Self::Held {
@@ -527,8 +647,10 @@ impl fmt::Display for GuestOwnerActivationReport {
                 ..
             } => write!(
                 formatter,
-                "guest owner held; supervisor exited {}: {}",
-                exit.status, exit.stderr_tail
+                "guest owner held; supervisor exited {}: {}{}",
+                exit.status,
+                exit.stderr_tail,
+                ClockNote(exit.clock.as_ref())
             ),
             Self::Held { .. } => formatter.write_str("guest owner held"),
             Self::Refused { step, .. } => write!(formatter, "guest owner refused at {step}"),
@@ -857,5 +979,51 @@ mod tests {
             GuestOwnerStep::of(&anyhow::anyhow!("unclassified")),
             GuestOwnerStep::Other
         );
+    }
+
+    #[test]
+    fn exit_report_carries_an_optional_bounded_clock_account() {
+        let bare = GuestSupervisorExit::from_raw_tail(GuestSupervisorStatus::Code(0), b"done");
+        let bare_line = GuestOwnerReport::SupervisorExit(bare.clone()).line();
+        assert!(!bare_line.contains("clock"), "{bare_line}");
+
+        let clock = GuestClockReport {
+            trust: GuestClockTrust::Unsynchronized,
+            observed_skew_ms: Some(-94_000),
+        };
+        let exit = bare.with_clock(clock);
+        let line = GuestOwnerReport::SupervisorExit(exit.clone()).line();
+        assert!(
+            line.len() <= MAX_GUEST_SUPERVISOR_EXIT_LINE_BYTES + 1,
+            "{line}"
+        );
+        assert_eq!(
+            GuestOwnerReport::parse_line(line.trim_end()).unwrap(),
+            GuestOwnerReport::SupervisorExit(exit.clone())
+        );
+
+        let mut out_of_bound = exit;
+        out_of_bound.clock.as_mut().unwrap().observed_skew_ms =
+            Some(MAX_GUEST_OBSERVED_SKEW_MS + 1);
+        let line = GuestOwnerReport::SupervisorExit(out_of_bound).line();
+        assert!(GuestOwnerReport::parse_line(line.trim_end()).is_err());
+    }
+
+    #[test]
+    fn supervisor_skew_marker_is_read_strictly_from_standard_error() {
+        assert_eq!(
+            GuestClockReport::observed_skew_from_stderr(
+                b"x\nryeos-guest-clock skew_ms=120\nryeos-guest-clock skew_ms=-3412\nrest"
+            ),
+            Some(-3412)
+        );
+        for raw in [
+            b"no marker".as_slice(),
+            b"ryeos-guest-clock skew_ms=",
+            b"ryeos-guest-clock skew_ms=abc",
+            b"ryeos-guest-clock skew_ms=999999999999",
+        ] {
+            assert_eq!(GuestClockReport::observed_skew_from_stderr(raw), None);
+        }
     }
 }

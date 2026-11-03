@@ -28,8 +28,9 @@ use ryeos_external_execution_contract::guest_import_authorization::{
     MAX_GUEST_IMPORT_AUTHORIZATION_BYTES, MAX_SIGNED_GUEST_OCCURRENCE_ASSIGNMENT_BYTES,
 };
 use ryeos_external_execution_contract::guest_owner_report::{
-    GuestOwnerReport, GuestOwnerStep as Step, GuestSupervisorExit, GuestSupervisorStatus,
-    MAX_GUEST_SUPERVISOR_STDERR_TAIL_BYTES, RefusedAt as _,
+    GuestClockReport, GuestClockTrust, GuestOwnerReport, GuestOwnerStep as Step,
+    GuestSupervisorExit, GuestSupervisorStatus, MAX_GUEST_SUPERVISOR_STDERR_TAIL_BYTES,
+    RefusedAt as _,
 };
 
 const RUNTIME_ROOT: &str = "/ryeos/guest-runtime";
@@ -389,7 +390,20 @@ fn supervisor_exit_from_parts(
         text.push(b'\n');
     }
     text.extend_from_slice(stderr);
-    GuestSupervisorExit::from_raw_tail(status, &text)
+    GuestSupervisorExit::from_raw_tail(status, &text).with_clock(GuestClockReport {
+        trust: match lillux::time::wall_clock_trust() {
+            lillux::time::WallClockTrust::Synced {
+                maximum_error_us,
+                estimated_error_us,
+            } => GuestClockTrust::Synced {
+                maximum_error_us,
+                estimated_error_us,
+            },
+            lillux::time::WallClockTrust::Unsynchronized => GuestClockTrust::Unsynchronized,
+            lillux::time::WallClockTrust::Unknown => GuestClockTrust::Unknown,
+        },
+        observed_skew_ms: GuestClockReport::observed_skew_from_stderr(stderr),
+    })
 }
 
 fn owner() -> Result<()> {
@@ -586,7 +600,10 @@ mod tests {
             .unwrap();
         assert_eq!(status.code(), Some(126));
         let raw = tail.finish(STDERR_GRACE);
-        let exit = supervisor_exit_from_parts(lillux::LinuxSandboxExit::Code(126), None, &raw);
+        let mut exit = supervisor_exit_from_parts(lillux::LinuxSandboxExit::Code(126), None, &raw);
+        // The owner always attaches its account of the guest clock; the rest
+        // of the line is what this test pins.
+        assert!(exit.clock.take().is_some());
         let line = GuestOwnerReport::SupervisorExit(exit.clone()).line();
         assert_eq!(
             line,
@@ -606,10 +623,7 @@ mod tests {
             b"last words\n",
         );
         assert_eq!(exit.status, GuestSupervisorStatus::Signal(9));
-        assert_eq!(
-            exit.stderr_tail,
-            "launch failure: exec failed | last words"
-        );
+        assert_eq!(exit.stderr_tail, "launch failure: exec failed | last words");
     }
 
     #[test]

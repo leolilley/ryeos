@@ -732,7 +732,10 @@ impl LockedSupervisorRoot {
             let clock_anchor = lillux::time::LocalClockAnchor::capture()
                 .map_err(anyhow::Error::msg)
                 .context("capture the guest clock anchor")?;
-            bootstrap.validate_at(lillux::time::timestamp_millis())?;
+            bootstrap.validate_fresh_on_guest(
+                lillux::time::timestamp_millis(),
+                &lillux::time::wall_clock_trust(),
+            )?;
             // Only HTTP samples target-local network files, before this fresh
             // root gains any entry. Relay captures the original pinned mailbox
             // identity when its journal is created.
@@ -1212,6 +1215,15 @@ impl LiveExternalCandidateSupervisor {
         let Some(RetainedSupervisorJournal::Attached(attached)) = state.journal.as_ref() else {
             bail!("external supervisor journal is not attached after attachment")
         };
+        // The owner reads this line from the supervisor's standard error to
+        // report how this guest's wall clock compared with the controller's
+        // at the moment the binding arrived. Diagnosis only: no window or
+        // check consults it.
+        eprintln!(
+            "{}{}",
+            ryeos_external_execution_contract::guest_owner_report::GUEST_CLOCK_SKEW_MARKER,
+            lillux::time::timestamp_millis().saturating_sub(attached.binding().issued_at_ms)
+        );
         let spec = ExternalCandidateLauncherSpec::from_admitted_program(
             attached.binding().clone(),
             &attached.bootstrap().candidate_program,
@@ -1757,6 +1769,7 @@ mod tests {
                 connect_timeout_ms: 1_000,
                 request_timeout_ms: 2_000,
                 maximum_response_bytes: 64 * 1024,
+                max_clock_skew_ms: None,
             }
             .into(),
             tls_root_certificates_der_base64: roots,

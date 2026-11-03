@@ -367,12 +367,15 @@ impl VerifiedGuestImportAuthorization {
         .collect()
     }
 
+    /// Freshness judged on this guest's wall clock, within the skew tolerance
+    /// the signed authorization declares.
     pub fn require_fresh_admission(&self) -> Result<()> {
         self.require_fresh_admission_at(lillux::time::timestamp_millis())
     }
 
-    pub(crate) fn require_fresh_admission_at(&self, now_ms: i64) -> Result<()> {
-        self.authorization.require_fresh_admission_at(now_ms)
+    pub(crate) fn require_fresh_admission_at(&self, guest_now_ms: i64) -> Result<()> {
+        self.authorization
+            .require_fresh_admission_on_guest(guest_now_ms, &lillux::time::wall_clock_trust())
     }
 }
 
@@ -551,6 +554,7 @@ mod tests {
                 guest_runtime_manifest_hash: digest('7'),
                 attachment_deadline_ms: 20_000,
                 admission_deadline_ms: 10_000,
+                max_clock_skew_ms: None,
                 nonce_sha256: digest('8'),
                 ticket,
                 guest_inputs: inputs,
@@ -700,7 +704,15 @@ mod tests {
             verify_guest_import_authorization(signed.clone(), &other.verifying_key(), &assignment,)
                 .is_err()
         );
-        assert!(verified.require_fresh_admission_at(10_000).is_err());
+        // The signed deadline is 10 000 ms; the authorization declares no
+        // tolerance, so the contract's fallback of 60 000 ms applies.
+        verified.require_fresh_admission_at(9_999).unwrap();
+        verified.require_fresh_admission_at(69_999).unwrap();
+        let refusal = verified.require_fresh_admission_at(70_000).unwrap_err();
+        assert!(
+            format!("{refusal:#}").contains("declared skew tolerance 60 s; guest clock trust:"),
+            "{refusal:#}"
+        );
         let different_occurrence = GuestOccurrenceAssignment {
             occurrence_id: "occ-2",
             ..assignment
@@ -860,7 +872,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            GuestOccurrenceOwner::begin_authorized_at(&occurrence, stale, 10_000).is_err(),
+            GuestOccurrenceOwner::begin_authorized_at(&occurrence, stale, 70_000).is_err(),
             "verified token created a new owner after its admission deadline"
         );
         assert!(
@@ -882,7 +894,7 @@ mod tests {
         let recovery =
             verify_guest_import_authorization(signed, &controller.verifying_key(), &assignment)
                 .unwrap();
-        assert!(recovery.require_fresh_admission_at(10_000).is_err());
+        assert!(recovery.require_fresh_admission_at(70_000).is_err());
         assert!(matches!(
             recover_guest_occurrence_authorized(&occurrence, &recovery)
                 .unwrap()

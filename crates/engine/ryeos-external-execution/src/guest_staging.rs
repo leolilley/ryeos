@@ -773,6 +773,7 @@ mod tests {
                 connect_timeout_ms: 5_000,
                 request_timeout_ms: 10_000,
                 maximum_response_bytes: 1024 * 1024,
+                max_clock_skew_ms: None,
             }.into(),
             tls_root_certificates_der_base64: roots,
             placement_thread_id: "T-staging-test".into(),

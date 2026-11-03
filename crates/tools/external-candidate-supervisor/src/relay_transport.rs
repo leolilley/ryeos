@@ -266,8 +266,10 @@ impl OriginalRelayMailbox {
             .open_pinned_regular(OsStr::new(ATTACH_REQUEST), false)?
             .is_none()
         {
-            self.bootstrap
-                .validate_at(lillux::time::timestamp_millis())?;
+            self.bootstrap.validate_fresh_on_guest(
+                lillux::time::timestamp_millis(),
+                &lillux::time::wall_clock_trust(),
+            )?;
         }
         self.files.publish_exact(ATTACH_REQUEST, &request_bytes)?;
         let response: ExternalChannelAttachResponse = self.files.wait_verified(
