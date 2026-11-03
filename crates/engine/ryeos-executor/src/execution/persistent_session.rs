@@ -33,6 +33,8 @@ use ryeos_state::objects::{
 };
 
 mod custody;
+#[cfg(test)]
+mod guest_relay_loopback_tests;
 
 use super::external_structured_session_relay::{
     ExternalStructuredSessionRelayCursor, ExternalStructuredSessionRelayPump,

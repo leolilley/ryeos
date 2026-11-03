@@ -917,7 +917,7 @@ impl RetainedExternalExecutionBinding {
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn composed_test_fixture(
         program: &ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram,
-        controller_transport: ExternalControllerTransportContract,
+        controller_transport: impl Into<ComposedTestTransport>,
         controller_tls_root_certificates_der_base64: Vec<String>,
         backend: String,
         backend_artifact_hash: String,
@@ -957,7 +957,7 @@ impl RetainedExternalExecutionBinding {
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn composed_test_fixture_with_settings(
         program: &ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram,
-        controller_transport: ExternalControllerTransportContract,
+        controller_transport: impl Into<ComposedTestTransport>,
         controller_tls_root_certificates_der_base64: Vec<String>,
         backend: String,
         backend_artifact_hash: String,
@@ -974,11 +974,11 @@ impl RetainedExternalExecutionBinding {
         settings: Value,
         qualification: &PlacementQualificationSelection,
     ) -> Result<Self> {
-        let provider_network_inputs = controller_transport.network_inputs.clone();
+        let transport: ComposedTestTransport = controller_transport.into();
         let document = compose::compose_binding_document(compose::ComposeInputs {
             program,
-            controller_transport: controller_transport.into(),
-            provider_network_inputs,
+            controller_transport: transport.selection,
+            provider_network_inputs: transport.network_inputs,
             tls_roots_der_base64: controller_tls_root_certificates_der_base64,
             backend,
             account: "account".into(),
@@ -1087,6 +1087,25 @@ impl std::fmt::Debug for InstalledExternalExecutionBinding {
     }
 }
 
+/// The controller transport a composed test binding selects, with the
+/// provider network inputs its lifecycle contacts read.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Debug, Clone)]
+pub struct ComposedTestTransport {
+    pub selection: ExternalControllerTransportSelection,
+    pub network_inputs: ExternalNetworkInputPolicy,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl From<ExternalControllerTransportContract> for ComposedTestTransport {
+    fn from(contract: ExternalControllerTransportContract) -> Self {
+        Self {
+            network_inputs: contract.network_inputs.clone(),
+            selection: contract.into(),
+        }
+    }
+}
+
 /// Plain-data selection of the runtime proofs a composed test binding carries.
 /// The binding types themselves stay crate-private; a downstream fixture
 /// names the published attestations it qualified and nothing else.
@@ -1165,7 +1184,7 @@ impl InstalledExternalExecutionBinding {
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn composed_test_fixture_with_settings(
         program: &ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram,
-        controller_transport: ExternalControllerTransportContract,
+        controller_transport: impl Into<ComposedTestTransport>,
         controller_tls_root_certificates_der_base64: Vec<String>,
         backend: String,
         backend_artifact_hash: String,

@@ -731,66 +731,7 @@ impl ExecutableExternalPlacementBackend {
     ) -> Result<ExternalLifecycleObservation<RelayFileAdapterResponse>> {
         let record = claim.record();
         let intent = &record.intent;
-        bootstrap.validate()?;
-        let relay = bootstrap.controller.relay()?;
-        ensure!(
-            bootstrap.digest()? == intent.bootstrap_digest
-                && bootstrap.placement_thread_id == intent.placement_thread_id
-                && bootstrap.occurrence_id == intent.occurrence_id
-                && bootstrap.allocation_request_digest == intent.allocation_request_digest
-                && bootstrap.relay_mailbox_root()? == intent.mailbox_root
-                && relay.maximum_file_bytes == intent.maximum_file_bytes,
-            "claimed relay differs from original signed placement"
-        );
-        ensure!(
-            match claim.effect() {
-                RelayFileEffect::UploadOnce =>
-                    intent.direction == RelayDirection::ControllerToGuest
-                        && record.phase == RelayTransferPhase::UploadPossible
-                        && record.read_attempts == 0,
-                RelayFileEffect::Download =>
-                    (intent.direction == RelayDirection::GuestToController
-                        && record.phase == RelayTransferPhase::Reading
-                        && record.read_attempts > 0)
-                        || (intent.direction == RelayDirection::ControllerToGuest
-                            && record.phase == RelayTransferPhase::UploadPossible
-                            && record.read_attempts > 0),
-            },
-            "relay adapter received no durable contact claim"
-        );
-        let claim_effect = claim.effect();
-        let request = RelayFileAdapterRequest {
-            schema: 2,
-            protocol: RELAY_FILE_PROTOCOL.into(),
-            binding_hash: bootstrap.execution_binding_hash.clone(),
-            settings_digest: contract.settings_digest.clone(),
-            placement_thread_id: intent.placement_thread_id.clone(),
-            occurrence_id: intent.occurrence_id.clone(),
-            allocation_request_digest: intent.allocation_request_digest.clone(),
-            bootstrap_digest: intent.bootstrap_digest.clone(),
-            mailbox_root: intent.mailbox_root.clone(),
-            kind: match intent.kind {
-                RelayKind::Attach => RelayFileKind::Attach,
-                RelayKind::Exchange => RelayFileKind::Exchange,
-            },
-            sequence: intent.sequence,
-            direction: match intent.direction {
-                RelayDirection::GuestToController => RelayFileDirection::GuestToController,
-                RelayDirection::ControllerToGuest => RelayFileDirection::ControllerToGuest,
-            },
-            remote_path: intent.remote_path.clone(),
-            maximum_file_bytes: intent.maximum_file_bytes,
-            deadline_ms: intent.deadline_ms,
-            effect: claim.effect(),
-            expected_sha256: intent.expected_sha256.clone(),
-            expected_bytes: intent.expected_bytes,
-            delivery_account: match claim_effect {
-                RelayFileEffect::UploadOnce => {
-                    Some(delivery_account.context("relay upload has no delivery account")?)
-                }
-                RelayFileEffect::Download => None,
-            },
-        };
+        let request = relay_file_adapter_request(contract, bootstrap, &claim, delivery_account)?;
         let request_bytes = request.canonical_bytes()?;
         let deadline = deadline.min(lillux::time::MonotonicDeadline::after(
             lillux::time::Duration::from_secs(u64::from(contract.contact_timeout_seconds)),
@@ -1036,6 +977,78 @@ impl ExecutableExternalPlacementBackend {
             deadline,
         )
     }
+}
+
+/// The exact relay-file request for one durable contact claim on the original
+/// sealed bootstrap. Every relay-file transport receives this request.
+pub(crate) fn relay_file_adapter_request(
+    contract: &ExternalPlacementBackendContract,
+    bootstrap: &ryeos_state::external_execution::transport::ExternalSupervisorBootstrap,
+    claim: &ClaimedRelayFileContact,
+    delivery_account: Option<RelayDeliveryAccount>,
+) -> Result<RelayFileAdapterRequest> {
+    let record = claim.record();
+    let intent = &record.intent;
+    bootstrap.validate()?;
+    let relay = bootstrap.controller.relay()?;
+    ensure!(
+        bootstrap.digest()? == intent.bootstrap_digest
+            && bootstrap.placement_thread_id == intent.placement_thread_id
+            && bootstrap.occurrence_id == intent.occurrence_id
+            && bootstrap.allocation_request_digest == intent.allocation_request_digest
+            && bootstrap.relay_mailbox_root()? == intent.mailbox_root
+            && relay.maximum_file_bytes == intent.maximum_file_bytes,
+        "claimed relay differs from original signed placement"
+    );
+    ensure!(
+        match claim.effect() {
+            RelayFileEffect::UploadOnce =>
+                intent.direction == RelayDirection::ControllerToGuest
+                    && record.phase == RelayTransferPhase::UploadPossible
+                    && record.read_attempts == 0,
+            RelayFileEffect::Download =>
+                (intent.direction == RelayDirection::GuestToController
+                    && record.phase == RelayTransferPhase::Reading
+                    && record.read_attempts > 0)
+                    || (intent.direction == RelayDirection::ControllerToGuest
+                        && record.phase == RelayTransferPhase::UploadPossible
+                        && record.read_attempts > 0),
+        },
+        "relay adapter received no durable contact claim"
+    );
+    let claim_effect = claim.effect();
+    Ok(RelayFileAdapterRequest {
+        schema: 2,
+        protocol: RELAY_FILE_PROTOCOL.into(),
+        binding_hash: bootstrap.execution_binding_hash.clone(),
+        settings_digest: contract.settings_digest.clone(),
+        placement_thread_id: intent.placement_thread_id.clone(),
+        occurrence_id: intent.occurrence_id.clone(),
+        allocation_request_digest: intent.allocation_request_digest.clone(),
+        bootstrap_digest: intent.bootstrap_digest.clone(),
+        mailbox_root: intent.mailbox_root.clone(),
+        kind: match intent.kind {
+            RelayKind::Attach => RelayFileKind::Attach,
+            RelayKind::Exchange => RelayFileKind::Exchange,
+        },
+        sequence: intent.sequence,
+        direction: match intent.direction {
+            RelayDirection::GuestToController => RelayFileDirection::GuestToController,
+            RelayDirection::ControllerToGuest => RelayFileDirection::ControllerToGuest,
+        },
+        remote_path: intent.remote_path.clone(),
+        maximum_file_bytes: intent.maximum_file_bytes,
+        deadline_ms: intent.deadline_ms,
+        effect: claim.effect(),
+        expected_sha256: intent.expected_sha256.clone(),
+        expected_bytes: intent.expected_bytes,
+        delivery_account: match claim_effect {
+            RelayFileEffect::UploadOnce => {
+                Some(delivery_account.context("relay upload has no delivery account")?)
+            }
+            RelayFileEffect::Download => None,
+        },
+    })
 }
 
 impl ExternalPlacementBackend for ExecutableExternalPlacementBackend {

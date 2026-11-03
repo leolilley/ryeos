@@ -8,7 +8,7 @@
 //! claim receives a non-cloneable credential-bearing permit.
 
 use std::collections::{BTreeMap, BTreeSet};
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
@@ -599,7 +599,7 @@ impl InstalledExternalCandidateConnector {
         })
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn open(path: &Path) -> Result<Self> {
         let executable = lillux::secure_fs::open_pinned_regular_file_no_follow(path)
             .context("open installed external candidate connector")?;
@@ -690,7 +690,7 @@ impl ExternalCandidateConnectorRegistry {
     /// Test-only constructor. Production composition must supply connector
     /// artifacts captured from signed bundle authority; a sibling of the
     /// daemon executable is not an admitted artifact source.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn from_paths(paths: impl IntoIterator<Item = PathBuf>) -> Result<Self> {
         let mut artifacts = BTreeMap::new();
         for path in paths {
@@ -8606,6 +8606,9 @@ mod session_lease_tests;
 #[cfg(test)]
 pub(crate) mod compose_test_support;
 
+#[cfg(any(test, feature = "test-support"))]
+pub mod guest_relay_loopback;
+
 #[cfg(test)]
 mod channel_stream_admission_tests;
 
@@ -9185,7 +9188,7 @@ pub mod test_support {
     pub fn install_precontact_binding_with_settings(
         state: &mut AppState,
         program: &ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram,
-        controller: ryeos_state::external_execution::transport::ExternalControllerTransportContract,
+        controller: impl Into<crate::node_config::sections::external_execution::ComposedTestTransport>,
         tls_root_certificates_der_base64: Vec<String>,
         settings: serde_json::Value,
         credential: &[u8],
@@ -9455,6 +9458,80 @@ pub mod test_support {
         Ok(operator)
     }
 
+    /// Install the composed binding for `capsule`'s program, reserve its
+    /// session allocation and bind the allocator's occurrence, leaving
+    /// activation and attachment to the production start owner. The fresh
+    /// contact's current guest-runtime qualification check is not reached:
+    /// the composed node publishes no guest runtime qualification. Returns
+    /// the placement.
+    pub fn bind_composed_external_session(
+        state: &mut AppState,
+        capsule: ryeos_state::objects::AdmittedPersistentSessionCapsule,
+        base_snapshot_hash: &str,
+        transport: crate::node_config::sections::external_execution::ComposedTestTransport,
+        supervisor_artifact_hash: String,
+        launcher_artifact_hash: String,
+        settings: serde_json::Value,
+        qualification: &PlacementQualificationSelection,
+    ) -> Result<String> {
+        let program = capsule
+            .external_candidate
+            .clone()
+            .context("composed external session capsule has no candidate program")?;
+        install_precontact_binding_with_settings(
+            state,
+            &program,
+            transport.clone(),
+            Vec::new(),
+            settings.clone(),
+            b"fixture-secret",
+            qualification,
+        )?;
+        let reserved = reserve_composed_session(
+            state,
+            capsule,
+            base_snapshot_hash,
+            transport,
+            Vec::new(),
+            supervisor_artifact_hash,
+            launcher_artifact_hash,
+            settings,
+            None,
+            qualification,
+        )?;
+        let placement = reserved.placement_thread_id;
+        ensure!(
+            matches!(
+                state.state_store.claim_external_allocation_contact(
+                    &placement,
+                    &reserved.reservation.request_digest
+                )?,
+                ExternalAllocationContactClaim::Contact(_)
+            ),
+            "composed external session did not own first allocator contact"
+        );
+        state.state_store.bind_external_allocation(
+            &placement,
+            &ExternalAllocationOccurrence {
+                schema: 1,
+                binding_hash: reserved.reservation.binding_hash.clone(),
+                request_digest: reserved.reservation.request_digest.clone(),
+                // The relay journal admits only the signed relay provider's
+                // occurrence identity form.
+                occurrence_id: format!("sbx-{}", &reserved.reservation.request_digest[..32]),
+                provider_observation_digest: lillux::sha256_hex(
+                    format!("composed-allocation:{}", reserved.reservation.request_digest)
+                        .as_bytes(),
+                ),
+            },
+            ExternalObservationTiming::Startup {
+                deadline_exceeded: false,
+                live_deadline: reserved.reservation.startup_deadline()?,
+            },
+        )?;
+        Ok(placement)
+    }
+
     pub fn external_occurrence_id(state: &AppState, placement: &str) -> Result<String> {
         Ok(state
             .state_store
@@ -9596,18 +9673,33 @@ pub mod test_support {
         Ok(launch_metadata)
     }
 
-    fn prepare_bound_external_supervisor_inner(
+    /// What a composed session reservation retains for its next owner.
+    struct ComposedSessionReservation {
+        placement_thread_id: String,
+        reservation: ExternalAllocationReservation,
+        contract: ExternalPlacementBackendContract,
+        program: ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram,
+        stored_capsule_hash: String,
+        occurrence_id: String,
+        channel_owner_public_key: String,
+        bootstrap_capability: String,
+    }
+
+    /// Store the capsule, retain the composed binding and reserve the
+    /// session's allocation, as session admission leaves it before contact.
+    fn reserve_composed_session(
         state: &mut AppState,
         mut capsule: ryeos_state::objects::AdmittedPersistentSessionCapsule,
-        base_snapshot_hash: String,
-        guest_inputs: ryeos_external_execution_contract::ExternalGuestInputProjection,
-        controller: ryeos_state::external_execution::transport::ExternalControllerTransportContract,
+        base_snapshot_hash: &str,
+        transport: crate::node_config::sections::external_execution::ComposedTestTransport,
         tls_root_certificates_der_base64: Vec<String>,
         supervisor_artifact_hash: String,
         launcher_artifact_hash: String,
+        settings: serde_json::Value,
         workspace: Option<(&std::path::Path, &Arc<crate::temp_dir_guard::TempDirGuard>)>,
         qualification: &PlacementQualificationSelection,
-    ) -> Result<ryeos_state::external_execution::transport::ExternalSupervisorBootstrap> {
+    ) -> Result<ComposedSessionReservation> {
+        let base_snapshot_hash = base_snapshot_hash.to_owned();
         capsule.validate()?;
         let program = capsule
             .external_candidate
@@ -9619,11 +9711,6 @@ pub mod test_support {
                 .retained_external_runtime_content_qualification
                 .as_ref(),
         )?;
-        guest_inputs.validate()?;
-        ensure!(
-            guest_inputs.base_snapshot.snapshot_hash == base_snapshot_hash,
-            "composed external fixture changed its base snapshot"
-        );
 
         let vault = Arc::new(SealedEnvelopeVault::new(
             state
@@ -9653,10 +9740,10 @@ pub mod test_support {
                 && launcher_artifact_hash == installed_launcher_hash,
             "composed fixture artifacts disagree with installed lifecycle authority"
         );
-        let retained = RetainedExternalExecutionBinding::composed_test_fixture(
+        let retained = RetainedExternalExecutionBinding::composed_test_fixture_with_settings(
             &program,
-            controller.clone(),
-            tls_root_certificates_der_base64.clone(),
+            transport,
+            tls_root_certificates_der_base64,
             backend,
             backend_hash,
             backend_bytes,
@@ -9669,6 +9756,7 @@ pub mod test_support {
             configuration_bytes,
             connector_hash,
             connector_bytes,
+            settings,
             qualification,
         )?;
         let credential_access = retained.credential_access()?;
@@ -9890,6 +9978,56 @@ pub mod test_support {
                     &launch_metadata,
                 )?;
         }
+        Ok(ComposedSessionReservation {
+            placement_thread_id,
+            reservation,
+            contract,
+            program,
+            stored_capsule_hash,
+            occurrence_id,
+            channel_owner_public_key,
+            bootstrap_capability,
+        })
+    }
+
+    fn prepare_bound_external_supervisor_inner(
+        state: &mut AppState,
+        capsule: ryeos_state::objects::AdmittedPersistentSessionCapsule,
+        base_snapshot_hash: String,
+        guest_inputs: ryeos_external_execution_contract::ExternalGuestInputProjection,
+        controller: ryeos_state::external_execution::transport::ExternalControllerTransportContract,
+        tls_root_certificates_der_base64: Vec<String>,
+        supervisor_artifact_hash: String,
+        launcher_artifact_hash: String,
+        workspace: Option<(&std::path::Path, &Arc<crate::temp_dir_guard::TempDirGuard>)>,
+        qualification: &PlacementQualificationSelection,
+    ) -> Result<ryeos_state::external_execution::transport::ExternalSupervisorBootstrap> {
+        guest_inputs.validate()?;
+        ensure!(
+            guest_inputs.base_snapshot.snapshot_hash == base_snapshot_hash,
+            "composed external fixture changed its base snapshot"
+        );
+        let ComposedSessionReservation {
+            placement_thread_id,
+            reservation,
+            contract,
+            program,
+            stored_capsule_hash,
+            occurrence_id,
+            channel_owner_public_key,
+            bootstrap_capability,
+        } = reserve_composed_session(
+            state,
+            capsule,
+            &base_snapshot_hash,
+            controller.clone().into(),
+            tls_root_certificates_der_base64.clone(),
+            supervisor_artifact_hash,
+            launcher_artifact_hash.clone(),
+            serde_json::json!({"region":"composed-test", "plan":"bounded-fixture"}),
+            workspace,
+            qualification,
+        )?;
         let contact = state
             .state_store
             .claim_external_allocation_contact(&placement_thread_id, &reservation.request_digest)?;
