@@ -7,6 +7,7 @@
 //! controller that admitted the adapter.
 
 pub mod guest_import_authorization;
+pub mod guest_owner_report;
 pub mod guest_supervisor_descriptors;
 pub mod lease_ready_inputs;
 pub mod length_prefixed;
