@@ -517,6 +517,7 @@ impl<R: Read> Read for DeadlineReader<'_, R> {
                 "guest upload staging deadline expired",
             ));
         }
+        lillux::progress::beat();
         self.inner.read(buffer)
     }
 }
@@ -567,6 +568,7 @@ fn stage_guest_package_in_private_root<R: Read>(
     }
     let plan = manifest.payload_plan();
     for (index, entry) in manifest.entries.iter().enumerate() {
+        lillux::progress::beat();
         let path = entry.path();
         let (parent_path, child_name) = match path.rsplit_once('/') {
             Some((parent_path, name)) => (Some(parent_path), name),

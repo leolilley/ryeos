@@ -7,7 +7,6 @@
 
 use anyhow::{Result, ensure};
 
-use ryeos_external_execution_contract::guest_owner_report::GuestOwnerActivationFailure;
 use ryeos_external_execution_contract::{
     LIFECYCLE_ADAPTER_EXECUTABLE_FD_ENV, LIFECYCLE_REQUEST_FD_ENV, MAX_LIFECYCLE_RESPONSE_BYTES,
 };
@@ -186,23 +185,12 @@ fn lifecycle_adapter_output(
     // Errors retain only typed host observations, never adapter-controlled
     // diagnostics. Complete bounded response bytes go solely to the trusted
     // protocol decoder below this invocation boundary.
-    // A plain operation exit in the contract's guest owner range is the
-    // closed outcome the adapter relayed from the guest owner's report.
-    let guest_owner = (invocation == LifecycleAdapterInvocation::Operate
-        && !result.timed_out
-        && result.output_limit_exceeded.is_none()
-        && result.launcher_refusal.is_none()
-        && result.aborted_before_attachment.is_none())
-    .then(|| GuestOwnerActivationFailure::from_adapter_exit_code(result.exit_code))
-    .flatten();
     let failure = if result.timed_out {
-        "deadline_exceeded".to_owned()
+        "deadline_exceeded"
     } else if result.output_limit_exceeded.is_some() {
-        "output_limit_exceeded".to_owned()
-    } else if let Some(guest_owner) = guest_owner {
-        guest_owner.to_string()
+        "output_limit_exceeded"
     } else {
-        "unsuccessful_exit".to_owned()
+        "unsuccessful_exit"
     };
     // This private runner uses direct spawn_until: no process scope or
     // supervised attachment is admitted. Snapshot production uses Lillux's
@@ -324,53 +312,6 @@ mod tests {
             LifecycleAdapterInvocation::ObserveSnapshotReadiness,
         ] {
             assert!(!invocation.requires_no_process_creation());
-        }
-    }
-
-    #[test]
-    fn operation_exit_in_the_guest_owner_range_names_the_owner_step() {
-        use ryeos_external_execution_contract::guest_owner_report::GuestOwnerRefusal;
-        let exited = |exit_code| {
-            let mut result = late_result();
-            result.timed_out = false;
-            result.stdout.clear();
-            result.exit_code = exit_code;
-            result
-        };
-        let stage = GuestOwnerActivationFailure::Refused(GuestOwnerRefusal::Stage);
-        let code = stage.adapter_exit_code();
-        let error = lifecycle_adapter_output(LifecycleAdapterInvocation::Operate, exited(code))
-            .err()
-            .unwrap()
-            .to_string();
-        assert_eq!(
-            error,
-            format!(
-                "external lifecycle adapter failed: guest owner refused at stage (exit_code={code})"
-            )
-        );
-        assert!(!error.contains("PRIVATE_DIAGNOSTIC"));
-        let unreported = GuestOwnerActivationFailure::ExitedUnreported.adapter_exit_code();
-        assert!(
-            lifecycle_adapter_output(LifecycleAdapterInvocation::Operate, exited(unreported))
-                .err()
-                .unwrap()
-                .to_string()
-                .contains("guest owner exited before reporting")
-        );
-        for (invocation, exit_code) in [
-            (LifecycleAdapterInvocation::Operate, 2),
-            (LifecycleAdapterInvocation::RelayFile, code),
-        ] {
-            assert_eq!(
-                lifecycle_adapter_output(invocation, exited(exit_code))
-                    .err()
-                    .unwrap()
-                    .to_string(),
-                format!(
-                    "external lifecycle adapter failed: unsuccessful_exit (exit_code={exit_code})"
-                )
-            );
         }
     }
 

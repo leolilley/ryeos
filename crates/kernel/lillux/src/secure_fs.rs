@@ -1143,6 +1143,7 @@ fn digest_open_regular_file_exact(file: &File, expected_bytes: u64) -> Result<St
         }
         digest.update(&buffer[..read]);
         remaining -= read as u64;
+        crate::progress::beat();
     }
     let mut sentinel = [0_u8; 1];
     if read_regular_file_at(file, &mut sentinel, expected_bytes)? != 0 {
@@ -8964,6 +8965,7 @@ fn copy_open_regular_into_new(
     }
     let mut target = unsafe { File::from_raw_fd(descriptor) };
     let result = (|| -> Result<()> {
+        crate::progress::beat();
         source.seek(std::io::SeekFrom::Start(0))?;
         let mut bounded = (&mut source).take(observation.size().saturating_add(1));
         let copied = std::io::copy(&mut bounded, &mut target)?;
