@@ -3616,7 +3616,7 @@ mod imp {
     ) -> Result<crate::InheritedDescriptorAuthority, String> {
         let expected = mount_source_stat(fd)?;
         let source = crate::secure_fs::pin_canonical_mount_source(path)
-            .map_err(|error| format!("pin mount source in cloned namespace: {error}"))?;
+            .map_err(|error| format!("pin mount source in cloned namespace: {error:#}"))?;
         let observed = mount_source_stat(source.file().as_raw_fd())?;
         // open_tree cannot clone a vfsmount owned by the former namespace.
         // A kernel-reported path is only a locator: a replacement, symlink,
