@@ -4,16 +4,26 @@
 //! The daemon has already committed one durable activation claim before this
 //! adapter is invoked. Every stage may have reached Render even if its reply
 //! is lost. This module never retries and reconciliation must never call it.
+//!
+//! The run stream is read only until the guest owner's one stdout report.
+//! A refusal or an owner exit before held fails the contact with its closed
+//! contract outcome; every other stream outcome, including loss, silence and
+//! the deadline, remains Pending. Stderr is never examined or forwarded.
 
 use std::io::Read as _;
 
 use anyhow::{Result, ensure};
 use lillux::network::{NetworkCancellation, NetworkContext};
-use lillux::time::MonotonicDeadline;
+use lillux::time::{Duration, MonotonicDeadline};
 use ryeos_external_execution_contract::canonical_json;
-use ryeos_http_transport::{
-    Deadlines, Header, HttpClient, HttpRequest, HttpResponse, Limits, RequestBodySource,
+use ryeos_external_execution_contract::guest_owner_report::{
+    GuestOwnerActivationFailure, GuestOwnerReport, GuestOwnerStdout,
 };
+use ryeos_http_transport::{
+    Deadlines, Header, HttpClient, HttpRequest, HttpResponse, Limits, RequestBodySource, SseLimits,
+    SseReader,
+};
+use serde::Deserialize;
 use zeroize::Zeroizing;
 
 use crate::provider_spec::{ProviderSpec, RouteName};
@@ -28,6 +38,87 @@ use crate::{
 
 const MAX_UPLOAD_RESPONSE_BYTES: u64 = 16 * 1024;
 const MAX_RUN_RESPONSE_BYTES: u64 = 1024 * 1024;
+/// The owner is silent while it stages and installs; stream silence longer
+/// than this is treated as a lost stream.
+const ACTIVATION_STREAM_IDLE: Duration = Duration::from_secs(60);
+const OWNER_STREAM_LIMITS: SseLimits = SseLimits {
+    line_bytes: 16 * 1024,
+    event_bytes: 16 * 1024,
+    total_bytes: 256 * 1024,
+    events: 1024,
+};
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunOutputEvent {
+    stream: String,
+    data: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunExitEvent {
+    #[serde(rename = "exit_code")]
+    _exit_code: i32,
+}
+
+fn owner_failure(failure: GuestOwnerActivationFailure) -> anyhow::Error {
+    anyhow::anyhow!("guest owner did not reach held")
+        .context(crate::fail_class::FailClass::GuestOwner(failure))
+}
+
+/// Read the run stream until the owner's report. `Ok` means held or no
+/// owner evidence either way; `Err` carries only a contract outcome.
+fn observe_owner_report(
+    body: impl std::io::Read,
+    deadline: MonotonicDeadline,
+    cancellation: &NetworkCancellation,
+) -> Result<()> {
+    let Ok(mut events) =
+        SseReader::with_operation_policy(body, OWNER_STREAM_LIMITS, cancellation.clone(), deadline)
+    else {
+        return Ok(());
+    };
+    let mut stdout = GuestOwnerStdout::new();
+    while let Ok(Some(event)) = events.next_event() {
+        let maximum = OWNER_STREAM_LIMITS.event_bytes;
+        match event.event.as_deref() {
+            Some("output") => {
+                let Ok(output) = ryeos_external_execution_contract::from_json_slice_strict::<
+                    RunOutputEvent,
+                >(event.data.as_bytes(), maximum) else {
+                    return Ok(());
+                };
+                if output.stream != "stdout" {
+                    continue;
+                }
+                match stdout.push(&output.data) {
+                    Ok(None) => {}
+                    Ok(Some(GuestOwnerReport::Held)) => return Ok(()),
+                    Ok(Some(GuestOwnerReport::Refused(step))) => {
+                        return Err(owner_failure(GuestOwnerActivationFailure::Refused(step)));
+                    }
+                    Err(_) => {
+                        return Err(owner_failure(GuestOwnerActivationFailure::MalformedReport));
+                    }
+                }
+            }
+            Some("exit") => {
+                if ryeos_external_execution_contract::from_json_slice_strict::<RunExitEvent>(
+                    event.data.as_bytes(),
+                    maximum,
+                )
+                .is_err()
+                {
+                    return Ok(());
+                }
+                return Err(owner_failure(GuestOwnerActivationFailure::ExitedUnreported));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
 
 /// The test seam keeps order and at-most-once behavior independent of HTTP.
 /// It is not an alternate lifecycle or a provider abstraction above this
@@ -391,22 +482,28 @@ impl OneShotContact for RenderContact<'_> {
         let operation = ProxyOperation::RunStream;
         let token = self.mint(operation, Some(command))?;
         let body = canonical_json(&serde_json::json!({ "command": command }))?;
-        let response = self.send_proxy(
+        let mut request = proxy_request(
+            self.settings,
+            self.occurrence_id,
             token,
             operation,
             RequestBodySource::from_bytes(body),
             "application/json",
             "text/event-stream",
             MAX_RUN_RESPONSE_BYTES,
+            self.deadline,
+            self.cancellation,
         )?;
+        request.deadlines.idle_timeout = ACTIVATION_STREAM_IDLE;
+        let response = HttpClient::new(self.network.clone()).execute(request)?;
         ensure!(
             response.status == 200,
             "Render run proxy did not return the expected stream status"
         );
-        // Dropping the stream is deliberate only after an installed test proves
-        // the guest owner survives lost client streams. This code is unreachable
-        // from the current signed provider profile.
-        Ok(())
+        // Dropping the stream after the held report is deliberate only after an
+        // installed test proves the guest owner survives lost client streams.
+        // This code is unreachable from the current signed provider profile.
+        observe_owner_report(response.body, self.deadline, self.cancellation)
     }
 }
 
@@ -615,6 +712,116 @@ mod tests {
         };
         assert!(contact_once(&mut contact, &plan, b"changed", &package).is_err());
         assert!(contact.calls.is_empty());
+    }
+
+    fn sse(events: &[(&str, serde_json::Value)]) -> Vec<u8> {
+        events
+            .iter()
+            .map(|(name, data)| format!("event: {name}\ndata: {data}\n\n"))
+            .collect::<String>()
+            .into_bytes()
+    }
+
+    fn output(stream: &str, data: &str) -> (&'static str, serde_json::Value) {
+        (
+            "output",
+            serde_json::json!({ "stream": stream, "data": data }),
+        )
+    }
+
+    fn observed(body: &[u8]) -> Option<crate::fail_class::FailClass> {
+        let deadline = MonotonicDeadline::after(lillux::time::Duration::from_secs(30));
+        observe_owner_report(body, deadline, &NetworkCancellation::default())
+            .err()
+            .map(|error| crate::fail_class::FailClass::of(&error))
+    }
+
+    #[test]
+    fn activation_stream_settles_only_on_the_owner_report() {
+        use crate::fail_class::FailClass;
+        use ryeos_external_execution_contract::guest_owner_report::GuestOwnerRefusal;
+        let held = GuestOwnerReport::Held.line();
+        let refused = GuestOwnerReport::Refused(GuestOwnerRefusal::Install).line();
+        let exit = ("exit", serde_json::json!({ "exit_code": 1 }));
+        assert_eq!(observed(&sse(&[output("stdout", &held)])), None);
+        // Held settles the contact; the stream is not read further.
+        assert_eq!(
+            observed(&sse(&[
+                output("stdout", &held),
+                output("stdout", &refused),
+                exit.clone()
+            ])),
+            None
+        );
+        assert_eq!(
+            observed(&sse(&[
+                output("stdout", &refused[..10]),
+                output("stdout", &refused[10..])
+            ])),
+            Some(FailClass::GuestOwner(GuestOwnerActivationFailure::Refused(
+                GuestOwnerRefusal::Install
+            )))
+        );
+        assert_eq!(
+            observed(&sse(&[
+                output("stderr", "Error: private text\n"),
+                exit.clone()
+            ])),
+            Some(FailClass::GuestOwner(
+                GuestOwnerActivationFailure::ExitedUnreported
+            ))
+        );
+        // Stderr is never read as a report, even when it looks like one.
+        assert_eq!(observed(&sse(&[output("stderr", &refused)])), None);
+        for garbage in ["thread 'main' panicked\n", &"x".repeat(4096)] {
+            assert_eq!(
+                observed(&sse(&[output("stdout", garbage), exit.clone()])),
+                Some(FailClass::GuestOwner(
+                    GuestOwnerActivationFailure::MalformedReport
+                ))
+            );
+        }
+        let class = observed(&sse(&[output("stdout", &refused)])).unwrap();
+        assert_eq!(
+            GuestOwnerActivationFailure::from_adapter_exit_code(class.exit_code()),
+            Some(GuestOwnerActivationFailure::Refused(
+                GuestOwnerRefusal::Install
+            ))
+        );
+    }
+
+    #[test]
+    fn activation_stream_without_owner_evidence_stays_pending() {
+        assert_eq!(observed(b""), None);
+        assert_eq!(
+            observed(&sse(&[("keepalive", serde_json::json!({}))])),
+            None
+        );
+        assert_eq!(
+            observed(&sse(&[(
+                "output",
+                serde_json::json!({ "stream": "stdout", "data": "x", "extra": 1 })
+            )])),
+            None
+        );
+        assert_eq!(observed(&sse(&[("exit", serde_json::json!({}))])), None);
+        let oversize = "a".repeat(32 * 1024);
+        assert_eq!(observed(&sse(&[output("stderr", &oversize)])), None);
+        let flood: Vec<_> = (0..64)
+            .map(|_| output("stderr", &"e".repeat(8 * 1024)))
+            .collect();
+        assert_eq!(observed(&sse(&flood)), None);
+        let deadline = MonotonicDeadline::after(lillux::time::Duration::from_secs(30));
+        let cancellation = NetworkCancellation::default();
+        cancellation.cancel();
+        let refused = sse(&[output(
+            "stdout",
+            &GuestOwnerReport::Refused(
+                ryeos_external_execution_contract::guest_owner_report::GuestOwnerRefusal::Stage,
+            )
+            .line(),
+        )]);
+        assert!(observe_owner_report(&refused[..], deadline, &cancellation).is_ok());
     }
 
     #[test]

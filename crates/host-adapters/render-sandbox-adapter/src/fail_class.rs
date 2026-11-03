@@ -4,8 +4,12 @@
 //! and `main` turns it into one stable exit code and one compile-time word.
 //! Nothing here is ever derived from error text, so provider responses, URLs,
 //! settings and credentials cannot reach the process output through it.
+//! A guest owner's startup report is relayed the same way: only its closed
+//! contract outcome, in the contract's own exit range.
 
 use std::fmt;
+
+use ryeos_external_execution_contract::guest_owner_report::GuestOwnerActivationFailure;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FailClass {
@@ -32,6 +36,7 @@ pub(crate) enum FailClass {
     RelayResponse,
     RelayInput,
     RelayBody,
+    GuestOwner(GuestOwnerActivationFailure),
     Other,
 }
 
@@ -62,6 +67,7 @@ impl FailClass {
             Self::RelayResponse => 23,
             Self::RelayInput => 24,
             Self::RelayBody => 25,
+            Self::GuestOwner(failure) => failure.adapter_exit_code(),
         }
     }
 
@@ -91,6 +97,7 @@ impl FailClass {
             Self::RelayResponse => "relay_response",
             Self::RelayInput => "relay_input",
             Self::RelayBody => "relay_body",
+            Self::GuestOwner(_) => "guest_owner",
         }
     }
 
@@ -102,7 +109,18 @@ impl FailClass {
 
 impl fmt::Display for FailClass {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.word())
+        match self {
+            Self::GuestOwner(GuestOwnerActivationFailure::Refused(step)) => {
+                write!(formatter, "guest_owner_refused {step}")
+            }
+            Self::GuestOwner(GuestOwnerActivationFailure::ExitedUnreported) => {
+                formatter.write_str("guest_owner_exited_unreported")
+            }
+            Self::GuestOwner(GuestOwnerActivationFailure::MalformedReport) => {
+                formatter.write_str("guest_owner_malformed_report")
+            }
+            _ => formatter.write_str(self.word()),
+        }
     }
 }
 
@@ -139,6 +157,9 @@ pub(crate) use ensure_class;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ryeos_external_execution_contract::guest_owner_report::{
+        GUEST_OWNER_EXIT_CODE_FIRST, GUEST_OWNER_EXIT_CODE_LAST, GuestOwnerRefusal,
+    };
 
     #[test]
     fn exit_codes_are_distinct_and_in_range() {
@@ -169,6 +190,22 @@ mod tests {
             FailClass::Other,
         ];
         let mut codes: Vec<i32> = all.iter().map(|class| class.exit_code()).collect();
+        assert!(codes.iter().all(|code| (2..=63).contains(code)));
+        assert!(codes.iter().all(|code| {
+            !(GUEST_OWNER_EXIT_CODE_FIRST..=GUEST_OWNER_EXIT_CODE_LAST).contains(code)
+        }));
+        let mut all = all.to_vec();
+        all.push(FailClass::GuestOwner(
+            GuestOwnerActivationFailure::ExitedUnreported,
+        ));
+        all.push(FailClass::GuestOwner(
+            GuestOwnerActivationFailure::MalformedReport,
+        ));
+        all.extend(
+            GuestOwnerRefusal::ALL
+                .map(|step| FailClass::GuestOwner(GuestOwnerActivationFailure::Refused(step))),
+        );
+        codes = all.iter().map(|class| class.exit_code()).collect();
         assert!(codes.iter().all(|code| (2..=63).contains(code)));
         codes.sort_unstable();
         codes.dedup();
