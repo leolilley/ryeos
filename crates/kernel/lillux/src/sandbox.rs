@@ -3098,6 +3098,14 @@ mod imp {
             .identity()
             .map_err(|error| format!("identify former temporary root: {error}"))?;
         let transition = || -> Result<crate::secure_fs::PinnedDirectory, String> {
+            // A preceding UID drop leaves this process non-dumpable, which
+            // makes its own /proc identity files unwritable to it. Restore
+            // dumpability for the mapping writes only; it is cleared again
+            // below, before any source byte is imported.
+            syscall_zero(
+                unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 1, 0, 0, 0) },
+                "make private source owner dumpable for its identity mapping",
+            )?;
             enter_mapped_user_namespace()?;
             syscall_zero(
                 unsafe { libc::unshare(libc::CLONE_NEWNS) },
