@@ -14,7 +14,12 @@
 //! retained candidate and inputs instead, and with
 //! `RYEOS_GUEST_START_REHEARSAL_ANSWER_ATTACH=1` answers its attach request;
 //! `RYEOS_GUEST_START_REHEARSAL_FILE_PRODUCT=<manifest hash>` also mounts
-//! that single-file large-content product. Otherwise the
+//! that single-file large-content product;
+//! `RYEOS_GUEST_START_REHEARSAL_EXPORT=<new directory>` writes the prepared
+//! host inputs (with the answer-attach plan, when asked for), this executable
+//! and a `run.sh` there instead of running them: `run.sh` replays the
+//! activation on the host it runs on, so build this executable statically for
+//! a host with another libc. Otherwise the
 //! synthetic cases run, with executables from
 //! `RYEOS_GUEST_START_REHEARSAL_BIN_DIR` (default: the guest-triple release
 //! directory of this test's target directory); without them, or on a host without namespaces or delegated
@@ -28,8 +33,8 @@ use anyhow::{Context as _, Result};
 use ryeos_external_execution::guest_import_authorization::GuestOwnerRuntimeProfile;
 use ryeos_external_execution::guest_start_rehearsal::{
     GuestStartRehearsalBase, GuestStartRehearsalFileProduct, GuestStartRehearsalOutcome,
-    GuestStartRehearsalRequest, GuestStartRehearsalStep, run_guest_start_rehearsal,
-    run_rehearsal_host_if_requested,
+    GuestStartRehearsalRequest, GuestStartRehearsalStep, export_guest_start_rehearsal,
+    run_guest_start_rehearsal, run_rehearsal_host_if_requested,
 };
 use ryeos_state::LeasedLargeObject;
 use ryeos_state::external_execution::transport::{
@@ -48,6 +53,23 @@ fn work_parent() -> PathBuf {
 
 fn print(outcome: &GuestStartRehearsalOutcome) {
     println!("{}", serde_json::to_string_pretty(outcome).unwrap());
+}
+
+/// Run the prepared rehearsal, or export it for a host when asked.
+fn conclude(
+    request: &GuestStartRehearsalRequest<'_>,
+    export: Option<&Path>,
+) -> Result<serde_json::Value> {
+    Ok(match export {
+        Some(directory) => serde_json::to_value(export_guest_start_rehearsal(request, directory)?)?,
+        None => serde_json::to_value(run_guest_start_rehearsal(request)?)?,
+    })
+}
+
+/// How long exported documents must stay admissible: a host is reached by a
+/// slower route than a local run.
+fn document_lifetime(export: Option<&Path>) -> Option<lillux::time::Duration> {
+    export.map(|_| lillux::time::Duration::from_secs(3 * 3600))
 }
 
 /// Private scratch for inputs this probe assembles; removed on drop.
@@ -360,7 +382,8 @@ fn rehearse_retained(
     app: &Path,
     binding: &str,
     retained: &Path,
-) -> Result<GuestStartRehearsalOutcome> {
+    export: Option<&Path>,
+) -> Result<serde_json::Value> {
     use ryeos_external_execution::guest_start_rehearsal::{
         RehearsalCandidate, RehearsalMount, RehearsalMountSource,
     };
@@ -423,7 +446,9 @@ fn rehearse_retained(
         "rehearsing the retained candidate of binding {binding} with {} mounts",
         mounts.len()
     );
-    run_guest_start_rehearsal(&GuestStartRehearsalRequest {
+    let host_executable = std::env::current_exe()?;
+    let work_parent = work_parent();
+    let request = GuestStartRehearsalRequest {
         owner_executable: &selection.owner,
         profile: selection.profile,
         supervisor_executable: &selection.supervisor,
@@ -438,8 +463,9 @@ fn rehearse_retained(
         relay: selection.relay,
         network_inputs: selection.network_inputs,
         attach_budget: lillux::time::Duration::from_secs(selection.attach_budget_seconds),
-        work_parent: &work_parent(),
-        host_executable: &std::env::current_exe()?,
+        document_lifetime: document_lifetime(export),
+        work_parent: &work_parent,
+        host_executable: &host_executable,
         candidate: Some(RehearsalCandidate {
             program: serde_json::from_value(bootstrap["candidate_program"].clone())?,
             bootstrap_schema: bootstrap["schema"]
@@ -452,10 +478,11 @@ fn rehearse_retained(
             limits: serde_json::from_value(bootstrap.clone())?,
         }),
         answer_attach: std::env::var_os("RYEOS_GUEST_START_REHEARSAL_ANSWER_ATTACH").is_some(),
-    })
+    };
+    conclude(&request, export)
 }
 
-fn rehearse_node(app: &Path, binding: &str) -> Result<GuestStartRehearsalOutcome> {
+fn rehearse_node(app: &Path, binding: &str, export: Option<&Path>) -> Result<serde_json::Value> {
     let inputs = scratch();
     // The base an allocation of this binding delivered (its reservation's
     // `base_snapshot_hash`); absent, the rehearsal delivers an empty project.
@@ -490,7 +517,9 @@ fn rehearse_node(app: &Path, binding: &str) -> Result<GuestStartRehearsalOutcome
         selection.launcher.display(),
         source.display()
     );
-    run_guest_start_rehearsal(&GuestStartRehearsalRequest {
+    let host_executable = std::env::current_exe()?;
+    let work_parent = work_parent();
+    let request = GuestStartRehearsalRequest {
         owner_executable: &selection.owner,
         profile: selection.profile,
         supervisor_executable: &selection.supervisor,
@@ -507,11 +536,13 @@ fn rehearse_node(app: &Path, binding: &str) -> Result<GuestStartRehearsalOutcome
         relay: selection.relay,
         network_inputs: selection.network_inputs,
         attach_budget: lillux::time::Duration::from_secs(selection.attach_budget_seconds),
-        work_parent: &work_parent(),
-        host_executable: &std::env::current_exe()?,
+        document_lifetime: document_lifetime(export),
+        work_parent: &work_parent,
+        host_executable: &host_executable,
         candidate: None,
         answer_attach: false,
-    })
+    };
+    conclude(&request, export)
 }
 
 fn synthetic_relay() -> ExternalControllerFileRelayContract {
@@ -566,6 +597,7 @@ fn rehearse_synthetic(
         relay: synthetic_relay(),
         network_inputs: synthetic_network(),
         attach_budget: lillux::time::Duration::from_secs(300),
+        document_lifetime: None,
         work_parent: &work_parent(),
         host_executable: &std::env::current_exe()?,
         candidate: None,
@@ -594,12 +626,19 @@ fn main() {
     if let Some(app) = std::env::var_os("RYEOS_GUEST_START_REHEARSAL_APP_ROOT") {
         let binding = std::env::var("RYEOS_GUEST_START_REHEARSAL_BINDING")
             .expect("RYEOS_GUEST_START_REHEARSAL_BINDING names the binding to rehearse");
+        let export = std::env::var_os("RYEOS_GUEST_START_REHEARSAL_EXPORT").map(PathBuf::from);
         let outcome = match std::env::var_os("RYEOS_GUEST_START_REHEARSAL_RETAINED") {
-            Some(retained) => rehearse_retained(Path::new(&app), &binding, Path::new(&retained))
-                .expect("rehearse the retained candidate"),
-            None => rehearse_node(Path::new(&app), &binding).expect("rehearse node selection"),
+            Some(retained) => rehearse_retained(
+                Path::new(&app),
+                &binding,
+                Path::new(&retained),
+                export.as_deref(),
+            )
+            .expect("rehearse the retained candidate"),
+            None => rehearse_node(Path::new(&app), &binding, export.as_deref())
+                .expect("rehearse node selection"),
         };
-        print(&outcome);
+        println!("{}", serde_json::to_string_pretty(&outcome).unwrap());
         return;
     }
     let bin = std::env::var_os("RYEOS_GUEST_START_REHEARSAL_BIN_DIR")

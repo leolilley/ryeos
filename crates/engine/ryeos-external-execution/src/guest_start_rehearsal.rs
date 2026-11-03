@@ -63,6 +63,10 @@ use crate::guest_runtime_product::{OWNER_NAME, produce_guest_owner_runtime};
 /// finds it set at startup is the rehearsal host and runs nothing else.
 pub const REHEARSAL_HOST_ENV: &str = "RYEOS_GUEST_START_REHEARSAL_HOST";
 
+/// Names an export directory: run the rehearsal host's observation directly on
+/// this machine, which already holds the activation's `/ryeos` layout.
+pub const REHEARSAL_ON_HOST_ENV: &str = "RYEOS_GUEST_START_REHEARSAL_ON_HOST";
+
 pub(crate) const PLAN_NAME: &str = "plan.json";
 pub(crate) const RUNTIME_NAME: &str = "runtime";
 pub(crate) const ACTIVATION_NAME: &str = "activation";
@@ -113,6 +117,9 @@ pub struct GuestStartRehearsalRequest<'a> {
     pub network_inputs: ExternalNetworkInputPolicy,
     /// Time the controller allows between contact and the attach request.
     pub attach_budget: lillux::time::Duration,
+    /// Least time the signed documents stay admissible after preparation,
+    /// for documents delivered to a host by a slower route.
+    pub document_lifetime: Option<lillux::time::Duration>,
     /// Private parent for the rehearsal work directory.
     pub work_parent: &'a Path,
     /// Executable that runs [`run_rehearsal_host_if_requested`] first thing.
@@ -429,6 +436,7 @@ pub(crate) fn copy_tree(
 
 struct Prepared {
     plan: HostPlan,
+    attachment_deadline_ms: i64,
 }
 
 fn base_snapshot(
@@ -931,8 +939,15 @@ fn prepare(
     let attach_budget_ms = u64::try_from(request.attach_budget.as_millis())
         .context("rehearsal attach budget overflow")?;
     let owner_deadline_ms = u64::from(request.profile.owner_timeout_seconds) * 1_000;
+    let document_lifetime_ms = request.document_lifetime.map_or(0, |lifetime| {
+        u64::try_from(lifetime.as_millis()).unwrap_or(u64::MAX)
+    });
     let attachment_deadline_ms = lillux::time::timestamp_millis()
-        + i64::try_from(owner_deadline_ms.max(attach_budget_ms))?
+        + i64::try_from(
+            owner_deadline_ms
+                .max(attach_budget_ms)
+                .max(document_lifetime_ms),
+        )?
         + 120_000;
     let allocation_request_digest = digest_of("allocation", &run);
     let admitted_capsule_hash = digest_of("capsule", &run);
@@ -1122,7 +1137,10 @@ fn prepare(
         },
     };
     write_file(work, PLAN_NAME, &serde_json::to_vec(&plan)?, 0o600)?;
-    Ok(Prepared { plan })
+    Ok(Prepared {
+        plan,
+        attachment_deadline_ms,
+    })
 }
 
 /// Refuse where the host cannot create the enclosure the owner needs.
@@ -1157,6 +1175,118 @@ fn enclosure_spec(
         },
         host_entries: HOST_ENTRIES,
     }
+}
+
+/// Files of an exported rehearsal, for a real sandbox host.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GuestStartRehearsalExport {
+    pub directory: String,
+    pub occurrence_id: String,
+    pub expected_mailbox: String,
+    pub runtime_manifest_hash: String,
+    pub attachment_deadline_ms: i64,
+    /// Whether the exported host answers the attach request itself.
+    pub answers_attach: bool,
+    pub package: GuestStartRehearsalPackage,
+    /// Each exported file and its size in bytes.
+    pub files: BTreeMap<String, u64>,
+}
+
+/// Name of the host executable beside an export's `run.sh`.
+const EXPORT_HOST_NAME: &str = "rehearsal-host";
+
+const EXPORT_RUN_SCRIPT: &str = include_str!("guest_start_rehearsal_export_run.sh");
+
+/// Prepare one rehearsal exactly as [`run_guest_start_rehearsal`] would, but
+/// write what a real sandbox host needs to `directory` (which must not exist)
+/// instead of running it: the runtime as the same deterministic tar a real
+/// runtime upload carries, the signed import, the framed package, the
+/// assignment, the host plan (with the answer-attach authority when the
+/// request asks for it), the host executable and `run.sh`. `run.sh` lays out
+/// `/ryeos` as an activation does, then runs the host executable, which
+/// starts the owner and observes it exactly as the local rehearsal does.
+pub fn export_guest_start_rehearsal(
+    request: &GuestStartRehearsalRequest<'_>,
+    directory: &Path,
+) -> Result<GuestStartRehearsalExport> {
+    let parent = directory
+        .parent()
+        .context("rehearsal export directory has no parent")?;
+    let name = directory
+        .file_name()
+        .context("rehearsal export directory has no name")?;
+    let parent = lillux::PinnedDirectory::open(parent)?
+        .with_context(|| format!("rehearsal export parent {} is absent", parent.display()))?;
+    let export = parent.create_child(name, 0o700)?;
+    let (work_name, work) = export.create_unique_child(".prepare", 0o700)?;
+    let result = (|| -> Result<GuestStartRehearsalExport> {
+        let prepared = prepare(request, &work)?;
+        let plan = &prepared.plan;
+        let runtime = work
+            .open_child_directory(OsStr::new(RUNTIME_NAME))?
+            .context("rehearsal runtime is absent")?;
+        let upload = crate::guest_runtime_product::seal_guest_owner_snapshot_upload(
+            &runtime,
+            &plan.runtime_manifest_hash,
+            64 * 1024 * 1024,
+        )?;
+        let (tar, _) = upload
+            .descriptor()
+            .read_regular_file_stable_bounded(upload.bytes())?;
+        write_file(&export, "guest-runtime.tar", &tar, 0o644)?;
+        let activation = work
+            .open_child_directory(OsStr::new(ACTIVATION_NAME))?
+            .context("rehearsal activation is absent")?;
+        for name in [IMPORT_NAME, PACKAGE_NAME] {
+            copy_file(
+                &export,
+                name,
+                &activation
+                    .open_pinned_regular(OsStr::new(name), false)?
+                    .with_context(|| format!("rehearsal {name} is absent"))?,
+                0o644,
+            )?;
+        }
+        write_file(&export, PLAN_NAME, &serde_json::to_vec(plan)?, 0o600)?;
+        write_file(&export, "assignment.b64", plan.assignment_b64.as_bytes(), 0o644)?;
+        write_file(&export, "expected-mailbox", plan.mailbox_root.as_bytes(), 0o644)?;
+        copy_file(
+            &export,
+            EXPORT_HOST_NAME,
+            &open_source(request.host_executable, "rehearsal host executable")?,
+            0o755,
+        )?;
+        write_file(&export, "run.sh", EXPORT_RUN_SCRIPT.as_bytes(), 0o755)?;
+        let mut files = BTreeMap::new();
+        for name in [
+            "guest-runtime.tar",
+            IMPORT_NAME,
+            PACKAGE_NAME,
+            PLAN_NAME,
+            "assignment.b64",
+            "expected-mailbox",
+            EXPORT_HOST_NAME,
+            "run.sh",
+        ] {
+            let file = export
+                .open_pinned_regular(OsStr::new(name), false)?
+                .with_context(|| format!("exported {name} vanished"))?;
+            files.insert(name.to_owned(), file.observation()?.size());
+        }
+        Ok(GuestStartRehearsalExport {
+            directory: export.path().to_string_lossy().into_owned(),
+            occurrence_id: plan.occurrence_id.clone(),
+            expected_mailbox: plan.mailbox_root.clone(),
+            runtime_manifest_hash: plan.runtime_manifest_hash.clone(),
+            attachment_deadline_ms: prepared.attachment_deadline_ms,
+            answers_attach: plan.answer_attach.is_some(),
+            package: plan.package.clone(),
+            files,
+        })
+    })();
+    work.remove_contents_recursive_bounded(lillux::DirectoryTraversalBudget::new(1_000_000, 64))?;
+    export.remove_empty_child_if_same(&work_name, &work)?;
+    result
 }
 
 /// Run one rehearsal. Every refusal, including one before the owner starts,
@@ -1245,6 +1375,16 @@ pub fn run_guest_start_rehearsal(
 /// set; otherwise it runs the rehearsal, prints its outcome as one JSON line
 /// and exits. Call it before the process starts any thread.
 pub fn run_rehearsal_host_if_requested() {
+    if let Some(export) = std::env::var_os(REHEARSAL_ON_HOST_ENV) {
+        let outcome = on_host(Path::new(&export)).unwrap_or_else(|error| {
+            GuestStartRehearsalOutcome::refused(
+                GuestStartRehearsalStep::Prepare,
+                format!("{error:#}"),
+            )
+        });
+        report(&outcome);
+        std::process::exit(0);
+    }
     let Some(work) = std::env::var_os(REHEARSAL_HOST_ENV) else {
         return;
     };
@@ -1257,6 +1397,27 @@ pub fn run_rehearsal_host_if_requested() {
     };
     report(&outcome);
     std::process::exit(0);
+}
+
+/// Observe the owner on the machine this runs on, which must already hold the
+/// `/ryeos` layout an activation leaves (an export's `run.sh` lays it out):
+/// there is no enclosure, because the machine is the enclosure.
+fn on_host(export: &Path) -> Result<GuestStartRehearsalOutcome> {
+    let directory =
+        lillux::PinnedDirectory::open(export)?.context("rehearsal export is absent")?;
+    let plan_file = directory
+        .open_pinned_regular(OsStr::new(PLAN_NAME), false)?
+        .context("rehearsal export has no plan")?;
+    let plan: HostPlan = serde_json::from_slice(
+        &plan_file
+            .read_stable_bounded(&plan_file.observation()?, MAX_PLAN_BYTES)
+            .map_err(anyhow::Error::msg)?,
+    )?;
+    ensure!(
+        plan.mode == HostMode::AttachProbe,
+        "an exported plan observes the owner until its attach request"
+    );
+    observe_owner(&plan)
 }
 
 pub(crate) fn report(outcome: &GuestStartRehearsalOutcome) {
