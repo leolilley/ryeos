@@ -6,7 +6,11 @@
 //! `RYEOS_GUEST_START_REHEARSAL_BINDING=<binding id>` rehearses that node's
 //! installed products (read-only) and prints the outcome;
 //! `RYEOS_GUEST_START_REHEARSAL_OWNER` substitutes a candidate owner build
-//! for the installed owner executable. Otherwise the
+//! for the installed owner executable, and
+//! `RYEOS_GUEST_START_REHEARSAL_BASE_SNAPSHOT=<hash>` delivers that project
+//! snapshot from the node's CAS as the base;
+//! `RYEOS_GUEST_START_REHEARSAL_FILE_PRODUCT=<manifest hash>` also mounts
+//! that single-file large-content product. Otherwise the
 //! synthetic cases run, with executables from
 //! `RYEOS_GUEST_START_REHEARSAL_BIN_DIR` (default: the guest-triple release
 //! directory of this test's target directory); without them, or on a host without namespaces or delegated
@@ -19,7 +23,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, Result};
 use ryeos_external_execution::guest_import_authorization::GuestOwnerRuntimeProfile;
 use ryeos_external_execution::guest_start_rehearsal::{
-    GuestStartRehearsalOutcome, GuestStartRehearsalRequest, GuestStartRehearsalStep,
+    GuestStartRehearsalBase, GuestStartRehearsalFileProduct, GuestStartRehearsalOutcome, GuestStartRehearsalRequest, GuestStartRehearsalStep,
     run_guest_start_rehearsal, run_rehearsal_host_if_requested,
 };
 use ryeos_state::LeasedLargeObject;
@@ -243,8 +247,60 @@ fn node_selection(app: &Path, binding: &str, inputs: &Path) -> Result<NodeSelect
     })
 }
 
+/// The retained record of a single-file product and a scratch copy of its
+/// content, read through a lease on the node's large-object store.
+fn leased_file_product(
+    app: &Path,
+    cas: &lillux::CasStore,
+    manifest_hash: &str,
+    inputs: &Path,
+) -> Result<(PathBuf, PathBuf)> {
+    let record = cas
+        .get_object_bytes_bounded(manifest_hash, 4 * 1024 * 1024)?
+        .with_context(|| format!("file product manifest {manifest_hash} is not in the node's CAS"))?;
+    let file = manifest_files(&serde_json::from_slice(&record)?)?
+        .into_iter()
+        .next()
+        .context("file product manifest has no file")?;
+    let large = file
+        .file_sha256
+        .as_deref()
+        .context("file product is not large content")?;
+    let state = app.join(".ai/state");
+    let runtime_directory =
+        lillux::PinnedDirectory::open(&state)?.context("node has no runtime state directory")?;
+    let store = ryeos_state::LargeObjectStore::open_under(&runtime_directory)?
+        .context("node has no large-object store")?;
+    let lease = store.lease_object(large, file.size.context("file product has no size")?)?;
+    let content = inputs.join("file-product");
+    std::fs::copy(lease.path(), &content)?;
+    drop((lease, store, runtime_directory));
+    let path = inputs.join("file-product-record.json");
+    std::fs::write(&path, record)?;
+    Ok((path, content))
+}
+
 fn rehearse_node(app: &Path, binding: &str) -> Result<GuestStartRehearsalOutcome> {
     let inputs = scratch();
+    // The base an allocation of this binding delivered (its reservation's
+    // `base_snapshot_hash`); absent, the rehearsal delivers an empty project.
+    let base_hash = std::env::var("RYEOS_GUEST_START_REHEARSAL_BASE_SNAPSHOT").ok();
+    let cas = lillux::CasStore::new(app.join(".ai/state/objects"));
+    // A single-file product the activation also mounts (the realization a
+    // reservation's qualification use names as its provider executable).
+    let file_product = match std::env::var("RYEOS_GUEST_START_REHEARSAL_FILE_PRODUCT") {
+        Ok(hash) => Some(leased_file_product(app, &cas, &hash, inputs.path())?),
+        Err(_) => None,
+    };
+    let file_products: Vec<GuestStartRehearsalFileProduct<'_>> = file_product
+        .iter()
+        .map(|(record, content)| GuestStartRehearsalFileProduct {
+            authority_id: "provider-executable",
+            destination: "/ryeos/realizations/provider-executable",
+            file: content,
+            manifest_record: record,
+        })
+        .collect();
     let selection = node_selection(app, binding, inputs.path())?;
     let (relative, source, mode) = &selection.product_member;
     let target = inputs.path().join("product").join(relative);
@@ -266,6 +322,11 @@ fn rehearse_node(app: &Path, binding: &str) -> Result<GuestStartRehearsalOutcome
         launcher_executable: &selection.launcher,
         product: &inputs.path().join("product"),
         product_manifest_record: Some(&selection.product_manifest_record),
+        file_products: &file_products,
+        base_snapshot: base_hash.as_deref().map(|snapshot_hash| GuestStartRehearsalBase {
+            cas: &cas,
+            snapshot_hash,
+        }),
         relay: selection.relay,
         network_inputs: selection.network_inputs,
         attach_budget: lillux::time::Duration::from_secs(selection.attach_budget_seconds),
@@ -318,6 +379,8 @@ fn rehearse_synthetic(bin: &Path, private_source_max_bytes: u64) -> Result<Guest
         launcher_executable: &bin.join(LAUNCHER),
         product: &inputs.path().join("product"),
         product_manifest_record: None,
+        base_snapshot: None,
+        file_products: &[],
         relay: synthetic_relay(),
         network_inputs: synthetic_network(),
         attach_budget: lillux::time::Duration::from_secs(300),

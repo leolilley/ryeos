@@ -97,6 +97,13 @@ pub struct GuestStartRehearsalRequest<'a> {
     /// The product's retained manifest record, when the selection has one;
     /// otherwise a content manifest of `product` is derived.
     pub product_manifest_record: Option<&'a Path>,
+    /// The project snapshot the activation delivers as its base, copied from
+    /// this CAS exactly as live activation copies it; `None` delivers an
+    /// empty project.
+    pub base_snapshot: Option<GuestStartRehearsalBase<'a>>,
+    /// Further single-file products the activation mounts beside the runtime
+    /// product, each under its retained manifest record.
+    pub file_products: &'a [GuestStartRehearsalFileProduct<'a>],
     /// The binding's controller relay, unchanged.
     pub relay: ExternalControllerFileRelayContract,
     /// The binding's guest network inputs, unchanged.
@@ -107,6 +114,46 @@ pub struct GuestStartRehearsalRequest<'a> {
     pub work_parent: &'a Path,
     /// Executable that runs [`run_rehearsal_host_if_requested`] first thing.
     pub host_executable: &'a Path,
+}
+
+/// A project snapshot held by a node's CAS.
+#[derive(Clone, Copy)]
+pub struct GuestStartRehearsalBase<'a> {
+    pub cas: &'a lillux::CasStore,
+    pub snapshot_hash: &'a str,
+}
+
+/// One regular-file product mount.
+#[derive(Clone, Copy)]
+pub struct GuestStartRehearsalFileProduct<'a> {
+    pub authority_id: &'a str,
+    pub destination: &'a str,
+    pub file: &'a Path,
+    pub manifest_record: &'a Path,
+}
+
+fn manifest_kind_of(record: &[u8]) -> Result<(GuestProductManifestKind, u64)> {
+    let value: serde_json::Value = serde_json::from_slice(record)?;
+    let kind = match value["kind"].as_str() {
+        Some(ryeos_state::objects::EXTERNAL_CONTENT_MANIFEST_KIND) => {
+            GuestProductManifestKind::Content
+        }
+        Some(ryeos_state::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND) => {
+            GuestProductManifestKind::LargeContent
+        }
+        other => anyhow::bail!("rehearsal product manifest kind {other:?} is not admitted"),
+    };
+    let total = value["total_bytes"]
+        .as_u64()
+        .context("rehearsal product manifest has no total bytes")?;
+    Ok((kind, total))
+}
+
+fn read_record(path: &Path) -> Result<Vec<u8>> {
+    let record = open_source(path, "product manifest record")?;
+    record
+        .read_stable_bounded(&record.observation()?, 4 * 1024 * 1024)
+        .map_err(anyhow::Error::msg)
 }
 
 /// Owner phases, in order. A refusal names the first phase that did not
@@ -296,11 +343,30 @@ struct Prepared {
 
 fn base_snapshot(
     work: &lillux::PinnedDirectory,
+    selected: Option<GuestStartRehearsalBase<'_>>,
 ) -> Result<(
     lillux::PinnedDirectory,
     ryeos_project_capture::ProjectSnapshotTransferMeasurement,
 )> {
     let base = work.create_child(OsStr::new("base"), 0o700)?;
+    if let Some(selected) = selected {
+        let closure = ryeos_state::object_closure::collect_object_closure_with_cas_and_limits(
+            selected.cas,
+            [selected.snapshot_hash.to_owned()],
+            ryeos_state::object_closure::ObjectClosureLimits::for_project_snapshot_transport(),
+        )?;
+        ensure!(
+            closure.is_complete() && closure.large_object_hashes.is_empty(),
+            "rehearsal base snapshot closure is incomplete or contains non-CAS content"
+        );
+        let measurement = ryeos_project_capture::copy_project_snapshot_closure(
+            selected.cas,
+            &closure,
+            &base,
+            selected.snapshot_hash,
+        )?;
+        return Ok((base, measurement));
+    }
     let cas = lillux::CasStore::from_pinned_root(base.try_clone()?);
     let policy = ProjectSnapshotPolicy::new(
         ryeos_state::project_sync::ProjectSyncScope::FullProject,
@@ -430,23 +496,8 @@ fn prepare(
     product.set_mode(0o755)?;
     let (manifest_kind, manifest_record, product_bytes) = match request.product_manifest_record {
         Some(path) => {
-            let record = open_source(path, "product manifest record")?;
-            let bytes = record
-                .read_stable_bounded(&record.observation()?, 4 * 1024 * 1024)
-                .map_err(anyhow::Error::msg)?;
-            let value: serde_json::Value = serde_json::from_slice(&bytes)?;
-            let kind = match value["kind"].as_str() {
-                Some(ryeos_state::objects::EXTERNAL_CONTENT_MANIFEST_KIND) => {
-                    GuestProductManifestKind::Content
-                }
-                Some(ryeos_state::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND) => {
-                    GuestProductManifestKind::LargeContent
-                }
-                other => anyhow::bail!("rehearsal product manifest kind {other:?} is not admitted"),
-            };
-            let total = value["total_bytes"]
-                .as_u64()
-                .context("rehearsal product manifest has no total bytes")?;
+            let bytes = read_record(path)?;
+            let (kind, total) = manifest_kind_of(&bytes)?;
             (kind, bytes, total)
         }
         None => {
@@ -479,10 +530,75 @@ fn prepare(
     let launcher_sha256 = launcher.digest_stable_exact(&launcher.observation()?)?;
     let member_bytes = supervisor.observation()?.size() + launcher.observation()?.size();
 
-    let (base, measurement) = base_snapshot(work)?;
+    let (base, measurement) = base_snapshot(work, request.base_snapshot)?;
     let base_authority = base.inherited_descriptor_authority()?;
     let product_authority = product.inherited_descriptor_authority()?;
     let record_authority = record_file.inherited_descriptor_authority()?;
+    let mut inputs = vec![GuestMountInput {
+        role: GuestMountRole::Product,
+        authority_id: PRODUCT_MOUNT.into(),
+        descriptor: product_authority
+            .inherited_descriptor()
+            .map_err(anyhow::Error::msg)?,
+        destination: PRODUCT_DESTINATION.into(),
+        kind: GuestMountKind::Directory,
+        access: GuestMountAccess::ReadOnly,
+        normalized_mode: None,
+        content_authority: GuestMountContentAuthority::ProductManifest {
+            manifest_kind,
+            manifest_hash: product_manifest_hash.clone(),
+            manifest_descriptor: record_authority
+                .inherited_descriptor()
+                .map_err(anyhow::Error::msg)?,
+            manifest_bytes: manifest_record.len() as u64,
+        },
+        bytes: product_bytes,
+    }];
+    let mut input_authorities = vec![product_authority];
+    let mut record_authorities = vec![record_authority];
+    let mut extra_bytes = 0_u64;
+    for (index, extra) in request.file_products.iter().enumerate() {
+        let record = read_record(extra.manifest_record)?;
+        let (kind, bytes) = manifest_kind_of(&record)?;
+        // A file product's single entry carries the mode it is mounted with.
+        let mode = serde_json::from_slice::<serde_json::Value>(&record)?["entries"][0]["mode"]
+            .as_u64()
+            .and_then(|mode| u32::try_from(mode).ok())
+            .context("rehearsal file product manifest has no file mode")?;
+        let file = copy_file(
+            work,
+            &format!("file-product-{index:02}"),
+            &open_source(extra.file, "file product")?,
+            mode,
+        )?;
+        let record_file =
+            write_file(work, &format!("file-product-{index:02}.json"), &record, 0o644)?;
+        let file_authority = file.inherited_descriptor_authority()?;
+        let record_authority = record_file.inherited_descriptor_authority()?;
+        inputs.push(GuestMountInput {
+            role: GuestMountRole::Product,
+            authority_id: extra.authority_id.into(),
+            descriptor: file_authority
+                .inherited_descriptor()
+                .map_err(anyhow::Error::msg)?,
+            destination: extra.destination.into(),
+            kind: GuestMountKind::RegularFile,
+            access: GuestMountAccess::ReadOnly,
+            normalized_mode: Some(mode),
+            content_authority: GuestMountContentAuthority::ProductManifest {
+                manifest_kind: kind,
+                manifest_hash: lillux::sha256_hex(&record),
+                manifest_descriptor: record_authority
+                    .inherited_descriptor()
+                    .map_err(anyhow::Error::msg)?,
+                manifest_bytes: record.len() as u64,
+            },
+            bytes,
+        });
+        extra_bytes += bytes + record.len() as u64;
+        input_authorities.push(file_authority);
+        record_authorities.push(record_authority);
+    }
     let projection = ExternalGuestInputProjection {
         workspace_view: GuestWorkspaceView::FullSnapshot,
         schema: EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA,
@@ -497,26 +613,7 @@ fn prepare(
             total_bytes: measurement.total_bytes,
         },
         workspace_outputs: None,
-        inputs: vec![GuestMountInput {
-            role: GuestMountRole::Product,
-            authority_id: PRODUCT_MOUNT.into(),
-            descriptor: product_authority
-                .inherited_descriptor()
-                .map_err(anyhow::Error::msg)?,
-            destination: PRODUCT_DESTINATION.into(),
-            kind: GuestMountKind::Directory,
-            access: GuestMountAccess::ReadOnly,
-            normalized_mode: None,
-            content_authority: GuestMountContentAuthority::ProductManifest {
-                manifest_kind,
-                manifest_hash: product_manifest_hash.clone(),
-                manifest_descriptor: record_authority
-                    .inherited_descriptor()
-                    .map_err(anyhow::Error::msg)?,
-                manifest_bytes: manifest_record.len() as u64,
-            },
-            bytes: product_bytes,
-        }],
+        inputs,
         executable_search: vec![],
         environment: BTreeMap::new(),
     };
@@ -581,7 +678,8 @@ fn prepare(
         + member_bytes
         + bootstrap_bytes.len() as u64
         + product_bytes
-        + manifest_record.len() as u64;
+        + manifest_record.len() as u64
+        + extra_bytes;
     let maximum_regular_bytes = known_regular + 64 * 1024;
     let maximum_framed_bytes = maximum_regular_bytes * 2 + 16 * 1024 * 1024;
     let expected = GuestStagingExpected {
@@ -597,8 +695,8 @@ fn prepare(
         projection.clone(),
         base_authority,
         None,
-        vec![product_authority],
-        vec![record_authority],
+        input_authorities,
+        record_authorities,
         Vec::new(),
     )?;
     let package = prepare_private_guest_package(
