@@ -3304,6 +3304,7 @@ dependencies = [
  "ryeos-state",
  "serde",
  "serde_json",
+ "serde_yaml",
  "tar",
  "tempfile",
 ]

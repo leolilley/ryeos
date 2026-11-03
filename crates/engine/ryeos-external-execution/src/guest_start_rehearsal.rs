@@ -1,0 +1,1114 @@
+//! Local guest-start rehearsal.
+//!
+//! The installed guest occurrence owner executable is started exactly as a
+//! sandbox host starts it: as the administrator of a `/ryeos` tree whose
+//! roots are administrator-private and whose uploads are `0600`, with the
+//! controller's real package producer, signed import and root-signed
+//! assignment. Locally there is no administrator, so the run happens inside a
+//! Lillux root enclosure where the caller is root over a constructed root
+//! and the profile's account is mapped. The run ends when the supervisor
+//! publishes its relay attach request, or when the owner refuses.
+//!
+//! The documents can never be accepted by a real activation: every run
+//! generates a fresh controller root and owner key that exist only in this
+//! process's memory, the assignment names the manifest of a runtime tree
+//! that carries that fresh root (a manifest no installed runtime has), and
+//! the occurrence and placement identities are rehearsal-only.
+
+use std::collections::BTreeMap;
+use std::ffi::OsStr;
+use std::io::Write as _;
+use std::path::Path;
+
+use anyhow::{Context as _, Result, ensure};
+use base64::{Engine as _, engine::general_purpose::STANDARD, engine::general_purpose::URL_SAFE_NO_PAD};
+use ryeos_external_execution_contract::guest_import_authorization::{
+    GUEST_IMPORT_AUTHORIZATION_SCHEMA, GUEST_OCCURRENCE_ASSIGNMENT_SCHEMA,
+    GuestImportAuthorization, GuestOccurrenceAssignment, GuestOccurrenceAssignmentDocument,
+};
+use ryeos_external_execution_contract::staging_package::{
+    GUEST_IMPORT_TICKET_SCHEMA, GuestImportTicket, GuestStagingExpected,
+};
+use ryeos_external_execution_contract::{
+    EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA, ExternalGuestInputProjection, GuestBaseSnapshotInput,
+    GuestMountAccess, GuestMountContentAuthority, GuestMountInput, GuestMountKind, GuestMountRole,
+    GuestProductManifestKind, GuestWorkspaceView,
+};
+use ryeos_state::external_execution::admission::{
+    AdmittedExternalCandidateProgram, CONNECTOR_PROTOCOL, ExternalCandidateExecutionRoute,
+    ExternalCandidateProcFilesystem, ExternalCandidateQualificationUse,
+    ExternalCandidateRequirement, ExternalCandidateRuntimeAuthority, ExternalCandidateRuntimeRecipe,
+    ExternalCandidateRuntimeSource, PROTOCOL,
+};
+use ryeos_state::external_execution::transport::{
+    EXTERNAL_SUPERVISOR_ORDINARY_RELAY_BOOTSTRAP_SCHEMA, ExternalControllerFileRelayContract,
+    ExternalControllerTransportSelection, ExternalNetworkInputPolicy, ExternalSupervisorBootstrap,
+    ExternalSupervisorNativeEnvelope,
+};
+use ryeos_state::objects::{ProjectSnapshot, ProjectSnapshotPolicy, ProjectTree};
+use serde::{Deserialize, Serialize};
+
+use crate::guest_import_authorization::{
+    GuestOwnerRuntimeProfile, ObservedGuestRuntime, sign_guest_import_authorization,
+    sign_guest_occurrence_assignment,
+};
+use crate::guest_inputs::ExternalGuestInputAuthority;
+use crate::guest_package_producer::prepare_private_guest_package;
+use crate::guest_runtime_product::{OWNER_NAME, produce_guest_owner_runtime};
+
+/// Environment variable naming the prepared work directory. A process that
+/// finds it set at startup is the rehearsal host and runs nothing else.
+pub const REHEARSAL_HOST_ENV: &str = "RYEOS_GUEST_START_REHEARSAL_HOST";
+
+const PLAN_NAME: &str = "plan.json";
+const RUNTIME_NAME: &str = "runtime";
+const ACTIVATION_NAME: &str = "activation";
+const IMPORT_NAME: &str = "signed-import.json";
+const PACKAGE_NAME: &str = "guest-package";
+const PLACEMENT_ID: &str = "T-guest-start-rehearsal";
+const PRODUCT_MOUNT: &str = "runtime";
+const PRODUCT_DESTINATION: &str = "/runtime/product";
+const OWNER_RECORD_DIRECTORY: &str = "guest-import-owner";
+const INSTALL_INTENT: &str = "guest-base-install-intent.json";
+const LAUNCH_INTENT: &str = "guest-supervisor-launch-intent.json";
+const SUPERVISOR_STATE: &str = "supervisor-state";
+const ATTACH_REQUEST: &str = "attach.request.json";
+const MAX_STDERR_BYTES: usize = 256 * 1024;
+const MAX_PLAN_BYTES: u64 = 64 * 1024;
+const POLL_INTERVAL: lillux::time::Duration = lillux::time::Duration::from_millis(10);
+/// The owner's own cancelled-occurrence settlement window, plus slack.
+const OWNER_CLEANUP: lillux::time::Duration = lillux::time::Duration::from_secs(45);
+/// Host directories the enclosure carries; `/ryeos` and `/tmp` are its own.
+const HOST_ENTRIES: &[&str] = &[
+    "usr", "bin", "sbin", "lib", "lib32", "lib64", "etc", "dev", "proc", "sys", "run",
+];
+
+/// Exact inputs a rehearsal starts from. Paths are read once and copied into
+/// a private work directory before anything runs.
+pub struct GuestStartRehearsalRequest<'a> {
+    /// The owner executable of the selected guest runtime product.
+    pub owner_executable: &'a Path,
+    /// That product's installed owner profile.
+    pub profile: GuestOwnerRuntimeProfile,
+    pub supervisor_executable: &'a Path,
+    pub launcher_executable: &'a Path,
+    /// Directory delivered as the candidate runtime product mount.
+    pub product: &'a Path,
+    /// The product's retained manifest record, when the selection has one;
+    /// otherwise a content manifest of `product` is derived.
+    pub product_manifest_record: Option<&'a Path>,
+    /// The binding's controller relay, unchanged.
+    pub relay: ExternalControllerFileRelayContract,
+    /// The binding's guest network inputs, unchanged.
+    pub network_inputs: ExternalNetworkInputPolicy,
+    /// Time the controller allows between contact and the attach request.
+    pub attach_budget: lillux::time::Duration,
+    /// Private parent for the rehearsal work directory.
+    pub work_parent: &'a Path,
+    /// Executable that runs [`run_rehearsal_host_if_requested`] first thing.
+    pub host_executable: &'a Path,
+}
+
+/// Owner phases, in order. A refusal names the first phase that did not
+/// complete; each completes at a durable record the owner writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GuestStartRehearsalStep {
+    /// The host cannot run a rehearsal.
+    Host,
+    /// Package production, signing or enclosure layout.
+    Prepare,
+    /// Account transition and document verification, until the occurrence
+    /// directory exists.
+    Admit,
+    /// Private source entry and upload import, until the base-install intent.
+    Stage,
+    /// Base install and launch preparation, until the supervisor launch intent.
+    Install,
+    /// Supervisor release, until the supervisor's first state record.
+    Release,
+    /// Supervisor startup, until the relay attach request.
+    Attach,
+}
+
+impl GuestStartRehearsalStep {
+    const OWNER_PHASES: [Self; 5] = [
+        Self::Admit,
+        Self::Stage,
+        Self::Install,
+        Self::Release,
+        Self::Attach,
+    ];
+}
+
+/// Elapsed milliseconds of each completed owner phase.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GuestStartRehearsalPhases {
+    pub admit_ms: Option<u64>,
+    pub stage_ms: Option<u64>,
+    pub install_ms: Option<u64>,
+    pub release_ms: Option<u64>,
+    pub attach_ms: Option<u64>,
+    /// Owner start to the last completed phase.
+    pub total_ms: u64,
+}
+
+/// What the package carried, for judging the owner's profile ceilings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GuestStartRehearsalPackage {
+    pub framed_bytes: u64,
+    pub regular_bytes: u64,
+    pub entries: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum GuestStartRehearsalOutcome {
+    AttachPublished {
+        phases: GuestStartRehearsalPhases,
+        attach_budget_ms: u64,
+        within_budget: bool,
+        package: GuestStartRehearsalPackage,
+        /// How the owner ended after the rehearsal asked it to cancel.
+        owner_cleanup: String,
+        owner_stderr: String,
+    },
+    Refused {
+        step: GuestStartRehearsalStep,
+        message: String,
+        phases: GuestStartRehearsalPhases,
+        package: Option<GuestStartRehearsalPackage>,
+        owner_stderr: String,
+    },
+}
+
+impl GuestStartRehearsalOutcome {
+    fn refused(step: GuestStartRehearsalStep, message: impl Into<String>) -> Self {
+        Self::Refused {
+            step,
+            message: message.into(),
+            phases: GuestStartRehearsalPhases::default(),
+            package: None,
+            owner_stderr: String::new(),
+        }
+    }
+}
+
+/// Everything the host needs besides the work directory's files.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HostPlan {
+    occurrence_id: String,
+    mailbox_root: String,
+    runtime_manifest_hash: String,
+    assignment_b64: String,
+    attach_budget_ms: u64,
+    owner_deadline_ms: u64,
+    package: GuestStartRehearsalPackage,
+}
+
+fn digest_of(label: &str, run: &str) -> String {
+    lillux::sha256_hex(format!("ryeos.guest-start-rehearsal.{run}.{label}").as_bytes())
+}
+
+fn write_file(
+    directory: &lillux::PinnedDirectory,
+    name: &str,
+    bytes: &[u8],
+    mode: u32,
+) -> Result<lillux::PinnedRegularFile> {
+    let mut file = directory.open_regular_create(OsStr::new(name), true, true, 0o600)?;
+    file.write_all(bytes)?;
+    lillux::set_open_regular_file_mode(&file, mode)?;
+    file.sync_all()?;
+    drop(file);
+    directory
+        .open_pinned_regular(OsStr::new(name), false)?
+        .with_context(|| format!("rehearsal file {name} vanished"))
+}
+
+/// Stream an open source into a new exact-mode file of `directory`.
+fn copy_file(
+    directory: &lillux::PinnedDirectory,
+    name: &str,
+    source: &lillux::PinnedRegularFile,
+    mode: u32,
+) -> Result<lillux::PinnedRegularFile> {
+    let observation = source.observation()?;
+    let mut reader = source.try_clone_descriptor()?;
+    let mut file = directory.open_regular_create(OsStr::new(name), true, true, 0o600)?;
+    let copied = std::io::copy(&mut reader, &mut file)?;
+    ensure!(
+        copied == observation.size(),
+        "rehearsal copy of {name} changed length"
+    );
+    lillux::set_open_regular_file_mode(&file, mode)?;
+    file.sync_all()?;
+    drop(file);
+    directory
+        .open_pinned_regular(OsStr::new(name), false)?
+        .with_context(|| format!("rehearsal file {name} vanished"))
+}
+
+fn open_source(path: &Path, what: &str) -> Result<lillux::PinnedRegularFile> {
+    lillux::open_pinned_regular_file_no_follow(path)
+        .with_context(|| format!("open rehearsal {what} {}", path.display()))
+}
+
+/// Copy a product directory tree with its exact modes.
+fn copy_tree(
+    source: &lillux::PinnedDirectory,
+    target: &lillux::PinnedDirectory,
+    budget: &mut u64,
+) -> Result<()> {
+    let mut names = source.entry_names()?;
+    names.sort();
+    for name in names {
+        ensure!(*budget > 0, "rehearsal product has too many entries");
+        *budget -= 1;
+        let is_directory = std::fs::symlink_metadata(source.path().join(&name))?.is_dir();
+        if is_directory {
+            let child = source
+                .open_child_directory(&name)?
+                .with_context(|| format!("rehearsal product directory {name:?} vanished"))?;
+            let copy = target.create_child(&name, 0o700)?;
+            copy_tree(&child, &copy, budget)?;
+            copy.set_mode(0o755)?;
+        } else {
+            let file = source
+                .open_pinned_regular(&name, false)?
+                .with_context(|| format!("rehearsal product member {name:?} is not regular"))?;
+            let mode = file.permission_mode()?;
+            copy_file(
+                target,
+                name.to_str().context("rehearsal product name is not UTF-8")?,
+                &file,
+                mode,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+struct Prepared {
+    plan: HostPlan,
+}
+
+fn base_snapshot(
+    work: &lillux::PinnedDirectory,
+) -> Result<(
+    lillux::PinnedDirectory,
+    ryeos_project_capture::ProjectSnapshotTransferMeasurement,
+)> {
+    let base = work.create_child(OsStr::new("base"), 0o700)?;
+    let cas = lillux::CasStore::from_pinned_root(base.try_clone()?);
+    let policy = ProjectSnapshotPolicy::new(
+        ryeos_state::project_sync::ProjectSyncScope::FullProject,
+        vec![],
+        vec![],
+        BTreeMap::new(),
+    )?;
+    let policy_hash = cas.store_object(&policy.to_value())?;
+    let tree_hash = cas.store_object(
+        &ProjectTree {
+            files: BTreeMap::new(),
+        }
+        .to_value(),
+    )?;
+    let snapshot_hash = cas.store_object(
+        &ProjectSnapshot {
+            project_tree_hash: tree_hash,
+            effective_policy_hash: policy_hash,
+            message: None,
+            parent_hashes: Vec::new(),
+            created_at: "2026-11-03T00:00:00Z".into(),
+            source: "guest-start-rehearsal".into(),
+        }
+        .to_value(),
+    )?;
+    let measurement =
+        ryeos_project_capture::inspect_project_snapshot_transfer(&base, &snapshot_hash)?;
+    Ok((base, measurement))
+}
+
+/// A structured-session program over the rehearsal's product. The relay
+/// carrier is admitted only for session programs; the program's own
+/// qualification identities are rehearsal-only.
+fn rehearsal_program(
+    manifest_kind: GuestProductManifestKind,
+    product_manifest_hash: &str,
+    run: &str,
+) -> Result<AdmittedExternalCandidateProgram> {
+    let recipe = ExternalCandidateRuntimeRecipe {
+        schema: 2,
+        runtime_mount_destination: PRODUCT_DESTINATION.into(),
+        executable_relative_path: "bin/rehearsal".into(),
+        argv0: "rehearsal".into(),
+        arguments: vec!["exec-server".into(), "--listen".into(), "stdio".into()],
+        cwd: "/workspace".into(),
+        environment: BTreeMap::new(),
+        max_stdout_bytes: 1024 * 1024,
+        max_stderr_bytes: 1024 * 1024,
+        proc_filesystem: ExternalCandidateProcFilesystem::PidNamespaceNested,
+        contain_process_group: false,
+        nested_sandbox: true,
+    };
+    let runtime_recipe_digest = recipe.digest()?;
+    let requirement = ExternalCandidateRequirement {
+        schema: 7,
+        protocol: PROTOCOL.into(),
+        connector_protocol: CONNECTOR_PROTOCOL.into(),
+        execution_route: ExternalCandidateExecutionRoute::ConnectorOnly,
+        required_lifecycle_capabilities: Default::default(),
+        provider_declaration_id: "guest-start-rehearsal".into(),
+        provider_configuration_destination: "rehearsal.toml".into(),
+        runtime_product_declaration_id: PRODUCT_MOUNT.into(),
+        runtime_authority: ExternalCandidateRuntimeAuthority::CapturedProduct,
+        runtime_recipe: recipe,
+    };
+    let qualification_use = ExternalCandidateQualificationUse {
+        schema: ryeos_state::external_execution::admission::QUALIFICATION_CONTEXT_SCHEMA.into(),
+        requirement_digest: requirement.qualification_requirement_digest()?,
+        profile_hash: digest_of("profile", run),
+        source_binding_hash: digest_of("source-binding", run),
+        source_content_manifest_hash: digest_of("source-content", run),
+        provider_executable_manifest_hash: product_manifest_hash.into(),
+        execution_environment_digest: digest_of("environment", run),
+    };
+    let program = AdmittedExternalCandidateProgram {
+        requirement,
+        qualification_use,
+        runtime_manifest_kind: match manifest_kind {
+            GuestProductManifestKind::Content => ryeos_state::objects::EXTERNAL_CONTENT_MANIFEST_KIND,
+            GuestProductManifestKind::LargeContent => {
+                ryeos_state::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND
+            }
+        }
+        .into(),
+        runtime_manifest_hash: product_manifest_hash.into(),
+        runtime_source: ExternalCandidateRuntimeSource::CapturedProduct {
+            witness_hash: digest_of("witness", run),
+        },
+        qualification_attestation_hash: digest_of("attestation", run),
+        selection_identity_digest: digest_of("selection", run),
+        runtime_recipe_digest,
+    };
+    program.validate()?;
+    Ok(program)
+}
+
+fn prepare(
+    request: &GuestStartRehearsalRequest<'_>,
+    work: &lillux::PinnedDirectory,
+) -> Result<Prepared> {
+    let run = hex::encode(lillux::crypto::generate_random_bytes::<8>());
+    let occurrence_id = format!("rehearsal-{run}");
+    let root_key = lillux::crypto::generate_signing_key();
+    let controller_key = lillux::crypto::generate_signing_key();
+
+    // Same owner bytes and profile under the fresh rehearsal root.
+    let owner_source = open_source(request.owner_executable, "owner executable")?;
+    let owner = copy_file(work, OWNER_NAME, &owner_source, 0o755)?;
+    let owner_bytes = owner.observation()?.size();
+    let owner_sha256 = owner.digest_stable_exact(&owner.observation()?)?;
+    let runtime = produce_guest_owner_runtime(
+        work,
+        OsStr::new(RUNTIME_NAME),
+        &owner.inherited_descriptor_authority()?,
+        owner_bytes,
+        &owner_sha256,
+        &root_key.verifying_key(),
+        &request.profile,
+    )?;
+    let runtime_manifest_hash = runtime.manifest_hash().to_owned();
+
+    // Candidate product as delivered, and its manifest record.
+    let product_source = lillux::PinnedDirectory::open(request.product)?
+        .with_context(|| format!("rehearsal product {} is absent", request.product.display()))?;
+    let product = work.create_child(OsStr::new("product"), 0o700)?;
+    copy_tree(&product_source, &product, &mut 400_000)?;
+    product.set_mode(0o755)?;
+    let (manifest_kind, manifest_record, product_bytes) = match request.product_manifest_record {
+        Some(path) => {
+            let record = open_source(path, "product manifest record")?;
+            let bytes = record
+                .read_stable_bounded(&record.observation()?, 4 * 1024 * 1024)
+                .map_err(anyhow::Error::msg)?;
+            let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+            let kind = match value["kind"].as_str() {
+                Some(ryeos_state::objects::EXTERNAL_CONTENT_MANIFEST_KIND) => {
+                    GuestProductManifestKind::Content
+                }
+                Some(ryeos_state::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND) => {
+                    GuestProductManifestKind::LargeContent
+                }
+                other => anyhow::bail!("rehearsal product manifest kind {other:?} is not admitted"),
+            };
+            let total = value["total_bytes"]
+                .as_u64()
+                .context("rehearsal product manifest has no total bytes")?;
+            (kind, bytes, total)
+        }
+        None => {
+            let manifest = ryeos_state::observe_external_content_tree_exact(&product)?;
+            let record = lillux::canonical_json(&serde_json::to_value(&manifest)?)?.into_bytes();
+            ensure!(
+                ryeos_state::external_content_manifest_digest(&manifest)?
+                    == lillux::sha256_hex(&record),
+                "rehearsal product manifest record differs from its digest"
+            );
+            (GuestProductManifestKind::Content, record, manifest.total_bytes)
+        }
+    };
+    let product_manifest_hash = lillux::sha256_hex(&manifest_record);
+    let record_file = write_file(work, "product-manifest.json", &manifest_record, 0o644)?;
+
+    let supervisor = copy_file(
+        work,
+        "supervisor",
+        &open_source(request.supervisor_executable, "supervisor executable")?,
+        0o755,
+    )?;
+    let launcher = copy_file(
+        work,
+        "launcher",
+        &open_source(request.launcher_executable, "launcher executable")?,
+        0o755,
+    )?;
+    let supervisor_sha256 = supervisor.digest_stable_exact(&supervisor.observation()?)?;
+    let launcher_sha256 = launcher.digest_stable_exact(&launcher.observation()?)?;
+    let member_bytes = supervisor.observation()?.size() + launcher.observation()?.size();
+
+    let (base, measurement) = base_snapshot(work)?;
+    let base_authority = base.inherited_descriptor_authority()?;
+    let product_authority = product.inherited_descriptor_authority()?;
+    let record_authority = record_file.inherited_descriptor_authority()?;
+    let projection = ExternalGuestInputProjection {
+        workspace_view: GuestWorkspaceView::FullSnapshot,
+        schema: EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA,
+        base_snapshot: GuestBaseSnapshotInput {
+            descriptor: base_authority
+                .inherited_descriptor()
+                .map_err(anyhow::Error::msg)?,
+            snapshot_hash: measurement.snapshot_hash.clone(),
+            closure_digest: measurement.closure_digest.clone(),
+            object_count: measurement.object_count,
+            blob_count: measurement.blob_count,
+            total_bytes: measurement.total_bytes,
+        },
+        workspace_outputs: None,
+        inputs: vec![GuestMountInput {
+            role: GuestMountRole::Product,
+            authority_id: PRODUCT_MOUNT.into(),
+            descriptor: product_authority
+                .inherited_descriptor()
+                .map_err(anyhow::Error::msg)?,
+            destination: PRODUCT_DESTINATION.into(),
+            kind: GuestMountKind::Directory,
+            access: GuestMountAccess::ReadOnly,
+            normalized_mode: None,
+            content_authority: GuestMountContentAuthority::ProductManifest {
+                manifest_kind,
+                manifest_hash: product_manifest_hash.clone(),
+                manifest_descriptor: record_authority
+                    .inherited_descriptor()
+                    .map_err(anyhow::Error::msg)?,
+                manifest_bytes: manifest_record.len() as u64,
+            },
+            bytes: product_bytes,
+        }],
+        executable_search: vec![],
+        environment: BTreeMap::new(),
+    };
+    projection.validate()?;
+    let guest_input_identity = projection.identity_digest()?;
+    let program = rehearsal_program(manifest_kind, &product_manifest_hash, &run)?;
+    let supervisor_runtime_hash = product_manifest_hash.clone();
+
+    let attach_budget_ms = u64::try_from(request.attach_budget.as_millis())
+        .context("rehearsal attach budget overflow")?;
+    let owner_deadline_ms = u64::from(request.profile.owner_timeout_seconds) * 1_000;
+    let attachment_deadline_ms = lillux::time::timestamp_millis()
+        + i64::try_from(owner_deadline_ms.max(attach_budget_ms))?
+        + 120_000;
+    let allocation_request_digest = digest_of("allocation", &run);
+    let admitted_capsule_hash = digest_of("capsule", &run);
+    let activation_request_digest = digest_of("activation", &run);
+    let execution_binding_hash = digest_of("binding", &run);
+    let bootstrap = ExternalSupervisorBootstrap {
+        schema: EXTERNAL_SUPERVISOR_ORDINARY_RELAY_BOOTSTRAP_SCHEMA,
+        controller: ExternalControllerTransportSelection::ControllerFileRelay(
+            request.relay.clone(),
+        ),
+        tls_root_certificates_der_base64: Vec::new(),
+        placement_thread_id: PLACEMENT_ID.into(),
+        occurrence_id: occurrence_id.clone(),
+        allocation_request_digest: allocation_request_digest.clone(),
+        admitted_capsule_hash: admitted_capsule_hash.clone(),
+        base_snapshot_hash: measurement.snapshot_hash.clone(),
+        execution_binding_hash: execution_binding_hash.clone(),
+        supervisor_runtime_hash: supervisor_runtime_hash.clone(),
+        launcher_artifact_hash: launcher_sha256.clone(),
+        candidate_program: program.into(),
+        guest_input_identity: guest_input_identity.clone(),
+        guest_inputs: projection.clone(),
+        owner_public_key: ryeos_state::external_execution::encode_channel_public_key(
+            &controller_key.verifying_key(),
+        )?,
+        bootstrap_capability: STANDARD.encode(lillux::crypto::generate_random_bytes::<32>()),
+        attachment_deadline_ms,
+        execution_timeout_seconds: 60,
+        post_execution_timeout_seconds: 120,
+        candidate_export_max_bytes: 512 * 1024,
+        channel_max_bytes: 1024 * 1024,
+        native_journal: ExternalSupervisorNativeEnvelope {
+            storage_bytes: 67_108_864,
+            allocator_steps: 2_000_000_000,
+            connections: 16,
+            operation_millis: 4_860_000,
+            cleanup_millis: 120_000,
+            cleanup_steps: 3_000_000,
+        },
+        report_capabilities: false,
+    };
+    bootstrap.validate()?;
+    let bootstrap_bytes = bootstrap.canonical_bytes()?;
+    let bootstrap_sha256 = lillux::sha256_hex(&bootstrap_bytes);
+    let mailbox_root = bootstrap.relay_mailbox_root()?;
+    let bootstrap_file = write_file(work, "bootstrap", &bootstrap_bytes, 0o600)?;
+
+    let known_regular = measurement.total_bytes
+        + member_bytes
+        + bootstrap_bytes.len() as u64
+        + product_bytes
+        + manifest_record.len() as u64;
+    let maximum_regular_bytes = known_regular + 64 * 1024;
+    let maximum_framed_bytes = maximum_regular_bytes * 2 + 16 * 1024 * 1024;
+    let expected = GuestStagingExpected {
+        inputs: &projection,
+        activation_request_digest: &activation_request_digest,
+        bootstrap_sha256: &bootstrap_sha256,
+        supervisor_sha256: &supervisor_sha256,
+        launcher_sha256: &launcher_sha256,
+        maximum_regular_bytes,
+        maximum_framed_bytes,
+    };
+    let authority = ExternalGuestInputAuthority::new(
+        projection.clone(),
+        base_authority,
+        None,
+        vec![product_authority],
+        vec![record_authority],
+        Vec::new(),
+    )?;
+    let package = prepare_private_guest_package(
+        work,
+        &authority,
+        &bootstrap_file.inherited_descriptor_authority()?,
+        &supervisor.inherited_descriptor_authority()?,
+        &launcher.inherited_descriptor_authority()?,
+        &expected,
+        lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(600)),
+    )?;
+
+    let ticket = GuestImportTicket {
+        schema: GUEST_IMPORT_TICKET_SCHEMA,
+        binding_hash: execution_binding_hash.clone(),
+        allocation_request_digest: allocation_request_digest.clone(),
+        occurrence_id: occurrence_id.clone(),
+        activation_request_digest: activation_request_digest.clone(),
+        guest_input_identity,
+        payload_sha256: package.sha256().to_owned(),
+        manifest_sha256: package.manifest_sha256().to_owned(),
+        framed_bytes: package.bytes(),
+        regular_bytes: package.manifest().total_regular_bytes,
+        bootstrap_sha256,
+        supervisor_sha256,
+        launcher_sha256,
+        maximum_regular_bytes,
+        maximum_framed_bytes,
+    };
+    let assignment = GuestOccurrenceAssignment {
+        placement_thread_id: PLACEMENT_ID,
+        admitted_capsule_hash: &admitted_capsule_hash,
+        base_snapshot_hash: &measurement.snapshot_hash,
+        execution_binding_hash: &execution_binding_hash,
+        allocation_request_digest: &allocation_request_digest,
+        occurrence_id: &occurrence_id,
+        activation_request_digest: &activation_request_digest,
+        supervisor_runtime_hash: &supervisor_runtime_hash,
+        guest_runtime_manifest_hash: &runtime_manifest_hash,
+        attachment_deadline_ms,
+    };
+    let document = GuestOccurrenceAssignmentDocument {
+        schema: GUEST_OCCURRENCE_ASSIGNMENT_SCHEMA,
+        placement_thread_id: PLACEMENT_ID.into(),
+        admitted_capsule_hash: admitted_capsule_hash.clone(),
+        base_snapshot_hash: measurement.snapshot_hash.clone(),
+        execution_binding_hash: execution_binding_hash.clone(),
+        allocation_request_digest: allocation_request_digest.clone(),
+        occurrence_id: occurrence_id.clone(),
+        activation_request_digest: activation_request_digest.clone(),
+        supervisor_runtime_hash: supervisor_runtime_hash.clone(),
+        guest_runtime_manifest_hash: runtime_manifest_hash.clone(),
+        owner_public_key_hex: hex::encode(controller_key.verifying_key().to_bytes()),
+        attachment_deadline_ms,
+    };
+    let signed_assignment = ryeos_external_execution_contract::canonical_json(
+        &sign_guest_occurrence_assignment(document, &root_key)?,
+    )?;
+    let authorization = GuestImportAuthorization {
+        schema: GUEST_IMPORT_AUTHORIZATION_SCHEMA,
+        placement_thread_id: PLACEMENT_ID.into(),
+        admitted_capsule_hash: admitted_capsule_hash.clone(),
+        base_snapshot_hash: measurement.snapshot_hash.clone(),
+        execution_binding_hash: execution_binding_hash.clone(),
+        allocation_request_digest: allocation_request_digest.clone(),
+        occurrence_id: occurrence_id.clone(),
+        activation_request_digest: activation_request_digest.clone(),
+        supervisor_runtime_hash: supervisor_runtime_hash.clone(),
+        guest_runtime_manifest_hash: runtime_manifest_hash.clone(),
+        attachment_deadline_ms,
+        admission_deadline_ms: attachment_deadline_ms - 1_000,
+        nonce_sha256: lillux::sha256_hex(&lillux::crypto::generate_random_bytes::<32>()),
+        ticket,
+        guest_inputs: projection.clone(),
+    };
+    let signed_import = ryeos_external_execution_contract::canonical_json(
+        &sign_guest_import_authorization(authorization, &controller_key, &assignment)?,
+    )?;
+    let package_extent = GuestStartRehearsalPackage {
+        framed_bytes: package.bytes(),
+        regular_bytes: package.manifest().total_regular_bytes,
+        entries: package.manifest().entries.len() as u64,
+    };
+
+    let activation = work.create_child(OsStr::new(ACTIVATION_NAME), 0o700)?;
+    write_file(&activation, IMPORT_NAME, &signed_import, 0o600)?;
+    copy_file(&activation, PACKAGE_NAME, package.payload(), 0o600)?;
+    package.discard()?;
+    let plan = HostPlan {
+        occurrence_id,
+        mailbox_root,
+        runtime_manifest_hash,
+        assignment_b64: URL_SAFE_NO_PAD.encode(&signed_assignment),
+        attach_budget_ms,
+        owner_deadline_ms,
+        package: package_extent,
+    };
+    write_file(work, PLAN_NAME, &serde_json::to_vec(&plan)?, 0o600)?;
+    Ok(Prepared { plan })
+}
+
+/// Refuse where the host cannot create the enclosure the owner needs.
+fn host_refusal(profile: &GuestOwnerRuntimeProfile, work_parent: &Path) -> Option<String> {
+    let facts = lillux::process_control::HostFacts::observe(0, work_parent);
+    if !facts.unshare_user_pid_mount.allowed() {
+        return Some(format!(
+            "this host does not allow unprivileged user, PID and mount namespaces: {:?}",
+            facts.unshare_user_pid_mount
+        ));
+    }
+    let lillux::GuestRuntimeAccount::Unix { uid, gid } = profile.account;
+    lillux::root_enclosure::root_enclosure_unavailable_reason(&enclosure_spec(uid, gid, 1))
+}
+
+fn enclosure_spec(uid: u32, gid: u32, package_bytes: u64) -> lillux::root_enclosure::RootEnclosureSpec<'static> {
+    lillux::root_enclosure::RootEnclosureSpec {
+        account_uid: uid,
+        account_gid: gid,
+        root_limits: lillux::sandbox::TmpfsLimits {
+            size_bytes: package_bytes
+                .saturating_mul(2)
+                .saturating_add(1024 * 1024 * 1024),
+            inodes: 1 << 18,
+        },
+        host_entries: HOST_ENTRIES,
+    }
+}
+
+/// Run one rehearsal. Every refusal, including one before the owner starts,
+/// is an outcome; an error means the rehearsal itself could not report.
+pub fn run_guest_start_rehearsal(
+    request: &GuestStartRehearsalRequest<'_>,
+) -> Result<GuestStartRehearsalOutcome> {
+    if let Some(reason) = host_refusal(&request.profile, request.work_parent) {
+        return Ok(GuestStartRehearsalOutcome::refused(
+            GuestStartRehearsalStep::Host,
+            reason,
+        ));
+    }
+    let parent = lillux::PinnedDirectory::open(request.work_parent)?.with_context(|| {
+        format!(
+            "rehearsal work parent {} is absent",
+            request.work_parent.display()
+        )
+    })?;
+    let (name, work) = parent.create_unique_child("guest-start-rehearsal", 0o700)?;
+    let result = (|| -> Result<GuestStartRehearsalOutcome> {
+        let prepared = match prepare(request, &work) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                return Ok(GuestStartRehearsalOutcome::refused(
+                    GuestStartRehearsalStep::Prepare,
+                    format!("{error:#}"),
+                ));
+            }
+        };
+        let timeout = (prepared.plan.owner_deadline_ms.max(prepared.plan.attach_budget_ms)
+            + OWNER_CLEANUP.as_millis() as u64
+            + 120_000) as f64
+            / 1_000.0;
+        let output = lillux::run(lillux::SubprocessRequest {
+            cmd: request.host_executable.to_string_lossy().into_owned(),
+            argv0: None,
+            args: Vec::new(),
+            cwd: None,
+            envs: vec![(
+                REHEARSAL_HOST_ENV.into(),
+                work.path().to_string_lossy().into_owned(),
+            )],
+            stdin_data: None,
+            timeout,
+            limits: None,
+            inherited_fds: Vec::new(),
+            inherited_fd_mappings: Vec::new(),
+            supervised_status: None,
+        });
+        let line = output.stdout.lines().rev().find(|line| !line.trim().is_empty());
+        match line.map(serde_json::from_str::<GuestStartRehearsalOutcome>) {
+            Some(Ok(outcome)) => Ok(outcome),
+            _ => Ok(GuestStartRehearsalOutcome::Refused {
+                step: GuestStartRehearsalStep::Prepare,
+                message: format!(
+                    "the rehearsal host reported no outcome (exit {}, timed out {}): {}",
+                    output.exit_code,
+                    output.timed_out,
+                    output.stderr.trim()
+                ),
+                phases: GuestStartRehearsalPhases::default(),
+                package: Some(prepared.plan.package),
+                owner_stderr: String::new(),
+            }),
+        }
+    })();
+    let cleanup = work
+        .remove_contents_recursive_bounded(lillux::DirectoryTraversalBudget::new(1_000_000, 64))
+        .and_then(|_| {
+            parent
+                .remove_empty_child_if_same(&name, &work)
+                .map(|_| ())
+        });
+    match (result, cleanup) {
+        (Ok(outcome), Ok(())) => Ok(outcome),
+        (Ok(_), Err(error)) => Err(error.context("rehearsal work directory cleanup failed")),
+        (Err(error), _) => Err(error),
+    }
+}
+
+/// Rehearsal host entry. Returns at once unless [`REHEARSAL_HOST_ENV`] is
+/// set; otherwise it runs the rehearsal, prints its outcome as one JSON line
+/// and exits. Call it before the process starts any thread.
+pub fn run_rehearsal_host_if_requested() {
+    let Some(work) = std::env::var_os(REHEARSAL_HOST_ENV) else {
+        return;
+    };
+    let outcome = match host(Path::new(&work)) {
+        Ok(outcome) => outcome,
+        Err(error) => GuestStartRehearsalOutcome::refused(
+            GuestStartRehearsalStep::Prepare,
+            format!("{error:#}"),
+        ),
+    };
+    report(&outcome);
+    std::process::exit(0);
+}
+
+fn report(outcome: &GuestStartRehearsalOutcome) {
+    match serde_json::to_string(outcome) {
+        Ok(line) => println!("{line}"),
+        Err(error) => eprintln!("rehearsal outcome is not serializable: {error}"),
+    }
+    let _ = std::io::stdout().flush();
+}
+
+fn host(work_path: &Path) -> Result<GuestStartRehearsalOutcome> {
+    let work = lillux::PinnedDirectory::open(work_path)?.context("rehearsal work is absent")?;
+    let plan_file = work
+        .open_pinned_regular(OsStr::new(PLAN_NAME), false)?
+        .context("rehearsal plan is absent")?;
+    let plan: HostPlan = serde_json::from_slice(
+        &plan_file
+            .read_stable_bounded(&plan_file.observation()?, MAX_PLAN_BYTES)
+            .map_err(anyhow::Error::msg)?,
+    )?;
+    let runtime = work
+        .open_child_directory(OsStr::new(RUNTIME_NAME))?
+        .context("rehearsal runtime is absent")?;
+    let observed = ObservedGuestRuntime::observe(&runtime)?;
+    ensure!(
+        observed.manifest_hash() == plan.runtime_manifest_hash,
+        "rehearsal runtime changed before the host started"
+    );
+    let lillux::GuestRuntimeAccount::Unix { uid, gid } = observed.profile().account;
+    let activation = work
+        .open_child_directory(OsStr::new(ACTIVATION_NAME))?
+        .context("rehearsal activation is absent")?;
+    let import = activation
+        .open_pinned_regular(OsStr::new(IMPORT_NAME), false)?
+        .context("rehearsal import is absent")?;
+    let package = activation
+        .open_pinned_regular(OsStr::new(PACKAGE_NAME), false)?
+        .context("rehearsal package is absent")?;
+    let spec = enclosure_spec(uid, gid, plan.package.framed_bytes);
+    let mut outcome = None;
+    let entered = lillux::root_enclosure::run_in_root_enclosure(&spec, || {
+        let result = enclosed(&plan, &runtime, &import, &package);
+        report(&result.unwrap_or_else(|error| {
+            GuestStartRehearsalOutcome::refused(GuestStartRehearsalStep::Prepare, format!("{error:#}"))
+        }));
+        0
+    });
+    match entered {
+        // The enclosed init printed the outcome itself.
+        Ok(_) => std::process::exit(0),
+        Err(error) => outcome.get_or_insert(GuestStartRehearsalOutcome::refused(
+            GuestStartRehearsalStep::Host,
+            error,
+        )),
+    };
+    outcome.context("rehearsal host has no outcome")
+}
+
+/// Lay out `/ryeos` as a sandbox host would, start the owner and observe it.
+fn enclosed(
+    plan: &HostPlan,
+    runtime: &lillux::PinnedDirectory,
+    import: &lillux::PinnedRegularFile,
+    package: &lillux::PinnedRegularFile,
+) -> Result<GuestStartRehearsalOutcome> {
+    let root = lillux::PinnedDirectory::open(Path::new("/"))?.context("enclosure root is absent")?;
+    let ryeos = root.create_child(OsStr::new("ryeos"), 0o700)?;
+    let installed = ryeos.create_child(OsStr::new("guest-runtime"), 0o700)?;
+    let bin = installed.create_child(OsStr::new("bin"), 0o700)?;
+    let source_bin = runtime
+        .open_child_directory(OsStr::new("bin"))?
+        .context("rehearsal runtime has no bin")?;
+    copy_file(
+        &bin,
+        OWNER_NAME,
+        &source_bin
+            .open_pinned_regular(OsStr::new(OWNER_NAME), false)?
+            .context("rehearsal runtime has no owner")?,
+        0o755,
+    )?;
+    bin.set_mode(0o755)?;
+    for name in ["controller-root.hex", "guest-owner-profile.json"] {
+        copy_file(
+            &installed,
+            name,
+            &runtime
+                .open_pinned_regular(OsStr::new(name), false)?
+                .with_context(|| format!("rehearsal runtime has no {name}"))?,
+            0o644,
+        )?;
+    }
+    // A host delivers the namespace and runtime roots administrator-private.
+    installed.set_mode(0o750)?;
+    ensure!(
+        ObservedGuestRuntime::observe(&installed)?.manifest_hash() == plan.runtime_manifest_hash,
+        "installed rehearsal runtime differs from the prepared runtime"
+    );
+    let activation = ryeos.create_child(OsStr::new("activation"), 0o700)?;
+    copy_file(&activation, IMPORT_NAME, import, 0o600)?;
+    copy_file(&activation, PACKAGE_NAME, package, 0o600)?;
+    ryeos.set_mode(0o750)?;
+    observe_owner(plan)
+}
+
+fn present(path: &str) -> bool {
+    std::fs::symlink_metadata(path).is_ok()
+}
+
+fn non_empty_directory(path: &str) -> bool {
+    std::fs::read_dir(path).is_ok_and(|mut entries| entries.next().is_some())
+}
+
+fn elapsed_ms(start: std::time::Instant, at: std::time::Instant) -> u64 {
+    u64::try_from(at.saturating_duration_since(start).as_millis()).unwrap_or(u64::MAX)
+}
+
+fn observe_owner(plan: &HostPlan) -> Result<GuestStartRehearsalOutcome> {
+    let occurrence = format!("/ryeos/occurrences/{}", plan.occurrence_id);
+    let records = format!("{occurrence}/{OWNER_RECORD_DIRECTORY}");
+    let markers = [
+        occurrence.clone(),
+        format!("{records}/{INSTALL_INTENT}"),
+        format!("{records}/{LAUNCH_INTENT}"),
+        format!("{occurrence}/{SUPERVISOR_STATE}"),
+        format!("{}/{ATTACH_REQUEST}", plan.mailbox_root),
+    ];
+    let reached = |index: usize| -> bool {
+        if index == 3 {
+            non_empty_directory(&markers[3])
+        } else {
+            present(&markers[index])
+        }
+    };
+    let start = std::time::Instant::now();
+    let mut owner = lillux::subordinate_process::SubordinateProcess::spawn(
+        lillux::subordinate_process::SubordinateProcessRequest {
+            cmd: format!("/ryeos/guest-runtime/bin/{OWNER_NAME}"),
+            argv0: None,
+            args: vec!["--assignment-b64".into(), plan.assignment_b64.clone()],
+            cwd: "/".into(),
+            envs: Vec::new(),
+            limits: None,
+            inherited_fds: Vec::new(),
+        },
+    )
+    .map_err(anyhow::Error::msg)?;
+    let _stdout = owner.take_output().map_err(anyhow::Error::msg)?;
+    let mut stderr = owner.take_error().map_err(anyhow::Error::msg)?;
+    let mut captured = Vec::new();
+    let mut drain = |captured: &mut Vec<u8>, slice: lillux::time::Duration| {
+        if let Ok(diagnostics) = stderr.drain_until(
+            MAX_STDERR_BYTES.saturating_sub(captured.len()),
+            lillux::time::MonotonicDeadline::after(slice),
+        ) {
+            captured.extend_from_slice(&diagnostics.bytes);
+        }
+    };
+    let deadline = lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_millis(
+        plan.owner_deadline_ms.max(plan.attach_budget_ms) + 60_000,
+    ));
+    let mut times: [Option<std::time::Instant>; 5] = [None; 5];
+    let exited = loop {
+        for (index, slot) in times.iter_mut().enumerate() {
+            if slot.is_none() && (index == 0 || reached(index)) && reached(index) {
+                *slot = Some(std::time::Instant::now());
+            }
+        }
+        if times[4].is_some() {
+            break None;
+        }
+        if let Some(exit) = owner.try_exit().map_err(anyhow::Error::msg)? {
+            break Some(exit);
+        }
+        if deadline.has_elapsed() {
+            break None;
+        }
+        drain(&mut captured, POLL_INTERVAL);
+    };
+    let mut phases = GuestStartRehearsalPhases::default();
+    let mut previous = start;
+    for (index, slot) in times.iter().enumerate() {
+        let Some(at) = *slot else { break };
+        let value = Some(elapsed_ms(previous, at));
+        match index {
+            0 => phases.admit_ms = value,
+            1 => phases.stage_ms = value,
+            2 => phases.install_ms = value,
+            3 => phases.release_ms = value,
+            _ => phases.attach_ms = value,
+        }
+        phases.total_ms = elapsed_ms(start, at);
+        previous = at;
+    }
+    let reached_count = times.iter().take_while(|slot| slot.is_some()).count();
+    if reached_count == times.len() {
+        let cleanup = settle_owner(&mut owner, &mut |slice| drain(&mut captured, slice));
+        let attach_budget_ms = plan.attach_budget_ms;
+        let attach_window = phases.release_ms.unwrap_or(0) + phases.attach_ms.unwrap_or(0);
+        return Ok(GuestStartRehearsalOutcome::AttachPublished {
+            within_budget: attach_window <= attach_budget_ms && phases.total_ms <= plan.owner_deadline_ms,
+            phases,
+            attach_budget_ms,
+            package: plan.package.clone(),
+            owner_cleanup: cleanup,
+            owner_stderr: String::from_utf8_lossy(&captured).into_owned(),
+        });
+    }
+    let step = GuestStartRehearsalStep::OWNER_PHASES[reached_count];
+    let message = match exited {
+        Some(exit) => {
+            drain(&mut captured, lillux::time::Duration::from_millis(500));
+            let stderr = String::from_utf8_lossy(&captured);
+            let last = stderr.lines().rev().find(|line| !line.trim().is_empty()).unwrap_or("");
+            format!("the owner exited with {:?} during {step:?}: {last}", exit.code)
+        }
+        None => {
+            let cleanup = settle_owner(&mut owner, &mut |slice| drain(&mut captured, slice));
+            format!(
+                "the owner reached no {step:?} record within its deadline; {cleanup}"
+            )
+        }
+    };
+    Ok(GuestStartRehearsalOutcome::Refused {
+        step,
+        message,
+        phases,
+        package: Some(plan.package.clone()),
+        owner_stderr: String::from_utf8_lossy(&captured).into_owned(),
+    })
+}
+
+/// Ask the owner to cancel, as a lost controller would, then force it.
+fn settle_owner(
+    owner: &mut lillux::subordinate_process::SubordinateProcess,
+    drain: &mut dyn FnMut(lillux::time::Duration),
+) -> String {
+    let requested = owner
+        .cooperative_termination()
+        .and_then(|termination| termination.request().map(|_| ()));
+    if let Err(error) = requested {
+        return format!("cancellation request failed: {error}");
+    }
+    let deadline = lillux::time::MonotonicDeadline::after(OWNER_CLEANUP);
+    loop {
+        match owner.try_exit() {
+            Ok(Some(exit)) => {
+                drain(lillux::time::Duration::from_millis(200));
+                return format!("cancelled; owner exited with {:?}", exit.code);
+            }
+            Ok(None) if deadline.has_elapsed() => break,
+            Ok(None) => drain(POLL_INTERVAL),
+            Err(error) => return format!("owner exit observation failed: {error}"),
+        }
+    }
+    match owner.kill_exact_child_until(lillux::time::MonotonicDeadline::after(
+        lillux::time::Duration::from_secs(5),
+    )) {
+        Ok(Some(_)) => "owner ignored cancellation and was killed".into(),
+        Ok(None) => "owner survived a kill; the enclosure ends it".into(),
+        Err(error) => format!("owner kill failed: {error}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn outcome_wire_is_tagged_and_round_trips() {
+        let outcome = GuestStartRehearsalOutcome::refused(GuestStartRehearsalStep::Stage, "full");
+        let text = serde_json::to_string(&outcome).unwrap();
+        assert!(text.contains(r#""outcome":"refused""#) && text.contains(r#""step":"stage""#));
+        assert_eq!(
+            serde_json::from_str::<GuestStartRehearsalOutcome>(&text).unwrap(),
+            outcome
+        );
+    }
+
+    #[test]
+    fn rehearsal_program_is_a_valid_session_program() {
+        let program =
+            rehearsal_program(GuestProductManifestKind::Content, &"a".repeat(64), "test").unwrap();
+        assert_eq!(program.runtime_manifest_hash, "a".repeat(64));
+    }
+
+    #[test]
+    fn rehearsal_digests_are_per_run() {
+        assert_ne!(digest_of("binding", "one"), digest_of("binding", "two"));
+    }
+}
