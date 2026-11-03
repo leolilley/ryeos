@@ -23,8 +23,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, Result};
 use ryeos_external_execution::guest_import_authorization::GuestOwnerRuntimeProfile;
 use ryeos_external_execution::guest_start_rehearsal::{
-    GuestStartRehearsalBase, GuestStartRehearsalFileProduct, GuestStartRehearsalOutcome, GuestStartRehearsalRequest, GuestStartRehearsalStep,
-    run_guest_start_rehearsal, run_rehearsal_host_if_requested,
+    GuestStartRehearsalBase, GuestStartRehearsalFileProduct, GuestStartRehearsalOutcome,
+    GuestStartRehearsalRequest, GuestStartRehearsalStep, run_guest_start_rehearsal,
+    run_rehearsal_host_if_requested,
 };
 use ryeos_state::LeasedLargeObject;
 use ryeos_state::external_execution::transport::{
@@ -73,7 +74,11 @@ struct NodeSelection {
     /// The lease on the large object the product member names, with the store
     /// and runtime directory its descriptor-relative path is resolved
     /// through; all must stay open while the path is used.
-    _product_lease: Option<(LeasedLargeObject, ryeos_state::LargeObjectStore, lillux::PinnedDirectory)>,
+    _product_lease: Option<(
+        LeasedLargeObject,
+        ryeos_state::LargeObjectStore,
+        lillux::PinnedDirectory,
+    )>,
     product_manifest_record: PathBuf,
     relay: ExternalControllerFileRelayContract,
     network_inputs: ExternalNetworkInputPolicy,
@@ -88,9 +93,7 @@ fn find_bundle_member(app: &Path, name: &str, sha256: &str) -> Result<PathBuf> {
         };
         for target in targets {
             let candidate = target?.path().join(name);
-            if candidate.is_file()
-                && lillux::sha256_hex(&std::fs::read(&candidate)?) == sha256
-            {
+            if candidate.is_file() && lillux::sha256_hex(&std::fs::read(&candidate)?) == sha256 {
                 return Ok(candidate);
             }
         }
@@ -174,10 +177,10 @@ fn node_selection(app: &Path, binding: &str, inputs: &Path) -> Result<NodeSelect
     let state = app.join(".ai/state");
     let cas = lillux::CasStore::new(state.join("objects"));
     let runtime_hash = field("guest_runtime_manifest_hash")?;
-    let runtime = manifest_files(
-        &cas.get_object(&runtime_hash)?
-            .with_context(|| format!("runtime manifest {runtime_hash} is not in the node's CAS"))?,
-    )?;
+    let runtime =
+        manifest_files(&cas.get_object(&runtime_hash)?.with_context(|| {
+            format!("runtime manifest {runtime_hash} is not in the node's CAS")
+        })?)?;
     let member = |path: &str, to: &str| -> Result<PathBuf> {
         let entry = runtime
             .iter()
@@ -186,7 +189,10 @@ fn node_selection(app: &Path, binding: &str, inputs: &Path) -> Result<NodeSelect
         let target = inputs.join(to);
         copy_blob(
             &cas,
-            entry.blob_hash.as_deref().context("runtime member has no blob")?,
+            entry
+                .blob_hash
+                .as_deref()
+                .context("runtime member has no blob")?,
             &target,
         )?;
         use std::os::unix::fs::PermissionsExt as _;
@@ -198,9 +204,9 @@ fn node_selection(app: &Path, binding: &str, inputs: &Path) -> Result<NodeSelect
     let product_manifest_hash = binding["workload"]["runtime_manifest_hash"]
         .as_str()
         .context("binding workload has no runtime manifest")?;
-    let product_value = cas
-        .get_object(product_manifest_hash)?
-        .with_context(|| format!("product manifest {product_manifest_hash} is not in the node's CAS"))?;
+    let product_value = cas.get_object(product_manifest_hash)?.with_context(|| {
+        format!("product manifest {product_manifest_hash} is not in the node's CAS")
+    })?;
     let product_manifest_record = inputs.join("product-manifest-record.json");
     std::fs::write(
         &product_manifest_record,
@@ -222,8 +228,12 @@ fn node_selection(app: &Path, binding: &str, inputs: &Path) -> Result<NodeSelect
                 .context("node has no runtime state directory")?;
             let store = ryeos_state::LargeObjectStore::open_under(&runtime_directory)?
                 .context("node has no large-object store")?;
-            let lease = store.lease_object(large, file.size.context("large product file has no size")?)?;
-            (lease.path().to_path_buf(), Some((lease, store, runtime_directory)))
+            let lease =
+                store.lease_object(large, file.size.context("large product file has no size")?)?;
+            (
+                lease.path().to_path_buf(),
+                Some((lease, store, runtime_directory)),
+            )
         }
         _ => anyhow::bail!("product file has no content"),
     };
@@ -257,7 +267,9 @@ fn leased_file_product(
 ) -> Result<(PathBuf, PathBuf)> {
     let record = cas
         .get_object_bytes_bounded(manifest_hash, 4 * 1024 * 1024)?
-        .with_context(|| format!("file product manifest {manifest_hash} is not in the node's CAS"))?;
+        .with_context(|| {
+            format!("file product manifest {manifest_hash} is not in the node's CAS")
+        })?;
     let file = manifest_files(&serde_json::from_slice(&record)?)?
         .into_iter()
         .next()
@@ -278,6 +290,157 @@ fn leased_file_product(
     let path = inputs.join("file-product-record.json");
     std::fs::write(&path, record)?;
     Ok((path, content))
+}
+
+/// Copy every file of one installed manifest under `to` (a directory mount)
+/// or to `to` itself (a single-file mount).
+fn materialize(
+    app: &Path,
+    cas: &lillux::CasStore,
+    manifest_hash: &str,
+    to: &Path,
+    single: bool,
+) -> Result<PathBuf> {
+    let record = cas
+        .get_object_bytes_bounded(manifest_hash, 4 * 1024 * 1024)?
+        .with_context(|| format!("manifest {manifest_hash} is not in the node's CAS"))?;
+    let files = manifest_files(&serde_json::from_slice(&record)?)?;
+    let state = app.join(".ai/state");
+    let runtime_directory =
+        lillux::PinnedDirectory::open(&state)?.context("node has no runtime state directory")?;
+    let store = ryeos_state::LargeObjectStore::open_under(&runtime_directory)?
+        .context("node has no large-object store")?;
+    if !single {
+        std::fs::create_dir_all(to)?;
+    }
+    for file in &files {
+        let target = if single {
+            to.to_path_buf()
+        } else {
+            to.join(&file.path)
+        };
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        match (file.blob_hash.as_deref(), file.file_sha256.as_deref()) {
+            (Some(blob), _) => copy_blob(cas, blob, &target)?,
+            (None, Some(large)) => {
+                let lease =
+                    store.lease_object(large, file.size.context("large file has no size")?)?;
+                std::fs::copy(lease.path(), &target)?;
+            }
+            _ => anyhow::bail!("manifest file {} has no content", file.path),
+        }
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(
+            &target,
+            std::fs::Permissions::from_mode(file.mode.unwrap_or(0o644)),
+        )?;
+    }
+    let record_path = PathBuf::from(format!("{}.manifest.json", to.display()));
+    std::fs::write(&record_path, record)?;
+    Ok(record_path)
+}
+
+/// Rehearse the candidate program and guest inputs a controller retained for
+/// one placement (its sealed bootstrap, as written by the controller-side
+/// dump), rematerialized from the node's stores, under the node's products.
+fn rehearse_retained(
+    app: &Path,
+    binding: &str,
+    retained: &Path,
+) -> Result<GuestStartRehearsalOutcome> {
+    use ryeos_external_execution::guest_start_rehearsal::{
+        RehearsalCandidate, RehearsalMount, RehearsalMountSource,
+    };
+    let document: serde_json::Value = serde_json::from_slice(&std::fs::read(retained)?)?;
+    let bootstrap = &document["bootstrap"];
+    let guest_inputs: ryeos_external_execution_contract::ExternalGuestInputProjection =
+        serde_json::from_value(bootstrap["guest_inputs"].clone())?;
+    let inputs = scratch();
+    let cas = lillux::CasStore::new(app.join(".ai/state/objects"));
+    let mut sources = Vec::new();
+    for (index, input) in guest_inputs.inputs.iter().enumerate() {
+        use ryeos_external_execution_contract::{GuestMountContentAuthority, GuestMountKind};
+        sources.push(match &input.content_authority {
+            GuestMountContentAuthority::ProductManifest { manifest_hash, .. } => {
+                let to = inputs.path().join(format!("input-{index:02}"));
+                let record = materialize(
+                    app,
+                    &cas,
+                    manifest_hash,
+                    &to,
+                    input.kind == GuestMountKind::RegularFile,
+                )?;
+                Some((to, record))
+            }
+            GuestMountContentAuthority::PrivateScratch { .. } => None,
+            other => anyhow::bail!(
+                "retained input {} has unsupported content authority {other:?}",
+                input.authority_id
+            ),
+        });
+    }
+    let mounts: Vec<RehearsalMount<'_>> = guest_inputs
+        .inputs
+        .iter()
+        .zip(&sources)
+        .map(|(input, source)| RehearsalMount {
+            role: input.role,
+            authority_id: &input.authority_id,
+            destination: &input.destination,
+            kind: input.kind,
+            access: input.access,
+            normalized_mode: input.normalized_mode,
+            source: match (source, &input.content_authority) {
+                (Some((content, record)), _) => RehearsalMountSource::Product {
+                    content,
+                    manifest_record: record,
+                },
+                (
+                    None,
+                    ryeos_external_execution_contract::GuestMountContentAuthority::PrivateScratch {
+                        binding_hash,
+                    },
+                ) => RehearsalMountSource::PrivateScratch { binding_hash },
+                _ => unreachable!(),
+            },
+        })
+        .collect();
+    let selection = node_selection(app, binding, inputs.path())?;
+    eprintln!(
+        "rehearsing the retained candidate of binding {binding} with {} mounts",
+        mounts.len()
+    );
+    run_guest_start_rehearsal(&GuestStartRehearsalRequest {
+        owner_executable: &selection.owner,
+        profile: selection.profile,
+        supervisor_executable: &selection.supervisor,
+        launcher_executable: &selection.launcher,
+        product: inputs.path(),
+        product_manifest_record: None,
+        file_products: &[],
+        base_snapshot: Some(GuestStartRehearsalBase {
+            cas: &cas,
+            snapshot_hash: &guest_inputs.base_snapshot.snapshot_hash,
+        }),
+        relay: selection.relay,
+        network_inputs: selection.network_inputs,
+        attach_budget: lillux::time::Duration::from_secs(selection.attach_budget_seconds),
+        work_parent: &work_parent(),
+        host_executable: &std::env::current_exe()?,
+        candidate: Some(RehearsalCandidate {
+            program: serde_json::from_value(bootstrap["candidate_program"].clone())?,
+            bootstrap_schema: bootstrap["schema"]
+                .as_u64()
+                .and_then(|schema| u32::try_from(schema).ok())
+                .context("retained bootstrap has no schema")?,
+            mounts: &mounts,
+            environment: guest_inputs.environment.clone(),
+            executable_search: guest_inputs.executable_search.clone(),
+            limits: serde_json::from_value(bootstrap.clone())?,
+        }),
+    })
 }
 
 fn rehearse_node(app: &Path, binding: &str) -> Result<GuestStartRehearsalOutcome> {
@@ -323,15 +486,18 @@ fn rehearse_node(app: &Path, binding: &str) -> Result<GuestStartRehearsalOutcome
         product: &inputs.path().join("product"),
         product_manifest_record: Some(&selection.product_manifest_record),
         file_products: &file_products,
-        base_snapshot: base_hash.as_deref().map(|snapshot_hash| GuestStartRehearsalBase {
-            cas: &cas,
-            snapshot_hash,
-        }),
+        base_snapshot: base_hash
+            .as_deref()
+            .map(|snapshot_hash| GuestStartRehearsalBase {
+                cas: &cas,
+                snapshot_hash,
+            }),
         relay: selection.relay,
         network_inputs: selection.network_inputs,
         attach_budget: lillux::time::Duration::from_secs(selection.attach_budget_seconds),
         work_parent: &work_parent(),
         host_executable: &std::env::current_exe()?,
+        candidate: None,
     })
 }
 
@@ -357,7 +523,10 @@ fn synthetic_network() -> ExternalNetworkInputPolicy {
     .unwrap()
 }
 
-fn rehearse_synthetic(bin: &Path, private_source_max_bytes: u64) -> Result<GuestStartRehearsalOutcome> {
+fn rehearse_synthetic(
+    bin: &Path,
+    private_source_max_bytes: u64,
+) -> Result<GuestStartRehearsalOutcome> {
     let inputs = scratch();
     let product = inputs.path().join("product/bin");
     std::fs::create_dir_all(&product)?;
@@ -386,6 +555,7 @@ fn rehearse_synthetic(bin: &Path, private_source_max_bytes: u64) -> Result<Guest
         attach_budget: lillux::time::Duration::from_secs(300),
         work_parent: &work_parent(),
         host_executable: &std::env::current_exe()?,
+        candidate: None,
     })
 }
 
@@ -410,7 +580,11 @@ fn main() {
     if let Some(app) = std::env::var_os("RYEOS_GUEST_START_REHEARSAL_APP_ROOT") {
         let binding = std::env::var("RYEOS_GUEST_START_REHEARSAL_BINDING")
             .expect("RYEOS_GUEST_START_REHEARSAL_BINDING names the binding to rehearse");
-        let outcome = rehearse_node(Path::new(&app), &binding).expect("rehearse node selection");
+        let outcome = match std::env::var_os("RYEOS_GUEST_START_REHEARSAL_RETAINED") {
+            Some(retained) => rehearse_retained(Path::new(&app), &binding, Path::new(&retained))
+                .expect("rehearse the retained candidate"),
+            None => rehearse_node(Path::new(&app), &binding).expect("rehearse node selection"),
+        };
         print(&outcome);
         return;
     }

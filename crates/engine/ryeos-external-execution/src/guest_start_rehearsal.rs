@@ -21,7 +21,9 @@ use std::io::Write as _;
 use std::path::Path;
 
 use anyhow::{Context as _, Result, ensure};
-use base64::{Engine as _, engine::general_purpose::STANDARD, engine::general_purpose::URL_SAFE_NO_PAD};
+use base64::{
+    Engine as _, engine::general_purpose::STANDARD, engine::general_purpose::URL_SAFE_NO_PAD,
+};
 use ryeos_external_execution_contract::guest_import_authorization::{
     GUEST_IMPORT_AUTHORIZATION_SCHEMA, GUEST_OCCURRENCE_ASSIGNMENT_SCHEMA,
     GuestImportAuthorization, GuestOccurrenceAssignment, GuestOccurrenceAssignmentDocument,
@@ -35,9 +37,10 @@ use ryeos_external_execution_contract::{
     GuestProductManifestKind, GuestWorkspaceView,
 };
 use ryeos_state::external_execution::admission::{
-    AdmittedExternalCandidateProgram, CONNECTOR_PROTOCOL, ExternalCandidateExecutionRoute,
-    ExternalCandidateProcFilesystem, ExternalCandidateQualificationUse,
-    ExternalCandidateRequirement, ExternalCandidateRuntimeAuthority, ExternalCandidateRuntimeRecipe,
+    AdmittedExternalCandidateProgram, AdmittedExternalExecutionProgram, CONNECTOR_PROTOCOL,
+    ExternalCandidateExecutionRoute, ExternalCandidateProcFilesystem,
+    ExternalCandidateQualificationUse, ExternalCandidateRequirement,
+    ExternalCandidateRuntimeAuthority, ExternalCandidateRuntimeRecipe,
     ExternalCandidateRuntimeSource, PROTOCOL,
 };
 use ryeos_state::external_execution::transport::{
@@ -114,6 +117,51 @@ pub struct GuestStartRehearsalRequest<'a> {
     pub work_parent: &'a Path,
     /// Executable that runs [`run_rehearsal_host_if_requested`] first thing.
     pub host_executable: &'a Path,
+    /// A real candidate program and the mounts its inputs name. When set,
+    /// `product` and `file_products` are not delivered.
+    pub candidate: Option<RehearsalCandidate<'a>>,
+}
+
+/// A candidate program and the guest inputs a controller delivered with it.
+pub struct RehearsalCandidate<'a> {
+    pub program: AdmittedExternalExecutionProgram,
+    pub bootstrap_schema: u32,
+    pub mounts: &'a [RehearsalMount<'a>],
+    pub environment: BTreeMap<String, String>,
+    pub executable_search: Vec<String>,
+    pub limits: RehearsalCandidateLimits,
+}
+
+/// The bootstrap bounds the controller sealed with the candidate.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RehearsalCandidateLimits {
+    pub execution_timeout_seconds: u32,
+    pub post_execution_timeout_seconds: u32,
+    pub candidate_export_max_bytes: u64,
+    pub channel_max_bytes: u64,
+    pub native_journal: ExternalSupervisorNativeEnvelope,
+    pub report_capabilities: bool,
+}
+
+/// One guest input mount, rematerialized locally.
+pub struct RehearsalMount<'a> {
+    pub role: GuestMountRole,
+    pub authority_id: &'a str,
+    pub destination: &'a str,
+    pub kind: GuestMountKind,
+    pub access: GuestMountAccess,
+    pub normalized_mode: Option<u32>,
+    pub source: RehearsalMountSource<'a>,
+}
+
+pub enum RehearsalMountSource<'a> {
+    /// A product's content (a directory or one file) and its manifest record.
+    Product {
+        content: &'a Path,
+        manifest_record: &'a Path,
+    },
+    /// A fresh private scratch directory.
+    PrivateScratch { binding_hash: &'a str },
 }
 
 /// A project snapshot held by a node's CAS.
@@ -339,7 +387,8 @@ pub(crate) fn copy_tree(
             let mode = file.permission_mode()?;
             copy_file(
                 target,
-                name.to_str().context("rehearsal product name is not UTF-8")?,
+                name.to_str()
+                    .context("rehearsal product name is not UTF-8")?,
                 &file,
                 mode,
             )?;
@@ -456,7 +505,9 @@ fn rehearsal_program(
         requirement,
         qualification_use,
         runtime_manifest_kind: match manifest_kind {
-            GuestProductManifestKind::Content => ryeos_state::objects::EXTERNAL_CONTENT_MANIFEST_KIND,
+            GuestProductManifestKind::Content => {
+                ryeos_state::objects::EXTERNAL_CONTENT_MANIFEST_KIND
+            }
             GuestProductManifestKind::LargeContent => {
                 ryeos_state::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND
             }
@@ -474,31 +525,171 @@ fn rehearsal_program(
     Ok(program)
 }
 
-fn prepare(
-    request: &GuestStartRehearsalRequest<'_>,
+/// What a rehearsal mounts: the candidate product, any single-file products
+/// and the base snapshot.
+pub struct RehearsalInputsRequest<'a> {
+    pub product: &'a Path,
+    pub product_manifest_record: Option<&'a Path>,
+    pub product_mount: &'a str,
+    pub product_destination: &'a str,
+    pub base_snapshot: Option<GuestStartRehearsalBase<'a>>,
+    pub file_products: &'a [GuestStartRehearsalFileProduct<'a>],
+}
+
+struct AssembledInputs {
+    projection: ExternalGuestInputProjection,
+    base_authority: lillux::InheritedDescriptorAuthority,
+    input_authorities: Vec<lillux::InheritedDescriptorAuthority>,
+    record_authorities: Vec<lillux::InheritedDescriptorAuthority>,
+    measurement: ryeos_project_capture::ProjectSnapshotTransferMeasurement,
+    product_manifest_hash: String,
+    manifest_kind: GuestProductManifestKind,
+    /// Product, record and file-product bytes the package carries.
+    delivered_bytes: u64,
+}
+
+/// Rehearsal guest inputs copied into `work`, with their descriptor authority.
+pub struct RehearsalGuestInputs {
+    pub authority: ExternalGuestInputAuthority,
+    pub product_manifest_hash: String,
+    pub manifest_kind: GuestProductManifestKind,
+    pub base_snapshot_hash: String,
+}
+
+/// Copy the inputs a rehearsal mounts into `work` and project them.
+pub fn rehearsal_guest_inputs(
     work: &lillux::PinnedDirectory,
-) -> Result<Prepared> {
-    let run = hex::encode(lillux::crypto::generate_random_bytes::<8>());
-    let occurrence_id = format!("rehearsal-{run}");
-    let root_key = lillux::crypto::generate_signing_key();
-    let controller_key = lillux::crypto::generate_signing_key();
+    request: &RehearsalInputsRequest<'_>,
+) -> Result<RehearsalGuestInputs> {
+    let assembled = assemble_inputs(work, request)?;
+    Ok(RehearsalGuestInputs {
+        base_snapshot_hash: assembled.measurement.snapshot_hash.clone(),
+        product_manifest_hash: assembled.product_manifest_hash,
+        manifest_kind: assembled.manifest_kind,
+        authority: ExternalGuestInputAuthority::new(
+            assembled.projection,
+            assembled.base_authority,
+            None,
+            assembled.input_authorities,
+            assembled.record_authorities,
+            Vec::new(),
+        )?,
+    })
+}
 
-    // Same owner bytes and profile under the fresh rehearsal root.
-    let owner_source = open_source(request.owner_executable, "owner executable")?;
-    let owner = copy_file(work, OWNER_NAME, &owner_source, 0o755)?;
-    let owner_bytes = owner.observation()?.size();
-    let owner_sha256 = owner.digest_stable_exact(&owner.observation()?)?;
-    let runtime = produce_guest_owner_runtime(
-        work,
-        OsStr::new(RUNTIME_NAME),
-        &owner.inherited_descriptor_authority()?,
-        owner_bytes,
-        &owner_sha256,
-        &root_key.verifying_key(),
-        &request.profile,
-    )?;
-    let runtime_manifest_hash = runtime.manifest_hash().to_owned();
+fn assemble_candidate_inputs(
+    work: &lillux::PinnedDirectory,
+    base: Option<GuestStartRehearsalBase<'_>>,
+    candidate: &RehearsalCandidate<'_>,
+) -> Result<AssembledInputs> {
+    let (base_directory, measurement) = base_snapshot(work, base)?;
+    let base_authority = base_directory.inherited_descriptor_authority()?;
+    let mut inputs = Vec::new();
+    let mut input_authorities = Vec::new();
+    let mut record_authorities = Vec::new();
+    let mut delivered_bytes = 0_u64;
+    for (index, mount) in candidate.mounts.iter().enumerate() {
+        let name = format!("mount-{index:02}");
+        let (authority, content_authority, bytes) = match &mount.source {
+            RehearsalMountSource::Product {
+                content,
+                manifest_record,
+            } => {
+                let record = read_record(manifest_record)?;
+                let (kind, total) = manifest_kind_of(&record)?;
+                let authority = match mount.kind {
+                    GuestMountKind::Directory => {
+                        let source =
+                            lillux::PinnedDirectory::open(content)?.with_context(|| {
+                                format!("rehearsal mount {} is absent", content.display())
+                            })?;
+                        let copy = work.create_child(OsStr::new(&name), 0o700)?;
+                        copy_tree(&source, &copy, &mut 400_000)?;
+                        copy.set_mode(0o755)?;
+                        copy.inherited_descriptor_authority()?
+                    }
+                    GuestMountKind::RegularFile => copy_file(
+                        work,
+                        &name,
+                        &open_source(content, "mounted file")?,
+                        mount.normalized_mode.unwrap_or(0o444),
+                    )?
+                    .inherited_descriptor_authority()?,
+                };
+                let record_file = write_file(work, &format!("{name}.json"), &record, 0o644)?;
+                let record_authority = record_file.inherited_descriptor_authority()?;
+                let content_authority = GuestMountContentAuthority::ProductManifest {
+                    manifest_kind: kind,
+                    manifest_hash: lillux::sha256_hex(&record),
+                    manifest_descriptor: record_authority
+                        .inherited_descriptor()
+                        .map_err(anyhow::Error::msg)?,
+                    manifest_bytes: record.len() as u64,
+                };
+                record_authorities.push(record_authority);
+                delivered_bytes += total + record.len() as u64;
+                (authority, content_authority, total)
+            }
+            RehearsalMountSource::PrivateScratch { binding_hash } => (
+                work.create_child(OsStr::new(&name), 0o700)?
+                    .inherited_descriptor_authority()?,
+                GuestMountContentAuthority::PrivateScratch {
+                    binding_hash: (*binding_hash).to_owned(),
+                },
+                0,
+            ),
+        };
+        inputs.push(GuestMountInput {
+            role: mount.role,
+            authority_id: mount.authority_id.into(),
+            descriptor: authority
+                .inherited_descriptor()
+                .map_err(anyhow::Error::msg)?,
+            destination: mount.destination.into(),
+            kind: mount.kind,
+            access: mount.access,
+            normalized_mode: mount.normalized_mode,
+            content_authority,
+            bytes,
+        });
+        input_authorities.push(authority);
+    }
+    let projection = ExternalGuestInputProjection {
+        workspace_view: GuestWorkspaceView::FullSnapshot,
+        schema: EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA,
+        base_snapshot: GuestBaseSnapshotInput {
+            descriptor: base_authority
+                .inherited_descriptor()
+                .map_err(anyhow::Error::msg)?,
+            snapshot_hash: measurement.snapshot_hash.clone(),
+            closure_digest: measurement.closure_digest.clone(),
+            object_count: measurement.object_count,
+            blob_count: measurement.blob_count,
+            total_bytes: measurement.total_bytes,
+        },
+        workspace_outputs: None,
+        inputs,
+        executable_search: candidate.executable_search.clone(),
+        environment: candidate.environment.clone(),
+    };
+    projection.validate()?;
+    candidate.program.validate_guest_inputs(&projection)?;
+    Ok(AssembledInputs {
+        projection,
+        base_authority,
+        input_authorities,
+        record_authorities,
+        measurement,
+        product_manifest_hash: candidate.program.runtime_manifest_hash()?.to_owned(),
+        manifest_kind: GuestProductManifestKind::LargeContent,
+        delivered_bytes,
+    })
+}
 
+fn assemble_inputs(
+    work: &lillux::PinnedDirectory,
+    request: &RehearsalInputsRequest<'_>,
+) -> Result<AssembledInputs> {
     // Candidate product as delivered, and its manifest record.
     let product_source = lillux::PinnedDirectory::open(request.product)?
         .with_context(|| format!("rehearsal product {} is absent", request.product.display()))?;
@@ -519,27 +710,15 @@ fn prepare(
                     == lillux::sha256_hex(&record),
                 "rehearsal product manifest record differs from its digest"
             );
-            (GuestProductManifestKind::Content, record, manifest.total_bytes)
+            (
+                GuestProductManifestKind::Content,
+                record,
+                manifest.total_bytes,
+            )
         }
     };
     let product_manifest_hash = lillux::sha256_hex(&manifest_record);
     let record_file = write_file(work, "product-manifest.json", &manifest_record, 0o644)?;
-
-    let supervisor = copy_file(
-        work,
-        "supervisor",
-        &open_source(request.supervisor_executable, "supervisor executable")?,
-        0o755,
-    )?;
-    let launcher = copy_file(
-        work,
-        "launcher",
-        &open_source(request.launcher_executable, "launcher executable")?,
-        0o755,
-    )?;
-    let supervisor_sha256 = supervisor.digest_stable_exact(&supervisor.observation()?)?;
-    let launcher_sha256 = launcher.digest_stable_exact(&launcher.observation()?)?;
-    let member_bytes = supervisor.observation()?.size() + launcher.observation()?.size();
 
     let (base, measurement) = base_snapshot(work, request.base_snapshot)?;
     let base_authority = base.inherited_descriptor_authority()?;
@@ -547,11 +726,11 @@ fn prepare(
     let record_authority = record_file.inherited_descriptor_authority()?;
     let mut inputs = vec![GuestMountInput {
         role: GuestMountRole::Product,
-        authority_id: PRODUCT_MOUNT.into(),
+        authority_id: request.product_mount.into(),
         descriptor: product_authority
             .inherited_descriptor()
             .map_err(anyhow::Error::msg)?,
-        destination: PRODUCT_DESTINATION.into(),
+        destination: request.product_destination.into(),
         kind: GuestMountKind::Directory,
         access: GuestMountAccess::ReadOnly,
         normalized_mode: None,
@@ -582,8 +761,12 @@ fn prepare(
             &open_source(extra.file, "file product")?,
             mode,
         )?;
-        let record_file =
-            write_file(work, &format!("file-product-{index:02}.json"), &record, 0o644)?;
+        let record_file = write_file(
+            work,
+            &format!("file-product-{index:02}.json"),
+            &record,
+            0o644,
+        )?;
         let file_authority = file.inherited_descriptor_authority()?;
         let record_authority = record_file.inherited_descriptor_authority()?;
         inputs.push(GuestMountInput {
@@ -629,9 +812,91 @@ fn prepare(
         environment: BTreeMap::new(),
     };
     projection.validate()?;
+    Ok(AssembledInputs {
+        projection,
+        base_authority,
+        input_authorities,
+        record_authorities,
+        measurement,
+        product_manifest_hash,
+        manifest_kind,
+        delivered_bytes: product_bytes + manifest_record.len() as u64 + extra_bytes,
+    })
+}
+
+fn prepare(
+    request: &GuestStartRehearsalRequest<'_>,
+    work: &lillux::PinnedDirectory,
+) -> Result<Prepared> {
+    let run = hex::encode(lillux::crypto::generate_random_bytes::<8>());
+    let occurrence_id = format!("rehearsal-{run}");
+    let root_key = lillux::crypto::generate_signing_key();
+    let controller_key = lillux::crypto::generate_signing_key();
+
+    // Same owner bytes and profile under the fresh rehearsal root.
+    let owner_source = open_source(request.owner_executable, "owner executable")?;
+    let owner = copy_file(work, OWNER_NAME, &owner_source, 0o755)?;
+    let owner_bytes = owner.observation()?.size();
+    let owner_sha256 = owner.digest_stable_exact(&owner.observation()?)?;
+    let runtime = produce_guest_owner_runtime(
+        work,
+        OsStr::new(RUNTIME_NAME),
+        &owner.inherited_descriptor_authority()?,
+        owner_bytes,
+        &owner_sha256,
+        &root_key.verifying_key(),
+        &request.profile,
+    )?;
+    let runtime_manifest_hash = runtime.manifest_hash().to_owned();
+
+    let supervisor = copy_file(
+        work,
+        "supervisor",
+        &open_source(request.supervisor_executable, "supervisor executable")?,
+        0o755,
+    )?;
+    let launcher = copy_file(
+        work,
+        "launcher",
+        &open_source(request.launcher_executable, "launcher executable")?,
+        0o755,
+    )?;
+    let supervisor_sha256 = supervisor.digest_stable_exact(&supervisor.observation()?)?;
+    let launcher_sha256 = launcher.digest_stable_exact(&launcher.observation()?)?;
+    let member_bytes = supervisor.observation()?.size() + launcher.observation()?.size();
+
+    let AssembledInputs {
+        projection,
+        base_authority,
+        input_authorities,
+        record_authorities,
+        measurement,
+        product_manifest_hash,
+        manifest_kind,
+        delivered_bytes,
+    } = match &request.candidate {
+        Some(candidate) => assemble_candidate_inputs(work, request.base_snapshot, candidate)?,
+        None => assemble_inputs(
+            work,
+            &RehearsalInputsRequest {
+                product: request.product,
+                product_manifest_record: request.product_manifest_record,
+                product_mount: PRODUCT_MOUNT,
+                product_destination: PRODUCT_DESTINATION,
+                base_snapshot: request.base_snapshot,
+                file_products: request.file_products,
+            },
+        )?,
+    };
     let guest_input_identity = projection.identity_digest()?;
-    let program = rehearsal_program(manifest_kind, &product_manifest_hash, &run)?;
-    let supervisor_runtime_hash = product_manifest_hash.clone();
+    let (program, bootstrap_schema) = match &request.candidate {
+        Some(candidate) => (candidate.program.clone(), candidate.bootstrap_schema),
+        None => (
+            rehearsal_program(manifest_kind, &product_manifest_hash, &run)?.into(),
+            EXTERNAL_SUPERVISOR_ORDINARY_RELAY_BOOTSTRAP_SCHEMA,
+        ),
+    };
+    let supervisor_runtime_hash = program.runtime_manifest_hash()?.to_owned();
 
     let attach_budget_ms = u64::try_from(request.attach_budget.as_millis())
         .context("rehearsal attach budget overflow")?;
@@ -644,7 +909,7 @@ fn prepare(
     let activation_request_digest = digest_of("activation", &run);
     let execution_binding_hash = digest_of("binding", &run);
     let bootstrap = ExternalSupervisorBootstrap {
-        schema: EXTERNAL_SUPERVISOR_ORDINARY_RELAY_BOOTSTRAP_SCHEMA,
+        schema: bootstrap_schema,
         controller: ExternalControllerTransportSelection::ControllerFileRelay(
             request.relay.clone(),
         ),
@@ -657,7 +922,7 @@ fn prepare(
         execution_binding_hash: execution_binding_hash.clone(),
         supervisor_runtime_hash: supervisor_runtime_hash.clone(),
         launcher_artifact_hash: launcher_sha256.clone(),
-        candidate_program: program.into(),
+        candidate_program: program,
         guest_input_identity: guest_input_identity.clone(),
         guest_inputs: projection.clone(),
         owner_public_key: ryeos_state::external_execution::encode_channel_public_key(
@@ -679,18 +944,27 @@ fn prepare(
         },
         report_capabilities: false,
     };
+    let mut bootstrap = bootstrap;
+    if let Some(limits) = request
+        .candidate
+        .as_ref()
+        .map(|candidate| &candidate.limits)
+    {
+        bootstrap.execution_timeout_seconds = limits.execution_timeout_seconds;
+        bootstrap.post_execution_timeout_seconds = limits.post_execution_timeout_seconds;
+        bootstrap.candidate_export_max_bytes = limits.candidate_export_max_bytes;
+        bootstrap.channel_max_bytes = limits.channel_max_bytes;
+        bootstrap.native_journal = limits.native_journal.clone();
+        bootstrap.report_capabilities = limits.report_capabilities;
+    }
     bootstrap.validate()?;
     let bootstrap_bytes = bootstrap.canonical_bytes()?;
     let bootstrap_sha256 = lillux::sha256_hex(&bootstrap_bytes);
     let mailbox_root = bootstrap.relay_mailbox_root()?;
     let bootstrap_file = write_file(work, "bootstrap", &bootstrap_bytes, 0o600)?;
 
-    let known_regular = measurement.total_bytes
-        + member_bytes
-        + bootstrap_bytes.len() as u64
-        + product_bytes
-        + manifest_record.len() as u64
-        + extra_bytes;
+    let known_regular =
+        measurement.total_bytes + member_bytes + bootstrap_bytes.len() as u64 + delivered_bytes;
     let maximum_regular_bytes = known_regular + 64 * 1024;
     let maximum_framed_bytes = maximum_regular_bytes * 2 + 16 * 1024 * 1024;
     let expected = GuestStagingExpected {
@@ -811,7 +1085,10 @@ fn prepare(
 }
 
 /// Refuse where the host cannot create the enclosure the owner needs.
-pub(crate) fn host_refusal(profile: &GuestOwnerRuntimeProfile, work_parent: &Path) -> Option<String> {
+pub(crate) fn host_refusal(
+    profile: &GuestOwnerRuntimeProfile,
+    work_parent: &Path,
+) -> Option<String> {
     let facts = lillux::process_control::HostFacts::observe(0, work_parent);
     if !facts.unshare_user_pid_mount.allowed() {
         return Some(format!(
@@ -823,7 +1100,11 @@ pub(crate) fn host_refusal(profile: &GuestOwnerRuntimeProfile, work_parent: &Pat
     lillux::root_enclosure::root_enclosure_unavailable_reason(&enclosure_spec(uid, gid, 1))
 }
 
-fn enclosure_spec(uid: u32, gid: u32, package_bytes: u64) -> lillux::root_enclosure::RootEnclosureSpec<'static> {
+fn enclosure_spec(
+    uid: u32,
+    gid: u32,
+    package_bytes: u64,
+) -> lillux::root_enclosure::RootEnclosureSpec<'static> {
     lillux::root_enclosure::RootEnclosureSpec {
         account_uid: uid,
         account_gid: gid,
@@ -865,7 +1146,10 @@ pub fn run_guest_start_rehearsal(
                 ));
             }
         };
-        let timeout = (prepared.plan.owner_deadline_ms.max(prepared.plan.attach_budget_ms)
+        let timeout = (prepared
+            .plan
+            .owner_deadline_ms
+            .max(prepared.plan.attach_budget_ms)
             + OWNER_CLEANUP.as_millis() as u64
             + 120_000) as f64
             / 1_000.0;
@@ -885,7 +1169,11 @@ pub fn run_guest_start_rehearsal(
             inherited_fd_mappings: Vec::new(),
             supervised_status: None,
         });
-        let line = output.stdout.lines().rev().find(|line| !line.trim().is_empty());
+        let line = output
+            .stdout
+            .lines()
+            .rev()
+            .find(|line| !line.trim().is_empty());
         match line.map(serde_json::from_str::<GuestStartRehearsalOutcome>) {
             Some(Ok(outcome)) => Ok(outcome),
             _ => Ok(GuestStartRehearsalOutcome::Refused {
@@ -904,11 +1192,7 @@ pub fn run_guest_start_rehearsal(
     })();
     let cleanup = work
         .remove_contents_recursive_bounded(lillux::DirectoryTraversalBudget::new(1_000_000, 64))
-        .and_then(|_| {
-            parent
-                .remove_empty_child_if_same(&name, &work)
-                .map(|_| ())
-        });
+        .and_then(|_| parent.remove_empty_child_if_same(&name, &work).map(|_| ()));
     match (result, cleanup) {
         (Ok(outcome), Ok(())) => Ok(outcome),
         (Ok(_), Err(error)) => Err(error.context("rehearsal work directory cleanup failed")),
@@ -1008,7 +1292,8 @@ fn lay_out(
     import: &lillux::PinnedRegularFile,
     package: &lillux::PinnedRegularFile,
 ) -> Result<()> {
-    let root = lillux::PinnedDirectory::open(Path::new("/"))?.context("enclosure root is absent")?;
+    let root =
+        lillux::PinnedDirectory::open(Path::new("/"))?.context("enclosure root is absent")?;
     let ryeos = root.create_child(OsStr::new("ryeos"), 0o700)?;
     let installed = ryeos.create_child(OsStr::new("guest-runtime"), 0o700)?;
     let bin = installed.create_child(OsStr::new("bin"), 0o700)?;
@@ -1149,7 +1434,8 @@ fn observe_owner(plan: &HostPlan) -> Result<GuestStartRehearsalOutcome> {
         let attach_budget_ms = plan.attach_budget_ms;
         let attach_window = phases.release_ms.unwrap_or(0) + phases.attach_ms.unwrap_or(0);
         return Ok(GuestStartRehearsalOutcome::AttachPublished {
-            within_budget: attach_window <= attach_budget_ms && phases.total_ms <= plan.owner_deadline_ms,
+            within_budget: attach_window <= attach_budget_ms
+                && phases.total_ms <= plan.owner_deadline_ms,
             phases,
             attach_budget_ms,
             package: plan.package.clone(),
@@ -1162,14 +1448,19 @@ fn observe_owner(plan: &HostPlan) -> Result<GuestStartRehearsalOutcome> {
         Some(exit) => {
             drain(&mut captured, lillux::time::Duration::from_millis(500));
             let stderr = String::from_utf8_lossy(&captured);
-            let last = stderr.lines().rev().find(|line| !line.trim().is_empty()).unwrap_or("");
-            format!("the owner exited with {:?} during {step:?}: {last}", exit.code)
+            let last = stderr
+                .lines()
+                .rev()
+                .find(|line| !line.trim().is_empty())
+                .unwrap_or("");
+            format!(
+                "the owner exited with {:?} during {step:?}: {last}",
+                exit.code
+            )
         }
         None => {
             let cleanup = settle_owner(&mut owner, &mut |slice| drain(&mut captured, slice));
-            format!(
-                "the owner reached no {step:?} record within its deadline; {cleanup}"
-            )
+            format!("the owner reached no {step:?} record within its deadline; {cleanup}")
         }
     };
     Ok(GuestStartRehearsalOutcome::Refused {

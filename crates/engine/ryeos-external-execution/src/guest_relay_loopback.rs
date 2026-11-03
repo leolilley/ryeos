@@ -15,16 +15,18 @@ use std::io::{BufRead as _, Read as _, Write as _};
 use std::path::Path;
 
 use anyhow::{Context as _, Result, bail, ensure};
-use base64::{Engine as _, engine::general_purpose::STANDARD, engine::general_purpose::URL_SAFE_NO_PAD};
+use base64::{
+    Engine as _, engine::general_purpose::STANDARD, engine::general_purpose::URL_SAFE_NO_PAD,
+};
 use ryeos_external_execution_contract::guest_owner_report::{
     GuestOwnerActivationReport, GuestOwnerStdout, GuestOwnerTerminal,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::guest_start_rehearsal::{
-    ACTIVATION_NAME, GuestStartRehearsalPackage, HostMode, HostPlan, IMPORT_NAME,
-    MAX_STDERR_BYTES, PACKAGE_NAME, PLAN_NAME, POLL_INTERVAL, REHEARSAL_HOST_ENV, RUNTIME_NAME,
-    copy_file, copy_tree, settle_owner, spawn_owner, write_file,
+    ACTIVATION_NAME, GuestStartRehearsalPackage, HostMode, HostPlan, IMPORT_NAME, MAX_STDERR_BYTES,
+    PACKAGE_NAME, PLAN_NAME, POLL_INTERVAL, REHEARSAL_HOST_ENV, RUNTIME_NAME, copy_file, copy_tree,
+    settle_owner, spawn_owner, write_file,
 };
 
 /// Largest relay file the loopback moves; the signed relay bound is smaller.
@@ -51,14 +53,27 @@ enum Request {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Message {
-    OwnerStdout { text: String },
-    OwnerExited { code: Option<i32> },
-    Downloaded { bytes_base64: String },
+    OwnerStdout {
+        text: String,
+    },
+    OwnerExited {
+        code: Option<i32>,
+    },
+    Downloaded {
+        bytes_base64: String,
+    },
     Absent,
     Uploaded,
-    Refused { message: String },
-    Stopped { owner_cleanup: String, owner_stderr: String },
-    Failed { message: String },
+    Refused {
+        message: String,
+    },
+    Stopped {
+        owner_cleanup: String,
+        owner_stderr: String,
+    },
+    Failed {
+        message: String,
+    },
 }
 
 fn emit(message: &Message) {
@@ -102,7 +117,11 @@ pub struct GuestRelayLoopbackHost {
     input: lillux::subordinate_process::SubordinateProcessInput,
     output: lillux::subordinate_process::SubordinateProcessOutput,
     error: lillux::subordinate_process::SubordinateProcessError,
-    work: Option<(lillux::PinnedDirectory, std::ffi::OsString, lillux::PinnedDirectory)>,
+    work: Option<(
+        lillux::PinnedDirectory,
+        std::ffi::OsString,
+        lillux::PinnedDirectory,
+    )>,
     owner_report: GuestOwnerStdout,
     owner_terminal: Option<std::result::Result<GuestOwnerTerminal, ()>>,
     owner_stdout: String,
@@ -113,7 +132,10 @@ impl GuestRelayLoopbackHost {
     /// Copy the activation into a private work directory and start the host.
     pub fn start(request: &GuestRelayLoopbackRequest<'_>) -> Result<Self> {
         let parent = lillux::PinnedDirectory::open(request.work_parent)?.with_context(|| {
-            format!("loopback work parent {} is absent", request.work_parent.display())
+            format!(
+                "loopback work parent {} is absent",
+                request.work_parent.display()
+            )
         })?;
         let (name, work) = parent.create_unique_child("guest-relay-loopback", 0o700)?;
         let prepared = (|| -> Result<()> {
@@ -201,12 +223,19 @@ impl GuestRelayLoopbackHost {
 
     /// The next host line, or `None` at the deadline.
     fn next(&mut self, deadline: lillux::time::MonotonicDeadline) -> Result<Option<Message>> {
-        let line = match self.output.read_frame_until(b'\n', MAX_LINE_BYTES, deadline) {
+        let line = match self
+            .output
+            .read_frame_until(b'\n', MAX_LINE_BYTES, deadline)
+        {
             Ok(line) => line,
             Err(error) if error.kind() == std::io::ErrorKind::TimedOut => return Ok(None),
             Err(error) => return Err(error).context("read the loopback host"),
         };
-        ensure!(!line.is_empty(), "the loopback host closed its output: {}", self.stderr_now());
+        ensure!(
+            !line.is_empty(),
+            "the loopback host closed its output: {}",
+            self.stderr_now()
+        );
         let text = std::str::from_utf8(&line)?.trim_end();
         let message = serde_json::from_str::<Message>(text)
             .with_context(|| format!("the loopback host reported {text}"))?;
@@ -247,13 +276,19 @@ impl GuestRelayLoopbackHost {
             }
             match self.next(deadline) {
                 Ok(Some(_)) => {}
-                Ok(None) => return GuestOwnerActivationReport::NoReportBeforeDeadline { last_phase },
+                Ok(None) => {
+                    return GuestOwnerActivationReport::NoReportBeforeDeadline { last_phase };
+                }
                 Err(_) => return GuestOwnerActivationReport::StreamLost { last_phase },
             }
         }
     }
 
-    fn call(&mut self, request: &Request, deadline: lillux::time::MonotonicDeadline) -> Result<Message> {
+    fn call(
+        &mut self,
+        request: &Request,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<Message> {
         let mut line = serde_json::to_vec(request)?;
         line.push(b'\n');
         self.input
@@ -320,7 +355,8 @@ impl GuestRelayLoopbackHost {
 
     /// Ask the owner to cancel as a lost controller would, then end the host.
     pub fn stop(mut self) -> Result<GuestRelayLoopbackEnd> {
-        let deadline = lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(90));
+        let deadline =
+            lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(90));
         let result = self.call(&Request::Stop, deadline);
         let mut end = GuestRelayLoopbackEnd {
             owner_cleanup: String::new(),
@@ -482,7 +518,9 @@ fn split(path: &str) -> Result<(lillux::PinnedDirectory, &OsStr)> {
     let path = Path::new(path);
     ensure!(path.is_absolute(), "loopback relay path is not absolute");
     let parent = path.parent().context("loopback relay path has no parent")?;
-    let name = path.file_name().context("loopback relay path has no name")?;
+    let name = path
+        .file_name()
+        .context("loopback relay path has no name")?;
     let directory = lillux::PinnedDirectory::open(parent)?
         .with_context(|| format!("loopback mailbox {} is absent", parent.display()))?;
     Ok((directory, name))
@@ -524,7 +562,8 @@ fn handle(request: Request) -> Result<Message> {
                 ".loopback-delivery-{}",
                 hex::encode(lillux::crypto::generate_random_bytes::<8>())
             );
-            let mut file = directory.open_regular_create(OsStr::new(&staging), true, true, 0o600)?;
+            let mut file =
+                directory.open_regular_create(OsStr::new(&staging), true, true, 0o600)?;
             file.write_all(&bytes)?;
             file.sync_all()?;
             drop(file);
