@@ -129,6 +129,9 @@ pub(crate) trait ExternalPlacementBackend: Send + Sync + std::fmt::Debug {
         _credential: &PlacementCredential,
         _bootstrap: &ryeos_state::external_execution::transport::ExternalSupervisorBootstrap,
         _claim: crate::runtime_db::external_execution::ClaimedRelayFileContact,
+        _delivery_account: Option<
+            ryeos_external_execution_contract::relay_file::RelayDeliveryAccount,
+        >,
         _deadline: lillux::time::MonotonicDeadline,
     ) -> Result<
         ExternalLifecycleObservation<
@@ -4432,6 +4435,31 @@ pub(crate) fn contact_ordinary_external_relay_transfer(
     )
 }
 
+/// The account the guest's supervisor runs as, from the owner profile of the
+/// binding's guest runtime. The manifest is content-addressed, so a replayed
+/// upload derives the same account.
+fn guest_delivery_account(
+    state: &AppState,
+    contract: &ExternalPlacementBackendContract,
+) -> Result<ryeos_external_execution_contract::relay_file::RelayDeliveryAccount> {
+    let read = state.acquire_cas_read()?;
+    delivery_account_from_cas(read.cas(), &contract.guest_runtime_manifest_hash)
+}
+
+fn delivery_account_from_cas(
+    cas: &lillux::CasStore,
+    guest_runtime_manifest_hash: &str,
+) -> Result<ryeos_external_execution_contract::relay_file::RelayDeliveryAccount> {
+    let profile =
+        ryeos_external_execution::guest_import_authorization::GuestOwnerRuntimeProfile::from_cas(
+            cas,
+            guest_runtime_manifest_hash,
+        )?
+        .context("the guest owner runtime is not held by the content store")?;
+    let lillux::GuestRuntimeAccount::Unix { uid, gid } = profile.account;
+    Ok(ryeos_external_execution_contract::relay_file::RelayDeliveryAccount::Unix { uid, gid })
+}
+
 fn contact_external_relay_transfer(
     state: &AppState,
     placement: &str,
@@ -4594,20 +4622,27 @@ fn contact_external_relay_transfer(
     if direction == RelayDirection::ControllerToGuest
         && reserved.phase == RelayTransferPhase::Reserved
     {
+        let delivery_account = guest_delivery_account(state, &contract)?;
         let claim = state
             .state_store
             .claim_external_relay_upload_contact(&intent)?;
         // Even a transport error might follow a completed PUT. Never mint a
         // second upload; only the same-slot bounded GET can reconcile it.
-        let _upload_observation =
-            backend.relay_file_contact(&contract, &credential, bootstrap, claim, deadline);
+        let _upload_observation = backend.relay_file_contact(
+            &contract,
+            &credential,
+            bootstrap,
+            claim,
+            Some(delivery_account),
+            deadline,
+        );
     }
     let claim = state
         .state_store
         .claim_external_relay_read_contact(&intent)?;
     let claimed_record = claim.record().clone();
     let observed =
-        backend.relay_file_contact(&contract, &credential, bootstrap, claim, deadline)?;
+        backend.relay_file_contact(&contract, &credential, bootstrap, claim, None, deadline)?;
     ensure!(
         !observed.deadline_exceeded,
         "external relay download finished after its contact deadline"
@@ -14902,5 +14937,62 @@ mod tests {
                 .require(changed, &contract, contract.timeout_seconds)
                 .unwrap();
         }
+    }
+}
+
+#[cfg(test)]
+mod relay_delivery_account_tests {
+    use super::*;
+    use ryeos_external_execution::guest_import_authorization::GuestOwnerRuntimeProfile;
+    use ryeos_external_execution_contract::relay_file::RelayDeliveryAccount;
+    use ryeos_state::objects::{
+        ExternalContentManifestEntry, ExternalContentManifestEntryKind,
+        ExternalContentManifestObject,
+    };
+
+    #[test]
+    fn delivery_account_is_the_guest_owner_profile_account() {
+        let dir = tempfile::tempdir().unwrap();
+        let cas = lillux::CasStore::new(dir.path().to_path_buf());
+        let profile = GuestOwnerRuntimeProfile {
+            schema: 2,
+            account: lillux::GuestRuntimeAccount::Unix {
+                uid: 4001,
+                gid: 4002,
+            },
+            private_source_max_bytes: 32 * 1024 * 1024,
+            private_source_max_inodes: 1024,
+            owner_timeout_seconds: 600,
+        };
+        let blob = cas
+            .store_blob(&serde_json::to_vec(&profile).unwrap())
+            .unwrap();
+        let manifest = ExternalContentManifestObject {
+            schema: ryeos_state::objects::external_content_manifest::EXTERNAL_CONTENT_TREE_SCHEMA
+                .into(),
+            kind: ryeos_state::objects::external_content_manifest::EXTERNAL_CONTENT_MANIFEST_KIND
+                .into(),
+            entries: vec![ExternalContentManifestEntry {
+                path: "guest-owner-profile.json".into(),
+                kind: ExternalContentManifestEntryKind::File,
+                mode: Some(0o644),
+                blob_hash: Some(blob),
+                size: Some(serde_json::to_vec(&profile).unwrap().len() as u64),
+                target: None,
+            }],
+            entry_count: 1,
+            total_bytes: serde_json::to_vec(&profile).unwrap().len() as u64,
+        };
+        let hash = cas
+            .store_object(&serde_json::to_value(&manifest).unwrap())
+            .unwrap();
+        assert_eq!(
+            delivery_account_from_cas(&cas, &hash).unwrap(),
+            RelayDeliveryAccount::Unix {
+                uid: 4001,
+                gid: 4002
+            }
+        );
+        assert!(delivery_account_from_cas(&cas, &"0".repeat(64)).is_err());
     }
 }

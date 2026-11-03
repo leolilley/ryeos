@@ -12,8 +12,8 @@ use ryeos_external_execution::lifecycle_adapter::{
 };
 use ryeos_external_execution_contract::relay_file::{
     LIFECYCLE_RELAY_UPLOAD_FD_ENV, MAX_RELAY_RESPONSE_BYTES, RELAY_FILE_PROTOCOL,
-    RelayFileAdapterRequest, RelayFileAdapterResponse, RelayFileDirection, RelayFileEffect,
-    RelayFileKind,
+    RelayDeliveryAccount, RelayFileAdapterRequest, RelayFileAdapterResponse, RelayFileDirection,
+    RelayFileEffect, RelayFileKind,
 };
 use ryeos_external_execution_contract::restored_runtime_measurement::{
     MAX_RESTORED_VERIFIER_ADAPTER_REQUEST_BYTES, MAX_RESTORED_VERIFIER_ADAPTER_RESPONSE_BYTES,
@@ -726,6 +726,7 @@ impl ExecutableExternalPlacementBackend {
         credential: &PlacementCredential,
         bootstrap: &ryeos_state::external_execution::transport::ExternalSupervisorBootstrap,
         claim: ClaimedRelayFileContact,
+        delivery_account: Option<RelayDeliveryAccount>,
         deadline: lillux::time::MonotonicDeadline,
     ) -> Result<ExternalLifecycleObservation<RelayFileAdapterResponse>> {
         let record = claim.record();
@@ -757,8 +758,9 @@ impl ExecutableExternalPlacementBackend {
             },
             "relay adapter received no durable contact claim"
         );
+        let claim_effect = claim.effect();
         let request = RelayFileAdapterRequest {
-            schema: 1,
+            schema: 2,
             protocol: RELAY_FILE_PROTOCOL.into(),
             binding_hash: bootstrap.execution_binding_hash.clone(),
             settings_digest: contract.settings_digest.clone(),
@@ -782,6 +784,12 @@ impl ExecutableExternalPlacementBackend {
             effect: claim.effect(),
             expected_sha256: intent.expected_sha256.clone(),
             expected_bytes: intent.expected_bytes,
+            delivery_account: match claim_effect {
+                RelayFileEffect::UploadOnce => {
+                    Some(delivery_account.context("relay upload has no delivery account")?)
+                }
+                RelayFileEffect::Download => None,
+            },
         };
         let request_bytes = request.canonical_bytes()?;
         let deadline = deadline.min(lillux::time::MonotonicDeadline::after(
@@ -1037,6 +1045,7 @@ impl ExternalPlacementBackend for ExecutableExternalPlacementBackend {
         credential: &PlacementCredential,
         bootstrap: &ryeos_state::external_execution::transport::ExternalSupervisorBootstrap,
         claim: ClaimedRelayFileContact,
+        delivery_account: Option<RelayDeliveryAccount>,
         deadline: lillux::time::MonotonicDeadline,
     ) -> Result<ExternalLifecycleObservation<RelayFileAdapterResponse>> {
         let intent = &claim.record().intent;
@@ -1044,8 +1053,15 @@ impl ExternalPlacementBackend for ExecutableExternalPlacementBackend {
             "relay the {:?} {:?} file (sequence {})",
             intent.kind, intent.direction, intent.sequence
         );
-        self.invoke_relay_file(contract, credential, bootstrap, claim, deadline)
-            .with_context(|| step)
+        self.invoke_relay_file(
+            contract,
+            credential,
+            bootstrap,
+            claim,
+            delivery_account,
+            deadline,
+        )
+        .with_context(|| step)
     }
 
     fn lifecycle_escrow_capture(&self) -> Result<Option<LifecycleEscrowCapture<'_>>> {
