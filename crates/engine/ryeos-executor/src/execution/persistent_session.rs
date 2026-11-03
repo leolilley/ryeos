@@ -3474,7 +3474,12 @@ fn await_external_candidate_ready(
     placement: &str,
     guest_inputs: ryeos_external_execution::guest_inputs::ExternalGuestInputAuthority,
 ) -> Result<Option<ExternalStructuredSessionRelayPump>> {
-    let result = await_external_candidate_ready_inner(state, placement, guest_inputs);
+    let result =
+        await_external_candidate_ready_inner(state, placement, guest_inputs).map_err(|error| {
+            ryeos_app::external_placement::with_external_guest_owner_testimony(
+                state, placement, error,
+            )
+        });
     match result {
         Ok(relay) => Ok(relay),
         Err(error) => Err(fence_external_candidate_start_failure(

@@ -2243,6 +2243,12 @@ pub struct StateStore {
     /// StateStore mutex (never a mutex probe followed by permit acquisition).
     write_barrier: WriteBarrier,
     process_attachment_admission_open: AtomicBool,
+    external_guest_owner_reports: Mutex<
+        std::collections::BTreeMap<
+            String,
+            ryeos_external_execution_contract::guest_owner_report::GuestOwnerActivationReport,
+        >,
+    >,
     process_attachment_admission_closed: tokio::sync::Notify,
     /// Kinds whose terminal chains retire only through a fence, installed once
     /// by the composition that declares them. The ordinary retention path
@@ -5759,6 +5765,7 @@ impl StateStore {
             allow_projection_rebuild,
             write_barrier,
             process_attachment_admission_open: AtomicBool::new(true),
+            external_guest_owner_reports: Mutex::new(std::collections::BTreeMap::new()),
             process_attachment_admission_closed: tokio::sync::Notify::new(),
             fenced_chain_kinds: std::sync::OnceLock::new(),
             attached_processes: Mutex::new(attached_processes),
@@ -5810,6 +5817,7 @@ impl StateStore {
             allow_projection_rebuild,
             write_barrier,
             process_attachment_admission_open: _,
+            external_guest_owner_reports: _,
             process_attachment_admission_closed,
             fenced_chain_kinds,
             attached_processes,
@@ -6052,6 +6060,7 @@ impl StateStore {
             allow_projection_rebuild: false,
             write_barrier,
             process_attachment_admission_open: AtomicBool::new(true),
+            external_guest_owner_reports: Mutex::new(std::collections::BTreeMap::new()),
             process_attachment_admission_closed: tokio::sync::Notify::new(),
             fenced_chain_kinds: std::sync::OnceLock::new(),
             attached_processes: Mutex::new(attached_processes),
@@ -19108,6 +19117,31 @@ impl StateStore {
         self.lock()?
             .runtime_db
             .bind_external_allocation(placement, occurrence, timing)
+    }
+
+    /// Hold first activation's guest owner report for this daemon process
+    /// only. It is diagnostic testimony for startup errors, never lifecycle
+    /// authority, so it is deliberately not durable.
+    pub(crate) fn note_external_guest_owner_report(
+        &self,
+        placement: &str,
+        report: ryeos_external_execution_contract::guest_owner_report::GuestOwnerActivationReport,
+    ) {
+        if let Ok(mut reports) = self.external_guest_owner_reports.lock() {
+            reports.insert(placement.to_owned(), report);
+        }
+    }
+
+    pub(crate) fn external_guest_owner_report(
+        &self,
+        placement: &str,
+    ) -> Option<ryeos_external_execution_contract::guest_owner_report::GuestOwnerActivationReport>
+    {
+        self.external_guest_owner_reports
+            .lock()
+            .ok()?
+            .get(placement)
+            .copied()
     }
 
     pub(crate) fn observe_external_lifecycle_pending(

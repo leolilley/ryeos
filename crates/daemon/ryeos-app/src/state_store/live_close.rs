@@ -2356,6 +2356,7 @@ fn advance_close(
                 write_barrier,
                 process_attachment_admission_open,
                 process_attachment_admission_closed,
+                external_guest_owner_reports: _,
                 fenced_chain_kinds: _,
                 attached_processes,
                 live_workers,

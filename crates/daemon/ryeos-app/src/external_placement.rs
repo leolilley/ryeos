@@ -40,6 +40,7 @@ use crate::vault::NodeVault;
 use crate::vault::external_channel::{ExternalChannelAuthority, ExternalChannelAuthorityAccess};
 use crate::vault::external_relay_bootstrap::ExternalRelayBootstrapAccess;
 use crate::vault::placement::PlacementCredential;
+use ryeos_external_execution_contract::guest_owner_report::GuestOwnerActivationReport;
 use ryeos_node_runtime::state_lock::StateLockLease;
 
 /// Trusted controller adapter metadata and offline contract verification. This
@@ -451,9 +452,18 @@ pub(crate) enum ExternalTerminationResolution {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ExternalSupervisorActivationResolution {
-    Started { provider_observation_digest: String },
-    NotStarted { provider_observation_digest: String },
-    Pending,
+    Started {
+        provider_observation_digest: String,
+    },
+    NotStarted {
+        provider_observation_digest: String,
+    },
+    /// First activation may carry the adapter's report of the guest owner.
+    Pending {
+        guest_owner: Option<
+            ryeos_external_execution_contract::guest_owner_report::GuestOwnerActivationReport,
+        >,
+    },
 }
 
 /// Secret-bearing, one-contact bootstrap material passed only to the selected
@@ -6514,6 +6524,46 @@ pub fn recover_external_direct_start<'a>(
     })
 }
 
+/// The retained guest owner report for a failed startup, in words: what the
+/// owner last reported, and for a held owner what never followed.
+pub fn external_startup_guest_owner_testimony(state: &AppState, placement: &str) -> Option<String> {
+    let report = state.state_store.external_guest_owner_report(placement)?;
+    Some(guest_owner_testimony(
+        report,
+        state
+            .state_store
+            .optional_external_execution_channel(placement)
+            .ok()
+            .flatten()
+            .is_some(),
+    ))
+}
+
+fn guest_owner_testimony(report: GuestOwnerActivationReport, attached: bool) -> String {
+    match report {
+        GuestOwnerActivationReport::Held { .. } if attached => {
+            format!("{report}; channel attached without Ready")
+        }
+        GuestOwnerActivationReport::Held { .. } => {
+            format!("{report}; supervisor published no Attach")
+        }
+        _ => report.to_string(),
+    }
+}
+
+/// Name the guest owner's retained report on a startup failure that does not
+/// already carry it.
+pub fn with_external_guest_owner_testimony(
+    state: &AppState,
+    placement: &str,
+    error: anyhow::Error,
+) -> anyhow::Error {
+    match external_startup_guest_owner_testimony(state, placement) {
+        Some(testimony) if !format!("{error:#}").contains(&testimony) => error.context(testimony),
+        _ => error,
+    }
+}
+
 /// Reserve startup once from the admitted capsule and project its retained
 /// expiry into the caller's live clock. No allocator is contacted here.
 pub fn external_candidate_startup_deadline(
@@ -8143,12 +8193,18 @@ impl ExternalPlacementReconciliation {
                 deadline,
             )?
         };
-        if !owns_contact && !matches!(resolution, ExternalSupervisorActivationResolution::Pending) {
+        if !owns_contact
+            && !matches!(
+                resolution,
+                ExternalSupervisorActivationResolution::Pending { guest_owner: None }
+            )
+        {
             require_lifecycle_capability(
                 self.backend.as_ref(),
                 LifecycleCapability::ExactActivationReconciliation,
             )?;
         }
+        let mut guest_owner = None;
         if let Some((activation_state, provider_observation_digest)) = match resolution {
             ExternalSupervisorActivationResolution::Started {
                 provider_observation_digest,
@@ -8156,7 +8212,12 @@ impl ExternalPlacementReconciliation {
             ExternalSupervisorActivationResolution::NotStarted {
                 provider_observation_digest,
             } => Some(("not_started", provider_observation_digest)),
-            ExternalSupervisorActivationResolution::Pending => None,
+            ExternalSupervisorActivationResolution::Pending {
+                guest_owner: report,
+            } => {
+                guest_owner = report;
+                None
+            }
         } {
             self.state_store.settle_external_supervisor_activation(
                 placement,
@@ -8175,6 +8236,20 @@ impl ExternalPlacementReconciliation {
                 },
             )?;
         } else {
+            if let Some(report) = guest_owner {
+                let outcome = serde_json::to_value(report)
+                    .ok()
+                    .and_then(|value| value["outcome"].as_str().map(str::to_owned))
+                    .unwrap_or_default();
+                tracing::info!(
+                    placement,
+                    outcome = outcome.as_str(),
+                    last_phase = report.last_phase().map(|step| step.as_str()),
+                    "external activation guest owner report"
+                );
+                self.state_store
+                    .note_external_guest_owner_report(placement, report);
+            }
             self.state_store.observe_external_lifecycle_pending(
                 placement,
                 ExternalObservationTiming::Startup {
@@ -8186,6 +8261,17 @@ impl ExternalPlacementReconciliation {
         // A late response is still durable lifecycle evidence, never proof
         // that no supervisor was started. Retain it before refusing Release.
         require_timely_lifecycle_observation(deadline_exceeded, deadline)?;
+        // The owner itself ended startup, or the deadline passed without held:
+        // no Attach can follow, so name what the owner last reported now.
+        if let Some(report) = guest_owner.filter(|report| {
+            report.owner_ended_without_held()
+                || matches!(
+                    report,
+                    GuestOwnerActivationReport::NoReportBeforeDeadline { .. }
+                )
+        }) {
+            bail!("external supervisor activation failed: {report}");
+        }
         current.reservation.startup_deadline()?;
         self.state_store
             .external_supervisor_activation(placement)?
@@ -10250,6 +10336,7 @@ mod tests {
         reconciled_termination: &'static str,
         late_allocation: bool,
         late_activation: bool,
+        activation_guest_owner: Option<GuestOwnerActivationReport>,
         stages_runtime: bool,
         prepare_calls: AtomicUsize,
     }
@@ -10271,6 +10358,7 @@ mod tests {
                 reconciled_termination: "terminal",
                 late_allocation: false,
                 late_activation: false,
+                activation_guest_owner: None,
                 stages_runtime: false,
                 prepare_calls: AtomicUsize::new(0),
             }
@@ -10426,6 +10514,14 @@ mod tests {
                     deadline_exceeded: true,
                 });
             }
+            if let Some(report) = self.activation_guest_owner {
+                return Ok(ExternalLifecycleObservation {
+                    value: ExternalSupervisorActivationResolution::Pending {
+                        guest_owner: Some(report),
+                    },
+                    deadline_exceeded: false,
+                });
+            }
             bail!("fixture lost the supervisor-start response after provider mutation")
         }
 
@@ -10447,7 +10543,9 @@ mod tests {
                     "not_started" => ExternalSupervisorActivationResolution::NotStarted {
                         provider_observation_digest: "4".repeat(64),
                     },
-                    "pending" => ExternalSupervisorActivationResolution::Pending,
+                    "pending" => {
+                        ExternalSupervisorActivationResolution::Pending { guest_owner: None }
+                    }
                     _ => bail!("fixture selected an unknown activation resolution"),
                 },
                 deadline_exceeded: false,
@@ -13833,6 +13931,120 @@ mod tests {
             .is_err()
         );
         require_timely_lifecycle_observation(false, test_startup_deadline()).unwrap();
+    }
+
+    #[test]
+    fn first_activation_retains_the_guest_owner_report_and_names_it_on_failure() {
+        use ryeos_external_execution_contract::guest_owner_report::GuestOwnerStep as Step;
+        for (report, ends_startup) in [
+            (
+                GuestOwnerActivationReport::NoReportBeforeDeadline {
+                    last_phase: Some(Step::Stage),
+                },
+                true,
+            ),
+            (
+                GuestOwnerActivationReport::Refused {
+                    step: Step::Install,
+                    last_phase: Some(Step::Install),
+                },
+                true,
+            ),
+            (
+                GuestOwnerActivationReport::ExitedBeforeReport {
+                    last_phase: Some(Step::ImportVerify),
+                },
+                true,
+            ),
+            (
+                GuestOwnerActivationReport::Held {
+                    last_phase: Some(Step::Release),
+                },
+                false,
+            ),
+            (
+                GuestOwnerActivationReport::StreamLost {
+                    last_phase: Some(Step::Install),
+                },
+                false,
+            ),
+        ] {
+            let (_store_owner, store, reservation, binding, lifetime, _) =
+                placement_store_fixture();
+            let backend = Arc::new(FaultBackend {
+                activation_guest_owner: Some(report),
+                ..FaultBackend::new()
+            });
+            let gate = Arc::new(AtomicBool::new(false));
+            let prepared = || {
+                prepared_fixture(
+                    store.clone(),
+                    backend.clone(),
+                    &reservation,
+                    &binding,
+                    gate.clone(),
+                    lifetime.clone(),
+                )
+            };
+            assert!(advance_prepared_external_start(prepared(), test_startup_deadline()).is_err());
+            assert_eq!(
+                advance_prepared_external_start(prepared(), test_startup_deadline()).unwrap(),
+                ExternalCandidateStartProgress::OccurrenceBound
+            );
+            let guest = tempfile::tempdir().unwrap();
+            let result = advance_prepared_external_start(
+                prepared_fixture_with_guest_inputs(
+                    store.clone(),
+                    backend.clone(),
+                    &reservation,
+                    &binding,
+                    gate.clone(),
+                    lifetime.clone(),
+                    guest.path(),
+                ),
+                test_startup_deadline(),
+            );
+            if ends_startup {
+                let error = format!("{:#}", result.unwrap_err());
+                assert!(error.contains(&report.to_string()), "{error}");
+            } else {
+                assert_eq!(
+                    result.unwrap(),
+                    ExternalCandidateStartProgress::SupervisorPending
+                );
+            }
+            assert_eq!(store.external_guest_owner_report("T-one"), Some(report));
+            assert!(
+                store
+                    .external_supervisor_activation("T-one")
+                    .unwrap()
+                    .unwrap()
+                    .observation
+                    .is_none()
+            );
+        }
+        assert_eq!(
+            guest_owner_testimony(
+                GuestOwnerActivationReport::Held {
+                    last_phase: Some(Step::Release)
+                },
+                false
+            ),
+            "guest owner held; supervisor published no Attach"
+        );
+        assert_eq!(
+            guest_owner_testimony(GuestOwnerActivationReport::Held { last_phase: None }, true),
+            "guest owner held; channel attached without Ready"
+        );
+        assert_eq!(
+            guest_owner_testimony(
+                GuestOwnerActivationReport::StreamLost {
+                    last_phase: Some(Step::Install)
+                },
+                false
+            ),
+            "guest owner last reported install; run stream lost before held"
+        );
     }
 
     #[test]

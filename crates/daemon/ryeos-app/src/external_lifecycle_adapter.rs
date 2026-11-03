@@ -2562,8 +2562,8 @@ impl ExecutableExternalPlacementBackend {
             } => ExternalSupervisorActivationResolution::NotStarted {
                 provider_observation_digest,
             },
-            LifecycleAdapterResponse::SupervisorPending { .. } => {
-                ExternalSupervisorActivationResolution::Pending
+            LifecycleAdapterResponse::SupervisorPending { guest_owner, .. } => {
+                ExternalSupervisorActivationResolution::Pending { guest_owner }
             }
             _ => anyhow::bail!("lifecycle adapter returned a non-activation response"),
         };

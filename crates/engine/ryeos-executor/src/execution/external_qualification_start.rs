@@ -320,6 +320,11 @@ fn await_external_qualification_ready(
             // The lifeline retains cancellation even when no local provider
             // was launched. Cleanup proof is a separate durable observation.
             drop(cleanup);
+            let error = ryeos_app::external_placement::with_external_guest_owner_testimony(
+                state,
+                start.placement(),
+                error,
+            );
             Err(error
                 .context(
                     "external qualification startup failed; cleanup attempted by retained owner",
