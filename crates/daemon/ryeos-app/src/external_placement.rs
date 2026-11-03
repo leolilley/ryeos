@@ -3929,9 +3929,8 @@ pub fn inspect_external_session_controller_transport(
 
 /// While a guest request is missing, look for the guest owner's report on
 /// every Nth miss, so the extra file reads stay a small fraction of the
-/// polling the signed schedule already does. The report slot has its own
-/// bounded read allowance; once that is spent or a read fails, the miss
-/// simply stands and the signed deadline remains the backstop.
+/// polling the signed schedule already does. A read that fails or finds no
+/// trusted file leaves the miss standing; the signed deadline is the backstop.
 const OWNER_REPORT_POLL_EVERY_MISSES: u32 = 4;
 
 fn owner_report_check_due(misses: u32) -> bool {
@@ -3978,34 +3977,138 @@ fn owner_report_exit_for(
     }
 }
 
-fn fail_on_guest_owner_report(state: &AppState, placement: &str, misses: u32) -> Result<()> {
-    use crate::runtime_db::external_execution::{RelayDirection, RelayKind};
-    use ryeos_external_execution_contract::guest_owner_report::GuestOwnerActivationReport;
-    if !owner_report_check_due(misses) {
-        return Ok(());
+/// At most this many owner-report reads per placement in this process. The
+/// report is a side-effect-free download, so it is bounded here in memory and
+/// not in the transfer journal.
+const OWNER_REPORT_MAX_READS: u32 = 32;
+
+fn owner_report_read_allowed(placement: &str) -> bool {
+    static READS: std::sync::Mutex<std::collections::BTreeMap<String, u32>> =
+        std::sync::Mutex::new(std::collections::BTreeMap::new());
+    let Ok(mut reads) = READS.lock() else {
+        return false;
+    };
+    let count = reads.entry(placement.to_owned()).or_default();
+    if *count >= OWNER_REPORT_MAX_READS {
+        return false;
     }
-    let accepted = match contact_ordinary_external_relay_transfer(
-        state,
-        placement,
+    *count += 1;
+    true
+}
+
+/// One unjournaled download of the owner's report file through the same
+/// adapter path as every relay read. `None` means no file (or no trusted one).
+fn read_owner_report(
+    state: &AppState,
+    placement: &str,
+    lane: ExternalRelayOwnerLane,
+) -> Result<Option<ryeos_external_execution_contract::guest_owner_report::GuestSupervisorExit>> {
+    use crate::runtime_db::external_execution::{
+        ClaimedRelayFileContact, RelayDirection, RelayKind, RelayTransferIntent,
+    };
+    use ryeos_external_execution_contract::relay_file::RelayFileAdapterResponse;
+
+    state
+        .controller_lifetime
+        .ensure_protects_app_root(&state.config.app_root)?;
+    let gate = state.external_placement_backends.contact_gate(placement)?;
+    ensure!(
+        gate.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok(),
+        "external relay file contact is already in progress"
+    );
+    let _lease = ExternalContactLease { gate };
+    let protected = recover_external_relay_bootstrap(state, placement, lane)?;
+    let bootstrap = protected.bootstrap();
+    let intent = RelayTransferIntent::from_bootstrap(
+        bootstrap,
         RelayKind::OwnerReport,
         0,
         RelayDirection::GuestToController,
         None,
-    ) {
-        Ok(ExternalRelayFileContactProgress::Accepted(record)) => record,
-        Ok(_) => return Ok(()),
+    )?;
+    let allocation = state
+        .state_store
+        .external_allocation(placement)?
+        .context("external relay lost its exact allocation")?;
+    ensure!(
+        allocation.phase == ExternalAllocationPhase::Bound,
+        "owner report read requires the live bound allocation"
+    );
+    let retained = state
+        .state_store
+        .retained_external_binding(&allocation.reservation.binding_hash)?
+        .context("external relay lost its exact signed binding")?;
+    let contract = retained.backend_contract();
+    let program = retained_external_channel_program(state, &allocation.reservation, &retained)?;
+    validate_external_placement_program(&program, &allocation.reservation, &contract)?;
+    ensure!(
+        state
+            .node_config
+            .external_execution
+            .iter()
+            .any(|installed| installed.digest() == retained.digest()),
+        "live relay contact requires its exact currently installed signed binding"
+    );
+    let credential_access = retained.credential_access()?;
+    let credential =
+        credential_access.decode(state.vault.placement_credential(&credential_access)?)?;
+    let backend = match lane {
+        ExternalRelayOwnerLane::Qualification => state
+            .external_placement_backends
+            .qualify_for_relay(&contract, &credential, &program)?,
+        ExternalRelayOwnerLane::OrdinarySession => state
+            .external_placement_backends
+            .qualify_for_ordinary_relay(&contract, &credential, &program)?,
+    };
+    let remaining_ms = intent
+        .deadline_ms
+        .saturating_sub(lillux::time::timestamp_millis());
+    ensure!(remaining_ms > 0, "owner report read deadline expired");
+    let deadline = lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_millis(
+        u64::try_from(remaining_ms)?,
+    ))
+    .min(lillux::time::MonotonicDeadline::after(
+        lillux::time::Duration::from_secs(u64::from(contract.contact_timeout_seconds)),
+    ));
+    let observed = backend.relay_file_contact(
+        &contract,
+        &credential,
+        bootstrap,
+        ClaimedRelayFileContact::unjournaled_download(intent)?,
+        None,
+        deadline,
+    )?;
+    ensure!(
+        !observed.deadline_exceeded,
+        "owner report download finished after its contact deadline"
+    );
+    match observed.value {
+        RelayFileAdapterResponse::Downloaded { bytes_base64, .. } => {
+            let bytes = STANDARD.decode(bytes_base64)?;
+            Ok(owner_report_exit(placement, &bytes, bootstrap))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn fail_on_guest_owner_report(
+    state: &AppState,
+    placement: &str,
+    misses: u32,
+    lane: ExternalRelayOwnerLane,
+) -> Result<()> {
+    use ryeos_external_execution_contract::guest_owner_report::GuestOwnerActivationReport;
+    if !owner_report_check_due(misses) || !owner_report_read_allowed(placement) {
+        return Ok(());
+    }
+    let exit = match read_owner_report(state, placement, lane) {
+        Ok(Some(exit)) => exit,
+        Ok(None) => return Ok(()),
         Err(error) => {
             tracing::debug!(placement, error = %error, "external guest owner report not read");
             return Ok(());
         }
-    };
-    let protected = recover_ordinary_external_relay_bootstrap(state, placement)?;
-    let Some(exit) = accepted
-        .canonical_bytes
-        .as_deref()
-        .and_then(|bytes| owner_report_exit(placement, bytes, protected.bootstrap()))
-    else {
-        return Ok(());
     };
     let last_phase = state
         .state_store
@@ -4049,7 +4152,12 @@ pub fn advance_external_session_relay_step(
                 record.phase == RelayTransferPhase::Reading,
                 "ordinary relay missing request lost its bounded read claim"
             );
-            fail_on_guest_owner_report(state, placement, record.read_attempts)?;
+            fail_on_guest_owner_report(
+                state,
+                placement,
+                record.read_attempts,
+                ExternalRelayOwnerLane::OrdinarySession,
+            )?;
             Ok(ExternalSessionRelayStepProgress::GuestRequestPending(
                 ExternalSessionRelayPending {
                     read_attempts: record.read_attempts,
@@ -4242,6 +4350,12 @@ pub fn advance_external_qualification_relay_step(
                 record.phase == RelayTransferPhase::Reading,
                 "Q relay missing request lost its bounded read claim"
             );
+            fail_on_guest_owner_report(
+                state,
+                placement,
+                record.read_attempts,
+                ExternalRelayOwnerLane::Qualification,
+            )?;
             Ok(ExternalQualificationRelayStepProgress::GuestRequestPending(
                 ExternalQualificationRelayPending {
                     read_attempts: record.read_attempts,
@@ -4782,14 +4896,6 @@ fn contact_external_relay_transfer(
             ..
         } => {
             let bytes = STANDARD.decode(bytes_base64)?;
-            if kind == crate::runtime_db::external_execution::RelayKind::OwnerReport
-                && owner_report_exit(placement, &bytes, bootstrap).is_none()
-            {
-                // The file is the guest's own text. A report that is not
-                // exactly this occurrence's is never retained; the slot stays
-                // open for a later read.
-                return Ok(ExternalRelayFileContactProgress::PendingHttpNotFound(claimed_record));
-            }
             Ok(ExternalRelayFileContactProgress::Accepted(
                 state.state_store.accept_external_relay_readback(&intent, &bytes)?,
             ))
@@ -14384,6 +14490,15 @@ mod tests {
         ] {
             assert_eq!(owner_report_exit_for("T", &bytes, occ, alloc, boot), None);
         }
+    }
+
+    #[test]
+    fn owner_report_reads_are_bounded_per_placement_in_memory() {
+        let allowed = (0..OWNER_REPORT_MAX_READS + 8)
+            .filter(|_| owner_report_read_allowed("T-bounded-a"))
+            .count();
+        assert_eq!(allowed, OWNER_REPORT_MAX_READS as usize);
+        assert!(owner_report_read_allowed("T-bounded-b"));
     }
 
     #[test]

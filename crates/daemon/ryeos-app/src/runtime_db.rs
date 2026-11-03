@@ -2593,7 +2593,7 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // The current operator schema epoch. Any other epoch is refused by ordinary
 // open and reset by the explicit execution-history reset; no stored row of an
 // earlier epoch gains authority through defaults or migration.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 130;
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 129;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK

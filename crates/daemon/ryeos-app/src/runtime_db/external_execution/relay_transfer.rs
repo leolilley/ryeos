@@ -13,7 +13,7 @@ use ryeos_state::external_execution::transport::{
 pub(in crate::runtime_db) const JOURNAL_SQL: &str = r#"
 CREATE TABLE external_execution_relay_transfer (
     placement_thread_id TEXT NOT NULL REFERENCES external_execution_allocation(placement_thread_id),
-    kind TEXT NOT NULL CHECK (kind IN ('attach','exchange','owner_report')),
+    kind TEXT NOT NULL CHECK (kind IN ('attach','exchange')),
     sequence INTEGER NOT NULL CHECK (sequence BETWEEN 0 AND 65536),
     direction TEXT NOT NULL CHECK (direction IN ('guest_to_controller','controller_to_guest')),
     remote_path TEXT NOT NULL UNIQUE,
@@ -111,8 +111,9 @@ pub(crate) enum RelayKind {
     Attach,
     Exchange,
     /// The guest owner's report of how its released supervisor ended. One
-    /// guest-to-controller slot, read on a bounded cadence while other slots
-    /// wait; it never carries an application or a controller response.
+    /// guest-to-controller file, read on a bounded cadence while other slots
+    /// wait. It is a side-effect-free download, so it is never journaled and
+    /// never carries an application or a controller response.
     OwnerReport,
 }
 
@@ -334,6 +335,28 @@ pub(crate) struct ClaimedRelayFileContact {
 }
 
 impl ClaimedRelayFileContact {
+    /// A download of a file that is read without a journal row: only the
+    /// owner report, which has no durable effect to make crash-safe.
+    pub(crate) fn unjournaled_download(intent: RelayTransferIntent) -> Result<Self> {
+        ensure!(
+            intent.kind == RelayKind::OwnerReport
+                && intent.direction == RelayDirection::GuestToController,
+            "only the guest owner report is read without a journal row"
+        );
+        intent.validate()?;
+        Ok(Self {
+            record: RelayTransferRecord {
+                intent,
+                phase: RelayTransferPhase::Reading,
+                read_attempts: 0,
+                observed_sha256: None,
+                observed_bytes: None,
+                canonical_bytes: None,
+            },
+            effect: ryeos_external_execution_contract::relay_file::RelayFileEffect::Download,
+        })
+    }
+
     pub(crate) fn record(&self) -> &RelayTransferRecord {
         &self.record
     }
@@ -1169,6 +1192,10 @@ impl RuntimeDb {
         self.conn.with_sql(|conn| {
             bootstrap.validate()?;
             ensure!(
+                intent.kind != RelayKind::OwnerReport,
+                "the guest owner report is never journaled"
+            );
+            ensure!(
                 bootstrap.controller.relay().is_ok()
                     && bootstrap.placement_thread_id == intent.placement_thread_id
                     && bootstrap.occurrence_id == intent.occurrence_id
@@ -1894,37 +1921,5 @@ mod tests {
         inbound.expected_sha256 = Some("d".repeat(64));
         inbound.expected_bytes = Some(2);
         assert!(inbound.validate().is_err());
-    }
-
-    #[test]
-    fn journal_admits_the_owner_report_kind() {
-        crate::runtime_db::test_native::with_transient(|conn| {
-            conn.execute_batch(
-                "CREATE TABLE external_execution_allocation (placement_thread_id TEXT PRIMARY KEY);",
-            )
-            .unwrap();
-            conn.execute_batch(JOURNAL_SQL).unwrap();
-            conn.execute(
-                "INSERT INTO external_execution_allocation VALUES('placement')",
-                [],
-            )
-            .unwrap();
-            let intent = owner_report_intent();
-            conn.execute(
-                "INSERT INTO external_execution_relay_transfer VALUES(
-                    'placement','owner_report',0,'guest_to_controller',?1,?2,'reserved',0,NULL,NULL,NULL,1,1)",
-                params![intent.remote_path, canonical(&intent).unwrap()],
-            )
-            .unwrap();
-            assert!(
-                conn.execute(
-                    "INSERT INTO external_execution_relay_transfer VALUES(
-                        'placement','other',0,'guest_to_controller','/x',?1,'reserved',0,NULL,NULL,NULL,1,1)",
-                    params![canonical(&intent).unwrap()],
-                )
-                .is_err()
-            );
-            Ok(())
-        });
     }
 }
