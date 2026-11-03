@@ -1,3 +1,5 @@
+mod guest_clock;
+pub use guest_clock::{LocalClockAnchor, LocalDeadline, WallClockTrust, wall_clock_trust};
 mod retained_occupancy;
 pub use retained_occupancy::{
     OccupancyServiceEdge, RetainedClockCloseFailure, RetainedOccupancyClock, RetiredOccupancyClock,
