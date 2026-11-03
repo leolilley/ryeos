@@ -2610,7 +2610,7 @@ pub(crate) fn preflight_external_qualification_program(
     }
 
     require_connector_process_group_authority(
-        provider.declaration().connector_process_group,
+        provider.declaration().connector_descendants,
         state.isolation.is_enforced(),
         state
             .isolation
@@ -2738,7 +2738,7 @@ fn preflight_external_candidate_dependencies(
     connectors.qualify(&contract)?;
     let provider = provider_configurations.qualify(&contract)?;
     require_connector_process_group_authority(
-        provider.declaration().connector_process_group,
+        provider.declaration().connector_descendants,
         isolation.is_enforced(),
         isolation
             .inspection()
@@ -2756,12 +2756,12 @@ fn preflight_external_candidate_dependencies(
 }
 
 fn require_connector_process_group_authority(
-    mode: ryeos_external_execution_contract::ExternalProviderConnectorProcessGroup,
+    mode: ryeos_external_execution_contract::ExternalProviderConnectorDescendants,
     enforced_isolation: bool,
     trusted_session_ready: bool,
 ) -> Result<()> {
-    use ryeos_external_execution_contract::ExternalProviderConnectorProcessGroup;
-    if mode == ExternalProviderConnectorProcessGroup::New {
+    use ryeos_external_execution_contract::ExternalProviderConnectorDescendants;
+    if mode == ExternalProviderConnectorDescendants::Contained {
         ensure!(
             !enforced_isolation && trusted_session_ready,
             "signed provider connector requires a trusted controller process-group session; enforced strict-group isolation has no retained controller scope"
@@ -13335,7 +13335,7 @@ mod tests {
 
     #[test]
     fn connector_process_group_requires_a_qualified_controller_session() {
-        use ryeos_external_execution_contract::ExternalProviderConnectorProcessGroup::{
+        use ryeos_external_execution_contract::ExternalProviderConnectorDescendants::{
             Inherited, New,
         };
 

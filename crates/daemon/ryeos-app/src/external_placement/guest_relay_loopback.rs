@@ -755,8 +755,8 @@ pub fn compose_guest_relay_loopback_session(
         protocol: ryeos_external_execution_contract::PROVIDER_DECLARATION_PROTOCOL.to_owned(),
         targets: vec![lillux::platform::current_binary_target()?.to_owned()],
         connector: "provider-connector".to_owned(),
-        connector_process_group:
-            ryeos_external_execution_contract::ExternalProviderConnectorProcessGroup::Inherited,
+        connector_descendants:
+            ryeos_external_execution_contract::ExternalProviderConnectorDescendants::InProcessGroup,
         configuration_adapter: "provider-configuration".to_owned(),
         configuration_destination: setup.requirement.provider_configuration_destination.clone(),
         qualification_request_binding_protocol: None,
