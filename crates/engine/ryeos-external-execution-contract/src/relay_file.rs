@@ -35,6 +35,25 @@ pub enum RelayFileEffect {
     Download,
 }
 
+/// The account that must own a delivered mailbox file so the guest's
+/// supervisor can read it. Same wire shape as the guest-owner profile account.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "implementation", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RelayDeliveryAccount {
+    Unix { uid: u32, gid: u32 },
+}
+
+impl RelayDeliveryAccount {
+    fn validate(&self) -> Result<()> {
+        let Self::Unix { uid, gid } = *self;
+        ensure!(
+            uid != 0 && gid != 0 && uid != u32::MAX && gid != u32::MAX,
+            "relay delivery account must be a non-root account"
+        );
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RelayFileAdapterRequest {
@@ -56,6 +75,9 @@ pub struct RelayFileAdapterRequest {
     pub effect: RelayFileEffect,
     pub expected_sha256: Option<String>,
     pub expected_bytes: Option<u64>,
+    /// Owner of the delivered file: required for an upload, absent for a
+    /// download.
+    pub delivery_account: Option<RelayDeliveryAccount>,
 }
 
 fn digest(value: &str) -> bool {
@@ -68,7 +90,7 @@ fn digest(value: &str) -> bool {
 impl RelayFileAdapterRequest {
     pub fn validate(&self) -> Result<()> {
         ensure!(
-            self.schema == 1 && self.protocol == RELAY_FILE_PROTOCOL,
+            self.schema == 2 && self.protocol == RELAY_FILE_PROTOCOL,
             "unsupported relay file request"
         );
         ensure!(
@@ -154,6 +176,13 @@ impl RelayFileAdapterRequest {
                 || self.direction == RelayFileDirection::ControllerToGuest,
             "relay guest request cannot upload from controller"
         );
+        ensure!(
+            self.delivery_account.is_some() == (self.effect == RelayFileEffect::UploadOnce),
+            "relay delivery account must accompany exactly an upload"
+        );
+        if let Some(account) = &self.delivery_account {
+            account.validate()?;
+        }
         Ok(())
     }
 
@@ -239,5 +268,71 @@ impl RelayFileAdapterResponse {
             _ => anyhow::bail!("relay effect response has wrong outcome"),
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn upload() -> RelayFileAdapterRequest {
+        let root = "/ryeos/occurrences/sbx-a/".to_owned() + &"a".repeat(64);
+        RelayFileAdapterRequest {
+            schema: 2,
+            protocol: RELAY_FILE_PROTOCOL.into(),
+            binding_hash: "a".repeat(64),
+            settings_digest: "b".repeat(64),
+            placement_thread_id: "T-1".into(),
+            occurrence_id: "sbx-a".into(),
+            allocation_request_digest: "c".repeat(64),
+            bootstrap_digest: "d".repeat(64),
+            remote_path: format!("{root}/attach.response.json"),
+            mailbox_root: root,
+            kind: RelayFileKind::Attach,
+            sequence: 0,
+            direction: RelayFileDirection::ControllerToGuest,
+            maximum_file_bytes: 1024,
+            deadline_ms: 1,
+            effect: RelayFileEffect::UploadOnce,
+            expected_sha256: Some("e".repeat(64)),
+            expected_bytes: Some(10),
+            delivery_account: Some(RelayDeliveryAccount::Unix {
+                uid: 65534,
+                gid: 65534,
+            }),
+        }
+    }
+
+    #[test]
+    fn upload_requires_a_non_root_delivery_account() {
+        upload().validate().unwrap();
+        let mut missing = upload();
+        missing.delivery_account = None;
+        assert!(missing.validate().is_err());
+        for (uid, gid) in [(0, 65534), (65534, 0)] {
+            let mut root = upload();
+            root.delivery_account = Some(RelayDeliveryAccount::Unix { uid, gid });
+            assert!(root.validate().is_err());
+        }
+    }
+
+    #[test]
+    fn download_carries_no_delivery_account() {
+        let mut download = upload();
+        download.direction = RelayFileDirection::GuestToController;
+        download.remote_path = format!("{}/attach.request.json", download.mailbox_root);
+        download.expected_sha256 = None;
+        download.expected_bytes = None;
+        download.effect = RelayFileEffect::Download;
+        assert!(download.validate().is_err());
+        download.delivery_account = None;
+        download.validate().unwrap();
+    }
+
+    #[test]
+    fn older_request_schema_is_refused() {
+        let mut old = upload();
+        old.schema = 1;
+        assert!(old.validate().is_err());
     }
 }

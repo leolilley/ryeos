@@ -195,6 +195,7 @@ pub(super) fn operate() -> Result<()> {
         &settings,
         &request.occurrence_id,
         &request.remote_path,
+        &request.mailbox_root,
         deadline,
         &cancellation,
     )
@@ -208,6 +209,9 @@ pub(super) fn operate() -> Result<()> {
             contact.upload_once(
                 bytes,
                 request.expected_sha256.as_deref().unwrap_or_default(),
+                request
+                    .delivery_account
+                    .ok_or_else(|| anyhow::anyhow!("relay upload lost its delivery account"))?,
             )?;
             RelayFileAdapterResponse::UploadTransportObserved { request_digest }
         }
