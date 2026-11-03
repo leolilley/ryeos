@@ -564,7 +564,7 @@ fn run(
         let committed = prepared.commit_outer_launch_intent(&context, &inputs)?;
         committed
             .prepare_mounted_sandbox_request(&context, &inputs)?
-            .prepare_held_in_dedicated_owner()?
+            .prepare_held_in_dedicated_owner(None)?
     } else {
         prepare_authorized_held_guest_supervisor_once(
             &occurrence,
@@ -574,6 +574,7 @@ fn run(
             &signed_assignment,
             source,
             lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(30)),
+            None,
             None,
             &mut |_| {},
         )?

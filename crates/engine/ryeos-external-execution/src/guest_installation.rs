@@ -427,6 +427,9 @@ pub struct HeldGuestMountedSandbox {
 /// `ready_boot_inputs` is present only for a leased guest: the verified
 /// activation inputs its Ready must name, in order. `on_phase` is told as
 /// each long step begins, so the owner can report where it is.
+/// `supervisor_stderr`, when present, becomes the held supervisor's standard
+/// error so its owner can read what the supervisor reports about its own
+/// failure.
 ///
 /// The result is held, not running or Ready. Its caller must inspect Lillux's
 /// mount receipt, release exactly once, join the authenticated supervisor
@@ -440,6 +443,7 @@ pub fn prepare_authorized_held_guest_supervisor_once(
     source: lillux::sandbox::LinuxPrivateSourceFilesystem,
     import_deadline: lillux::time::MonotonicDeadline,
     ready_boot_inputs: Option<Vec<String>>,
+    supervisor_stderr: Option<std::fs::File>,
     on_phase: &mut dyn FnMut(GuestOwnerStep),
 ) -> Result<HeldGuestMountedSandbox> {
     use GuestOwnerStep as Step;
@@ -508,7 +512,7 @@ pub fn prepare_authorized_held_guest_supervisor_once(
     on_phase(Step::HeldPrepare);
     committed
         .prepare_mounted_sandbox_request(&context, inputs)
-        .and_then(|request| request.prepare_held_in_dedicated_owner())
+        .and_then(|request| request.prepare_held_in_dedicated_owner(supervisor_stderr))
         .refused_at(Step::HeldPrepare)
 }
 
@@ -1062,7 +1066,10 @@ impl PreparedGuestMountedSandbox {
     /// Enter the one-way native preparation cut in a dedicated, unprivileged
     /// owner process. Lillux exits that process on a source mismatch or failed
     /// namespace transition; this must never run on a shared daemon worker.
-    pub fn prepare_held_in_dedicated_owner(mut self) -> Result<HeldGuestMountedSandbox> {
+    pub fn prepare_held_in_dedicated_owner(
+        mut self,
+        supervisor_stderr: Option<std::fs::File>,
+    ) -> Result<HeldGuestMountedSandbox> {
         let installed = &mut self
             ._committed
             ._prepared
@@ -1081,6 +1088,7 @@ impl PreparedGuestMountedSandbox {
             OsStr::new(&stage_name),
             std::path::Path::new(SUPERVISOR_STAGE_MOUNT_DESTINATION),
             self.request.clone(),
+            supervisor_stderr,
         );
         let receipt = held
             .held()

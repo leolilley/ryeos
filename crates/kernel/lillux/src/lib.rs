@@ -22,6 +22,7 @@ pub mod root_enclosure;
 pub mod sandbox;
 pub mod secure_fs;
 pub mod signature;
+pub mod stderr_tail;
 pub mod subordinate_process;
 pub mod task;
 pub mod test_hooks;

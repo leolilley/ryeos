@@ -1376,15 +1376,42 @@ pub fn prepare_linux_sandbox(
 /// process; callers must not run this in a shared daemon. This protects source
 /// integrity, not confidentiality from a same-UID peer after target exec.
 /// Whole-scope settlement and product-policy checks remain separate gates.
+///
+/// The target inherits this process's standard input and output. With
+/// `target_stderr` it receives that file as its standard error instead, which
+/// lets the owner read what the target says about its own failure; the owner's
+/// copy of the descriptor closes when this call returns.
 pub fn prepare_linux_sandbox_from_sealed_source(
     source: LinuxSealedPrivateSourceFilesystem,
     source_child: &std::ffi::OsStr,
     source_destination: &Path,
     request: LinuxSandboxRequest,
+    target_stderr: Option<std::fs::File>,
 ) -> HeldPrivateSourceSandboxProcess {
     imp::validate_private_source_request(&source, source_child, source_destination, &request)
         .unwrap_or_else(|error| imp::fatal_private_source_transition(&error));
-    let held = prepare_linux_sandbox_inner(request, None, Some(&source))
+    let stdio = target_stderr.map(|stderr| {
+        let ambient = |descriptor: i32| -> Result<std::fs::File, String> {
+            // SAFETY: F_DUPFD_CLOEXEC on a descriptor number only duplicates
+            // an open descriptor or fails.
+            let duplicate = unsafe { libc::fcntl(descriptor, libc::F_DUPFD_CLOEXEC, 3) };
+            if duplicate >= 0 {
+                use std::os::fd::FromRawFd as _;
+                // SAFETY: fcntl returned a new descriptor owned by nothing else.
+                return Ok(unsafe { std::fs::File::from_raw_fd(duplicate) });
+            }
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open("/dev/null")
+                .map_err(|error| format!("open null stand-in for stdio {descriptor}: {error}"))
+        };
+        Ok::<_, String>([ambient(0)?, ambient(1)?, stderr])
+    });
+    let stdio = stdio
+        .transpose()
+        .unwrap_or_else(|error| imp::fatal_private_source_transition(&error));
+    let held = prepare_linux_sandbox_inner(request, stdio.as_ref(), Some(&source))
         .unwrap_or_else(|error| imp::fatal_private_source_transition(&error));
     HeldPrivateSourceSandboxProcess {
         held,

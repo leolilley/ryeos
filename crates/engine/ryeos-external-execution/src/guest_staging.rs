@@ -2674,7 +2674,7 @@ mod tests {
                 .all(|(source, _)| *source != mounted_request.mounts[0].source_fd)
         );
         let native_refusal = mounted
-            .prepare_held_in_dedicated_owner()
+            .prepare_held_in_dedicated_owner(None)
             .err()
             .expect("a structural source fixture must not reach native held launch");
         assert!(format!("{native_refusal:#}").contains("source was not sealed"));

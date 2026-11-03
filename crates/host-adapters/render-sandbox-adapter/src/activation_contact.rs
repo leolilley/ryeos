@@ -7,8 +7,12 @@
 //!
 //! The run stream is read until the guest owner's terminal report, its exit,
 //! loss, or the activation's absolute deadline, and the closed outcome with
-//! the owner's last reported phase rides back in the Pending response. Only
-//! closed words leave; stderr is never examined or forwarded.
+//! the owner's last reported phase rides back in the Pending response. After
+//! `held` the read continues for a short window, because the owner reports a
+//! released supervisor's early end on the same stream; the window is short
+//! because the daemon cannot begin waiting for Ready until this call returns.
+//! Run stderr is never examined or forwarded; the only free text that leaves
+//! is the owner's bounded, sanitized supervisor stderr tail.
 
 use std::io::Read as _;
 
@@ -17,7 +21,7 @@ use lillux::network::{NetworkCancellation, NetworkContext};
 use lillux::time::{Duration, MonotonicDeadline};
 use ryeos_external_execution_contract::canonical_json;
 use ryeos_external_execution_contract::guest_owner_report::{
-    GuestOwnerActivationReport, GuestOwnerStdout, GuestOwnerTerminal,
+    GuestOwnerActivationReport, GuestOwnerPostHeldStdout, GuestOwnerStdout, GuestOwnerTerminal,
 };
 use ryeos_http_transport::{
     Deadlines, Header, HttpClient, HttpRequest, HttpResponse, Limits, RequestBodySource, SseLimits,
@@ -38,6 +42,9 @@ use crate::{
 
 const MAX_UPLOAD_RESPONSE_BYTES: u64 = 16 * 1024;
 const MAX_RUN_RESPONSE_BYTES: u64 = 2 * 1024 * 1024;
+/// How long the run stream is kept open after `held` for a supervisor that
+/// ends early. A supervisor that is still running then is the normal case.
+const POST_HELD_WINDOW: Duration = Duration::from_secs(10);
 /// Time kept back from the activation deadline to write the response.
 const ACTIVATION_RESPONSE_RESERVE: Duration = Duration::from_secs(3);
 const OWNER_STREAM_LIMITS: SseLimits = SseLimits {
@@ -62,11 +69,22 @@ struct RunExitEvent {
 }
 
 /// Read the run stream until the owner's terminal report. Ending the read is
-/// never an owner verdict beyond the closed outcome it returns.
+/// never an owner verdict beyond the closed outcome it returns. After `held`
+/// the read goes on for `POST_HELD_WINDOW` (or the deadline) to take the
+/// owner's supervisor exit line.
 fn observe_owner_report(
     body: impl std::io::Read,
     deadline: MonotonicDeadline,
     cancellation: &NetworkCancellation,
+) -> GuestOwnerActivationReport {
+    observe_owner_report_for(body, deadline, cancellation, POST_HELD_WINDOW)
+}
+
+fn observe_owner_report_for(
+    body: impl std::io::Read,
+    deadline: MonotonicDeadline,
+    cancellation: &NetworkCancellation,
+    post_held_window: Duration,
 ) -> GuestOwnerActivationReport {
     let mut stdout = GuestOwnerStdout::new();
     let ended = |stdout: &GuestOwnerStdout| {
@@ -83,54 +101,94 @@ fn observe_owner_report(
         return ended(&stdout);
     };
     let maximum = OWNER_STREAM_LIMITS.event_bytes;
-    while let Ok(Some(event)) = events.next_event() {
-        match event.event.as_deref() {
-            Some("output") => {
-                let Ok(output) = ryeos_external_execution_contract::from_json_slice_strict::<
-                    RunOutputEvent,
-                >(event.data.as_bytes(), maximum) else {
-                    break;
-                };
-                if output.stream != "stdout" {
-                    continue;
+    // Once held, a timer ends the window by cancelling the blocked read; the
+    // stream is dropped afterwards, so nothing else observes the cancellation.
+    std::thread::scope(|scope| {
+        let mut post_held: Option<(GuestOwnerPostHeldStdout, std::sync::mpsc::Sender<()>)> = None;
+        while let Ok(Some(event)) = events.next_event() {
+            match event.event.as_deref() {
+                Some("output") => {
+                    let Ok(output) = ryeos_external_execution_contract::from_json_slice_strict::<
+                        RunOutputEvent,
+                    >(event.data.as_bytes(), maximum) else {
+                        break;
+                    };
+                    if output.stream != "stdout" {
+                        continue;
+                    }
+                    if let Some((owner, _)) = &mut post_held {
+                        if let Some(exit) = owner.push(&output.data) {
+                            return GuestOwnerActivationReport::Held {
+                                last_phase: stdout.last_phase(),
+                                supervisor_exit: Some(exit),
+                            };
+                        }
+                        continue;
+                    }
+                    match stdout.push(&output.data) {
+                        Ok(None) => {}
+                        Ok(Some(GuestOwnerTerminal::Held)) => {
+                            let (stop, stopped) = std::sync::mpsc::channel();
+                            let window = post_held_window.min(deadline.remaining());
+                            let timer = cancellation.clone();
+                            scope.spawn(move || {
+                                if stopped.recv_timeout(window)
+                                    == Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                                {
+                                    timer.cancel();
+                                }
+                            });
+                            let mut owner = GuestOwnerPostHeldStdout::new();
+                            // The rest of this chunk may already hold the exit.
+                            if let Some(exit) = owner.push(stdout.after_terminal()) {
+                                return GuestOwnerActivationReport::Held {
+                                    last_phase: stdout.last_phase(),
+                                    supervisor_exit: Some(exit),
+                                };
+                            }
+                            post_held = Some((owner, stop));
+                        }
+                        Ok(Some(GuestOwnerTerminal::Refused(step))) => {
+                            return GuestOwnerActivationReport::Refused {
+                                step,
+                                last_phase: stdout.last_phase(),
+                            };
+                        }
+                        Err(_) => {
+                            return GuestOwnerActivationReport::MalformedReport {
+                                last_phase: stdout.last_phase(),
+                            };
+                        }
+                    }
                 }
-                match stdout.push(&output.data) {
-                    Ok(None) => {}
-                    Ok(Some(GuestOwnerTerminal::Held)) => {
-                        return GuestOwnerActivationReport::Held {
-                            last_phase: stdout.last_phase(),
-                        };
+                Some("exit") => {
+                    if ryeos_external_execution_contract::from_json_slice_strict::<RunExitEvent>(
+                        event.data.as_bytes(),
+                        maximum,
+                    )
+                    .is_err()
+                    {
+                        break;
                     }
-                    Ok(Some(GuestOwnerTerminal::Refused(step))) => {
-                        return GuestOwnerActivationReport::Refused {
-                            step,
-                            last_phase: stdout.last_phase(),
-                        };
+                    if post_held.is_some() {
+                        break;
                     }
-                    Err(_) => {
-                        return GuestOwnerActivationReport::MalformedReport {
-                            last_phase: stdout.last_phase(),
-                        };
-                    }
+                    return GuestOwnerActivationReport::ExitedBeforeReport {
+                        last_phase: stdout.last_phase(),
+                    };
                 }
+                _ => {}
             }
-            Some("exit") => {
-                if ryeos_external_execution_contract::from_json_slice_strict::<RunExitEvent>(
-                    event.data.as_bytes(),
-                    maximum,
-                )
-                .is_err()
-                {
-                    break;
-                }
-                return GuestOwnerActivationReport::ExitedBeforeReport {
-                    last_phase: stdout.last_phase(),
-                };
-            }
-            _ => {}
         }
-    }
-    ended(&stdout)
+        if post_held.is_some() {
+            GuestOwnerActivationReport::Held {
+                last_phase: stdout.last_phase(),
+                supervisor_exit: None,
+            }
+        } else {
+            ended(&stdout)
+        }
+    })
 }
 
 /// The test seam keeps order and at-most-once behavior independent of HTTP.
@@ -688,7 +746,10 @@ mod tests {
         }
         fn run(&mut self, _: &str) -> Result<GuestOwnerActivationReport> {
             self.record("run")?;
-            Ok(GuestOwnerActivationReport::Held { last_phase: None })
+            Ok(GuestOwnerActivationReport::Held {
+                last_phase: None,
+                supervisor_exit: None,
+            })
         }
     }
 
@@ -779,7 +840,8 @@ mod tests {
         assert_eq!(
             observed(&with(&[output("stdout", &held)])),
             GuestOwnerActivationReport::Held {
-                last_phase: Some(Step::Stage)
+                last_phase: Some(Step::Stage),
+                supervisor_exit: None
             }
         );
         // The terminal line ends the read; later events are never examined.
@@ -790,7 +852,8 @@ mod tests {
                 exit.clone()
             ])),
             GuestOwnerActivationReport::Held {
-                last_phase: Some(Step::Stage)
+                last_phase: Some(Step::Stage),
+                supervisor_exit: None
             }
         );
         assert_eq!(
@@ -832,6 +895,71 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn a_supervisor_exit_after_held_rides_the_report() {
+        use ryeos_external_execution_contract::guest_owner_report::{
+            GuestOwnerReport, GuestOwnerStep as Step, GuestSupervisorExit, GuestSupervisorStatus,
+        };
+        let held = GuestOwnerReport::Held.line();
+        let exit = GuestSupervisorExit::from_raw_tail(
+            GuestSupervisorStatus::Code(126),
+            b"ryeos-external-candidate-supervisor: launcher refused",
+        );
+        let exit_line = GuestOwnerReport::SupervisorExit(exit.clone()).line();
+        let expected = GuestOwnerActivationReport::Held {
+            last_phase: Some(Step::Release),
+            supervisor_exit: Some(exit),
+        };
+        let release = GuestOwnerReport::Phase(Step::Release).line();
+        // Separate events, with supervisor noise between them.
+        assert_eq!(
+            observed(&sse(&[
+                output("stdout", &release),
+                output("stdout", &held),
+                output("stdout", "{\"outcome\":\"x\"}\n"),
+                output("stderr", &exit_line),
+                output("stdout", &exit_line[..30]),
+                output("stdout", &exit_line[30..]),
+                output("stdout", "never read\n"),
+            ])),
+            expected
+        );
+        // The exit may share the chunk that completed held.
+        assert_eq!(
+            observed(&sse(&[
+                output("stdout", &release),
+                output("stdout", &format!("{held}{exit_line}"))
+            ])),
+            expected
+        );
+        // Held with no later line, or only the command's exit or noise.
+        let silent = GuestOwnerActivationReport::Held {
+            last_phase: Some(Step::Release),
+            supervisor_exit: None,
+        };
+        for tail in [
+            vec![],
+            vec![("exit", serde_json::json!({ "exit_code": 1 }))],
+            vec![output("stdout", "garbage\n")],
+            vec![output("stdout", &exit_line.replace("126", "x"))],
+        ] {
+            let mut events = vec![output("stdout", &release), output("stdout", &held)];
+            events.extend(tail);
+            assert_eq!(observed(&sse(&events)), silent);
+        }
+        // An expired deadline ends the window at once.
+        let expired = MonotonicDeadline::after(lillux::time::Duration::ZERO);
+        assert_eq!(
+            observe_owner_report_for(
+                &sse(&[output("stdout", &held)])[..],
+                expired,
+                &NetworkCancellation::default(),
+                Duration::from_secs(60)
+            ),
+            GuestOwnerActivationReport::NoReportBeforeDeadline { last_phase: None }
+        );
     }
 
     #[test]

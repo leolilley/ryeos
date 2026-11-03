@@ -6598,7 +6598,7 @@ pub fn external_startup_guest_owner_testimony(state: &AppState, placement: &str)
 }
 
 fn guest_owner_testimony(report: GuestOwnerActivationReport, attached: bool) -> String {
-    match report {
+    match &report {
         GuestOwnerActivationReport::Held { .. } if attached => {
             format!("{report}; channel attached without Ready")
         }
@@ -8294,19 +8294,30 @@ impl ExternalPlacementReconciliation {
                 },
             )?;
         } else {
-            if let Some(report) = guest_owner {
+            if let Some(report) = &guest_owner {
                 let outcome = serde_json::to_value(report)
                     .ok()
                     .and_then(|value| value["outcome"].as_str().map(str::to_owned))
                     .unwrap_or_default();
+                let supervisor_exit = match report {
+                    GuestOwnerActivationReport::Held {
+                        supervisor_exit: Some(exit),
+                        ..
+                    } => Some(exit),
+                    _ => None,
+                };
+                // The tail is the guest's own untrusted text: log it, never
+                // act on it.
                 tracing::info!(
                     placement,
                     outcome = outcome.as_str(),
                     last_phase = report.last_phase().map(|step| step.as_str()),
+                    supervisor_exit = supervisor_exit.map(|exit| exit.status.to_string()),
+                    supervisor_stderr_tail = supervisor_exit.map(|exit| exit.stderr_tail.as_str()),
                     "external activation guest owner report"
                 );
                 self.state_store
-                    .note_external_guest_owner_report(placement, report);
+                    .note_external_guest_owner_report(placement, report.clone());
             }
             self.state_store.observe_external_lifecycle_pending(
                 placement,
@@ -10714,7 +10725,7 @@ mod tests {
                     deadline_exceeded: true,
                 });
             }
-            if let Some(report) = self.activation_guest_owner {
+            if let Some(report) = self.activation_guest_owner.clone() {
                 return Ok(ExternalLifecycleObservation {
                     value: ExternalSupervisorActivationResolution::Pending {
                         guest_owner: Some(report),
@@ -14231,6 +14242,7 @@ mod tests {
             (
                 GuestOwnerActivationReport::Held {
                     last_phase: Some(Step::Release),
+                    supervisor_exit: None,
                 },
                 false,
             ),
@@ -14244,7 +14256,7 @@ mod tests {
             let (_store_owner, store, reservation, binding, lifetime, _) =
                 placement_store_fixture();
             let backend = Arc::new(FaultBackend {
-                activation_guest_owner: Some(report),
+                activation_guest_owner: Some(report.clone()),
                 ..FaultBackend::new()
             });
             let gate = Arc::new(AtomicBool::new(false));
@@ -14285,7 +14297,10 @@ mod tests {
                     ExternalCandidateStartProgress::SupervisorPending
                 );
             }
-            assert_eq!(store.external_guest_owner_report("T-one"), Some(report));
+            assert_eq!(
+                store.external_guest_owner_report("T-one"),
+                Some(report.clone())
+            );
             assert!(
                 store
                     .external_supervisor_activation("T-one")
@@ -14298,14 +14313,38 @@ mod tests {
         assert_eq!(
             guest_owner_testimony(
                 GuestOwnerActivationReport::Held {
-                    last_phase: Some(Step::Release)
+                    last_phase: Some(Step::Release),
+                    supervisor_exit: None
                 },
                 false
             ),
             "guest owner held; supervisor published no Attach"
         );
+        let exited = GuestOwnerActivationReport::Held {
+            last_phase: Some(Step::Release),
+            supervisor_exit: Some(
+                ryeos_external_execution_contract::guest_owner_report::GuestSupervisorExit::from_raw_tail(
+                    ryeos_external_execution_contract::guest_owner_report::GuestSupervisorStatus::Code(126),
+                    b"ryeos-external-candidate-launcher: refused",
+                ),
+            ),
+        };
         assert_eq!(
-            guest_owner_testimony(GuestOwnerActivationReport::Held { last_phase: None }, true),
+            guest_owner_testimony(exited.clone(), true),
+            "guest owner held; supervisor exited with code 126: ryeos-external-candidate-launcher: refused; channel attached without Ready"
+        );
+        assert_eq!(
+            guest_owner_testimony(exited, false),
+            "guest owner held; supervisor exited with code 126: ryeos-external-candidate-launcher: refused; supervisor published no Attach"
+        );
+        assert_eq!(
+            guest_owner_testimony(
+                GuestOwnerActivationReport::Held {
+                    last_phase: None,
+                    supervisor_exit: None
+                },
+                true
+            ),
             "guest owner held; channel attached without Ready"
         );
         assert_eq!(

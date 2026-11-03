@@ -7,7 +7,9 @@
 //!
 //! Stdout carries only the contract's startup report lines: the phase as each
 //! step begins (repeated while a long step makes progress), then held once
-//! the supervisor is released, or the closed step word that refused. Stderr
+//! the supervisor is released, or the closed step word that refused. After
+//! held the owner keeps supervising and reports the supervisor's end with a
+//! bounded, sanitized tail of the supervisor's own stderr. Its own stderr
 //! keeps the full error for local diagnosis and is never relayed.
 
 use std::ffi::OsStr;
@@ -25,7 +27,8 @@ use ryeos_external_execution_contract::guest_import_authorization::{
     MAX_GUEST_IMPORT_AUTHORIZATION_BYTES, MAX_SIGNED_GUEST_OCCURRENCE_ASSIGNMENT_BYTES,
 };
 use ryeos_external_execution_contract::guest_owner_report::{
-    GuestOwnerReport, GuestOwnerStep as Step, RefusedAt as _,
+    GuestOwnerReport, GuestOwnerStep as Step, GuestSupervisorExit, GuestSupervisorStatus,
+    MAX_GUEST_SUPERVISOR_STDERR_TAIL_BYTES, RefusedAt as _,
 };
 
 const RUNTIME_ROOT: &str = "/ryeos/guest-runtime";
@@ -37,6 +40,8 @@ const POLL_INTERVAL: lillux::time::Duration = lillux::time::Duration::from_milli
 const CLEANUP_TIMEOUT: lillux::time::Duration = lillux::time::Duration::from_secs(30);
 /// A long step's progress points repeat its phase at most this often.
 const PHASE_REPEAT_MS: u64 = 10_000;
+/// How long to wait for a dead supervisor's last stderr bytes to arrive.
+const STDERR_GRACE: lillux::time::Duration = lillux::time::Duration::from_secs(2);
 const NO_PHASE: usize = usize::MAX;
 
 static PHASE: AtomicUsize = AtomicUsize::new(NO_PHASE);
@@ -162,7 +167,7 @@ fn now_ms() -> u64 {
 
 fn report(report: GuestOwnerReport) {
     #[cfg(test)]
-    tests::REPORTS.with(|reports| reports.borrow_mut().push(report));
+    tests::REPORTS.with(|reports| reports.borrow_mut().push(report.clone()));
     let mut stdout = std::io::stdout().lock();
     let _ = stdout
         .write_all(report.line().as_bytes())
@@ -257,6 +262,10 @@ fn run(assignment_bytes: &[u8]) -> Result<()> {
         .and_then(|()| occurrence.rebind_in_current_mount_namespace())
         .refused_at(Step::PathRebind)?;
     let ready_boot_inputs = admitted.ready_boot_inputs(&import_bytes);
+    let (mut supervisor_stderr, supervisor_stderr_writer) =
+        lillux::stderr_tail::StderrTail::open(MAX_GUEST_SUPERVISOR_STDERR_TAIL_BYTES)
+            .map_err(anyhow::Error::msg)
+            .refused_at(Step::HeldPrepare)?;
     let mut held = prepare_authorized_held_guest_supervisor_once(
         &occurrence,
         &upload,
@@ -266,6 +275,7 @@ fn run(assignment_bytes: &[u8]) -> Result<()> {
         source,
         lifetime,
         Some(ready_boot_inputs),
+        Some(supervisor_stderr_writer),
         &mut enter,
     )?;
     enter(Step::MountPreparation);
@@ -288,6 +298,7 @@ fn run(assignment_bytes: &[u8]) -> Result<()> {
     let mut released = held.release_once().refused_at(Step::Release)?;
     report(GuestOwnerReport::Held);
     loop {
+        supervisor_stderr.drain();
         let natural = match released.try_observe_natural_exit() {
             Ok(exit) => exit,
             Err(error) => {
@@ -304,6 +315,11 @@ fn run(assignment_bytes: &[u8]) -> Result<()> {
             }
         };
         if let Some(exit) = natural {
+            let tail = supervisor_stderr.finish(STDERR_GRACE);
+            report(GuestOwnerReport::SupervisorExit(supervisor_exit_report(
+                exit.termination(),
+                &tail,
+            )));
             ensure!(
                 exit.target_reported_success(),
                 anyhow::anyhow!(
@@ -334,6 +350,40 @@ fn run(assignment_bytes: &[u8]) -> Result<()> {
         }
         lillux::time::sleep(POLL_INTERVAL);
     }
+}
+
+/// What the owner relays of a supervisor's end: its status, then whatever
+/// Lillux recorded of a failed launch, then the supervisor's stderr tail.
+fn supervisor_exit_report(
+    termination: &lillux::LinuxSandboxTermination,
+    stderr: &[u8],
+) -> GuestSupervisorExit {
+    supervisor_exit_from_parts(
+        termination.exit(),
+        termination
+            .launch_failure()
+            .map(|failure| failure.diagnostic()),
+        stderr,
+    )
+}
+
+fn supervisor_exit_from_parts(
+    exit: lillux::LinuxSandboxExit,
+    launch_failure: Option<&str>,
+    stderr: &[u8],
+) -> GuestSupervisorExit {
+    let status = match exit {
+        lillux::LinuxSandboxExit::Code(code) => GuestSupervisorStatus::Code(code),
+        lillux::LinuxSandboxExit::Signal(signal) => GuestSupervisorStatus::Signal(signal),
+    };
+    let mut text = Vec::new();
+    if let Some(diagnostic) = launch_failure {
+        text.extend_from_slice(b"launch failure: ");
+        text.extend_from_slice(diagnostic.as_bytes());
+        text.push(b'\n');
+    }
+    text.extend_from_slice(stderr);
+    GuestSupervisorExit::from_raw_tail(status, &text)
 }
 
 fn owner() -> Result<()> {
@@ -514,6 +564,46 @@ mod tests {
             assert_eq!(refused(prepare_non_root_owner()), Step::AccountTransition);
             assert_eq!(refused(run(b"assignment")), Step::RuntimeRoot);
         }
+    }
+
+    #[test]
+    fn a_nonzero_supervisor_exit_reports_its_status_and_stderr_tail() {
+        let (mut tail, writer) =
+            lillux::stderr_tail::StderrTail::open(MAX_GUEST_SUPERVISOR_STDERR_TAIL_BYTES).unwrap();
+        let status = std::process::Command::new("sh")
+            .args([
+                "-c",
+                "echo 'ryeos-external-candidate-supervisor: launcher refused: cause' >&2; exit 126",
+            ])
+            .stderr(writer)
+            .status()
+            .unwrap();
+        assert_eq!(status.code(), Some(126));
+        let raw = tail.finish(STDERR_GRACE);
+        let exit = supervisor_exit_from_parts(lillux::LinuxSandboxExit::Code(126), None, &raw);
+        let line = GuestOwnerReport::SupervisorExit(exit.clone()).line();
+        assert_eq!(
+            line,
+            "{\"guest_owner\":\"supervisor_exit\",\"status\":{\"code\":126},\"stderr_tail\":\"ryeos-external-candidate-supervisor: launcher refused: cause\"}\n"
+        );
+        assert_eq!(
+            GuestOwnerReport::parse_line(line.trim_end()).unwrap(),
+            GuestOwnerReport::SupervisorExit(exit)
+        );
+    }
+
+    #[test]
+    fn a_failed_launch_diagnostic_precedes_the_stderr_tail() {
+        let exit = supervisor_exit_from_parts(
+            lillux::LinuxSandboxExit::Signal(9),
+            Some("exec failed"),
+            b"last words\n",
+        );
+        assert_eq!(exit.status, GuestSupervisorStatus::Signal(9));
+        assert_eq!(
+            exit.stderr_tail,
+            "launch failure: exec failed | last words"
+        );
     }
 
     #[test]

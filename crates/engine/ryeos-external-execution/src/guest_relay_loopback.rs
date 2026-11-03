@@ -264,7 +264,10 @@ impl GuestRelayLoopbackHost {
             let last_phase = self.owner_report.last_phase();
             match self.owner_terminal {
                 Some(Ok(GuestOwnerTerminal::Held)) => {
-                    return GuestOwnerActivationReport::Held { last_phase };
+                    return GuestOwnerActivationReport::Held {
+                        last_phase,
+                        supervisor_exit: None,
+                    };
                 }
                 Some(Ok(GuestOwnerTerminal::Refused(step))) => {
                     return GuestOwnerActivationReport::Refused { step, last_phase };

@@ -19141,7 +19141,7 @@ impl StateStore {
             .lock()
             .ok()?
             .get(placement)
-            .copied()
+            .cloned()
     }
 
     pub(crate) fn observe_external_lifecycle_pending(
