@@ -434,10 +434,7 @@ pub(super) struct SelectedTransport {
     pub(super) tls_roots: Vec<String>,
 }
 
-pub(super) fn select_transport(
-    request: &ComposeTransportRequest,
-    settings: &Value,
-) -> Result<SelectedTransport> {
+pub(super) fn select_transport(request: &ComposeTransportRequest) -> Result<SelectedTransport> {
     let network_inputs = operator_network_inputs();
     match request {
         ComposeTransportRequest::Https { origin, roots_pem } => {
@@ -468,11 +465,6 @@ pub(super) fn select_transport(
                 "a file-relay mailbox parent must be the guest owner's occurrence root `{}`, \
                  where each relay mailbox lives; got `{private_mailbox_parent}`",
                 ryeos_external_execution_contract::GUEST_OCCURRENCES_ROOT
-            );
-            ensure!(
-                settings.get("owner_id").and_then(Value::as_str)
-                    == Some(owner_workspace_id.as_str()),
-                "file-relay settings owner_id must equal the owner workspace id"
             );
             Ok(SelectedTransport {
                 selection: ExternalControllerTransportSelection::ControllerFileRelay(
@@ -630,7 +622,7 @@ pub(crate) fn compose_with_resolver(
     validate_document_id(&request.id, "external-execution binding")?;
     let identity = load_node_identity(request.app_root)?;
     let backend = canonical_backend_id(&request.backend).to_owned();
-    let transport = select_transport(&request.transport, &request.settings)?;
+    let transport = select_transport(&request.transport)?;
     let runtime_qualification = request
         .runtime_qualification
         .map(|value| {
@@ -1100,7 +1092,7 @@ pub(crate) mod tests {
         transport: &ComposeTransportRequest,
         settings: Value,
     ) -> Result<BindingDocument> {
-        let selected = select_transport(transport, &settings)?;
+        let selected = select_transport(transport)?;
         compose_binding_document(ComposeInputs {
             program,
             controller_transport: selected.selection,
@@ -1166,7 +1158,7 @@ pub(crate) mod tests {
         program: &AdmittedExternalCandidateProgram,
         content: Option<ExternalRuntimeContentQualificationBinding>,
     ) -> Result<BindingDocument> {
-        let selected = select_transport(&relay(), &relay_settings())?;
+        let selected = select_transport(&relay())?;
         compose_binding_document(ComposeInputs {
             program,
             controller_transport: selected.selection,
@@ -1610,22 +1602,11 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn relay_owner_must_equal_settings_owner_and_carries_no_roots() {
+    fn relay_carries_no_roots() {
         let program = program();
-        let error = refusal(compose(
-            &program,
-            &relay(),
-            serde_json::json!({"owner_id": "other"}),
-        ));
-        assert!(
-            error
-                .to_string()
-                .contains("owner_id must equal the owner workspace id"),
-            "{error}"
-        );
-        assert!(compose(&program, &relay(), serde_json::json!({})).is_err());
+        compose(&program, &relay(), relay_settings()).unwrap();
         // The constructor itself refuses roots beside a relay transport.
-        let selected = select_transport(&relay(), &relay_settings()).unwrap();
+        let selected = select_transport(&relay()).unwrap();
         let error = refusal(compose_binding_document(ComposeInputs {
             program: &program,
             controller_transport: selected.selection,

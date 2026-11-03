@@ -505,17 +505,18 @@ impl BindingDocument {
                     )? == http.tls_root_bundle_digest,
                 "external controller TLS roots changed their signed identity"
             ),
-            ExternalControllerTransportSelection::ControllerFileRelay(relay) => ensure!(
+            // Whether the installed adapter implements the relay operation is
+            // checked at placement qualification, where its declaration is in
+            // hand; the adapter also checks its own settings against the
+            // relay's workspace scope when it moves a file.
+            ExternalControllerTransportSelection::ControllerFileRelay(_) => ensure!(
                 matches!(
                     &self.workload,
                     ExternalWorkloadBinding::QualificationStructuredSession(_)
                         | ExternalWorkloadBinding::StructuredSession(_)
                 ) && self.network_policy == "controller_file_relay_guest_deny_all_v1"
-                    && self.backend == "render-sandbox-early-access"
-                    && self.controller_tls_root_certificates_der_base64.is_empty()
-                    && self.settings.get("owner_id").and_then(Value::as_str)
-                        == Some(relay.owner_workspace_id.as_str()),
-                "external controller file relay requires signed Render Q owner and no TLS roots"
+                    && self.controller_tls_root_certificates_der_base64.is_empty(),
+                "external controller file relay requires a session workload, the relay network policy and no TLS roots"
             ),
         }
         Ok(())
@@ -1479,8 +1480,8 @@ mod workload_binding_tests {
     fn ordinary_relay_document() -> BindingDocument {
         let mut document = document();
         document.schema = 19;
-        document.backend = "render-sandbox-early-access".into();
-        document.settings = serde_json::json!({"owner_id":"render-owner"});
+        document.backend = "example-backend".into();
+        document.settings = serde_json::json!({"owner_id":"owner-a"});
         document.settings_digest = adapter_settings_digest(&document.settings).unwrap();
         document.network_policy = "controller_file_relay_guest_deny_all_v1".into();
         document.controller_tls_root_certificates_der_base64.clear();
@@ -1490,7 +1491,7 @@ mod workload_binding_tests {
                 route_contract:
                     ryeos_state::external_execution::transport::EXTERNAL_CHANNEL_RELAY_CONTRACT
                         .into(),
-                owner_workspace_id: "render-owner".into(),
+                owner_workspace_id: "owner-a".into(),
                 private_mailbox_parent: "/run/ryeos/private-relay".into(),
                 maximum_file_bytes: 1024 * 1024,
                 maximum_frames: 1024,

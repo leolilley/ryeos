@@ -829,6 +829,10 @@ pub enum LifecycleCapability {
     ExactActivationReconciliation,
     IdempotentTermination,
     ExactTerminalObservation,
+    /// The adapter implements the journal-claimed occurrence file relay
+    /// operation, so a binding may select the controller file relay transport.
+    /// Admission must require this before relaying through the adapter.
+    ControllerFileRelay,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]

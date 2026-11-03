@@ -39,6 +39,7 @@ fn render_source_declaration_commits_exact_profile_and_bounded_capability_ceilin
             "supervisor_activation",
             "authoritative_no_occurrence",
             "exact_terminal_observation",
+            "controller_file_relay",
         ])
     );
 }

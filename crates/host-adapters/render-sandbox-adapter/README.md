@@ -627,10 +627,13 @@ qualification is absent. A read-only Render inventory on 2026-09-27 returned
 no snapshots (`[]`), so none of the installed claims above has been made.
 
 The capabilities the signed bundle spec yields are exactly
-`authoritative_no_occurrence`, `exact_terminal_observation` and
-`supervisor_activation`. The last is derived only when both one-shot
-activation and the journal-claimed file relay are selected; it admits startup
-and does not attest `Ready`, which the channel owner still verifies. The first
+`authoritative_no_occurrence`, `controller_file_relay`,
+`exact_terminal_observation` and `supervisor_activation`.
+`controller_file_relay` is derived when the journal-claimed file relay is
+selected, and a binding may select the controller file relay transport only
+over an adapter that declares it. `supervisor_activation` is derived only
+when both one-shot activation and the file relay are selected; it admits
+startup and does not attest `Ready`, which the channel owner still verifies. The first
 capability is limited to W1's
 `NoRequestSent` result; provider response errors do not currently establish it.
 The adapter does not declare `idempotent_termination` because it follows the

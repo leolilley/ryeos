@@ -682,6 +682,9 @@ impl ProviderSpec {
         if self.one_shot_activation_enabled() && self.relay_file_enabled() {
             capabilities.insert(LifecycleCapability::SupervisorActivation);
         }
+        if self.relay_file_enabled() {
+            capabilities.insert(LifecycleCapability::ControllerFileRelay);
+        }
         capabilities
     }
 
@@ -1321,6 +1324,7 @@ mod tests {
                 LifecycleCapability::SupervisorActivation,
                 LifecycleCapability::AuthoritativeNoOccurrence,
                 LifecycleCapability::ExactTerminalObservation,
+                LifecycleCapability::ControllerFileRelay,
             ])
         );
 
@@ -1456,6 +1460,7 @@ mod tests {
                 LifecycleCapability::SupervisorActivation,
                 LifecycleCapability::AuthoritativeNoOccurrence,
                 LifecycleCapability::ExactTerminalObservation,
+                LifecycleCapability::ControllerFileRelay,
             ]),
             "activation plus relay admits startup, not runtime or reconciliation testimony"
         );

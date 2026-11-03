@@ -1695,6 +1695,17 @@ impl ExternalPlacementBackendRegistry {
         if require_activation {
             required.insert(LifecycleCapability::SupervisorActivation);
         }
+        // A relay transport moves files through the adapter's relay operation;
+        // a binding must not select it over an adapter that does not declare
+        // that operation. Retained cleanup never relays, so it is not gated.
+        if require_activation
+            && matches!(
+                contract.controller_transport,
+                ryeos_state::external_execution::transport::ExternalControllerTransportSelection::ControllerFileRelay(_)
+            )
+        {
+            required.insert(LifecycleCapability::ControllerFileRelay);
+        }
         // This is inherent to the admitted cleanup proof. Reconciliation is
         // optional: an unknown outcome may remain quarantined with its capacity
         // reserved, but cannot be converted into an unsupported stronger fact.
@@ -12147,6 +12158,61 @@ mod tests {
             assert_eq!(backend.activation_calls.load(Ordering::SeqCst), 0);
             assert_eq!(backend.terminate_calls.load(Ordering::SeqCst), 0);
         }
+    }
+
+    #[test]
+    fn file_relay_transport_requires_the_adapter_relay_capability() {
+        let binding = InstalledExternalExecutionBinding::test_fixture();
+        let mut contract = binding.backend_contract();
+        contract.controller_transport =
+            ryeos_state::external_execution::transport::ExternalControllerTransportSelection::ControllerFileRelay(
+                ryeos_state::external_execution::transport::ExternalControllerFileRelayContract {
+                    schema: 3,
+                    route_contract:
+                        ryeos_state::external_execution::transport::EXTERNAL_CHANNEL_RELAY_CONTRACT
+                            .into(),
+                    owner_workspace_id: "workspace-a".into(),
+                    private_mailbox_parent: "/ryeos/occurrences".into(),
+                    maximum_file_bytes: 1024 * 1024,
+                    maximum_frames: 1024,
+                    poll_interval_ms: 1000,
+                    poll_deadline_ms: 30_000,
+                },
+            );
+        let credential = credential(&binding);
+        let base = BTreeSet::from([
+            LifecycleCapability::SupervisorActivation,
+            LifecycleCapability::ExactTerminalObservation,
+        ]);
+        let admitted = AdmittedExternalExecutionProgram::StructuredSession(program());
+        let without = Arc::new(FaultBackend {
+            capabilities: base.clone(),
+            ..FaultBackend::new()
+        });
+        let registry =
+            ExternalPlacementBackendRegistry::from_backends(vec![without.clone()]).unwrap();
+        let error = registry
+            .qualify(&contract, &credential, &admitted)
+            .err()
+            .expect("an adapter without the relay capability must be refused");
+        assert!(
+            error.to_string().contains("ControllerFileRelay"),
+            "{error:#}"
+        );
+        assert_eq!(without.allocate_calls.load(Ordering::SeqCst), 0);
+        // Retained cleanup never relays, so it stays available.
+        registry
+            .qualify_for_cleanup(&contract, &credential, &admitted)
+            .unwrap();
+        let mut with = base;
+        with.insert(LifecycleCapability::ControllerFileRelay);
+        let registry =
+            ExternalPlacementBackendRegistry::from_backends(vec![Arc::new(FaultBackend {
+                capabilities: with,
+                ..FaultBackend::new()
+            })])
+            .unwrap();
+        registry.qualify(&contract, &credential, &admitted).unwrap();
     }
 
     #[test]

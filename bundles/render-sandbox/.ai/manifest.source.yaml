@@ -25,3 +25,4 @@ external_lifecycle_adapters:
       - supervisor_activation
       - authoritative_no_occurrence
       - exact_terminal_observation
+      - controller_file_relay

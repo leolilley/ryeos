@@ -272,13 +272,10 @@ pub(crate) fn compose_with_inputs(
         true,
     )?;
     crate::external_placement::require_qualification_channel_limits(limits.max_transfer_bytes)?;
-    let transport = select_transport(
-        &ComposeTransportRequest::FileRelay {
-            owner_workspace_id: owner_id.to_owned(),
-            private_mailbox_parent: request.private_mailbox_parent.clone(),
-        },
-        &settings,
-    )?;
+    let transport = select_transport(&ComposeTransportRequest::FileRelay {
+        owner_workspace_id: owner_id.to_owned(),
+        private_mailbox_parent: request.private_mailbox_parent.clone(),
+    })?;
     let document = qualification_binding_document(
         &request,
         &facts,

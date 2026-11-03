@@ -218,12 +218,10 @@ impl RelayTransferIntent {
         ensure!(
             !self.placement_thread_id.is_empty()
                 && self.placement_thread_id.len() <= 256
-                && self.occurrence_id.starts_with("sbx-")
-                && self.occurrence_id.len() <= 128
-                && self
-                    .occurrence_id
-                    .bytes()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'),
+                && ryeos_external_execution_contract::relay_file::require_relay_occurrence_id(
+                    &self.occurrence_id,
+                )
+                .is_ok(),
             "external relay placement or occurrence is invalid"
         );
         ensure!(

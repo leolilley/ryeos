@@ -14,6 +14,25 @@ pub const MAX_RELAY_RESPONSE_BYTES: usize = 3 * 1024 * 1024;
 pub const LIFECYCLE_RELAY_UPLOAD_FD_ENV: &str = "RYEOS_LIFECYCLE_RELAY_UPLOAD_FD";
 pub const RELAY_FILE_PROTOCOL: &str = "ryeos.external-execution.relay-file.v1";
 
+/// An adapter-issued occurrence id is opaque, but the relay uses it as one
+/// path component under the guest occurrences root. Admit only lowercase
+/// ASCII letters, digits and interior hyphens, at most 128 bytes, so it can
+/// never name a different directory or hide behind a leading or trailing
+/// separator-like character.
+pub fn require_relay_occurrence_id(id: &str) -> Result<()> {
+    ensure!(
+        !id.is_empty()
+            && id.len() <= 128
+            && !id.starts_with('-')
+            && !id.ends_with('-')
+            && id
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'),
+        "relay occurrence identity is invalid"
+    );
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RelayFileKind {
@@ -109,12 +128,7 @@ impl RelayFileAdapterRequest {
             "relay placement identity is invalid"
         );
         ensure!(
-            self.occurrence_id.starts_with("sbx-")
-                && self.occurrence_id.len() <= 128
-                && self
-                    .occurrence_id
-                    .bytes()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'),
+            require_relay_occurrence_id(&self.occurrence_id).is_ok(),
             "relay occurrence identity is invalid"
         );
         ensure!(
@@ -301,6 +315,24 @@ mod tests {
                 gid: 65534,
             }),
         }
+    }
+
+    #[test]
+    fn occurrence_id_is_one_safe_path_component_with_no_provider_prefix() {
+        for ok in ["a", "occ-1", "0abc", "sbx-a", "x".repeat(128).as_str()] {
+            require_relay_occurrence_id(ok).unwrap();
+        }
+        let too_long = "x".repeat(129);
+        for bad in [
+            "", "a/b", "..", "a.b", "Upper", "-a", "a-", "a b", "a\0b", "é", &too_long,
+        ] {
+            assert!(require_relay_occurrence_id(bad).is_err(), "{bad:?}");
+        }
+        let mut request = upload();
+        request.occurrence_id = "occ-1".into();
+        request.validate().unwrap();
+        request.occurrence_id = "-occ".into();
+        assert!(request.validate().is_err());
     }
 
     #[test]
