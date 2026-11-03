@@ -22,6 +22,7 @@ use ryeos_external_execution::guest_start_rehearsal::{
     GuestStartRehearsalOutcome, GuestStartRehearsalRequest, GuestStartRehearsalStep,
     run_guest_start_rehearsal, run_rehearsal_host_if_requested,
 };
+use ryeos_state::LeasedLargeObject;
 use ryeos_state::external_execution::transport::{
     ExternalControllerFileRelayContract, ExternalNetworkInputPolicy,
 };
@@ -55,26 +56,24 @@ fn copy_executable(from: &Path, to: &Path) -> Result<()> {
     Ok(())
 }
 
-/// The node's installed binding, owner runtime and products, read in place.
+/// The node's installed binding, owner runtime and products. Objects and
+/// blobs are read through the node's CAS, large content through its
+/// large-object store; every file the rehearsal needs a path for is a copy
+/// the harness made in its own scratch (or a lease it holds).
 struct NodeSelection {
     owner: PathBuf,
     profile: GuestOwnerRuntimeProfile,
     supervisor: PathBuf,
     launcher: PathBuf,
     product_member: (String, PathBuf, u32),
+    /// The lease on the large object the product member names, with the store
+    /// and runtime directory its descriptor-relative path is resolved
+    /// through; all must stay open while the path is used.
+    _product_lease: Option<(LeasedLargeObject, ryeos_state::LargeObjectStore, lillux::PinnedDirectory)>,
     product_manifest_record: PathBuf,
     relay: ExternalControllerFileRelayContract,
     network_inputs: ExternalNetworkInputPolicy,
     attach_budget_seconds: u64,
-}
-
-fn read_json(path: &Path) -> Result<serde_json::Value> {
-    serde_json::from_slice(&std::fs::read(path).with_context(|| format!("read {}", path.display()))?)
-        .with_context(|| format!("parse {}", path.display()))
-}
-
-fn sharded(root: &Path, hash: &str, suffix: &str) -> PathBuf {
-    root.join(&hash[0..2]).join(&hash[2..4]).join(format!("{hash}{suffix}"))
 }
 
 fn find_bundle_member(app: &Path, name: &str, sha256: &str) -> Result<PathBuf> {
@@ -95,7 +94,62 @@ fn find_bundle_member(app: &Path, name: &str, sha256: &str) -> Result<PathBuf> {
     anyhow::bail!("no installed bundle carries {name} with sha256 {sha256}")
 }
 
-fn node_selection(app: &Path, binding: &str) -> Result<NodeSelection> {
+/// Copy a CAS blob through the store's API to `to`.
+fn copy_blob(cas: &lillux::CasStore, hash: &str, to: &Path) -> Result<()> {
+    let (mut blob, _size) = cas
+        .open_blob(hash)?
+        .with_context(|| format!("blob {hash} is not in the node's CAS"))?;
+    let mut out = std::fs::File::create(to).with_context(|| format!("create {}", to.display()))?;
+    std::io::copy(&mut blob, &mut out)?;
+    Ok(())
+}
+
+/// One regular-file entry of an installed content manifest, either tier.
+struct ManifestFile {
+    path: String,
+    mode: Option<u32>,
+    blob_hash: Option<String>,
+    file_sha256: Option<String>,
+    size: Option<u64>,
+}
+
+fn manifest_files(value: &serde_json::Value) -> Result<Vec<ManifestFile>> {
+    use ryeos_state::objects::{
+        EXTERNAL_LARGE_CONTENT_MANIFEST_KIND, ExternalContentManifestEntryKind,
+        ExternalContentManifestObject, ExternalLargeContentManifestObject,
+    };
+    if value["kind"] == EXTERNAL_LARGE_CONTENT_MANIFEST_KIND {
+        Ok(ExternalLargeContentManifestObject::from_value(value)?
+            .entries
+            .into_iter()
+            .filter(|entry| entry.kind == ExternalContentManifestEntryKind::File)
+            .map(|entry| ManifestFile {
+                path: entry.path,
+                mode: entry.mode,
+                blob_hash: entry.blob_hash,
+                file_sha256: entry.file_sha256,
+                size: entry.size,
+            })
+            .collect())
+    } else {
+        Ok(ExternalContentManifestObject::from_value(value)?
+            .entries
+            .into_iter()
+            .filter(|entry| entry.kind == ExternalContentManifestEntryKind::File)
+            .map(|entry| ManifestFile {
+                path: entry.path,
+                mode: entry.mode,
+                blob_hash: entry.blob_hash,
+                file_sha256: None,
+                size: entry.size,
+            })
+            .collect())
+    }
+}
+
+fn node_selection(app: &Path, binding: &str, inputs: &Path) -> Result<NodeSelection> {
+    // The binding is a signed node-config document; its typed loader lives in
+    // ryeos-app, which this crate cannot depend on, so the fields are read raw.
     let text = std::fs::read_to_string(
         app.join(".ai/node/external_execution")
             .join(format!("{binding}.yaml")),
@@ -112,58 +166,74 @@ fn node_selection(app: &Path, binding: &str) -> Result<NodeSelection> {
             .map(str::to_owned)
             .with_context(|| format!("binding has no {name}"))
     };
+    // The node daemon's runtime state directory and its CAS root.
     let state = app.join(".ai/state");
-    let objects = state.join("objects/objects");
-    let blobs = state.join("objects/blobs");
-    let runtime = read_json(&sharded(&objects, &field("guest_runtime_manifest_hash")?, ".json"))?;
-    let member = |path: &str| -> Result<PathBuf> {
-        let entry = runtime["entries"]
-            .as_array()
-            .context("runtime manifest has no entries")?
+    let cas = lillux::CasStore::new(state.join("objects"));
+    let runtime_hash = field("guest_runtime_manifest_hash")?;
+    let runtime = manifest_files(
+        &cas.get_object(&runtime_hash)?
+            .with_context(|| format!("runtime manifest {runtime_hash} is not in the node's CAS"))?,
+    )?;
+    let member = |path: &str, to: &str| -> Result<PathBuf> {
+        let entry = runtime
             .iter()
-            .find(|entry| entry["path"] == path)
+            .find(|entry| entry.path == path)
             .with_context(|| format!("runtime manifest has no {path}"))?;
-        Ok(sharded(
-            &blobs,
-            entry["blob_hash"].as_str().context("runtime member has no blob")?,
-            "",
-        ))
+        let target = inputs.join(to);
+        copy_blob(
+            &cas,
+            entry.blob_hash.as_deref().context("runtime member has no blob")?,
+            &target,
+        )?;
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755))?;
+        Ok(target)
     };
-    let profile: GuestOwnerRuntimeProfile =
-        serde_json::from_slice(&std::fs::read(member("guest-owner-profile.json")?)?)?;
-    let product_manifest_record = sharded(
-        &objects,
-        binding["workload"]["runtime_manifest_hash"]
-            .as_str()
-            .context("binding workload has no runtime manifest")?,
-        ".json",
-    );
-    let product = read_json(&product_manifest_record)?;
-    let file = product["entries"]
-        .as_array()
-        .context("product manifest has no entries")?
-        .iter()
-        .find(|entry| entry["kind"] == "file")
+    let profile = GuestOwnerRuntimeProfile::from_cas(&cas, &runtime_hash)?
+        .with_context(|| format!("runtime manifest {runtime_hash} is not in the node's CAS"))?;
+    let product_manifest_hash = binding["workload"]["runtime_manifest_hash"]
+        .as_str()
+        .context("binding workload has no runtime manifest")?;
+    let product_value = cas
+        .get_object(product_manifest_hash)?
+        .with_context(|| format!("product manifest {product_manifest_hash} is not in the node's CAS"))?;
+    let product_manifest_record = inputs.join("product-manifest-record.json");
+    std::fs::write(
+        &product_manifest_record,
+        cas.get_object_bytes_bounded(product_manifest_hash, 4 * 1024 * 1024)?
+            .context("product manifest vanished from the node's CAS")?,
+    )?;
+    let file = manifest_files(&product_value)?
+        .into_iter()
+        .next()
         .context("product manifest has no file")?;
-    let source = match (file["blob_hash"].as_str(), file["file_sha256"].as_str()) {
-        (Some(blob), _) => sharded(&blobs, blob, ""),
-        (None, Some(large)) => state.join("large-objects/objects").join(large),
+    let (source, lease) = match (file.blob_hash.as_deref(), file.file_sha256.as_deref()) {
+        (Some(blob), _) => {
+            let target = inputs.join("product-source");
+            copy_blob(&cas, blob, &target)?;
+            (target, None)
+        }
+        (None, Some(large)) => {
+            let runtime_directory = lillux::PinnedDirectory::open(&state)?
+                .context("node has no runtime state directory")?;
+            let store = ryeos_state::LargeObjectStore::open_under(&runtime_directory)?
+                .context("node has no large-object store")?;
+            let lease = store.lease_object(large, file.size.context("large product file has no size")?)?;
+            (lease.path().to_path_buf(), Some((lease, store, runtime_directory)))
+        }
         _ => anyhow::bail!("product file has no content"),
     };
     Ok(NodeSelection {
         // A candidate owner build may stand in for the installed one.
         owner: match std::env::var_os("RYEOS_GUEST_START_REHEARSAL_OWNER") {
             Some(path) => PathBuf::from(path),
-            None => member(&format!("bin/{OWNER}"))?,
+            None => member(&format!("bin/{OWNER}"), "owner")?,
         },
         profile,
         supervisor: find_bundle_member(app, SUPERVISOR, &field("supervisor_artifact_hash")?)?,
         launcher: find_bundle_member(app, LAUNCHER, &field("launcher_artifact_hash")?)?,
-        product_member: (
-            file["path"].as_str().context("product file has no path")?.to_owned(),
-            source,
-            file["mode"].as_u64().unwrap_or(0o755) as u32,
-        ),
+        product_member: (file.path, source, file.mode.unwrap_or(0o755)),
+        _product_lease: lease,
         product_manifest_record,
         relay: serde_json::from_value(binding["controller_transport"].clone())?,
         network_inputs: serde_json::from_value(binding["provider_network_inputs"].clone())?,
@@ -174,8 +244,8 @@ fn node_selection(app: &Path, binding: &str) -> Result<NodeSelection> {
 }
 
 fn rehearse_node(app: &Path, binding: &str) -> Result<GuestStartRehearsalOutcome> {
-    let selection = node_selection(app, binding)?;
     let inputs = scratch();
+    let selection = node_selection(app, binding, inputs.path())?;
     let (relative, source, mode) = &selection.product_member;
     let target = inputs.path().join("product").join(relative);
     std::fs::create_dir_all(target.parent().context("product member has no parent")?)?;
