@@ -3826,6 +3826,32 @@ impl PinnedDirectory {
         Ok(())
     }
 
+    /// Re-anchor this path binding after the current process deliberately
+    /// entered a new mount namespace. Every mount there has a new identity, so
+    /// the original descriptor can no longer prove the path. Reopen the same
+    /// path inside the current namespace, require the identical directory
+    /// inode, and keep that descriptor: later checks then compare mounts
+    /// within this namespace. A binding that is not re-anchored keeps
+    /// refusing, and a path that now reaches another inode refuses here.
+    pub fn rebind_in_current_mount_namespace(&mut self) -> Result<()> {
+        if !self.path_binding_required {
+            return Ok(());
+        }
+        let current = Self::open(&self.path)?.ok_or_else(|| {
+            anyhow::anyhow!(
+                "pinned directory path disappeared at mount namespace entry: {}",
+                self.path.display()
+            )
+        })?;
+        ensure!(
+            self.is_same_directory(&current)?,
+            "pinned directory path reaches another inode after mount namespace entry: {}",
+            self.path.display()
+        );
+        self.directory = current.directory;
+        Ok(())
+    }
+
     /// Fixed-size path-binding check for an original admission checkpoint.
     /// This performs the same no-follow component traversal and exact inode /
     /// mount comparison as the ordinary check, without cloning path buffers or
@@ -11782,6 +11808,22 @@ mod fixed_directory_binding_controls {
         std::fs::create_dir(&selected).unwrap();
         assert!(original.ensure_path_binding().is_err());
         assert!(original.ensure_path_binding_fixed().is_err());
+    }
+    #[test]
+    fn namespace_rebind_keeps_the_same_inode_and_refuses_another() {
+        let temp = tempfile::tempdir().unwrap();
+        let selected = temp.path().join("selected");
+        std::fs::create_dir(&selected).unwrap();
+        let mut original = super::PinnedDirectory::open(&selected).unwrap().unwrap();
+        let identity = original.identity().unwrap();
+        original.rebind_in_current_mount_namespace().unwrap();
+        assert_eq!(original.identity().unwrap(), identity);
+        original.ensure_path_binding().unwrap();
+        std::fs::rename(&selected, temp.path().join("retained")).unwrap();
+        std::fs::create_dir(&selected).unwrap();
+        assert!(original.rebind_in_current_mount_namespace().is_err());
+        assert_eq!(original.identity().unwrap(), identity);
+        assert!(original.ensure_path_binding().is_err());
     }
     #[test]
     fn original_binding_rejects_symlink_replacement() {

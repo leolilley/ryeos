@@ -183,6 +183,13 @@ impl ObservedGuestRuntime {
         Ok(())
     }
 
+    /// Re-anchor the runtime root's path binding after this process entered
+    /// its private mount namespace, then recheck the whole installed identity.
+    pub fn rebind_in_current_mount_namespace(&mut self) -> Result<()> {
+        self.root.rebind_in_current_mount_namespace()?;
+        self.recheck()
+    }
+
     /// A mutable occurrence journal or source may not become an ambient
     /// entry beneath the exact runtime tree used as the controller-root anchor.
     pub fn require_disjoint_directory_tree(&self, other: &lillux::PinnedDirectory) -> Result<()> {

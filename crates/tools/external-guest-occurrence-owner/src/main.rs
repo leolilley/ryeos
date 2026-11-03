@@ -128,7 +128,7 @@ fn prepare_non_root_owner() -> Result<()> {
 fn run(assignment_bytes: &[u8]) -> Result<()> {
     let runtime_root = lillux::PinnedDirectory::open(Path::new(RUNTIME_ROOT))?
         .context("qualified guest runtime root is absent")?;
-    let runtime = ObservedGuestRuntime::observe(&runtime_root)?;
+    let mut runtime = ObservedGuestRuntime::observe(&runtime_root)?;
     runtime.profile().account.require_current_process()?;
     let activation = open_private_root(ACTIVATION_ROOT)?;
     let occurrences = open_private_root(OCCURRENCES_ROOT)?;
@@ -146,7 +146,7 @@ fn run(assignment_bytes: &[u8]) -> Result<()> {
         upload.observation()?.size() == admitted.authorization().ticket.framed_bytes,
         "guest owner upload changed its exact signed size"
     );
-    let occurrence =
+    let mut occurrence =
         occurrences.create_child(OsStr::new(&admitted.authorization().occurrence_id), 0o700)?;
     occurrence.require_owner_private_directory()?;
     let limits = runtime.profile().private_source_limits();
@@ -155,6 +155,10 @@ fn run(assignment_bytes: &[u8]) -> Result<()> {
     ));
     let source = lillux::sandbox::enter_linux_private_source_filesystem(limits)
         .map_err(anyhow::Error::msg)?;
+    // Every mount has a new identity in the private namespace just entered.
+    // Re-anchor the two roots carried across it before any recheck.
+    runtime.rebind_in_current_mount_namespace()?;
+    occurrence.rebind_in_current_mount_namespace()?;
     let ready_boot_inputs = admitted.ready_boot_inputs(&import_bytes);
     let mut held = prepare_authorized_held_guest_supervisor_once(
         &occurrence,
