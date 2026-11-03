@@ -596,7 +596,7 @@ mod tests {
         let cas = lillux::CasStore::new(
             ryeos_engine::roots::RuntimeRoot::new(root.to_path_buf())
                 .state()
-                .join("cas"),
+                .join("objects"),
         );
         let profile = format!(
             r#"{{"account":{{"gid":65534,"implementation":"unix","uid":65534}},"owner_timeout_seconds":600,"private_source_max_bytes":{private_source_max_bytes},"private_source_max_inodes":4096,"schema":2}}"#

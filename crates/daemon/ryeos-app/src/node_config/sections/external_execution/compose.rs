@@ -100,7 +100,7 @@ pub(crate) fn require_guest_owner_stages_largest_package(
     let cas = lillux::CasStore::new(
         ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf())
             .state()
-            .join("cas"),
+            .join("objects"),
     );
     let Some(profile) =
         ryeos_external_execution::guest_import_authorization::GuestOwnerRuntimeProfile::from_cas(
