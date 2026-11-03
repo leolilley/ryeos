@@ -4,8 +4,13 @@
 //! controller-root/profile tree. Until a lifecycle adapter has qualified that
 //! snapshot and proved this process survives a lost run stream, it must
 //! remain fail-closed.
+//!
+//! Stdout carries only the contract's one startup report line: held once the
+//! supervisor is released, or the closed step word that refused. Stderr keeps
+//! the full error for local diagnosis and is never relayed.
 
 use std::ffi::OsStr;
+use std::io::Write as _;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,6 +21,9 @@ use ryeos_external_execution::guest_import_authorization::ObservedGuestRuntime;
 use ryeos_external_execution::guest_installation::prepare_authorized_held_guest_supervisor_once;
 use ryeos_external_execution_contract::guest_import_authorization::{
     MAX_GUEST_IMPORT_AUTHORIZATION_BYTES, MAX_SIGNED_GUEST_OCCURRENCE_ASSIGNMENT_BYTES,
+};
+use ryeos_external_execution_contract::guest_owner_report::{
+    GuestOwnerRefusal as Step, GuestOwnerReport, RefusedAt as _,
 };
 
 const RUNTIME_ROOT: &str = "/ryeos/guest-runtime";
@@ -29,6 +37,10 @@ const CLEANUP_TIMEOUT: lillux::time::Duration = lillux::time::Duration::from_sec
 fn decode_assignment_argument(
     args: impl IntoIterator<Item = std::ffi::OsString>,
 ) -> Result<Vec<u8>> {
+    decode_assignment_words(args).refused_at(Step::AssignmentArgument)
+}
+
+fn decode_assignment_words(args: impl IntoIterator<Item = std::ffi::OsString>) -> Result<Vec<u8>> {
     let mut args = args.into_iter();
     ensure!(
         args.next().as_deref() == Some(OsStr::new("--assignment-b64")),
@@ -82,6 +94,10 @@ fn require_admissible_inbound_file(file: &lillux::PinnedRegularFile) -> Result<(
 }
 
 fn read_signed_import(activation: &lillux::PinnedDirectory) -> Result<Vec<u8>> {
+    read_signed_import_bytes(activation).refused_at(Step::ImportRead)
+}
+
+fn read_signed_import_bytes(activation: &lillux::PinnedDirectory) -> Result<Vec<u8>> {
     let file = activation
         .open_pinned_regular(OsStr::new(IMPORT_NAME), false)?
         .context("guest owner has no separately delivered signed import")?;
@@ -102,6 +118,10 @@ fn read_signed_import(activation: &lillux::PinnedDirectory) -> Result<Vec<u8>> {
 /// runtime root may arrive administrator-private, so both are delegated
 /// read-only traversal first, and root keeps every mutation.
 fn prepare_non_root_owner() -> Result<()> {
+    transition_to_non_root_owner().refused_at(Step::AccountTransition)
+}
+
+fn transition_to_non_root_owner() -> Result<()> {
     let runtime_root = lillux::PinnedDirectory::open(Path::new(RUNTIME_ROOT))?
         .context("guest owner runtime root is absent before account transition")?;
     let observed = ObservedGuestRuntime::observe(&runtime_root)?;
@@ -125,40 +145,70 @@ fn prepare_non_root_owner() -> Result<()> {
     Ok(())
 }
 
+fn report(report: GuestOwnerReport) {
+    let mut stdout = std::io::stdout().lock();
+    let _ = stdout
+        .write_all(report.line().as_bytes())
+        .and_then(|()| stdout.flush());
+}
+
 fn run(assignment_bytes: &[u8]) -> Result<()> {
-    let runtime_root = lillux::PinnedDirectory::open(Path::new(RUNTIME_ROOT))?
-        .context("qualified guest runtime root is absent")?;
-    let mut runtime = ObservedGuestRuntime::observe(&runtime_root)?;
-    runtime.profile().account.require_current_process()?;
-    let activation = open_private_root(ACTIVATION_ROOT)?;
-    let occurrences = open_private_root(OCCURRENCES_ROOT)?;
-    runtime.require_disjoint_directory_tree(&activation)?;
-    runtime.require_disjoint_directory_tree(&occurrences)?;
-    activation.require_disjoint_directory_tree(&occurrences)?;
+    let mut runtime = (|| -> Result<_> {
+        let runtime_root = lillux::PinnedDirectory::open(Path::new(RUNTIME_ROOT))?
+            .context("qualified guest runtime root is absent")?;
+        let runtime = ObservedGuestRuntime::observe(&runtime_root)?;
+        runtime.profile().account.require_current_process()?;
+        Ok(runtime)
+    })()
+    .refused_at(Step::RuntimeRoot)?;
+    let (activation, occurrences) = (|| -> Result<_> {
+        let activation = open_private_root(ACTIVATION_ROOT)?;
+        let occurrences = open_private_root(OCCURRENCES_ROOT)?;
+        runtime.require_disjoint_directory_tree(&activation)?;
+        runtime.require_disjoint_directory_tree(&occurrences)?;
+        activation.require_disjoint_directory_tree(&occurrences)?;
+        Ok((activation, occurrences))
+    })()
+    .refused_at(Step::PrivateRoots)?;
     let import_bytes = read_signed_import(&activation)?;
-    let admitted = runtime.verify_import_documents(&import_bytes, assignment_bytes)?;
-    admitted.require_fresh_admission()?;
-    let upload = activation
-        .open_pinned_regular(OsStr::new(PACKAGE_NAME), false)?
-        .context("guest owner has no exact uploaded package")?;
-    require_admissible_inbound_file(&upload)?;
-    ensure!(
-        upload.observation()?.size() == admitted.authorization().ticket.framed_bytes,
-        "guest owner upload changed its exact signed size"
-    );
-    let mut occurrence =
-        occurrences.create_child(OsStr::new(&admitted.authorization().occurrence_id), 0o700)?;
-    occurrence.require_owner_private_directory()?;
+    let admitted = runtime
+        .verify_import_documents(&import_bytes, assignment_bytes)
+        .refused_at(Step::ImportVerify)?;
+    admitted
+        .require_fresh_admission()
+        .refused_at(Step::AdmissionExpired)?;
+    let upload = (|| -> Result<_> {
+        let upload = activation
+            .open_pinned_regular(OsStr::new(PACKAGE_NAME), false)?
+            .context("guest owner has no exact uploaded package")?;
+        require_admissible_inbound_file(&upload)?;
+        ensure!(
+            upload.observation()?.size() == admitted.authorization().ticket.framed_bytes,
+            "guest owner upload changed its exact signed size"
+        );
+        Ok(upload)
+    })()
+    .refused_at(Step::PackageIdentity)?;
+    let mut occurrence = (|| -> Result<_> {
+        let occurrence =
+            occurrences.create_child(OsStr::new(&admitted.authorization().occurrence_id), 0o700)?;
+        occurrence.require_owner_private_directory()?;
+        Ok(occurrence)
+    })()
+    .refused_at(Step::OccurrenceRoot)?;
     let limits = runtime.profile().private_source_limits();
     let lifetime = lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(
         u64::from(runtime.profile().owner_timeout_seconds),
     ));
     let source = lillux::sandbox::enter_linux_private_source_filesystem(limits)
-        .map_err(anyhow::Error::msg)?;
+        .map_err(anyhow::Error::msg)
+        .refused_at(Step::PrivateSourceEntry)?;
     // Every mount has a new identity in the private namespace just entered.
     // Re-anchor the two roots carried across it before any recheck.
-    runtime.rebind_in_current_mount_namespace()?;
-    occurrence.rebind_in_current_mount_namespace()?;
+    runtime
+        .rebind_in_current_mount_namespace()
+        .and_then(|()| occurrence.rebind_in_current_mount_namespace())
+        .refused_at(Step::PathRebind)?;
     let ready_boot_inputs = admitted.ready_boot_inputs(&import_bytes);
     let mut held = prepare_authorized_held_guest_supervisor_once(
         &occurrence,
@@ -170,16 +220,22 @@ fn run(assignment_bytes: &[u8]) -> Result<()> {
         lifetime,
         Some(ready_boot_inputs),
     )?;
-    held.mount_preparation_receipt()?;
+    held.mount_preparation_receipt()
+        .refused_at(Step::MountPreparation)?;
     let cancelling = Arc::new(AtomicBool::new(false));
-    for signal in [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM] {
-        signal_hook::flag::register(signal, Arc::clone(&cancelling))?;
-    }
     // Provider stream loss is not a cancellation. Retain this occurrence on
     // SIGHUP and wait for the original supervisor/channel outcome.
     let _stream_hangup = Arc::new(AtomicBool::new(false));
-    signal_hook::flag::register(signal_hook::consts::SIGHUP, Arc::clone(&_stream_hangup))?;
-    let mut released = held.release_once()?;
+    (|| -> Result<_> {
+        for signal in [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM] {
+            signal_hook::flag::register(signal, Arc::clone(&cancelling))?;
+        }
+        signal_hook::flag::register(signal_hook::consts::SIGHUP, Arc::clone(&_stream_hangup))?;
+        Ok(())
+    })()
+    .refused_at(Step::SignalRegistration)?;
+    let mut released = held.release_once().refused_at(Step::Release)?;
+    report(GuestOwnerReport::Held);
     loop {
         let natural = match released.try_observe_natural_exit() {
             Ok(exit) => exit,
@@ -192,18 +248,22 @@ fn run(assignment_bytes: &[u8]) -> Result<()> {
                     Err(cleanup) => error.context(format!(
                         "guest owner could not prove refused target death: {cleanup:#}"
                     )),
-                });
+                })
+                .refused_at(Step::SupervisorExit);
             }
         };
         if let Some(exit) = natural {
             ensure!(
                 exit.target_reported_success(),
-                "guest supervisor exited without successful applied native launch: {:?}{}",
-                exit.termination().exit(),
-                exit.termination()
-                    .launch_failure()
-                    .map(|failure| format!("; launch failure: {}", failure.diagnostic()))
-                    .unwrap_or_default()
+                anyhow::anyhow!(
+                    "guest supervisor exited without successful applied native launch: {:?}{}",
+                    exit.termination().exit(),
+                    exit.termination()
+                        .launch_failure()
+                        .map(|failure| format!("; launch failure: {}", failure.diagnostic()))
+                        .unwrap_or_default()
+                )
+                .context(Step::SupervisorExit)
             );
             // The controller must independently join its authenticated
             // supervisor transcript and frozen export. This exit is only
@@ -211,19 +271,32 @@ fn run(assignment_bytes: &[u8]) -> Result<()> {
             return Ok(());
         }
         if lifetime.has_elapsed() || cancelling.load(Ordering::Acquire) {
-            let _death = released.terminate_namespace_for_export_until(
-                lillux::time::MonotonicDeadline::after(CLEANUP_TIMEOUT),
-            )?;
-            anyhow::bail!("guest owner cancelled or exceeded installed lifetime");
+            let _death = released
+                .terminate_namespace_for_export_until(lillux::time::MonotonicDeadline::after(
+                    CLEANUP_TIMEOUT,
+                ))
+                .refused_at(Step::Lifetime)?;
+            return Err(anyhow::anyhow!(
+                "guest owner cancelled or exceeded installed lifetime"
+            ))
+            .refused_at(Step::Lifetime);
         }
         lillux::time::sleep(POLL_INTERVAL);
     }
 }
 
-fn main() -> Result<()> {
+fn owner() -> Result<()> {
     let assignment = decode_assignment_argument(std::env::args_os().skip(1))?;
     prepare_non_root_owner()?;
     run(&assignment)
+}
+
+fn main() {
+    if let Err(error) = owner() {
+        report(GuestOwnerReport::Refused(Step::of(&error)));
+        eprintln!("Error: {error:?}");
+        std::process::exit(1);
+    }
 }
 
 #[cfg(test)]
@@ -283,6 +356,45 @@ mod tests {
         assert!(
             decode_assignment_argument(["--assignment-b64".into(), "a".repeat(10_000).into()])
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn each_deterministic_early_refusal_names_its_step() {
+        fn refused<T>(result: Result<T>) -> Step {
+            Step::of(&result.err().expect("step refuses"))
+        }
+        assert_eq!(
+            refused(decode_assignment_argument(["--other".into()])),
+            Step::AssignmentArgument
+        );
+        let activation = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(activation.path(), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        let root = lillux::PinnedDirectory::open(activation.path())
+            .unwrap()
+            .unwrap();
+        assert_eq!(refused(read_signed_import(&root)), Step::ImportRead);
+        // These steps need the installed guest image; on any other host the
+        // runtime root is absent and the refusal must still name its step.
+        if !Path::new(RUNTIME_ROOT).exists() {
+            assert_eq!(refused(prepare_non_root_owner()), Step::AccountTransition);
+            assert_eq!(refused(run(b"assignment")), Step::RuntimeRoot);
+        }
+    }
+
+    #[test]
+    fn refusal_report_carries_only_the_step_word() {
+        let error = Err::<(), _>(anyhow::anyhow!("/private/path secret"))
+            .refused_at(Step::PackageIdentity)
+            .unwrap_err();
+        assert_eq!(
+            GuestOwnerReport::Refused(Step::of(&error)).line(),
+            "{\"guest_owner\":\"refused\",\"step\":\"package_identity\"}\n"
+        );
+        assert_eq!(
+            GuestOwnerReport::Refused(Step::of(&anyhow::anyhow!("unclassified"))).line(),
+            "{\"guest_owner\":\"refused\",\"step\":\"other\"}\n"
         );
     }
 }
