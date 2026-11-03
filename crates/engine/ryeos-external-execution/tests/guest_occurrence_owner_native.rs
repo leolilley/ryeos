@@ -583,8 +583,8 @@ fn run(
     };
     let receipt = held.mount_preparation_receipt()?;
     ensure!(
-        receipt.mount_count == 3,
-        "held native target lacks the stage and two sealed network inputs"
+        receipt.mount_count == 4,
+        "held native target lacks the stage, two sealed network inputs and the candidate-private mount"
     );
     if release {
         let mut released = held.release_once()?;

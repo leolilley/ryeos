@@ -225,11 +225,17 @@ impl LocalDeadline {
         }
     }
 
-    /// Process-local view for components that carry only a monotonic
-    /// deadline. It starts from the time left now and so cannot outlive this
-    /// deadline unless the host later suspends.
+    /// The same deadline as a [`super::MonotonicDeadline`] for components
+    /// that carry that type. It counts the suspend-inclusive clock, so a
+    /// paused host cannot extend it, and it reads as elapsed when this
+    /// deadline is from another boot. On a host with no such clock it falls
+    /// back to the process clock from the time left now.
     pub fn to_monotonic(&self) -> super::MonotonicDeadline {
-        super::MonotonicDeadline::after(self.remaining())
+        if self.remaining().is_zero() {
+            return super::MonotonicDeadline::after(Duration::ZERO);
+        }
+        super::MonotonicDeadline::at_boot_tick(self.coordinate.tick_ns)
+            .unwrap_or_else(|| super::MonotonicDeadline::after(self.remaining()))
     }
 }
 
@@ -371,5 +377,41 @@ mod tests {
         assert!(deadline.remaining() <= Duration::from_secs(60));
         assert!(anchor.deadline_after(Duration::ZERO).unwrap().has_elapsed());
         assert!(!deadline.to_monotonic().has_elapsed());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn monotonic_view_counts_the_suspend_inclusive_clock_and_mixes_with_process_deadlines() {
+        let anchor = LocalClockAnchor::capture().unwrap();
+        let long = anchor
+            .deadline_after(Duration::from_secs(3600))
+            .unwrap()
+            .to_monotonic();
+        let short = anchor
+            .deadline_after(Duration::from_secs(5))
+            .unwrap()
+            .to_monotonic();
+        assert!(!long.has_elapsed());
+        assert!(long.remaining() > Duration::from_secs(3500));
+        assert!(short.remaining() <= Duration::from_secs(5));
+        // Same clock narrows exactly; across clocks by time left.
+        assert!(short.min(long).remaining() <= Duration::from_secs(5));
+        assert!(long.min(short).remaining() <= Duration::from_secs(5));
+        let process = super::super::MonotonicDeadline::after(Duration::from_secs(60));
+        assert!(short.min(process).remaining() <= Duration::from_secs(5));
+        assert!(process.min(short).remaining() <= Duration::from_secs(5));
+        assert!(process.min(long).remaining() <= Duration::from_secs(60));
+        assert!(long.min(process).remaining() <= Duration::from_secs(60));
+        // An elapsed window and one from another boot are elapsed at once.
+        let elapsed = anchor.deadline_after(Duration::ZERO).unwrap();
+        assert!(elapsed.to_monotonic().has_elapsed());
+        let mut other = anchor.coordinate().clone();
+        other.incarnation_digest = crate::sha256_hex(b"another boot");
+        let foreign = LocalClockAnchor::from_retained(other)
+            .unwrap()
+            .deadline_after(Duration::from_secs(60))
+            .unwrap();
+        assert!(foreign.to_monotonic().has_elapsed());
+        assert!(foreign.to_monotonic().remaining().is_zero());
     }
 }

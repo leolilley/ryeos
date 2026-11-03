@@ -664,9 +664,9 @@ frames to it on an inherited descriptor.
   descriptors, since its request arrives on the request descriptor. It reads
   the signed provider spec and a canonical request (schema 3) carrying the
   workload's lease entries, its guest entries, its guest egress allow-list,
-  its lifetime and activation deadline, and optionally `ready_clock_skew_ms`,
-  how far the guest's Ready time may lead the controller's clock (default
-  5 s, at most 30 s). The
+  its lifetime and activation deadline. The guest's Ready time is its own
+  testimony and is not compared with the controller's clock; the controller
+  judges Ready against the activation deadline on its own clock. The
   evidence is `provider_attested` by `render_sandbox_v1` and derived from
   implemented operation kinds only (`lease.create_bound`,
   `lease.lifetime_bound`, `lease.network_policy`, `lease.terminate_observed`,

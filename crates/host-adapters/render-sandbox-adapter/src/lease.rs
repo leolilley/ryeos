@@ -134,7 +134,6 @@ mod tests {
             guest_network_allow: BTreeSet::new(),
             maximum_lifetime_seconds: 4 * 60 * 60,
             activation_deadline_seconds: 5 * 60,
-            ready_clock_skew_ms: None,
         }
     }
 

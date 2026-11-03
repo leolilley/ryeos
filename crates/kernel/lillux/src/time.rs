@@ -39,7 +39,7 @@ impl OriginalLocalDeadlineHandoff {
         // BOOTTIME precedes both remaining observations: export can only narrow.
         let before = occupancy_now()?;
         let service_tick = local_deadline_wire::expiry(before.tick_ns, service.remaining())?;
-        let cleanup_tick = if service.deadline == cleanup.deadline {
+        let cleanup_tick = if service.same_endpoint(&cleanup) {
             service_tick
         } else {
             local_deadline_wire::expiry(before.tick_ns, cleanup.remaining())?
@@ -157,20 +157,14 @@ impl AdoptedOriginalLocalDeadlines {
         clock: crate::InheritedDescriptorAuthority,
     ) -> Result<Self, String> {
         let wire = local_deadline_wire::read(&bound, &clock)?;
-        // Instant precedes BOOTTIME: parsing/adoption delay cannot renew time.
-        let anchor = Instant::now();
+        // The wire carries exact suspend-inclusive coordinates, so adoption
+        // delay cannot renew time and a paused host cannot extend it.
         let now = occupancy_now()?;
         wire.validate(&now)?;
-        let service = MonotonicDeadline {
-            deadline: anchor
-                .checked_add(Duration::from_nanos(wire.service_tick - now.tick_ns))
-                .ok_or("adopted service deadline overflow")?,
-        };
-        let cleanup = MonotonicDeadline {
-            deadline: anchor
-                .checked_add(Duration::from_nanos(wire.cleanup_tick - now.tick_ns))
-                .ok_or("adopted cleanup deadline overflow")?,
-        };
+        let service = MonotonicDeadline::at_boot_tick(wire.service_tick)
+            .ok_or("adopted service deadline has no suspend-inclusive clock")?;
+        let cleanup = MonotonicDeadline::at_boot_tick(wire.cleanup_tick)
+            .ok_or("adopted cleanup deadline has no suspend-inclusive clock")?;
         original_window::require_same_clock_namespace(clock.file())?;
         wire.validate(&occupancy_now()?)?;
         if service.has_elapsed() {
@@ -284,12 +278,12 @@ mod local_deadline_handoff_tests {
         // Consume both registered owners; this same-process fixture must not
         // impersonate raw inheritance or register an already-owned FD again.
         let adopted = AdoptedOriginalLocalDeadlines::from_owned_roles(bound, clock).unwrap();
-        assert!(adopted.service.deadline <= original.deadline);
-        assert_eq!(adopted.service.deadline, adopted.cleanup.deadline);
-        assert_eq!(
-            adopted.service_deadline().deadline,
-            adopted.service_deadline().deadline
-        );
+        let original_left = original.remaining();
+        assert!(adopted.service.remaining() <= original_left);
+        assert!(adopted.service.same_endpoint(&adopted.cleanup));
+        assert!(adopted.service_deadline().same_endpoint(&adopted.service));
+        // Adopted deadlines count the suspend-inclusive clock.
+        assert!(matches!(adopted.service.basis, DeadlineBasis::Boot(_)));
     }
 
     #[test]
@@ -308,8 +302,8 @@ mod local_deadline_handoff_tests {
             let b = b.file().metadata().unwrap();
             assert_eq!((a.dev(), a.ino()), (b.dev(), b.ino()));
         }
-        assert_eq!(original.service.deadline, copy.service.deadline);
-        assert_eq!(original.cleanup.deadline, copy.cleanup.deadline);
+        assert!(original.service.same_endpoint(&copy.service));
+        assert!(original.cleanup.same_endpoint(&copy.cleanup));
     }
 
     #[test]
@@ -626,46 +620,118 @@ pub struct MonotonicTimer {
     started_at: Instant,
 }
 
-/// Opaque process-local monotonic expiry authority.
+/// The host clock a [`MonotonicDeadline`] counts on.
+#[derive(Debug, Clone, Copy)]
+enum DeadlineBasis {
+    /// The process monotonic clock, which stands still while the host is
+    /// suspended.
+    Process(Instant),
+    /// The host's suspend-inclusive clock as a nanosecond coordinate, valid
+    /// for the boot this process is running on.
+    Boot(u64),
+}
+
+/// Opaque process-local expiry authority.
 ///
 /// Callers can ask whether the deadline has elapsed, but never receive the
 /// host `Instant` or compare it as durable identity. This keeps callback and
 /// lease expiry mechanics inside the Lillux time boundary.
+///
+/// A deadline made by [`Self::after`] counts the process monotonic clock and
+/// so does not advance while the host is suspended; that suits purely local
+/// timeouts. A deadline that mirrors a window issued by a remote authority
+/// comes from `LocalDeadline::to_monotonic` and counts the suspend-inclusive
+/// clock, so a paused host cannot extend it. Either kind narrows with the
+/// other through [`Self::min`].
 #[derive(Debug, Clone, Copy)]
 pub struct MonotonicDeadline {
-    deadline: Instant,
+    basis: DeadlineBasis,
 }
 
 impl MonotonicDeadline {
     pub fn after(duration: Duration) -> Self {
         Self {
-            deadline: Instant::now() + duration,
+            basis: DeadlineBasis::Process(Instant::now() + duration),
         }
+    }
+
+    pub(crate) fn at_instant(deadline: Instant) -> Self {
+        Self {
+            basis: DeadlineBasis::Process(deadline),
+        }
+    }
+
+    #[cfg(test)]
+    fn instant(&self) -> Instant {
+        match self.basis {
+            DeadlineBasis::Process(deadline) => deadline,
+            DeadlineBasis::Boot(_) => panic!("deadline counts the suspend-inclusive clock"),
+        }
+    }
+
+    /// A deadline at a suspend-inclusive clock coordinate of this boot.
+    /// `None` where the host offers no such clock.
+    pub(crate) fn at_boot_tick(tick_ns: u64) -> Option<Self> {
+        boot_tick_ns().map(|_| Self {
+            basis: DeadlineBasis::Boot(tick_ns),
+        })
     }
 
     pub fn has_elapsed(&self) -> bool {
-        Instant::now() >= self.deadline
-    }
-
-    /// Narrow two process-local expiry authorities without restarting either
-    /// clock or exposing the underlying host instant.
-    pub fn min(self, other: Self) -> Self {
-        Self {
-            deadline: self.deadline.min(other.deadline),
+        match self.basis {
+            DeadlineBasis::Process(deadline) => Instant::now() >= deadline,
+            DeadlineBasis::Boot(deadline) => boot_tick_ns().is_none_or(|now| now >= deadline),
         }
     }
 
-    /// Compare process-local expiries without sampling, exporting or renewing time.
-    pub(crate) fn is_before(&self, other: &Self) -> bool {
-        self.deadline < other.deadline
+    /// Narrow two expiry authorities without restarting either clock or
+    /// exposing the underlying host instant. Authorities on different clocks
+    /// are ordered by the time each has left now.
+    pub fn min(self, other: Self) -> Self {
+        if other.is_before(&self) { other } else { self }
     }
 
-    /// Remaining duration in this process-local monotonic clock domain.
-    /// Returning zero is the only expiry representation exposed to callers;
-    /// the host `Instant` never escapes Lillux.
-    pub fn remaining(&self) -> Duration {
-        self.deadline.saturating_duration_since(Instant::now())
+    /// Whether both name the very same endpoint on the same clock.
+    pub(crate) fn same_endpoint(&self, other: &Self) -> bool {
+        match (self.basis, other.basis) {
+            (DeadlineBasis::Process(a), DeadlineBasis::Process(b)) => a == b,
+            (DeadlineBasis::Boot(a), DeadlineBasis::Boot(b)) => a == b,
+            _ => false,
+        }
     }
+
+    /// Compare expiries without exporting or renewing time. Two on one clock
+    /// compare exactly; two on different clocks by the time each has left.
+    pub(crate) fn is_before(&self, other: &Self) -> bool {
+        match (self.basis, other.basis) {
+            (DeadlineBasis::Process(a), DeadlineBasis::Process(b)) => a < b,
+            (DeadlineBasis::Boot(a), DeadlineBasis::Boot(b)) => a < b,
+            _ => self.remaining() < other.remaining(),
+        }
+    }
+
+    /// Remaining duration on this deadline's own clock. Returning zero is the
+    /// only expiry representation exposed to callers; the host `Instant`
+    /// never escapes Lillux.
+    pub fn remaining(&self) -> Duration {
+        match self.basis {
+            DeadlineBasis::Process(deadline) => deadline.saturating_duration_since(Instant::now()),
+            DeadlineBasis::Boot(deadline) => match boot_tick_ns() {
+                Some(now) => Duration::from_nanos(deadline.saturating_sub(now)),
+                None => Duration::ZERO,
+            },
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn boot_tick_ns() -> Option<u64> {
+    occupancy_tick_ns().ok()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn boot_tick_ns() -> Option<u64> {
+    None
 }
 
 #[cfg(test)]
@@ -675,10 +741,12 @@ mod monotonic_deadline_ordering_tests {
     #[test]
     fn deadline_order_uses_exact_endpoints_and_accepts_equal_copies() {
         let anchor = Instant::now();
-        let early = MonotonicDeadline { deadline: anchor };
+        let early = MonotonicDeadline {
+            basis: DeadlineBasis::Process(anchor),
+        };
         let equal = early;
         let late = MonotonicDeadline {
-            deadline: anchor + Duration::from_secs(1),
+            basis: DeadlineBasis::Process(anchor + Duration::from_secs(1)),
         };
         assert!(!early.is_before(&equal));
         assert!(!equal.is_before(&early));
@@ -691,9 +759,11 @@ mod monotonic_deadline_ordering_tests {
         let anchor = Instant::now();
         let earlier = anchor.checked_sub(Duration::from_secs(2));
         let early = MonotonicDeadline {
-            deadline: earlier.unwrap_or(anchor),
+            basis: DeadlineBasis::Process(earlier.unwrap_or(anchor)),
         };
-        let late = MonotonicDeadline { deadline: anchor };
+        let late = MonotonicDeadline {
+            basis: DeadlineBasis::Process(anchor),
+        };
         assert!(early.has_elapsed());
         assert!(late.has_elapsed());
         assert_eq!(early.is_before(&late), earlier.is_some());
@@ -1012,10 +1082,10 @@ mod tests {
     fn deadline_intersection_preserves_the_original_earliest_instant() {
         let earlier = MonotonicDeadline::after(Duration::ZERO);
         let later = MonotonicDeadline::after(Duration::from_secs(60));
-        assert_eq!(earlier.min(later).deadline, earlier.deadline);
-        assert_eq!(later.min(earlier).deadline, earlier.deadline);
+        assert!(earlier.min(later).same_endpoint(&earlier));
+        assert!(later.min(earlier).same_endpoint(&earlier));
         assert!(later.min(earlier).has_elapsed());
-        assert_eq!(earlier.min(earlier).deadline, earlier.deadline);
+        assert!(earlier.min(earlier).same_endpoint(&earlier));
     }
 }
 
@@ -1312,11 +1382,11 @@ impl AdoptedOriginalNamespaceOccupancy {
         wire.validate(&now)?;
         wire.require_clock_namespace(clock_namespace.file())?;
         let remaining = Duration::from_nanos(wire.contact_expiry_tick_ns - now.tick_ns);
-        let deadline = MonotonicDeadline {
-            deadline: anchor
+        let deadline = MonotonicDeadline::at_instant(
+            anchor
                 .checked_add(remaining)
                 .ok_or("original contact deadline overflow")?,
-        };
+        );
         original_window::require_window(
             &wire.limit,
             Duration::from_nanos(wire.cleanup_ns),
@@ -1562,13 +1632,13 @@ mod original_window_tests {
             Some((&writer, &companions)),
         )
         .unwrap();
-        assert!(adopted.deadline.deadline <= deadline.deadline);
+        assert!(adopted.deadline.instant() <= deadline.instant());
         assert!(writer.file_identity().is_ok());
         let (actual_limit, actual_cleanup, actual_deadline) =
             adopted.into_original_parts().unwrap();
         assert_eq!(actual_limit, limit);
         assert_eq!(actual_cleanup, cleanup);
-        assert!(actual_deadline.deadline <= deadline.deadline);
+        assert!(actual_deadline.instant() <= deadline.instant());
     }
 
     #[test]
@@ -1630,12 +1700,12 @@ mod original_window_tests {
             )
         }
         .unwrap();
-        assert!(adopted.deadline.deadline <= deadline.deadline);
+        assert!(adopted.deadline.instant() <= deadline.instant());
         let (actual_limit, actual_cleanup, actual_deadline) =
             adopted.into_original_parts().unwrap();
         assert_eq!(actual_limit, limit);
         assert_eq!(actual_cleanup, cleanup);
-        assert!(actual_deadline.deadline <= deadline.deadline);
+        assert!(actual_deadline.instant() <= deadline.instant());
     }
 
     fn adopt_original_bound(
@@ -1666,7 +1736,7 @@ mod original_window_tests {
                 adopted.original_service_parts().unwrap();
             assert_eq!(observed_limit, limit);
             assert_eq!(observed_cleanup, cleanup);
-            assert_eq!(observed_deadline.deadline, adopted.deadline.deadline);
+            assert_eq!(observed_deadline.instant(), adopted.deadline.instant());
             assert_eq!(
                 adopted.clock_namespace.inherited_descriptor().unwrap(),
                 clock_fd
@@ -1738,8 +1808,8 @@ mod original_window_tests {
             OriginalNamespaceOccupancyHandoff::from_original(&limit, cleanup, deadline).unwrap();
         let copy = original.duplicate_retained_pair().unwrap();
         assert_eq!(
-            copy.original_deadline.deadline,
-            original.original_deadline.deadline
+            copy.original_deadline.instant(),
+            original.original_deadline.instant()
         );
         let mut coordinates = Vec::new();
         for authority in [
@@ -1783,9 +1853,7 @@ mod original_window_tests {
             original.window.inherited_descriptor().unwrap(),
             original.clock_namespace.inherited_descriptor().unwrap(),
         ];
-        original.original_deadline = MonotonicDeadline {
-            deadline: Instant::now(),
-        };
+        original.original_deadline = MonotonicDeadline::at_instant(Instant::now());
         assert!(original.duplicate_retained_pair().is_err());
         assert_eq!(original.window.inherited_descriptor().unwrap(), fds[0]);
         assert_eq!(

@@ -152,8 +152,8 @@ impl RetainedOccupancyClock {
             .checked_add(total)
             .ok_or("original cleanup endpoint overflow")?;
         Ok((
-            super::MonotonicDeadline { deadline: service },
-            super::MonotonicDeadline { deadline: cleanup },
+            super::MonotonicDeadline::at_instant(service),
+            super::MonotonicDeadline::at_instant(cleanup),
         ))
     }
 

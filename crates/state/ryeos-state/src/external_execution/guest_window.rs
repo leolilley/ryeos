@@ -122,8 +122,7 @@ impl GuestChannelWindow {
         self.expiry.remaining().is_zero()
     }
 
-    /// Process-local views of the two deadlines, for components that carry
-    /// only a monotonic deadline and for handing to a child process.
+    /// Suspend-inclusive monotonic views of the two deadlines.
     pub fn execution_monotonic(&self) -> MonotonicDeadline {
         self.execution.monotonic()
     }
@@ -132,24 +131,12 @@ impl GuestChannelWindow {
         self.expiry.monotonic()
     }
 
-    /// Both deadlines as process-local views read at one instant, so their
-    /// order cannot be perturbed by two separate samples.
+    /// Both deadlines as suspend-inclusive monotonic views, for components
+    /// that carry only a monotonic deadline and for handing to a child
+    /// process. Each is an exact coordinate on the host clock, so their order
+    /// cannot be perturbed by two separate samples.
     pub fn monotonic_pair(&self) -> (MonotonicDeadline, MonotonicDeadline) {
-        match (&self.execution, &self.expiry) {
-            (Deadline::Local(execution), Deadline::Local(expiry)) => {
-                match lillux::time::occupancy_now() {
-                    Ok(now) => (
-                        MonotonicDeadline::after(execution.remaining_at(&now)),
-                        MonotonicDeadline::after(expiry.remaining_at(&now)),
-                    ),
-                    Err(_) => (
-                        MonotonicDeadline::after(Duration::ZERO),
-                        MonotonicDeadline::after(Duration::ZERO),
-                    ),
-                }
-            }
-            (execution, expiry) => (execution.monotonic(), expiry.monotonic()),
-        }
+        (self.execution.monotonic(), self.expiry.monotonic())
     }
 
     /// A window that began now and runs for the binding's own declared

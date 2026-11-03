@@ -1973,6 +1973,27 @@ mod tests {
     }
 
     #[test]
+    fn window_derived_monotonic_deadlines_keep_the_window_lengths_and_order() {
+        let (binding, _, _) = binding_issued_at(lillux::time::timestamp_millis());
+        let anchor = lillux::time::LocalClockAnchor::capture().unwrap();
+        let window = guest_window::GuestChannelWindow::derive(&anchor, &binding).unwrap();
+        let (execution, expiry) = window.monotonic_pair();
+        assert!(!execution.has_elapsed() && !expiry.has_elapsed());
+        assert!(execution.remaining() > lillux::time::Duration::from_secs(99));
+        assert!(execution.remaining() <= lillux::time::Duration::from_secs(100));
+        assert!(expiry.remaining() > lillux::time::Duration::from_secs(199));
+        // A purely local timeout narrows a window deadline, and the other way
+        // round, whichever clock each counts.
+        let poll = lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(2));
+        assert!(execution.min(poll).remaining() <= lillux::time::Duration::from_secs(2));
+        assert!(poll.min(execution).remaining() <= lillux::time::Duration::from_secs(2));
+        assert!(expiry.min(execution).remaining() <= lillux::time::Duration::from_secs(100));
+        // The pair survives a handoff to a child as a window of its own.
+        let handed = guest_window::GuestChannelWindow::from_handed_down(execution, expiry).unwrap();
+        assert!(!handed.expiry_elapsed());
+    }
+
+    #[test]
     fn guest_frame_verification_follows_the_local_window_not_the_wall_clock() {
         let guest_wall_ms = lillux::time::timestamp_millis();
         for skew in SKEWS_MS {
