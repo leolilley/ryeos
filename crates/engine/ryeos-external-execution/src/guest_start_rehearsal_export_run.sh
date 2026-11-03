@@ -49,16 +49,16 @@ SAMPLES=$HERE/process-samples.txt
         printf '== %s\n' "$(date +%T)" >> "$SAMPLES"
         for proc in /proc/[0-9]*; do
             pid=${proc#/proc/}
-            comm=$(cat "$proc/comm" 2>/dev/null) || continue
-            case $comm in
-                ryeos-*|rehearsal-host|sh|bash) ;;
+            args=$(tr '\0' ' ' < "$proc/cmdline" 2>/dev/null | cut -c1-110) || continue
+            case $args in
+                */ryeos/*|*ryeos-*|*rehearsal-host*) ;;
                 *) continue ;;
             esac
             [ "$pid" = "$$" ] && continue
             state=$(sed -n 's/^State:[[:space:]]*//p' "$proc/status" 2>/dev/null | head -1)
             ppid=$(sed -n 's/^PPid:[[:space:]]*//p' "$proc/status" 2>/dev/null | head -1)
-            printf '%s ppid=%s %s [%s] wchan=%s fds=%s\n' "$pid" "$ppid" "$comm" "$state" \
-                "$(cat "$proc/wchan" 2>/dev/null)" "$(ls "$proc/fd" 2>/dev/null | wc -l)" >> "$SAMPLES"
+            printf '%s ppid=%s [%s] wchan=%s fds=%s %s\n' "$pid" "$ppid" "$state" \
+                "$(cat "$proc/wchan" 2>/dev/null)" "$(ls "$proc/fd" 2>/dev/null | wc -l)" "$args" >> "$SAMPLES"
         done
         sleep 1
     done
@@ -76,8 +76,10 @@ echo "-- host stderr"
 tail -c 4000 "$HERE/host.stderr"
 echo "-- occurrence tree"
 find /ryeos/occurrences -maxdepth 4 -printf '%M %u:%g %s %TT %p\n' 2>&1 | head -60
-echo "-- guest process samples (last 12 blocks)"
-tail -n 120 "$SAMPLES"
+echo "-- guest process states seen (pid ppid state wait-channel command)"
+grep -v '^==' "$SAMPLES" | sed 's/ fds=[0-9]*//' | cut -c1-170 | sort -n -u | head -80
+echo "-- last samples"
+tail -n 12 "$SAMPLES" | cut -c1-170
 echo "-- outcome"
 cat "$HERE/outcome.json"
 echo

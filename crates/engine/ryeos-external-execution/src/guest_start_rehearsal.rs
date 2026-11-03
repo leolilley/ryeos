@@ -63,6 +63,11 @@ use crate::guest_runtime_product::{OWNER_NAME, produce_guest_owner_runtime};
 /// finds it set at startup is the rehearsal host and runs nothing else.
 pub const REHEARSAL_HOST_ENV: &str = "RYEOS_GUEST_START_REHEARSAL_HOST";
 
+/// Names an export directory: replay its `run.sh` in a local root enclosure,
+/// as a stand-in for the sandbox host it is meant for. Handled first thing,
+/// like [`REHEARSAL_HOST_ENV`].
+pub const REHEARSAL_REPLAY_ENV: &str = "RYEOS_GUEST_START_REHEARSAL_REPLAY_EXPORT";
+
 /// Names an export directory: run the rehearsal host's observation directly on
 /// this machine, which already holds the activation's `/ryeos` layout.
 pub const REHEARSAL_ON_HOST_ENV: &str = "RYEOS_GUEST_START_REHEARSAL_ON_HOST";
@@ -1375,6 +1380,13 @@ pub fn run_guest_start_rehearsal(
 /// set; otherwise it runs the rehearsal, prints its outcome as one JSON line
 /// and exits. Call it before the process starts any thread.
 pub fn run_rehearsal_host_if_requested() {
+    if let Some(export) = std::env::var_os(REHEARSAL_REPLAY_ENV) {
+        let code = replay_export(Path::new(&export)).unwrap_or_else(|error| {
+            eprintln!("the export could not be replayed: {error:#}");
+            2
+        });
+        std::process::exit(code);
+    }
     if let Some(export) = std::env::var_os(REHEARSAL_ON_HOST_ENV) {
         let outcome = on_host(Path::new(&export)).unwrap_or_else(|error| {
             GuestStartRehearsalOutcome::refused(
@@ -1397,6 +1409,82 @@ pub fn run_rehearsal_host_if_requested() {
     };
     report(&outcome);
     std::process::exit(0);
+}
+
+/// Run an export's `run.sh` inside a root enclosure built for its runtime's
+/// account, with the export copied in beside `/ryeos`. Returns the script's
+/// exit code, after printing its output.
+fn replay_export(export: &Path) -> Result<i32> {
+    let directory =
+        lillux::PinnedDirectory::open(export)?.context("rehearsal export is absent")?;
+    let tar_file = directory
+        .open_pinned_regular(OsStr::new("guest-runtime.tar"), false)?
+        .context("rehearsal export has no runtime tar")?;
+    let tar_bytes = tar_file
+        .read_stable_bounded(&tar_file.observation()?, 64 * 1024 * 1024)
+        .map_err(anyhow::Error::msg)?;
+    let mut profile = None;
+    for entry in tar::Archive::new(tar_bytes.as_slice()).entries()? {
+        let mut entry = entry?;
+        if entry.path()?.file_name() == Some(OsStr::new("guest-owner-profile.json")) {
+            let mut bytes = Vec::new();
+            std::io::Read::read_to_end(&mut entry, &mut bytes)?;
+            profile = Some(serde_json::from_slice::<GuestOwnerRuntimeProfile>(&bytes)?);
+        }
+    }
+    let lillux::GuestRuntimeAccount::Unix { uid, gid } =
+        profile.context("exported runtime has no owner profile")?.account;
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(export)? {
+        let name = entry?
+            .file_name()
+            .into_string()
+            .map_err(|name| anyhow::anyhow!("export file name {name:?} is not text"))?;
+        let file = directory
+            .open_pinned_regular(OsStr::new(&name), false)?
+            .with_context(|| format!("export file {name:?} vanished"))?;
+        let mode = if name == "run.sh" || name == "rehearsal-host" { 0o755 } else { 0o644 };
+        files.push((name, file, mode));
+    }
+    let package_bytes = files
+        .iter()
+        .map(|(_, file, _)| file.observation().map(|seen| seen.size()))
+        .sum::<Result<u64, _>>()?;
+    let spec = enclosure_spec(uid, gid, package_bytes);
+    let code = lillux::root_enclosure::run_in_root_enclosure(&spec, || {
+        let copied = (|| -> Result<()> {
+            let root = lillux::PinnedDirectory::open(Path::new("/"))?
+                .context("enclosure root is absent")?;
+            let here = root.create_child(OsStr::new("export"), 0o755)?;
+            for (name, file, mode) in &files {
+                copy_file(&here, name, file, *mode)?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = copied {
+            eprintln!("the export could not be copied into the enclosure: {error:#}");
+            return 2;
+        }
+        let output = lillux::run(lillux::SubprocessRequest {
+            cmd: "/bin/sh".into(),
+            argv0: None,
+            args: vec!["/export/run.sh".into()],
+            cwd: Some("/export".into()),
+            envs: Vec::new(),
+            stdin_data: None,
+            timeout: 900.0,
+            limits: None,
+            inherited_fds: Vec::new(),
+            inherited_fd_mappings: Vec::new(),
+            supervised_status: None,
+        });
+        print!("{}", output.stdout);
+        eprint!("{}", output.stderr);
+        let _ = std::io::stdout().flush();
+        output.exit_code
+    })
+    .map_err(anyhow::Error::msg)?;
+    Ok(code)
 }
 
 /// Observe the owner on the machine this runs on, which must already hold the

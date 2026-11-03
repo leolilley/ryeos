@@ -19,7 +19,8 @@
 //! host inputs (with the answer-attach plan, when asked for), this executable
 //! and a `run.sh` there instead of running them: `run.sh` replays the
 //! activation on the host it runs on, so build this executable statically for
-//! a host with another libc. Otherwise the
+//! a host with another libc. `RYEOS_GUEST_START_REHEARSAL_REPLAY_EXPORT=<export>`
+//! replays an export's `run.sh` in a local root enclosure instead. Otherwise the
 //! synthetic cases run, with executables from
 //! `RYEOS_GUEST_START_REHEARSAL_BIN_DIR` (default: the guest-triple release
 //! directory of this test's target directory); without them, or on a host without namespaces or delegated
