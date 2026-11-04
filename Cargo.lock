@@ -1726,7 +1726,6 @@ dependencies = [
  "clap",
  "ed25519-dalek",
  "hickory-resolver",
- "hkdf",
  "hmac",
  "libc",
  "rand 0.8.6",
