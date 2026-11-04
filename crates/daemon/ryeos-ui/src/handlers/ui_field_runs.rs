@@ -96,7 +96,7 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
     })?;
     let limit = request.limit.clamp(1, MAX_LIMIT);
     let facets = normalize_facet_filters(request.facets)
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let project_root = caller.project_query_identity()?;
     let filter = ThreadListFilter {
         // A mutable SQL scope cannot be a negative authorization proof: it
@@ -679,7 +679,7 @@ fn add_run_definition_versions(
             Err(error) => {
                 builder.warn(
                     "external_realization_invalid",
-                    format!("run `{thread_id}` carries an invalid realization set: {error}"),
+                    format!("run `{thread_id}` carries an invalid realization set: {error:#}"),
                 );
             }
         }
@@ -730,7 +730,7 @@ fn add_run_source_closure(
         Err(error) => {
             builder.warn(
                 "source_closure_invalid",
-                format!("admitted source binding is invalid: {error}"),
+                format!("admitted source binding is invalid: {error:#}"),
             );
             return Ok(());
         }

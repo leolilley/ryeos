@@ -706,9 +706,9 @@ pub(crate) async fn read_live_root_cut(
     })
     .await
     .map_err(|error| HandlerError::Internal(format!("paired cut reader failed: {error}")))?
-    .map_err(|error| HandlerError::Conflict(error.to_string()))?;
+    .map_err(|error| HandlerError::Conflict(format!("{error:#}")))?;
     let cut = FixedTransferCut::new(&state, session, proof)
-        .map_err(|error| HandlerError::Conflict(error.to_string()))?;
+        .map_err(|error| HandlerError::Conflict(format!("{error:#}")))?;
     if cut.memberships.get(&membership.presentation_id) != Some(membership) {
         return Err(HandlerError::Conflict("paired cut root membership changed".into()).into());
     }
@@ -800,7 +800,7 @@ pub(crate) async fn read_retired_root(
     })
     .await
     .map_err(|error| HandlerError::Internal(format!("retired cut reader failed: {error}")))?
-    .map_err(|error| HandlerError::Conflict(error.to_string()))?;
+    .map_err(|error| HandlerError::Conflict(format!("{error:#}")))?;
     let Some(proof) = proof else {
         return Ok(RetiredRoot {
             evidence,
@@ -809,7 +809,7 @@ pub(crate) async fn read_retired_root(
         });
     };
     let cut = FixedTransferCut::new(&state, session, proof)
-        .map_err(|error| HandlerError::Conflict(error.to_string()))?;
+        .map_err(|error| HandlerError::Conflict(format!("{error:#}")))?;
     if cut.memberships.get(&membership.presentation_id) != Some(membership) {
         return Err(HandlerError::Conflict("retired cut root membership changed".into()).into());
     }

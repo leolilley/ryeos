@@ -115,9 +115,9 @@ pub async fn handle_files_list(
         .map_err(|e| HandlerError::BadRequest(format!("invalid request: {e}")))?;
 
     let allowed_root = resolve_allowed_root(&req.root, &caller, operator_project_path.as_deref())
-        .map_err(|e| HandlerError::BadRequest(e.to_string()))?;
+        .map_err(|e| HandlerError::BadRequest(format!("{e:#}")))?;
     let (directory, _) = open_relative_directory(&allowed_root, &req.path)
-        .map_err(|e| HandlerError::BadRequest(e.to_string()))?;
+        .map_err(|e| HandlerError::BadRequest(format!("{e:#}")))?;
 
     let listing = tokio::task::spawn_blocking(move || {
         list_directory(&directory, MAX_LIST_ENTRIES, MAX_LIST_WORK)
@@ -278,9 +278,9 @@ pub async fn handle_files_tree(
         .map_err(|e| HandlerError::BadRequest(format!("invalid request: {e}")))?;
 
     let allowed_root = resolve_allowed_root(&req.root, &caller, operator_project_path.as_deref())
-        .map_err(|e| HandlerError::BadRequest(e.to_string()))?;
+        .map_err(|e| HandlerError::BadRequest(format!("{e:#}")))?;
     let (directory, relative_directory) = open_relative_directory(&allowed_root, &req.path)
-        .map_err(|e| HandlerError::BadRequest(e.to_string()))?;
+        .map_err(|e| HandlerError::BadRequest(format!("{e:#}")))?;
 
     let max_depth = req.max_depth.clamp(1, MAX_TREE_DEPTH);
     let max_entries = req.max_entries.clamp(1, MAX_TREE_ENTRIES);
@@ -438,7 +438,7 @@ pub async fn handle_files_read(
         .map_err(|e| HandlerError::BadRequest(format!("invalid request: {e}")))?;
 
     let allowed_root = resolve_allowed_root(&req.root, &caller, operator_project_path.as_deref())
-        .map_err(|e| HandlerError::BadRequest(e.to_string()))?;
+        .map_err(|e| HandlerError::BadRequest(format!("{e:#}")))?;
     let file = allowed_root
         .open_pinned_regular_descendant(Path::new(&req.path), false)?
         .ok_or_else(|| HandlerError::BadRequest("path is not a regular file".into()))?;

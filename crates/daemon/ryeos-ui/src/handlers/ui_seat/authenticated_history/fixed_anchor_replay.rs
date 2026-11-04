@@ -42,7 +42,7 @@ pub(crate) fn replay_frame_bounds(state: &AppState) -> Result<ReplayFrameBounds,
     let policy = state
         .node_policy
         .require::<ryeos_node_runtime::node_policy::sections::ui_browser_sessions::UiBrowserSessionPolicy>()
-        .map_err(|error| invalid(error.to_string()))?;
+        .map_err(|error| invalid(format!("{error:#}")))?;
     Ok(ReplayFrameBounds {
         events: usize::try_from(policy.seat.max_replay_frame_events)
             .map_err(|_| invalid("signed replay frame event bound overflows"))?,
@@ -152,7 +152,7 @@ impl FixedAnchorReplay {
         let tip = state
             .state_store
             .retained_thread_event_by_hash(&tip_hash)
-            .map_err(|error| invalid(error.to_string()))?
+            .map_err(|error| invalid(format!("{error:#}")))?
             .ok_or_else(|| invalid("seat replay signed tip is absent from CAS"))?;
         if tip.chain_root_id != chain_root_id
             || tip.thread_id != thread_id
@@ -230,7 +230,7 @@ impl FixedAnchorReplay {
                 self.bounds.events,
                 self.bounds.bytes,
             )
-            .map_err(|error| invalid(error.to_string()))?;
+            .map_err(|error| invalid(format!("{error:#}")))?;
         if page.events.is_empty() {
             return Err(invalid(
                 "seat replay projection made no progress before signed tip",
@@ -244,7 +244,7 @@ impl FixedAnchorReplay {
             let event = state
                 .state_store
                 .retained_thread_event_by_hash(hash)
-                .map_err(|error| invalid(error.to_string()))?
+                .map_err(|error| invalid(format!("{error:#}")))?
                 .ok_or_else(|| invalid("seat replay locator CAS object is absent"))?;
             let record = persisted(hash.to_owned(), event)?;
             let expected_seq = self
@@ -388,7 +388,7 @@ impl FixedAnchorReplay {
         let anchor = state
             .state_store
             .capture_thread_event_read_anchor(&self.chain_root_id, &self.thread_id)
-            .map_err(|error| invalid(error.to_string()))?
+            .map_err(|error| invalid(format!("{error:#}")))?
             .ok_or_else(|| invalid("seat live replay lost its signed anchor"))?;
         let (hash, sequence) = anchor
             .tip()
@@ -405,7 +405,7 @@ impl FixedAnchorReplay {
         let tip = state
             .state_store
             .retained_thread_event_by_hash(&hash)
-            .map_err(|error| invalid(error.to_string()))?
+            .map_err(|error| invalid(format!("{error:#}")))?
             .ok_or_else(|| invalid("seat live replay signed tip is absent from CAS"))?;
         if tip.chain_root_id != self.chain_root_id
             || tip.thread_id != self.thread_id

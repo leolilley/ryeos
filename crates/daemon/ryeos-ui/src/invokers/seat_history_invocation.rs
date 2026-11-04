@@ -184,7 +184,7 @@ impl CompiledRouteInvocation for CompiledSeatHistoryInvocation {
         let anchor = state
             .state_store
             .capture_thread_event_read_anchor(&detail.chain_root_id, &detail.thread_id)
-            .map_err(|error| RouteDispatchError::Internal(error.to_string()))?
+            .map_err(|error| RouteDispatchError::Internal(format!("{error:#}")))?
             .ok_or_else(|| {
                 RouteDispatchError::Internal("seat history has no signed anchor".into())
             })?;
@@ -462,7 +462,7 @@ impl HistoryStream {
         let named = match named {
             Ok(Ok(named)) => named,
             Ok(Err(error)) => {
-                tracing::warn!(%error, "seat history transfer discovery failed");
+                tracing::warn!(error = %format!("{error:#}"), "seat history transfer discovery failed");
                 return None;
             }
             Err(error) => {
@@ -481,7 +481,7 @@ impl HistoryStream {
         match cut {
             Ok(cut) => Some((membership, Some(cut))),
             Err(error) => {
-                tracing::warn!(%error, "seat history paired cut failed");
+                tracing::warn!(error = %format!("{error:#}"), "seat history paired cut failed");
                 None
             }
         }
@@ -691,7 +691,7 @@ fn dependencies_moved(
         .get_session(session_id)
         .ok_or_else(|| HandlerError::Forbidden("session expired".into()))?;
     cut.publication_cut(state, &session)
-        .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
+        .map_err(|error| HandlerError::Forbidden(format!("{error:#}")))?;
     for anchor in cut.current_anchors() {
         if anchor.chain_root_id() == detail.chain_root_id {
             continue;
@@ -699,7 +699,7 @@ fn dependencies_moved(
         let current = state
             .state_store
             .capture_thread_event_read_anchor(anchor.chain_root_id(), anchor.thread_id())
-            .map_err(|error| HandlerError::Internal(error.to_string()))?;
+            .map_err(|error| HandlerError::Internal(format!("{error:#}")))?;
         if current.as_ref() != Some(&anchor) {
             return Ok(true);
         }

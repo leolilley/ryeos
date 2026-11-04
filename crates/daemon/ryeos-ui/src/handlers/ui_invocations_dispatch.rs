@@ -277,7 +277,7 @@ pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> 
             &item_ref,
             None,
         )
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?,
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?,
     };
 
     let invocation_id = uuid::Uuid::new_v4().to_string();
@@ -1657,7 +1657,7 @@ async fn execute_prepared_item_ref(
         Some(directory) => {
             directory.ensure_path_binding().map_err(|error| {
                 HandlerError::Forbidden(format!(
-                    "the session project no longer names its retained directory: {error}"
+                    "the session project no longer names its retained directory: {error:#}"
                 ))
             })?;
             let project_root = directory.path().to_path_buf();
@@ -1688,13 +1688,13 @@ async fn execute_prepared_item_ref(
         authority_scopes.to_vec(),
         &state.isolation,
     )
-    .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
+    .map_err(|error| HandlerError::Forbidden(format!("{error:#}")))?;
     let provenance = ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
         project_root.clone(),
         exec_ctx.engine.clone(),
         resolved_authority.project,
     )
-    .map_err(|error| HandlerError::Internal(error.to_string()))?;
+    .map_err(|error| HandlerError::Internal(format!("{error:#}")))?;
 
     // The handler of a recorded service runs on a task the daemon owns, so
     // the compiled dispatch authority this task holds is carried to it.

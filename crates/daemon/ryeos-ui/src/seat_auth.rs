@@ -174,7 +174,7 @@ pub(crate) fn attachment_project_access(
                 authority: authority.clone(),
                 descriptor_path: authority
                     .descriptor_path()
-                    .map_err(|error| HandlerError::Internal(error.to_string()))?,
+                    .map_err(|error| HandlerError::Internal(format!("{error:#}")))?,
             })
         })
         .transpose()

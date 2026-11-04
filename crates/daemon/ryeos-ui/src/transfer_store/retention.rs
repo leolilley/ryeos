@@ -363,7 +363,7 @@ pub fn settle_claimed_seats(
             Ok(true) => finalized += 1,
             Ok(false) => {}
             Err(error) => {
-                tracing::warn!(%root, %error, "claimed seat settlement retained for retry");
+                tracing::warn!(%root, error = %format!("{error:#}"), "claimed seat settlement retained for retry");
             }
         }
     }

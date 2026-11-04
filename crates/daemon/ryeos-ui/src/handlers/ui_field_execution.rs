@@ -232,7 +232,7 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
             let ui_state =
                 crate::state::get_ui_state(&state).context("UI state is not registered")?;
             document = apply_bounded_expansions(document, &expansions, &ui_state, SERVICE_REF)
-                .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+                .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
         }
         return serde_json::to_value(document).map_err(Into::into);
     };
@@ -317,7 +317,7 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
         Err(error) => {
             assembler.builder.warn(
                 "manifest_verifier_unavailable",
-                format!("state manifest verification is unavailable: {error}"),
+                format!("state manifest verification is unavailable: {error:#}"),
             );
             None
         }
@@ -516,7 +516,7 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
     if !expansions.is_empty() {
         let ui_state = crate::state::get_ui_state(&state).context("UI state is not registered")?;
         document = apply_bounded_expansions(document, &expansions, &ui_state, SERVICE_REF)
-            .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+            .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     }
     serde_json::to_value(document).map_err(Into::into)
 }
