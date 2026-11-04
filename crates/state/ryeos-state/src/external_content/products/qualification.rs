@@ -93,6 +93,11 @@ pub struct ProductQualificationPolicy {
     /// Bundle generation and join them to the selected relationship.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub consumer_execution_context: Option<ProductQualificationConsumerExecutionContext>,
+    /// Guarantees a node must hold, under the capability names it reports,
+    /// to prove or launch this policy. A node lacking one refuses; empty asks
+    /// nothing of the node.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requires_guarantees: Vec<lillux::process_control::CapabilityRequirement>,
     /// Finite signed alternatives for one selected producer attempt per
     /// admitted verifier root. A ref is only source identity, not permission
     /// to launch: the daemon must resolve and admit a typed Bundle recipe.
@@ -865,6 +870,11 @@ impl ProductQualificationPolicy {
         )?;
         if let Some(context) = &self.consumer_execution_context {
             context.validate()?;
+        }
+        if !self.requires_guarantees.is_empty() {
+            super::qualification_variants::validate_required_guarantees(
+                &self.requires_guarantees,
+            )?;
         }
         if self.producer_scenarios.len() > MAX_PRODUCT_QUALIFICATION_PRODUCER_SCENARIOS {
             bail!("qualification producer scenario count exceeds bound");

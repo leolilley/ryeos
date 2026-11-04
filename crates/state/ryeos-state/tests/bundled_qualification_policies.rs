@@ -2,6 +2,7 @@
 //! A Rust-only fixture can pass while a shipped signed Config is unreadable.
 
 use ryeos_state::external_content::products::qualification::ProductQualificationPolicy;
+use lillux::process_control::{HostCapabilities, ProofSource};
 use serde_json::Value;
 use std::path::Path;
 
@@ -157,4 +158,133 @@ fn shipped_codex_consumer_qualification_configs_agree_and_parse() {
         recipe.loopback_ingress.as_ref().unwrap().address,
         origin.strip_prefix("http://").unwrap()
     );
+}
+
+fn node(held: &[(&str, ProofSource)]) -> HostCapabilities {
+    let mut view = HostCapabilities::default();
+    for (name, source) in held {
+        view.provide(name, source.clone(), "test", "held");
+    }
+    for name in [
+        "isolation:enforced",
+        "filesystem:captured_execution",
+        "callback:captured_compatible",
+        "termination:scope",
+        "recovery:scope",
+        "termination:pid_namespace",
+        "recovery:pid_namespace",
+        "sessions:trusted_process_group",
+    ] {
+        view.refuse(name, format!("{name} is not held"));
+    }
+    view
+}
+
+fn contained_node() -> HostCapabilities {
+    node(&[
+        ("isolation:enforced", ProofSource::Measured),
+        ("filesystem:captured_execution", ProofSource::Measured),
+        ("callback:captured_compatible", ProofSource::Measured),
+        ("termination:pid_namespace", ProofSource::Measured),
+        ("recovery:pid_namespace", ProofSource::Measured),
+    ])
+}
+
+#[test]
+fn shipped_codex_variants_select_by_held_guarantees_and_agree_with_their_policies() {
+    use ryeos_state::external_content::products::composition::ProductRelationships;
+    use ryeos_state::external_content::products::qualification::VerifierProcessSettlementAuthority;
+    use ryeos_state::external_content::products::qualification_variants::{
+        QualificationVariants, require_policy_guarantees,
+    };
+
+    let variants = QualificationVariants::from_value(&codex_config(
+        "qualification-variants.yaml",
+        "qualification_variants",
+    ))
+    .unwrap();
+    let relationships = ProductRelationships::from_value(codex_config(
+        "guest-runtime-products.yaml",
+        "product_relationships",
+    ))
+    .unwrap();
+    let contained = contained_node();
+    let trusted = node(&[("sessions:trusted_process_group", ProofSource::Trusted)]);
+    for (node, settlement) in [
+        (&contained, VerifierProcessSettlementAuthority::ContainmentEmpty),
+        (&trusted, VerifierProcessSettlementAuthority::TrustedProcessGroupAbsent),
+    ] {
+        let variant = variants.select(node).unwrap();
+        let file = format!(
+            "{}.yaml",
+            variant.policy_ref.strip_prefix("config:codex/").unwrap()
+        );
+        let policy = ProductQualificationPolicy::from_value(&codex_config(
+            &file,
+            "product_qualification_policy",
+        ))
+        .unwrap();
+        // The policy repeats exactly the guarantees its variant requires, so
+        // the node that selected it also admits it, and no other node does.
+        assert_eq!(policy.requires_guarantees, variant.requires_guarantees);
+        assert_eq!(policy.minimum_verifier_process_settlement, settlement);
+        require_policy_guarantees(&policy.requires_guarantees, node, &variant.policy_ref).unwrap();
+        let other = if std::ptr::eq(node, &contained) { &trusted } else { &contained };
+        assert!(
+            require_policy_guarantees(&policy.requires_guarantees, other, &variant.policy_ref)
+                .is_err()
+        );
+        let worker = relationships.select(&variant.relationship_name).unwrap();
+        assert_eq!(
+            worker.qualification.policy_ref.as_deref(),
+            Some(variant.policy_ref.as_str())
+        );
+        policy
+            .consumer_execution_context
+            .as_ref()
+            .unwrap()
+            .validate_relationship_consumer(&worker.consumer)
+            .unwrap();
+    }
+    assert_eq!(
+        variants.select(&contained).unwrap().relationship_name,
+        "runtime_to_external_authoring_worker"
+    );
+    assert_eq!(
+        variants.select(&trusted).unwrap().relationship_name,
+        "runtime_to_external_authoring_worker_trusted_lane"
+    );
+}
+
+#[test]
+fn shipped_codex_variants_refuse_a_node_holding_neither_and_an_ambiguous_one() {
+    use ryeos_state::external_content::products::qualification_variants::QualificationVariants;
+
+    let variants = QualificationVariants::from_value(&codex_config(
+        "qualification-variants.yaml",
+        "qualification_variants",
+    ))
+    .unwrap();
+    // Enforced isolation without a qualified containment mechanism, and no
+    // trusted-session acceptance, holds neither variant's guarantees.
+    let uncontained = node(&[
+        ("isolation:enforced", ProofSource::Measured),
+        ("filesystem:captured_execution", ProofSource::Measured),
+        ("callback:captured_compatible", ProofSource::Measured),
+    ]);
+    let error = variants.select(&uncontained).unwrap_err().to_string();
+    assert!(error.contains("no qualification variant"), "{error}");
+    assert!(error.contains("config:codex/consumer-qualification-policy "), "{error}");
+    assert!(error.contains("any_of(termination:scope, termination:pid_namespace)"), "{error}");
+    assert!(error.contains("sessions:trusted_process_group is not held"), "{error}");
+    // A node that holds both sets of guarantees cannot choose.
+    let mut both = contained_node();
+    both.provide("sessions:trusted_process_group", ProofSource::Trusted, "test", "held");
+    let error = variants.select(&both).unwrap_err().to_string();
+    assert!(error.contains("more than one"), "{error}");
+    assert!(error.contains("consumer-qualification-policy-trusted-lane"), "{error}");
+    // A weaker grade of the same name does not stand in.
+    let mut attested = contained_node();
+    attested.provide("isolation:enforced", ProofSource::ProviderAttested, "test", "held");
+    assert!(variants.select(&attested).is_err());
 }

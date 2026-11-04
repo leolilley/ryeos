@@ -800,7 +800,7 @@ fn prove_unguarded(
         .policy_ref
         .as_deref()
         .context("selected product relationship has no qualification policy")?;
-    let policy_source = resolve_current_bundle_qualification_policy(state, policy_ref)?;
+    let policy_source = resolve_current_bundle_qualification_policy_for_local_run(state, policy_ref)?;
     if let Some(consumer_context) = &policy_source.policy.consumer_execution_context {
         consumer_context.validate_relationship_consumer(&relationship.consumer)?;
     }
@@ -1293,6 +1293,24 @@ pub(super) fn resolve_current_bundle_qualification_policy(
     state.engine.with_checked_bundle_generation(|generation| {
         resolve_current_bundle_qualification_policy_in_generation(generation, policy_ref)
     })
+}
+
+/// Resolve the current policy for a qualification this node is about to run
+/// itself, and refuse a policy that requires guarantees this node does not
+/// hold. Imported testimony and later selection re-resolve through the plain
+/// resolver: the guarantees are a property of where the verifier and Worker
+/// execute, not of who may read the evidence.
+pub(super) fn resolve_current_bundle_qualification_policy_for_local_run(
+    state: &AppState,
+    policy_ref: &str,
+) -> anyhow::Result<ProductQualificationPolicySource> {
+    let policy_source = resolve_current_bundle_qualification_policy(state, policy_ref)?;
+    ryeos_state::external_content::products::qualification_variants::require_policy_guarantees(
+        &policy_source.policy.requires_guarantees,
+        &state.isolation.reported_guarantees(),
+        policy_ref,
+    )?;
+    Ok(policy_source)
 }
 
 pub(crate) fn resolve_current_bundle_qualification_policy_in_generation(

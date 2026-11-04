@@ -396,6 +396,7 @@ mod tests {
                     ryeos_state::external_content::products::qualification::VerifierProcessSettlementAuthority::ScopeEmpty,
                 verifier_parameters: serde_json::json!({}),
                 consumer_execution_context: None,
+                requires_guarantees: Vec::new(),
                 producer_scenarios: Default::default(),
             },
         }

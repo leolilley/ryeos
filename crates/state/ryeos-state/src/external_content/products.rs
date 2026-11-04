@@ -31,6 +31,8 @@ pub use producer_recipe::{
 
 pub mod qualification;
 
+pub mod qualification_variants;
+
 pub mod qualification_publication;
 
 pub mod qualification_testimony;

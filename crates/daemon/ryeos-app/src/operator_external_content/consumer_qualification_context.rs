@@ -20,6 +20,9 @@ use ryeos_state::external_content::products::composition::{
     ExternalProductSlotDeclaration, ProductRelationship, ProductRelationships,
 };
 use ryeos_state::external_content::products::qualification::ProductQualificationConsumerExecutionContext;
+use ryeos_state::external_content::products::qualification_variants::{
+    QualificationVariant, QualificationVariants, require_policy_guarantees,
+};
 use ryeos_state::external_content::qualification_consumer_record::MAX_CONSUMER_INPUT_RECORD_BYTES;
 use ryeos_state::objects::{
     ExternalContentKind, ExternalContentManifestEntryKind, ExternalContentRealization,
@@ -38,16 +41,17 @@ use crate::handler_context::HandlerContext;
 use crate::state::AppState;
 use ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy;
 
-/// Inputs name the signed policy that carries the consumer execution context
-/// (worker, environment, worker execution and runtime declaration), the signed
-/// relationship that selects the runtime product, and the exact manifest of the
-/// runtime product the consumer will be handed.
+/// Inputs name the signed variant set, the signed relationship Config
+/// that selects the runtime product, and the exact manifest of the runtime
+/// product the consumer will be handed. The variant set lists each accepted
+/// policy (worker, environment, worker execution and runtime declaration)
+/// with the guarantees it requires; the guarantees this node reports select
+/// exactly one.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConsumerQualificationContextRequest {
-    pub policy_ref: String,
+    pub variants_ref: String,
     pub relationship_ref: String,
-    pub relationship_name: String,
     pub subject_manifest_hash: String,
 }
 
@@ -57,9 +61,8 @@ impl ConsumerQualificationContextRequest {
             bail!("subject_manifest_hash must be a 64-character lowercase hex digest");
         }
         for (field, value) in [
-            ("policy_ref", &self.policy_ref),
+            ("variants_ref", &self.variants_ref),
             ("relationship_ref", &self.relationship_ref),
-            ("relationship_name", &self.relationship_name),
         ] {
             if value.is_empty() {
                 bail!("{field} must not be empty");
@@ -89,6 +92,8 @@ const TAR_INLINE_NAME_BYTES: usize = 100;
 pub struct ConsumerQualificationContextResponse {
     pub policy_ref: String,
     pub relationship_name: String,
+    /// The guarantees the selected variant required of this node.
+    pub requires_guarantees: Vec<lillux::process_control::CapabilityRequirement>,
     pub subject_manifest_hash: String,
     pub bundle_generation_identity: String,
     pub verifier_parameters: serde_json::Value,
@@ -112,15 +117,31 @@ fn derive_blocking(
     state: &AppState,
     request: &ConsumerQualificationContextRequest,
 ) -> anyhow::Result<ConsumerQualificationContextResponse> {
+    derive_for_guarantees(state, request, &state.isolation.reported_guarantees())
+}
+
+/// Derive for the variant selected by `guarantees`, the guarantees this node
+/// reports; kept separate so selection is exercised against any reported set.
+fn derive_for_guarantees(
+    state: &AppState,
+    request: &ConsumerQualificationContextRequest,
+    guarantees: &lillux::process_control::HostCapabilities,
+) -> anyhow::Result<ConsumerQualificationContextResponse> {
     require_unguarded_resolution("consumer qualification context derivation")?;
-    let policy_source = resolve_current_bundle_qualification_policy(state, &request.policy_ref)?;
+    let variant = select_variant(state, &request.variants_ref, guarantees)?;
+    let policy_source = resolve_current_bundle_qualification_policy(state, &variant.policy_ref)?;
+    require_policy_guarantees(
+        &policy_source.policy.requires_guarantees,
+        guarantees,
+        &variant.policy_ref,
+    )?;
     let signed_context = policy_source
         .policy
         .consumer_execution_context
         .clone()
         .context("qualification policy has no consumer execution context")?;
     let relationship =
-        resolve_relationship(state, &request.relationship_ref, &request.relationship_name)?;
+        resolve_relationship(state, &request.relationship_ref, &variant.relationship_name)?;
     let prepared = prepare_current_bundle_consumer_content_inputs(
         state,
         &policy_source,
@@ -199,8 +220,9 @@ fn derive_blocking(
     // Nothing was published: dropping the staged content leaves node state
     // exactly as it was.
     Ok(ConsumerQualificationContextResponse {
-        policy_ref: request.policy_ref.clone(),
-        relationship_name: request.relationship_name.clone(),
+        policy_ref: variant.policy_ref.clone(),
+        relationship_name: variant.relationship_name.clone(),
+        requires_guarantees: variant.requires_guarantees.clone(),
         subject_manifest_hash: request.subject_manifest_hash.clone(),
         bundle_generation_identity: prepared.definitions.bundle_generation_identity.clone(),
         verifier_parameters: qualification_use.parameters()?,
@@ -352,6 +374,26 @@ fn require_slot_matches_context(
         bail!("consumer runtime slot differs from the signed consumer context product");
     }
     Ok(())
+}
+
+/// Read the signed variant set and select the one variant whose required
+/// guarantees this node holds.
+fn select_variant(
+    state: &AppState,
+    variants_ref: &str,
+    guarantees: &lillux::process_control::HostCapabilities,
+) -> anyhow::Result<QualificationVariant> {
+    state.engine.with_checked_bundle_generation(|generation| {
+        let authored = resolve_consumer_definition_in_generation(generation, variants_ref, "config")?;
+        let set = QualificationVariants::from_value(
+            authored
+                .composed
+                .composed
+                .get("qualification_variants")
+                .context("variant Config has no qualification_variants")?,
+        )?;
+        Ok(set.select(guarantees)?.clone())
+    })
 }
 
 fn resolve_relationship(
@@ -637,9 +679,8 @@ mod tests {
     #[test]
     fn request_refuses_a_malformed_manifest_digest() {
         let request = ConsumerQualificationContextRequest {
-            policy_ref: "config:test/consumer-qualification".into(),
+            variants_ref: "config:test/qualification-variants".into(),
             relationship_ref: "config:codex/guest-runtime-products".into(),
-            relationship_name: "runtime_to_external_authoring_worker".into(),
             subject_manifest_hash: "not-a-digest".into(),
         };
         assert!(request.validate().is_err());
@@ -656,11 +697,26 @@ mod tests {
         let policy_path = test_bundle.join(".ai/config/test/consumer-qualification.yaml");
         fs::create_dir_all(policy_path.parent().unwrap())?;
         let signer = SigningKey::from_bytes(&[7u8; 32]);
+        let variants_path = test_bundle.join(".ai/config/test/qualification-variants.yaml");
+        let variants = r#"category: test
+version: "1.0.0"
+qualification_variants:
+  schema: ryeos.qualification_variants.v1
+  variants:
+    - policy_ref: config:test/consumer-qualification
+      relationship_name: runtime_to_external_authoring_worker
+      requires_guarantees: [test:held]
+"#;
+        fs::write(
+            &variants_path,
+            lillux::signature::sign_content(variants, &signer, "#", None),
+        )?;
         let policy = r#"category: test
 version: "1.0.0"
 product_qualification_policy:
   schema: ryeos.product_qualification_policy.v5
   verifier_ref: tool:fixtures/qualify_runtime
+  requires_guarantees: [test:held]
   subject_declaration_id: guest-runtime
   allowed_claims: [runtime_qualified]
   minimum_verifier_process_settlement: scope_empty
@@ -718,12 +774,29 @@ product_qualification_policy:
                 .with_registered_bundle_roots(registered),
         );
         let request = ConsumerQualificationContextRequest {
-            policy_ref: "config:test/consumer-qualification".into(),
+            variants_ref: "config:test/qualification-variants".into(),
             relationship_ref: "config:codex/guest-runtime-products".into(),
-            relationship_name: "runtime_to_external_authoring_worker".into(),
             subject_manifest_hash: "a".repeat(64),
         };
-        let refusal = derive_blocking(&state, &request)
+        // A node reporting no guarantee holds neither fixture variant: the
+        // refusal names each candidate and what it lacks.
+        let none = derive_blocking(&state, &request)
+            .err()
+            .context("a node holding no variant's guarantees selected one")?;
+        ensure!(
+            none.to_string().contains("no qualification variant")
+                && none.to_string().contains("config:test/consumer-qualification")
+                && none.to_string().contains("does not know how to prove test:held"),
+            "refusal does not name the candidate and its unmet guarantee: {none:#}"
+        );
+        let mut held = lillux::process_control::HostCapabilities::default();
+        held.provide(
+            "test:held",
+            lillux::process_control::ProofSource::Measured,
+            "test",
+            "held by the fixture node",
+        );
+        let refusal = derive_for_guarantees(&state, &request, &held)
             .err()
             .context("a missing environment definition was admitted")?;
         ensure!(
@@ -732,6 +805,89 @@ product_qualification_policy:
                 .contains("config:codex/environments/absent"),
             "refusal does not name the absent environment: {refusal:#}"
         );
+        Ok(())
+    }
+
+    fn readiness(
+        trusted_process_group: bool,
+        cgroup_scope: bool,
+        pid_namespace: bool,
+    ) -> ryeos_engine::isolation::ProcessScopeReadiness {
+        use ryeos_engine::isolation::{
+            DescendantContainmentReadiness, PidNamespaceContainmentQualification,
+            ProcessControlReadinessReason, ProcessScopeAuthorityStatus, ProcessScopeReadiness,
+            ProtocolProcessControlReadiness,
+        };
+        let idle = || ProtocolProcessControlReadiness {
+            ready: false,
+            reason: ProcessControlReadinessReason::PolicyUnconfigured,
+        };
+        ProcessScopeReadiness {
+            policy: ryeos_engine::isolation::IsolationProcessScopePolicy::Unconfigured {},
+            authority: ProcessScopeAuthorityStatus::Absent,
+            authority_digest: None,
+            qualified_capabilities: Default::default(),
+            ordinary_subprocess: idle(),
+            pooled_requests: idle(),
+            exclusive_session: idle(),
+            trusted_exclusive_session: idle(),
+            descendant_containment: DescendantContainmentReadiness {
+                cgroup_scope,
+                pid_namespace: if pid_namespace {
+                    PidNamespaceContainmentQualification::qualified_by(
+                        lillux::process_control::ProofSource::Measured,
+                        "probed",
+                    )
+                } else {
+                    PidNamespaceContainmentQualification::not_probed("not probed")
+                },
+                trusted_process_group,
+            },
+        }
+    }
+
+    #[test]
+    fn shipped_codex_variants_are_selected_by_the_guarantees_a_node_reports() -> Result<()> {
+        let path = ryeos_engine::test_support::workspace_root()
+            .join("bundles/codex/.ai/config/codex/qualification-variants.yaml");
+        let document: serde_json::Value = serde_yaml::from_str(&fs::read_to_string(path)?)?;
+        let variants = QualificationVariants::from_value(&document["qualification_variants"])?;
+        let relationship = |view: &lillux::process_control::HostCapabilities| {
+            variants
+                .select(view)
+                .map(|variant| variant.relationship_name.clone())
+                .map_err(|error| error.to_string())
+        };
+        // Enforced isolation with a qualified containment mechanism.
+        for (cgroup_scope, pid_namespace) in [(true, false), (false, true), (true, true)] {
+            let view = readiness(false, cgroup_scope, pid_namespace).reported_guarantees(true);
+            ensure!(
+                relationship(&view) == Ok("runtime_to_external_authoring_worker".to_owned()),
+                "contained node: {:?}",
+                relationship(&view)
+            );
+        }
+        // Node policy accepting trusted sessions on a node that does not
+        // enforce isolation; a qualified mechanism alone is not enforcement.
+        let view = readiness(true, false, false).reported_guarantees(false);
+        ensure!(
+            relationship(&view) == Ok("runtime_to_external_authoring_worker_trusted_lane".to_owned()),
+            "trusted node: {:?}",
+            relationship(&view)
+        );
+        // Neither: enforced without containment, or nothing at all.
+        for (enforced, trusted) in [(true, false), (false, false)] {
+            let view = readiness(trusted, false, false).reported_guarantees(enforced);
+            let refusal = relationship(&view).err().context("a node holding neither selected a variant")?;
+            ensure!(
+                refusal.contains("no qualification variant")
+                    && refusal.contains("config:codex/consumer-qualification-policy-trusted-lane"),
+                "{refusal}"
+            );
+        }
+        // Enforced isolation never lets a trusted-session acceptance stand in.
+        let view = readiness(true, false, false).reported_guarantees(true);
+        ensure!(relationship(&view).is_err(), "enforced uncontained node selected a variant");
         Ok(())
     }
 }
