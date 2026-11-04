@@ -199,7 +199,7 @@ or require current execution contact. An absent normal-intent or readiness probe
 remains negative without demanding a capture that never happened. Revocation
 and cancellation cleanup remain independent of normal fixture evidence. SQL
 readback alone is not authenticated CAS custody. These source joins and authored
-tests do not establish installed execution, product semantics or a Render proof.
+tests do not establish installed execution, product semantics or a provider proof.
 
 The transcript is published after original Worker retirement and exact native
 settlement application, before relay shutdown, private-root removal and provider
@@ -301,7 +301,7 @@ it to the original retained source.
 
 These source contracts and synthetic interpreter fixtures do not establish an
 actual model-generated three-call turn, hostile writer exclusion, callback
-expiry, native containment, accepted five-claim qualification or Render readiness.
+expiry, native containment, accepted five-claim qualification or provider readiness.
 The independent credential-free diagnostic keeps its separate occurrence and
 claim requirements. All five ordinary admission claims remain disabled.
 

@@ -190,10 +190,6 @@ pub use sandbox::{
     write_inherited_descriptor,
 };
 
-pub use identity::envelope::{
-    AadFields, Envelope, InspectResult, OpenResult, ValidateResult, inspect_envelope,
-    open_envelope, seal_envelope, validate_envelope_env,
-};
 pub fn run(request: SubprocessRequest) -> SubprocessResult {
     exec::lib_run(request)
 }

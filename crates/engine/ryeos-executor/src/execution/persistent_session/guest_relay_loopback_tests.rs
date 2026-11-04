@@ -346,7 +346,7 @@ fn run_synthetic(fault: Option<GuestRelayLoopbackFault>) -> Option<LoopbackOutco
         &GuestRelayLoopbackSetup {
             // The relay binding admits only its signed relay backend; the
             // loopback stands in for it.
-            backend_id: "render-sandbox-early-access",
+            backend_id: "test-backend",
             owner_executable: &bin.join(OWNER),
             profile: GuestOwnerRuntimeProfile {
                 schema: 2,

@@ -25,6 +25,8 @@ zeroize = "1"
 
 [dev-dependencies]
 tempfile = { workspace = true }
+ryeos-bundle = { workspace = true }
+serde_yaml = { workspace = true }
 ryeos-external-execution = { path = "../../engine/ryeos-external-execution" }
 
 [[bin]]

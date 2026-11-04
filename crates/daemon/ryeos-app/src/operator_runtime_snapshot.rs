@@ -3315,7 +3315,7 @@ mod tests {
             schema: RUNTIME_SNAPSHOT_INTENT_SCHEMA,
             operation_id: String::new(),
             owner_principal: owner.clone(),
-            provider_id: "render-sandbox-early-access".into(),
+            provider_id: "test-backend".into(),
             source_occurrence_id: "sbx-source".into(),
             source_bootstrap_operation_id: Some("8".repeat(64)),
             source_created_at: Some("2026-09-29T00:00:00Z".into()),
@@ -3482,7 +3482,7 @@ mod tests {
                 &termination,
                 expected,
                 &identity,
-                "render-sandbox-early-access",
+                "test-backend",
                 &owner,
             )
         };
@@ -3551,7 +3551,7 @@ mod tests {
                 &late_terminal,
                 &source,
                 &identity,
-                "render-sandbox-early-access",
+                "test-backend",
                 &owner,
             )
             .is_err()
@@ -3584,7 +3584,7 @@ mod tests {
             schema: RUNTIME_SNAPSHOT_INTENT_SCHEMA,
             operation_id: String::new(),
             owner_principal: owner.clone(),
-            provider_id: "render-sandbox-early-access".into(),
+            provider_id: "test-backend".into(),
             source_occurrence_id: "sbx-source".into(),
             source_bootstrap_operation_id: None,
             source_created_at: None,
@@ -3631,7 +3631,7 @@ mod tests {
             &named,
             proof,
             &source,
-            "render-sandbox-early-access",
+            "test-backend",
             &owner,
         )
         .unwrap();
@@ -3642,7 +3642,7 @@ mod tests {
                 &named,
                 proof,
                 &source,
-                "render-sandbox-early-access",
+                "test-backend",
                 &owner
             )
             .is_err()
@@ -3657,7 +3657,7 @@ mod tests {
                 &named,
                 proof,
                 &source,
-                "render-sandbox-early-access",
+                "test-backend",
                 &owner
             )
             .is_err()
@@ -3676,7 +3676,7 @@ mod tests {
                 &named,
                 proof,
                 &source,
-                "render-sandbox-early-access",
+                "test-backend",
                 &owner,
             )
             .is_err()
@@ -3702,7 +3702,7 @@ mod tests {
                 &named,
                 proof,
                 &source,
-                "render-sandbox-early-access",
+                "test-backend",
                 &owner
             )
             .is_err()
@@ -3718,7 +3718,7 @@ mod tests {
             qualification_operation_id: "2".repeat(64),
             occurrence_id: "sbx-restored".into(),
             owner_principal: owner.clone(),
-            provider_id: "render-sandbox-early-access".into(),
+            provider_id: "test-backend".into(),
             provider_spec_digest: "3".repeat(64),
             attempt_deadline_ms: 1,
         };
@@ -3749,7 +3749,7 @@ mod tests {
                 retained,
                 qualification,
                 occurrence,
-                "render-sandbox-early-access",
+                "test-backend",
                 &owner,
                 hash,
             )

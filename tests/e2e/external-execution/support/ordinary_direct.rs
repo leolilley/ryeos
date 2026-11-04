@@ -144,7 +144,7 @@ pub fn install_before_start(
         &fixture.publisher,
         artifacts,
     );
-    // The synthetic local backend has no independently qualified Render-style
+    // The synthetic local backend has no independently qualified provider-style
     // snapshot, but its exact signed executable closure is still an identity
     // in the current placement binding. Do not fill this coordinate with a
     // placeholder or mistake the consumer's separate runtime product for it.

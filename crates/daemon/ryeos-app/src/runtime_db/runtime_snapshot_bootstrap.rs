@@ -25,7 +25,7 @@ CREATE TABLE runtime_snapshot_bootstrap (
     CHECK ((occurrence_json IS NULL) = (occurrence_id IS NULL)),
     CHECK ((phase IN ('occurrence_bound','late_occurrence_bound','rejected_occurrence_bound')) =
            (occurrence_json IS NOT NULL AND occurrence_id IS NOT NULL)),
-    -- Render does not attest a group in its Sandbox create response. One
+    -- A provider may not attest a group in its sandbox create response. One
     -- actual provider occurrence cannot acquire two intended group owners.
     UNIQUE(provider_id,occurrence_id)
 );
@@ -709,7 +709,7 @@ mod tests {
             schema: BOOTSTRAP_INTENT_SCHEMA,
             operation_id: String::new(),
             owner_principal: format!("fp:{}", "1".repeat(64)),
-            provider_id: "render-sandbox-early-access".into(),
+            provider_id: "test-backend".into(),
             provider_group_id: "sbg-exact".into(),
             production_binding_digest: "2".repeat(64),
             bootstrap_profile_digest: "a".repeat(64),

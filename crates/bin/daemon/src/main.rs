@@ -181,8 +181,8 @@ impl Drop for LifecycleExitGuard {
     }
 }
 
-/// Main owns the original exclusion/lifecycle guards and Render custody outside
-/// the run future, retaining them until the selected root and Render owners close.
+/// Main owns the original exclusion/lifecycle guards and host-adapter custody outside
+/// the run future, retaining them until the selected root and host-adapter owners close.
 #[derive(Default)]
 struct NativeFinalizerAttempts(u8);
 
@@ -2907,7 +2907,7 @@ impl DaemonSelectedComposition {
     /// `failure` is the error that ended the run, when there is one; it
     /// decides whether a startup failure inhibits the restart.
     fn record_exit(&mut self, reason: &str, error: Option<&str>, failure: Option<&anyhow::Error>) {
-        // Root closure and Render drain are distinct: callers reach the normal
+        // Root closure and host-adapter drain are distinct: callers reach the normal
         // exit only after complete_shutdown_drain has returned, never on HOLD.
         self.close_after_run();
         // A marker recorded before operator target retirement is final unless

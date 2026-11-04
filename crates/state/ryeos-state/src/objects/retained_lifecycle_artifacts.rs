@@ -258,7 +258,7 @@ mod tests {
         RetainedLifecycleArtifacts {
             schema: RETAINED_LIFECYCLE_ARTIFACTS_SCHEMA,
             kind: RETAINED_LIFECYCLE_ARTIFACTS_KIND.to_owned(),
-            bundle_name: "render-sandbox".to_owned(),
+            bundle_name: "test-bundle".to_owned(),
             signed_bundle_manifest_blob_hash: hash('f'),
             bundle_manifest_body_digest: hash('a'),
             signer_fingerprint: lillux::crypto::fingerprint(&verifier),
@@ -266,7 +266,7 @@ mod tests {
                 "ed25519:{}",
                 base64::engine::general_purpose::STANDARD.encode(verifier.to_bytes())
             ),
-            declaration_id: "render-sandbox-early-access".to_owned(),
+            declaration_id: "test-backend".to_owned(),
             executables: vec![
                 executable(RetainedLifecycleExecutableRole::Adapter, "adapter", 'a'),
                 executable(

@@ -884,7 +884,7 @@ mod tests {
             schema: RUNTIME_SNAPSHOT_INTENT_SCHEMA,
             operation_id: String::new(),
             owner_principal: format!("fp:{}", "2".repeat(64)),
-            provider_id: "render-sandbox-early-access".into(),
+            provider_id: "test-backend".into(),
             source_occurrence_id: "sbx-source".into(),
             source_bootstrap_operation_id: None,
             source_created_at: None,

@@ -27,7 +27,7 @@ enum Command {
         #[command(subcommand)]
         action: cas::CasAction,
     },
-    /// Identity primitive — signing, verification, keypairs, sealed envelopes
+    /// Identity primitive — signing, verification, keypairs
     Identity {
         #[command(subcommand)]
         action: identity::IdentityAction,
