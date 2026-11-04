@@ -21,7 +21,7 @@ use ryeos_app::execution_history_reset::{
 };
 use ryeos_app::node_config::sections::external_execution::compose::{
     ComposeLimits, ComposeRequest, ComposeTransportRequest, DEFAULT_CAPACITY_GROUP,
-    canonical_backend_id, compose_external_execution_binding,
+    compose_external_execution_binding,
     installed_binding_credential_generation,
 };
 use ryeos_app::node_config::sections::external_execution::compose_qualification::{
@@ -553,7 +553,7 @@ pub(super) fn external_compose(ctx: &HandlerContext<'_>) -> Result<Value> {
         app_root: ctx.app_root,
         state_lock: ctx.state_lock,
         id: arguments.id.clone(),
-        backend: canonical_backend_id(&arguments.backend).to_owned(),
+        backend: arguments.backend.clone(),
         program,
         transport,
         account: arguments.account.clone(),
@@ -933,7 +933,7 @@ mod tests {
             SnapshotComposeArguments {
                 id: "producer".into(),
                 binding: binding.map(str::to_owned),
-                backend: backend.then(|| "render".to_owned()),
+                backend: backend.then(|| "test-backend".to_owned()),
                 account: account.then(|| "acct".to_owned()),
                 owner_id: owner.then(|| "usr-1".to_owned()),
                 sandbox_group_id: "sbg-1".into(),
