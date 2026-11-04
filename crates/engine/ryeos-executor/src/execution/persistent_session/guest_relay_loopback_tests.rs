@@ -545,6 +545,49 @@ fn an_early_supervisor_exit_reaches_the_start_failure_through_the_owner_report()
     );
 }
 
+/// What this machine's enforced isolation qualifies as descendant containment:
+/// the lane a Q Worker would take here. Prints the readiness; asserts only that
+/// the generation composes, since a host without the mechanism is a finding,
+/// not a failure.
+#[test]
+fn this_nodes_enforced_isolation_readiness_is_reported() {
+    if std::env::var_os("RYEOS_GUEST_RELAY_LOOPBACK_APP_ROOT").is_some() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let mut policy = ryeos_engine::isolation::IsolationPolicy::disabled_for_authoring();
+    policy.mode = ryeos_engine::isolation::IsolationMode::Enforce;
+    policy.backend = Some(ryeos_isolation_protocol::IsolationBackendSelection {
+        bundle: "core".into(),
+        implementation: "linux-lillux".into(),
+    });
+    policy.filesystem.proc_filesystem =
+        ryeos_isolation_protocol::IsolationProcFilesystem::PidNamespace;
+    let roots = vec![ryeos_engine::test_support::core_bundle_root()];
+    let trust = ryeos_engine::test_support::live_trust_store();
+    let isolation = match ryeos_node_runtime::engine_init::load_test_execution_isolation(
+        root.path(),
+        &roots,
+        &trust,
+        policy,
+    ) {
+        Ok(isolation) => isolation,
+        Err(error) => {
+            eprintln!("enforced isolation does not compose here: {error:#}");
+            assert!(
+                std::env::var("RYEOS_GUEST_RELAY_LOOPBACK").as_deref() != Ok("1"),
+                "isolation required, but it does not compose: {error:#}"
+            );
+            return;
+        }
+    };
+    eprintln!(
+        "enforced: {}\nprocess scope readiness: {}",
+        isolation.is_enforced(),
+        serde_json::to_string_pretty(&isolation.inspection().process_scope_readiness).unwrap()
+    );
+}
+
 /// One regular-file entry of an installed content manifest, either tier.
 struct ManifestFile {
     path: String,

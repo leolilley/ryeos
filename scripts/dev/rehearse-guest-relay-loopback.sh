@@ -8,6 +8,15 @@
 # crates/engine/ryeos-executor/src/execution/persistent_session/
 # guest_relay_loopback_tests.rs for what each case asserts.
 #
+# Cases (all in the one test module, all run by the `run` step):
+#   baseline Ready and candidate launch; corrupted attach response; controller
+#   clock +-30 s (attaches) and -1 h (refused, the refusal's detail reaches the
+#   start failure); early supervisor exit (the owner's report reaches the start
+#   failure); and a report of the enforced isolation and descendant containment
+#   this machine qualifies. The qualification (Q) session itself is not covered:
+#   it needs an accepted qualification root that only the full operator flow
+#   produces.
+#
 # Prerequisites
 #   - Linux with unprivileged user, PID and mount namespaces (the cases skip
 #     with a stated reason otherwise; RYEOS_GUEST_RELAY_LOOPBACK=1, set here,
