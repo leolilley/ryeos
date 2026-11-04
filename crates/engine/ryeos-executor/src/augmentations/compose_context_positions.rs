@@ -833,6 +833,7 @@ pub async fn run(
                     state_root: provenance.state_root_override(),
                     checkpoint_dir: None,
                     checkpoint_authority: None,
+                    captured_callback_socket: false,
                     daemon_socket_path: callback_ipc_requested
                         .then_some(state.config.uds_path.as_path()),
                     bundle_roots: &bundle_roots,

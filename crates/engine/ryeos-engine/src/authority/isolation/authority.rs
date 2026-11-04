@@ -824,6 +824,11 @@ pub struct IsolationLaunchContext<'a> {
     pub checkpoint_dir: Option<&'a Path>,
     pub checkpoint_authority: Option<&'a lillux::PinnedDirectory>,
     pub daemon_socket_path: Option<&'a Path>,
+    /// The daemon admitted `daemon_socket_path` as the callback socket of a
+    /// captured-compatible callback protocol. Under a captured filesystem
+    /// ceiling this admits exactly that one socket and nothing else ambient;
+    /// without it a captured launch carrying a socket is refused.
+    pub captured_callback_socket: bool,
     pub bundle_roots: &'a [PathBuf],
     pub node_trusted_keys_dir: Option<&'a Path>,
     pub verified_code: &'a [IsolationVerifiedCode],

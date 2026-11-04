@@ -2897,7 +2897,7 @@ impl IsolationRuntime {
             if context.live_access.is_some()
                 || context.checkpoint_dir.is_some()
                 || context.checkpoint_authority.is_some()
-                || context.daemon_socket_path.is_some()
+                || (context.daemon_socket_path.is_some() && !context.captured_callback_socket)
                 || !context.bundle_roots.is_empty()
                 || context.node_trusted_keys_dir.is_some()
             {
@@ -8256,6 +8256,7 @@ mod tests {
                     checkpoint_dir: None,
                     checkpoint_authority: None,
                     daemon_socket_path: None,
+                    captured_callback_socket: false,
                     bundle_roots: &[],
                     node_trusted_keys_dir: None,
                     verified_code: std::slice::from_ref(command.identity()),
@@ -8343,6 +8344,7 @@ mod tests {
                     checkpoint_dir: None,
                     checkpoint_authority: None,
                     daemon_socket_path: None,
+                    captured_callback_socket: false,
                     bundle_roots: &[],
                     node_trusted_keys_dir: None,
                     verified_code: std::slice::from_ref(&captured),
@@ -8412,6 +8414,7 @@ mod tests {
                     checkpoint_dir: None,
                     checkpoint_authority: None,
                     daemon_socket_path: None,
+                    captured_callback_socket: false,
                     bundle_roots: &[],
                     node_trusted_keys_dir: None,
                     verified_code: &verified_code,
@@ -8542,6 +8545,7 @@ mod tests {
                     checkpoint_dir: None,
                     checkpoint_authority: None,
                     daemon_socket_path: None,
+                    captured_callback_socket: false,
                     bundle_roots: &[],
                     node_trusted_keys_dir: None,
                     verified_code: std::slice::from_ref(&verified),
@@ -8955,6 +8959,7 @@ mod tests {
                     checkpoint_dir: None,
                     checkpoint_authority: None,
                     daemon_socket_path: None,
+                    captured_callback_socket: false,
                     bundle_roots: &[],
                     node_trusted_keys_dir: None,
                     verified_code: &[],
@@ -9096,6 +9101,7 @@ mod tests {
                 checkpoint_dir: None,
                 checkpoint_authority: None,
                 daemon_socket_path: None,
+                captured_callback_socket: false,
                 bundle_roots: &[],
                 node_trusted_keys_dir: None,
                 verified_code: &[],
@@ -9349,6 +9355,7 @@ mod tests {
                     checkpoint_dir: None,
                     checkpoint_authority: None,
                     daemon_socket_path: None,
+                    captured_callback_socket: false,
                     bundle_roots: &[],
                     node_trusted_keys_dir: None,
                     verified_code: std::slice::from_ref(&captured),
@@ -9471,6 +9478,7 @@ mod tests {
                 checkpoint_dir: None,
                 checkpoint_authority: None,
                 daemon_socket_path: None,
+                captured_callback_socket: false,
                 bundle_roots: &[],
                 node_trusted_keys_dir: None,
                 verified_code: &[],
@@ -9536,6 +9544,7 @@ mod tests {
                     checkpoint_dir: None,
                     checkpoint_authority: None,
                     daemon_socket_path: None,
+                    captured_callback_socket: false,
                     bundle_roots: &[],
                     node_trusted_keys_dir: None,
                     verified_code: &[],
@@ -9629,6 +9638,7 @@ mod tests {
             checkpoint_dir: Some(&checkpoint_dir),
             checkpoint_authority: Some(&checkpoint_authority),
             daemon_socket_path: None,
+            captured_callback_socket: false,
             bundle_roots: &[],
             node_trusted_keys_dir: None,
             verified_code: &[],
@@ -9758,6 +9768,7 @@ mod tests {
             checkpoint_dir: None,
             checkpoint_authority: None,
             daemon_socket_path: None,
+            captured_callback_socket: false,
             bundle_roots: &[],
             node_trusted_keys_dir: None,
             verified_code: &[],
@@ -10018,6 +10029,7 @@ mod tests {
                     checkpoint_dir: None,
                     checkpoint_authority: None,
                     daemon_socket_path: None,
+                    captured_callback_socket: false,
                     bundle_roots: &[],
                     node_trusted_keys_dir: None,
                     verified_code: &[],
@@ -10099,6 +10111,7 @@ mod tests {
                     checkpoint_dir: None,
                     checkpoint_authority: None,
                     daemon_socket_path: None,
+                    captured_callback_socket: false,
                     bundle_roots: &[],
                     node_trusted_keys_dir: None,
                     verified_code: &[],
@@ -10156,6 +10169,7 @@ mod tests {
                 checkpoint_dir: None,
                 checkpoint_authority: None,
                 daemon_socket_path: None,
+                captured_callback_socket: false,
                 bundle_roots: &[],
                 node_trusted_keys_dir: Some(app_root.path()),
                 verified_code: &[],
@@ -10177,6 +10191,75 @@ mod tests {
                 .to_string()
                 .contains("captured execution context carries ambient filesystem authority")
         );
+    }
+
+    #[test]
+    fn captured_execution_carries_only_the_admitted_callback_socket() {
+        let app_root = tempfile::tempdir().unwrap();
+        write_policy(app_root.path(), &IsolationPolicy::disabled_for_authoring());
+        let mut runtime = IsolationRuntime::load(app_root.path()).unwrap();
+        runtime.state = IsolationRuntimeState::Enforced;
+        let socket = std::path::Path::new("/run/ryeos/daemon.sock");
+        let extra_root = [app_root.path().to_path_buf()];
+        let ambient = "captured execution context carries ambient filesystem authority";
+        let attempt = |socket_path: Option<&Path>,
+                       admitted: bool,
+                       bundle_roots: &[PathBuf]|
+         -> String {
+            let request = lillux::SubprocessRequest {
+                cmd: "/bin/true".to_string(),
+                argv0: None,
+                args: Vec::new(),
+                cwd: None,
+                envs: Vec::new(),
+                stdin_data: None,
+                timeout: 1.0,
+                limits: None,
+                inherited_fds: Vec::new(),
+                inherited_fd_mappings: Vec::new(),
+                supervised_status: None,
+            };
+            match runtime.apply(
+                request,
+                IsolationLaunchContext {
+                    immutable_project: None,
+                    workspace_view: None,
+                    project_path: app_root.path(),
+                    project_authority: IsolationProjectAuthority::EphemeralScratch,
+                    filesystem_authority_ceiling:
+                        IsolationFilesystemAuthorityCeiling::CapturedExecution,
+                    network_authority_ceiling: IsolationNetworkAuthorityCeiling::Isolated,
+                    live_access: None,
+                    state_root: None,
+                    checkpoint_dir: None,
+                    checkpoint_authority: None,
+                    daemon_socket_path: socket_path,
+                    captured_callback_socket: admitted,
+                    bundle_roots,
+                    node_trusted_keys_dir: None,
+                    verified_code: &[],
+                    verified_command: None,
+                    external_read_only_mounts: &[],
+                    writable_runtime_view_mounts: &[],
+                    producer_prepared_mounts: &[],
+                    target_channels: &[],
+                    item_ref: "worker:tests/captured",
+                    thread_id: "T-captured",
+                    verbatim_env_names: &[],
+                },
+            ) {
+                Ok(_) => String::new(),
+                Err(error) => error.to_string(),
+            }
+        };
+        // Off the class a captured launch with a socket is refused.
+        assert!(attempt(Some(socket), false, &[]).contains(ambient));
+        // On the class the socket passes the captured ambient check; any later
+        // refusal is about socket pinning, not ambient authority.
+        assert!(!attempt(Some(socket), true, &[]).contains(ambient));
+        // The class admits the socket only: other ambient authority still refuses.
+        assert!(attempt(Some(socket), true, &extra_root).contains(ambient));
+        assert!(attempt(None, true, &extra_root).contains(ambient));
     }
 
     #[test]
@@ -10213,6 +10296,7 @@ mod tests {
                 checkpoint_dir: None,
                 checkpoint_authority: None,
                 daemon_socket_path: None,
+                captured_callback_socket: false,
                 bundle_roots: &[],
                 node_trusted_keys_dir: None,
                 verified_code: &[],
@@ -10321,6 +10405,7 @@ mod tests {
                     checkpoint_dir: None,
                     checkpoint_authority: None,
                     daemon_socket_path: None,
+                    captured_callback_socket: false,
                     bundle_roots: &[],
                     node_trusted_keys_dir: None,
                     verified_code: &[],
@@ -10371,6 +10456,7 @@ mod tests {
             checkpoint_dir: None,
             checkpoint_authority: None,
             daemon_socket_path: None,
+            captured_callback_socket: false,
             bundle_roots: &[],
             node_trusted_keys_dir: None,
             verified_code: &[],
@@ -10432,6 +10518,7 @@ mod tests {
             checkpoint_dir: None,
             checkpoint_authority: None,
             daemon_socket_path: None,
+            captured_callback_socket: false,
             bundle_roots: &[],
             node_trusted_keys_dir: None,
             verified_code: &[],
@@ -10484,6 +10571,7 @@ mod tests {
             checkpoint_dir: None,
             checkpoint_authority: None,
             daemon_socket_path: None,
+            captured_callback_socket: false,
             bundle_roots: &[],
             node_trusted_keys_dir: None,
             verified_code: &[],
@@ -10566,6 +10654,7 @@ mod tests {
                     checkpoint_dir: None,
                     checkpoint_authority: None,
                     daemon_socket_path: None,
+                    captured_callback_socket: false,
                     bundle_roots: &[],
                     node_trusted_keys_dir: None,
                     verified_code: &[],

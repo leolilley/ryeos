@@ -476,6 +476,9 @@ pub struct PreparedItemPlan {
     realization_command: Option<PreparedRealizationCommand>,
     resource_policy: PersistentSessionResourcePolicy,
     persistent_session_capsule_hash: Option<String>,
+    /// Set by closure admission when a captured plan's callback authority was
+    /// admitted through the captured-compatible protocol class.
+    captured_callback_class: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1465,6 +1468,7 @@ impl PreparedItemPlan {
                 });
             if callback_authority {
                 admit_captured_compatible_callback(&protocol.descriptor)?;
+                self.captured_callback_class = true;
             }
         }
         if !external
@@ -1802,6 +1806,7 @@ impl PreparedItemPlan {
             realization_command,
             resource_policy: PersistentSessionResourcePolicy::Ordinary,
             persistent_session_capsule_hash: None,
+            captured_callback_class: false,
         })
     }
 
@@ -1961,6 +1966,7 @@ impl PreparedItemPlan {
             isolation_checkpoint_dir: None,
             isolation_checkpoint_authority: None,
             isolation_daemon_socket_path: None,
+            isolation_captured_callback_socket: false,
             // A persistent session executes its captured command and exact
             // external realizations. Mutable bundle roots and node trust state
             // are neither inputs nor ambient read authority for that worker.
@@ -2956,6 +2962,7 @@ pub fn with_prepared_external_qualification_local_worker_plan<T>(
                 realization_command: None,
                 resource_policy: PersistentSessionResourcePolicy::QualificationNoResources,
                 persistent_session_capsule_hash: None,
+                captured_callback_class: false,
             },
             declaration,
             signed_protocol,
@@ -3060,6 +3067,7 @@ fn prepare_item_plan_with_logical_context(
             realization_command: None,
             resource_policy: PersistentSessionResourcePolicy::Ordinary,
             persistent_session_capsule_hash: None,
+            captured_callback_class: false,
         })
     })
 }
@@ -3171,6 +3179,7 @@ fn assemble_captured_item_plan(
         realization_command: None,
         resource_policy: PersistentSessionResourcePolicy::Ordinary,
         persistent_session_capsule_hash: None,
+        captured_callback_class: false,
     })
 }
 
@@ -3519,6 +3528,7 @@ pub fn spawn_item(
             isolation_checkpoint_authority: allocated_checkpoint_authority,
             isolation_daemon_socket_path: isolation_daemon_socket_path
                 .map(std::path::Path::to_path_buf),
+            isolation_captured_callback_socket: prepared_plan.captured_callback_class,
             isolation_bundle_roots,
             isolation_node_trusted_keys_dir: Some(isolation_node_trusted_keys_dir),
             isolation_verified_code,
@@ -4277,6 +4287,7 @@ mod tests {
             realization_command: None,
             resource_policy: PersistentSessionResourcePolicy::Ordinary,
             persistent_session_capsule_hash: None,
+            captured_callback_class: false,
         }
     }
 
