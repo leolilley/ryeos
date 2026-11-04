@@ -187,6 +187,11 @@ impl ExternalPlacementBackend for GuestRelayLoopbackBackend {
         &self.settings_schema_digest
     }
 
+    /// The key the composed settings carry the relay's workspace scope under.
+    fn relay_scope_setting(&self) -> Option<&str> {
+        Some("owner_id")
+    }
+
     fn qualify_offline(
         &self,
         _contract: &ExternalPlacementBackendContract,
