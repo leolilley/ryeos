@@ -633,7 +633,7 @@ async fn lifecycle_summary(app_root: PathBuf) -> TtyNodeSummary {
             Ok(Err(err)) => {
                 return TtyNodeSummary {
                     status: "config error".to_string(),
-                    detail: Some(err.to_string()),
+                    detail: Some(format!("{err:#}")),
                 };
             }
             Err(err) => {
