@@ -105,6 +105,23 @@ FIXED = {
     },
     "worker_ref": "worker:codex/external-hosted-authoring",
 }
+# One verifier Tool exists per qualification variant, each targeting its variant's Worker.
+# The settlement each variant's Worker session reaches, which the checker root must reach too: the contained
+# Worker settles by its containment, the trusted-lane Worker by its process group.
+SETTLEMENT_BY_WORKER = {
+    "worker:codex/external-hosted-authoring": "containment_empty",
+    "worker:codex/external-hosted-authoring-trusted-lane": "trusted_process_group_absent",
+}
+VARIANTS = {
+    "contained": (
+        "consumer-runtime-verifier.yaml",
+        "external-hosted-authoring",
+    ),
+    "trusted": (
+        "consumer-runtime-verifier-trusted-lane.yaml",
+        "external-hosted-authoring-trusted-lane",
+    ),
+}
 
 
 class Refusal(Exception):
@@ -156,7 +173,7 @@ def runtime_manifest_hash(tool: Path) -> str:
     return require_hex("runtime digest", matches[0]["digest"])
 
 
-def build_contract(captured: dict, tool: Path = TOOL, worker: Path = WORKER, checker: Path = CHECKER) -> dict:
+def build_contract(captured: dict, tool: Path = TOOL, worker: Path = WORKER, checker: Path = CHECKER, worker_ref: str = FIXED["worker_ref"]) -> dict:
     code = checker.read_bytes()
     if not code:
         raise Refusal("checker script is empty")
@@ -164,7 +181,7 @@ def build_contract(captured: dict, tool: Path = TOOL, worker: Path = WORKER, che
         "schema": FIXED["schema"],
         "audit_edition": FIXED["audit_edition"],
         "target": {
-            "worker_ref": FIXED["worker_ref"],
+            "worker_ref": worker_ref,
             "profile_hash": captured["profile_hash"],
             "source_binding_hash": captured["source_binding_hash"],
             "source_content_manifest_hash": captured["source_content_manifest_hash"],
@@ -196,7 +213,7 @@ def build_contract(captured: dict, tool: Path = TOOL, worker: Path = WORKER, che
             },
             "max_header_bytes": 2 * 1024 * 1024,
             "max_response_bytes": 64 * 1024,
-            "required_root_settlement": "scope_empty",
+            "required_root_settlement": SETTLEMENT_BY_WORKER[worker_ref],
         },
     }
 
@@ -246,13 +263,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--captured", type=Path, help="JSON file of live-captured values")
     parser.add_argument("--placeholders", action="store_true", help="emit refusable @@NAME@@ tokens")
     parser.add_argument("--write-tool", action="store_true", help="rewrite the Tool's third argument in place")
+    parser.add_argument("--variant", choices=sorted(VARIANTS), help="build for this qualification variant's verifier and Worker")
     parser.add_argument("--tool", type=Path, default=TOOL)
     parser.add_argument("--worker", type=Path, default=WORKER)
     parser.add_argument("--checker", type=Path, default=CHECKER)
     args = parser.parse_args(argv)
+    worker_ref = FIXED["worker_ref"]
+    if args.variant:
+        tool_name, worker_name = VARIANTS[args.variant]
+        args.tool = BUNDLE / ".ai/tools/codex/qualification" / tool_name
+        args.worker = BUNDLE / ".ai/workers/codex" / (worker_name + ".yaml")
+        worker_ref = "worker:codex/" + worker_name
     try:
         captured = load_captured(args.captured) if args.captured else None
-        literal = generate(captured, args.placeholders, tool=args.tool, worker=args.worker, checker=args.checker)
+        literal = generate(captured, args.placeholders, tool=args.tool, worker=args.worker, checker=args.checker, worker_ref=worker_ref)
         if args.write_tool:
             write_tool(args.tool, literal)
         else:

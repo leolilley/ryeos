@@ -15,8 +15,9 @@ use base64::Engine as _;
 use lillux::process_control::{
     CapabilityEvidence, CapabilityRequirement, HOST_PROVIDER, HostCapabilities, HostFacts,
     PERSISTENCE_DURABLE_STATE, PrivateDirectoryFacts, ProofSource, ResidencyProof, SCOPE_LIMITS,
-    decide_private_directory, is_scope_capability, satisfies,
+    decide_private_directory, is_scope_capability,
 };
+use ryeos_engine::isolation::add_pid_namespace_containment;
 use serde::{Deserialize, Serialize};
 
 pub const CAPABILITY_REPORT_SCHEMA: &str = "ryeos.node.capability-report/v8";
@@ -198,6 +199,7 @@ pub struct SignedNodeCapabilityReport {
     pub signature: String,
 }
 
+#[cfg(test)]
 use lillux::process_control::{
     QUIESCENCE_PID_NAMESPACE as PID_NAMESPACE_QUIESCENCE,
     RECOVERY_PID_NAMESPACE as PID_NAMESPACE_RECOVERY,
@@ -263,6 +265,16 @@ impl NodeCapabilityReport {
                 .process_scope_readiness
                 .descendant_containment
                 .pid_namespace,
+        );
+        // What a workload may declare it needs of this node's isolation and
+        // node policy; qualification variants are selected against these names.
+        inputs.isolation.add_policy_guarantees(
+            inputs.isolation.mode == ryeos_engine::isolation::IsolationMode::Enforce,
+            &ryeos_engine::isolation::GuaranteeHost {
+                gvisor: host.gvisor(),
+                ..Default::default()
+            },
+            &mut view,
         );
         add_provider_environment(&mut view, inputs.provider_environment);
         add_credential_home(&mut view, &credential_home, established.as_deref());
@@ -612,41 +624,35 @@ fn add_scope_capabilities(
         .flat_map(|entry| entry.names())
         .filter_map(|name| lillux::ProcessScopeCapability::from_capability_name(name))
         .collect::<std::collections::BTreeSet<_>>();
-    let source = if gvisor {
-        ProofSource::ProviderAttested
-    } else {
-        ProofSource::Measured
+    let host = ryeos_engine::isolation::GuaranteeHost {
+        gvisor,
+        scope_provider: provider.to_owned(),
+        scope_absent: absent.clone(),
     };
     for capability in lillux::ProcessScopeCapability::ALL {
-        let name = capability.capability_name();
-        if qualified.contains(&capability) {
-            view.provide(
-                name,
-                source.clone(),
-                provider,
-                "qualified by a disposable probe scope of the delegated cgroup provider",
-            );
-        } else if let Some(reason) = &absent {
-            view.refuse(name, reason.clone());
+        let refusal = if let Some(reason) = &absent {
+            reason.clone()
         } else if capability == lillux::ProcessScopeCapability::Quiescence
             && !wanted.contains(&capability)
         {
-            view.refuse(
-                name,
-                "not probed: the capability floor does not name it, so the kernel barrier was not \
-                 exercised",
-            );
+            "not probed: the capability floor does not name it, so the kernel barrier was not \
+             exercised"
+                .to_owned()
         } else {
-            view.refuse(
-                name,
-                "the delegated cgroup provider's probe scope did not qualify it",
-            );
-        }
+            "the delegated cgroup provider's probe scope did not qualify it".to_owned()
+        };
+        ryeos_engine::isolation::provide_scope_guarantee(
+            view,
+            capability,
+            qualified.contains(&capability),
+            &host,
+            &refusal,
+        );
     }
     if qualified.contains(&lillux::ProcessScopeCapability::Termination) {
         view.provide(
             SCOPE_LIMITS,
-            source,
+            host.mechanism_source(),
             provider,
             "each job scope carries its own memory.max, memory.swap.max of 0 and pids.max",
         );
@@ -658,33 +664,6 @@ fn add_scope_capabilities(
             }),
         );
     }
-}
-
-/// Descendant containment by the execution's retained PID-namespace init.
-/// Provided only when the enforced runtime's disposable probe showed that a
-/// setsid'd, double-forked and nested-namespace descendant all die with the
-/// init and the init's exit settles them. Quiescence is explicitly never
-/// provided: namespace membership is not an atomic writer freeze.
-fn add_pid_namespace_containment(
-    view: &mut HostCapabilities,
-    containment: &ryeos_engine::isolation::PidNamespaceContainmentQualification,
-) {
-    for name in [PID_NAMESPACE_TERMINATION, PID_NAMESPACE_RECOVERY] {
-        if containment.qualified {
-            view.provide(
-                name,
-                containment.source.clone(),
-                ryeos_engine::isolation::PidNamespaceContainmentQualification::PROVIDER,
-                containment.detail.clone(),
-            );
-        } else {
-            view.refuse(name, containment.detail.clone());
-        }
-    }
-    view.refuse(
-        PID_NAMESPACE_QUIESCENCE,
-        "a retained PID-namespace init terminates and settles descendants but cannot freeze them",
-    );
 }
 
 /// Grade the provider-delivered environment. The node cannot observe where
@@ -779,41 +758,20 @@ pub fn match_floor(requires: &[CapabilityRequirement], view: &HostCapabilities) 
     let mut unmet = BTreeMap::new();
     let mut met_by = BTreeMap::new();
     for entry in requires {
-        let mut failures: Vec<(&str, String)> = Vec::new();
-        let met = entry
-            .names()
-            .iter()
-            .find(|name| match unmet_reason(entry, name, view) {
-                None => true,
-                Some(reason) => {
-                    failures.push((name.as_str(), reason));
-                    false
-                }
-            });
-        match (met, failures.as_slice()) {
-            (Some(name), _) => {
+        match view.meets(entry) {
+            Ok(name) => {
                 let evidence = &view.provided[name];
                 met_by.insert(
                     entry.label(),
                     FloorEntryMet {
-                        name: name.clone(),
+                        name: name.to_owned(),
                         source: evidence.source.clone(),
                         provider: evidence.provider.clone(),
                     },
                 );
             }
-            (None, [(_, reason)]) if !entry.is_set() => {
-                unmet.insert(entry.label(), reason.clone());
-            }
-            (None, _) => {
-                let reasons: Vec<String> = failures
-                    .iter()
-                    .map(|(name, reason)| format!("{name}: {reason}"))
-                    .collect();
-                unmet.insert(
-                    entry.label(),
-                    format!("none of its names is met; {}", reasons.join("; ")),
-                );
+            Err(reason) => {
+                unmet.insert(entry.label(), reason);
             }
         }
     }
@@ -822,28 +780,6 @@ pub fn match_floor(requires: &[CapabilityRequirement], view: &HostCapabilities) 
         admitted: unmet.is_empty(),
         met_by,
         unmet,
-    }
-}
-
-/// Why `name`, one of `entry`'s names, is not met here, or `None` when it
-/// is: the proof's basis is appended to a grade or provider mismatch so the
-/// refusal says what was proven instead.
-fn unmet_reason(
-    entry: &CapabilityRequirement,
-    name: &str,
-    view: &HostCapabilities,
-) -> Option<String> {
-    match view.provided.get(name) {
-        Some(evidence) => match satisfies(entry, name, evidence) {
-            Ok(()) => None,
-            Err(mismatch) => Some(format!("{mismatch} ({})", evidence.basis)),
-        },
-        None => Some(
-            view.missing
-                .get(name)
-                .cloned()
-                .unwrap_or_else(|| format!("this node does not know how to prove {name}")),
-        ),
     }
 }
 
@@ -1212,6 +1148,18 @@ mod tests {
         }
         names.extend(
             [SCOPE_LIMITS, SECRETS_PROVIDER_ENV, CREDENTIAL_PRIVATE_HOME].map(str::to_owned),
+        );
+        names.extend(
+            [
+                ryeos_engine::isolation::ISOLATION_ENFORCED,
+                ryeos_engine::isolation::FILESYSTEM_CAPTURED_EXECUTION,
+                ryeos_engine::isolation::CALLBACK_CAPTURED_COMPATIBLE,
+                ryeos_engine::isolation::SESSIONS_TRUSTED_PROCESS_GROUP,
+                PID_NAMESPACE_TERMINATION,
+                PID_NAMESPACE_RECOVERY,
+                PID_NAMESPACE_QUIESCENCE,
+            ]
+            .map(str::to_owned),
         );
         assert!(
             names.len() <= MAX_CAPABILITY_ENTRIES,

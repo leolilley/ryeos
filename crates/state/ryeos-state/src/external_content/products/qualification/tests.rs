@@ -53,6 +53,7 @@ fn policy() -> ProductQualificationPolicy {
         minimum_verifier_process_settlement: VerifierProcessSettlementAuthority::ScopeEmpty,
         verifier_parameters: json!({"scope":"bounded_fixture"}),
         consumer_execution_context: None,
+        requires_guarantees: Vec::new(),
         producer_scenarios: BTreeMap::new(),
     }
 }
@@ -3079,4 +3080,22 @@ fn portable_consumer_identity_ignores_only_the_generation_identity() {
             changed.portable().digest().unwrap()
         );
     }
+}
+
+#[test]
+fn policy_required_guarantees_are_declared_data_and_absent_when_unset() {
+    let unset = serde_json::to_value(policy()).unwrap();
+    assert!(unset.get("requires_guarantees").is_none());
+    let mut declared = policy();
+    declared.requires_guarantees = serde_json::from_value(json!([
+        "isolation:enforced",
+        {"name": "sessions:trusted_process_group", "accept": ["trusted"]},
+    ]))
+    .unwrap();
+    let value = serde_json::to_value(&declared).unwrap();
+    assert_eq!(value["requires_guarantees"][0], "isolation:enforced");
+    assert_eq!(ProductQualificationPolicy::from_value(&value).unwrap(), declared);
+    let mut malformed = value;
+    malformed["requires_guarantees"] = json!([""]);
+    assert!(ProductQualificationPolicy::from_value(&malformed).is_err());
 }

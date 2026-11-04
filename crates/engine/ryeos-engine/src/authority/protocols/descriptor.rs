@@ -527,6 +527,7 @@ mod tests {
                 allows_pushed_head: false,
                 allows_target_site: false,
                 allows_detached: false,
+                pushed_head_requires_declaration: false,
             },
             lifecycle: ProtocolLifecycle {
                 mode: LifecycleMode::Managed,
@@ -561,6 +562,7 @@ mod tests {
                 allows_pushed_head: false,
                 allows_target_site: false,
                 allows_detached: false,
+                pushed_head_requires_declaration: false,
             },
             lifecycle: ProtocolLifecycle {
                 mode: LifecycleMode::Managed,

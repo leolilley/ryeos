@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-20T20:37:21Z:24b6c639cfb0093eeb33e910a3f94faa554e50460b9ea79db1c61fddaad8d3db:F+OdshKGTfS0HjhYskJlaGsEM9fcR0/2tNZ4b7SqEHVWzYs+kScuI2yuLcM9aNSDfXQGMHjEpCxNwFVHC1lwDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-04T04:58:11Z:8f8885d8e7802611f37decea97d7a0a546d75e3ab8d6f179c8af87966c7b360a:JAbNZhw0FoyNjHO3DibtodK4UtpJdDWVTwNSr6csLLxtrzSvxe37x4JJOS+0gXGb9dd5Us5vV91+L7/68JR1AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/tool"
 version: "1.3.0"
 location:
@@ -38,6 +38,11 @@ execution:
   filesystem_authority_ceiling:
     path: [filesystem_authority]
     default: node_policy
+  # Optional declaration that the tool runs against a pinned project snapshot
+  # (a pushed-head project source). Protocols that gate that capability on a
+  # declaration admit only tools that author `project_lane: pinned_snapshot`.
+  pushed_head_declaration:
+    path: [project_lane]
   # Direct opaque producers and evaluators use the same signed target
   # contract as resident workers. Ordinary tools omit it and request no
   # constrained execution resource.

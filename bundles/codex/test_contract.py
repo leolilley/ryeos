@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ryeos:signed:2026-10-19T06:04:35Z:41aac179b05512fe821948802cc1536317ac6b915c68b94d9b334e626cd10f05:Y6Bd1OkD+pNdUUFlHz5631vm8H8Uo/fxHxkOA5F8mlXzpmSSoVyrJJXExH64CrvqmUY8sx/omWVqMRohK5UEBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-04T06:11:51Z:eded34fafb0ee5315fb74ed3b693bad69385b46a7779722cf8963ea447363580:KJpiuGzlT0CQ9CzbO+A45nDqqW4p2eW86lbyHYl2BjHUzIFPOM6jAhD9t+Oz+IGC9+4cqWYvh03m+3iJ8PocBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Bundle-owned conformance tests for the pinned Codex integration data."""
 
 from __future__ import annotations
@@ -356,7 +356,7 @@ class CodexContractTests(unittest.TestCase):
             item for item in product["product_relationships"]["relationships"]
             if item["name"] == "runtime_to_external_authoring_worker"
         )
-        self.assertEqual(worker["execution_protocol"], "protocol:ryeos/core/trusted_structured_session")
+        self.assertEqual(worker["execution_protocol"], "protocol:ryeos/core/contained_structured_session")
         self.assertEqual(worker["external_product_slots"][0]["id"], "guest-runtime")
         self.assertEqual(relationship["consumer"], {
             "canonical_ref": "worker:codex/external-hosted-authoring",
@@ -1302,6 +1302,122 @@ class CodexContractTests(unittest.TestCase):
             source = yaml.safe_load(path.read_text(encoding="utf-8"))["source"]
             self.assertRegex(source["digest"], r"^[0-9a-f]{64}$")
             self.assertEqual(source["digest"], source_manifest_digest())
+
+
+    def test_variants_declare_the_guarantees_each_requires_and_agree_with_their_files(self) -> None:
+        config = BUNDLE / ".ai/config/codex"
+        variants = yaml.safe_load((config / "qualification-variants.yaml").read_text())[
+            "qualification_variants"
+        ]
+        self.assertEqual(variants["schema"], "ryeos.qualification_variants.v1")
+        self.assertEqual(len(variants["variants"]), 2)
+        by_name = {item["relationship_name"]: item for item in variants["variants"]}
+        products = yaml.safe_load((config / "guest-runtime-products.yaml").read_text())
+        relationships = {
+            item["name"]: item for item in products["product_relationships"]["relationships"]
+        }
+        contained_requires = [
+            "isolation:enforced",
+            "filesystem:captured_execution",
+            "callback:captured_compatible",
+            {"any_of": ["termination:scope", "termination:pid_namespace"]},
+            {"any_of": ["recovery:scope", "recovery:pid_namespace"]},
+        ]
+        trusted_requires = [{"name": "sessions:trusted_process_group", "accept": ["trusted"]}]
+        # relationship, worker, verifier, worker authority, worker protocol,
+        # verifier authority, environment, requirements, minimum settlement
+        expected = (
+            ("runtime_to_external_authoring_worker", "external-hosted-authoring",
+             "consumer-runtime-verifier", "captured_execution",
+             "protocol:ryeos/core/contained_structured_session", "captured_execution",
+             "environments/external-authoring", contained_requires, "containment_empty"),
+            ("runtime_to_external_authoring_worker_trusted_lane",
+             "external-hosted-authoring-trusted-lane", "consumer-runtime-verifier-trusted-lane",
+             "node_policy", "protocol:ryeos/core/trusted_structured_session", "node_policy",
+             "environments/external-authoring-trusted-lane", trusted_requires,
+             "trusted_process_group_absent"),
+        )
+        self.assertEqual(sorted(by_name), sorted(item[0] for item in expected))
+        for (name, worker_id, verifier_id, authority, protocol, verifier_authority,
+             environment, requires, settlement) in expected:
+            variant = by_name[name]
+            self.assertEqual(variant["requires_guarantees"], requires)
+            policy_name = variant["policy_ref"].removeprefix("config:codex/")
+            policy = yaml.safe_load((config / (policy_name + ".yaml")).read_text())[
+                "product_qualification_policy"
+            ]
+            relationship = relationships[variant["relationship_name"]]
+            worker = yaml.safe_load((BUNDLE / ".ai/workers/codex" / (worker_id + ".yaml")).read_text())
+            verifier = yaml.safe_load((
+                BUNDLE / ".ai/tools/codex/qualification" / (verifier_id + ".yaml")
+            ).read_text())
+            # The policy repeats exactly what its variant requires.
+            self.assertEqual(policy["requires_guarantees"], requires)
+            self.assertEqual(policy["minimum_verifier_process_settlement"], settlement)
+            self.assertNotIn("isolation_lane", policy)
+            self.assertEqual(policy["verifier_ref"], "tool:codex/qualification/" + verifier_id)
+            self.assertEqual(
+                policy["consumer_execution_context"]["worker_ref"], "worker:codex/" + worker_id
+            )
+            self.assertEqual(
+                policy["consumer_execution_context"]["environment_ref"], "config:" + "codex/" + environment
+            )
+            self.assertEqual(relationship["consumer"]["canonical_ref"], "worker:codex/" + worker_id)
+            self.assertEqual(relationship["qualification"]["policy_ref"], variant["policy_ref"])
+            self.assertEqual(worker["filesystem_authority"], authority)
+            self.assertEqual(worker["execution_protocol"], protocol)
+            self.assertEqual(worker["external_product_slots"][0]["relationship"],
+                             variant["relationship_name"])
+            # The captured verifier holds the callback authority only through
+            # the captured-compatible protocol; the trusted one is node_policy.
+            self.assertEqual(verifier["filesystem_authority"], verifier_authority)
+            self.assertEqual(verifier["project_lane"], "pinned_snapshot")
+            self.assertEqual(verifier["execution_protocol"],
+                             "protocol:ryeos/core/qualification_consumer_callback")
+            contract = json.loads(verifier["config"]["args"][2])
+            self.assertEqual(contract["target"]["worker_ref"], "worker:codex/" + worker_id)
+            # The checker root must reach the settlement the policy requires.
+            self.assertEqual(contract["semantic_checker"]["required_root_settlement"], settlement)
+            checker = yaml.safe_load((config / "semantic-checker-code-products.yaml").read_text())
+            known = {**relationships, **{
+                item["name"]: item for item in checker["product_relationships"]["relationships"]
+            }}
+            for slot in verifier["external_product_slots"]:
+                self.assertEqual(
+                    known[slot["relationship"]]["consumer"]["canonical_ref"],
+                    "tool:codex/qualification/" + verifier_id,
+                )
+            environment_doc = yaml.safe_load((config / (environment + ".yaml")).read_text())
+            self.assertEqual(environment_doc["worker_ref"], "worker:codex/" + worker_id)
+        # The two Worker variants differ only in protocol, authority and identity.
+        contained = yaml.safe_load((BUNDLE / ".ai/workers/codex/external-hosted-authoring.yaml").read_text())
+        trusted = yaml.safe_load(
+            (BUNDLE / ".ai/workers/codex/external-hosted-authoring-trusted-lane.yaml").read_text())
+        for key in ("source", "external_content", "config", "supported_target"):
+            self.assertEqual(contained[key], trusted[key], key)
+
+    def test_each_variant_verifier_literal_is_what_the_builder_emits(self) -> None:
+        build = load_path("product_contract_build_variant", PRODUCT_CONTRACT_DIR / "build.py")
+        for variant in sorted(build.VARIANTS):
+            tool_name, worker_name = build.VARIANTS[variant]
+            tool = BUNDLE / ".ai/tools/codex/qualification" / tool_name
+            literal = yaml.safe_load(tool.read_text())["config"]["args"][2]
+            contract = json.loads(literal)
+            captured = {
+                "code_manifest_hash": contract["semantic_checker"]["code"]["manifest_hash"],
+                "profile_hash": contract["target"]["profile_hash"],
+                "source_binding_hash": contract["target"]["source_binding_hash"],
+                "source_content_manifest_hash": contract["target"]["source_content_manifest_hash"],
+            }
+            self.assertEqual(
+                literal,
+                build.generate(
+                    captured, False, tool=tool,
+                    worker=BUNDLE / ".ai/workers/codex" / (worker_name + ".yaml"),
+                    worker_ref="worker:codex/" + worker_name,
+                ),
+                variant,
+            )
 
 
 if __name__ == "__main__":

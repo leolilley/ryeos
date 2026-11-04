@@ -373,16 +373,13 @@ pub struct DispatchRequest<'a> {
 fn check_dispatch_capabilities(
     caps: &ryeos_engine::protocol_vocabulary::ProtocolCapabilities,
     request: &DispatchRequest<'_>,
+    declares_pushed_head: bool,
 ) -> Result<(), DispatchError> {
     let is_pushed = matches!(
         request.provenance.project_source(),
         ProjectSourceKind::PushedHead
     );
-    if is_pushed && !caps.allows_pushed_head {
-        return Err(DispatchError::CapabilityRejected {
-            reason: "pushed_head not yet supported for native runtimes".into(),
-        });
-    }
+    check_pushed_head_capability(caps, is_pushed, declares_pushed_head)?;
     if request.target_site_id.is_some() && !caps.allows_target_site {
         return Err(DispatchError::CapabilityRejected {
             reason: "remote execution not yet supported for native runtimes".into(),
@@ -391,6 +388,48 @@ fn check_dispatch_capabilities(
     if request.launch_mode == "detached" && !caps.allows_detached {
         return Err(DispatchError::CapabilityRejected {
             reason: "detached mode not yet supported for native runtimes".into(),
+        });
+    }
+    Ok(())
+}
+
+/// Whether the launched item declares the pinned snapshot project lane,
+/// evaluated only when it can matter: the protocol gates a pushed head on the
+/// declaration and the project source is a pushed head. Otherwise the field is
+/// never read, so a stray value on an ungated launch cannot fail it.
+pub(crate) fn pushed_head_declaration_if_gated(
+    caps: &ryeos_engine::protocol_vocabulary::ProtocolCapabilities,
+    is_pushed: bool,
+    execution: &ExecutionSchema,
+    composed: &serde_json::Value,
+) -> Result<bool, ryeos_engine::error::EngineError> {
+    if is_pushed && caps.allows_pushed_head && caps.pushed_head_requires_declaration {
+        execution.project_pushed_head_declaration(composed)
+    } else {
+        Ok(false)
+    }
+}
+
+/// A pushed-head project source needs the protocol to allow it and, when the
+/// protocol requires a declaration, the launched item to have declared the
+/// pinned-snapshot project source through its kind's signed projection.
+fn check_pushed_head_capability(
+    caps: &ryeos_engine::protocol_vocabulary::ProtocolCapabilities,
+    is_pushed: bool,
+    declares_pushed_head: bool,
+) -> Result<(), DispatchError> {
+    if !is_pushed {
+        return Ok(());
+    }
+    if !caps.allows_pushed_head {
+        return Err(DispatchError::CapabilityRejected {
+            reason: "pushed_head not yet supported for native runtimes".into(),
+        });
+    }
+    if caps.pushed_head_requires_declaration && !declares_pushed_head {
+        return Err(DispatchError::CapabilityRejected {
+            reason: "pushed_head requires the launched item to declare the pinned snapshot project lane"
+                .into(),
         });
     }
     Ok(())
@@ -6507,6 +6546,50 @@ async fn dispatch_by(
 mod tests {
     use super::*;
 
+    fn capabilities(allows: bool, requires_declaration: bool) -> ryeos_engine::protocol_vocabulary::ProtocolCapabilities {
+        ryeos_engine::protocol_vocabulary::ProtocolCapabilities {
+            allows_pushed_head: allows,
+            allows_target_site: false,
+            allows_detached: false,
+            pushed_head_requires_declaration: requires_declaration,
+        }
+    }
+
+    #[test]
+    fn the_declaration_is_read_only_for_a_gated_pushed_head() {
+        let mut execution = exec_with_methods(&["run"], None);
+        execution.pushed_head_declaration =
+            Some(ryeos_engine::kind_registry::PushedHeadDeclarationDecl {
+                path: vec!["project_lane".to_owned()],
+            });
+        let stray = serde_json::json!({"project_lane": "live"});
+        let declared = serde_json::json!({"project_lane": "pinned_snapshot"});
+        let gated = capabilities(true, true);
+        // Ungated protocol, or not a pushed head: never evaluated, even when malformed.
+        assert!(!pushed_head_declaration_if_gated(&capabilities(true, false), true, &execution, &stray).unwrap());
+        assert!(!pushed_head_declaration_if_gated(&gated, false, &execution, &stray).unwrap());
+        // Gated pushed head: read, and a malformed value is refused.
+        assert!(pushed_head_declaration_if_gated(&gated, true, &execution, &declared).unwrap());
+        assert!(pushed_head_declaration_if_gated(&gated, true, &execution, &stray).is_err());
+        assert!(!pushed_head_declaration_if_gated(&gated, true, &execution, &serde_json::json!({})).unwrap());
+    }
+
+    #[test]
+    fn a_pushed_head_needs_the_protocol_and_when_required_the_item_declaration() {
+        // not a pushed head: nothing is checked
+        assert!(check_pushed_head_capability(&capabilities(false, false), false, false).is_ok());
+        // closed protocol refuses regardless of any declaration
+        assert!(check_pushed_head_capability(&capabilities(false, false), true, true).is_err());
+        // open protocol without a declaration requirement admits every item
+        assert!(check_pushed_head_capability(&capabilities(true, false), true, false).is_ok());
+        // declaration-gated protocol admits only the declaring item
+        assert!(check_pushed_head_capability(&capabilities(true, true), true, true).is_ok());
+        let refused = check_pushed_head_capability(&capabilities(true, true), true, false)
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("declare the pinned snapshot project lane"), "{refused}");
+    }
+
     #[test]
     fn direct_product_selection_requires_kind_contract_and_direct_root_targets() {
         use ryeos_state::external_content::products::composition::{
@@ -8455,6 +8538,7 @@ requires:
             effect_class_ceiling: None,
             workspace_access: None,
             network_authority_ceiling: None,
+            pushed_head_declaration: None,
             filesystem_authority_ceiling: None,
             target: None,
             endpoint: None,
