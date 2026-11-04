@@ -1454,6 +1454,39 @@ impl HostCapabilities {
         self.provided.remove(name);
         self.missing.remove(name);
     }
+
+    /// Whether `entry` is met by this view: the name that met it, or why none
+    /// of its names did. A name is met only by exact evidence at a grade and
+    /// from a provider the entry accepts; the reason of a refused single name
+    /// is its own, and a set of alternatives lists every name's reason.
+    pub fn meets<'a>(&'a self, entry: &'a CapabilityRequirement) -> Result<&'a str, String> {
+        let mut failures: Vec<(&str, String)> = Vec::new();
+        for name in entry.names() {
+            let reason = match self.provided.get(name) {
+                Some(evidence) => match satisfies(entry, name, evidence) {
+                    Ok(()) => return Ok(name),
+                    Err(mismatch) => format!("{mismatch} ({})", evidence.basis),
+                },
+                None => self
+                    .missing
+                    .get(name)
+                    .cloned()
+                    .unwrap_or_else(|| format!("this node does not know how to prove {name}")),
+            };
+            failures.push((name, reason));
+        }
+        match failures.as_slice() {
+            [(_, reason)] if !entry.is_set() => Err(reason.clone()),
+            _ => Err(format!(
+                "none of its names is met; {}",
+                failures
+                    .iter()
+                    .map(|(name, reason)| format!("{name}: {reason}"))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            )),
+        }
+    }
 }
 
 impl HostFacts {

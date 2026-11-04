@@ -248,6 +248,117 @@ impl ProcessScopeReadiness {
     }
 }
 
+/// The node runs descendant-contained, descriptor-mounted isolation.
+pub const ISOLATION_ENFORCED: &str = "isolation:enforced";
+/// A tool authored `filesystem_authority: captured_execution` is admissible.
+pub const FILESYSTEM_CAPTURED_EXECUTION: &str = "filesystem:captured_execution";
+/// A captured tool may hold the captured-compatible callback class.
+pub const CALLBACK_CAPTURED_COMPATIBLE: &str = "callback:captured_compatible";
+/// Node policy accepts trusted process-group sessions on a node whose
+/// isolation is not enforced; a weaker guarantee, never an automatic fallback.
+pub const SESSIONS_TRUSTED_PROCESS_GROUP: &str = "sessions:trusted_process_group";
+/// Provider id of guarantees this node derives from its own isolation state.
+pub const ISOLATION_PROVIDER: &str = "isolation";
+/// Provider id of the guarantee node policy grants.
+pub const NODE_POLICY_PROVIDER: &str = "node_policy";
+
+impl ProcessScopeReadiness {
+    /// The guarantees this node's isolation state and node policy decide,
+    /// under the same open capability names the node reports. A trusted
+    /// process-group session is a guarantee only where isolation is not
+    /// enforced: an enforced node runs descendant containment instead.
+    pub fn add_policy_guarantees(
+        &self,
+        enforced: bool,
+        view: &mut lillux::process_control::HostCapabilities,
+    ) {
+        use lillux::process_control::ProofSource;
+        let enforced_names = [
+            (ISOLATION_ENFORCED, "descriptor-mounted isolation is enforced"),
+            (
+                FILESYSTEM_CAPTURED_EXECUTION,
+                "captured filesystem authority is admitted only under enforced isolation",
+            ),
+            (
+                CALLBACK_CAPTURED_COMPATIBLE,
+                "the captured-compatible callback class is admitted only under captured execution",
+            ),
+        ];
+        for (name, basis) in enforced_names {
+            if enforced {
+                view.provide(name, ProofSource::Measured, ISOLATION_PROVIDER, basis);
+            } else {
+                view.refuse(name, "isolation is not enforced on this node");
+            }
+        }
+        match (self.descendant_containment.trusted_process_group, enforced) {
+            (true, false) => view.provide(
+                SESSIONS_TRUSTED_PROCESS_GROUP,
+                ProofSource::Trusted,
+                NODE_POLICY_PROVIDER,
+                "node policy accepts trusted process-group sessions; a descendant that leaves \
+                 the process group is not contained",
+            ),
+            (true, true) => view.refuse(
+                SESSIONS_TRUSTED_PROCESS_GROUP,
+                "isolation is enforced, so sessions run descendant containment, not the trusted \
+                 process-group lane",
+            ),
+            (false, _) => view.refuse(
+                SESSIONS_TRUSTED_PROCESS_GROUP,
+                "node policy does not accept trusted process-group sessions",
+            ),
+        }
+    }
+
+    /// Every guarantee a variant can require, from this node's qualified
+    /// facts: the policy-decided ones plus descendant containment by a
+    /// qualified cgroup scope or PID-namespace init. The report adds the
+    /// same containment names with the host runtime's provider and grade;
+    /// admission here is as for execution, which treats a qualified
+    /// mechanism as held.
+    pub fn reported_guarantees(
+        &self,
+        enforced: bool,
+    ) -> lillux::process_control::HostCapabilities {
+        use lillux::process_control::{
+            ProofSource, RECOVERY_PID_NAMESPACE, TERMINATION_PID_NAMESPACE,
+        };
+        let mut view = lillux::process_control::HostCapabilities::default();
+        self.add_policy_guarantees(enforced, &mut view);
+        let containment = &self.descendant_containment;
+        for capability in [
+            lillux::ProcessScopeCapability::Termination,
+            lillux::ProcessScopeCapability::Recovery,
+        ] {
+            let name = capability.capability_name();
+            if containment.cgroup_scope {
+                view.provide(
+                    name,
+                    ProofSource::Measured,
+                    ISOLATION_PROVIDER,
+                    "qualified by a disposable probe scope of the delegated cgroup provider",
+                );
+            } else {
+                view.refuse(name, "no qualified cgroup scope provider on this node");
+            }
+        }
+        for name in [TERMINATION_PID_NAMESPACE, RECOVERY_PID_NAMESPACE] {
+            if containment.pid_namespace.qualified {
+                view.provide(
+                    name,
+                    containment.pid_namespace.source.clone(),
+                    PidNamespaceContainmentQualification::PROVIDER,
+                    containment.pid_namespace.detail.clone(),
+                );
+            } else {
+                view.refuse(name, containment.pid_namespace.detail.clone());
+            }
+        }
+        view
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ProcessScopeAuthorityStatus {
@@ -612,6 +723,77 @@ mod tests {
         .descendant_containment;
         assert!(trusted_only.trusted_process_group);
         assert_eq!(trusted_only.enforced_guarantee(), None);
+    }
+
+    #[test]
+    fn reported_guarantees_follow_isolation_state_containment_and_node_policy() {
+        let digest = || Some(format!("sha256:{}", "c".repeat(64)));
+        let pid_namespace = || {
+            PidNamespaceContainmentQualification::qualified_by(
+                lillux::process_control::ProofSource::Measured,
+                "probed".to_owned(),
+            )
+        };
+        let readiness = |trusted, contained: bool| {
+            if contained {
+                ProcessScopeReadiness::classify(
+                    required_policy(),
+                    BTreeSet::new(),
+                    trusted,
+                    digest(),
+                    complete_capabilities(),
+                    pid_namespace(),
+                )
+            } else {
+                ProcessScopeReadiness::classify(
+                    IsolationProcessScopePolicy::Unconfigured {},
+                    BTreeSet::new(),
+                    trusted,
+                    None,
+                    BTreeSet::new(),
+                    PidNamespaceContainmentQualification::not_probed("refused"),
+                )
+            }
+        };
+        let provided = |view: &lillux::process_control::HostCapabilities| {
+            view.provided.keys().cloned().collect::<Vec<_>>()
+        };
+        // Enforced and contained: captured authority and both containment
+        // mechanisms are held; the trusted lane is not, even if node policy
+        // accepts it.
+        let contained = readiness(true, true).reported_guarantees(true);
+        for name in [
+            ISOLATION_ENFORCED,
+            FILESYSTEM_CAPTURED_EXECUTION,
+            CALLBACK_CAPTURED_COMPATIBLE,
+            "termination:scope",
+            "recovery:scope",
+            "termination:pid_namespace",
+            "recovery:pid_namespace",
+        ] {
+            assert!(contained.provided.contains_key(name), "{name}");
+        }
+        assert!(
+            contained.missing[SESSIONS_TRUSTED_PROCESS_GROUP].contains("enforced"),
+            "{:?}",
+            contained.missing
+        );
+        // Not enforced, trusted sessions accepted: only the weaker grade.
+        let trusted = readiness(true, false).reported_guarantees(false);
+        assert_eq!(provided(&trusted), [SESSIONS_TRUSTED_PROCESS_GROUP]);
+        assert_eq!(
+            trusted.provided[SESSIONS_TRUSTED_PROCESS_GROUP].source,
+            lillux::process_control::ProofSource::Trusted
+        );
+        // Neither: nothing is held and every name says why.
+        let bare = readiness(false, false).reported_guarantees(false);
+        assert!(bare.provided.is_empty(), "{:?}", bare.provided);
+        assert!(bare.missing[SESSIONS_TRUSTED_PROCESS_GROUP].contains("does not accept"));
+        // Enforced without a qualified mechanism holds no containment.
+        let uncontained = readiness(false, false).reported_guarantees(true);
+        assert!(uncontained.provided.contains_key(ISOLATION_ENFORCED));
+        assert!(!uncontained.provided.contains_key("termination:scope"));
+        assert!(!uncontained.provided.contains_key("termination:pid_namespace"));
     }
 
     #[test]

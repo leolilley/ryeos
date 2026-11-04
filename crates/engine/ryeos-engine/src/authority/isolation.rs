@@ -44,6 +44,8 @@ pub use authority::{
 };
 pub use backend::{ResolvedIsolationBackend, VerifiedIsolationBackendCapture};
 pub use inspection::{
+    CALLBACK_CAPTURED_COMPATIBLE, FILESYSTEM_CAPTURED_EXECUTION, ISOLATION_ENFORCED,
+    ISOLATION_PROVIDER, NODE_POLICY_PROVIDER, SESSIONS_TRUSTED_PROCESS_GROUP,
     DescendantContainmentGuarantee, DescendantContainmentReadiness, IsolationBackendInspection,
     IsolationBackendStatus, IsolationInspection, PidNamespaceContainmentQualification,
     ProcessControlReadinessReason, ProcessScopeAuthorityStatus, ProcessScopeReadiness,
@@ -2176,6 +2178,14 @@ impl IsolationRuntime {
 
     pub fn is_enforced(&self) -> bool {
         self.state == IsolationRuntimeState::Enforced
+    }
+
+    /// The guarantees this node reports for variant selection, under the
+    /// capability names its report uses.
+    pub fn reported_guarantees(&self) -> lillux::process_control::HostCapabilities {
+        self.inspection
+            .process_scope_readiness
+            .reported_guarantees(self.is_enforced())
     }
 
     /// Whether this runtime can enforce an isolated-network launch ceiling.
