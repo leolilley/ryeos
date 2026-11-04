@@ -75,7 +75,7 @@ fn lookup_provider_call(
         .lookup_replay_record(&namespace, cache_key, |indexed| {
             if let Err(error) = authority.ensure_guard(&guard) {
                 return ryeos_state::ReplayRecordVerification::Unavailable {
-                    reason: error.to_string(),
+                    reason: format!("{error:#}"),
                 };
             }
             let value = match cas.get_object(&indexed.record_hash) {
@@ -90,7 +90,7 @@ fn lookup_provider_call(
                 }
                 Err(error) => {
                     return ryeos_state::ReplayRecordVerification::Unavailable {
-                        reason: error.to_string(),
+                        reason: format!("{error:#}"),
                     };
                 }
             };
@@ -98,7 +98,7 @@ fn lookup_provider_call(
                 Ok(record) => record,
                 Err(error) => {
                     return ryeos_state::ReplayRecordVerification::IntegrityFailure {
-                        reason: error.to_string(),
+                        reason: format!("{error:#}"),
                     };
                 }
             };
@@ -172,7 +172,7 @@ fn sealed_financial_authority(
     })?;
     external_effect_authority
         .validate()
-        .map_err(|error| anyhow!("sealed external-effect authority failed validation: {error}"))?;
+        .map_err(|error| anyhow!("sealed external-effect authority failed validation: {error:#}"))?;
     let mut required_secret_names: Vec<String> = prepared
         .required_secrets
         .into_iter()
@@ -839,7 +839,7 @@ fn publish_provider_call(
     let _permit = state
         .write_barrier
         .acquire_with_timeout(ryeos_app::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
-        .map_err(|error| anyhow!("cannot acquire provider-publication write permit: {error}"))?;
+        .map_err(|error| anyhow!("cannot acquire provider-publication write permit: {error:#}"))?;
     let cas = authority.cas_store()?;
     let mut staged = authority
         .require_recovery()?
@@ -1294,7 +1294,7 @@ fn persist_local_worker_observation(
     let _permit = state
         .write_barrier
         .acquire_with_timeout(ryeos_app::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
-        .map_err(|error| anyhow!("cannot acquire local-observation write permit: {error}"))?;
+        .map_err(|error| anyhow!("cannot acquire local-observation write permit: {error:#}"))?;
     let mut staged = authority
         .require_recovery()?
         .begin_staged_cas_roots_admitted(&guard, "provider-local-worker-observation")?;

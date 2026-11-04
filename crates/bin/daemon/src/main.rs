@@ -3370,8 +3370,8 @@ fn check_service_catalog_entry(
     let endpoint = match ryeos_api::registry::extract_endpoint(&verified.resolved.metadata.extra) {
         Ok(endpoint) => endpoint,
         Err(error) => {
-            let message = format!("endpoint extraction failed: {error}");
-            tracing::error!(service = desc.service_ref, %error, %message);
+            let message = format!("endpoint extraction failed: {error:#}");
+            tracing::error!(service = desc.service_ref, error = %format!("{error:#}"), %message);
             return ServiceCatalogCheck::Failed(message);
         }
     };
@@ -4288,7 +4288,7 @@ async fn run(
                         ) {
                             Ok(false) => continue,
                             Err(error) => {
-                                failed.push((service_ref, error.to_string()));
+                                failed.push((service_ref, format!("{error:#}")));
                                 continue;
                             }
                             Ok(true) => {}
@@ -4680,7 +4680,7 @@ async fn run(
             let accounting = match state_store.live_accounting_native_admission() {
                 Err(error) => {
                     tracing::error!(
-                        %error,
+                        error = %format!("{error:#}"),
                         "accounting ledger admission refused; hard-budget admission is disabled"
                     );
                     None
@@ -4712,7 +4712,7 @@ async fn run(
                             }
                             Err(error) => {
                                 tracing::error!(
-                                    %error,
+                                    error = %format!("{error:#}"),
                                     "accounting ledger failed startup verification; hard-budget \
                                      admission is disabled"
                                 );
@@ -4962,7 +4962,7 @@ async fn run(
                 shutdown_signal().await;
                 if let Err(error) = admission_store.close_process_attachment_admission() {
                     tracing::error!(
-                        error = %error,
+                        error = %format!("{error:#}"),
                         "failed to close process attachment admission from shutdown signal"
                     );
                 }
@@ -5399,7 +5399,7 @@ async fn run(
             if result.is_ok() {
                 result = work_result;
             } else if let Err(error) = work_result {
-                tracing::error!(%error, "daemon work also failed while handling listener loss");
+                tracing::error!(error = %format!("{error:#}"), "daemon work also failed while handling listener loss");
             }
         }
 
@@ -5641,7 +5641,7 @@ async fn run(
     }
     match daemon_result.as_ref() {
         Ok(()) => tracing::info!(reason = exit_reason, "daemon exiting"),
-        Err(error) => tracing::error!(reason = exit_reason, error = %error, "daemon exiting"),
+        Err(error) => tracing::error!(reason = exit_reason, error = %format!("{error:#}"), "daemon exiting"),
     }
     if startup_cancelled {
         Ok(())
@@ -5837,7 +5837,7 @@ async fn dispatch_resume_intents(
             Err(error) => {
                 tracing::error!(
                     thread_id,
-                    error = %error,
+                    error = %format!("{error:#}"),
                     "resume parameters could not be reconstructed; recording an owner-fenced refusal"
                 );
                 let outcome =
@@ -6190,13 +6190,13 @@ async fn run_periodic_recovery(state: AppState) -> Result<()> {
     }
     if let Err(error) = recover_durable_project_head_reconciliations(&state).await {
         tracing::error!(
-            error = %error,
+            error = %format!("{error:#}"),
             "initial remote project-head reconciliation failed; durable jobs remain retryable"
         );
     }
     if let Err(error) = recover_durable_worker_result_pulls(&state).await {
         tracing::error!(
-            error = %error,
+            error = %format!("{error:#}"),
             "initial hosted worker-result pull recovery failed; durable jobs remain retryable"
         );
     }
@@ -6251,7 +6251,7 @@ async fn run_periodic_recovery(state: AppState) -> Result<()> {
         let pass_result = run_periodic_recovery_pass(&state).await;
         if let Err(error) = pass_result {
             tracing::error!(
-                error = %error,
+                error = %format!("{error:#}"),
                 "periodic recovery pass failed; durable recovery state preserved and daemon remains available"
             );
         }
