@@ -621,10 +621,10 @@ impl<R: ExternalSupervisorRuntime, T: ExternalExecutionChannelTransport>
     fn enqueue_dispatch(&mut self, dispatched: ExternalOwnerFrameDispatch) -> Result<()> {
         let mut frames = vec![dispatched.acknowledgement_frame.into_bytes()];
         frames.sort_by_key(|wire| {
-            SignedExecutionFrame::decode_and_verify(
+            SignedExecutionFrame::decode_and_verify_in_guest_window(
                 wire,
                 self.runtime.binding(),
-                self.runtime.binding().issued_at_ms,
+                self.runtime.window(),
             )
             .map(|frame| frame.frame().sequence)
             .unwrap_or(u64::MAX)
@@ -2692,16 +2692,6 @@ mod tests {
         (binding, owner, supervisor)
     }
 
-    fn wait_until(mut done: impl FnMut() -> bool) {
-        for _ in 0..400 {
-            if done() {
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
-        panic!("local window never elapsed");
-    }
-
     fn owner_protocol_input(
         binding: &ExecutionChannelBinding,
         owner: &lillux::crypto::SigningKey,
@@ -2812,14 +2802,12 @@ mod tests {
     #[test]
     fn a_guest_refuses_frames_once_its_local_window_elapses_whatever_its_wall_clock_says() {
         for skew_ms in [-3_600_000_i64, 3_600_000] {
-            // Windows that run out in real time on the guest's own clock.
-            let (binding, owner, supervisor) = skewed_binding(skew_ms, 4_000, 6_000);
+            // The guest's own clock is advanced past each window by a simulated
+            // host suspension, so no test waits in real time.
+            let (binding, owner, supervisor) = skewed_binding(skew_ms, 60_000, 120_000);
             let runtime =
                 JournalFixtureRuntime::running(binding.clone(), &owner, supervisor, vec![]);
-            assert!(
-                !runtime.journal.window().execution_elapsed(),
-                "the fixture needs more than 4 s to start"
-            );
+            assert!(!runtime.journal.window().execution_elapsed());
             let release_digest = runtime.owner_predecessor_digest.clone();
             let input = owner_protocol_input(&binding, &owner, 2, &release_digest);
             assert!(
@@ -2831,7 +2819,8 @@ mod tests {
 
             // Past the execution window the retained input can no longer be
             // claimed, though the channel itself is still open.
-            wait_until(|| runtime.journal.window().execution_elapsed());
+            lillux::time::simulated_suspension::suspend_for(std::time::Duration::from_secs(61));
+            assert!(runtime.journal.window().execution_elapsed());
             assert!(!runtime.journal.window().expiry_elapsed());
             let refusal = runtime
                 .journal
@@ -2848,7 +2837,8 @@ mod tests {
             );
 
             // Past the channel window nothing more is accepted at all.
-            wait_until(|| runtime.journal.window().expiry_elapsed());
+            lillux::time::simulated_suspension::suspend_for(std::time::Duration::from_secs(60));
+            assert!(runtime.journal.window().expiry_elapsed());
             let later = owner_protocol_input(&binding, &owner, 3, input.digest());
             let refusal = runtime
                 .journal

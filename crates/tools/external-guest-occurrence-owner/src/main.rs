@@ -402,7 +402,7 @@ fn supervisor_exit_from_parts(
             lillux::time::WallClockTrust::Unsynchronized => GuestClockTrust::Unsynchronized,
             lillux::time::WallClockTrust::Unknown => GuestClockTrust::Unknown,
         },
-        observed_skew_ms: GuestClockReport::observed_skew_from_stderr(stderr),
+        observed_issue_lag_ms: GuestClockReport::observed_issue_lag_from_stderr(stderr),
     })
 }
 

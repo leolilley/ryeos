@@ -191,15 +191,16 @@ impl fmt::Display for GuestClockTrust {
     }
 }
 
-/// The most skew, in either direction, a report may claim: one day.
-pub const MAX_GUEST_OBSERVED_SKEW_MS: i64 = 86_400_000;
+/// The most issue lag, in either direction, a report may claim: one day.
+pub const MAX_GUEST_OBSERVED_ISSUE_LAG_MS: i64 = 86_400_000;
 
 /// The marker the supervisor writes to its standard error once it holds its
 /// binding, followed by the signed millisecond difference between the guest's
 /// wall clock at that moment and the controller's issue time of the binding.
-/// The difference includes delivery delay, so it bounds skew only from above
-/// when the guest is ahead.
-pub const GUEST_CLOCK_SKEW_MARKER: &str = "ryeos-guest-clock skew_ms=";
+/// This is the guest's wall-clock reading minus the issue time, so it is the
+/// sum of delivery latency and the two clocks' disagreement; it is not a
+/// measurement of either alone.
+pub const GUEST_CLOCK_ISSUE_LAG_MARKER: &str = "ryeos-guest-clock issue_lag_ms=";
 
 /// The owner's account of the guest clock when the supervisor ended. For logs
 /// and diagnosis only: it grants no authority.
@@ -208,43 +209,43 @@ pub const GUEST_CLOCK_SKEW_MARKER: &str = "ryeos-guest-clock skew_ms=";
 pub struct GuestClockReport {
     pub trust: GuestClockTrust,
     /// Guest wall clock at the attach response minus the controller's
-    /// `issued_at_ms`, when the supervisor's marker survived in its tail.
+    /// `issued_at_ms` (delivery latency plus clock disagreement), when the supervisor's marker survived in its tail.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub observed_skew_ms: Option<i64>,
+    pub observed_issue_lag_ms: Option<i64>,
 }
 
 impl GuestClockReport {
     fn validate(&self) -> Result<()> {
         ensure!(
-            self.observed_skew_ms
-                .is_none_or(|ms| ms.unsigned_abs() <= MAX_GUEST_OBSERVED_SKEW_MS as u64),
-            "guest clock report skew exceeds its bound"
+            self.observed_issue_lag_ms
+                .is_none_or(|ms| ms.unsigned_abs() <= MAX_GUEST_OBSERVED_ISSUE_LAG_MS as u64),
+            "guest clock report issue lag exceeds its bound"
         );
         Ok(())
     }
 
     /// Find the newest supervisor marker in raw standard-error bytes.
-    pub fn observed_skew_from_stderr(raw: &[u8]) -> Option<i64> {
+    pub fn observed_issue_lag_from_stderr(raw: &[u8]) -> Option<i64> {
         let text = String::from_utf8_lossy(raw);
-        let rest = &text[text.rfind(GUEST_CLOCK_SKEW_MARKER)? + GUEST_CLOCK_SKEW_MARKER.len()..];
+        let rest = &text[text.rfind(GUEST_CLOCK_ISSUE_LAG_MARKER)? + GUEST_CLOCK_ISSUE_LAG_MARKER.len()..];
         let end = rest
             .char_indices()
             .find(|(index, character)| {
                 !(character.is_ascii_digit() || (*index == 0 && *character == '-'))
             })
             .map_or(rest.len(), |(index, _)| index);
-        let skew: i64 = rest[..end].parse().ok()?;
-        (skew.unsigned_abs() <= MAX_GUEST_OBSERVED_SKEW_MS as u64).then_some(skew)
+        let lag: i64 = rest[..end].parse().ok()?;
+        (lag.unsigned_abs() <= MAX_GUEST_OBSERVED_ISSUE_LAG_MS as u64).then_some(lag)
     }
 }
 
 impl fmt::Display for GuestClockReport {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "guest clock trust: {}", self.trust)?;
-        if let Some(skew) = self.observed_skew_ms {
+        if let Some(lag) = self.observed_issue_lag_ms {
             write!(
                 formatter,
-                "; guest wall clock {skew} ms from the controller's issue time at attach"
+                "; guest wall clock read {lag} ms from the controller's issue time at attach (delivery latency plus clock disagreement)"
             )?;
         }
         Ok(())
@@ -989,7 +990,7 @@ mod tests {
 
         let clock = GuestClockReport {
             trust: GuestClockTrust::Unsynchronized,
-            observed_skew_ms: Some(-94_000),
+            observed_issue_lag_ms: Some(-94_000),
         };
         let exit = bare.with_clock(clock);
         let line = GuestOwnerReport::SupervisorExit(exit.clone()).line();
@@ -1003,27 +1004,27 @@ mod tests {
         );
 
         let mut out_of_bound = exit;
-        out_of_bound.clock.as_mut().unwrap().observed_skew_ms =
-            Some(MAX_GUEST_OBSERVED_SKEW_MS + 1);
+        out_of_bound.clock.as_mut().unwrap().observed_issue_lag_ms =
+            Some(MAX_GUEST_OBSERVED_ISSUE_LAG_MS + 1);
         let line = GuestOwnerReport::SupervisorExit(out_of_bound).line();
         assert!(GuestOwnerReport::parse_line(line.trim_end()).is_err());
     }
 
     #[test]
-    fn supervisor_skew_marker_is_read_strictly_from_standard_error() {
+    fn supervisor_issue_lag_marker_is_read_strictly_from_standard_error() {
         assert_eq!(
-            GuestClockReport::observed_skew_from_stderr(
-                b"x\nryeos-guest-clock skew_ms=120\nryeos-guest-clock skew_ms=-3412\nrest"
+            GuestClockReport::observed_issue_lag_from_stderr(
+                b"x\nryeos-guest-clock issue_lag_ms=120\nryeos-guest-clock issue_lag_ms=-3412\nrest"
             ),
             Some(-3412)
         );
         for raw in [
             b"no marker".as_slice(),
-            b"ryeos-guest-clock skew_ms=",
-            b"ryeos-guest-clock skew_ms=abc",
-            b"ryeos-guest-clock skew_ms=999999999999",
+            b"ryeos-guest-clock issue_lag_ms=",
+            b"ryeos-guest-clock issue_lag_ms=abc",
+            b"ryeos-guest-clock issue_lag_ms=999999999999",
         ] {
-            assert_eq!(GuestClockReport::observed_skew_from_stderr(raw), None);
+            assert_eq!(GuestClockReport::observed_issue_lag_from_stderr(raw), None);
         }
     }
 }

@@ -92,10 +92,6 @@ WHEN NEW.binding_digest != OLD.binding_digest OR NEW.direction != OLD.direction
 BEGIN SELECT RAISE(ABORT, 'external frame cannot be rewritten or reapplied'); END;
 "#;
 
-/// Protected owner-specific checks; none has a permissive default. Shared
-/// authentication, ordering, revocation and deadline checks cannot be replaced.
-/// Implementations query the supplied connection (the caller's transaction),
-/// never reconstruct authority from project files or another database.
 /// How a journal judges a frame's channel lifetime and execution deadline.
 /// The controller runtime database judges them on the controller's wall clock,
 /// which issued the binding. A guest journal judges them on the guest's own
@@ -134,6 +130,10 @@ impl FrameLifetimeCheck<'_> {
     }
 }
 
+/// Protected owner-specific checks; none has a permissive default. Shared
+/// authentication, ordering, revocation and deadline checks cannot be replaced.
+/// Implementations query the supplied connection (the caller's transaction),
+/// never reconstruct authority from project files or another database.
 pub trait JournalOwner {
     /// The clock authority this owner's journal judges frame lifetimes by.
     fn frame_lifetime(&self) -> FrameLifetimeCheck<'_>;

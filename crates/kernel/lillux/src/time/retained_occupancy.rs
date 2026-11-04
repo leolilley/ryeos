@@ -399,7 +399,6 @@ mod controls {
     use super::*;
     #[test]
     fn service_edge_matches_window_service_boundary() {
-        let _serial = crate::exec::registered_pair::serialize_clock_close_tests();
         let clock = RetainedOccupancyClock::capture().unwrap();
         let limit = OccupancyLimit::new(clock.start().clone(), 3_600_000_000_000).unwrap();
         let cleanup = Duration::from_secs(60);
@@ -428,7 +427,6 @@ mod controls {
     }
     #[test]
     fn live_original_observer_preserves_start_and_exact_phase_boundaries() {
-        let _serial = crate::exec::registered_pair::serialize_clock_close_tests();
         let clock = RetainedOccupancyClock::capture().unwrap();
         let limit = OccupancyLimit::new(clock.start().clone(), 10_000).unwrap();
         let cleanup = Duration::from_nanos(2_000);
@@ -470,7 +468,6 @@ mod controls {
     }
     #[test]
     fn retained_boot_and_namespace_substitution_refuse_observation() {
-        let _serial = crate::exec::registered_pair::serialize_clock_close_tests();
         let mut clock = RetainedOccupancyClock::capture().unwrap();
         let limit = OccupancyLimit::new(clock.start().clone(), 60_000_000_000).unwrap();
         clock.boot_bytes[0] ^= 1;

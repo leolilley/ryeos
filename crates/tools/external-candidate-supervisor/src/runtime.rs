@@ -954,6 +954,20 @@ impl ProtectedSupervisorState {
         Ok(())
     }
 
+    /// Record the binding durably, then derive its local window. The
+    /// controller already holds the binding, so a refused window must leave it
+    /// recorded here: the guest then fails from the attached stage rather than
+    /// forgetting an attachment the controller made.
+    fn record_binding_then_derive_window(
+        &mut self,
+        binding: ExecutionChannelBinding,
+        relay_response_digest: Option<&str>,
+        native: &JournalNative<'_>,
+    ) -> Result<GuestChannelWindow> {
+        self.record_binding(binding.clone(), relay_response_digest, native)?;
+        GuestChannelWindow::derive(&self.clock_anchor, &binding)
+    }
+
     /// Record durable launch intent: the attached journal becomes launched.
     fn begin_launch(
         &mut self,
@@ -1114,22 +1128,27 @@ impl LiveExternalCandidateSupervisor {
                         prepared.attachment_request(),
                         prepared.captured_network_inputs()?,
                     )?;
-                    let window = GuestChannelWindow::derive(&state.clock_anchor, &binding)?;
-                    // Selecting the carrier contacts nothing. Its outcome is
-                    // held until the attached binding is durable, so a failed
-                    // selection still recovers from the attached stage and
-                    // never by attaching again.
-                    let selected = prepared.captured_network_inputs().and_then(|inputs| {
-                        select_exchange_transport(
-                            prepared.bootstrap(),
-                            prepared.supervisor_signing_key(),
-                            &binding,
-                            inputs,
-                            &window,
-                            Some(transport),
-                        )
-                    });
+                    // The controller already holds this binding, so it is made
+                    // durable before the window is derived: a refused window
+                    // then recovers from the attached stage and never by
+                    // attaching again. Selecting the carrier contacts nothing;
+                    // its outcome is held for the same reason.
+                    let derived = GuestChannelWindow::derive(&state.clock_anchor, &binding);
+                    let selected = match derived.as_ref() {
+                        Ok(window) => prepared.captured_network_inputs().and_then(|inputs| {
+                            select_exchange_transport(
+                                prepared.bootstrap(),
+                                prepared.supervisor_signing_key(),
+                                &binding,
+                                inputs,
+                                window,
+                                Some(transport),
+                            )
+                        }),
+                        Err(_) => Err(anyhow::anyhow!("external channel window was refused")),
+                    };
                     state.record_binding(binding, None, native)?;
+                    let window = derived?;
                     (selected?, window)
                 }
                 ExternalSupervisorTransportCapture::Relay(capture) => {
@@ -1153,8 +1172,11 @@ impl LiveExternalCandidateSupervisor {
                         deadline,
                     )?;
                     let binding = authenticated.binding().clone();
-                    let window = GuestChannelWindow::derive(&state.clock_anchor, &binding)?;
-                    state.record_binding(binding, Some(authenticated.response_digest()), native)?;
+                    let window = state.record_binding_then_derive_window(
+                        binding,
+                        Some(authenticated.response_digest()),
+                        native,
+                    )?;
                     (
                         AttachedExternalExecutionTransport::from(
                             mailbox.into_attached(authenticated, window.clone())?,
@@ -1216,12 +1238,12 @@ impl LiveExternalCandidateSupervisor {
             bail!("external supervisor journal is not attached after attachment")
         };
         // The owner reads this line from the supervisor's standard error to
-        // report how this guest's wall clock compared with the controller's
+        // report how far this guest's wall clock read from the controller's
         // at the moment the binding arrived. Diagnosis only: no window or
         // check consults it.
         eprintln!(
             "{}{}",
-            ryeos_external_execution_contract::guest_owner_report::GUEST_CLOCK_SKEW_MARKER,
+            ryeos_external_execution_contract::guest_owner_report::GUEST_CLOCK_ISSUE_LAG_MARKER,
             lillux::time::timestamp_millis().saturating_sub(attached.binding().issued_at_ms)
         );
         let spec = ExternalCandidateLauncherSpec::from_admitted_program(
@@ -2808,6 +2830,73 @@ mod tests {
             // publication; capturing afresh would lengthen every window.
             assert_eq!(recovered.clock_anchor, first);
             recovered.close_journals(native).unwrap();
+        });
+    }
+
+    #[test]
+    fn a_wiped_state_root_cannot_reattach_because_its_supervisor_key_is_new() {
+        // The controller answers a repeated attachment with the retained
+        // binding only for the same supervisor public key (see
+        // `attach_external_execution_channel`), and a guest whose state root
+        // was wiped would otherwise get a later anchor and so a longer window.
+        // Each fresh state root mints its own signing key, so it cannot.
+        let mut keys = Vec::new();
+        for _ in 0..2 {
+            let root = private_root();
+            let original = bootstrap("wiped-root", lillux::time::timestamp_millis() + 60_000);
+            let key = with_test_native(|_host, native| {
+                let state =
+                    ProtectedSupervisorState::open_or_create(pinned(root.path()), original, native)
+                        .unwrap();
+                let key = match state.journal.as_ref().unwrap() {
+                    RetainedSupervisorJournal::Prepared(prepared) => {
+                        ryeos_state::external_execution::encode_channel_public_key(
+                            &prepared.supervisor_signing_key().verifying_key(),
+                        )
+                        .unwrap()
+                    }
+                    _ => panic!("fresh state must be prepared"),
+                };
+                state.close_journals(native).unwrap();
+                key
+            });
+            keys.push(key);
+        }
+        assert_ne!(keys[0], keys[1]);
+    }
+
+    #[test]
+    fn a_refused_window_leaves_the_controller_attached_binding_recorded() {
+        let root = private_root();
+        let original = bootstrap("refused-window", lillux::time::timestamp_millis() + 60_000);
+        with_test_native(|_host, native| {
+            let mut state =
+                ProtectedSupervisorState::open_or_create(pinned(root.path()), original, native)
+                    .unwrap();
+            let binding = match state.journal.as_ref().unwrap() {
+                RetainedSupervisorJournal::Prepared(prepared) => {
+                    binding(prepared.bootstrap(), prepared.supervisor_signing_key())
+                }
+                _ => panic!("fresh state must be prepared"),
+            };
+            // An anchor of another boot proves nothing, so the window is refused.
+            let mut foreign = state.clock_anchor.coordinate().clone();
+            foreign.incarnation_digest = lillux::sha256_hex(b"another boot");
+            state.clock_anchor = lillux::time::LocalClockAnchor::from_retained(foreign).unwrap();
+            let refusal = state
+                .record_binding_then_derive_window(binding.clone(), None, native)
+                .unwrap_err();
+            assert!(
+                format!("{refusal:#}").contains("earlier boot"),
+                "{refusal:#}"
+            );
+            match state.journal.as_ref().unwrap() {
+                RetainedSupervisorJournal::Attached(attached) => {
+                    assert_eq!(attached.binding(), &binding);
+                }
+                _ => panic!("the controller's binding must stay recorded"),
+            }
+            state.close_journals(native).unwrap();
         });
     }
 

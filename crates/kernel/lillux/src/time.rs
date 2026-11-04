@@ -269,7 +269,6 @@ mod local_deadline_handoff_tests {
 
     #[test]
     fn equal_endpoints_share_one_tick_and_delayed_adoption_does_not_extend() {
-        let _serial = crate::exec::registered_pair::serialize_clock_close_tests();
         let handoff = pair();
         let original = handoff.original_service();
         let wire = local_deadline_wire::read(&handoff.bound, &handoff.clock).unwrap();
@@ -289,7 +288,6 @@ mod local_deadline_handoff_tests {
 
     #[test]
     fn duplicates_preserve_objects_and_original_endpoints() {
-        let _serial = crate::exec::registered_pair::serialize_clock_close_tests();
         let original = pair();
         let copy = original.duplicate_retained_pair().unwrap();
         for (a, b) in [
@@ -310,7 +308,6 @@ mod local_deadline_handoff_tests {
 
     #[test]
     fn construction_refuses_inverted_and_expired_originals() {
-        let _serial = crate::exec::registered_pair::serialize_clock_close_tests();
         let earlier = MonotonicDeadline::after(Duration::from_secs(30));
         let later = MonotonicDeadline::after(Duration::from_secs(60));
         assert!(OriginalLocalDeadlineHandoff::from_original(later, earlier).is_err());
@@ -325,7 +322,6 @@ mod local_deadline_handoff_tests {
 
     #[test]
     fn decoding_refuses_unknown_fields_domain_version_order_and_expiry() {
-        let _serial = crate::exec::registered_pair::serialize_clock_close_tests();
         let handoff = pair();
         let mut wire = local_deadline_wire::read(&handoff.bound, &handoff.clock).unwrap();
         let now = occupancy_now().unwrap();
@@ -350,7 +346,6 @@ mod local_deadline_handoff_tests {
 
     #[test]
     fn descriptor_reader_refuses_wrong_clock_identity_and_oversized_packet() {
-        let _serial = crate::exec::registered_pair::serialize_clock_close_tests();
         let handoff = pair();
         let mut wire = local_deadline_wire::read(&handoff.bound, &handoff.clock).unwrap();
         wire.clock_ino ^= 1;
@@ -377,7 +372,6 @@ mod local_deadline_handoff_tests {
 
     #[test]
     fn role_validation_precedes_ownership_and_arithmetic_refuses_overflow() {
-        let _serial = crate::exec::registered_pair::serialize_clock_close_tests();
         for (bound, clock) in [(0, 9), (9, 1), (2, 9), (9, 9)] {
             assert!(
                 unsafe { AdoptedOriginalLocalDeadlines::take_inherited(bound, clock) }.is_err()
@@ -571,7 +565,22 @@ fn occupancy_contract_digest(contract: &OccupancyClockContract) -> Result<String
 
 #[cfg(target_os = "linux")]
 fn occupancy_now_platform() -> Result<OccupancyCoordinate, String> {
-    let contract = OccupancyClockContract::current()?;
+    // The contract is fixed for the life of the process, and its digest is a
+    // canonical-JSON hash, so it is computed once.
+    static CONTRACT_DIGEST: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let contract_digest = match CONTRACT_DIGEST.get() {
+        Some(digest) => digest.clone(),
+        None => CONTRACT_DIGEST
+            .get_or_init(|| {
+                OccupancyClockContract::current()
+                    .map(|contract| contract.contract_digest)
+                    .unwrap_or_default()
+            })
+            .clone(),
+    };
+    if contract_digest.is_empty() {
+        return Err("occupancy clock contract is unavailable".to_string());
+    }
     let tick_ns = occupancy_tick_ns()?;
     // The boot id cannot change while this process runs, so it is read once:
     // deadline checks sample the clock often and must not open a descriptor
@@ -592,15 +601,22 @@ fn occupancy_now_platform() -> Result<OccupancyCoordinate, String> {
         }
     };
     Ok(OccupancyCoordinate {
-        contract_digest: contract.contract_digest,
+        contract_digest,
         incarnation_digest,
         tick_ns,
     })
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(any(test, feature = "test-support"))))]
 fn occupancy_tick_ns() -> Result<u64, String> {
     occupancy_tick_ns_fixed().map_err(str::to_owned)
+}
+
+#[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
+fn occupancy_tick_ns() -> Result<u64, String> {
+    occupancy_tick_ns_fixed()
+        .map(|tick| tick + simulated_suspension::get())
+        .map_err(str::to_owned)
 }
 
 #[cfg(target_os = "linux")]
@@ -736,8 +752,11 @@ impl MonotonicDeadline {
         match self.basis {
             DeadlineBasis::Boot(tick) => Some(tick),
             DeadlineBasis::Process(_) => {
+                // The tick first, then the time left: the coordinate can then
+                // only be earlier than the true one, as in `from_original`.
+                let tick = boot_tick_ns()?;
                 let left = u64::try_from(self.remaining().as_nanos()).ok()?;
-                boot_tick_ns()?.checked_add(left)
+                tick.checked_add(left)
             }
         }
     }
@@ -778,33 +797,27 @@ impl MonotonicDeadline {
     }
 }
 
-#[cfg(all(target_os = "linux", not(test)))]
+#[cfg(target_os = "linux")]
 fn boot_tick_ns() -> Option<u64> {
     occupancy_tick_ns().ok()
 }
 
-/// Under test the suspend-inclusive clock can be advanced on its own, as a
-/// host suspension advances it while the process clock stands still.
-#[cfg(all(target_os = "linux", test))]
-fn boot_tick_ns() -> Option<u64> {
-    occupancy_tick_ns()
-        .ok()
-        .map(|tick| tick + simulated_suspension::get())
-}
-
-#[cfg(all(target_os = "linux", test))]
-pub(crate) mod simulated_suspension {
+/// A host suspension, for tests: it advances the suspend-inclusive clock as
+/// this thread reads it while the process clock stands still. Per thread, so
+/// concurrent tests keep their own time.
+#[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
+pub mod simulated_suspension {
     use std::cell::Cell;
 
     thread_local! {
         static EXTRA_NS: Cell<u64> = const { Cell::new(0) };
     }
 
-    pub(crate) fn get() -> u64 {
+    pub(super) fn get() -> u64 {
         EXTRA_NS.with(Cell::get)
     }
 
-    pub(crate) fn suspend_for(duration: std::time::Duration) {
+    pub fn suspend_for(duration: std::time::Duration) {
         EXTRA_NS.with(|extra| extra.set(extra.get() + duration.as_nanos() as u64));
     }
 }
@@ -1743,7 +1756,6 @@ mod original_window_tests {
 
     #[test]
     fn terminal_peer_scan_observes_original_roles_before_close_without_extending_window() {
-        let _serial = crate::exec::registered_pair::serialize_clock_close_tests();
         let (limit, cleanup, deadline) = window();
         let (sealed, namespace) =
             OriginalNamespaceOccupancyHandoff::from_original(&limit, cleanup, deadline)
@@ -1776,7 +1788,6 @@ mod original_window_tests {
 
     #[test]
     fn original_terminal_hook_rejects_live_writer_alias_and_missing_stdio() {
-        let _serial = crate::exec::registered_pair::serialize_clock_close_tests();
         let (_held, writer) = terminal_pipe();
         let alias = writer.duplicate_at_or_above(64).unwrap();
         let (limit, cleanup, deadline) = window();
@@ -1823,7 +1834,6 @@ mod original_window_tests {
 
     #[test]
     fn sealed_original_window_roundtrip_cannot_extend_original_deadline() {
-        let _serial = crate::exec::registered_pair::serialize_clock_close_tests();
         let (limit, cleanup, deadline) = window();
         let handoff =
             OriginalNamespaceOccupancyHandoff::from_original(&limit, cleanup, deadline).unwrap();
@@ -1937,7 +1947,6 @@ mod original_window_tests {
 
     #[test]
     fn retained_pair_duplicate_preserves_objects_deadline_and_original_owners() {
-        let _serial = crate::exec::registered_pair::serialize_clock_close_tests();
         use std::os::unix::fs::MetadataExt as _;
         let (limit, cleanup, deadline) = window();
         let original =
@@ -1982,7 +1991,6 @@ mod original_window_tests {
 
     #[test]
     fn retained_pair_duplicate_refuses_expiry_without_consuming_originals() {
-        let _serial = crate::exec::registered_pair::serialize_clock_close_tests();
         let (limit, cleanup, deadline) = window();
         let mut original =
             OriginalNamespaceOccupancyHandoff::from_original(&limit, cleanup, deadline).unwrap();
@@ -2004,7 +2012,6 @@ mod original_window_tests {
 
     #[test]
     fn retained_pair_duplicate_refuses_aliased_roles_without_consuming_originals() {
-        let _serial = crate::exec::registered_pair::serialize_clock_close_tests();
         let (limit, cleanup, deadline) = window();
         let mut original =
             OriginalNamespaceOccupancyHandoff::from_original(&limit, cleanup, deadline).unwrap();
@@ -2017,7 +2024,6 @@ mod original_window_tests {
 
     #[test]
     fn original_window_rejects_unsealed_foreign_clock_and_descriptor_alias() {
-        let _serial = crate::exec::registered_pair::serialize_clock_close_tests();
         let (limit, cleanup, deadline) = window();
         let (sealed, namespace) =
             OriginalNamespaceOccupancyHandoff::from_original(&limit, cleanup, deadline)
@@ -2063,7 +2069,6 @@ mod original_window_tests {
 
     #[test]
     fn original_window_strict_wire_refuses_expired_foreign_and_partial() {
-        let _serial = crate::exec::registered_pair::serialize_clock_close_tests();
         let (limit, cleanup, deadline) = window();
         let (sealed, _namespace) =
             OriginalNamespaceOccupancyHandoff::from_original(&limit, cleanup, deadline)

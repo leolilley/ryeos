@@ -41,11 +41,7 @@ pub(crate) fn close_pair(
     if original.has_elapsed() {
         return Err("original clock close interval exhausted");
     }
-    let mut state = match barrier.state.try_lock() {
-        Ok(state) => state,
-        Err(std::sync::TryLockError::WouldBlock) => return Err("clock close barrier busy"),
-        Err(std::sync::TryLockError::Poisoned(_)) => return Err("clock close barrier poisoned"),
-    };
+    let mut state = lock_barrier(barrier, original)?;
     reopen_settled_strand_locked(barrier, &mut state);
     if state.fork_quiesced || original.has_elapsed() {
         return Err("clock close barrier unavailable within original interval");
@@ -73,17 +69,6 @@ pub(crate) fn close_pair(
     })
 }
 
-/// Tests that close clock descriptors, hand off or adopt deadlines, or hold the process-wide fork barrier
-/// to provoke a busy refusal, share that barrier with each other. They take
-/// this guard so none observes another's deliberate hold.
-#[cfg(test)]
-pub(crate) fn serialize_clock_close_tests() -> std::sync::MutexGuard<'static, ()> {
-    static CLOCK_CLOSE_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    CLOCK_CLOSE_TESTS
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
 #[cfg(test)]
 mod controls {
     use super::*;
@@ -102,7 +87,6 @@ mod controls {
 
     #[test]
     fn shared_or_busy_before_effects_retains_both_live_descriptors() {
-        let _serial = serialize_clock_close_tests();
         let (mut first, mut second) = pair();
         let alias = second.clone();
         let deadline = MonotonicDeadline::after(Duration::from_secs(10));
@@ -111,7 +95,9 @@ mod controls {
         drop(alias);
         let barrier = direct_attachment_fork_barrier();
         let guard = barrier.state.lock().unwrap();
+        EXPECTS_BUSY_BARRIER.with(|flag| flag.set(true));
         assert!(close_pair(&mut first, &mut second, deadline).is_err());
+        EXPECTS_BUSY_BARRIER.with(|flag| flag.set(false));
         assert!(first.handle.is_registered_live() && second.handle.is_registered_live());
         drop(guard);
         let receipt = close_pair(&mut first, &mut second, deadline).unwrap();
@@ -122,7 +108,6 @@ mod controls {
 
     #[test]
     fn ambiguous_close_is_cached_and_never_retried_by_coordinate() {
-        let _serial = serialize_clock_close_tests();
         let (mut first, mut second) = pair();
         // Inject an ambiguous result AFTER actually consuming the owned FD.
         // Never close a stale number or leave a File owning an already-closed
@@ -148,4 +133,57 @@ mod controls {
         );
         assert!(first.file.is_none());
     }
+}
+
+#[cfg(not(test))]
+fn lock_barrier<'a>(
+    barrier: &'a super::DescriptorForkBarrier,
+    _original: MonotonicDeadline,
+) -> Result<std::sync::MutexGuard<'a, super::DescriptorForkBarrierState>, &'static str> {
+    match barrier.state.try_lock() {
+        Ok(state) => Ok(state),
+        Err(std::sync::TryLockError::WouldBlock) => Err("clock close barrier busy"),
+        Err(std::sync::TryLockError::Poisoned(_)) => Err("clock close barrier poisoned"),
+    }
+}
+
+/// Under test other threads constantly take the process-wide barrier (every
+/// spawn and descriptor lease does), so a close that expects to succeed waits
+/// for the barrier and for any fork window to open, woken by the barrier's own
+/// condition variable and bounded by the original interval. A test that holds
+/// the barrier itself, to provoke the busy refusal, declares so and gets the
+/// production behaviour.
+#[cfg(test)]
+fn lock_barrier<'a>(
+    barrier: &'a super::DescriptorForkBarrier,
+    original: MonotonicDeadline,
+) -> Result<std::sync::MutexGuard<'a, super::DescriptorForkBarrierState>, &'static str> {
+    if EXPECTS_BUSY_BARRIER.with(std::cell::Cell::get) {
+        return match barrier.state.try_lock() {
+            Ok(state) => Ok(state),
+            Err(std::sync::TryLockError::WouldBlock) => Err("clock close barrier busy"),
+            Err(std::sync::TryLockError::Poisoned(_)) => Err("clock close barrier poisoned"),
+        };
+    }
+    let mut state = barrier
+        .state
+        .lock()
+        .map_err(|_| "clock close barrier poisoned")?;
+    while state.fork_quiesced {
+        let remaining = original.remaining();
+        if remaining.is_zero() {
+            break;
+        }
+        state = barrier
+            .changed
+            .wait_timeout(state, remaining)
+            .map_err(|_| "clock close barrier poisoned")?
+            .0;
+    }
+    Ok(state)
+}
+
+#[cfg(test)]
+thread_local! {
+    static EXPECTS_BUSY_BARRIER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
