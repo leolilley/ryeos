@@ -37,6 +37,23 @@ pub fn local_endpoint_path_addressable(endpoint: &Path) -> bool {
     endpoint.as_os_str().as_bytes().len() <= max_local_endpoint_path_bytes()
 }
 
+/// Bind a Unix listener whose socket inode is created owner-only, so no
+/// window exists between creation and a later permission change. The creation
+/// mask is narrowed only around the `bind` call and restored immediately; the
+/// listener is returned non-blocking for the async runtime to adopt.
+#[cfg(unix)]
+pub fn bind_owner_private_unix_listener(
+    endpoint: &Path,
+) -> std::io::Result<std::os::unix::net::UnixListener> {
+    // A socket file is created with mode 0o777 & !mask; 0o177 leaves 0o600.
+    let previous = unsafe { libc::umask(0o177) };
+    let bound = std::os::unix::net::UnixListener::bind(endpoint);
+    unsafe { libc::umask(previous) };
+    let listener = bound?;
+    listener.set_nonblocking(true)?;
+    Ok(listener)
+}
+
 /// Kernel-authenticated process that connected one Unix stream. Its PID is
 /// expressed in the receiver's namespace, not in the peer's namespace. The
 /// retained pidfd pins the incarnation; a caller's numeric PID is never proof.
@@ -1237,6 +1254,23 @@ mod local_connect_tests {
 mod peer_process_tests {
     use super::*;
     use std::os::fd::{AsFd as _, AsRawFd as _};
+
+    #[test]
+    fn owner_private_listener_is_born_0600_and_restores_the_mask() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let temporary = tempfile::tempdir().unwrap();
+        let endpoint = temporary.path().join("private.sock");
+        let before = unsafe { libc::umask(0o022) };
+        let listener = bind_owner_private_unix_listener(&endpoint).unwrap();
+        let after = unsafe { libc::umask(before) };
+        assert_eq!(after, 0o022, "the creation mask is restored");
+        let mode = std::fs::symlink_metadata(&endpoint)
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+        drop(listener);
+    }
 
     #[test]
     fn pinned_local_endpoint_works_below_deep_private_root() {

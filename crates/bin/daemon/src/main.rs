@@ -4045,8 +4045,8 @@ async fn run(
     );
 
     let early_startup = async {
-        process::remove_stale_socket(&config.uds_path)?;
-        process::remove_stale_socket(&config.runtime_uds_path())?;
+        let runtime_uds_path = config.runtime_uds_path();
+        process::remove_stale_sockets(&[&config.uds_path, &runtime_uds_path])?;
         ensure_runtime_paths(&config)?;
         let daemon_json_path = config.app_root.join("daemon.json");
         let _ = std::fs::remove_file(&daemon_json_path);
@@ -4060,47 +4060,40 @@ async fn run(
         let actual_bind = tcp_listener
             .local_addr()
             .with_context(|| format!("failed to read local_addr after binding {}", config.bind))?;
-        let uds_listener = UnixListener::bind(&config.uds_path)
-            .with_context(|| format!("failed to bind {}", config.uds_path.display()))?;
-        let runtime_uds_path = config.runtime_uds_path();
-        let runtime_uds_listener = UnixListener::bind(&runtime_uds_path)
-            .with_context(|| format!("failed to bind {}", runtime_uds_path.display()))?;
+        // Both sockets are created owner-only. Cleanup guards the first socket
+        // before the second is bound, so a failed second bind leaves no stale
+        // control socket behind.
+        let uds_listener = bind_owner_private_listener(&config.uds_path)?;
+        let discovery_cleanup =
+            startup::DiscoveryCleanup::new(config.uds_path.clone(), daemon_json_path.clone())?;
+        let runtime_uds_listener = bind_owner_private_listener(&runtime_uds_path)?;
+        let discovery_cleanup = discovery_cleanup.with_runtime_socket(runtime_uds_path)?;
         Ok::<_, anyhow::Error>((
             tcp_listener,
             uds_listener,
             runtime_uds_listener,
+            discovery_cleanup,
             daemon_json_path,
             actual_bind,
         ))
     }
     .await;
-    let (tcp_listener, uds_listener, runtime_uds_listener, daemon_json_path, actual_bind) =
-        match early_startup {
-            Ok(value) => value,
-            Err(error) => {
-                let detail = format!("{error:#}");
-                composition.record_exit("startup_failed", Some(&detail), None);
-                return Err(error);
-            }
-        };
-    config.bind = actual_bind;
-    let _discovery_cleanup =
-        startup::DiscoveryCleanup::new(config.uds_path.clone(), daemon_json_path.clone())?
-            .with_runtime_socket(config.runtime_uds_path())?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        for socket_path in [config.uds_path.clone(), config.runtime_uds_path()] {
-            std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))
-                .with_context(|| {
-                    format!(
-                        "failed to set socket permissions on {}",
-                        socket_path.display()
-                    )
-                })?;
+    let (
+        tcp_listener,
+        uds_listener,
+        runtime_uds_listener,
+        _discovery_cleanup,
+        daemon_json_path,
+        actual_bind,
+    ) = match early_startup {
+        Ok(value) => value,
+        Err(error) => {
+            let detail = format!("{error:#}");
+            composition.record_exit("startup_failed", Some(&detail), None);
+            return Err(error);
         }
-    }
+    };
+    config.bind = actual_bind;
 
     // daemon.json is an early discovery hint.  Live lifecycle truth always
     // comes from the UDS, and started_at is process start (never ready time).
@@ -7956,6 +7949,13 @@ async fn shutdown_signal() {
         _ = lifecycle_shutdown => {}
     }
     ryeosd::request_shutdown();
+}
+
+/// Bind an owner-only Unix listener and hand it to the async runtime.
+fn bind_owner_private_listener(path: &std::path::Path) -> Result<UnixListener> {
+    let listener = lillux::local_ipc::bind_owner_private_unix_listener(path)
+        .with_context(|| format!("failed to bind {}", path.display()))?;
+    UnixListener::from_std(listener).with_context(|| format!("failed to adopt {}", path.display()))
 }
 
 fn ensure_runtime_paths(config: &Config) -> Result<()> {
