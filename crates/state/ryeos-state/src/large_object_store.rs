@@ -1165,7 +1165,7 @@ impl LargeObjectStore {
             Err(error) => {
                 findings.push(LargeObjectIntegrityFinding::MalformedSidecar {
                     file_sha256: file_sha256.to_string(),
-                    error: error.to_string(),
+                    error: format!("{error:#}"),
                 });
                 None
             }

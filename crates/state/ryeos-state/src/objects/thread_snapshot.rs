@@ -201,9 +201,9 @@ pub struct ThreadUsage {
 impl ThreadUsage {
     pub fn validate(&self) -> anyhow::Result<()> {
         let started_at = parse_canonical_timestamp(&self.started_at)
-            .map_err(|error| anyhow::anyhow!("invalid thread usage started_at: {error}"))?;
+            .map_err(|error| anyhow::anyhow!("invalid thread usage started_at: {error:#}"))?;
         let settled_at = parse_canonical_timestamp(&self.settled_at)
-            .map_err(|error| anyhow::anyhow!("invalid thread usage settled_at: {error}"))?;
+            .map_err(|error| anyhow::anyhow!("invalid thread usage settled_at: {error:#}"))?;
         if settled_at < started_at {
             anyhow::bail!("thread usage settled_at must not precede started_at");
         }
@@ -550,7 +550,7 @@ impl CapturedThreadHistoryPolicy {
     pub fn validate(&self) -> anyhow::Result<()> {
         self.retention.validate()?;
         validate_canonical_item_ref(&self.canonical_item_ref).map_err(|error| {
-            anyhow::anyhow!("invalid captured history canonical_item_ref: {error}")
+            anyhow::anyhow!("invalid captured history canonical_item_ref: {error:#}")
         })?;
         for (label, value) in [
             ("item_content_hash", self.item_content_hash.as_str()),
@@ -913,9 +913,9 @@ impl ThreadSnapshot {
             anyhow::bail!("base_project_snapshot_hash projection contradicts project_authority");
         }
         let created_at = parse_canonical_timestamp(&self.created_at)
-            .map_err(|error| anyhow::anyhow!("invalid created_at: {error}"))?;
+            .map_err(|error| anyhow::anyhow!("invalid created_at: {error:#}"))?;
         let updated_at = parse_canonical_timestamp(&self.updated_at)
-            .map_err(|error| anyhow::anyhow!("invalid updated_at: {error}"))?;
+            .map_err(|error| anyhow::anyhow!("invalid updated_at: {error:#}"))?;
         if updated_at < created_at {
             anyhow::bail!("updated_at must not precede created_at");
         }
@@ -924,13 +924,13 @@ impl ThreadSnapshot {
             .as_deref()
             .map(parse_canonical_timestamp)
             .transpose()
-            .map_err(|error| anyhow::anyhow!("invalid started_at: {error}"))?;
+            .map_err(|error| anyhow::anyhow!("invalid started_at: {error:#}"))?;
         let finished_at = self
             .finished_at
             .as_deref()
             .map(parse_canonical_timestamp)
             .transpose()
-            .map_err(|error| anyhow::anyhow!("invalid finished_at: {error}"))?;
+            .map_err(|error| anyhow::anyhow!("invalid finished_at: {error:#}"))?;
         if started_at
             .as_ref()
             .is_some_and(|started_at| *started_at < created_at || *started_at > updated_at)

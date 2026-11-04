@@ -427,7 +427,7 @@ impl ThreadEvent {
             anyhow::bail!("event_type must not be empty");
         }
         parse_canonical_timestamp(&self.ts)
-            .map_err(|error| anyhow::anyhow!("invalid thread event ts: {error}"))?;
+            .map_err(|error| anyhow::anyhow!("invalid thread event ts: {error:#}"))?;
         if let Some(hash) = &self.prev_chain_event_hash {
             validate_canonical_hash("prev_chain_event_hash", hash)?;
         }

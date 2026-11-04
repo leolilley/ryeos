@@ -428,7 +428,7 @@ impl ExecutableSearchPathEntry {
         }
         if self.relative_directory != "." {
             super::validate_canonical_project_relative_path(&self.relative_directory)
-                .map_err(|error| anyhow::anyhow!("executable-search directory: {error}"))?;
+                .map_err(|error| anyhow::anyhow!("executable-search directory: {error:#}"))?;
         }
         Ok(())
     }
@@ -630,7 +630,7 @@ pub fn validate_session_process_environment_name(name: &str) -> anyhow::Result<(
 pub fn validate_session_process_environment_relative_path(path: &str) -> anyhow::Result<()> {
     if path != "." {
         super::validate_canonical_project_relative_path(path)
-            .map_err(|error| anyhow::anyhow!("session process environment path: {error}"))?;
+            .map_err(|error| anyhow::anyhow!("session process environment path: {error:#}"))?;
     }
     Ok(())
 }
@@ -1211,7 +1211,7 @@ pub struct SessionRuntimeConfigurationFile {
 impl SessionRuntimeConfigurationFile {
     pub fn validate(&self) -> anyhow::Result<()> {
         super::validate_canonical_project_relative_path(&self.source)
-            .map_err(|error| anyhow::anyhow!("invalid runtime configuration source: {error}"))?;
+            .map_err(|error| anyhow::anyhow!("invalid runtime configuration source: {error:#}"))?;
         if self.source.len() > 4096 {
             anyhow::bail!("runtime configuration source exceeds its path bound");
         }

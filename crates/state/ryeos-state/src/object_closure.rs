@@ -370,8 +370,8 @@ fn registered_event_links_in(
     // Diagnostic traversal also refuses unvalidated domain edges.
     let envelope = serde_json::from_value::<crate::objects::ThreadEvent>(value.clone())
         .map_err(|error| error.to_string())?;
-    envelope.validate().map_err(|error| error.to_string())?;
-    (contract.validate)(value).map_err(|error| error.to_string())?;
+    envelope.validate().map_err(|error| format!("{error:#}"))?;
+    (contract.validate)(value).map_err(|error| format!("{error:#}"))?;
     convert_registered_links((contract.links)(value)?).map(Some)
 }
 

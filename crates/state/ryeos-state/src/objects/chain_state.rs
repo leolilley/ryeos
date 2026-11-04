@@ -147,7 +147,7 @@ impl ChainState {
             validate_canonical_hash("last_event_hash", hash)?;
         }
         parse_canonical_timestamp(&self.updated_at)
-            .map_err(|error| anyhow::anyhow!("invalid chain state updated_at: {error}"))?;
+            .map_err(|error| anyhow::anyhow!("invalid chain state updated_at: {error:#}"))?;
 
         // Validate all thread entries
         for (thread_id, entry) in &self.threads {

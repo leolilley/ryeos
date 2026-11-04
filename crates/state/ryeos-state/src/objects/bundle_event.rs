@@ -102,7 +102,7 @@ impl BundleEventObject {
             validate_canonical_hash("prev_chain_event_hash", hash)?;
         }
         parse_canonical_timestamp(&self.created_at)
-            .map_err(|error| anyhow::anyhow!("invalid bundle event created_at: {error}"))?;
+            .map_err(|error| anyhow::anyhow!("invalid bundle event created_at: {error:#}"))?;
         if let Some(key) = &self.idempotency_key {
             validate_idempotency_key(key)?;
         }
