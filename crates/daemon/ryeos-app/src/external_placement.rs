@@ -3429,6 +3429,25 @@ pub fn apply_external_qualification_native_settlement(
 /// Finalize exactly one occurrence-scoped channel after bootstrap
 /// authentication.  All mutable limits and identities are derived from the
 /// retained session, allocation and signed binding rather than request data.
+/// A repeated attachment is answered with the retained binding only for the
+/// very supervisor that made the first one. A guest whose state root was lost
+/// mints a new signing key, so it can never take over the retained binding and
+/// start a fresh, later window under it.
+fn require_attachment_replay_matches(
+    existing: &ryeos_state::external_execution::ExecutionChannelBinding,
+    supervisor_public_key: &str,
+    program_digest: &str,
+    execution_mode: &ryeos_state::external_execution::ExternalExecutionMode,
+) -> Result<()> {
+    ensure!(
+        existing.supervisor_public_key == supervisor_public_key
+            && existing.candidate_program_digest == program_digest
+            && &existing.execution_mode == execution_mode,
+        "external channel attachment replay changed its exact supervisor or program"
+    );
+    Ok(())
+}
+
 pub fn attach_external_execution_channel(
     state: &AppState,
     authenticated: &AuthenticatedExternalOccurrence,
@@ -3466,12 +3485,12 @@ pub fn attach_external_execution_channel(
         .state_store
         .optional_external_execution_channel(&authenticated.placement_thread_id)?
     {
-        ensure!(
-            existing.supervisor_public_key == supervisor_public_key
-                && existing.candidate_program_digest == program.digest()?
-                && existing.execution_mode == program.execution_mode(),
-            "external channel attachment replay changed its exact supervisor or program"
-        );
+        require_attachment_replay_matches(
+            &existing,
+            supervisor_public_key,
+            &program.digest()?,
+            &program.execution_mode(),
+        )?;
         return Ok(existing);
     }
     controller_clock::require_for_new_windows(state)?;
