@@ -140,7 +140,7 @@ impl OciLifecycleIntent {
     /// init incarnation. Callers must retain it through all namespace-rooted
     /// observations and mutations.
     pub fn open_process_root(&self) -> Result<super::ExactProcessRoot, String> {
-        super::require_administrator().map_err(|error| error.to_string())?;
+        super::require_administrator().map_err(|error| format!("{error:#}"))?;
         self.require_live()?;
         super::ExactProcessRoot::open(&self.init_process)
     }
@@ -356,7 +356,7 @@ impl OciPreparationProgress {
         }
     }
     pub fn prove_ended_and_retire(&self, intent: &OciLifecycleIntent) -> Result<(), String> {
-        super::require_administrator().map_err(|error| error.to_string())?;
+        super::require_administrator().map_err(|error| format!("{error:#}"))?;
         self.require_intent(intent)?;
         if intent.host_lifetime.has_ended()? {
             return Ok(());

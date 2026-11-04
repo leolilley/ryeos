@@ -1438,7 +1438,7 @@ impl DelegatedCgroup {
     /// already have delegated it to this UID; opening never grants delegation.
     pub fn open(path: &Path) -> Result<Self, String> {
         let directory = PinnedDirectory::open(path)
-            .map_err(|error| format!("open cgroup delegation: {error}"))?
+            .map_err(|error| format!("open cgroup delegation: {error:#}"))?
             .ok_or_else(|| "cgroup delegation is absent".to_owned())?;
         let fd = directory.try_clone_descriptor().map_err(display)?;
         require_cgroup2(&fd)?;
@@ -1836,7 +1836,7 @@ impl ProcessCgroup {
                 if waited < 0 && error.raw_os_error() == Some(libc::EINTR) {
                     continue;
                 }
-                return Err(format!("reap exact scope probe: {error}"));
+                return Err(format!("reap exact scope probe: {error:#}"));
             }
             self.wait_empty(deadline.saturating_duration_since(Instant::now()))
         })();

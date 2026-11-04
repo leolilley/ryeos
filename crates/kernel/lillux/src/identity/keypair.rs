@@ -123,9 +123,9 @@ fn write_secure(path: &Path, data: &[u8], _mode: u32) -> Result<(), String> {
         .write(true)
         .create_new(true)
         .open(path)
-        .map_err(|e| format!("create {}: {e}", path.display()))?
+        .map_err(|e| format!("create {}: {e:#}", path.display()))?
         .write_all(data)
-        .map_err(|e| format!("write {}: {e}", path.display()))
+        .map_err(|e| format!("write {}: {e:#}", path.display()))
 }
 
 #[cfg(unix)]

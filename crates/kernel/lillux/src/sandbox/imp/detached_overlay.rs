@@ -46,21 +46,21 @@ pub(crate) fn create_overlay_template(
     let original_state = inherited_directory(state_fd, "overlay template state")?;
     let original_upper = original_state
         .open_child_directory(OsStr::new("upper"))
-        .map_err(|error| format!("pin template upper: {error}"))?
+        .map_err(|error| format!("pin template upper: {error:#}"))?
         .ok_or_else(|| "overlay template upper is missing".to_string())?;
     let original_work = original_state
         .open_child_directory(OsStr::new("work"))
-        .map_err(|error| format!("pin template work: {error}"))?
+        .map_err(|error| format!("pin template work: {error:#}"))?
         .ok_or_else(|| "overlay template work is missing".to_string())?;
     let lower = original_lower
         .try_clone_descriptor()
-        .map_err(|error| format!("retain template lower: {error}"))?;
+        .map_err(|error| format!("retain template lower: {error:#}"))?;
     let upper = original_upper
         .try_clone_descriptor()
-        .map_err(|error| format!("retain template upper: {error}"))?;
+        .map_err(|error| format!("retain template upper: {error:#}"))?;
     let work = original_work
         .try_clone_descriptor()
-        .map_err(|error| format!("retain template work: {error}"))?;
+        .map_err(|error| format!("retain template work: {error:#}"))?;
 
     enter_mapped_user_namespace()?;
     syscall_zero(
@@ -195,20 +195,20 @@ pub(super) fn probe() -> Result<(), String> {
             .map_err(|error| format!("make template probe mounts private: {error}"))?;
         mount_private_root()?;
         let root = crate::PinnedDirectory::open(std::path::Path::new(ROOT))
-            .map_err(|error| error.to_string())?
+            .map_err(|error| format!("{error:#}"))?
             .ok_or_else(|| "template probe root is missing".to_string())?;
         let lower = root
             .create_child(OsStr::new("lower"), 0o700)
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| format!("{error:#}"))?;
         let state = root
             .create_child(OsStr::new("state"), 0o700)
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| format!("{error:#}"))?;
         state
             .create_child(OsStr::new("upper"), 0o700)
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| format!("{error:#}"))?;
         state
             .create_child(OsStr::new("work"), 0o700)
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| format!("{error:#}"))?;
         lower
             .atomic_write_if_same(
                 OsStr::new("seed"),
@@ -217,13 +217,13 @@ pub(super) fn probe() -> Result<(), String> {
                 0o600,
                 PROBE_TEMP_PURPOSE,
             )
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| format!("{error:#}"))?;
         let lower = lower
             .inherited_descriptor_authority()
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| format!("{error:#}"))?;
         let state = state
             .inherited_descriptor_authority()
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| format!("{error:#}"))?;
         let (receiver, sender) =
             crate::inherited_descriptor_transfer_pair().map_err(|error| error.to_string())?;
         let parent = unsafe { libc::getpid() };
