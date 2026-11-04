@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-28T22:00:59Z:f510e87a41f2d880e57cb44f17be94ec111a5059e1106eb286c217fc1e61a57b:0SGEgQC09UDc8ohQhnTVSNp5aNoDNj02mrmlQ1/G2Q66J44B3VyfIDlt3iwEskhh36X3v0O3Ap6TbbSaX9o2Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-04T04:58:11Z:0cf875687c84be905a4c4165f1dba7cee3d63d13ca4758042e6b038266d41485:0uwtKsY93KqsiT3UFbpy7CetWuZh6I7BlBVQXRaR/hw/XK8zc1EHAdVSG3vpJ8IImYocxircwlx10JW0aGGxBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: codex
 version: "1.0.0"
 description: Retained authored Codex semantic checker source; capture is not checker execution or qualification.
@@ -32,6 +32,27 @@ product_relationships:
         parameters: {}
       consumer:
         canonical_ref: tool:codex/qualification/consumer-runtime-verifier
+        declaration_id: checker-code
+      required_product:
+        shape: tree
+        storage: content
+        bounds:
+          maximum_entries: 16
+          maximum_depth: 4
+          maximum_file_bytes: 1048576
+          maximum_total_bytes: 2097152
+      qualification:
+        policy_ref: null
+        required_claims: []
+    # Trusted variant verifier's edge to the same retained checker source.
+    - name: checker_code_to_consumer_verifier_trusted_lane
+      producer:
+        canonical_ref: graph:codex/semantic-checker-code-capture
+        recipe_binding: product_recipe
+        product_name: semantic_checker_code
+        parameters: {}
+      consumer:
+        canonical_ref: tool:codex/qualification/consumer-runtime-verifier-trusted-lane
         declaration_id: checker-code
       required_product:
         shape: tree

@@ -8,6 +8,15 @@ use ryeos_state::objects::thread_snapshot::validate_canonical_hash;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+/// The Worker variants this contract may target: the contained Worker
+/// (captured filesystem authority) and the trusted-lane Worker (node-policy
+/// authority). The consumer policy selected by the guarantees the node holds
+/// names exactly one, and the contract's target must equal it.
+const ACCEPTED_WORKER_REFS: [&str; 2] = [
+    "worker:codex/external-hosted-authoring",
+    "worker:codex/external-hosted-authoring-trusted-lane",
+];
+
 pub const MAX_FINITE_PRODUCT_CONTRACT_BYTES: usize = 8 * 1024;
 const HELPER_IDS: [&str; 5] = [
     "codex",
@@ -231,7 +240,7 @@ impl FiniteProductContract {
             "unsupported finite product audit_edition"
         );
         ensure!(
-            self.target.worker_ref == "worker:codex/external-hosted-authoring",
+            ACCEPTED_WORKER_REFS.contains(&self.target.worker_ref.as_str()),
             "unsupported finite product target.worker_ref"
         );
         validate_canonical_hash(
@@ -590,6 +599,17 @@ mod tests {
                 "{mutation}"
             );
         }
+    }
+
+    #[test]
+    fn each_variant_worker_is_a_valid_target_and_others_are_refused() {
+        let mut variant = value();
+        variant["target"]["worker_ref"] =
+            json!("worker:codex/external-hosted-authoring-trusted-lane");
+        assert!(FiniteProductContract::parse(&bytes(&variant)).is_ok());
+        let mut other = value();
+        other["target"]["worker_ref"] = json!("worker:codex/hosted-authoring");
+        assert!(FiniteProductContract::parse(&bytes(&other)).is_err());
     }
 
     #[test]

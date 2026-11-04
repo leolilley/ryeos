@@ -1,0 +1,29 @@
+# ryeos:signed:2026-11-04T04:58:11Z:9c4e5e80113251bee684d2eb476e529c133d3d99fec04c5dceb3b570f6bfa094:+9h96Jq3tuib7fzhi/fT8JBJ3sYau/jlPltq0qi0o9afujv7UjqZhRF0XrftXjqGlOXPx74v0NqhjyfDMBgzCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: codex/environments
+schema: ryeos.worker_environment.v6
+external_product_slots: []
+worker_ref: worker:codex/external-hosted-authoring-trusted-lane
+external_content:
+  - id: authoring-tools
+    kind: tree
+    mode: pinned
+    digest: 462135d8fd8f9df1101b9100ba3661baaba4a07c7070288262d7dd8b22a50050
+    metadata_hint: ryeos-authoring-environment-v1-x86_64-linux
+    mount_root: execution_runtime
+    mount: authoring-tools
+configuration:
+  executable_search:
+    - realization_id: authoring-tools
+      relative_directory: bin
+  process_environment:
+    GIT_CONFIG_NOSYSTEM: {kind: literal, value: "1"}
+    GIT_CONFIG_GLOBAL: {kind: literal, value: /dev/null}
+    GIT_PAGER: {kind: literal, value: cat}
+    TZ: {kind: literal, value: UTC}
+    TMPDIR: {kind: runtime_view_directory, relative_path: scratch}
+credential_requirement:
+  workload_family: codex
+  required_state: active
+  subject_projection_contract: codex.account.v1
+portable_state_contract: ryeos.worker_session.restore.v1
+workload_client: null

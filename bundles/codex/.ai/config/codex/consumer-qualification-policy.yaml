@@ -1,12 +1,18 @@
-# ryeos:signed:2026-11-02T01:47:58Z:fd8b9dcfcb39c5181a0f3ef73c13263d5d756cbd7f374c2c12e930df40fed304:wX8LqZ5N6SKJ8kyCBigsIZg3XKwp0PDZE7ir66QwLB0lkXwmtTMKhUUrajQ++ih5mldQwBU5Dl0L1IVh1zbKCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-04T04:58:11Z:427c0a1d128510e952383e8acd6ae90b5cd1c8dddca3c3f602069b855fdb7498:sjSDWdo5EDdf0/KwjcVpYY8lLuHrCAMuFBvT0DRXU7xxFNqpizSZ9Ufwp8wmxCXFFn0A8v4+TG9ydcnCN+gtBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: codex
 version: 1.0.0
-description: Independent consumer qualification of the exact Codex guest runtime;
+description: Contained variant of the independent consumer qualification of the exact Codex guest runtime, for a node that holds enforced isolation and qualified descendant containment;
   the node-derived external candidate context is merged into verifier_parameters before
   signing
 product_qualification_policy:
   schema: ryeos.product_qualification_policy.v5
   verifier_ref: tool:codex/qualification/consumer-runtime-verifier
+  requires_guarantees:
+  - isolation:enforced
+  - filesystem:captured_execution
+  - callback:captured_compatible
+  - any_of: [termination:scope, termination:pid_namespace]
+  - any_of: [recovery:scope, recovery:pid_namespace]
   subject_declaration_id: subject
   allowed_claims:
   - bounded_candidate_capture
@@ -14,7 +20,7 @@ product_qualification_policy:
   - controller_credential_exclusion
   - native_writer_exclusion
   - no_local_execution_fallback
-  minimum_verifier_process_settlement: scope_empty
+  minimum_verifier_process_settlement: containment_empty
   verifier_parameters:
     schema: ryeos.codex.consumer_verifier.v4
     controller:

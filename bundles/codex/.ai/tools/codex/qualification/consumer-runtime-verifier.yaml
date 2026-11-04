@@ -1,20 +1,24 @@
-# ryeos:signed:2026-11-02T01:48:00Z:ff5b1dbe7c21ee138bb285a2e4c539890d8686dcc4e44ace87669b58eeeb850c:r3+UjanZ0iPsGENdrOGN06GEboGvGdE7lKfO4oNJNwPYX7nz5Wjn3IklXv+Yr32nKyp+SuEmkNnamxY6fQdXAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-04T04:58:11Z:5f1b590055b984840cb64e0751c2b6367871e7f5242ddb3167837d11e985b1c5:vEoAaBVlHFXDN+PpmhLsjbvQhCCQWKAtJyyBk4FZpsOZWPZC1yv+9dqGunX4ajSxiO+Wck/TMKrSpCMPpguwAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: codex/qualification
 version: "1.0.0"
 description: >-
   Check the actual qualification command and an independent diagnostic through restricted daemon
-  callbacks; propose finite claims for issuer corroboration. Runs as an ordinary node_policy tool, not
-  captured_execution: it produces no filesystem product to capture, it reads only its pinned read-only
-  project root plus its admitted content and product slots, and its authority channel is the daemon
-  callback, which captured execution refuses by rule. Captured execution also requires an enforced
-  isolation lane, while the Codex session it checks runs on the trusted process-group lane.
+  callbacks; propose finite claims for issuer corroboration. Runs as a captured_execution tool: it
+  produces no filesystem product to capture and reads only its pinned read-only project root plus its
+  admitted content and product slots. Its authority channel is the daemon callback, admitted to captured
+  execution only because its protocol declares the captured-compatible callback class. This is the
+  verifier of the contained variant: it checks worker:codex/external-hosted-authoring, which holds
+  captured filesystem authority over a contained session.
 executor_id: "@subprocess"
 execution_protocol: protocol:ryeos/core/qualification_consumer_callback
 effects: live
-# node_policy, not captured_execution: captured execution bounds the filesystem products of a tool under enforced
-# isolation and may never hold daemon callback authority. This verifier produces no filesystem product, reads only
-# its pinned read-only project root and admitted mounts, and does all of its work through the callback protocol.
-filesystem_authority: node_policy
+# captured_execution: this verifier produces no filesystem product, reads only its pinned read-only project root and
+# admitted mounts, and does all of its work through the callback protocol, whose captured-compatible class admits
+# exactly the daemon socket and the closed consumer-verification surface.
+filesystem_authority: captured_execution
+# The verifier runs against the exact pinned snapshot its subject was captured from, a pushed-head project source;
+# the qualification callback protocol admits that only to a tool that declares it here.
+project_lane: pinned_snapshot
 required_caps: []
 external_content:
   # Pinned musl CPython tree that runs the semantic checker; its members are
