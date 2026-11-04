@@ -67,6 +67,7 @@ ryeos-node-runtime = { workspace = true, features = ["test-support"] }
 tempfile = { workspace = true }
 ryeos-state = { workspace = true, features = ["test-support"] }
 ryeos-engine = { workspace = true, features = ["test-support"] }
+ryeos-tracing = { workspace = true, features = ["test-harness"] }
 
 [lints]
 workspace = true

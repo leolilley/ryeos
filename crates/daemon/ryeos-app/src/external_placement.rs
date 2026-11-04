@@ -14496,6 +14496,53 @@ mod tests {
         }
     }
 
+    /// The deepest drive of the missing-request path that needs no guest
+    /// host: the same `fail_on_guest_owner_report` both relay steps call on a
+    /// pending miss, over a bound node with no allocation for the placement.
+    /// Reading the report fails, the step keeps its miss standing instead of
+    /// failing, and the failed read is logged at warn rather than swallowed.
+    /// The qualification-lane success path (a valid report in a loopback
+    /// mailbox failing the step with the supervisor exit named) has no
+    /// fixture: the loopback composes only an ordinary dedicated session and
+    /// needs a built rehearsal host plus namespaces.
+    #[test]
+    fn a_failed_owner_report_read_is_logged_and_leaves_the_miss_standing() {
+        let root = tempfile::tempdir().unwrap();
+        let (_store_owner, state) = crate::state::test_support::build_bound(root.path()).unwrap();
+        ryeos_tracing::test::prime_callsites();
+        for (lane, placement) in [
+            (ExternalRelayOwnerLane::Qualification, "T-read-fails-q"),
+            (ExternalRelayOwnerLane::OrdinarySession, "T-read-fails-s"),
+        ] {
+            // Off the cadence nothing is read and nothing is logged.
+            let (result, capture) = ryeos_tracing::test::capture_full(|| {
+                fail_on_guest_owner_report(&state, placement, 3, lane)
+            });
+            result.unwrap();
+            assert!(capture.orphan_events.is_empty());
+            // On the cadence the read fails, is logged, and is not an error.
+            let (result, capture) = ryeos_tracing::test::capture_full(|| {
+                fail_on_guest_owner_report(&state, placement, 4, lane)
+            });
+            result.unwrap();
+            let event = capture
+                .orphan_events
+                .iter()
+                .find(|event| {
+                    event.message.as_deref() == Some("external guest owner report not read")
+                })
+                .expect("a failed owner report read is logged");
+            assert_eq!(event.level, tracing::Level::WARN);
+            assert!(
+                event
+                    .field("error")
+                    .is_some_and(|error| error.contains("has no allocation")),
+                "{event:?}"
+            );
+            assert_eq!(event.field("placement"), Some(placement));
+        }
+    }
+
     #[test]
     fn owner_report_reads_are_bounded_per_placement_in_memory() {
         let allowed = (0..OWNER_REPORT_MAX_READS + 8)
