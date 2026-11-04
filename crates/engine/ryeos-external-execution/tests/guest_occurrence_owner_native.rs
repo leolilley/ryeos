@@ -105,6 +105,7 @@ fn supervisor_bootstrap(
             connect_timeout_ms: 5_000,
             request_timeout_ms: 10_000,
             maximum_response_bytes: 1024 * 1024,
+            max_clock_skew_ms: None,
         }.into(),
         tls_root_certificates_der_base64: roots,
         placement_thread_id: "T-native-test".into(),
@@ -481,6 +482,7 @@ fn run(
         guest_runtime_manifest_hash: assignment.guest_runtime_manifest_hash.into(),
         attachment_deadline_ms: assignment.attachment_deadline_ms,
         admission_deadline_ms: assignment.attachment_deadline_ms - 1_000,
+        max_clock_skew_ms: None,
         nonce_sha256: "8".repeat(64),
         ticket: ticket.clone(),
         guest_inputs: inputs.clone(),
@@ -581,8 +583,8 @@ fn run(
     };
     let receipt = held.mount_preparation_receipt()?;
     ensure!(
-        receipt.mount_count == 3,
-        "held native target lacks the stage and two sealed network inputs"
+        receipt.mount_count == 4,
+        "held native target lacks the stage, two sealed network inputs and the candidate-private mount"
     );
     if release {
         let mut released = held.release_once()?;

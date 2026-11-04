@@ -305,10 +305,10 @@ impl Guest {
             authority,
             &"f".repeat(64),
             binding.clone(),
+            ryeos_state::external_execution::guest_window::GuestChannelWindow::starting_now_for_single_clock_harness(&binding).unwrap(),
             host.factory(),
             host.destination(),
-            &ryeos_state::external_execution::native_journal::testing::census(host),
-        )
+            &ryeos_state::external_execution::native_journal::testing::census(host))
         .unwrap();
         let occurrence = LauncherOccurrenceEvidence::from_held_launcher(
             lillux::ExactProcessIdentity {
@@ -433,6 +433,7 @@ fn compose_app(
             resource_authority: None,
             producer_resource_ceiling: None,
             external_lease_budget: Some(budget()),
+            external_wall_clock_requirement: None,
         };
     state.node_policy = Arc::new(
         ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![Arc::new(

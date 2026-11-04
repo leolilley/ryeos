@@ -1103,6 +1103,7 @@ fn prepare(
         guest_runtime_manifest_hash: runtime_manifest_hash.clone(),
         attachment_deadline_ms,
         admission_deadline_ms: attachment_deadline_ms - 1_000,
+        max_clock_skew_ms: None,
         nonce_sha256: lillux::sha256_hex(&lillux::crypto::generate_random_bytes::<32>()),
         ticket,
         guest_inputs: projection.clone(),

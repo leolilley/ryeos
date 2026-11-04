@@ -150,6 +150,7 @@ pub mod test_support {
                 connect_timeout_ms: 5_000,
                 request_timeout_ms: 10_000,
                 maximum_response_bytes: 1024 * 1024,
+                max_clock_skew_ms: None,
                 network_inputs: ryeos_state::external_execution::transport::ExternalNetworkInputPolicy {
                     resolver: ryeos_state::external_execution::transport::ExternalNetworkInputSelection {
                         source: "/etc/resolv.conf".into(),

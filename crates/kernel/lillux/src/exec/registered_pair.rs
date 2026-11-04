@@ -91,6 +91,7 @@ mod controls {
 
     #[test]
     fn shared_or_busy_before_effects_retains_both_live_descriptors() {
+        let _serial = serialize_clock_close_tests();
         let (mut first, mut second) = pair();
         let alias = second.clone();
         let deadline = MonotonicDeadline::after(Duration::from_secs(10));
@@ -102,6 +103,7 @@ mod controls {
         assert!(close_pair(&mut first, &mut second, deadline).is_err());
         assert!(first.handle.is_registered_live() && second.handle.is_registered_live());
         drop(guard);
+        wait_for_open_fork_window(deadline);
         let receipt = close_pair(&mut first, &mut second, deadline).unwrap();
         assert_eq!((receipt.first, receipt.second), (Ok(()), Ok(())));
         assert!(first.handle.explicitly_retired() && second.handle.explicitly_retired());
@@ -110,6 +112,7 @@ mod controls {
 
     #[test]
     fn ambiguous_close_is_cached_and_never_retried_by_coordinate() {
+        let _serial = serialize_clock_close_tests();
         let (mut first, mut second) = pair();
         // Inject an ambiguous result AFTER actually consuming the owned FD.
         // Never close a stale number or leave a File owning an already-closed
@@ -135,4 +138,39 @@ mod controls {
         );
         assert!(first.file.is_none());
     }
+}
+
+/// For tests that expect a close to succeed: other tests spawn processes and
+/// take descriptor leases on this same process-wide barrier all the time, and
+/// the real close refuses while a fork window is open. This waits, on the
+/// barrier's own condition variable and bounded by `original`, until no fork
+/// window is open, and leaves the real `close_pair` to run unchanged. A test
+/// that provokes the busy refusal calls `close_pair` directly instead.
+#[cfg(test)]
+pub(crate) fn wait_for_open_fork_window(original: MonotonicDeadline) {
+    let barrier = direct_attachment_fork_barrier();
+    let mut state = barrier
+        .state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    while state.fork_quiesced && !original.remaining().is_zero() {
+        state = barrier
+            .changed
+            .wait_timeout(state, original.remaining())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .0;
+    }
+}
+
+/// Tests that close clock descriptors, hand off or adopt deadlines, or hold
+/// the process-wide fork barrier to provoke a busy refusal contend for that
+/// barrier with one another. They hold this guard so none observes another's
+/// brief hold; spawning tests elsewhere are handled by
+/// [`wait_for_open_fork_window`].
+#[cfg(test)]
+pub(crate) fn serialize_clock_close_tests() -> std::sync::MutexGuard<'static, ()> {
+    static CLOCK_CLOSE_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    CLOCK_CLOSE_TESTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }

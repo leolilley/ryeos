@@ -200,6 +200,7 @@ pub fn select_exchange_transport(
     supervisor_signing_key: &lillux::crypto::SigningKey,
     binding: &ExecutionChannelBinding,
     network_inputs: &ryeos_state::external_execution::transport::ExternalCapturedNetworkInputs,
+    window: &ryeos_state::external_execution::guest_window::GuestChannelWindow,
     request_response: Option<AttachedExternalExecutionChannel>,
 ) -> Result<AttachedExternalExecutionTransport> {
     if bootstrap.controller.http()?.exchanges_on_stream() {
@@ -208,6 +209,7 @@ pub fn select_exchange_transport(
             supervisor_signing_key,
             binding,
             network_inputs,
+            window,
         )?
         .into());
     }
@@ -503,6 +505,7 @@ mod tests {
                     connect_timeout_ms: 1_000,
                     request_timeout_ms: 2_000,
                     maximum_response_bytes: 64 * 1024,
+                    max_clock_skew_ms: None,
                 }.into(),
             tls_root_certificates_der_base64: roots,
             placement_thread_id: "T-placement".into(),
@@ -1376,8 +1379,10 @@ mod tests {
         let inputs = test_network_inputs(&bootstrap);
         let supervisor = lillux::crypto::SigningKey::from_bytes(&[43; 32]);
         let binding = stream_binding(&bootstrap, &supervisor, lillux::time::timestamp_millis());
+        let window = ryeos_state::external_execution::guest_window::GuestChannelWindow::starting_now_for_single_clock_harness(&binding).unwrap();
         let selected =
-            select_exchange_transport(&bootstrap, &supervisor, &binding, &inputs, None).unwrap();
+            select_exchange_transport(&bootstrap, &supervisor, &binding, &inputs, &window, None)
+                .unwrap();
         assert!(matches!(
             selected,
             AttachedExternalExecutionTransport::HttpJson(_)
@@ -1387,9 +1392,15 @@ mod tests {
             ryeos_state::external_execution::transport::EXTERNAL_CHANNEL_STREAM_CONTRACT.into();
         let http = reconnect_external_execution_channel(&bootstrap, &supervisor, &binding, &inputs)
             .unwrap();
-        let selected =
-            select_exchange_transport(&bootstrap, &supervisor, &binding, &inputs, Some(http))
-                .unwrap();
+        let selected = select_exchange_transport(
+            &bootstrap,
+            &supervisor,
+            &binding,
+            &inputs,
+            &window,
+            Some(http),
+        )
+        .unwrap();
         assert!(matches!(
             selected,
             AttachedExternalExecutionTransport::ChannelStream(_)
@@ -1398,7 +1409,10 @@ mod tests {
         // A stream contract whose binding is not this supervisor's opens
         // nothing, not even the request/response channel.
         let other = lillux::crypto::SigningKey::from_bytes(&[44; 32]);
-        assert!(select_exchange_transport(&bootstrap, &other, &binding, &inputs, None).is_err());
+        assert!(
+            select_exchange_transport(&bootstrap, &other, &binding, &inputs, &window, None)
+                .is_err()
+        );
     }
 
     #[test]
@@ -1411,18 +1425,20 @@ mod tests {
         let supervisor = lillux::crypto::SigningKey::from_bytes(&[41; 32]);
         let now = lillux::time::timestamp_millis();
         let binding = stream_binding(&bootstrap, &supervisor, now);
+        let window = ryeos_state::external_execution::guest_window::GuestChannelWindow::starting_now_for_single_clock_harness(&binding).unwrap();
         stream_transport::connect_external_execution_stream(
             &bootstrap,
             &supervisor,
             &binding,
             &inputs,
+            &window,
         )
         .unwrap();
 
         let other = lillux::crypto::SigningKey::from_bytes(&[42; 32]);
         assert!(
             stream_transport::connect_external_execution_stream(
-                &bootstrap, &other, &binding, &inputs,
+                &bootstrap, &other, &binding, &inputs, &window,
             )
             .is_err(),
             "a binding attached to another supervisor key must not open a stream"
@@ -1431,18 +1447,24 @@ mod tests {
         let lifetime_ms = i64::from(
             bootstrap.execution_timeout_seconds + bootstrap.post_execution_timeout_seconds,
         ) * 1_000;
-        let expired = stream_binding(&bootstrap, &supervisor, now - lifetime_ms - 1_000);
-        let refusal = stream_transport::connect_external_execution_stream(
-            &bootstrap,
-            &supervisor,
-            &expired,
-            &inputs,
-        )
-        .err()
-        .expect("an expired binding must not open a stream");
+        // A window is measured on the guest's own clock from an anchor taken
+        // before the binding was requested, so a binding is expired exactly
+        // when its anchor is older than the window, whatever its absolute
+        // times say.
+        let mut aged = lillux::time::LocalClockAnchor::capture()
+            .unwrap()
+            .coordinate()
+            .clone();
+        aged.tick_ns -= u64::try_from(lifetime_ms + 1_000).unwrap() * 1_000_000;
+        let expired = stream_binding(&bootstrap, &supervisor, now);
+        let expired_window =
+            ryeos_state::external_execution::guest_window::GuestChannelWindow::derive(
+                &lillux::time::LocalClockAnchor::from_retained(aged).unwrap(),
+                &expired,
+            );
         assert!(
-            format!("{refusal:#}").contains("already expired"),
-            "{refusal:#}"
+            format!("{:#}", expired_window.unwrap_err()).contains("already elapsed"),
+            "an aged anchor must leave no window"
         );
     }
 }

@@ -447,6 +447,7 @@ async fn prepare_public_ordinary_fixture(recorded: bool) -> anyhow::Result<Ordin
         connect_timeout_ms: 1000,
         request_timeout_ms: 5000,
         maximum_response_bytes: 2 * 1024 * 1024,
+        max_clock_skew_ms: None,
         network_inputs: ExternalNetworkInputPolicy {
             resolver: ExternalNetworkInputSelection {
                 source: "/etc/resolv.conf".into(),

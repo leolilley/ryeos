@@ -92,11 +92,51 @@ WHEN NEW.binding_digest != OLD.binding_digest OR NEW.direction != OLD.direction
 BEGIN SELECT RAISE(ABORT, 'external frame cannot be rewritten or reapplied'); END;
 "#;
 
+/// How a journal judges a frame's channel lifetime and execution deadline.
+/// The controller runtime database judges them on the controller's wall clock,
+/// which issued the binding. A guest journal judges them on the guest's own
+/// local window and never reads a wall clock it cannot vouch for.
+#[derive(Clone, Copy)]
+pub enum FrameLifetimeCheck<'a> {
+    ControllerWall,
+    GuestWindow(&'a super::guest_window::GuestChannelWindow),
+}
+
+impl FrameLifetimeCheck<'_> {
+    pub(super) fn decode_and_verify(
+        &self,
+        wire: &[u8],
+        binding: &ExecutionChannelBinding,
+    ) -> Result<AuthenticatedExecutionFrame> {
+        match self {
+            Self::ControllerWall => SignedExecutionFrame::decode_and_verify(
+                wire,
+                binding,
+                lillux::time::timestamp_millis(),
+            ),
+            Self::GuestWindow(window) => {
+                SignedExecutionFrame::decode_and_verify_in_guest_window(wire, binding, window)
+            }
+        }
+    }
+
+    fn execution_elapsed(&self, binding: &ExecutionChannelBinding) -> bool {
+        match self {
+            Self::ControllerWall => {
+                lillux::time::timestamp_millis() >= binding.execution_deadline_ms
+            }
+            Self::GuestWindow(window) => window.execution_elapsed(),
+        }
+    }
+}
+
 /// Protected owner-specific checks; none has a permissive default. Shared
 /// authentication, ordering, revocation and deadline checks cannot be replaced.
 /// Implementations query the supplied connection (the caller's transaction),
 /// never reconstruct authority from project files or another database.
 pub trait JournalOwner {
+    /// The clock authority this owner's journal judges frame lifetimes by.
+    fn frame_lifetime(&self) -> FrameLifetimeCheck<'_>;
     /// Check exact retained authority, including duplicate/idempotent requests.
     /// This must allow historical evidence under a quarantined/expired owner.
     fn require_owner(&self, conn: &Connection, binding: &ExecutionChannelBinding) -> Result<()>;
@@ -222,8 +262,7 @@ pub fn record_revocation(
     wire: &[u8],
 ) -> Result<bool> {
     let binding = load_binding(tx, placement)?;
-    let verified =
-        SignedExecutionFrame::decode_and_verify(wire, &binding, lillux::time::timestamp_millis())?;
+    let verified = owner.frame_lifetime().decode_and_verify(wire, &binding)?;
     if verified.frame().direction != ChannelDirection::OwnerToSupervisor
         || !matches!(verified.frame().payload, ExecutionChannelPayload::Cancel)
         || wire.len() as u64 > TERMINAL_CONTROL_BYTES
@@ -271,8 +310,7 @@ pub fn append_frame(
     wire: &[u8],
 ) -> Result<bool> {
     let binding = load_binding(tx, placement)?;
-    let now = lillux::time::timestamp_millis();
-    let verified = SignedExecutionFrame::decode_and_verify(wire, &binding, now)?;
+    let verified = owner.frame_lifetime().decode_and_verify(wire, &binding)?;
     let frame = verified.frame();
     if matches!(frame.payload, ExecutionChannelPayload::Cancel) {
         let retained: Option<String> = tx
@@ -374,7 +412,7 @@ pub fn append_frame(
     let next = ChannelPhase::parse(&state)?.advance(
         completion.as_deref(),
         &frame.payload,
-        now < binding.execution_deadline_ms,
+        !owner.frame_lifetime().execution_elapsed(&binding),
     )?;
     let ordinal: i64 = tx.query_row(
         "SELECT COALESCE(MAX(ordinal),0)+1 FROM external_execution_frame WHERE binding_digest=?1",
@@ -933,7 +971,7 @@ pub fn prepare_frame(
         signing_key,
     )?;
     let wire = lillux::canonical_json(&serde_json::to_value(signed)?)?.into_bytes();
-    SignedExecutionFrame::decode_and_verify(&wire, &binding, lillux::time::timestamp_millis())
+    owner.frame_lifetime().decode_and_verify(&wire, &binding)
 }
 
 /// Recover or author an exact signed acknowledgement of the peer frame's
@@ -1350,7 +1388,7 @@ pub fn claim_application(
         sequence,
         &stored_digest,
         wire.as_bytes(),
-        lillux::time::timestamp_millis(),
+        owner.frame_lifetime(),
     )?;
     owner.authorize_frame(tx, &binding, &verified.frame().payload)?;
     let non_input_observation = matches!(
@@ -1368,7 +1406,7 @@ pub fn claim_application(
     {
         bail!("external execution is durably revoked");
     }
-    if lillux::time::timestamp_millis() >= binding.execution_deadline_ms
+    if owner.frame_lifetime().execution_elapsed(&binding)
         && is_execution_input(direction, &verified.frame().payload)
     {
         bail!("external execution deadline passed before application");
@@ -1482,15 +1520,39 @@ pub fn finish_application(
     Ok(())
 }
 
-fn authenticate_retained_frame(
+/// What a retained frame is verified against: the instant it was issued, or a
+/// live lifetime check.
+enum RetainedFrameValidation<'a> {
+    At(i64),
+    Lifetime(FrameLifetimeCheck<'a>),
+}
+
+impl From<i64> for RetainedFrameValidation<'_> {
+    fn from(instant_ms: i64) -> Self {
+        Self::At(instant_ms)
+    }
+}
+
+impl<'a> From<FrameLifetimeCheck<'a>> for RetainedFrameValidation<'a> {
+    fn from(check: FrameLifetimeCheck<'a>) -> Self {
+        Self::Lifetime(check)
+    }
+}
+
+fn authenticate_retained_frame<'a>(
     binding: &ExecutionChannelBinding,
     direction: ChannelDirection,
     sequence: i64,
     stored_digest: &str,
     wire: &[u8],
-    validation_instant_ms: i64,
+    lifetime: impl Into<RetainedFrameValidation<'a>>,
 ) -> Result<AuthenticatedExecutionFrame> {
-    let verified = SignedExecutionFrame::decode_and_verify(wire, binding, validation_instant_ms)?;
+    let verified = match lifetime.into() {
+        RetainedFrameValidation::At(instant_ms) => {
+            SignedExecutionFrame::decode_and_verify(wire, binding, instant_ms)?
+        }
+        RetainedFrameValidation::Lifetime(check) => check.decode_and_verify(wire, binding)?,
+    };
     if verified.digest() != stored_digest
         || verified.frame().direction != direction
         || i64::try_from(verified.frame().sequence)? != sequence
@@ -2493,6 +2555,10 @@ mod tests {
     struct TestOwner;
 
     impl JournalOwner for TestOwner {
+        fn frame_lifetime(&self) -> FrameLifetimeCheck<'_> {
+            FrameLifetimeCheck::ControllerWall
+        }
+
         fn require_owner(
             &self,
             conn: &Connection,

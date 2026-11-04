@@ -77,6 +77,7 @@ pub fn connect_external_execution_stream(
     supervisor_signing_key: &lillux::crypto::SigningKey,
     binding: &ExecutionChannelBinding,
     network_inputs: &ExternalCapturedNetworkInputs,
+    window: &ryeos_state::external_execution::guest_window::GuestChannelWindow,
 ) -> Result<AttachedExternalExecutionStream> {
     bootstrap.validate_attached_binding(
         binding,
@@ -99,12 +100,12 @@ pub fn connect_external_execution_stream(
                 .context("decode admitted external TLS root")
         })
         .collect::<Result<Vec<_>>>()?;
-    let now = lillux::time::timestamp_millis();
-    let remaining_ms = binding
-        .expires_at_ms
-        .checked_sub(now)
-        .filter(|remaining| *remaining > 0)
-        .context("external channel stream binding has already expired")?;
+    // The window's own suspend-inclusive expiry, not a duration restarted here.
+    let lifetime = window.expiry_monotonic();
+    ensure!(
+        !lifetime.has_elapsed(),
+        "external channel stream window has already elapsed"
+    );
     assemble(
         StreamEndpoint {
             network,
@@ -117,7 +118,7 @@ pub fn connect_external_execution_stream(
             setup_timeout: Duration::from_millis(u64::from(http.connect_timeout_ms)),
             request_timeout: Duration::from_millis(u64::from(http.request_timeout_ms)),
             maximum_response_bytes: http.maximum_response_bytes,
-            lifetime: Duration::from_millis(u64::try_from(remaining_ms)?),
+            lifetime,
         },
     )
 }
@@ -137,7 +138,7 @@ struct StreamBounds {
     setup_timeout: Duration,
     request_timeout: Duration,
     maximum_response_bytes: u64,
-    lifetime: Duration,
+    lifetime: MonotonicDeadline,
 }
 
 fn assemble(
@@ -155,7 +156,7 @@ fn assemble(
         !bounds.setup_timeout.is_zero()
             && !bounds.request_timeout.is_zero()
             && bounds.maximum_response_bytes > 0
-            && !bounds.lifetime.is_zero(),
+            && !bounds.lifetime.has_elapsed(),
         "external channel stream bounds must be nonzero"
     );
     Ok(AttachedExternalExecutionStream {
@@ -168,7 +169,7 @@ fn assemble(
         maximum_response_bytes: usize::try_from(bounds.maximum_response_bytes)
             .unwrap_or(usize::MAX)
             .min(MAX_EXTERNAL_CHANNEL_STREAM_OUTBOUND_BYTES),
-        lifetime: MonotonicDeadline::after(bounds.lifetime),
+        lifetime: bounds.lifetime,
         socket: None,
         backoff: Duration::ZERO,
         redial_after: None,
@@ -207,7 +208,7 @@ pub mod test_support {
                 setup_timeout: spec.request_timeout,
                 request_timeout: spec.request_timeout,
                 maximum_response_bytes: spec.maximum_response_bytes,
-                lifetime: spec.lifetime,
+                lifetime: MonotonicDeadline::after(spec.lifetime),
             },
         )
     }

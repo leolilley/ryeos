@@ -2758,6 +2758,10 @@ fn require_session_protocol_channel(binding: &ExecutionChannelBinding) -> Result
 pub(super) struct NodeJournalOwner;
 
 impl JournalOwner for NodeJournalOwner {
+    fn frame_lifetime(&self) -> ryeos_state::external_execution::journal::FrameLifetimeCheck<'_> {
+        ryeos_state::external_execution::journal::FrameLifetimeCheck::ControllerWall
+    }
+
     fn permits_execution_input_transport(
         &self,
         conn: &Connection,

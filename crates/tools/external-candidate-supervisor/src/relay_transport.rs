@@ -14,6 +14,7 @@ use lillux::time::{Duration, MonotonicDeadline};
 use ryeos_external_execution::transport::{
     ExternalExecutionChannelTransport, ExternalTransportExchange, ExternalTransportStepFailure,
 };
+use ryeos_state::external_execution::guest_window::GuestChannelWindow;
 use ryeos_state::external_execution::transport::{
     ExternalChannelAttachRequest, ExternalChannelAttachResponse, ExternalChannelExchangeRequest,
     ExternalChannelExchangeResponse, ExternalControllerFileRelayContract,
@@ -265,8 +266,10 @@ impl OriginalRelayMailbox {
             .open_pinned_regular(OsStr::new(ATTACH_REQUEST), false)?
             .is_none()
         {
-            self.bootstrap
-                .validate_at(lillux::time::timestamp_millis())?;
+            self.bootstrap.validate_fresh_on_guest(
+                lillux::time::timestamp_millis(),
+                &lillux::time::wall_clock_trust(),
+            )?;
         }
         self.files.publish_exact(ATTACH_REQUEST, &request_bytes)?;
         let response: ExternalChannelAttachResponse = self.files.wait_verified(
@@ -295,6 +298,7 @@ impl OriginalRelayMailbox {
     pub fn into_attached(
         self,
         attachment: AuthenticatedRelayAttachment,
+        window: GuestChannelWindow,
     ) -> Result<AttachedFileRelayChannel> {
         ensure!(
             attachment.bootstrap_digest == self.bootstrap.digest()?
@@ -306,6 +310,7 @@ impl OriginalRelayMailbox {
         Ok(AttachedFileRelayChannel {
             mailbox: self,
             binding: attachment.binding,
+            window,
         })
     }
 
@@ -317,6 +322,7 @@ impl OriginalRelayMailbox {
         request: &ExternalChannelAttachRequest,
         binding: &ExecutionChannelBinding,
         expected_response_digest: &str,
+        window: GuestChannelWindow,
         deadline: MonotonicDeadline,
     ) -> Result<AttachedFileRelayChannel> {
         request.validate_for_bootstrap(&self.bootstrap)?;
@@ -351,13 +357,15 @@ impl OriginalRelayMailbox {
             supervisor_public_key: request.supervisor_public_key.clone(),
             response_digest: expected_response_digest.to_owned(),
         };
-        self.into_attached(attachment)
+        self.into_attached(attachment, window)
     }
 }
 
 pub struct AttachedFileRelayChannel {
     mailbox: OriginalRelayMailbox,
     binding: ExecutionChannelBinding,
+    /// The channel's lifetime on this guest's own clock.
+    window: GuestChannelWindow,
 }
 
 impl ExternalExecutionChannelTransport for AttachedFileRelayChannel {
@@ -383,10 +391,10 @@ impl ExternalExecutionChannelTransport for AttachedFileRelayChannel {
                 anyhow::anyhow!("external relay exchange deadline elapsed before file publication"),
             ));
         }
-        let verified = SignedExecutionFrame::decode_and_verify(
+        let verified = SignedExecutionFrame::decode_and_verify_in_guest_window(
             canonical_supervisor_frame,
             &self.binding,
-            lillux::time::timestamp_millis(),
+            &self.window,
         )
         .map_err(ExternalTransportStepFailure::Fatal)?;
         if verified.frame().direction != ChannelDirection::SupervisorToOwner {

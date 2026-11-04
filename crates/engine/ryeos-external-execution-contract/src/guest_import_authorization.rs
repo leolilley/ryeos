@@ -223,6 +223,12 @@ pub struct GuestImportAuthorization {
     pub guest_runtime_manifest_hash: String,
     pub attachment_deadline_ms: i64,
     pub admission_deadline_ms: i64,
+    /// How far the guest's wall clock may stand past `admission_deadline_ms`
+    /// before the guest refuses a fresh import, copied from the signed
+    /// controller transport contract. Absent when that contract declares none,
+    /// which leaves the document's bytes as they were before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_clock_skew_ms: Option<u32>,
     pub nonce_sha256: String,
     pub ticket: GuestImportTicket,
     pub guest_inputs: ExternalGuestInputProjection,
@@ -301,6 +307,7 @@ impl GuestImportAuthorization {
                 && self.admission_deadline_ms <= self.attachment_deadline_ms,
             "guest import admission deadline exceeds attachment"
         );
+        crate::clock_skew::validate_declared_max_clock_skew_ms(self.max_clock_skew_ms)?;
         self.guest_inputs.validate()?;
         ensure!(
             self.guest_inputs.base_snapshot.snapshot_hash == self.base_snapshot_hash,
@@ -315,14 +322,31 @@ impl GuestImportAuthorization {
         Ok(())
     }
 
-    /// Fresh import is forbidden after this signed deadline. Recovery may
-    /// still verify the signature and exact assignment after it has elapsed.
+    /// Fresh import is forbidden after this signed deadline, judged on the
+    /// clock of the node that wrote it. Recovery may still verify the
+    /// signature and exact assignment after it has elapsed.
     pub fn require_fresh_admission_at(&self, now_ms: i64) -> Result<()> {
         ensure!(
             now_ms > 0 && self.admission_deadline_ms > now_ms,
             "guest import admission deadline has elapsed"
         );
         Ok(())
+    }
+
+    /// The same freshness judged by a guest whose wall clock may disagree with
+    /// the controller's by up to the declared tolerance.
+    pub fn require_fresh_admission_on_guest(
+        &self,
+        guest_now_ms: i64,
+        guest_clock_trust: &dyn std::fmt::Display,
+    ) -> Result<()> {
+        crate::clock_skew::require_fresh_before(
+            "guest import admission deadline",
+            self.admission_deadline_ms,
+            guest_now_ms,
+            crate::clock_skew::effective_max_clock_skew_ms(self.max_clock_skew_ms),
+            guest_clock_trust,
+        )
     }
 
     pub fn signing_bytes(&self) -> Result<Vec<u8>> {

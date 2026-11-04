@@ -3472,6 +3472,25 @@ pub fn apply_external_qualification_native_settlement(
 /// Finalize exactly one occurrence-scoped channel after bootstrap
 /// authentication.  All mutable limits and identities are derived from the
 /// retained session, allocation and signed binding rather than request data.
+/// A repeated attachment is answered with the retained binding only for the
+/// very supervisor that made the first one. A guest whose state root was lost
+/// mints a new signing key, so it can never take over the retained binding and
+/// start a fresh, later window under it.
+fn require_attachment_replay_matches(
+    existing: &ryeos_state::external_execution::ExecutionChannelBinding,
+    supervisor_public_key: &str,
+    program_digest: &str,
+    execution_mode: &ryeos_state::external_execution::ExternalExecutionMode,
+) -> Result<()> {
+    ensure!(
+        existing.supervisor_public_key == supervisor_public_key
+            && existing.candidate_program_digest == program_digest
+            && &existing.execution_mode == execution_mode,
+        "external channel attachment replay changed its exact supervisor or program"
+    );
+    Ok(())
+}
+
 pub fn attach_external_execution_channel(
     state: &AppState,
     authenticated: &AuthenticatedExternalOccurrence,
@@ -3509,14 +3528,15 @@ pub fn attach_external_execution_channel(
         .state_store
         .optional_external_execution_channel(&authenticated.placement_thread_id)?
     {
-        ensure!(
-            existing.supervisor_public_key == supervisor_public_key
-                && existing.candidate_program_digest == program.digest()?
-                && existing.execution_mode == program.execution_mode(),
-            "external channel attachment replay changed its exact supervisor or program"
-        );
+        require_attachment_replay_matches(
+            &existing,
+            supervisor_public_key,
+            &program.digest()?,
+            &program.execution_mode(),
+        )?;
         return Ok(existing);
     }
+    controller_clock::require_for_new_windows(state)?;
     let nonce = lillux::crypto::generate_random_bytes::<32>();
     let binding = build_external_execution_channel_binding(
         &allocation.reservation,
@@ -5622,6 +5642,7 @@ impl<'a> ExternalPlacementOwner<'a> {
                 prior.reservation.startup_deadline_ms,
             )
         } else {
+            controller_clock::require_for_new_windows(&*self.state)?;
             let now = lillux::time::timestamp_millis();
             (
                 now,
@@ -5959,6 +5980,7 @@ impl<'a> ExternalPlacementOwner<'a> {
             );
             expected
         } else {
+            controller_clock::require_for_new_windows(&*self.state)?;
             let now = lillux::time::timestamp_millis();
             let contact_deadline_ms = now
                 .checked_add(i64::from(contract.contact_timeout_seconds) * 1_000)
@@ -6401,6 +6423,7 @@ pub fn prepare_external_qualification_start_for_invocation<'a>(
         "admitted_adapter_request_base64": &admitted_adapter_request_base64,
     }))?;
     let startup_budget_ms = qualification_startup_budget_ms(&contract)?;
+    controller_clock::require_for_new_windows(state)?;
     let now = lillux::time::timestamp_millis();
     let reservation = ExternalAllocationReservation {
         schema: EXTERNAL_ALLOCATION_RESERVATION_SCHEMA,
@@ -8911,6 +8934,7 @@ mod channel_stream_admission_tests;
 #[cfg(test)]
 mod lease_ready_loopback_tests;
 
+mod controller_clock;
 mod lease_lifecycle;
 mod lease_ready_gate;
 pub(crate) use lease_lifecycle::admit_turn_on_external_lease;
@@ -9246,6 +9270,7 @@ fn sign_guest_import_ticket(
         guest_runtime_manifest_hash: contract.guest_runtime_manifest_hash.clone(),
         attachment_deadline_ms: intent.attachment_deadline_ms,
         admission_deadline_ms: intent.attachment_deadline_ms,
+        max_clock_skew_ms: contract.controller_transport.declared_max_clock_skew_ms(),
         nonce_sha256: lillux::sha256_hex(&lillux::crypto::generate_random_bytes::<32>()),
         ticket,
         guest_inputs: inputs.clone(),
@@ -12473,6 +12498,7 @@ mod tests {
                     maximum_frames: 1024,
                     poll_interval_ms: 1000,
                     poll_deadline_ms: 30_000,
+                    max_clock_skew_ms: None,
                 },
             );
         contract.settings = serde_json::json!({"owner_id": "workspace-a"});

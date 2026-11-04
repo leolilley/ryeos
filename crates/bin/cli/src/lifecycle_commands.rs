@@ -2315,6 +2315,11 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
         ));
     }
 
+    // The wall clock the node issues external execution windows from. Always
+    // reported; a node policy that requires a synchronized clock turns an
+    // unsatisfied reading into a failure.
+    checks.push(wall_clock_check(&config.app_root, initialized));
+
     if initialized {
         match ryeos_app::bundle_transaction::inspect_bundle_transactions(&config.app_root) {
             Ok(diagnostics) if !diagnostics.invalid.is_empty() => checks.push(check(
@@ -2640,6 +2645,78 @@ fn durable_identity_check(
             "durable_identity",
             FAIL,
             serde_json::json!({ "error": format!("{error:#}") }),
+        ),
+    }
+}
+
+/// The node's wall-clock trust against the clock requirement its signed
+/// execution policy declares, if any. Reporting needs no policy: without one
+/// (or without an initialized node) the row is informational.
+fn wall_clock_check(
+    app_root: &std::path::Path,
+    initialized: bool,
+) -> ryeos_core_tools::actions::doctor::CheckResult {
+    use ryeos_core_tools::actions::doctor::{FAIL, OK, WARN};
+    let trust = lillux::time::wall_clock_trust();
+    let requirement = if initialized {
+        (|| -> Result<_> {
+            let isolation =
+                ryeos_node_runtime::engine_init::load_locked_registered_definition_isolation(
+                    app_root,
+                )?;
+            let node_trust = isolation
+                .registered_generation_node_trust()
+                .context("retained isolation generation omitted node trust")?;
+            let policy = crate::node_descriptors::load_verified_policy_snapshot_with_trust(
+                app_root, node_trust,
+            )?;
+            Ok(policy
+                .require::<ryeos_node_runtime::node_policy::sections::execution::NodeExecutionAdmissionPolicy>()?
+                .external_wall_clock_requirement)
+        })()
+    } else {
+        Ok(None)
+    };
+    let synced = matches!(trust, lillux::time::WallClockTrust::Synced { .. });
+    match requirement {
+        Ok(Some(requirement)) => match requirement.require(&trust) {
+            Ok(()) => check(
+                "wall_clock",
+                OK,
+                serde_json::json!({ "trust": trust, "requirement": requirement }),
+            ),
+            Err(error) => check(
+                "wall_clock",
+                FAIL,
+                serde_json::json!({
+                    "trust": trust,
+                    "requirement": requirement,
+                    "message": format!("{error:#}"),
+                    "fix": "synchronize this host's clock, or change `external_wall_clock_requirement` in the signed execution policy",
+                }),
+            ),
+        },
+        Ok(None) if synced => check(
+            "wall_clock",
+            OK,
+            serde_json::json!({ "trust": trust, "requirement": "none (report only)" }),
+        ),
+        Ok(None) => check(
+            "wall_clock",
+            WARN,
+            serde_json::json!({
+                "trust": trust,
+                "requirement": "none (report only)",
+                "note": "external execution windows are issued from this clock; guests tolerate a declared skew",
+            }),
+        ),
+        Err(error) => check(
+            "wall_clock",
+            WARN,
+            serde_json::json!({
+                "trust": trust,
+                "note": format!("the clock requirement could not be read: {error:#}"),
+            }),
         ),
     }
 }

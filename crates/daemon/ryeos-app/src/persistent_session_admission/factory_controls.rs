@@ -138,6 +138,7 @@ pub(crate) fn populate_fixture(
         resource_authority: Some(resources.clone()),
         producer_resource_ceiling: None,
         external_lease_budget: None,
+        external_wall_clock_requirement: None,
     };
     policy.validate().unwrap();
     state.node_policy = Arc::new(

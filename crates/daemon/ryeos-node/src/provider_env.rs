@@ -140,6 +140,7 @@ mod tests {
             resource_authority: None,
             producer_resource_ceiling: None,
             external_lease_budget: None,
+            external_wall_clock_requirement: None,
         }
     }
 

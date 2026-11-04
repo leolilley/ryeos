@@ -1918,6 +1918,7 @@ mod offline_fixture_tests {
                 guest_runtime_manifest_hash: digest('9'),
                 attachment_deadline_ms,
                 admission_deadline_ms: attachment_deadline_ms,
+                max_clock_skew_ms: None,
                 nonce_sha256: digest('0'),
                 ticket,
                 guest_inputs: inputs,
