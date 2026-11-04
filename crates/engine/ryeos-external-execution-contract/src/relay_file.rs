@@ -238,7 +238,7 @@ pub enum RelayFileAdapterResponse {
     },
     /// Exact HTTP 404 from this occurrence's signed file GET route. This is
     /// transport status only; it does not prove that the file or sandbox is
-    /// absent. The raw Render status needs an installed missing-file probe.
+    /// absent. The raw provider status needs an installed missing-file probe.
     DownloadHttpNotFound {
         request_digest: String,
     },

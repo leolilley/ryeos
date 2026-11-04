@@ -544,7 +544,7 @@ mod tests {
             schema: BOOTSTRAP_INTENT_SCHEMA,
             operation_id: String::new(),
             owner_principal: format!("fp:{}", "1".repeat(64)),
-            provider_id: "render-sandbox-early-access".into(),
+            provider_id: "test-backend".into(),
             provider_group_id: format!("sbg-{group}"),
             production_binding_digest: "2".repeat(64),
             bootstrap_profile_digest: "3".repeat(64),

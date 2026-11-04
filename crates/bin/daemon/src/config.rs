@@ -340,7 +340,7 @@ mod tests {
             "--active-bundle",
             "core",
             "--active-bundle",
-            "render-sandbox",
+            "test-bundle",
         ])
         .unwrap();
         assert!(matches!(
@@ -349,7 +349,7 @@ mod tests {
                 schema_cut: false,
                 active_bundles,
                 ..
-            }) if active_bundles == ["core", "render-sandbox"]
+            }) if active_bundles == ["core", "test-bundle"]
         ));
     }
 }
