@@ -9801,8 +9801,11 @@ pub mod test_support {
                 // occurrence identity form.
                 occurrence_id: format!("sbx-{}", &reserved.reservation.request_digest[..32]),
                 provider_observation_digest: lillux::sha256_hex(
-                    format!("composed-allocation:{}", reserved.reservation.request_digest)
-                        .as_bytes(),
+                    format!(
+                        "composed-allocation:{}",
+                        reserved.reservation.request_digest
+                    )
+                    .as_bytes(),
                 ),
             },
             ExternalObservationTiming::Startup {
@@ -13371,8 +13374,8 @@ mod tests {
         use ryeos_external_execution_contract::ExternalProviderConnectorDescendants::{
             Contained, InProcessGroup,
         };
-        let readiness = |cgroup_scope, pid_namespace, trusted_process_group| {
-            DescendantContainmentReadiness {
+        let readiness =
+            |cgroup_scope, pid_namespace, trusted_process_group| DescendantContainmentReadiness {
                 cgroup_scope,
                 pid_namespace: if pid_namespace {
                     PidNamespaceContainmentQualification {
@@ -13383,20 +13386,54 @@ mod tests {
                     PidNamespaceContainmentQualification::not_probed("unavailable")
                 },
                 trusted_process_group,
-            }
-        };
+            };
         // (declared, enforced, cgroup, pid namespace, trusted lane) -> admission
         let table = [
             (InProcessGroup, true, false, false, false, Some(NotRequired)),
-            (InProcessGroup, false, false, false, false, Some(NotRequired)),
+            (
+                InProcessGroup,
+                false,
+                false,
+                false,
+                false,
+                Some(NotRequired),
+            ),
             (Contained, true, false, false, false, None),
             (Contained, true, false, false, true, None),
-            (Contained, true, false, true, false, Some(Enforced(PidNamespaceInit))),
-            (Contained, true, true, false, false, Some(Enforced(CgroupScope))),
-            (Contained, true, true, true, true, Some(Enforced(CgroupScope))),
+            (
+                Contained,
+                true,
+                false,
+                true,
+                false,
+                Some(Enforced(PidNamespaceInit)),
+            ),
+            (
+                Contained,
+                true,
+                true,
+                false,
+                false,
+                Some(Enforced(CgroupScope)),
+            ),
+            (
+                Contained,
+                true,
+                true,
+                true,
+                true,
+                Some(Enforced(CgroupScope)),
+            ),
             (Contained, false, true, true, false, None),
             (Contained, false, false, false, false, None),
-            (Contained, false, false, false, true, Some(TrustedProcessGroup)),
+            (
+                Contained,
+                false,
+                false,
+                false,
+                true,
+                Some(TrustedProcessGroup),
+            ),
         ];
         for (declared, enforced, cgroup, namespace, trusted, expected) in table {
             let observed = require_connector_descendant_containment(
@@ -13424,7 +13461,10 @@ mod tests {
         )
         .unwrap_err()
         .to_string();
-        assert!(error.contains("no qualified descendant containment"), "{error}");
+        assert!(
+            error.contains("no qualified descendant containment"),
+            "{error}"
+        );
         assert!(error.contains("unavailable"), "{error}");
     }
 

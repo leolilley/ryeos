@@ -142,16 +142,16 @@ external_lifecycle_adapters:
     protocol: ryeos.external-execution.provider-declaration.v2
     targets: [{target}]
     connector: ryeos-synthetic-external-candidate-connector
-    connector_process_group: {connector_process_group}
+    connector_descendants: {connector_descendants}
     configuration_adapter: ryeos-synthetic-codex-external-configuration
     configuration_destination: environments.toml
     qualification_request_binding_protocol: null
 "#,
         "9".repeat(64),
-        connector_process_group = if connector_new_group {
-            "new"
+        connector_descendants = if connector_new_group {
+            "contained"
         } else {
-            "inherited"
+            "in_process_group"
         },
         provider_spec_sha256 = provider_spec_sha256,
         guest_admission = if independent_guest_runtime_admission {

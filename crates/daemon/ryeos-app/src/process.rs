@@ -1605,9 +1605,13 @@ mod tests {
         // Containment never quiesces; the refusal names why, whatever the
         // node qualified for cgroup scopes.
         let qualified = lillux::ProcessScopeCapability::ALL.into_iter().collect();
-        let error = quiesce_exact_process_group(&identity, &qualified, lillux::time::Duration::from_secs(1))
-            .err()
-            .expect("PID-namespace containment cannot be frozen");
+        let error = quiesce_exact_process_group(
+            &identity,
+            &qualified,
+            lillux::time::Duration::from_secs(1),
+        )
+        .err()
+        .expect("PID-namespace containment cannot be frozen");
         assert!(error.to_string().contains("cannot quiesce"), "{error:#}");
         let error = recover_quiesced_execution(&identity, lillux::time::Duration::from_secs(1))
             .err()

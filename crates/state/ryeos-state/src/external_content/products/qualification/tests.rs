@@ -822,7 +822,9 @@ fn signed_policy_distinguishes_scope_from_trusted_process_group_settlement() {
 
 #[test]
 fn containment_empty_settlement_is_ordered_between_the_trusted_group_and_a_scope() {
-    use VerifierProcessSettlementAuthority::{ContainmentEmpty, ScopeEmpty, TrustedProcessGroupAbsent};
+    use VerifierProcessSettlementAuthority::{
+        ContainmentEmpty, ScopeEmpty, TrustedProcessGroupAbsent,
+    };
     // (observed, minimum, accepted)
     for (observed, minimum, accepted) in [
         (ScopeEmpty, ScopeEmpty, true),

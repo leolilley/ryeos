@@ -1312,8 +1312,8 @@ fn signed_worker_admission_produces_real_external_candidate_capsule() {
 }
 
 #[test]
-fn signed_worker_admission_refuses_unsupported_connector_process_group() {
-    run_signed_worker_admission(SignedAdmissionCase::UnsupportedConnectorProcessGroup);
+fn signed_worker_admission_answers_contained_connector_descendants_from_reported_guarantees() {
+    run_signed_worker_admission(SignedAdmissionCase::ContainedConnectorDescendants);
 }
 
 #[test]
@@ -1329,7 +1329,7 @@ fn signed_runtime_selection_refuses_missing_claim_before_allocation() {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SignedAdmissionCase {
     Ready,
-    UnsupportedConnectorProcessGroup,
+    ContainedConnectorDescendants,
     MissingConnector,
     MissingRuntimeClaim,
 }
@@ -1415,7 +1415,7 @@ fn run_signed_worker_admission_on(
     state.started_at_iso = lillux::time::iso8601_now();
     let (external_bundle, external_trust, _) = install_signed_test_bundle(
         root.path(),
-        case == SignedAdmissionCase::UnsupportedConnectorProcessGroup,
+        case == SignedAdmissionCase::ContainedConnectorDescendants,
         true,
     );
     let external_artifacts = ryeos_app::external_artifacts::resolve_external_execution_artifacts(
@@ -1630,12 +1630,28 @@ fn run_signed_worker_admission_on(
         qualification_use.clone(),
         &placement_qualification,
     );
-    if case == SignedAdmissionCase::UnsupportedConnectorProcessGroup {
-        let error = admission.unwrap_err();
-        assert!(
-            format!("{error:#}").contains("trusted controller process-group session"),
-            "unexpected refusal: {error:#}"
-        );
+    if case == SignedAdmissionCase::ContainedConnectorDescendants {
+        // The declared `contained` requirement is answered by what this
+        // enforced node reports: admitted when it qualified a containment
+        // mechanism, refused naming the missing guarantee when it did not.
+        let reported = state
+            .isolation
+            .inspection()
+            .process_scope_readiness
+            .descendant_containment
+            .enforced_guarantee();
+        match reported {
+            Some(_) => {
+                admission.unwrap();
+            }
+            None => {
+                let error = admission.unwrap_err();
+                assert!(
+                    format!("{error:#}").contains("no qualified descendant containment"),
+                    "unexpected refusal: {error:#}"
+                );
+            }
+        }
         return;
     }
     let capsule_hash = admission.unwrap();

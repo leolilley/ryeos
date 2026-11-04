@@ -524,7 +524,12 @@ mod tests {
         );
         // Both qualified: the scope is preferred; the trusted lane is never
         // a guarantee of its own.
-        let both = classify(required_policy(), complete_capabilities(), digest(), qualified());
+        let both = classify(
+            required_policy(),
+            complete_capabilities(),
+            digest(),
+            qualified(),
+        );
         assert_eq!(
             both.enforced_guarantee(),
             Some(DescendantContainmentGuarantee::CgroupScope)

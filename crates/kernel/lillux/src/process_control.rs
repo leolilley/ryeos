@@ -28,7 +28,9 @@ mod oci_lifecycle;
 #[cfg(target_os = "linux")]
 mod pid_namespace;
 #[cfg(target_os = "linux")]
-pub use pid_namespace::{PidNamespaceIdentity, PinnedPidNamespace, probe_pid_namespace_containment};
+pub use pid_namespace::{
+    PidNamespaceIdentity, PinnedPidNamespace, probe_pid_namespace_containment,
+};
 mod scope;
 pub use host_capability::{
     ACCOUNTING, CapabilityEvidence, CapabilityRequirement, CapabilityRequirementSpec, CgroupFacts,

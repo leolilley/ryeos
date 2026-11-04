@@ -210,8 +210,7 @@ pub(crate) fn prepare_external_qualification_local_materials(
                     )?,
                 ),
             };
-            let bound =
-                bound.context("qualification local Worker has no retained realizations")?;
+            let bound = bound.context("qualification local Worker has no retained realizations")?;
             let (mut mounts, realizations_env, leases) = bound.into_spawn_parts();
             ensure!(
                 !leases.is_empty(),
@@ -284,7 +283,8 @@ mod tests {
         DescendantContainmentReadiness, PidNamespaceContainmentQualification,
     };
     use ryeos_engine::protocols::descriptor::{
-        PersistentSessionCleanupAuthority as Cleanup, PersistentSessionWorkspaceAuthority as Workspace,
+        PersistentSessionCleanupAuthority as Cleanup,
+        PersistentSessionWorkspaceAuthority as Workspace,
     };
 
     fn protocol(cleanup: Cleanup, workspace: Workspace) -> PersistentSessionProtocol {
@@ -293,9 +293,10 @@ mod tests {
         );
         let descriptor: ryeos_engine::protocols::descriptor::ProtocolDescriptor =
             serde_yaml::from_str(signed).unwrap();
-        let mut session = ryeos_engine::protocols::validate_persistent_session_protocol(&descriptor)
-            .unwrap()
-            .clone();
+        let mut session =
+            ryeos_engine::protocols::validate_persistent_session_protocol(&descriptor)
+                .unwrap()
+                .clone();
         session.cleanup_authority = cleanup;
         session.workspace_authority = workspace;
         session
@@ -326,8 +327,8 @@ mod tests {
             ),
         )
         .unwrap();
-        let shipped = ryeos_engine::protocols::validate_persistent_session_protocol(&shipped)
-            .unwrap();
+        let shipped =
+            ryeos_engine::protocols::validate_persistent_session_protocol(&shipped).unwrap();
         assert_eq!(shipped.cleanup_authority, session.cleanup_authority);
         assert_eq!(shipped.workspace_authority, session.workspace_authority);
         contained_worker_launch_admission(&session, &readiness(true)).unwrap();

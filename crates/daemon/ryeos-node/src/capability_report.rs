@@ -678,7 +678,12 @@ fn add_pid_namespace_containment(
     };
     for name in [PID_NAMESPACE_TERMINATION, PID_NAMESPACE_RECOVERY] {
         if containment.qualified {
-            view.provide(name, source.clone(), PID_NAMESPACE_PROVIDER, containment.detail.clone());
+            view.provide(
+                name,
+                source.clone(),
+                PID_NAMESPACE_PROVIDER,
+                containment.detail.clone(),
+            );
         } else {
             view.refuse(name, containment.detail.clone());
         }

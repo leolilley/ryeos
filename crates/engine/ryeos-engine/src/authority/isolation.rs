@@ -110,7 +110,6 @@ impl<'a> RetainedContainment<'a> {
     }
 }
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RequestedLaunchLifecycle {
     Run,
@@ -2007,8 +2006,7 @@ impl IsolationRuntime {
                 .qualified
             {
                 return Err(refused(
-                    "PID-namespace descendant containment is not qualified on this node"
-                        .to_owned(),
+                    "PID-namespace descendant containment is not qualified on this node".to_owned(),
                 ));
             }
             return Ok(());
@@ -5054,10 +5052,9 @@ impl IsolationRuntime {
                 self.inspection.filesystem.proc_filesystem,
                 containment.is_cgroup(),
             ) {
-                (
-                    ryeos_isolation_protocol::IsolationProcFilesystem::PidNamespaceNested,
-                    false,
-                ) => ryeos_isolation_protocol::IsolationProcFilesystem::PidNamespace,
+                (ryeos_isolation_protocol::IsolationProcFilesystem::PidNamespaceNested, false) => {
+                    ryeos_isolation_protocol::IsolationProcFilesystem::PidNamespace
+                }
                 (selected, _) => selected,
             },
             pid_namespace: IsolationPidNamespace::Isolated,
@@ -10438,11 +10435,10 @@ mod tests {
         // A broader node ceiling than any one launch's retained authority.
         runtime.inspection.filesystem.proc_filesystem =
             ryeos_isolation_protocol::IsolationProcFilesystem::PidNamespaceNested;
-        runtime.inspection.requires_capabilities = vec![
-            lillux::process_control::CapabilityRequirement::from(
+        runtime.inspection.requires_capabilities =
+            vec![lillux::process_control::CapabilityRequirement::from(
                 lillux::process_control::ISOLATION_NAMESPACES,
-            ),
-        ];
+            )];
         assert!(
             runtime.inspection.nested_sandbox(),
             "fixture node must permit a nested sandbox so the PID-namespace case proves it is withheld"
