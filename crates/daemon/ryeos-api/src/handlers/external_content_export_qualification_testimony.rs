@@ -165,7 +165,7 @@ mod tests {
         let valid = serde_json::json!({
             "remote": "hosted",
             "qualification_hash": "a".repeat(64),
-            "acceptance_policy_ref": "config:render/snapshot-acceptance-policy",
+            "acceptance_policy_ref": "config:test/snapshot-acceptance-policy",
         });
         serde_json::from_value::<Request>(valid.clone())
             .unwrap()
@@ -180,7 +180,7 @@ mod tests {
             ("remote", serde_json::json!("")),
             ("qualification_hash", serde_json::json!("A".repeat(64))),
             ("qualification_hash", serde_json::json!("b".repeat(63))),
-            ("acceptance_policy_ref", serde_json::json!("render/policy")),
+            ("acceptance_policy_ref", serde_json::json!("test/policy")),
             ("acceptance_policy_ref", serde_json::json!("config:")),
         ] {
             let mut invalid = valid.clone();

@@ -769,7 +769,7 @@ mod tests {
     #[test]
     fn runtime_snapshot_request_cannot_supply_upload_or_filesystem_authority() {
         let required = json!({
-            "binding_id": "signed-render-producer",
+            "binding_id": "signed-test-producer",
             "source": {
                 "kind": "captured_product",
                 "witness_hash": "a".repeat(64),
@@ -785,7 +785,7 @@ mod tests {
             super::RuntimeSnapshotSourceRequest::CapturedProduct { .. }
         ));
         let materialized = json!({
-            "binding_id": "signed-render-producer",
+            "binding_id": "signed-test-producer",
             "source": {
                 "kind": "bundle_materialization",
                 "materialization_binding_id": "signed-owner-materializer",

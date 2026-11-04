@@ -326,7 +326,7 @@ fn run(
         executable_search: Vec::new(),
         environment: BTreeMap::new(),
     };
-    // The native fixture owns its exact network-input bytes. Render Sandboxes
+    // The native fixture owns its exact network-input bytes. Provider sandboxes
     // need not expose /etc/hosts, and this probe tests native installation,
     // not a host's ambient network configuration.
     let resolver_source = fixture_path.join("network-resolver");

@@ -2103,7 +2103,7 @@ mod tests {
         let request = LifecycleRuntimeProbeRequest {
             schema: 2,
             protocol: LIFECYCLE_ADAPTER_PROTOCOL.into(),
-            adapter_id: "render-sandbox-early-access".into(),
+            adapter_id: "test-lease-backend".into(),
             adapter_artifact_hash: "a".repeat(64),
             settings_digest: "b".repeat(64),
             binding_hash: "c".repeat(64),
@@ -2111,7 +2111,7 @@ mod tests {
             runtime_source: runtime_snapshot::RuntimeSnapshotSource::CapturedProduct {
                 product_witness_hash: "e".repeat(64),
             },
-            account: "render-account".into(),
+            account: "test-account".into(),
             source: LifecycleRuntimeProbeSource {
                 manifest_hash: "f".repeat(64),
                 owner_executable_sha256: "1".repeat(64),

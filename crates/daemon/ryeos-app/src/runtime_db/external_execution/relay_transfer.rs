@@ -1,4 +1,4 @@
-//! Durable controller ownership for Render's occurrence-private file relay.
+//! Durable controller ownership for the adapter's occurrence-private file relay.
 //!
 //! A transfer receipt is transport evidence only. It cannot attach a channel,
 //! acknowledge a signed frame, start another guest process, or qualify a Q
@@ -1183,7 +1183,7 @@ impl RuntimeDb {
         })
     }
 
-    /// Reserve the one file slot before any Render token mint. Exact replay is
+    /// Reserve the one file slot before any provider token mint. Exact replay is
     /// read-only; a different digest cannot take the same sequence/path.
     pub(crate) fn reserve_external_relay_transfer(
         &self,
@@ -1260,7 +1260,7 @@ impl RuntimeDb {
         })
     }
 
-    /// Retain each read allowance before minting a Render download token.
+    /// Retain each read allowance before minting a provider download token.
     /// Repeated reads are allowed only for this same fixed path and owner.
     pub(crate) fn claim_external_relay_read(
         &self,

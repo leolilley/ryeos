@@ -1596,7 +1596,7 @@ mod tests {
             owner_principal: format!("fp:{}", f.attester.fingerprint()),
             qualification: ProductRelationshipQualification {
                 policy_ref: Some("config:fixtures/qualification".into()),
-                required_claims: vec!["render_snapshot_v1".into()],
+                required_claims: vec!["snapshot_v1".into()],
             },
             remote_testimony: None,
         };
@@ -1713,7 +1713,7 @@ mod tests {
             },
             qualification: ProductRelationshipQualification {
                 policy_ref: policy_ref.map(str::to_owned),
-                required_claims: vec!["render_snapshot_v1".into()],
+                required_claims: vec!["snapshot_v1".into()],
             },
         }
     }

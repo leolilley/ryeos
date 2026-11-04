@@ -1,6 +1,6 @@
 //! Descriptor-relative, private staging of one external guest-input package.
 //!
-//! This is not a Render adapter, a qualification verdict, or a Ready claim.
+//! This is not a provider adapter, a qualification verdict, or a Ready claim.
 //! It checks the wire and exact base CAS closure before returning a pinned
 //! private tree. Product/source authority and fixed-FD supervisor installation
 //! remain separate joined checks.
