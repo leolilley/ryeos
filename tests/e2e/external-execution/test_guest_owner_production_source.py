@@ -1,6 +1,6 @@
 """Source boundary for node-rooted and explicitly targeted owner production.
 
-This does not qualify a producer host, captured product, or Render snapshot.
+This does not qualify a producer host, captured product, or provider snapshot.
 """
 
 from pathlib import Path

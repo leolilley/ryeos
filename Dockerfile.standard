@@ -80,7 +80,7 @@ RUN groupadd --gid 10000 ryeos && \
       --shell /bin/bash ryeos && \
     install -d -o ryeos -g ryeos -m 0750 /data /data/app
 
-# Platform shells (Render's SSH and dashboard shell) attach as root, after
+# Platform shells (a host's SSH and dashboard shell) attach as root, after
 # checking that the service's running user has a login shell: the entrypoint
 # drops root to the node account before the daemon starts, so that account
 # carries bash above (a nologin shell makes the gateway close every session

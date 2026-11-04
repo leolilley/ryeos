@@ -22,7 +22,7 @@ Projects may select or narrow a named protected lifecycle profile, slot
 requirement, and budget. Exact provider service IDs, regions, image and public
 configuration ceilings, lifecycle bindings, credential handles, and mutation
 authority belong to protected source-node installation state. They are not
-project authority or RyeOS development constants. Railway, Fly, Modal, a
+project authority or RyeOS development constants. A hosting platform, a
 managed container service, or a future deployment backend can bind this
 contract only after its installed adapter and evidence satisfy the same generic
 authority requirements.
@@ -53,7 +53,7 @@ and its worker selects `cleanup_authority: trusted_process_group`. RyeOS then
 owns the exact direct process-group lifecycle, retained candidate, completion
 fence, and independent evaluation, but does not claim hard containment or
 hostile descendant-death proof. This lane exists for single-tenant managed
-containers such as a dedicated Railway service while the lifecycle-adapter
+containers such as a dedicated hosted service while the lifecycle-adapter
 product remains under qualification. It must not use
 `external_placement_incarnation`, satisfy that product's acceptance claims, or
 silently fall back from a missing local process scope.

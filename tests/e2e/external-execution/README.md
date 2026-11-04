@@ -3,7 +3,7 @@
 Status: source implementation in progress; **not yet an installed supported
 execution backend**. The signed synthetic lifecycle adapter is test-only and no
 production provider adapter/profile is enabled. Its results establish the native
-generic runtime boundary, not qualification of Render or another destination.
+generic runtime boundary, not qualification of a provider or another destination.
 
 ## Current acceptance boundary (September 24)
 
@@ -51,7 +51,7 @@ generic runtime boundary, not qualification of Render or another destination.
   provider, synthetic qualification testimony and an in-process AppState; its
   same-process replay is not a real-daemon restart or independent runtime
   qualification. Active-turn recovery, lost acknowledgements and installed
-  Render/Farm acceptance remain open.
+  provider/Farm acceptance remain open.
 - The connector's inherited interactive pipes now use Lillux-owned interruption
   and bounded I/O; terminal paths join the input task. Send and acknowledgement
   share one deadline, and peer EOF waits for actual close bookkeeping. Six pipe
@@ -237,7 +237,7 @@ that the fixture provider root was mode `0755`; the adapter requires owner-only
 `0700` before allocation. Future fixture setup now creates and verifies that
 directory through Lillux before signing the binding. The failed directory and
 reservation remain untouched; this correction has compile evidence, not yet a
-successful public run. No Render or model contact occurred in these fixtures.
+successful public run. No provider or model contact occurred in these fixtures.
 
 With the private-root fixture correction, the next public run allocated its
 occurrence and started the supervisor. Attachment returned HTTP 401; the
@@ -279,7 +279,7 @@ the read-only evidence verifier. No session, connector, export authority or
 controller process attachment remained. Channel projection is `stopping`, with
 one final acknowledgment pending, separately from the proved terminated
 occurrence. This live Tool executed once; it does not establish recorded replay,
-bounded-turn candidate capture or Render qualification. The earlier HTTP closure
+bounded-turn candidate capture or provider qualification. The earlier HTTP closure
 did not recur, but its cause is still unproven. Prior unresolved runs remain
 untouched. Full log is retained in feature `.tmp/public-ordinary-mount-20260924.log`.
 
@@ -303,7 +303,7 @@ remain session-only. These component joins still need public-launch acceptance.
 
 The actual local native target-exit probe passed, including nonzero exit,
 signal, pre-exec failure, cleanup distinction and descendant-held stdout.
-This tests the existing Lillux owner, not Render or a completed evaluator.
+This tests the existing Lillux owner, not a provider or a completed evaluator.
 
 Direct launcher/supervisor components now carry one-shot stdin, both bounded
 output streams and exact terminal receipts. Input stays fenced until the exact
@@ -322,7 +322,7 @@ materialization-lease lifetime, simulated stdin backpressure, output framing,
 mode separation, cancellation and exact terminal replay after acknowledgement
 loss. These are component tests: the output fixture supplies an exit observation,
 and journal fixtures sign it. They do not establish a composed native direct
-launch, born-thread admission, real-daemon recovery or Render qualification.
+launch, born-thread admission, real-daemon recovery or provider qualification.
 Positive direct-entry qualification remains open. Output overflow, broken input
 and launch faults currently fail closed; no authenticated `OutputLimit` result
 is claimed, and forced cleanup without actual target status remains uncertain.
@@ -373,7 +373,7 @@ September 24: 268 app, 222 state and 31 executor tests. The two member-proof
 tests also pass against a private test-signed copy of the exact current Tool
 schema. Their shared size limit now covers ordinary blobs, large-manifest blobs
 and chunked members before content access. These are component and signed-state
-persistence checks; no joined public execution or installed Render acceptance
+persistence checks; no joined public execution or installed provider acceptance
 is claimed.
 
 Outbound executable backlog has a separate current-authority gate from retained
@@ -413,7 +413,7 @@ Admission has two distinct stages: exact signed artifacts, binding, lifecycle
 capabilities and budget authorize bounded provisioning; successful held native
 preparation in the guest must precede authenticated Ready and code release.
 Controller-local isolation and executable-product qualification do not attest
-the guest kernel. Neither stage alone qualifies the installed Render path.
+the guest kernel. Neither stage alone qualifies the installed provider path.
 
 The authored, not-yet-run daemon test
 `recorded_managed_realization_replays_after_daemon_restart` targets the
@@ -424,7 +424,7 @@ products and action/effect/record identities, `effect_record` with no publicatio
 and no second managed child. The last assertion uses read-only exact-parent
 runtime launch links: a public continuation-chain listing is not a separately
 rooted child inventory. This is local managed-product replay qualification,
-not a Render worker run or a repeat of the completed Codex runtime production.
+not a provider worker run or a repeat of the completed Codex runtime production.
 
 The synthetic runtime's `--qualification-probe` emits fixed fixture claims after
 checking the subject-digest argument. It exercises signed verifier execution,
@@ -453,7 +453,7 @@ bundle/user inputs and project remain retained for diagnosis, without relaunch.
 It passed against a real disposable daemon in 13.29s (root
 `T-85a659e6-8354-f59b-22a7-d7d523ffbcc7`), including repeat-capture identity and
 live-source mutation assertions. It does not establish runtime
-qualification, a completed worker, actual worker restart, or Render acceptance.
+qualification, a completed worker, actual worker restart, or provider acceptance.
 
 Once the single compiler slot and disk headroom are available:
 
@@ -528,7 +528,7 @@ terminal observation. The session is admitted, send boundary none, with no
 commands or controller HTTPS requests. The failure state is retained; no
 replacement was launched. This is not a passing turn or cleanup proof, and the
 returned cleanup error does not establish the original activation failure.
-No live Render, paid model or simulator contact occurred in that run.
+No live provider, paid model or simulator contact occurred in that run.
 
 The subsequent diagnostic correction preserves the exact normal managed-runtime
 fallback error through the existing root failure guard when cleanup refuses.
@@ -628,7 +628,7 @@ capture4 subsequently passed as well. Joined daemon tests remain a separate gate
 validation15tests and scoped source checks pass.
 
 This is occurrence-local protected capture, not controller attestation of target
-DNS bytes, complete network/streaming qualification or installed Render evidence.
+DNS bytes, complete network/streaming qualification or installed provider evidence.
 No new provider, candidate, evaluation or publication workflow is introduced.
 
 ### Real-daemon recovery fixture preparation
@@ -706,7 +706,7 @@ This does not prove a real daemon restart through `ExternalPlacementOwner::prepa
 with a retained demanded capability missing from the reloaded registry. That
 requires the composed/public fixture with real born-thread/capsule authority.
 Normal bundle source/signature refresh, installed runtime qualification and the
-actual Render lifecycle remain open. The external profile demands exact terminal
+actual provider lifecycle remain open. The external profile demands exact terminal
 observation only; it does not assert automatic ambiguous-create recovery.
 
 ## Native guest feasibility (2026-09-23)
@@ -723,7 +723,7 @@ The writer fixture initially tried `/probe` in its directory-executable variant,
 where that path is intentionally absent. It now uses the mandatory exact
 `LILLUX_PROBE_EXECUTABLE` supplied by its launch request. Independent review
 confirmed no change to product isolation, four-variant coverage or writer-proof
-requirements. These are local operation tests, not Render qualification.
+requirements. These are local operation tests, not provider qualification.
 
 One operator-approved 900-second Starter sandbox in Oregon was created for
 feasibility. Read-only diagnostics observed Linux `6.1.155+`, x86_64 and the
@@ -804,7 +804,7 @@ public path. All 19 guard tests pass, and the corrected joined run passed that
 handoff. It then reached an old signed bridge binary that rejects the new lifecycle
 capability field. Normal bundle-artifact refresh is required before proceeding.
 The synthetic local lifecycle occurrence was terminated; no session commands,
-paid model, Render or simulator contact occurred. Cold retained recovery has a
+paid model, provider or simulator contact occurred. Cold retained recovery has a
 separate descriptor/cleanup handoff and remains unqualified.
 
 ## Historical generic runtime and native lifecycle fixture
@@ -1176,7 +1176,7 @@ the 4 admission tests and 4 launcher recipe/projection tests passed again, as
 did the bounded seven-crate test check. Architecture, security/recovery, and
 testing review found no remaining authority defect after adding the conservative
 recipe ceiling and direct path/budget plus complete projection mutation tests.
-No installation, lifecycle, provider/model, Render, credential, grant, or paid
+No installation, lifecycle, provider/model, provider, credential, grant, or paid
 resource was contacted or changed.
 
 This historical checkpoint did not provide the production supervisor executable,
@@ -1215,7 +1215,7 @@ EOF lifecycle preservation, author-failure retention and one-shot EOF, exact-bou
 EOF/idle/overflow, byte-identical ambiguous retry without a second read, duplex
 progress during partial stdin, no post-capture polling, and exact sealed-export
 application. The descriptor child required the explicit test sandbox exception.
-No installation, lifecycle, provider/model, Render, credential, grant, or paid
+No installation, lifecycle, provider/model, provider, credential, grant, or paid
 resource was contacted or changed.
 
 This checkpoint still does not provide the protected supervisor executable,
@@ -1251,7 +1251,7 @@ canonical intent/observation digest replacement, both attachment/non-start race
 orders, and activation/termination exclusion. Independent architecture,
 reservation-owner/recovery, and testing re-review found no remaining blocker
 after the specific recovery-validator assertion was corrected. No install, node lifecycle,
-provider/model, Render, credential, grant, or paid-resource contact occurred.
+provider/model, provider, credential, grant, or paid-resource contact occurred.
 
 This checkpoint still has no supervisor executable, production lifecycle
 adapter, dispatch integration, or complete B -> C -> evaluation -> D proof.
@@ -1469,7 +1469,7 @@ in this inactive exchange slice.
 
 This is still not an installed or live network qualification. The production
 backend registry is empty, no guest supervisor network loop or TLS/server
-identity has been qualified, and no provider, model, Render, or worker contact
+identity has been qualified, and no provider, model, provider, or worker contact
 occurred. The signed route/service definitions and source checks do not prove a
 remote B -> C workflow.
 
@@ -1505,7 +1505,7 @@ continuation were corrected.
 This remains an inactive pure transport checkpoint. It does not provide the
 guest HTTP client/executable, a sealed endpoint/TLS identity, lifecycle-adapter
 activation, controller-to-guest bootstrap delivery, or an installed B -> C
-execution. No network, provider, allocator, model, Render, installation, or node
+execution. No network, provider, allocator, model, provider, installation, or node
 lifecycle contact occurred.
 
 The sections below retain earlier checkpoint evidence. References there to
@@ -2521,7 +2521,7 @@ fixture ran against the matching dirty source before that commit.
 
 This proves ordinary recorded external Tool execution and completed-work replay
 on the local synthetic lifecycle backend. It does not prove active-worker crash
-recovery, external B-owned candidate evaluation, installed Render qualification,
+recovery, external B-owned candidate evaluation, installed provider qualification,
 or the Farm research loop. Those remain separate acceptance gates.
 
 ### Guest-package budget authority
