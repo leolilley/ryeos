@@ -5558,3 +5558,38 @@ execution:
         );
     }
 }
+
+#[cfg(test)]
+mod captured_verifier_admission_tests {
+    use super::admit_captured_compatible_callback as admit;
+    use ryeos_engine::protocols::ProtocolDescriptor;
+
+    fn protocol(name: &str) -> ProtocolDescriptor {
+        let path = ryeos_engine::test_support::workspace_root()
+            .join("bundles/core/.ai/protocols/ryeos/core")
+            .join(name);
+        serde_yaml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn the_shipped_contained_verifier_protocol_is_admitted_to_captured_execution() {
+        let tool: serde_json::Value = serde_yaml::from_str(
+            &std::fs::read_to_string(
+                ryeos_engine::test_support::workspace_root().join(
+                    "bundles/codex/.ai/tools/codex/qualification/consumer-runtime-verifier.yaml",
+                ),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(tool["filesystem_authority"], "captured_execution");
+        assert_eq!(
+            tool["execution_protocol"],
+            "protocol:ryeos/core/qualification_consumer_callback"
+        );
+        admit(&protocol("qualification_consumer_callback.yaml")).unwrap();
+        // A callback protocol that declares no captured-compatible class stays refused.
+        assert!(admit(&protocol("qualification_scoped_callback.yaml")).is_err());
+        assert!(admit(&protocol("tool_callback.yaml")).is_err());
+    }
+}

@@ -195,7 +195,7 @@ fn shipped_codex_variants_select_by_held_guarantees_and_agree_with_their_policie
     use ryeos_state::external_content::products::composition::ProductRelationships;
     use ryeos_state::external_content::products::qualification::VerifierProcessSettlementAuthority;
     use ryeos_state::external_content::products::qualification_variants::{
-        QualificationVariants, require_policy_guarantees,
+        NodeGuarantees, QualificationVariants, require_policy_guarantees,
     };
 
     let variants = QualificationVariants::from_value(&codex_config(
@@ -214,7 +214,7 @@ fn shipped_codex_variants_select_by_held_guarantees_and_agree_with_their_policie
         (&contained, VerifierProcessSettlementAuthority::ContainmentEmpty),
         (&trusted, VerifierProcessSettlementAuthority::TrustedProcessGroupAbsent),
     ] {
-        let variant = variants.select(node).unwrap();
+        let variant = variants.select(NodeGuarantees::new(node, &[])).unwrap();
         let file = format!(
             "{}.yaml",
             variant.policy_ref.strip_prefix("config:codex/").unwrap()
@@ -228,10 +228,10 @@ fn shipped_codex_variants_select_by_held_guarantees_and_agree_with_their_policie
         // the node that selected it also admits it, and no other node does.
         assert_eq!(policy.requires_guarantees, variant.requires_guarantees);
         assert_eq!(policy.minimum_verifier_process_settlement, settlement);
-        require_policy_guarantees(&policy.requires_guarantees, node, &variant.policy_ref).unwrap();
+        require_policy_guarantees(&policy.requires_guarantees, NodeGuarantees::new(node, &[]), &variant.policy_ref).unwrap();
         let other = if std::ptr::eq(node, &contained) { &trusted } else { &contained };
         assert!(
-            require_policy_guarantees(&policy.requires_guarantees, other, &variant.policy_ref)
+            require_policy_guarantees(&policy.requires_guarantees, NodeGuarantees::new(other, &[]), &variant.policy_ref)
                 .is_err()
         );
         let worker = relationships.select(&variant.relationship_name).unwrap();
@@ -247,18 +247,20 @@ fn shipped_codex_variants_select_by_held_guarantees_and_agree_with_their_policie
             .unwrap();
     }
     assert_eq!(
-        variants.select(&contained).unwrap().relationship_name,
+        variants.select(NodeGuarantees::new(&contained, &[])).unwrap().relationship_name,
         "runtime_to_external_authoring_worker"
     );
     assert_eq!(
-        variants.select(&trusted).unwrap().relationship_name,
+        variants.select(NodeGuarantees::new(&trusted, &[])).unwrap().relationship_name,
         "runtime_to_external_authoring_worker_trusted_lane"
     );
 }
 
 #[test]
 fn shipped_codex_variants_refuse_a_node_holding_neither_and_an_ambiguous_one() {
-    use ryeos_state::external_content::products::qualification_variants::QualificationVariants;
+    use ryeos_state::external_content::products::qualification_variants::{
+        NodeGuarantees, QualificationVariants,
+    };
 
     let variants = QualificationVariants::from_value(&codex_config(
         "qualification-variants.yaml",
@@ -272,7 +274,7 @@ fn shipped_codex_variants_refuse_a_node_holding_neither_and_an_ambiguous_one() {
         ("filesystem:captured_execution", ProofSource::Measured),
         ("callback:captured_compatible", ProofSource::Measured),
     ]);
-    let error = variants.select(&uncontained).unwrap_err().to_string();
+    let error = variants.select(NodeGuarantees::new(&uncontained, &[])).unwrap_err().to_string();
     assert!(error.contains("no qualification variant"), "{error}");
     assert!(error.contains("config:codex/consumer-qualification-policy "), "{error}");
     assert!(error.contains("any_of(termination:scope, termination:pid_namespace)"), "{error}");
@@ -280,13 +282,13 @@ fn shipped_codex_variants_refuse_a_node_holding_neither_and_an_ambiguous_one() {
     // A node that holds both sets of guarantees cannot choose.
     let mut both = contained_node();
     both.provide("sessions:trusted_process_group", ProofSource::Trusted, "test", "held");
-    let error = variants.select(&both).unwrap_err().to_string();
+    let error = variants.select(NodeGuarantees::new(&both, &[])).unwrap_err().to_string();
     assert!(error.contains("more than one"), "{error}");
     assert!(error.contains("consumer-qualification-policy-trusted-lane"), "{error}");
     // A weaker grade of the same name does not stand in.
     let mut attested = contained_node();
     attested.provide("isolation:enforced", ProofSource::ProviderAttested, "test", "held");
-    assert!(variants.select(&attested).is_err());
+    assert!(variants.select(NodeGuarantees::new(&attested, &[])).is_err());
 }
 
 #[test]

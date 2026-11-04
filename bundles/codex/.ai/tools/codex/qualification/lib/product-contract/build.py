@@ -1,4 +1,3 @@
-# ryeos:signed:2026-11-04T06:11:51Z:c6899b777870b7b438436046ebd66e78e7ec2d7a5f0120db776174b2b90ae59c:GnH2JsWD4AeuwzvVWFTUz3BJg/q9eQzYNQgNLFw3rx6Cnguj5tJhc5zzvw07URbkm1a6oGHSZnKhPbX+OuGQCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Build the canonical finite product contract literal for the verifier Tool.
 
 The literal is the third argument of consumer-runtime-verifier.yaml. It is

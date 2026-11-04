@@ -11,7 +11,9 @@
 //! selected. Nothing here names a consumer, an ecosystem or a lane.
 
 use anyhow::{Context as _, bail, ensure};
-use lillux::process_control::{CapabilityRequirement, HostCapabilities};
+use lillux::process_control::{
+    CapabilityRequirement, CapabilityRequirementSpec, HostCapabilities, satisfies,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -57,11 +59,60 @@ pub fn validate_required_guarantees(requires: &[CapabilityRequirement]) -> anyho
     Ok(())
 }
 
-/// The entries of `requires` the node's reported guarantees do not meet,
-/// each with its reason.
+/// What a node holds: the guarantees it reports and the signed capability
+/// floor that decides which weaker grades of them it admits. A requirement
+/// names grades itself (bare means measured only); a node whose floor
+/// explicitly accepts a grade for a capability admits that grade for the same
+/// capability here, exactly as it does for its own startup.
+#[derive(Debug, Clone, Copy)]
+pub struct NodeGuarantees<'a> {
+    pub reported: &'a HostCapabilities,
+    pub floor: &'a [CapabilityRequirement],
+}
+
+impl<'a> NodeGuarantees<'a> {
+    pub fn new(reported: &'a HostCapabilities, floor: &'a [CapabilityRequirement]) -> Self {
+        Self { reported, floor }
+    }
+
+    /// `Ok` when `entry` is met, else the reason.
+    fn meets(&self, entry: &CapabilityRequirement) -> Result<(), String> {
+        let refusal = match self.reported.meets(entry) {
+            Ok(_) => return Ok(()),
+            Err(refusal) => refusal,
+        };
+        for name in entry.names() {
+            let Some(evidence) = self.reported.provided.get(name) else {
+                continue;
+            };
+            let mut accept: Vec<String> = entry.accepted_grades().to_vec();
+            for floor_entry in self.floor {
+                if floor_entry.names().contains(name) {
+                    for grade in floor_entry.accepted_grades() {
+                        if !accept.contains(grade) {
+                            accept.push(grade.clone());
+                        }
+                    }
+                }
+            }
+            let widened = CapabilityRequirement::Spec(CapabilityRequirementSpec {
+                name: Some(name.clone()),
+                any_of: Vec::new(),
+                accept,
+                providers: entry.providers().to_vec(),
+            });
+            if satisfies(&widened, name, evidence).is_ok() {
+                return Ok(());
+            }
+        }
+        Err(refusal)
+    }
+}
+
+/// The entries of `requires` the node does not hold, each with its reason.
 pub fn unmet_guarantees(
     requires: &[CapabilityRequirement],
-    node: &HostCapabilities,
+    node: NodeGuarantees<'_>,
 ) -> Vec<(String, String)> {
     requires
         .iter()
@@ -99,7 +150,7 @@ impl QualificationVariants {
     /// The single variant whose required guarantees `node` holds. No match
     /// and more than one match are both refused; the refusal lists every
     /// candidate with the guarantees it requires that the node lacks.
-    pub fn select(&self, node: &HostCapabilities) -> anyhow::Result<&QualificationVariant> {
+    pub fn select(&self, node: NodeGuarantees<'_>) -> anyhow::Result<&QualificationVariant> {
         let admitted: Vec<_> = self
             .variants
             .iter()
@@ -122,7 +173,7 @@ impl QualificationVariants {
         }
     }
 
-    fn candidates(&self, node: &HostCapabilities) -> String {
+    fn candidates(&self, node: NodeGuarantees<'_>) -> String {
         self.variants
             .iter()
             .map(|variant| {
@@ -142,7 +193,7 @@ impl QualificationVariants {
 /// on a node that holds them. An empty declaration asks nothing of the node.
 pub fn require_policy_guarantees(
     requires: &[CapabilityRequirement],
-    node: &HostCapabilities,
+    node: NodeGuarantees<'_>,
     policy_ref: &str,
 ) -> anyhow::Result<()> {
     let unmet = unmet_guarantees(requires, node);
@@ -216,20 +267,20 @@ mod tests {
             ("isolation:enforced", ProofSource::Measured),
             ("termination:pid_namespace", ProofSource::Measured),
         ]);
-        assert_eq!(set(None).select(&node).unwrap().policy_ref, CONTAINED);
+        assert_eq!(set(None).select(NodeGuarantees::new(&node, &[])).unwrap().policy_ref, CONTAINED);
     }
 
     #[test]
     fn a_trusted_node_selects_the_trusted_variant() {
         let node = node(&[("sessions:trusted_process_group", ProofSource::Trusted)]);
-        assert_eq!(set(None).select(&node).unwrap().policy_ref, TRUSTED);
+        assert_eq!(set(None).select(NodeGuarantees::new(&node, &[])).unwrap().policy_ref, TRUSTED);
     }
 
     #[test]
     fn a_node_holding_neither_is_refused_with_each_unmet_guarantee() {
         // Enforced but uncontained, and not trusted: no variant is met.
         let node = node(&[("isolation:enforced", ProofSource::Measured)]);
-        let error = set(None).select(&node).unwrap_err().to_string();
+        let error = set(None).select(NodeGuarantees::new(&node, &[])).unwrap_err().to_string();
         assert!(error.contains(CONTAINED) && error.contains(TRUSTED), "{error}");
         assert!(error.contains("any_of(termination:scope, termination:pid_namespace)"), "{error}");
         assert!(error.contains("sessions:trusted_process_group is not held"), "{error}");
@@ -242,8 +293,37 @@ mod tests {
             ("isolation:enforced", ProofSource::ProviderAttested),
             ("termination:scope", ProofSource::Measured),
         ]);
-        let error = set(None).select(&node).unwrap_err().to_string();
+        let error = set(None).select(NodeGuarantees::new(&node, &[])).unwrap_err().to_string();
         assert!(error.contains("provider_attested-proven"), "{error}");
+    }
+
+    #[test]
+    fn an_attested_grade_is_admitted_only_where_the_node_floor_names_it() {
+        let attested = node(&[
+            ("isolation:enforced", ProofSource::Measured),
+            ("termination:pid_namespace", ProofSource::ProviderAttested),
+        ]);
+        let variants = set(None);
+        assert!(variants.select(NodeGuarantees::new(&attested, &[])).is_err());
+        // A floor naming a different capability, or accepting only measured,
+        // does not widen it.
+        let other: Vec<CapabilityRequirement> = serde_json::from_value(json!([
+            {"name": "termination:scope", "accept": ["provider_attested"]},
+            {"name": "termination:pid_namespace", "accept": ["measured"]},
+        ]))
+        .unwrap();
+        assert!(variants.select(NodeGuarantees::new(&attested, &other)).is_err());
+        let floor: Vec<CapabilityRequirement> = serde_json::from_value(json!([
+            {"name": "termination:pid_namespace", "accept": ["measured", "provider_attested"]},
+        ]))
+        .unwrap();
+        assert_eq!(
+            variants
+                .select(NodeGuarantees::new(&attested, &floor))
+                .unwrap()
+                .policy_ref,
+            CONTAINED
+        );
     }
 
     #[test]
@@ -253,7 +333,7 @@ mod tests {
             ("termination:scope", ProofSource::Measured),
             ("sessions:trusted_process_group", ProofSource::Trusted),
         ]);
-        let error = set(None).select(&both).unwrap_err().to_string();
+        let error = set(None).select(NodeGuarantees::new(&both, &[])).unwrap_err().to_string();
         assert!(error.contains("more than one"), "{error}");
         assert!(error.contains(CONTAINED) && error.contains(TRUSTED), "{error}");
     }
@@ -294,9 +374,9 @@ mod tests {
         let requires: Vec<CapabilityRequirement> =
             serde_json::from_value(json!(["isolation:enforced"])).unwrap();
         let held = node(&[("isolation:enforced", ProofSource::Measured)]);
-        require_policy_guarantees(&requires, &held, "p").unwrap();
-        require_policy_guarantees(&[], &node(&[]), "p").unwrap();
-        let error = require_policy_guarantees(&requires, &node(&[]), "p")
+        require_policy_guarantees(&requires, NodeGuarantees::new(&held, &[]), "p").unwrap();
+        require_policy_guarantees(&[], NodeGuarantees::new(&node(&[]), &[]), "p").unwrap();
+        let error = require_policy_guarantees(&requires, NodeGuarantees::new(&node(&[]), &[]), "p")
             .unwrap_err()
             .to_string();
         assert!(error.contains("policy p") && error.contains("isolation:enforced is not held"), "{error}");

@@ -266,7 +266,7 @@ pub(crate) async fn dispatch_subprocess(
                 kind: current_ref.kind.clone(),
                 detail: "dispatch_subprocess called on a schema with no terminator".into(),
             })?;
-    let (protocol_ref, declares_pushed_head) = match terminator {
+    let (protocol_ref, composed_value) = match terminator {
         TerminatorDecl::Subprocess { protocol } => {
             let verified = hop_verified.ok_or_else(|| DispatchError::SchemaMisconfigured {
                 kind: current_ref.kind.clone(),
@@ -295,19 +295,13 @@ pub(crate) async fn dispatch_subprocess(
                             .into(),
                 });
             }
-            let declares_pushed_head = exec
-                .project_pushed_head_declaration(&effective.composed_value)
-                .map_err(|error| DispatchError::SchemaMisconfigured {
-                    kind: current_ref.kind.clone(),
-                    detail: error.to_string(),
-                })?;
             let protocol_ref = protocol
                 .resolve(&effective.composed_value)
                 .map_err(|detail| DispatchError::SchemaMisconfigured {
                     kind: current_ref.kind.clone(),
                     detail,
                 })?;
-            (protocol_ref, declares_pushed_head)
+            (protocol_ref, effective.composed_value)
         }
         TerminatorDecl::InProcess { .. } => {
             return Err(DispatchError::SchemaMisconfigured {
@@ -325,6 +319,21 @@ pub(crate) async fn dispatch_subprocess(
         .require(&protocol_ref)
         .map_err(|_| DispatchError::ProtocolNotRegistered(protocol_ref.clone()))?;
 
+    // The declaration is read only where it matters: a gated protocol and a
+    // pushed-head project source. Every other launch never evaluates it.
+    let declares_pushed_head = crate::dispatch::pushed_head_declaration_if_gated(
+        &protocol.descriptor.capabilities,
+        matches!(
+            request.provenance.project_source(),
+            ProjectSourceKind::PushedHead
+        ),
+        exec,
+        &composed_value,
+    )
+    .map_err(|error| DispatchError::SchemaMisconfigured {
+        kind: current_ref.kind.clone(),
+        detail: error.to_string(),
+    })?;
     check_dispatch_capabilities(
         &protocol.descriptor.capabilities,
         request,

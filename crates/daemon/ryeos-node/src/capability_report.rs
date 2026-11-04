@@ -17,6 +17,7 @@ use lillux::process_control::{
     PERSISTENCE_DURABLE_STATE, PrivateDirectoryFacts, ProofSource, ResidencyProof, SCOPE_LIMITS,
     decide_private_directory, is_scope_capability,
 };
+use ryeos_engine::isolation::add_pid_namespace_containment;
 use serde::{Deserialize, Serialize};
 
 pub const CAPABILITY_REPORT_SCHEMA: &str = "ryeos.node.capability-report/v8";
@@ -198,6 +199,7 @@ pub struct SignedNodeCapabilityReport {
     pub signature: String,
 }
 
+#[cfg(test)]
 use lillux::process_control::{
     QUIESCENCE_PID_NAMESPACE as PID_NAMESPACE_QUIESCENCE,
     RECOVERY_PID_NAMESPACE as PID_NAMESPACE_RECOVERY,
@@ -266,8 +268,12 @@ impl NodeCapabilityReport {
         );
         // What a workload may declare it needs of this node's isolation and
         // node policy; qualification variants are selected against these names.
-        inputs.isolation.process_scope_readiness.add_policy_guarantees(
+        inputs.isolation.add_policy_guarantees(
             inputs.isolation.mode == ryeos_engine::isolation::IsolationMode::Enforce,
+            &ryeos_engine::isolation::GuaranteeHost {
+                gvisor: host.gvisor(),
+                ..Default::default()
+            },
             &mut view,
         );
         add_provider_environment(&mut view, inputs.provider_environment);
@@ -618,41 +624,35 @@ fn add_scope_capabilities(
         .flat_map(|entry| entry.names())
         .filter_map(|name| lillux::ProcessScopeCapability::from_capability_name(name))
         .collect::<std::collections::BTreeSet<_>>();
-    let source = if gvisor {
-        ProofSource::ProviderAttested
-    } else {
-        ProofSource::Measured
+    let host = ryeos_engine::isolation::GuaranteeHost {
+        gvisor,
+        scope_provider: provider.to_owned(),
+        scope_absent: absent.clone(),
     };
     for capability in lillux::ProcessScopeCapability::ALL {
-        let name = capability.capability_name();
-        if qualified.contains(&capability) {
-            view.provide(
-                name,
-                source.clone(),
-                provider,
-                "qualified by a disposable probe scope of the delegated cgroup provider",
-            );
-        } else if let Some(reason) = &absent {
-            view.refuse(name, reason.clone());
+        let refusal = if let Some(reason) = &absent {
+            reason.clone()
         } else if capability == lillux::ProcessScopeCapability::Quiescence
             && !wanted.contains(&capability)
         {
-            view.refuse(
-                name,
-                "not probed: the capability floor does not name it, so the kernel barrier was not \
-                 exercised",
-            );
+            "not probed: the capability floor does not name it, so the kernel barrier was not \
+             exercised"
+                .to_owned()
         } else {
-            view.refuse(
-                name,
-                "the delegated cgroup provider's probe scope did not qualify it",
-            );
-        }
+            "the delegated cgroup provider's probe scope did not qualify it".to_owned()
+        };
+        ryeos_engine::isolation::provide_scope_guarantee(
+            view,
+            capability,
+            qualified.contains(&capability),
+            &host,
+            &refusal,
+        );
     }
     if qualified.contains(&lillux::ProcessScopeCapability::Termination) {
         view.provide(
             SCOPE_LIMITS,
-            source,
+            host.mechanism_source(),
             provider,
             "each job scope carries its own memory.max, memory.swap.max of 0 and pids.max",
         );
@@ -664,33 +664,6 @@ fn add_scope_capabilities(
             }),
         );
     }
-}
-
-/// Descendant containment by the execution's retained PID-namespace init.
-/// Provided only when the enforced runtime's disposable probe showed that a
-/// setsid'd, double-forked and nested-namespace descendant all die with the
-/// init and the init's exit settles them. Quiescence is explicitly never
-/// provided: namespace membership is not an atomic writer freeze.
-fn add_pid_namespace_containment(
-    view: &mut HostCapabilities,
-    containment: &ryeos_engine::isolation::PidNamespaceContainmentQualification,
-) {
-    for name in [PID_NAMESPACE_TERMINATION, PID_NAMESPACE_RECOVERY] {
-        if containment.qualified {
-            view.provide(
-                name,
-                containment.source.clone(),
-                ryeos_engine::isolation::PidNamespaceContainmentQualification::PROVIDER,
-                containment.detail.clone(),
-            );
-        } else {
-            view.refuse(name, containment.detail.clone());
-        }
-    }
-    view.refuse(
-        PID_NAMESPACE_QUIESCENCE,
-        "a retained PID-namespace init terminates and settles descendants but cannot freeze them",
-    );
 }
 
 /// Grade the provider-delivered environment. The node cannot observe where

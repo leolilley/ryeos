@@ -1305,9 +1305,17 @@ pub(super) fn resolve_current_bundle_qualification_policy_for_local_run(
     policy_ref: &str,
 ) -> anyhow::Result<ProductQualificationPolicySource> {
     let policy_source = resolve_current_bundle_qualification_policy(state, policy_ref)?;
+    // The variant set that listed this policy is not known here (only the
+    // relationship's policy ref is), so agreement between set and policy is
+    // enforced where the set is read, at context derivation; the policy's own
+    // declaration is what this node holds itself to.
+    let reported = state.isolation.reported_guarantees();
     ryeos_state::external_content::products::qualification_variants::require_policy_guarantees(
         &policy_source.policy.requires_guarantees,
-        &state.isolation.reported_guarantees(),
+        ryeos_state::external_content::products::qualification_variants::NodeGuarantees::new(
+            &reported,
+            state.isolation.capability_floor(),
+        ),
         policy_ref,
     )?;
     Ok(policy_source)

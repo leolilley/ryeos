@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use anyhow::{Context as _, bail};
+use anyhow::{Context as _, bail, ensure};
 use ryeos_external_execution_contract::restored_runtime_measurement::{
     CONSUMER_INPUT_RECORD_NAME, CONSUMER_VERIFIER_REMOTE_NAME, ConsumerArchiveBudget,
     ConsumerRuntimeVerifierSelection,
@@ -21,7 +21,7 @@ use ryeos_state::external_content::products::composition::{
 };
 use ryeos_state::external_content::products::qualification::ProductQualificationConsumerExecutionContext;
 use ryeos_state::external_content::products::qualification_variants::{
-    QualificationVariant, QualificationVariants, require_policy_guarantees,
+    NodeGuarantees, QualificationVariant, QualificationVariants, require_policy_guarantees,
 };
 use ryeos_state::external_content::qualification_consumer_record::MAX_CONSUMER_INPUT_RECORD_BYTES;
 use ryeos_state::objects::{
@@ -117,7 +117,12 @@ fn derive_blocking(
     state: &AppState,
     request: &ConsumerQualificationContextRequest,
 ) -> anyhow::Result<ConsumerQualificationContextResponse> {
-    derive_for_guarantees(state, request, &state.isolation.reported_guarantees())
+    let reported = state.isolation.reported_guarantees();
+    derive_for_guarantees(
+        state,
+        request,
+        NodeGuarantees::new(&reported, state.isolation.capability_floor()),
+    )
 }
 
 /// Derive for the variant selected by `guarantees`, the guarantees this node
@@ -125,11 +130,19 @@ fn derive_blocking(
 fn derive_for_guarantees(
     state: &AppState,
     request: &ConsumerQualificationContextRequest,
-    guarantees: &lillux::process_control::HostCapabilities,
+    guarantees: NodeGuarantees<'_>,
 ) -> anyhow::Result<ConsumerQualificationContextResponse> {
     require_unguarded_resolution("consumer qualification context derivation")?;
     let variant = select_variant(state, &request.variants_ref, guarantees)?;
     let policy_source = resolve_current_bundle_qualification_policy(state, &variant.policy_ref)?;
+    // The variant set and the policy it names must agree on what they
+    // require, so a policy cannot be selected under weaker guarantees than
+    // the policy itself declares (or than the set advertised).
+    ensure!(
+        policy_source.policy.requires_guarantees == variant.requires_guarantees,
+        "qualification policy {} declares different required guarantees than the variant set that selected it",
+        variant.policy_ref
+    );
     require_policy_guarantees(
         &policy_source.policy.requires_guarantees,
         guarantees,
@@ -381,7 +394,7 @@ fn require_slot_matches_context(
 fn select_variant(
     state: &AppState,
     variants_ref: &str,
-    guarantees: &lillux::process_control::HostCapabilities,
+    guarantees: NodeGuarantees<'_>,
 ) -> anyhow::Result<QualificationVariant> {
     state.engine.with_checked_bundle_generation(|generation| {
         let authored = resolve_consumer_definition_in_generation(generation, variants_ref, "config")?;
@@ -430,6 +443,8 @@ mod tests {
         ExternalContentKind, ExternalContentMode, ExternalContentMountRoot,
         ExternalContentRealization, ExternalContentRealizationSet,
     };
+
+    use ryeos_engine::isolation::GuaranteeHost;
 
     use super::*;
 
@@ -796,7 +811,7 @@ product_qualification_policy:
             "test",
             "held by the fixture node",
         );
-        let refusal = derive_for_guarantees(&state, &request, &held)
+        let refusal = derive_for_guarantees(&state, &request, NodeGuarantees::new(&held, &[]))
             .err()
             .context("a missing environment definition was admitted")?;
         ensure!(
@@ -808,30 +823,21 @@ product_qualification_policy:
         Ok(())
     }
 
-    fn readiness(
+    fn inspection(
         trusted_process_group: bool,
         cgroup_scope: bool,
         pid_namespace: bool,
-    ) -> ryeos_engine::isolation::ProcessScopeReadiness {
+    ) -> ryeos_engine::isolation::IsolationInspection {
         use ryeos_engine::isolation::{
             DescendantContainmentReadiness, PidNamespaceContainmentQualification,
-            ProcessControlReadinessReason, ProcessScopeAuthorityStatus, ProcessScopeReadiness,
-            ProtocolProcessControlReadiness,
         };
-        let idle = || ProtocolProcessControlReadiness {
-            ready: false,
-            reason: ProcessControlReadinessReason::PolicyUnconfigured,
-        };
-        ProcessScopeReadiness {
-            policy: ryeos_engine::isolation::IsolationProcessScopePolicy::Unconfigured {},
-            authority: ProcessScopeAuthorityStatus::Absent,
-            authority_digest: None,
-            qualified_capabilities: Default::default(),
-            ordinary_subprocess: idle(),
-            pooled_requests: idle(),
-            exclusive_session: idle(),
-            trusted_exclusive_session: idle(),
-            descendant_containment: DescendantContainmentReadiness {
+        let mut inspection = ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring()
+            .inspection()
+            .clone();
+        inspection.filesystem.readable = vec!["{verified_code}".into()];
+        inspection.filesystem.writable = vec!["{project}".into()];
+        inspection.process_scope_readiness.descendant_containment =
+            DescendantContainmentReadiness {
                 cgroup_scope,
                 pid_namespace: if pid_namespace {
                     PidNamespaceContainmentQualification::qualified_by(
@@ -842,8 +848,8 @@ product_qualification_policy:
                     PidNamespaceContainmentQualification::not_probed("not probed")
                 },
                 trusted_process_group,
-            },
-        }
+            };
+        inspection
     }
 
     #[test]
@@ -854,13 +860,14 @@ product_qualification_policy:
         let variants = QualificationVariants::from_value(&document["qualification_variants"])?;
         let relationship = |view: &lillux::process_control::HostCapabilities| {
             variants
-                .select(view)
+                .select(NodeGuarantees::new(view, &[]))
                 .map(|variant| variant.relationship_name.clone())
                 .map_err(|error| error.to_string())
         };
         // Enforced isolation with a qualified containment mechanism.
         for (cgroup_scope, pid_namespace) in [(true, false), (false, true), (true, true)] {
-            let view = readiness(false, cgroup_scope, pid_namespace).reported_guarantees(true);
+            let view = inspection(false, cgroup_scope, pid_namespace)
+                .reported_guarantees(true, &GuaranteeHost::default());
             ensure!(
                 relationship(&view) == Ok("runtime_to_external_authoring_worker".to_owned()),
                 "contained node: {:?}",
@@ -869,7 +876,7 @@ product_qualification_policy:
         }
         // Node policy accepting trusted sessions on a node that does not
         // enforce isolation; a qualified mechanism alone is not enforcement.
-        let view = readiness(true, false, false).reported_guarantees(false);
+        let view = inspection(true, false, false).reported_guarantees(false, &GuaranteeHost::default());
         ensure!(
             relationship(&view) == Ok("runtime_to_external_authoring_worker_trusted_lane".to_owned()),
             "trusted node: {:?}",
@@ -877,7 +884,7 @@ product_qualification_policy:
         );
         // Neither: enforced without containment, or nothing at all.
         for (enforced, trusted) in [(true, false), (false, false)] {
-            let view = readiness(trusted, false, false).reported_guarantees(enforced);
+            let view = inspection(trusted, false, false).reported_guarantees(enforced, &GuaranteeHost::default());
             let refusal = relationship(&view).err().context("a node holding neither selected a variant")?;
             ensure!(
                 refusal.contains("no qualification variant")
@@ -886,7 +893,7 @@ product_qualification_policy:
             );
         }
         // Enforced isolation never lets a trusted-session acceptance stand in.
-        let view = readiness(true, false, false).reported_guarantees(true);
+        let view = inspection(true, false, false).reported_guarantees(true, &GuaranteeHost::default());
         ensure!(relationship(&view).is_err(), "enforced uncontained node selected a variant");
         Ok(())
     }
