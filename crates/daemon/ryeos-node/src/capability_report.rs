@@ -198,10 +198,11 @@ pub struct SignedNodeCapabilityReport {
     pub signature: String,
 }
 
-/// Capability names of descendant containment by retained PID-namespace init.
-pub const PID_NAMESPACE_TERMINATION: &str = "termination:pid_namespace";
-pub const PID_NAMESPACE_RECOVERY: &str = "recovery:pid_namespace";
-pub const PID_NAMESPACE_QUIESCENCE: &str = "quiescence:pid_namespace";
+use lillux::process_control::{
+    QUIESCENCE_PID_NAMESPACE as PID_NAMESPACE_QUIESCENCE,
+    RECOVERY_PID_NAMESPACE as PID_NAMESPACE_RECOVERY,
+    TERMINATION_PID_NAMESPACE as PID_NAMESPACE_TERMINATION,
+};
 
 /// Inputs from the running node that the host facts cannot know.
 pub struct ReportInputs<'a> {

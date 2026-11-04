@@ -311,19 +311,28 @@ fn observe_init(pid: u32, start: u64) -> Result<InitObservation, String> {
 /// Grade of the PID-namespace proof on this host: measured on a native kernel,
 /// provider-attested where the kernel is an emulation (gVisor), whose
 /// namespace answers are not observations of a real kernel.
-pub fn pid_namespace_proof_source() -> super::host_capability::ProofSource {
+pub fn pid_namespace_proof_source(gvisor: bool) -> super::host_capability::ProofSource {
     use super::host_capability::ProofSource;
-    match std::fs::read_to_string("/proc/version") {
-        Ok(version) if version.to_ascii_lowercase().contains("gvisor") => {
-            ProofSource::ProviderAttested
-        }
-        _ => ProofSource::Measured,
+    if gvisor {
+        ProofSource::ProviderAttested
+    } else {
+        ProofSource::Measured
     }
 }
 
-/// The probe's outcome, run at most once per boot per process. A definitive
-/// answer (allowed or refused) is kernel and boot stable; an unobservable one
-/// (for example a busy fork window) is transient and is retried.
+/// The probe's outcome, run at most once per boot per process while its
+/// answer is stable. An allowed outcome and a refusal by a permanent errno
+/// (`EPERM`, `EINVAL`, `ENOSYS`: namespaces forbidden or unsupported by this
+/// kernel or policy) are cached; every other outcome (resource exhaustion,
+/// a busy fork window, any non-errno failure) is transient and is probed
+/// again by the next caller.
+///
+/// This qualifies the kernel mechanism (`CLONE_NEWUSER|CLONE_NEWPID`, a
+/// retained init, kernel teardown of every member). It cannot run the
+/// isolation backend's own entry point, which needs a built, signed adapter
+/// and a target image. So every launch checks the same fact on the real
+/// target: binding pins the held target as PID 1 of a namespace excluding the
+/// daemon and refuses, naming the mismatch, if the backend did not make it so.
 pub fn cached_pid_namespace_containment_probe() -> super::host_capability::ProbeOutcome {
     use super::host_capability::ProbeOutcome;
     use std::sync::{Mutex, OnceLock};
@@ -341,8 +350,15 @@ pub fn cached_pid_namespace_containment_probe() -> super::host_capability::Probe
         }
     }
     let outcome = probe_pid_namespace_containment();
+    let stable = match &outcome {
+        ProbeOutcome::Allowed => true,
+        ProbeOutcome::Refused { errno, .. } => {
+            matches!(*errno, libc::EPERM | libc::EINVAL | libc::ENOSYS)
+        }
+        ProbeOutcome::Unobservable { .. } => false,
+    };
     if let Some(boot) = boot
-        && !matches!(outcome, ProbeOutcome::Unobservable { .. })
+        && stable
     {
         *cache
             .lock()

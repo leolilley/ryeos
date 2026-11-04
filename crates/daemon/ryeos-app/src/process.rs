@@ -732,16 +732,33 @@ pub fn kill_by_action(identity: &ExecutionProcessIdentity, action: ShutdownActio
                 method: "identity_unavailable",
             };
         }
+        // A PID-namespace init holds only the target's tree. The launcher
+        // (wrapper) that owns the group keeps running after the init exits:
+        // it reaps the init, publishes the native terminal record and only
+        // then exits. So its pinned group is also settled, after the init.
+        let wrapper_group_wait = |wait: Duration| -> Option<KillResult> {
+            scope
+                .is_pid_namespace_init()
+                .then(|| settle_wrapper_group_after_containment(identity, wait))
+        };
         if let ShutdownAction::Graceful(grace) = action {
             let delivered = signal_exact_target(identity, libc::SIGTERM);
             if delivered == SignalResult::Delivered && scope.wait_empty(grace).is_ok() {
-                return KillResult {
-                    success: true,
-                    method: "scope_graceful",
+                return match wrapper_group_wait(grace) {
+                    Some(group) if !group.success => group,
+                    _ => KillResult {
+                        success: true,
+                        method: "scope_graceful",
+                    },
                 };
             }
         }
         let success = scope.terminate_and_wait(scope.control_timeout()).is_ok();
+        if success && let Some(group) = wrapper_group_wait(Duration::ZERO) {
+            if !group.success {
+                return group;
+            }
+        }
         return KillResult {
             success,
             method: if success {
@@ -775,6 +792,44 @@ pub fn kill_by_action(identity: &ExecutionProcessIdentity, action: ShutdownActio
         match action {
             ShutdownAction::Hard => hard_kill_pinned_group(identity, &group, "hard_killed"),
             ShutdownAction::Graceful(grace) => graceful_kill(identity, &group, grace),
+        }
+    }
+}
+
+/// End the pinned launcher group of an execution whose descendants a
+/// PID-namespace init holds. Wait up to `wait` for it to leave on its own (it
+/// is publishing the init's terminal record), then hard-kill what remains.
+/// Success means the exact group is gone or was killed; a lost leader with a
+/// still-populated numeric group is not success.
+fn settle_wrapper_group_after_containment(
+    identity: &ExecutionProcessIdentity,
+    wait: Duration,
+) -> KillResult {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (identity, wait);
+        return KillResult {
+            success: false,
+            method: "identity_unavailable",
+        };
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if identity.group_leader_pid == daemon_pgid() {
+            return KillResult {
+                success: false,
+                method: "skipped_daemon_pgid",
+            };
+        }
+        let deadline = std::time::Instant::now() + wait;
+        loop {
+            match pin_group_leader(identity) {
+                Err(error) => return group_pin_failure(identity, error),
+                Ok(group) if std::time::Instant::now() >= deadline => {
+                    return hard_kill_pinned_group(identity, &group, "wrapper_group_killed");
+                }
+                Ok(_) => std::thread::sleep(Duration::from_millis(20)),
+            }
         }
     }
 }
@@ -868,6 +923,15 @@ pub fn signal_exact_group(identity: &ExecutionProcessIdentity, signal: i32) -> S
             return SignalResult::IdentityUnavailable;
         }
         return match scope.terminate_and_wait(scope.control_timeout()) {
+            Ok(()) if scope.is_pid_namespace_init() => {
+                // The init is gone; the launcher's pinned group still owes
+                // its terminal publication and reap, so end it too.
+                if settle_wrapper_group_after_containment(identity, Duration::ZERO).success {
+                    SignalResult::Delivered
+                } else {
+                    SignalResult::IdentityUnavailable
+                }
+            }
             Ok(()) => SignalResult::Delivered,
             Err(_) => SignalResult::IdentityUnavailable,
         };
@@ -1025,6 +1089,16 @@ pub fn assert_reaped_process_group_absent(identity: &ExecutionProcessIdentity) -
         if execution_liveness(identity) != IdentityLiveness::DeadOrStale {
             anyhow::bail!("owned subprocess wait did not prove exact target absence");
         }
+        // A PID-namespace init proves only the target's tree empty. Its
+        // launcher group may still be publishing the terminal record, so the
+        // pinned group must be absent too, exactly as for a strict group.
+        if scope.is_pid_namespace_init()
+            && (execution_group_liveness_of_wrapper(identity) != IdentityLiveness::DeadOrStale
+                || (execution_identity_is_current_boot(identity)?
+                    && process_group_presence(identity.pgid()) != IdentityLiveness::DeadOrStale))
+        {
+            anyhow::bail!("PID-namespace containment is empty but its launcher group is not");
+        }
         return Ok(());
     }
     if execution_liveness(identity) != IdentityLiveness::DeadOrStale
@@ -1049,10 +1123,22 @@ pub fn execution_group_liveness(identity: &ExecutionProcessIdentity) -> Identity
         if validate_execution_process_identity_shape(identity).is_err() {
             return IdentityLiveness::Unavailable;
         }
-        return match scope.is_empty(scope.control_timeout()) {
+        let contained = match scope.is_empty(scope.control_timeout()) {
             Ok(true) => IdentityLiveness::DeadOrStale,
             Ok(false) => IdentityLiveness::Alive,
             Err(_) => IdentityLiveness::Unavailable,
+        };
+        if !scope.is_pid_namespace_init() {
+            return contained;
+        }
+        // The init's tree is only part of the execution: the launcher group
+        // outlives it while it reaps and publishes. Alive if either is.
+        return match (contained, execution_group_liveness_of_wrapper(identity)) {
+            (IdentityLiveness::Alive, _) | (_, IdentityLiveness::Alive) => IdentityLiveness::Alive,
+            (IdentityLiveness::Unavailable, _) | (_, IdentityLiveness::Unavailable) => {
+                IdentityLiveness::Unavailable
+            }
+            _ => IdentityLiveness::DeadOrStale,
         };
     }
     #[cfg(not(target_os = "linux"))]
@@ -1061,6 +1147,19 @@ pub fn execution_group_liveness(identity: &ExecutionProcessIdentity) -> Identity
         IdentityLiveness::Unavailable
     }
 
+    #[cfg(target_os = "linux")]
+    {
+        pin_liveness(pin_group_leader(identity))
+    }
+}
+
+/// Liveness of the pinned launcher group leader alone (the strict-group view).
+fn execution_group_liveness_of_wrapper(identity: &ExecutionProcessIdentity) -> IdentityLiveness {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = identity;
+        IdentityLiveness::Unavailable
+    }
     #[cfg(target_os = "linux")]
     {
         pin_liveness(pin_group_leader(identity))
@@ -1606,6 +1705,53 @@ mod tests {
             .err()
             .expect("a lost freeze cannot be recovered on a containment that never froze");
         assert!(error.to_string().contains("cannot quiesce"), "{error:#}");
+    }
+
+    /// The launcher (wrapper) group is a real running process; the namespace
+    /// init recorded for it is already gone. This is the interval in which
+    /// the wrapper still reaps the init and publishes its terminal record.
+    fn live_wrapper_gone_init_identity(
+        wrapper: ExecutionProcessIdentity,
+    ) -> ExecutionProcessIdentity {
+        let mut identity = exited_pid_namespace_identity();
+        identity.group_leader_pid = wrapper.group_leader_pid;
+        identity.group_leader_start_time_ticks = wrapper.group_leader_start_time_ticks;
+        identity
+    }
+
+    #[test]
+    fn pid_namespace_identity_is_not_settled_while_its_launcher_group_runs() {
+        let tmp = TempDir::new().unwrap();
+        let (mut child, wrapper, _marker) = spawn_signal_target(&tmp);
+        let identity = live_wrapper_gone_init_identity(wrapper);
+        validate_execution_process_identity_shape(&identity).unwrap();
+        // The init is gone, but the pinned launcher group is alive: not dead,
+        // not reaped, and the next owner must not clear its attachment.
+        assert_eq!(execution_group_liveness(&identity), IdentityLiveness::Alive);
+        let error = assert_reaped_process_group_absent(&identity)
+            .err()
+            .expect("a running launcher group is not settled");
+        assert!(error.to_string().contains("launcher group"), "{error:#}");
+        // Cleanup ends the init's tree and then the pinned launcher group.
+        let (killed, _status) = run_kill_with_reaper(
+            move || kill_by_action(&identity, ShutdownAction::Hard),
+            &mut child,
+        );
+        assert!(killed.success, "{}", killed.method);
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn pid_namespace_group_signal_also_ends_the_launcher_group() {
+        let tmp = TempDir::new().unwrap();
+        let (mut child, wrapper, _marker) = spawn_signal_target(&tmp);
+        let identity = live_wrapper_gone_init_identity(wrapper);
+        let (delivered, _status) = run_kill_with_reaper(
+            move || signal_exact_group(&identity, libc::SIGKILL),
+            &mut child,
+        );
+        assert_eq!(delivered, SignalResult::Delivered);
+        let _ = child.wait();
     }
 
     fn resource_binding_bare_identity() -> ExecutionProcessIdentity {

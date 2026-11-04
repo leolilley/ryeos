@@ -19278,6 +19278,23 @@ impl StateStore {
         )
     }
 
+    pub(crate) fn connect_external_connector_contained(
+        &self,
+        placement: &str,
+        capability_generation: &str,
+        capability_hash: &str,
+        peer: &crate::external_connector::ContainedQualificationPeer,
+    ) -> Result<bool> {
+        self.lock()?
+            .runtime_db
+            .connect_external_connector_contained(
+                placement,
+                capability_generation,
+                capability_hash,
+                peer,
+            )
+    }
+
     pub(crate) fn close_external_connector(
         &self,
         placement: &str,

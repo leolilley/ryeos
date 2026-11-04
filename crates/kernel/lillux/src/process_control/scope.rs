@@ -1822,6 +1822,31 @@ impl ProcessScopeRecovery {
         Ok(member && still_that_process()?)
     }
 
+    /// Membership of an exact process recorded earlier (for example a retained
+    /// connector peer) while its Worker is live. This opens its own pidfd for
+    /// the recorded PID and requires the recorded birth before relying on it,
+    /// so a recycled PID is not a member; then it applies the pinned check.
+    #[cfg(target_os = "linux")]
+    pub fn contains_exact_process(
+        &self,
+        process: &super::ExactProcessIdentity,
+        timeout: Duration,
+    ) -> Result<bool, String> {
+        use std::os::fd::AsFd as _;
+        process.validate()?;
+        let pidfd = match super::linux::open_pidfd(process.target_pid) {
+            Ok(pidfd) => pidfd,
+            // An absent task is not a member (and the Worker, if live, has no
+            // such process).
+            Err(_) => return Ok(false),
+        };
+        match super::linux::read_process_stat(process.target_pid) {
+            Ok(stat) if stat.start_time_ticks == process.target_start_time_ticks => {}
+            _ => return Ok(false),
+        }
+        self.contains_pinned_process(process, pidfd.as_fd(), timeout)
+    }
+
     fn contains_process(
         &self,
         process: &super::ExactProcessIdentity,
@@ -2083,7 +2108,11 @@ fn bind_pid_namespace_init(
     use std::os::fd::AsFd as _;
     let pidfd = super::linux::open_pidfd(pid)?;
     let identity = super::capture_exact_process_identity_from_pidfd(pid, None, pidfd.as_fd())?;
-    let init = super::PinnedPidNamespace::pin(&identity)?;
+    let init = super::PinnedPidNamespace::pin(&identity).map_err(|error| {
+        format!(
+            "the node qualified PID-namespace containment, but the isolation backend's held target is not the init of a private PID namespace: {error}"
+        )
+    })?;
     let recovery = ProcessScopeRecovery {
         version: SCOPE_RECOVERY_VERSION,
         configuration: ProcessScopeConfiguration {
@@ -3551,6 +3580,21 @@ mod pid_namespace_containment {
             // borrow a member's identity.
             assert!(!pinned(std::process::id(), &identity_of(fixture.detached)).unwrap());
         }
+        // The self-pinning entry point used while a Worker is live: recorded
+        // PID and birth must both match.
+        assert!(
+            recovery
+                .contains_exact_process(&identity_of(fixture.detached), timeout)
+                .unwrap()
+        );
+        let mut reborn = identity_of(fixture.detached);
+        reborn.target_start_time_ticks += 1;
+        assert!(!recovery.contains_exact_process(&reborn, timeout).unwrap());
+        assert!(
+            !recovery
+                .contains_exact_process(&identity_of(std::process::id()), timeout)
+                .unwrap()
+        );
         // Another boot is never membership.
         let mut other_boot = identity_of(fixture.detached);
         other_boot.boot_id = "00000000-0000-0000-0000-000000000000".to_owned();

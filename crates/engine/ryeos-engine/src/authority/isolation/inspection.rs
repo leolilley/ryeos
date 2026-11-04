@@ -49,7 +49,7 @@ pub struct PidNamespaceContainmentQualification {
 impl PidNamespaceContainmentQualification {
     /// Provider name this proof is attributed to in the capability report
     /// and judged against a floor.
-    pub const PROVIDER: &'static str = "pid_namespace_init";
+    pub const PROVIDER: &'static str = lillux::process_control::PID_NAMESPACE_PROVIDER;
 
     pub fn not_probed(reason: impl Into<String>) -> Self {
         Self {
@@ -78,7 +78,9 @@ impl PidNamespaceContainmentQualification {
     pub fn probe() -> Self {
         match lillux::process_control::cached_pid_namespace_containment_probe() {
             lillux::process_control::ProbeOutcome::Allowed => Self::qualified_by(
-                lillux::process_control::pid_namespace_proof_source(),
+                lillux::process_control::pid_namespace_proof_source(
+                    lillux::process_control::host_kernel_is_gvisor(),
+                ),
                 "kernel mechanism qualified (CLONE_NEWUSER|CLONE_NEWPID): a retained \
                  namespace init contained and settled setsid, double-fork and nested \
                  PID namespace descendants in a disposable probe",
@@ -108,7 +110,9 @@ impl PidNamespaceContainmentQualification {
         let mut named = false;
         for entry in floor {
             for name in entry.names() {
-                if name == "termination:pid_namespace" || name == "recovery:pid_namespace" {
+                if name == lillux::process_control::TERMINATION_PID_NAMESPACE
+                    || name == lillux::process_control::RECOVERY_PID_NAMESPACE
+                {
                     named = true;
                     if let Err(reason) = satisfies(entry, name, &evidence) {
                         self.qualified = false;

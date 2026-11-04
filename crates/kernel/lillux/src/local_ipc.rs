@@ -85,7 +85,11 @@ impl AuthenticatedUnixPeer {
         #[cfg(target_os = "linux")]
         {
             use std::os::fd::AsFd as _;
-            let identity = self.exact_process_identity(None)?;
+            let identity = crate::process_control::capture_contained_process_identity_from_pidfd(
+                u32::try_from(self.pid).context("authenticated peer PID is outside range")?,
+                self.pidfd.as_fd(),
+            )
+            .map_err(anyhow::Error::msg)?;
             let member = containment
                 .contains_pinned_process(
                     &identity,

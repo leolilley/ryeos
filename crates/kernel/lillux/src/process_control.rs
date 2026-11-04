@@ -38,13 +38,14 @@ pub use host_capability::{
     CgroupLimit, DirectoryStepFacts, HOST_FACTS_VERSION, HOST_PROVIDER, HostCapabilities,
     HostFacts, HostLifetimeBound, ISOLATION_NAMESPACES, MAX_CAPABILITY_ENTRIES,
     MAX_CAPABILITY_NAME_BYTES, MAX_CAPABILITY_TEXT_BYTES, MemlockFacts, PERSISTENCE_DURABLE_STATE,
-    PrivateDirectoryFacts, ProbeOutcome, ProofSource, RECOVERY_ENCLOSURE,
-    RECOVERY_ENCLOSURE_TRUSTED_INIT, RESIDENCY_CAPABILITIES, RESIDENCY_LOCKED,
-    RESIDENCY_SWAP_ABSENT, RESIDENCY_SWAP_LIMIT, ResidencyProof, RootStorageFacts, SCOPE_LIMITS,
-    STORAGE_DURABLE_ROOT, TERMINATION_ENCLOSURE, TERMINATION_ENCLOSURE_TRUSTED_INIT,
+    PID_NAMESPACE_PROVIDER, PrivateDirectoryFacts, ProbeOutcome, ProofSource,
+    QUIESCENCE_PID_NAMESPACE, RECOVERY_ENCLOSURE, RECOVERY_ENCLOSURE_TRUSTED_INIT,
+    RECOVERY_PID_NAMESPACE, RESIDENCY_CAPABILITIES, RESIDENCY_LOCKED, RESIDENCY_SWAP_ABSENT,
+    RESIDENCY_SWAP_LIMIT, ResidencyProof, RootStorageFacts, SCOPE_LIMITS, STORAGE_DURABLE_ROOT,
+    TERMINATION_ENCLOSURE, TERMINATION_ENCLOSURE_TRUSTED_INIT, TERMINATION_PID_NAMESPACE,
     admit_enclosure_inits, current_host_generation, decide_durable_root, decide_durable_state,
-    decide_private_directory, floor_entry_refusal, is_scope_capability, is_weaker_grade,
-    met_by_strongest, satisfies,
+    decide_private_directory, floor_entry_refusal, host_kernel_is_gvisor, is_scope_capability,
+    is_weaker_grade, kernel_version_is_gvisor, met_by_strongest, satisfies,
 };
 pub use oci_lifecycle::{
     OciHookState, OciLifecycleGeneration, OciLifecycleIntent, OciPreparationPhase,
@@ -592,6 +593,19 @@ pub(crate) fn capture_exact_process_identity_from_pidfd(
     target_pidfd: std::os::fd::BorrowedFd<'_>,
 ) -> Result<ExactProcessIdentity, String> {
     linux::capture_from_pidfd(target_pid, expected_group_leader, target_pidfd)
+}
+
+/// Identity of a process whose authority is membership in a retained
+/// containment, not its process group. It requires no live group leader (an
+/// orphaned-group member or a connector that called `setsid` has none to
+/// pin), so the group coordinates are the process's own birth and are not
+/// evidence of a group.
+#[cfg(target_os = "linux")]
+pub(crate) fn capture_contained_process_identity_from_pidfd(
+    target_pid: u32,
+    target_pidfd: std::os::fd::BorrowedFd<'_>,
+) -> Result<ExactProcessIdentity, String> {
+    linux::capture_contained_from_pidfd(target_pid, target_pidfd)
 }
 
 /// One completed process barrier, retaining whichever exact lifecycle
@@ -1315,6 +1329,31 @@ mod linux {
         })
     }
 
+    pub(super) fn capture_contained_from_pidfd(
+        target_pid: u32,
+        target_pidfd: BorrowedFd<'_>,
+    ) -> Result<ExactProcessIdentity, String> {
+        if target_pid <= 1 {
+            return Err("exact target PID is unsafe".to_owned());
+        }
+        pidfd_signal(target_pidfd.as_raw_fd(), 0, 0)
+            .map_err(|error| format!("probe exact target pidfd: {error}"))?;
+        let target = read_process_stat(target_pid)
+            .map_err(|error| format!("read exact target process stat: {error}"))?;
+        if matches!(target.state, 'Z' | 'X') {
+            return Err("exact target exited during identity capture".to_owned());
+        }
+        pidfd_signal(target_pidfd.as_raw_fd(), 0, 0)
+            .map_err(|error| format!("reprobe exact target pidfd: {error}"))?;
+        Ok(ExactProcessIdentity {
+            boot_id: read_boot_id()?,
+            target_pid,
+            target_start_time_ticks: target.start_time_ticks,
+            group_leader_pid: target_pid,
+            group_leader_start_time_ticks: target.start_time_ticks,
+        })
+    }
+
     pub(super) fn read_process_stat(pid: u32) -> std::io::Result<ProcessStat> {
         let raw = std::fs::read_to_string(format!("/proc/{pid}/stat"))?;
         let close = raw.rfind(')').ok_or_else(|| {
@@ -1428,6 +1467,48 @@ mod linux {
                 pollfd.revents
             ));
         }
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod contained_identity_tests {
+    use std::io::Read as _;
+    use std::os::fd::AsFd as _;
+    use std::os::unix::process::CommandExt as _;
+    use std::process::{Command, Stdio};
+
+    #[test]
+    fn contained_identity_needs_no_live_group_leader() {
+        // The group leader exits at once, leaving `sleep` an orphaned-group
+        // member: nothing remains to pin as its group.
+        let mut leader = Command::new("sh")
+            .args(["-c", "sleep 30 >/dev/null 2>&1 & echo $!"])
+            .process_group(0)
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut text = String::new();
+        leader
+            .stdout
+            .take()
+            .unwrap()
+            .read_to_string(&mut text)
+            .unwrap();
+        leader.wait().unwrap();
+        let pid: u32 = text.trim().parse().unwrap();
+        let pidfd = super::linux::open_pidfd(pid).unwrap();
+        let group_required =
+            super::capture_exact_process_identity_from_pidfd(pid, None, pidfd.as_fd());
+        let contained = super::capture_contained_process_identity_from_pidfd(pid, pidfd.as_fd());
+        unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+        assert!(
+            group_required.is_err(),
+            "the group requirement cannot be met"
+        );
+        let identity = contained.expect("membership, not the group, is the authority");
+        assert_eq!(identity.target_pid, pid);
+        assert_eq!(identity.group_leader_pid, pid);
+        identity.incarnation_digest().unwrap();
     }
 }
 

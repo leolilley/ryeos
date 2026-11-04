@@ -353,11 +353,33 @@ pub(super) fn require_terminal_qualification_worker_process(
 /// Lillux has observed the authenticated peer in this process's retained
 /// group. Boot and group-leader birth identity prevent numeric PGID reuse
 /// from joining a different incarnation. This makes no containment claim.
+/// How a connector peer was proved to belong to its Worker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PeerBasis {
+    /// Member of the Worker's process group (the trusted lane).
+    Group,
+    /// Member of the Worker's retained containment, captured by the pinned
+    /// contained path.
+    Contained,
+}
+
+fn require_basis_matches_holder(
+    basis: PeerBasis,
+    worker: &crate::process::ExecutionProcessIdentity,
+) -> Result<()> {
+    ensure!(
+        (basis == PeerBasis::Contained) == worker.process_scope.is_some(),
+        "qualification connector peer was proved by a basis that does not match its Worker's holder"
+    );
+    Ok(())
+}
+
 pub(super) fn require_attached_qualification_worker_process(
     conn: &Connection,
     reservation: &ExternalAllocationReservation,
     channel_binding_digest: &str,
     peer: &lillux::ExactProcessIdentity,
+    basis: PeerBasis,
 ) -> Result<QualificationWorkerProcessRecord> {
     let record = read_process(conn, &reservation.placement_thread_id)?
         .context("qualification connector lost its attached local Worker")?;
@@ -367,7 +389,21 @@ pub(super) fn require_attached_qualification_worker_process(
             && record.channel_binding_digest == channel_binding_digest,
         "qualification connector lost its live exact Worker owner"
     );
+    // The admission path must match what holds the Worker. A contained
+    // Worker's peers are admitted only through the contained path, so every
+    // retained peer of a contained Worker was proved against its containment.
+    require_basis_matches_holder(basis, &record.process_identity)?;
     require_trusted_peer_group(&record.process_identity, peer)?;
+    if let Some(scope) = record.process_identity.process_scope.as_ref() {
+        // While the Worker is live, re-prove membership through the
+        // recovered scope for this exact incarnation.
+        ensure!(
+            scope
+                .contains_exact_process(peer, scope.control_timeout())
+                .map_err(anyhow::Error::msg)?,
+            "qualification connector peer is not inside its live Worker's retained containment"
+        );
+    }
     Ok(record)
 }
 
@@ -721,5 +757,40 @@ mod tests {
         // The same peer is refused for a Worker held only by its group.
         worker.process_scope = None;
         assert!(require_trusted_peer_group(&worker, &detached).is_err());
+    }
+
+    #[test]
+    fn peer_basis_must_match_what_holds_the_worker() {
+        let (boot, _) = lillux::process_control::current_host_generation().unwrap();
+        let trusted = crate::process::execution_process_identity_from_lillux(
+            lillux::ExactProcessIdentity {
+                boot_id: boot.clone(),
+                target_pid: 40,
+                target_start_time_ticks: 100,
+                group_leader_pid: 40,
+                group_leader_start_time_ticks: 100,
+            },
+            None,
+        )
+        .unwrap();
+        let mut contained = trusted.clone();
+        contained.process_scope = Some(
+            serde_json::from_value(serde_json::json!({
+                "version": 5, "control_timeout": {"secs": 5, "nanos": 0},
+                "configuration": {"version": 3, "backend": {"implementation": "pid_namespace_init"}},
+                "backend": {"implementation": "pid_namespace_init", "boot_id": boot,
+                    "init_pid": 40, "init_start_time_ticks": 100,
+                    "namespace": {"device": 4, "inode": 9}}
+            }))
+            .unwrap(),
+        );
+        // Group-proved peers reach only trusted-lane Workers; contained
+        // peers only contained Workers. A group-proved peer can therefore
+        // never be retained against a contained Worker, so the historical
+        // containment branch is reachable only by contained admissions.
+        require_basis_matches_holder(PeerBasis::Group, &trusted).unwrap();
+        require_basis_matches_holder(PeerBasis::Contained, &contained).unwrap();
+        assert!(require_basis_matches_holder(PeerBasis::Group, &contained).is_err());
+        assert!(require_basis_matches_holder(PeerBasis::Contained, &trusted).is_err());
     }
 }
