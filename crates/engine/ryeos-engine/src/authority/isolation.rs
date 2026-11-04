@@ -11502,7 +11502,7 @@ mod tests {
         assert!(IsolationRuntime::validate_policy(&inits).is_err());
         let mut bounded = scoped_without_sandbox.clone();
         bounded.host_lifetime_bound = Some(lillux::process_control::HostLifetimeBound {
-            provider: "render-sandbox".to_owned(),
+            provider: "test-sandbox".to_owned(),
             seconds: 86_400,
         });
         IsolationRuntime::validate_policy(&bounded).unwrap();
@@ -11519,7 +11519,7 @@ mod tests {
                 .is_none()
         );
         bounded.host_lifetime_bound = Some(lillux::process_control::HostLifetimeBound {
-            provider: "render-sandbox".to_owned(),
+            provider: "test-sandbox".to_owned(),
             seconds: 0,
         });
         let error = IsolationRuntime::validate_policy(&bounded)

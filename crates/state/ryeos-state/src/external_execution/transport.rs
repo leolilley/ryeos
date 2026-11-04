@@ -1493,7 +1493,7 @@ mod tests {
             ExternalControllerFileRelayContract {
                 schema: 3,
                 route_contract: EXTERNAL_CHANNEL_RELAY_CONTRACT.into(),
-                owner_workspace_id: "render-owner".into(),
+                owner_workspace_id: "test-owner".into(),
                 private_mailbox_parent: "/run/ryeos/private-relay".into(),
                 maximum_file_bytes: 1024 * 1024,
                 maximum_frames: 1024,
@@ -1515,7 +1515,7 @@ mod tests {
             ExternalControllerFileRelayContract {
                 schema: 3,
                 route_contract: EXTERNAL_CHANNEL_RELAY_CONTRACT.into(),
-                owner_workspace_id: "render-owner".into(),
+                owner_workspace_id: "test-owner".into(),
                 private_mailbox_parent: "/run/ryeos/private-relay".into(),
                 maximum_file_bytes: 1024 * 1024,
                 maximum_frames: 1024,
@@ -1710,7 +1710,7 @@ mod tests {
         let relay = ExternalControllerFileRelayContract {
             schema: 3,
             route_contract: EXTERNAL_CHANNEL_RELAY_CONTRACT.into(),
-            owner_workspace_id: "render-owner".into(),
+            owner_workspace_id: "test-owner".into(),
             private_mailbox_parent: "/run/ryeos/private-relay".into(),
             maximum_file_bytes: 1024 * 1024,
             maximum_frames: 1024,

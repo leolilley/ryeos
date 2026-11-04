@@ -260,7 +260,7 @@ impl ObservedGuestRuntime {
     }
 
     /// Refuse drift immediately before admitting the exact one-shot import.
-    /// This does not prove that Render supplied the qualified snapshot or that
+    /// This does not prove that the provider supplied the qualified snapshot or that
     /// the installed tree cannot change after this point.
     pub fn verify_import_documents(
         &self,

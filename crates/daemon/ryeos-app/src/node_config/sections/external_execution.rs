@@ -1591,8 +1591,8 @@ mod workload_binding_tests {
             attestation_hash: "4".repeat(64),
             owner_principal: format!("fp:{}", "5".repeat(64)),
             qualification: ryeos_state::external_content::products::composition::ProductRelationshipQualification {
-                policy_ref: Some("config:render/snapshot-qualification".into()),
-                required_claims: vec!["render_snapshot_v1".into()],
+                policy_ref: Some("config:test/snapshot-qualification".into()),
+                required_claims: vec!["snapshot_v1".into()],
             },
             remote_testimony: None,
         });
@@ -1742,8 +1742,8 @@ mod workload_binding_tests {
             attestation_hash: "6".repeat(64),
             owner_principal: format!("fp:{}", "7".repeat(64)),
             qualification: ryeos_state::external_content::products::composition::ProductRelationshipQualification {
-                policy_ref: Some("config:render/snapshot-qualification".into()),
-                required_claims: vec!["render_snapshot_v1".into()],
+                policy_ref: Some("config:test/snapshot-qualification".into()),
+                required_claims: vec!["snapshot_v1".into()],
             },
             remote_testimony: None,
         });
@@ -1786,12 +1786,12 @@ mod workload_binding_tests {
             attestation_hash: "6".repeat(64),
             owner_principal: format!("fp:{}", "7".repeat(64)),
             qualification: ryeos_state::external_content::products::composition::ProductRelationshipQualification {
-                policy_ref: Some("config:render/snapshot-qualification".into()),
-                required_claims: vec!["render_snapshot_v1".into()],
+                policy_ref: Some("config:test/snapshot-qualification".into()),
+                required_claims: vec!["snapshot_v1".into()],
             },
             remote_testimony: Some(ExternalRemoteQualificationTestimonyBinding {
                 acceptance_hash: "8".repeat(64),
-                acceptance_policy_ref: "config:render/snapshot-acceptance".into(),
+                acceptance_policy_ref: "config:test/snapshot-acceptance".into(),
             }),
         });
         qualified.validate().unwrap();
@@ -1827,10 +1827,10 @@ mod workload_binding_tests {
 
         for (field, bad) in [
             ("acceptance_hash", "not-a-hash"),
-            ("acceptance_policy_ref", "tool:render/snapshot-acceptance"),
+            ("acceptance_policy_ref", "tool:test/snapshot-acceptance"),
             (
                 "acceptance_policy_ref",
-                "config:render/snapshot-acceptance@1",
+                "config:test/snapshot-acceptance@1",
             ),
         ] {
             let mut wrong = qualified.clone();

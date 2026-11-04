@@ -237,7 +237,7 @@ mod tests {
             kind: "node".into(),
             schema: 3,
             protocol: "ryeos.runtime-snapshot-qualification.v3".into(),
-            production_binding_id: "render-source".into(),
+            production_binding_id: "test-source".into(),
             production_binding_digest: "1".repeat(64),
             provider_spec_digest: "2".repeat(64),
             settings_digest: lillux::sha256_hex(

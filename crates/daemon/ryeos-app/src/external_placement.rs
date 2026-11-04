@@ -1574,7 +1574,7 @@ impl ExternalPlacementBackendRegistry {
         );
         // Full live qualification retains SupervisorActivation and every
         // signed Q workload capability requirement. In particular, today's
-        // unsupported_pending Render profile cannot contact a relay file.
+        // unsupported_pending provider profile cannot contact a relay file.
         self.qualify(contract, credential, program)
     }
 
@@ -4384,7 +4384,7 @@ pub enum ExternalQualificationRelayStepProgress {
 /// cannot take the occurrence mutex: a local Worker may hold it while waiting
 /// for the guest exchange that this method must transport. An exact 404 only
 /// yields Pending; all other contact errors remain errors. The current signed
-/// Render profile keeps this unreachable from a live Q loop.
+/// provider profile keeps this unreachable from a live Q loop.
 pub fn advance_external_qualification_relay_step(
     state: &AppState,
     placement: &str,
@@ -12015,7 +12015,7 @@ mod tests {
                 owner_principal: format!("fp:{}", "2".repeat(64)),
                 qualification: ryeos_state::external_content::products::composition::ProductRelationshipQualification {
                     policy_ref: Some("config:fixture/guest-mechanisms".into()),
-                    required_claims: vec!["render_snapshot_v1".into()],
+                    required_claims: vec!["snapshot_v1".into()],
                 },
                 remote_testimony: None,
             },
@@ -12102,8 +12102,8 @@ mod tests {
                 attestation_hash: proof.attestation_hash.clone(),
                 owner_principal: owner_principal.clone(),
                 qualification: ryeos_state::external_content::products::composition::ProductRelationshipQualification {
-                    policy_ref: Some("config:render/snapshot-qualification".into()),
-                    required_claims: vec!["render_snapshot_v1".into()],
+                    policy_ref: Some("config:test/snapshot-qualification".into()),
+                    required_claims: vec!["snapshot_v1".into()],
                 },
                 remote_testimony: None,
             },
@@ -12361,8 +12361,8 @@ mod tests {
                 attestation_hash: "6".repeat(64),
                 owner_principal: format!("fp:{}", "7".repeat(64)),
                 qualification: ryeos_state::external_content::products::composition::ProductRelationshipQualification {
-                    policy_ref: Some("config:render/snapshot-qualification".into()),
-                    required_claims: vec!["render_snapshot_v1".into()],
+                    policy_ref: Some("config:test/snapshot-qualification".into()),
+                    required_claims: vec!["snapshot_v1".into()],
                 },
                 remote_testimony: None,
             },

@@ -32,8 +32,9 @@ use super::{
 };
 use crate::node_config::NodeConfigSection as _;
 
-/// Backend id the `render` shorthand selects.
-pub const RENDER_BACKEND_ID: &str = "render-sandbox-early-access";
+/// Installed-backend id the tests register.
+#[cfg(test)]
+pub(super) const TEST_BACKEND_ID: &str = "test-lease-backend";
 /// Capacity group an operator binding joins unless told otherwise.
 pub const DEFAULT_CAPACITY_GROUP: &str = "candidate-workers";
 
@@ -42,15 +43,6 @@ pub(super) const RELAY_NETWORK_POLICY: &str = "controller_file_relay_guest_deny_
 pub(super) const STORAGE_POLICY: &str = "ephemeral_private_candidate_v1";
 pub(super) const CLEANUP_PROOF: &str = "provider_terminal_occurrence_v1";
 const MAX_ROOTS_PEM_BYTES: usize = 256 * 1024;
-
-/// Resolve the operator's backend spelling to the installed adapter id.
-pub fn canonical_backend_id(backend: &str) -> &str {
-    if backend == "render" {
-        RENDER_BACKEND_ID
-    } else {
-        backend
-    }
-}
 
 /// Bounds a binding grants one placement. Every omitted field keeps the
 /// operator default; the document validation still owns the hard limits.
@@ -630,7 +622,7 @@ pub(crate) fn compose_with_resolver(
         .ensure_protects_app_root(request.app_root)?;
     validate_document_id(&request.id, "external-execution binding")?;
     let identity = load_node_identity(request.app_root)?;
-    let backend = canonical_backend_id(&request.backend).to_owned();
+    let backend = request.backend.clone();
     let transport = select_transport(&request.transport)?;
     let runtime_qualification = request
         .runtime_qualification
@@ -1091,7 +1083,7 @@ pub(crate) mod tests {
 
     fn relay() -> ComposeTransportRequest {
         ComposeTransportRequest::FileRelay {
-            owner_workspace_id: "render-owner".into(),
+            owner_workspace_id: "test-owner".into(),
             private_mailbox_parent: ryeos_external_execution_contract::GUEST_OCCURRENCES_ROOT
                 .into(),
         }
@@ -1108,7 +1100,7 @@ pub(crate) mod tests {
             controller_transport: selected.selection,
             provider_network_inputs: selected.network_inputs,
             tls_roots_der_base64: selected.tls_roots,
-            backend: RENDER_BACKEND_ID.into(),
+            backend: TEST_BACKEND_ID.into(),
             account: "operator-account".into(),
             capacity_group: DEFAULT_CAPACITY_GROUP.into(),
             credential_generation: fresh_credential_generation()?,
@@ -1129,7 +1121,7 @@ pub(crate) mod tests {
     }
 
     fn relay_settings() -> Value {
-        serde_json::json!({"owner_id": "render-owner"})
+        serde_json::json!({"owner_id": "test-owner"})
     }
 
     fn content_program() -> AdmittedExternalCandidateProgram {
@@ -1174,7 +1166,7 @@ pub(crate) mod tests {
             controller_transport: selected.selection,
             provider_network_inputs: selected.network_inputs,
             tls_roots_der_base64: selected.tls_roots,
-            backend: RENDER_BACKEND_ID.into(),
+            backend: TEST_BACKEND_ID.into(),
             account: "operator-account".into(),
             capacity_group: DEFAULT_CAPACITY_GROUP.into(),
             credential_generation: "a".repeat(64),
@@ -1247,7 +1239,7 @@ pub(crate) mod tests {
             "{error:#}"
         );
         let node = stopped_node();
-        let mut request = compose_request(&node, "render");
+        let mut request = compose_request(&node, TEST_BACKEND_ID);
         request.runtime_content_qualification = Some(content_qualification_value());
         let resolved =
             installed_artifacts(&node, Some(PROVIDER_ID), vec![lifecycle(&"d".repeat(64))]);
@@ -1298,7 +1290,7 @@ pub(crate) mod tests {
     #[test]
     fn a_remote_content_testimony_selection_is_signed_through_composition() {
         let node = stopped_node();
-        let mut request = compose_request(&node, "render");
+        let mut request = compose_request(&node, TEST_BACKEND_ID);
         request.program = content_program();
         let mut selected = content_qualification_value();
         selected["remote_testimony"] = serde_json::json!({
@@ -1329,7 +1321,7 @@ pub(crate) mod tests {
             "owner_principal": format!("fp:{}", "7".repeat(64)),
             "qualification": {
                 "policy_ref": "config:fixtures/guest-qualification",
-                "required_claims": ["render_snapshot_v1"],
+                "required_claims": ["snapshot_v1"],
             },
             "remote_testimony": remote,
         })
@@ -1361,7 +1353,7 @@ pub(crate) mod tests {
     #[test]
     fn a_remote_testimony_selection_is_signed_through_composition() {
         let node = stopped_node();
-        let mut request = compose_request(&node, "render");
+        let mut request = compose_request(&node, TEST_BACKEND_ID);
         request.runtime_qualification = Some(guest_qualification_value(serde_json::json!({
             "acceptance_hash": "8".repeat(64),
             "acceptance_policy_ref": "config:fixtures/guest-acceptance",
@@ -1386,7 +1378,7 @@ pub(crate) mod tests {
     #[test]
     fn an_activated_content_program_is_refused_without_a_content_qualification() {
         let node = stopped_node();
-        let mut request = compose_request(&node, "render");
+        let mut request = compose_request(&node, TEST_BACKEND_ID);
         request.program = content_program();
         let resolved =
             installed_artifacts(&node, Some(PROVIDER_ID), vec![lifecycle(&"d".repeat(64))]);
@@ -1535,7 +1527,7 @@ pub(crate) mod tests {
             app_root: root.path(),
             state_lock: &lock,
             id: "operator".into(),
-            backend: "render".into(),
+            backend: TEST_BACKEND_ID.into(),
             program: program(),
             transport: https(),
             account: "operator-account".into(),
@@ -1614,12 +1606,12 @@ pub(crate) mod tests {
     #[test]
     fn relay_scope_must_equal_the_setting_the_adapter_declares() {
         let program = program();
-        // `relay()` names workspace `render-owner`; the declared key is `owner_id`.
+        // `relay()` names workspace `test-owner`; the declared key is `owner_id`.
         compose(&program, &relay(), relay_settings()).unwrap();
         for settings in [
             serde_json::json!({"owner_id": "other"}),
             serde_json::json!({}),
-            serde_json::json!({"workspace": "render-owner"}),
+            serde_json::json!({"workspace": "test-owner"}),
         ] {
             let error = refusal(compose(&program, &relay(), settings));
             assert!(
@@ -1634,7 +1626,7 @@ pub(crate) mod tests {
             controller_transport: selected.selection,
             provider_network_inputs: selected.network_inputs,
             tls_roots_der_base64: Vec::new(),
-            backend: RENDER_BACKEND_ID.into(),
+            backend: TEST_BACKEND_ID.into(),
             account: "a".into(),
             capacity_group: DEFAULT_CAPACITY_GROUP.into(),
             credential_generation: "a".repeat(64),
@@ -1665,7 +1657,7 @@ pub(crate) mod tests {
             controller_transport: selected.selection,
             provider_network_inputs: selected.network_inputs,
             tls_roots_der_base64: vec![STANDARD.encode(der_of(CERT_A_BODY))],
-            backend: RENDER_BACKEND_ID.into(),
+            backend: TEST_BACKEND_ID.into(),
             account: "a".into(),
             capacity_group: DEFAULT_CAPACITY_GROUP.into(),
             credential_generation: "a".repeat(64),
@@ -1680,13 +1672,6 @@ pub(crate) mod tests {
             error.to_string().contains("carries no TLS roots"),
             "{error}"
         );
-    }
-
-    #[test]
-    fn render_alias_resolves_and_other_backends_pass_through() {
-        assert_eq!(canonical_backend_id("render"), RENDER_BACKEND_ID);
-        assert_eq!(canonical_backend_id(RENDER_BACKEND_ID), RENDER_BACKEND_ID);
-        assert_eq!(canonical_backend_id("other"), "other");
     }
 
     #[test]
@@ -1739,7 +1724,7 @@ pub(crate) mod tests {
 
     #[test]
     fn binding_id_is_a_bounded_identifier() {
-        assert!(validate_document_id("render-1.a_b", "binding").is_ok());
+        assert!(validate_document_id("doc-1.a_b", "binding").is_ok());
         for bad in ["", ".hidden", "a/b", "a b", &"a".repeat(129)] {
             assert!(validate_document_id(bad, "binding").is_err(), "{bad}");
         }
@@ -1825,7 +1810,7 @@ pub(crate) mod tests {
         artifact: &str,
     ) -> std::sync::Arc<dyn crate::external_placement::ExternalPlacementBackend> {
         installed::CoordinateOnlyBackend::shared(
-            RENDER_BACKEND_ID,
+            TEST_BACKEND_ID,
             artifact,
             SETTINGS_SCHEMA,
             &"1".repeat(64),
@@ -1896,10 +1881,11 @@ pub(crate) mod tests {
         let resolved =
             installed_artifacts(&node, Some(PROVIDER_ID), vec![lifecycle(&"d".repeat(64))]);
         let report =
-            compose_with_resolver(compose_request(&node, "render"), |_| Ok(resolved)).unwrap();
+            compose_with_resolver(compose_request(&node, TEST_BACKEND_ID), |_| Ok(resolved))
+                .unwrap();
 
         assert_eq!(report.id, BINDING_ID);
-        assert_eq!(report.backend, RENDER_BACKEND_ID);
+        assert_eq!(report.backend, TEST_BACKEND_ID);
         assert_eq!(report.path, binding_path(&node));
         let published =
             lillux::secure_fs::open_pinned_regular_file_no_follow(&report.path).unwrap();
@@ -1953,7 +1939,7 @@ pub(crate) mod tests {
             vec![lifecycle(&"d".repeat(64))],
         );
         let error = refusal(compose_with_resolver(
-            compose_request(&node, "render"),
+            compose_request(&node, TEST_BACKEND_ID),
             |_| Ok(resolved),
         ));
         assert!(
@@ -1968,13 +1954,12 @@ pub(crate) mod tests {
         let node = stopped_node();
         let resolved = installed_artifacts(&node, Some(PROVIDER_ID), Vec::new());
         let error = refusal(compose_with_resolver(
-            compose_request(&node, "render"),
+            compose_request(&node, TEST_BACKEND_ID),
             |_| Ok(resolved),
         ));
         assert!(
-            format!("{error:#}").contains(
-                "external lifecycle backend `render-sandbox-early-access` is not installed"
-            ),
+            format!("{error:#}")
+                .contains("external lifecycle backend `test-lease-backend` is not installed"),
             "{error:#}"
         );
         assert!(!binding_path(&node).exists());
@@ -1990,7 +1975,7 @@ pub(crate) mod tests {
                     refusal(bundle_artifact_facts(
                         resolved,
                         PROVIDER_ID,
-                        RENDER_BACKEND_ID
+                        TEST_BACKEND_ID
                     ))
                 )
             };
@@ -2067,7 +2052,8 @@ pub(crate) mod tests {
         let resolved =
             installed_artifacts(&node, Some(PROVIDER_ID), vec![lifecycle(&"d".repeat(64))]);
         let report =
-            compose_with_resolver(compose_request(&node, "render"), |_| Ok(resolved)).unwrap();
+            compose_with_resolver(compose_request(&node, TEST_BACKEND_ID), |_| Ok(resolved))
+                .unwrap();
 
         let provisioned = super::super::provision::provision_installed_placement_credential(
             node.root.path(),
