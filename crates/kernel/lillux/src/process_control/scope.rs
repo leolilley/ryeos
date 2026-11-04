@@ -1785,13 +1785,44 @@ impl ProcessScopeRecovery {
         }
     }
 
-    /// Whether `process` is a member of this retained containment: inside the
-    /// recorded PID namespace, or inside the recorded cgroup scope, wherever
-    /// its process group or session now is. The caller must hold the
-    /// process's pidfd (as an authenticated peer does) across this call so the
-    /// numeric membership observation cannot name a recycled PID. A different
-    /// boot, an exited containment or any control failure is "not a member".
-    pub fn contains_process(
+    /// Whether the process named by the caller's retained `pidfd` is a member
+    /// of this containment: inside the recorded PID namespace, or inside the
+    /// recorded cgroup scope, wherever its process group or session now is.
+    ///
+    /// Membership is read by numeric PID, and holding a pidfd does not by
+    /// itself stop a PID being recycled. The descriptor is therefore used as
+    /// testimony on both sides of the read: it must still signal (the task is
+    /// alive) and its fdinfo `Pid` must equal the identity's PID before and
+    /// after. A recycled PID can no longer be attributed to this pidfd. A
+    /// different boot, an exited containment or any control failure is "not a
+    /// member".
+    #[cfg(target_os = "linux")]
+    pub fn contains_pinned_process(
+        &self,
+        process: &super::ExactProcessIdentity,
+        pidfd: std::os::fd::BorrowedFd<'_>,
+        timeout: Duration,
+    ) -> Result<bool, String> {
+        use std::os::fd::AsRawFd as _;
+        let raw = pidfd.as_raw_fd();
+        let still_that_process = || -> Result<bool, String> {
+            match super::linux::pidfd_signal(raw, 0, 0) {
+                Ok(()) => {}
+                Err(error) if error.raw_os_error() == Some(libc::ESRCH) => return Ok(false),
+                Err(error) => return Err(format!("probe peer pidfd: {error}")),
+            }
+            Ok(super::linux::pidfd_pid(raw)? == i64::from(process.target_pid))
+        };
+        if !still_that_process()? {
+            return Ok(false);
+        }
+        let member = self.contains_process(process, timeout)?;
+        // Re-probe after the numeric read: only now is the observation
+        // attributable to the descriptor's incarnation.
+        Ok(member && still_that_process()?)
+    }
+
+    fn contains_process(
         &self,
         process: &super::ExactProcessIdentity,
         timeout: Duration,
@@ -3505,6 +3536,20 @@ mod pid_namespace_containment {
                     .unwrap(),
                 "{pid}"
             );
+        }
+        // The same answers through the pinned entry point peers use.
+        {
+            use std::os::fd::AsFd as _;
+            let pinned = |pid: u32, identity: &crate::ExactProcessIdentity| {
+                let fd = crate::process_control::linux::open_pidfd(pid).unwrap();
+                recovery.contains_pinned_process(identity, fd.as_fd(), timeout)
+            };
+            assert!(pinned(fixture.detached, &identity_of(fixture.detached)).unwrap());
+            assert!(!pinned(std::process::id(), &identity_of(std::process::id())).unwrap());
+            // A descriptor that does not name the identity's PID is refused
+            // even though the numeric PID is a member: a recycled PID cannot
+            // borrow a member's identity.
+            assert!(!pinned(std::process::id(), &identity_of(fixture.detached)).unwrap());
         }
         // Another boot is never membership.
         let mut other_boot = identity_of(fixture.detached);

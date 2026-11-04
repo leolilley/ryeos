@@ -5438,6 +5438,7 @@ impl IsolationRuntime {
                 && matches!(scope_admission, ProcessScopeAdmission::Execution)
             {
                 PidNamespaceContainmentQualification::probe()
+                    .graded_by(&policy.requires_capabilities)
             } else {
                 PidNamespaceContainmentQualification::not_probed(
                     "not probed: this runtime is not an enforced execution runtime",

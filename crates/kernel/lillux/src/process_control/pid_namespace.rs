@@ -225,38 +225,130 @@ pub(super) fn recover_init(
         group_leader_pid: init_pid,
         group_leader_start_time_ticks: init_start_time_ticks,
     };
+    // Never classify from the /proc state letter: a thread-group leader that
+    // exits while other threads run is `Z` with namespace members alive. The
+    // init is gone only when no such pid exists, its birth differs, or its
+    // pidfd is readable (the whole thread group exited, which the kernel
+    // publishes only after the namespace was torn down).
     for _ in 0..2 {
-        match linux::read_process_stat(init_pid) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(RecoveredInit::Gone);
-            }
-            Err(error) => return Err(format!("observe recorded namespace init: {error}")),
-            Ok(stat) if stat.start_time_ticks != init_start_time_ticks => {
-                return Ok(RecoveredInit::Gone);
-            }
-            Ok(stat) if matches!(stat.state, 'Z' | 'X') => return Ok(RecoveredInit::Gone),
-            Ok(_) => {}
+        if matches!(
+            observe_init(init_pid, init_start_time_ticks)?,
+            InitObservation::Gone
+        ) {
+            return Ok(RecoveredInit::Gone);
         }
         match PinnedPidNamespace::pin_expected(&process, expected) {
             Ok(pinned) => return Ok(RecoveredInit::Live(pinned)),
-            // The init may have exited between observation and pin; the
-            // next iteration classifies that as gone. A live init in another
-            // namespace keeps failing and is refused.
+            // The init may have exited between observation and pin; the next
+            // iteration classifies that. A live init in another namespace
+            // keeps failing and is refused.
             Err(_) => continue,
         }
     }
-    match linux::read_process_stat(init_pid) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(RecoveredInit::Gone),
-        Ok(stat)
-            if stat.start_time_ticks != init_start_time_ticks
-                || matches!(stat.state, 'Z' | 'X') =>
-        {
-            Ok(RecoveredInit::Gone)
-        }
-        _ => {
+    match observe_init(init_pid, init_start_time_ticks)? {
+        InitObservation::Gone => Ok(RecoveredInit::Gone),
+        InitObservation::Live => {
             Err("recorded namespace init is live but is not the recorded namespace init".to_owned())
         }
     }
+}
+
+enum InitObservation {
+    Gone,
+    Live,
+}
+
+fn observe_init(pid: u32, start: u64) -> Result<InitObservation, String> {
+    use std::os::fd::{FromRawFd as _, OwnedFd};
+    let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0u32) } as i32;
+    if raw < 0 {
+        let error = std::io::Error::last_os_error();
+        return if error.raw_os_error() == Some(libc::ESRCH) {
+            Ok(InitObservation::Gone)
+        } else {
+            Err(format!("open recorded namespace init pidfd: {error}"))
+        };
+    }
+    // SAFETY: pidfd_open returned one new uniquely owned descriptor.
+    let pidfd = unsafe { OwnedFd::from_raw_fd(raw) };
+    match linux::read_process_stat(pid) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(InitObservation::Gone);
+        }
+        Err(error) => return Err(format!("observe recorded namespace init: {error}")),
+        Ok(stat) if stat.start_time_ticks != start => return Ok(InitObservation::Gone),
+        Ok(_) => {}
+    }
+    // Birth was read after the pidfd was opened, so the pidfd names that
+    // incarnation. Gone means exit of the whole thread group.
+    match linux::pidfd_signal(pidfd.as_raw_fd(), 0, 0) {
+        Err(error) if error.raw_os_error() == Some(libc::ESRCH) => {
+            return Ok(InitObservation::Gone);
+        }
+        Err(error) => return Err(format!("probe recorded namespace init: {error}")),
+        Ok(()) => {}
+    }
+    let mut pollfd = libc::pollfd {
+        fd: pidfd.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    loop {
+        let result = unsafe { libc::poll(&mut pollfd, 1, 0) };
+        if result > 0 {
+            return Ok(InitObservation::Gone);
+        }
+        if result == 0 {
+            return Ok(InitObservation::Live);
+        }
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::EINTR) {
+            return Err(format!("poll recorded namespace init pidfd: {error}"));
+        }
+    }
+}
+
+/// Grade of the PID-namespace proof on this host: measured on a native kernel,
+/// provider-attested where the kernel is an emulation (gVisor), whose
+/// namespace answers are not observations of a real kernel.
+pub fn pid_namespace_proof_source() -> super::host_capability::ProofSource {
+    use super::host_capability::ProofSource;
+    match std::fs::read_to_string("/proc/version") {
+        Ok(version) if version.to_ascii_lowercase().contains("gvisor") => {
+            ProofSource::ProviderAttested
+        }
+        _ => ProofSource::Measured,
+    }
+}
+
+/// The probe's outcome, run at most once per boot per process. A definitive
+/// answer (allowed or refused) is kernel and boot stable; an unobservable one
+/// (for example a busy fork window) is transient and is retried.
+pub fn cached_pid_namespace_containment_probe() -> super::host_capability::ProbeOutcome {
+    use super::host_capability::ProbeOutcome;
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<Option<(String, ProbeOutcome)>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    let boot = linux::read_boot_id().ok();
+    if let Some(boot) = boot.as_ref() {
+        let held = cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some((cached_boot, outcome)) = held.as_ref()
+            && cached_boot == boot
+        {
+            return outcome.clone();
+        }
+    }
+    let outcome = probe_pid_namespace_containment();
+    if let Some(boot) = boot
+        && !matches!(outcome, ProbeOutcome::Unobservable { .. })
+    {
+        *cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((boot, outcome.clone()));
+    }
+    outcome
 }
 
 /// Upper bound for the whole qualification probe, including its fork window.
@@ -666,7 +758,9 @@ fn require_incarnation(member: &PinnedMember, start: u64) -> Result<(), String> 
         .map_err(|error| format!("probe namespace process incarnation: {error}"))?;
     let stat = linux::read_process_stat(member.pid)
         .map_err(|error| format!("read namespace process incarnation: {error}"))?;
-    if stat.start_time_ticks != start || matches!(stat.state, 'Z' | 'X') {
+    // Liveness is the pidfd's, not the state letter's: a zombie leader may
+    // still lead live threads. Only a dead (`X`) task is not an incarnation.
+    if stat.start_time_ticks != start || stat.state == 'X' {
         return Err("PID namespace process incarnation changed or exited".to_owned());
     }
     linux::pidfd_signal(member.pidfd.as_raw_fd(), 0, 0)
@@ -716,6 +810,124 @@ mod tests {
     fn pid_namespace_translation_has_no_unsupported_descriptor_fallback() {
         let file = tempfile::tempfile().unwrap();
         assert!(translate(&file, NS_GET_PID_IN_PIDNS, std::process::id()).is_err());
+    }
+
+    extern "C" fn park_forever(_: *mut libc::c_void) -> *mut libc::c_void {
+        loop {
+            unsafe { libc::pause() };
+        }
+    }
+
+    /// Namespace init that starts a second thread, reports readiness, then on
+    /// command exits ONLY its leader thread (`SYS_exit`), leaving a zombie
+    /// thread-group leader with a live member.
+    fn spawn_leader_exit_fixture() -> (libc::pid_t, u32, libc::c_int) {
+        let pipe = || {
+            let mut fds = [0; 2];
+            assert_eq!(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
+            fds
+        };
+        let (report, ready, control) = (pipe(), pipe(), pipe());
+        let wrapper = unsafe { libc::fork() };
+        assert!(wrapper >= 0);
+        if wrapper == 0 {
+            unsafe {
+                libc::setpgid(0, 0);
+                if libc::unshare(libc::CLONE_NEWUSER | libc::CLONE_NEWPID) != 0 {
+                    libc::_exit(1);
+                }
+                let init = libc::fork();
+                if init == 0 {
+                    libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0);
+                    let mut thread: libc::pthread_t = std::mem::zeroed();
+                    if libc::pthread_create(
+                        &mut thread,
+                        std::ptr::null(),
+                        park_forever,
+                        std::ptr::null_mut(),
+                    ) != 0
+                    {
+                        libc::_exit(2);
+                    }
+                    libc::write(ready[1], b"T".as_ptr().cast(), 1);
+                    let mut byte = 0u8;
+                    libc::read(control[0], (&mut byte as *mut u8).cast(), 1);
+                    libc::syscall(libc::SYS_exit, 0);
+                    libc::_exit(3);
+                }
+                let pid = init as u32;
+                libc::write(report[1], (&pid as *const u32).cast(), 4);
+                let mut status = 0;
+                libc::waitpid(init, &mut status, 0);
+                libc::_exit(0);
+            }
+        }
+        let mut pid = [0u8; 4];
+        assert_eq!(
+            unsafe { libc::read(report[0], pid.as_mut_ptr().cast(), 4) },
+            4,
+            "wrapper reported its namespace init"
+        );
+        let mut tag = 0u8;
+        assert_eq!(
+            unsafe { libc::read(ready[0], (&mut tag as *mut u8).cast(), 1) },
+            1,
+            "the init started its second thread"
+        );
+        (wrapper, u32::from_ne_bytes(pid), control[1])
+    }
+
+    #[test]
+    fn recovery_does_not_report_empty_when_the_init_leader_exits_but_threads_live() {
+        use std::os::fd::AsFd as _;
+        let (wrapper, init_pid, control) = spawn_leader_exit_fixture();
+        struct Reap(libc::pid_t);
+        impl Drop for Reap {
+            fn drop(&mut self) {
+                unsafe {
+                    libc::kill(self.0, libc::SIGKILL);
+                    let mut status = 0;
+                    libc::waitpid(self.0, &mut status, 0);
+                }
+            }
+        }
+        let _reap = Reap(wrapper);
+        let pidfd = linux::open_pidfd(init_pid).unwrap();
+        let identity =
+            super::super::capture_exact_process_identity_from_pidfd(init_pid, None, pidfd.as_fd())
+                .unwrap();
+        let namespace = PinnedPidNamespace::pin(&identity).unwrap().identity();
+        // The leader thread exits; the thread group (and namespace) lives on.
+        assert_eq!(unsafe { libc::write(control, b"x".as_ptr().cast(), 1) }, 1);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while linux::read_process_stat(init_pid).unwrap().state != 'Z' {
+            assert!(Instant::now() < deadline, "leader did not become a zombie");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let recovered = recover_init(
+            &identity.boot_id,
+            init_pid,
+            identity.target_start_time_ticks,
+            namespace,
+        )
+        .unwrap();
+        let RecoveredInit::Live(live) = recovered else {
+            panic!("a zombie leader with live threads was reported as an empty namespace");
+        };
+        assert!(!live.init_exited().unwrap());
+        live.terminate_and_wait(Duration::from_secs(5)).unwrap();
+        assert!(live.init_exited().unwrap());
+        // Only now, after the whole thread group exited, is it gone.
+        assert!(matches!(
+            recover_init(
+                &identity.boot_id,
+                init_pid,
+                identity.target_start_time_ticks,
+                namespace
+            )
+            .unwrap(),
+            RecoveredInit::Gone
+        ));
     }
 
     #[test]

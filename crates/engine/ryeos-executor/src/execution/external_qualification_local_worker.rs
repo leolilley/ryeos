@@ -744,9 +744,26 @@ pub(crate) fn start_external_qualification_local_worker_for_signed_request(
                     // whichever mechanism the node qualified: its cgroup
                     // scope or the Worker's own PID-namespace init. The same
                     // guarantee the connector gate admitted against.
-                    let containment = enforced
+                    let containment = match enforced
                         .then(|| allocate_worker_containment(state, &placement))
-                        .transpose()?;
+                        .transpose()
+                    {
+                        Ok(containment) => containment,
+                        // Failure after connector preparation settles through
+                        // the same path as a failed spawn: fence the start
+                        // and hand the connector settlement to the caller.
+                        Err(error) => {
+                            return Ok(LaunchOutcome::Failed {
+                                error: fence_start_failure(
+                                    owner,
+                                    error,
+                                    "Q Worker descendant containment could not be allocated",
+                                ),
+                                connector_settlement,
+                                attached_process: None,
+                            });
+                        }
+                    };
                     let scope_cleanup = containment
                         .as_ref()
                         .and_then(|containment| containment.cgroup_recovery.clone());
@@ -781,9 +798,21 @@ pub(crate) fn start_external_qualification_local_worker_for_signed_request(
                             let error = match scope_cleanup.as_ref() {
                                 Some(recovery) => match settle_unlaunched_scope(state, recovery) {
                                     Ok(()) => error,
-                                    Err(cleanup) => error.context(format!(
-                                        "Q cgroup scope cleanup remains unproved: {cleanup:#}"
-                                    )),
+                                    Err(cleanup) => {
+                                        // The slot is left in place on purpose: its
+                                        // deterministic name lets the Q local cleanup
+                                        // sweep (`retire_qualification_worker_scope_slot`)
+                                        // find and retire it, and the Q start is
+                                        // fenced cleanup-unproved below.
+                                        tracing::warn!(
+                                            placement = %placement,
+                                            error = %format!("{cleanup:#}"),
+                                            "Q cgroup scope retained for the restart sweep after a failed held spawn"
+                                        );
+                                        error.context(format!(
+                                            "Q cgroup scope cleanup remains unproved and is retained for the sweep: {cleanup:#}"
+                                        ))
+                                    }
                                 },
                                 None => error,
                             };

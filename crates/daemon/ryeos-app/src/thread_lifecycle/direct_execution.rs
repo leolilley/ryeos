@@ -1872,7 +1872,12 @@ impl PreparedItemPlan {
         if !persistent_session_state_root_admitted(
             state_root.is_some(),
             workspace_authority,
-            process_scope.is_some(),
+            // Only the qualification local Worker: a dedicated, resource-free
+            // exclusive session whose state root is its private credential
+            // home and whose descendants its own retained containment holds.
+            process_scope.is_some()
+                && self.resource_policy
+                    == PersistentSessionResourcePolicy::QualificationNoResources,
         ) {
             bail!("persistent-session state root requires runtime-workspace authority");
         }
@@ -2202,20 +2207,22 @@ impl PreparedItemPlan {
 /// isolation compiler refuses the node state directory itself, anything
 /// outside it and any sibling, drops every broader overlapping writable policy
 /// mount, and under captured execution refuses all ambient authority beside
-/// it). It belongs to a runtime workspace, or to a dedicated execution whose
-/// descendants are held by its own retained containment (captured-execution
-/// scratch). A pooled or uncontained scratch session has none.
+/// it). It belongs to a runtime workspace, or to the qualification local
+/// Worker: a dedicated, resource-free session whose descendants its own
+/// retained containment holds, over captured scratch. A cgroup-scoped
+/// ordinary scratch session is NOT admitted here: its scope exists for
+/// resource limits, and nothing else binds a private state root to it.
 fn persistent_session_state_root_admitted(
     has_state_root: bool,
     workspace_authority: ryeos_engine::protocols::descriptor::PersistentSessionWorkspaceAuthority,
-    retained_containment: bool,
+    qualification_worker_containment: bool,
 ) -> bool {
     use ryeos_engine::protocols::descriptor::PersistentSessionWorkspaceAuthority::{
         EphemeralScratch, RuntimeWorkspace,
     };
     !has_state_root
         || matches!(workspace_authority, RuntimeWorkspace)
-        || (matches!(workspace_authority, EphemeralScratch) && retained_containment)
+        || (matches!(workspace_authority, EphemeralScratch) && qualification_worker_containment)
 }
 
 #[cfg(test)]
@@ -2226,7 +2233,7 @@ mod state_root_authority_tests {
     };
 
     #[test]
-    fn state_root_follows_a_runtime_workspace_or_a_retained_containment() {
+    fn state_root_follows_a_runtime_workspace_or_the_qualification_worker() {
         // (has root, authority, contained) -> admitted
         for (root, authority, contained, expected) in [
             (false, EphemeralScratch, false, true),
@@ -2242,6 +2249,32 @@ mod state_root_authority_tests {
             );
         }
     }
+}
+
+/// The signed session protocol a qualification-only local Worker may use,
+/// per launch lane. Disabled isolation runs the trusted process-group lane
+/// over a runtime workspace; enforced isolation runs descendant containment
+/// over captured scratch. Each lane's launch repeats its own check.
+pub fn qualification_worker_protocol_lane_admits(
+    session: &ryeos_engine::protocols::descriptor::PersistentSessionProtocol,
+    enforced: bool,
+) -> bool {
+    use ryeos_engine::protocols::PersistentSessionCleanupAuthority::{
+        DescendantContainment, TrustedProcessGroup,
+    };
+    use ryeos_engine::protocols::descriptor::{
+        PersistentSessionProcessMode,
+        PersistentSessionWorkspaceAuthority::{EphemeralScratch, RuntimeWorkspace},
+    };
+    let (cleanup, workspace) = if enforced {
+        (DescendantContainment, EphemeralScratch)
+    } else {
+        (TrustedProcessGroup, RuntimeWorkspace)
+    };
+    session.process_mode == PersistentSessionProcessMode::ExclusiveSession
+        && session.cleanup_authority == cleanup
+        && session.workspace_authority == workspace
+        && session.channel == ryeos_engine::protocols::PersistentSessionChannel::InheritedUnixSocket
 }
 
 fn validate_admitted_direct_executor_binding(
@@ -2891,17 +2924,10 @@ pub fn with_prepared_external_qualification_local_worker_plan<T>(
             &signed_protocol.descriptor,
         )
         .map_err(anyhow::Error::msg)?;
-        use ryeos_engine::protocols::descriptor::{
-            PersistentSessionProcessMode, PersistentSessionWorkspaceAuthority,
-        };
-        if session.process_mode != PersistentSessionProcessMode::ExclusiveSession
-            || session.cleanup_authority
-                != ryeos_engine::protocols::PersistentSessionCleanupAuthority::TrustedProcessGroup
-            || session.workspace_authority != PersistentSessionWorkspaceAuthority::RuntimeWorkspace
-            || session.channel
-                != ryeos_engine::protocols::PersistentSessionChannel::InheritedUnixSocket
-        {
-            bail!("qualification-only local Worker requires a dedicated trusted session protocol");
+        if !qualification_worker_protocol_lane_admits(session, state.isolation.is_enforced()) {
+            bail!(
+                "qualification-only local Worker requires a dedicated session protocol for its lane: trusted process group over a runtime workspace when isolation is disabled, descendant containment over captured scratch when enforced"
+            );
         }
         if session.readiness_identity_env.is_none()
             || (!content.process_environment.is_empty()

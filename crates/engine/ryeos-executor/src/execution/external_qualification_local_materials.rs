@@ -308,10 +308,10 @@ mod tests {
         DescendantContainmentReadiness {
             cgroup_scope: false,
             pid_namespace: if qualified {
-                PidNamespaceContainmentQualification {
-                    qualified: true,
-                    detail: "probed".into(),
-                }
+                PidNamespaceContainmentQualification::qualified_by(
+                    lillux::process_control::ProofSource::Measured,
+                    "probed",
+                )
             } else {
                 PidNamespaceContainmentQualification::not_probed("user namespaces refused")
             },
@@ -362,10 +362,10 @@ mod tests {
         let readiness = |cgroup_scope, namespace| DescendantContainmentReadiness {
             cgroup_scope,
             pid_namespace: if namespace {
-                PidNamespaceContainmentQualification {
-                    qualified: true,
-                    detail: "probed".into(),
-                }
+                PidNamespaceContainmentQualification::qualified_by(
+                    lillux::process_control::ProofSource::Measured,
+                    "probed",
+                )
             } else {
                 PidNamespaceContainmentQualification::not_probed("user namespaces refused")
             },
@@ -379,5 +379,22 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("no qualified mechanism"), "{error}");
+    }
+
+    #[test]
+    fn both_launch_checks_agree_on_each_lane() {
+        use ryeos_app::thread_lifecycle::qualification_worker_protocol_lane_admits as plan_lane;
+        let contained = protocol(Cleanup::DescendantContainment, Workspace::EphemeralScratch);
+        let trusted = protocol(Cleanup::TrustedProcessGroup, Workspace::RuntimeWorkspace);
+        let qualified = readiness(true);
+        // Enforced: the contained Worker passes the plan check AND the launch
+        // check; the trusted triple passes neither.
+        assert!(plan_lane(&contained, true));
+        contained_worker_launch_admission(&contained, &qualified).unwrap();
+        assert!(!plan_lane(&trusted, true));
+        assert!(contained_worker_launch_admission(&trusted, &qualified).is_err());
+        // Disabled: the existing trusted triple, never the contained one.
+        assert!(plan_lane(&trusted, false));
+        assert!(!plan_lane(&contained, false));
     }
 }

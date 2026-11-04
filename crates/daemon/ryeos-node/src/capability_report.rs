@@ -202,7 +202,6 @@ pub struct SignedNodeCapabilityReport {
 pub const PID_NAMESPACE_TERMINATION: &str = "termination:pid_namespace";
 pub const PID_NAMESPACE_RECOVERY: &str = "recovery:pid_namespace";
 pub const PID_NAMESPACE_QUIESCENCE: &str = "quiescence:pid_namespace";
-const PID_NAMESPACE_PROVIDER: &str = "pid_namespace_init";
 
 /// Inputs from the running node that the host facts cannot know.
 pub struct ReportInputs<'a> {
@@ -263,7 +262,6 @@ impl NodeCapabilityReport {
                 .process_scope_readiness
                 .descendant_containment
                 .pid_namespace,
-            host.gvisor(),
         );
         add_provider_environment(&mut view, inputs.provider_environment);
         add_credential_home(&mut view, &credential_home, established.as_deref());
@@ -669,19 +667,13 @@ fn add_scope_capabilities(
 fn add_pid_namespace_containment(
     view: &mut HostCapabilities,
     containment: &ryeos_engine::isolation::PidNamespaceContainmentQualification,
-    gvisor: bool,
 ) {
-    let source = if gvisor {
-        ProofSource::ProviderAttested
-    } else {
-        ProofSource::Measured
-    };
     for name in [PID_NAMESPACE_TERMINATION, PID_NAMESPACE_RECOVERY] {
         if containment.qualified {
             view.provide(
                 name,
-                source.clone(),
-                PID_NAMESPACE_PROVIDER,
+                containment.source.clone(),
+                ryeos_engine::isolation::PidNamespaceContainmentQualification::PROVIDER,
                 containment.detail.clone(),
             );
         } else {
@@ -1124,11 +1116,10 @@ mod tests {
         let mut passed = view(&["time"], &[]);
         add_pid_namespace_containment(
             &mut passed,
-            &Probe {
-                qualified: true,
-                detail: "probed".to_owned(),
-            },
-            false,
+            &Probe::qualified_by(
+                lillux::process_control::ProofSource::Measured,
+                "probed".to_owned(),
+            ),
         );
         for name in [PID_NAMESPACE_TERMINATION, PID_NAMESPACE_RECOVERY] {
             let evidence = &passed.provided[name];
@@ -1140,11 +1131,10 @@ mod tests {
         let mut emulated = view(&["time"], &[]);
         add_pid_namespace_containment(
             &mut emulated,
-            &Probe {
-                qualified: true,
-                detail: "probed".to_owned(),
-            },
-            true,
+            &Probe::qualified_by(
+                lillux::process_control::ProofSource::ProviderAttested,
+                "probed".to_owned(),
+            ),
         );
         assert_eq!(
             emulated.provided[PID_NAMESPACE_TERMINATION].source,
@@ -1155,11 +1145,7 @@ mod tests {
         assert!(match_floor(&floor, &passed).admitted);
         assert!(!match_floor(&floor, &emulated).admitted);
         let mut failed = view(&["time"], &[]);
-        add_pid_namespace_containment(
-            &mut failed,
-            &Probe::not_probed("user namespaces refused"),
-            false,
-        );
+        add_pid_namespace_containment(&mut failed, &Probe::not_probed("user namespaces refused"));
         assert!(failed.provided.get(PID_NAMESPACE_TERMINATION).is_none());
         assert_eq!(
             failed.missing[PID_NAMESPACE_TERMINATION],

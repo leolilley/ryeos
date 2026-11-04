@@ -38,33 +38,94 @@ pub struct ProcessScopeReadiness {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct PidNamespaceContainmentQualification {
     pub qualified: bool,
+    /// Grade of the proof: measured on a native kernel, provider-attested
+    /// where the kernel is emulated. A floor decides whether that grade is
+    /// accepted.
+    pub source: lillux::process_control::ProofSource,
     /// Why the mechanism is or is not qualified; always set.
     pub detail: String,
 }
 
 impl PidNamespaceContainmentQualification {
+    /// Provider name this proof is attributed to in the capability report
+    /// and judged against a floor.
+    pub const PROVIDER: &'static str = "pid_namespace_init";
+
     pub fn not_probed(reason: impl Into<String>) -> Self {
         Self {
             qualified: false,
+            source: lillux::process_control::ProofSource::Measured,
             detail: reason.into(),
         }
     }
 
-    /// Run the host probe: a disposable private namespace whose detached,
-    /// double-forked and nested descendants must all die with its init.
-    pub fn probe() -> Self {
-        match lillux::process_control::probe_pid_namespace_containment() {
-            lillux::process_control::ProbeOutcome::Allowed => Self {
-                qualified: true,
-                detail: "a retained namespace init contained and settled setsid, double-fork \
-                         and nested PID namespace descendants in a disposable probe"
-                    .to_owned(),
-            },
-            other => Self {
-                qualified: false,
-                detail: format!("PID-namespace containment probe: {other:?}"),
-            },
+    pub fn qualified_by(
+        source: lillux::process_control::ProofSource,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self {
+            qualified: true,
+            source,
+            detail: detail.into(),
         }
+    }
+
+    /// Qualify the kernel mechanism the Worker launch relies on: unshare of
+    /// `CLONE_NEWUSER | CLONE_NEWPID`, a retained namespace init, and the
+    /// kernel ending every member (detached, double-forked and nested-PID-
+    /// namespace descendants included) with that init. Run once per boot per
+    /// process; the same answer serves every runtime generation.
+    pub fn probe() -> Self {
+        match lillux::process_control::cached_pid_namespace_containment_probe() {
+            lillux::process_control::ProbeOutcome::Allowed => Self::qualified_by(
+                lillux::process_control::pid_namespace_proof_source(),
+                "kernel mechanism qualified (CLONE_NEWUSER|CLONE_NEWPID): a retained \
+                 namespace init contained and settled setsid, double-fork and nested \
+                 PID namespace descendants in a disposable probe",
+            ),
+            other => Self::not_probed(format!(
+                "PID-namespace containment probe (CLONE_NEWUSER|CLONE_NEWPID): {other:?}"
+            )),
+        }
+    }
+
+    /// Apply the node's capability floor exactly as the capability report
+    /// grades this proof. A floor entry naming the PID-namespace termination
+    /// or recovery capability must be satisfied by this proof's grade and
+    /// provider. Where the floor does not name it, only a measured proof
+    /// counts: an attested one is admitted solely by a floor that accepts
+    /// that grade by name.
+    pub fn graded_by(mut self, floor: &[lillux::process_control::CapabilityRequirement]) -> Self {
+        use lillux::process_control::{CapabilityEvidence, ProofSource, satisfies};
+        if !self.qualified {
+            return self;
+        }
+        let evidence = CapabilityEvidence {
+            source: self.source.clone(),
+            provider: Self::PROVIDER.to_owned(),
+            basis: self.detail.clone(),
+        };
+        let mut named = false;
+        for entry in floor {
+            for name in entry.names() {
+                if name == "termination:pid_namespace" || name == "recovery:pid_namespace" {
+                    named = true;
+                    if let Err(reason) = satisfies(entry, name, &evidence) {
+                        self.qualified = false;
+                        self.detail = reason;
+                        return self;
+                    }
+                }
+            }
+        }
+        if !named && self.source != ProofSource::Measured {
+            self.qualified = false;
+            self.detail = format!(
+                "the {} proof of PID-namespace containment is admitted only by a floor that names it and accepts that grade",
+                self.source.as_str()
+            );
+        }
+        self
     }
 }
 
@@ -456,9 +517,11 @@ mod tests {
     #[test]
     fn descendant_containment_is_derived_from_qualified_facts_in_a_stable_preference() {
         let digest = || Some(format!("sha256:{}", "c".repeat(64)));
-        let qualified = || PidNamespaceContainmentQualification {
-            qualified: true,
-            detail: "probed".to_owned(),
+        let qualified = || {
+            PidNamespaceContainmentQualification::qualified_by(
+                lillux::process_control::ProofSource::Measured,
+                "probed".to_owned(),
+            )
         };
         let classify = |policy, caps: BTreeSet<_>, authority, pid_namespace| {
             ProcessScopeReadiness::classify(
@@ -545,6 +608,63 @@ mod tests {
         .descendant_containment;
         assert!(trusted_only.trusted_process_group);
         assert_eq!(trusted_only.enforced_guarantee(), None);
+    }
+
+    #[test]
+    fn pid_namespace_proof_is_judged_by_the_floor_as_the_report_grades_it() {
+        use lillux::process_control::{
+            CapabilityRequirement, CapabilityRequirementSpec, ProofSource,
+        };
+        let attested = || {
+            PidNamespaceContainmentQualification::qualified_by(
+                ProofSource::ProviderAttested,
+                "emulated kernel",
+            )
+        };
+        let measured =
+            || PidNamespaceContainmentQualification::qualified_by(ProofSource::Measured, "native");
+        let accepting = |grades: &[&str]| {
+            CapabilityRequirement::Spec(CapabilityRequirementSpec {
+                name: Some("termination:pid_namespace".to_owned()),
+                any_of: Vec::new(),
+                accept: grades.iter().map(|grade| (*grade).to_owned()).collect(),
+                providers: Vec::new(),
+            })
+        };
+        // A silent floor admits only a measured proof.
+        assert!(measured().graded_by(&[]).qualified);
+        let silent = attested().graded_by(&[]);
+        assert!(
+            !silent.qualified && silent.detail.contains("provider_attested"),
+            "{silent:?}"
+        );
+        // A floor naming it by bare name accepts measured only, as the report grades.
+        assert!(
+            measured()
+                .graded_by(&["termination:pid_namespace".into()])
+                .qualified
+        );
+        assert!(
+            !attested()
+                .graded_by(&["termination:pid_namespace".into()])
+                .qualified
+        );
+        // A floor that accepts the attested grade admits it; one that does
+        // not, refuses it with the grade mismatch named.
+        assert!(
+            attested()
+                .graded_by(&[accepting(&["provider_attested"])])
+                .qualified
+        );
+        let refused = attested().graded_by(&[accepting(&["measured"])]);
+        assert!(
+            !refused.qualified && refused.detail.contains("provider_attested"),
+            "{refused:?}"
+        );
+        // An unqualified probe stays unqualified whatever the floor says.
+        let failed = PidNamespaceContainmentQualification::not_probed("refused")
+            .graded_by(&[accepting(&["measured", "provider_attested"])]);
+        assert!(!failed.qualified);
     }
 
     #[test]

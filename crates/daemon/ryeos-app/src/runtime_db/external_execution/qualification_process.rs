@@ -399,7 +399,16 @@ fn require_trusted_peer_group(
     // cgroup scope) instead had the peer's membership proved against that
     // containment at connect time; the connector may sit in its own group or
     // session, so the group leader is not part of that identity.
-    if worker.process_scope.is_none() {
+    if worker.process_scope.is_some() {
+        // No schema column holds a membership attestation, so the historical
+        // check can only use what the rows already imply: a member of the
+        // Worker's namespace or scope cannot predate the Worker target.
+        ensure!(
+            u64::try_from(worker.target_start_time_ticks).ok()
+                <= Some(peer.target_start_time_ticks),
+            "qualification connector peer predates its contained Worker"
+        );
+    } else {
         ensure!(
             worker.group_leader_pid == i64::from(peer.group_leader_pid)
                 && u64::try_from(worker.group_leader_start_time_ticks).ok()
@@ -701,6 +710,10 @@ mod tests {
             group_leader_start_time_ticks: 500,
         };
         require_trusted_peer_group(&worker, &detached).unwrap();
+        // A process born before the Worker target cannot be a member.
+        let mut predates = detached.clone();
+        predates.target_start_time_ticks = 50;
+        assert!(require_trusted_peer_group(&worker, &predates).is_err());
         // Another boot is still refused.
         let mut other_boot = detached.clone();
         other_boot.boot_id = "00000000-0000-0000-0000-000000000000".into();

@@ -732,10 +732,6 @@ pub fn mark_qualification_local_cleanup_unproved(
     )
 }
 
-/// Retire the original Q local workspace after the one-shot Worker and
-/// connector have settled. Every effect follows its durable Q cleanup phase;
-/// an interrupted phase can be resumed only with this daemon's original
-/// workspace and state-root descriptors. This grants no qualification claim.
 /// Deterministic cgroup slot of one Q Worker, derived from its placement so a
 /// restarted daemon finds the same slot without any new journal row.
 pub fn qualification_worker_scope_name(placement: &str) -> String {
@@ -792,6 +788,10 @@ pub fn retire_qualification_worker_scope_slot(state: &AppState, placement: &str)
     }
 }
 
+/// Retire the original Q local workspace after the one-shot Worker and
+/// connector have settled. Every effect follows its durable Q cleanup phase;
+/// an interrupted phase can be resumed only with this daemon's original
+/// workspace and state-root descriptors. This grants no qualification claim.
 pub fn cleanup_qualification_local_worker(
     state: &AppState,
     placement: &str,

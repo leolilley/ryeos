@@ -797,19 +797,12 @@ fn run_authenticated_connector(
                 }
                 // Retained containment: the connector may run in its own
                 // process group or session. Key on the containment itself.
-                // The peer's pidfd (held by `peer`) pins the incarnation
-                // while its membership in the retained PID namespace or
-                // cgroup scope is read.
-                Some(scope) => {
-                    let identity = peer.exact_process_identity(None)?;
-                    ensure!(
-                        scope
-                            .contains_process(&identity, scope.control_timeout())
-                            .map_err(anyhow::Error::msg)?,
-                        "qualification connector peer is not inside its Worker's retained containment"
-                    );
-                    identity
-                }
+                // Lillux re-probes the peer's pidfd on both sides of the
+                // membership read, so the numeric PID read is attributable
+                // to this incarnation.
+                Some(scope) => peer.contained_exact_process_identity(scope).context(
+                    "qualification connector peer is not inside its Worker's retained containment",
+                )?,
             }
         } else {
             peer.exact_process_identity(None)?

@@ -29,7 +29,8 @@ mod oci_lifecycle;
 mod pid_namespace;
 #[cfg(target_os = "linux")]
 pub use pid_namespace::{
-    PidNamespaceIdentity, PinnedPidNamespace, probe_pid_namespace_containment,
+    PidNamespaceIdentity, PinnedPidNamespace, cached_pid_namespace_containment_probe,
+    pid_namespace_proof_source, probe_pid_namespace_containment,
 };
 mod scope;
 pub use host_capability::{
@@ -1366,6 +1367,20 @@ mod linux {
         }
         // SAFETY: pidfd_open returned one new uniquely owned descriptor.
         Ok(unsafe { OwnedFd::from_raw_fd(raw) })
+    }
+
+    /// The PID a pidfd names in this process's PID namespace, read from its
+    /// fdinfo. `-1` means the task has exited. This is the descriptor's own
+    /// testimony, unlike a numeric PID read from /proc.
+    pub(super) fn pidfd_pid(pidfd: i32) -> Result<i64, String> {
+        let info = std::fs::read_to_string(format!("/proc/self/fdinfo/{pidfd}"))
+            .map_err(|error| format!("read pidfd fdinfo: {error}"))?;
+        info.lines()
+            .find_map(|line| line.strip_prefix("Pid:"))
+            .ok_or_else(|| "pidfd fdinfo has no Pid".to_owned())?
+            .trim()
+            .parse::<i64>()
+            .map_err(|error| format!("parse pidfd fdinfo Pid: {error}"))
     }
 
     pub(super) fn pidfd_signal(pidfd: i32, signal: i32, flags: u32) -> std::io::Result<()> {

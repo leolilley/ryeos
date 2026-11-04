@@ -2609,7 +2609,11 @@ pub(crate) fn preflight_external_qualification_program(
             .require_qualification_request_binding()?;
     }
 
-    require_connector_descendant_containment(
+    // The qualification local Worker launch binds the node's qualified
+    // containment unconditionally when isolation is enforced
+    // (`allocate_worker_containment`), so an `Enforced` admission here always
+    // has a containment bound to the launch that follows.
+    let admission = require_connector_descendant_containment(
         provider.declaration().connector_descendants,
         state.isolation.is_enforced(),
         &state
@@ -2618,6 +2622,10 @@ pub(crate) fn preflight_external_qualification_program(
             .process_scope_readiness
             .descendant_containment,
     )?;
+    tracing::info!(
+        ?admission,
+        "qualification connector descendant containment admitted"
+    );
     let access = binding.credential_access()?;
     let credential = access.decode(
         state
@@ -2736,7 +2744,7 @@ fn preflight_external_candidate_dependencies(
     // observation made after credential access or provider qualification.
     connectors.qualify(&contract)?;
     let provider = provider_configurations.qualify(&contract)?;
-    require_connector_descendant_containment(
+    let admission = require_connector_descendant_containment(
         provider.declaration().connector_descendants,
         isolation.is_enforced(),
         &isolation
@@ -2744,6 +2752,13 @@ fn preflight_external_candidate_dependencies(
             .process_scope_readiness
             .descendant_containment,
     )?;
+    // Nothing in this candidate flow binds a retained containment to its
+    // launch, so an enforced `contained` admission would be a promise with no
+    // mechanism behind it. Only the qualification Worker launch binds one.
+    ensure!(
+        !matches!(admission, ConnectorDescendantAdmission::Enforced(_)),
+        "signed provider connector declares `contained` descendants under enforced isolation, but this candidate launch binds no retained containment; only the enforced qualification Worker launch does"
+    );
     let credential = load_credential(binding)?;
     backends.qualify(
         &contract,
@@ -13378,10 +13393,10 @@ mod tests {
             |cgroup_scope, pid_namespace, trusted_process_group| DescendantContainmentReadiness {
                 cgroup_scope,
                 pid_namespace: if pid_namespace {
-                    PidNamespaceContainmentQualification {
-                        qualified: true,
-                        detail: "probed".into(),
-                    }
+                    PidNamespaceContainmentQualification::qualified_by(
+                        lillux::process_control::ProofSource::Measured,
+                        "probed",
+                    )
                 } else {
                     PidNamespaceContainmentQualification::not_probed("unavailable")
                 },
