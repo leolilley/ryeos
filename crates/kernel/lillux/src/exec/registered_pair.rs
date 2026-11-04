@@ -73,6 +73,17 @@ pub(crate) fn close_pair(
     })
 }
 
+/// Tests that close clock descriptors, hand off or adopt deadlines, or hold the process-wide fork barrier
+/// to provoke a busy refusal, share that barrier with each other. They take
+/// this guard so none observes another's deliberate hold.
+#[cfg(test)]
+pub(crate) fn serialize_clock_close_tests() -> std::sync::MutexGuard<'static, ()> {
+    static CLOCK_CLOSE_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    CLOCK_CLOSE_TESTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 #[cfg(test)]
 mod controls {
     use super::*;
@@ -91,6 +102,7 @@ mod controls {
 
     #[test]
     fn shared_or_busy_before_effects_retains_both_live_descriptors() {
+        let _serial = serialize_clock_close_tests();
         let (mut first, mut second) = pair();
         let alias = second.clone();
         let deadline = MonotonicDeadline::after(Duration::from_secs(10));
@@ -110,6 +122,7 @@ mod controls {
 
     #[test]
     fn ambiguous_close_is_cached_and_never_retried_by_coordinate() {
+        let _serial = serialize_clock_close_tests();
         let (mut first, mut second) = pair();
         // Inject an ambiguous result AFTER actually consuming the owned FD.
         // Never close a stale number or leave a File owning an already-closed
