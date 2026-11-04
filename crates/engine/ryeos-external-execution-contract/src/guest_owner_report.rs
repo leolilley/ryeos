@@ -604,6 +604,14 @@ impl GuestOwnerActivationReport {
             Self::Refused { .. } | Self::ExitedBeforeReport { .. } | Self::MalformedReport { .. }
         )
     }
+
+    /// Startup can fail now on this outcome. The owner ended without held, or
+    /// the activation deadline arrived without it. A lost stream is the one
+    /// ambiguous outcome: the guest may still be running, so startup keeps
+    /// waiting to its signed deadline. `Held` proceeds to the relay.
+    pub fn ends_startup(&self) -> bool {
+        self.owner_ended_without_held() || matches!(self, Self::NoReportBeforeDeadline { .. })
+    }
 }
 
 struct ClockNote<'a>(Option<&'a GuestClockReport>);
@@ -674,6 +682,30 @@ impl fmt::Display for GuestOwnerActivationReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_definite_no_hold_or_the_deadline_ends_startup() {
+        let last_phase = Some(GuestOwnerStep::Install);
+        let ends = |report: GuestOwnerActivationReport| report.ends_startup();
+        assert!(ends(GuestOwnerActivationReport::Refused {
+            step: GuestOwnerStep::Stage,
+            last_phase,
+        }));
+        assert!(ends(GuestOwnerActivationReport::ExitedBeforeReport {
+            last_phase
+        }));
+        assert!(ends(GuestOwnerActivationReport::MalformedReport {
+            last_phase
+        }));
+        assert!(ends(GuestOwnerActivationReport::NoReportBeforeDeadline {
+            last_phase
+        }));
+        assert!(!ends(GuestOwnerActivationReport::StreamLost { last_phase }));
+        assert!(!ends(GuestOwnerActivationReport::Held {
+            last_phase,
+            supervisor_exit: None,
+        }));
+    }
 
     #[test]
     fn report_lines_round_trip_exactly() {

@@ -8617,13 +8617,7 @@ impl ExternalPlacementReconciliation {
         require_timely_lifecycle_observation(deadline_exceeded, deadline)?;
         // The owner itself ended startup, or the deadline passed without held:
         // no Attach can follow, so name what the owner last reported now.
-        if let Some(report) = guest_owner.filter(|report| {
-            report.owner_ended_without_held()
-                || matches!(
-                    report,
-                    GuestOwnerActivationReport::NoReportBeforeDeadline { .. }
-                )
-        }) {
+        if let Some(report) = guest_owner.filter(GuestOwnerActivationReport::ends_startup) {
             bail!("external supervisor activation failed: {report}");
         }
         current.reservation.startup_deadline()?;
@@ -14737,6 +14731,12 @@ mod tests {
             (
                 GuestOwnerActivationReport::ExitedBeforeReport {
                     last_phase: Some(Step::ImportVerify),
+                },
+                true,
+            ),
+            (
+                GuestOwnerActivationReport::MalformedReport {
+                    last_phase: Some(Step::Stage),
                 },
                 true,
             ),
