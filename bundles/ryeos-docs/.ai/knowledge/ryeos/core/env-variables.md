@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-29T09:08:38Z:caf9eecbe5d3b5a51fec59e50700fdabbaa683f9a5547b23c0cee3941f81b34b:VWQoFYWO0g8aQWB+a5OOk6NCVbgyfFfm/K6aXm4501yqJdB53SNE8e0LKsJE7CfZyPzZruEKyOlS8NvR0sCDAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-04T09:32:59Z:7c011eba1eb9f3e9d68d26f9723fd4ea1bf9348eb4bbca556676f3fb18a612ac:CMXatpDW3E/dQq20Ik6R/bjB3y/KmZvoBqWjee91JwpCxC9xRP08uJE0ILCqwlqr0R4/g98uwnzVDc14KCKhCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [reference, env, daemon, cli, runtimes, lifecycle]
@@ -83,5 +83,7 @@ variables are represented in the typed launch plan. Enforced mode replaces any i
 `TMPDIR` value with `/tmp`, the isolation-private tmpfs. When a verified protocol
 requests callback IPC, its `RYEOSD_SOCKET_PATH` value
 is checked against the daemon-pinned path before the exact socket is exposed.
+That path is the callback-only socket (`ryeosd-runtime.sock`), which routes
+`runtime.*` alone; the control socket is never given to a tool.
 Callback-free launches do not mount it. See [Execution
 Isolation](node/execution-isolation.md).
