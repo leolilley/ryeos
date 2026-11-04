@@ -161,7 +161,7 @@ impl LocalLifecycleEnv {
             Ok(None) => None,
             Err(err) => {
                 tracing::debug!(
-                    error = %err,
+                    error = %format!("{err:#}"),
                     "daemon.json present but unreadable; treating as no hint"
                 );
                 None
