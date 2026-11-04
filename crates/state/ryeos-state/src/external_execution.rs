@@ -2051,17 +2051,24 @@ mod tests {
         let (binding, _, _) = binding_issued_at(lillux::time::timestamp_millis());
         let now = lillux::time::LocalClockAnchor::capture().unwrap();
 
-        let mut aged = now.coordinate().clone();
-        aged.tick_ns -= 201_000 * 1_000_000;
-        let refusal = guest_window::GuestChannelWindow::derive(
-            &lillux::time::LocalClockAnchor::from_retained(aged).unwrap(),
-            &binding,
-        )
-        .unwrap_err();
-        assert!(
-            format!("{refusal:#}").contains("already elapsed"),
-            "{refusal:#}"
-        );
+        // Short windows keep the aged anchors independent of host uptime.
+        let (mut short, _, _) = binding_issued_at(lillux::time::timestamp_millis());
+        short.execution_deadline_ms = short.issued_at_ms + 20;
+        short.expires_at_ms = short.issued_at_ms + 10_000;
+        for (age_ms, label) in [(30_u64, "execution"), (11_000, "expiry")] {
+            let mut aged = now.coordinate().clone();
+            aged.tick_ns = aged.tick_ns.saturating_sub(age_ms * 1_000_000);
+            assert!(aged.tick_ns > 0, "host booted less than {age_ms} ms ago");
+            let refusal = guest_window::GuestChannelWindow::derive(
+                &lillux::time::LocalClockAnchor::from_retained(aged).unwrap(),
+                &short,
+            )
+            .unwrap_err();
+            assert!(
+                format!("{refusal:#}").contains("already elapsed"),
+                "{label}: {refusal:#}"
+            );
+        }
 
         let mut other_boot = now.coordinate().clone();
         other_boot.incarnation_digest = lillux::sha256_hex(b"another boot");

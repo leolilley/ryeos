@@ -294,6 +294,11 @@ impl LiveInheritedExternalCandidateSupervisor {
         self.supervisor.journal().binding()
     }
 
+    /// The channel window on the guest's own clock.
+    pub fn window(&self) -> &ryeos_state::external_execution::guest_window::GuestChannelWindow {
+        self.supervisor.journal().window()
+    }
+
     pub fn process_identity(&self) -> &lillux::ExactProcessIdentity {
         &self.process_identity
     }

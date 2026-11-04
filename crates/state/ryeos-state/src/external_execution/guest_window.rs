@@ -84,7 +84,7 @@ impl GuestChannelWindow {
             ),
         };
         ensure!(
-            !window.expiry_elapsed(),
+            !window.expiry_elapsed() && !window.execution_elapsed(),
             "external channel window already elapsed on the guest's own clock"
         );
         Ok(window)
@@ -143,6 +143,7 @@ impl GuestChannelWindow {
     /// lengths. For harnesses that issue the binding and run the guest in one
     /// process on one clock; a real guest derives its window from an anchor
     /// captured before it asked for the binding.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn starting_now_for_single_clock_harness(
         binding: &ExecutionChannelBinding,
     ) -> Result<Self> {

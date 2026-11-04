@@ -455,9 +455,7 @@ pub(super) fn select_transport(request: &ComposeTransportRequest) -> Result<Sele
                 connect_timeout_ms: 5_000,
                 request_timeout_ms: 10_000,
                 maximum_response_bytes: 1024 * 1024,
-                max_clock_skew_ms: Some(
-                    ryeos_external_execution_contract::clock_skew::DEFAULT_MAX_CLOCK_SKEW_MS,
-                ),
+                max_clock_skew_ms: None,
             };
             Ok(SelectedTransport {
                 selection: contract.into(),
@@ -486,9 +484,7 @@ pub(super) fn select_transport(request: &ComposeTransportRequest) -> Result<Sele
                         maximum_frames: 1024,
                         poll_interval_ms: 1000,
                         poll_deadline_ms: 30_000,
-                        max_clock_skew_ms: Some(
-                    ryeos_external_execution_contract::clock_skew::DEFAULT_MAX_CLOCK_SKEW_MS,
-                ),
+                        max_clock_skew_ms: None,
                     },
                 ),
                 network_inputs,

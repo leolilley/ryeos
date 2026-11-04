@@ -2683,6 +2683,7 @@ impl GuestStore {
     fn owner(&self) -> GuestOwner<'_> {
         GuestOwner {
             bootstrap_digest: &self.bootstrap_digest,
+            window: &self.window,
         }
     }
 
@@ -3222,9 +3223,14 @@ impl GuestStore {
 
 struct GuestOwner<'a> {
     bootstrap_digest: &'a str,
+    window: &'a GuestChannelWindow,
 }
 
 impl JournalOwner for GuestOwner<'_> {
+    fn frame_lifetime(&self) -> journal::FrameLifetimeCheck<'_> {
+        journal::FrameLifetimeCheck::GuestWindow(self.window)
+    }
+
     fn require_owner(&self, conn: &Connection, binding: &ExecutionChannelBinding) -> Result<()> {
         let retained: Option<(String, String)> = conn
             .query_row(

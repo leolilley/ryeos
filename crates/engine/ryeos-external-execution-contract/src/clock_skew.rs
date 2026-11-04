@@ -11,7 +11,10 @@
 use anyhow::{Result, ensure};
 use std::fmt::Display;
 
-/// Tolerance the controller declares in the transport contracts it composes.
+/// A tolerance a node's policy may declare in the transport contracts it
+/// composes. Composition leaves it unset unless policy supplies a value, so a
+/// composed contract's bytes and digest do not change; the guest then applies
+/// the same value as its fallback.
 pub const DEFAULT_MAX_CLOCK_SKEW_MS: u32 = 60_000;
 
 /// Tolerance applied when a signed contract declares none: contract documents

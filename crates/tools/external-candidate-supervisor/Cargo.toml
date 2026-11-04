@@ -8,7 +8,7 @@ repository = "https://github.com/leolilley/ryeos"
 
 [features]
 default = []
-test-support = []
+test-support = ["ryeos-state/test-support"]
 
 [dependencies]
 anyhow = { workspace = true }

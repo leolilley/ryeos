@@ -2649,9 +2649,6 @@ fn durable_identity_check(
     }
 }
 
-/// Doctor row for the native-capacity account: healthy with its summary,
-/// a warning with the cure when the allowance is spent and the signed policy
-/// lets the operator re-issue, a failure when it does not.
 /// The node's wall-clock trust against the clock requirement its signed
 /// execution policy declares, if any. Reporting needs no policy: without one
 /// (or without an initialized node) the row is informational.
@@ -2724,6 +2721,9 @@ fn wall_clock_check(
     }
 }
 
+/// Doctor row for the native-capacity account: healthy with its summary,
+/// a warning with the cure when the allowance is spent and the signed policy
+/// lets the operator re-issue, a failure when it does not.
 fn native_capacity_check(
     app_root: &std::path::Path,
 ) -> ryeos_core_tools::actions::doctor::CheckResult {

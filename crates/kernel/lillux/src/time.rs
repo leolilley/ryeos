@@ -567,15 +567,27 @@ fn occupancy_contract_digest(contract: &OccupancyClockContract) -> Result<String
 fn occupancy_now_platform() -> Result<OccupancyCoordinate, String> {
     let contract = OccupancyClockContract::current()?;
     let tick_ns = occupancy_tick_ns()?;
-    let incarnation = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
-        .map_err(|error| format!("read occupancy clock incarnation: {error}"))?;
-    let incarnation = incarnation.trim();
-    if incarnation.is_empty() {
-        return Err("occupancy clock incarnation is empty".to_string());
-    }
+    // The boot id cannot change while this process runs, so it is read once:
+    // deadline checks sample the clock often and must not open a descriptor
+    // each time.
+    static INCARNATION_DIGEST: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let incarnation_digest = match INCARNATION_DIGEST.get() {
+        Some(digest) => digest.clone(),
+        None => {
+            let incarnation = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+                .map_err(|error| format!("read occupancy clock incarnation: {error}"))?;
+            let incarnation = incarnation.trim();
+            if incarnation.is_empty() {
+                return Err("occupancy clock incarnation is empty".to_string());
+            }
+            INCARNATION_DIGEST
+                .get_or_init(|| crate::sha256_hex(incarnation.as_bytes()))
+                .clone()
+        }
+    };
     Ok(OccupancyCoordinate {
         contract_digest: contract.contract_digest,
-        incarnation_digest: crate::sha256_hex(incarnation.as_bytes()),
+        incarnation_digest,
         tick_ns,
     })
 }
@@ -686,9 +698,42 @@ impl MonotonicDeadline {
 
     /// Narrow two expiry authorities without restarting either clock or
     /// exposing the underlying host instant. Authorities on different clocks
-    /// are ordered by the time each has left now.
+    /// are compared on the suspend-inclusive clock, and the result counts it:
+    /// a process-clock deadline that wins is carried over as the boot
+    /// coordinate it stands at now, so a host pause cannot stretch the
+    /// narrowed deadline past the suspend-inclusive one it was narrowed by.
     pub fn min(self, other: Self) -> Self {
-        if other.is_before(&self) { other } else { self }
+        match (self.basis, other.basis) {
+            (DeadlineBasis::Process(_), DeadlineBasis::Boot(_))
+            | (DeadlineBasis::Boot(_), DeadlineBasis::Process(_)) => {
+                match (self.boot_coordinate(), other.boot_coordinate()) {
+                    (Some(a), Some(b)) => Self {
+                        basis: DeadlineBasis::Boot(a.min(b)),
+                    },
+                    _ if other.is_before(&self) => other,
+                    _ => self,
+                }
+            }
+            _ => {
+                if other.is_before(&self) {
+                    other
+                } else {
+                    self
+                }
+            }
+        }
+    }
+
+    /// This deadline as a suspend-inclusive coordinate, where the host has
+    /// such a clock. A process deadline is placed by its time left now.
+    fn boot_coordinate(&self) -> Option<u64> {
+        match self.basis {
+            DeadlineBasis::Boot(tick) => Some(tick),
+            DeadlineBasis::Process(_) => {
+                let left = u64::try_from(self.remaining().as_nanos()).ok()?;
+                boot_tick_ns()?.checked_add(left)
+            }
+        }
     }
 
     /// Whether both name the very same endpoint on the same clock.
@@ -701,12 +746,15 @@ impl MonotonicDeadline {
     }
 
     /// Compare expiries without exporting or renewing time. Two on one clock
-    /// compare exactly; two on different clocks by the time each has left.
+    /// compare exactly; two on different clocks on the suspend-inclusive one.
     pub(crate) fn is_before(&self, other: &Self) -> bool {
         match (self.basis, other.basis) {
             (DeadlineBasis::Process(a), DeadlineBasis::Process(b)) => a < b,
             (DeadlineBasis::Boot(a), DeadlineBasis::Boot(b)) => a < b,
-            _ => self.remaining() < other.remaining(),
+            _ => match (self.boot_coordinate(), other.boot_coordinate()) {
+                (Some(a), Some(b)) => a < b,
+                _ => self.remaining() < other.remaining(),
+            },
         }
     }
 
@@ -724,9 +772,35 @@ impl MonotonicDeadline {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(test)))]
 fn boot_tick_ns() -> Option<u64> {
     occupancy_tick_ns().ok()
+}
+
+/// Under test the suspend-inclusive clock can be advanced on its own, as a
+/// host suspension advances it while the process clock stands still.
+#[cfg(all(target_os = "linux", test))]
+fn boot_tick_ns() -> Option<u64> {
+    occupancy_tick_ns()
+        .ok()
+        .map(|tick| tick + simulated_suspension::get())
+}
+
+#[cfg(all(target_os = "linux", test))]
+pub(crate) mod simulated_suspension {
+    use std::cell::Cell;
+
+    thread_local! {
+        static EXTRA_NS: Cell<u64> = const { Cell::new(0) };
+    }
+
+    pub(crate) fn get() -> u64 {
+        EXTRA_NS.with(Cell::get)
+    }
+
+    pub(crate) fn suspend_for(duration: std::time::Duration) {
+        EXTRA_NS.with(|extra| extra.set(extra.get() + duration.as_nanos() as u64));
+    }
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -768,6 +842,58 @@ mod monotonic_deadline_ordering_tests {
         assert!(late.has_elapsed());
         assert_eq!(early.is_before(&late), earlier.is_some());
         assert!(!late.is_before(&early));
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod mixed_basis_tests {
+    use super::*;
+
+    fn boot_deadline(after: Duration) -> MonotonicDeadline {
+        let now = occupancy_tick_ns().unwrap();
+        MonotonicDeadline::at_boot_tick(now + after.as_nanos() as u64).unwrap()
+    }
+
+    #[test]
+    fn a_mixed_min_never_outlives_the_suspend_inclusive_deadline() {
+        let long_process = MonotonicDeadline::after(Duration::from_secs(3600));
+        let short_boot = boot_deadline(Duration::from_secs(10));
+        let narrowed = [long_process.min(short_boot), short_boot.min(long_process)];
+        assert!(narrowed.iter().all(|deadline| !deadline.has_elapsed()));
+        // The host suspends: the boot clock moves on, the process clock does
+        // not. The narrowed deadlines follow the boot clock.
+        simulated_suspension::suspend_for(Duration::from_secs(11));
+        assert!(narrowed.iter().all(MonotonicDeadline::has_elapsed));
+        assert!(short_boot.has_elapsed());
+        assert!(!long_process.has_elapsed());
+    }
+
+    #[test]
+    fn a_process_deadline_that_wins_a_mixed_min_still_counts_suspension() {
+        let short_process = MonotonicDeadline::after(Duration::from_secs(5));
+        let long_boot = boot_deadline(Duration::from_secs(3600));
+        let narrowed = short_process.min(long_boot);
+        assert!(matches!(narrowed.basis, DeadlineBasis::Boot(_)));
+        assert!(narrowed.remaining() <= Duration::from_secs(5));
+        let other_way = long_boot.min(short_process);
+        assert!(matches!(other_way.basis, DeadlineBasis::Boot(_)));
+        assert!(!narrowed.has_elapsed());
+        simulated_suspension::suspend_for(Duration::from_secs(6));
+        assert!(narrowed.has_elapsed() && other_way.has_elapsed());
+        // The process deadline alone would not have noticed.
+        assert!(!short_process.has_elapsed());
+    }
+
+    #[test]
+    fn same_basis_min_is_unchanged() {
+        let early = MonotonicDeadline::after(Duration::from_secs(1));
+        let late = MonotonicDeadline::after(Duration::from_secs(9));
+        assert!(early.min(late).same_endpoint(&early));
+        assert!(late.min(early).same_endpoint(&early));
+        let early = boot_deadline(Duration::from_secs(1));
+        let late = boot_deadline(Duration::from_secs(9));
+        assert!(early.min(late).same_endpoint(&early));
+        assert!(late.min(early).same_endpoint(&early));
     }
 }
 
