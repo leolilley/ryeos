@@ -226,7 +226,7 @@ crates/tools/external-guest-restoration-verifier/Cargo.toml
 crates/tools/external-guest-runtime-producer/Cargo.toml
 crates/tools/codex-runtime-verifier/Cargo.toml
 crates/tools/guest-wire-verifier/Cargo.toml
-crates/tools/modal-guest-launcher/Cargo.toml
+crates/host-adapters/modal-guest-launcher/Cargo.toml
 crates/bin/cli/Cargo.toml
 crates/bin/daemon/Cargo.toml
 Cargo.lock
@@ -265,7 +265,7 @@ files=(
   crates/tools/external-guest-runtime-producer/Cargo.toml
   crates/tools/codex-runtime-verifier/Cargo.toml
   crates/tools/guest-wire-verifier/Cargo.toml
-  crates/tools/modal-guest-launcher/Cargo.toml
+  crates/host-adapters/modal-guest-launcher/Cargo.toml
   crates/bin/cli/Cargo.toml
   crates/bin/daemon/Cargo.toml
 )
@@ -736,7 +736,7 @@ Before tagging:
   - [ ] `crates/tools/session-exec/Cargo.toml`
   - [ ] All `crates/tools/{codex-*,external-*}/Cargo.toml` release-version manifests
   - [ ] `crates/tools/guest-wire-verifier/Cargo.toml`
-  - [ ] `crates/tools/modal-guest-launcher/Cargo.toml`
+  - [ ] `crates/host-adapters/modal-guest-launcher/Cargo.toml`
   - [ ] `crates/bin/cli/Cargo.toml`
   - [ ] `crates/bin/daemon/Cargo.toml`
   - [ ] `Cargo.lock`

@@ -20,7 +20,7 @@ fn render_source_declaration_commits_exact_profile_and_bounded_capability_ceilin
         lillux::sha256_hex(profile)
     );
     let settings = include_bytes!(
-        "../../../host-adapters/render-sandbox-adapter/fixtures/settings.schema.json"
+        "../fixtures/settings.schema.json"
     );
     assert_eq!(
         declaration.settings_schema_digest,
