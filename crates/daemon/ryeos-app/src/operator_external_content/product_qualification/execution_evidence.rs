@@ -638,7 +638,23 @@ fn direct_process_settlement(
     }
     let authority = match settlement.kind {
         crate::runtime_db::ThreadProcessSettlementKind::ReapedScopeEmpty => {
-            VerifierProcessSettlementAuthority::ScopeEmpty
+            // The settlement kind records that a whole retained containment
+            // was proved empty; the retained recovery names the mechanism.
+            // No verifier launch path binds a PID-namespace containment yet
+            // (today only the qualification local Worker does), so the second
+            // arm is unreachable until the enforced verifier variant runs
+            // under containment. It is kept so that variant's settlement is
+            // graded by its actual mechanism and never as a cgroup scope.
+            if settlement
+                .process_identity
+                .process_scope
+                .as_ref()
+                .is_some_and(lillux::ProcessScopeRecovery::is_pid_namespace_init)
+            {
+                VerifierProcessSettlementAuthority::ContainmentEmpty
+            } else {
+                VerifierProcessSettlementAuthority::ScopeEmpty
+            }
         }
         crate::runtime_db::ThreadProcessSettlementKind::ReapedGroupAbsent => {
             if !state

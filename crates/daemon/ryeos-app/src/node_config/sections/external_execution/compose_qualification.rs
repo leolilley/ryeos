@@ -636,8 +636,8 @@ mod tests {
             protocol: ryeos_external_execution_contract::PROVIDER_DECLARATION_PROTOCOL.to_owned(),
             targets: vec!["x86_64-unknown-linux-gnu".to_owned()],
             connector: "provider-connector".to_owned(),
-            connector_process_group:
-                ryeos_external_execution_contract::ExternalProviderConnectorProcessGroup::New,
+            connector_descendants:
+                ryeos_external_execution_contract::ExternalProviderConnectorDescendants::Contained,
             configuration_adapter: "provider-configuration".to_owned(),
             configuration_destination: "environments.toml".to_owned(),
             qualification_request_binding_protocol: binding_protocol.map(str::to_owned),

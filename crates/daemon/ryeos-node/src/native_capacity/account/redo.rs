@@ -539,6 +539,7 @@ pub(super) mod controls {
             target_start_time_ticks: 71,
             group_leader_pid: pid,
             group_leader_start_time_ticks: 71,
+            group_basis: lillux::GroupBasis::ProcessGroup,
         }
     }
 

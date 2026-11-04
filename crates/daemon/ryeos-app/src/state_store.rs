@@ -19278,6 +19278,23 @@ impl StateStore {
         )
     }
 
+    pub(crate) fn connect_external_connector_contained(
+        &self,
+        placement: &str,
+        capability_generation: &str,
+        capability_hash: &str,
+        peer: &crate::external_connector::ContainedQualificationPeer,
+    ) -> Result<bool> {
+        self.lock()?
+            .runtime_db
+            .connect_external_connector_contained(
+                placement,
+                capability_generation,
+                capability_hash,
+                peer,
+            )
+    }
+
     pub(crate) fn close_external_connector(
         &self,
         placement: &str,
@@ -20235,9 +20252,25 @@ impl StateStore {
             .context("qualification Worker process is not attached")?;
         let proof = runtime_db::external_execution::QualificationWorkerDeathProof::capture(record)?;
         let _permit = self.acquire_write_permit()?;
-        self.lock()?
+        let settled = self
+            .lock()?
             .runtime_db
-            .settle_qualification_worker_process(proof)
+            .settle_qualification_worker_process(proof)?;
+        // A cgroup scope is a kernel resource that outlives its settled
+        // processes; remove it now that the terminal row names it empty.
+        // A PID-namespace containment has no resource to retire.
+        if let Some(scope) = settled
+            .process_identity
+            .process_scope
+            .as_ref()
+            .filter(|scope| !scope.is_pid_namespace_init())
+        {
+            scope
+                .retire_after_settlement()
+                .map_err(anyhow::Error::msg)
+                .context("retire the settled Q Worker's cgroup scope")?;
+        }
+        Ok(settled)
     }
 
     /// Read one exact Q framed request and observed turn. This projection is

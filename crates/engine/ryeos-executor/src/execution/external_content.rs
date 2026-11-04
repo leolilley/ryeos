@@ -1492,6 +1492,25 @@ pub(crate) fn bind_retained_qualification_local_realizations(
     )
 }
 
+/// Redeem the accepted Q realization set as descriptor-pinned read-only
+/// isolation mounts for an enforced local Worker. Project mounts target the
+/// Worker's own workspace and fixed runtime mounts keep their signed
+/// execution-runtime coordinates; nothing is copied into a host view.
+pub(crate) fn bind_retained_qualification_isolated_realizations(
+    state: &ryeos_app::state::AppState,
+    realized: &ryeos_state::objects::ExternalContentRealizationSet,
+    workspace: &Path,
+) -> anyhow::Result<Option<BoundExternalRealizations>> {
+    require_isolation_realization_count(realized.iter().len())?;
+    bind_external_realization_set_with(
+        state,
+        realized.clone(),
+        workspace,
+        ExternalRealizationBinding::IsolationMounts,
+        None,
+    )
+}
+
 /// Exact project-relative roots populated from separately admitted external
 /// realizations. Native private-copy fold-back excludes these operational
 /// shadows so input realizations never become project output bytes.

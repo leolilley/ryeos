@@ -49,7 +49,9 @@ impl RootEnclosureSpec<'_> {
                 || name.contains('\0')
                 || !seen.insert(*name)
             {
-                return Err(format!("root enclosure host entry {name:?} is not one plain name"));
+                return Err(format!(
+                    "root enclosure host entry {name:?} is not one plain name"
+                ));
             }
         }
         Ok(())
@@ -116,7 +118,11 @@ mod imp {
     }
 
     fn zero(result: libc::c_int, label: &str) -> Result<(), String> {
-        if result == 0 { Ok(()) } else { Err(last_error(label)) }
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(last_error(label))
+        }
     }
 
     fn c_path(path: &str) -> Result<CString, String> {
@@ -236,7 +242,12 @@ mod imp {
 
     /// Forked helper, still in the caller's user namespace: once the caller
     /// has unshared, install both id maps for it with the setuid tools.
-    fn map_ids_for(target: libc::pid_t, go: OwnedFd, plan: &[(CString, u32, u32); 2], account: [u32; 2]) -> ! {
+    fn map_ids_for(
+        target: libc::pid_t,
+        go: OwnedFd,
+        plan: &[(CString, u32, u32); 2],
+        account: [u32; 2],
+    ) -> ! {
         let mut byte = [0_u8; 1];
         let mut go = std::fs::File::from(go);
         if go.read_exact(&mut byte).is_err() {
@@ -279,7 +290,12 @@ mod imp {
         }
         if helper == 0 {
             drop(go_writer);
-            map_ids_for(target, go_reader, &plan, [spec.account_uid, spec.account_gid]);
+            map_ids_for(
+                target,
+                go_reader,
+                &plan,
+                [spec.account_uid, spec.account_gid],
+            );
         }
         drop(go_reader);
         let unshared = zero(
@@ -393,7 +409,9 @@ mod imp {
                 make_directory(&target, 0o755)?;
                 mount(&host, &target, None, libc::MS_BIND | libc::MS_REC, None)?;
             } else {
-                return Err(format!("host entry {host} is neither a directory nor a link"));
+                return Err(format!(
+                    "host entry {host} is neither a directory nor a link"
+                ));
             }
         }
         make_directory(&format!("{NEW_ROOT}/tmp"), 0o1777)?;
@@ -429,13 +447,7 @@ mod imp {
             unsafe { libc::unshare(libc::CLONE_NEWNS | libc::CLONE_NEWPID) },
             "create enclosure mount and PID namespaces",
         )?;
-        mount(
-            "none",
-            "/",
-            None,
-            libc::MS_REC | libc::MS_PRIVATE,
-            None,
-        )?;
+        mount("none", "/", None, libc::MS_REC | libc::MS_PRIVATE, None)?;
         let (status_reader, status_writer) = pipe()?;
         let init = unsafe { libc::fork() };
         if init < 0 {
@@ -481,7 +493,10 @@ mod imp {
             .unwrap();
             let path = table.path().to_str().unwrap();
             assert_eq!(subordinate_start(path, 1000, "leo").unwrap(), 100000);
-            assert_eq!(subordinate_start(path, 1001, "nobody-else").unwrap(), 300000);
+            assert_eq!(
+                subordinate_start(path, 1001, "nobody-else").unwrap(),
+                300000
+            );
             assert!(subordinate_start(path, 1002, "absent").is_err());
         }
     }

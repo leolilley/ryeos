@@ -397,6 +397,22 @@ pub(crate) fn bind_retained_qualification_source(
     )
 }
 
+/// Redeem the same retained Q source as a read-only execution-runtime mount
+/// for an enforced local Worker, outside its writable workspace.
+pub(crate) fn bind_retained_qualification_source_isolated(
+    state: &ryeos_app::state::AppState,
+    projection: &ryeos_state::objects::EffectiveSourceClosureProjection,
+    workspace: &Path,
+) -> anyhow::Result<BoundSourceClosure> {
+    bind_source_projection_with(
+        state,
+        projection,
+        workspace,
+        BindingMode::IsolationMount(SourceMountPlacement::ExecutionRuntime),
+        None,
+    )
+}
+
 pub(crate) fn bind_source_in_private_workspace_with_budget(
     state: &ryeos_app::state::AppState,
     resolution: &ryeos_engine::resolution::ResolutionOutput,

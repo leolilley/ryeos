@@ -718,6 +718,44 @@ fn run_connector_owner(
     closed
 }
 
+/// A connector peer whose identity was captured and proved against the
+/// retained containment of its qualification Worker (namespace or cgroup
+/// membership, between pidfd probes). The field is private and the only
+/// constructor performs that capture, so the containment branch of the
+/// historical peer check is reachable only by peers admitted this way.
+pub(crate) struct ContainedQualificationPeer {
+    identity: lillux::ExactProcessIdentity,
+    /// The exact containment record this membership was read against. The
+    /// durable admission compares it with the Worker row instead of
+    /// repeating the slow read under the state-store lock.
+    proven_against: lillux::ProcessScopeRecovery,
+}
+
+impl ContainedQualificationPeer {
+    fn capture(
+        peer: &lillux::local_ipc::AuthenticatedUnixPeer,
+        containment: &lillux::ProcessScopeRecovery,
+    ) -> Result<Self> {
+        Ok(Self {
+            identity: peer.contained_exact_process_identity(containment)?,
+            proven_against: containment.clone(),
+        })
+    }
+
+    pub(crate) fn proven_against(&self) -> &lillux::ProcessScopeRecovery {
+        &self.proven_against
+    }
+
+    pub(crate) fn identity(&self) -> &lillux::ExactProcessIdentity {
+        &self.identity
+    }
+}
+
+enum AdmittedPeer {
+    Group(lillux::ExactProcessIdentity),
+    Contained(ContainedQualificationPeer),
+}
+
 fn accept_connector(
     listener: &lillux::OwnerPrivateLocalDuplexListener,
     control: &ExternalConnectorRelayControl,
@@ -767,7 +805,7 @@ fn run_authenticated_connector(
             .state_store
             .external_allocation(placement)?
             .context("external connector lost its retained allocation")?;
-        let peer_identity = if matches!(
+        let admitted_peer = if matches!(
             allocation.reservation.owner,
             crate::runtime_db::external_execution::ExternalAllocationOwner::QualificationCandidate(
                 _
@@ -784,27 +822,50 @@ fn run_authenticated_connector(
                         == state.state_store.external_execution_channel(placement)?.digest()?,
                 "qualification connector changed its attached Worker or channel"
             );
-            ensure!(
-                worker.process_identity.process_scope.is_none(),
-                "qualification connector requires its signed trusted process-group owner"
-            );
-            let group = u32::try_from(worker.process_identity.group_leader_pid)
-                .context("qualification connector Worker group is outside range")?;
-            // Lillux observes both the socket peer and group leader through
-            // pinned process descriptors. The connection transaction below
-            // rejoins their boot/group birth tuple to this retained Worker.
-            peer.exact_process_identity(Some(group))?
+            match worker.process_identity.process_scope.as_ref() {
+                // Trusted lane: the connector is held only by the Worker's
+                // process group. Lillux observes both the socket peer and
+                // group leader through pinned process descriptors; the
+                // connection transaction rejoins their boot/group birth
+                // tuple to this retained Worker.
+                None => {
+                    let group = u32::try_from(worker.process_identity.group_leader_pid)
+                        .context("qualification connector Worker group is outside range")?;
+                    AdmittedPeer::Group(peer.exact_process_identity(Some(group))?)
+                }
+                // Retained containment: the connector may run in its own
+                // process group or session. Key on the containment itself.
+                // Lillux re-probes the peer's pidfd on both sides of the
+                // membership read, so the numeric PID read is attributable
+                // to this incarnation.
+                Some(scope) => AdmittedPeer::Contained(
+                    ContainedQualificationPeer::capture(&peer, scope).context(
+                        "qualification connector peer is not inside its Worker's retained containment",
+                    )?,
+                ),
+            }
         } else {
-            peer.exact_process_identity(None)?
+            AdmittedPeer::Group(peer.exact_process_identity(None)?)
         };
         stage = "durable_connection";
-        ensure!(
-            state.state_store.connect_external_connector(
+        let first_connection = match &admitted_peer {
+            AdmittedPeer::Group(identity) => state.state_store.connect_external_connector(
                 placement,
                 capability_generation,
                 capability_hash,
-                &peer_identity,
+                identity,
             )?,
+            AdmittedPeer::Contained(contained) => {
+                state.state_store.connect_external_connector_contained(
+                    placement,
+                    capability_generation,
+                    capability_hash,
+                    contained,
+                )?
+            }
+        };
+        ensure!(
+            first_connection,
             "external connector connection is already uncertain"
         );
         stage = "ready_frame";

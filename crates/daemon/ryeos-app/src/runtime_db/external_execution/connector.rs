@@ -553,12 +553,53 @@ impl RuntimeDb {
 
     /// Returns `true` only to the transaction that acquired the one allowed
     /// connection. `false` is durable uncertainty and grants no reconnect.
+    /// Admit a connector peer proved only by its process group. A Worker held
+    /// by a retained containment refuses this path: its peers must arrive
+    /// through [`Self::connect_external_connector_contained`].
     pub(crate) fn connect_external_connector(
         &self,
         placement: &str,
         capability_generation: &str,
         capability_hash: &str,
         peer: &lillux::ExactProcessIdentity,
+    ) -> Result<bool> {
+        self.connect_external_connector_with(
+            placement,
+            capability_generation,
+            capability_hash,
+            peer,
+            qualification_process::PeerBasis::Group,
+        )
+    }
+
+    /// Admit a peer whose membership in the Worker's retained containment was
+    /// captured through the pinned contained path. Only a contained Worker
+    /// accepts it, so a retained row whose Worker is held by a containment
+    /// was always admitted this way, and a group-proved peer never reaches
+    /// the containment branch of the historical check.
+    pub(crate) fn connect_external_connector_contained(
+        &self,
+        placement: &str,
+        capability_generation: &str,
+        capability_hash: &str,
+        peer: &crate::external_connector::ContainedQualificationPeer,
+    ) -> Result<bool> {
+        self.connect_external_connector_with(
+            placement,
+            capability_generation,
+            capability_hash,
+            peer.identity(),
+            qualification_process::PeerBasis::Contained(peer.proven_against()),
+        )
+    }
+
+    fn connect_external_connector_with(
+        &self,
+        placement: &str,
+        capability_generation: &str,
+        capability_hash: &str,
+        peer: &lillux::ExactProcessIdentity,
+        basis: qualification_process::PeerBasis<'_>,
     ) -> Result<bool> {
         self.conn.with_sql(|conn| {
             let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
@@ -595,7 +636,13 @@ impl RuntimeDb {
                             &allocation.reservation,
                             &channel.digest()?,
                             peer,
+                            basis,
                         )?;
+                    } else {
+                        ensure!(
+                            matches!(basis, qualification_process::PeerBasis::Group),
+                            "a contained-peer admission belongs to a qualification Worker"
+                        );
                     }
                     let retained =
                         read_retained_binding(&tx, &allocation.reservation.binding_hash)?
@@ -716,6 +763,7 @@ mod tests {
             target_start_time_ticks: ticks,
             group_leader_pid: pid,
             group_leader_start_time_ticks: ticks,
+            group_basis: lillux::GroupBasis::ProcessGroup,
         }
     }
 

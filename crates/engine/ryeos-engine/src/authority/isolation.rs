@@ -44,7 +44,8 @@ pub use authority::{
 };
 pub use backend::{ResolvedIsolationBackend, VerifiedIsolationBackendCapture};
 pub use inspection::{
-    IsolationBackendInspection, IsolationBackendStatus, IsolationInspection,
+    DescendantContainmentGuarantee, DescendantContainmentReadiness, IsolationBackendInspection,
+    IsolationBackendStatus, IsolationInspection, PidNamespaceContainmentQualification,
     ProcessControlReadinessReason, ProcessScopeAuthorityStatus, ProcessScopeReadiness,
     ProtocolProcessControlReadiness,
 };
@@ -78,6 +79,35 @@ pub const VERIFIED_CODE_MAP_ENV: &str = "RYEOS_VERIFIED_CODE_MAP";
 enum IsolationRuntimeState {
     Disabled,
     Enforced,
+}
+
+/// The retained whole-execution containment one launch compiles against. A
+/// closed enum is right here: each variant is a mechanism with its own
+/// plan contract, not a policy choice.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RetainedContainment<'a> {
+    /// Strict process group: the sandbox denies `setsid`/`setpgid`, and the
+    /// launcher's group is the only containment.
+    Group,
+    /// A cgroup scope, with its own nested-sandbox and quiescence authority.
+    Cgroup(&'a lillux::ProcessScopeRecovery),
+    /// The target's own PID-namespace init, retained by the launcher: every
+    /// descendant is contained even after leaving the group. No quiescence.
+    PidNamespaceInit,
+}
+
+impl<'a> RetainedContainment<'a> {
+    fn of(scope: Option<&'a lillux::ProcessScope>) -> Self {
+        match scope {
+            None => Self::Group,
+            Some(scope) if scope.is_pid_namespace_init() => Self::PidNamespaceInit,
+            Some(scope) => Self::Cgroup(scope.recovery()),
+        }
+    }
+
+    fn is_cgroup(self) -> bool {
+        matches!(self, Self::Cgroup(_))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1962,6 +1992,38 @@ impl IsolationRuntime {
         }
     }
 
+    /// Admit a concrete retained containment against the node's qualified
+    /// guarantees. A cgroup scope must come from this runtime's admitted
+    /// provider generation; a PID-namespace init needs the node's passed
+    /// qualification probe. Neither is inferred from configuration alone.
+    fn validate_retained_scope(&self, scope: &lillux::ProcessScope) -> Result<(), EngineError> {
+        if scope.is_pid_namespace_init() {
+            if !self
+                .inspection
+                .process_scope_readiness
+                .descendant_containment
+                .pid_namespace
+                .qualified
+            {
+                return Err(refused(
+                    "PID-namespace descendant containment is not qualified on this node".to_owned(),
+                ));
+            }
+            return Ok(());
+        }
+        let timeout = self.process_scope_control_timeout()?;
+        let provider = self.process_scope_provider.as_ref().ok_or_else(|| {
+            refused("retained scope has no admitted provider generation".to_owned())
+        })?;
+        provider.validate_scope(scope).map_err(refused)?;
+        if scope.recovery().control_timeout() != timeout {
+            return Err(refused(
+                "retained process scope differs from the admitted control budget".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Prepare the allocation intent without creating a kernel resource.
     /// The existing launch owner must commit this before allocation, then
     /// bind the exact result before spawn and attach the held child before
@@ -2515,7 +2577,7 @@ impl IsolationRuntime {
             request,
             context,
             RequestedLaunchLifecycle::Run,
-            None,
+            RetainedContainment::Group,
             None,
             None,
             None,
@@ -2559,22 +2621,13 @@ impl IsolationRuntime {
     ) -> Result<AppliedIsolationLaunchAwaitingAttachment, EngineError> {
         self.ensure_registered_generation_current()?;
         if let Some(scope) = scope.as_ref() {
-            let timeout = self.process_scope_control_timeout()?;
-            let provider = self.process_scope_provider.as_ref().ok_or_else(|| {
-                refused("retained scope has no admitted provider generation".to_owned())
-            })?;
-            provider.validate_scope(scope).map_err(refused)?;
-            if scope.recovery().control_timeout() != timeout {
-                return Err(refused(
-                    "retained process scope differs from the admitted control budget".to_owned(),
-                ));
-            }
+            self.validate_retained_scope(scope)?;
         }
         let applied = self.apply_with_provenance_current(
             request,
             context,
             RequestedLaunchLifecycle::AwaitAttachment,
-            scope.as_ref().map(|scope| scope.recovery()),
+            RetainedContainment::of(scope.as_ref()),
             None,
             None,
             None,
@@ -2601,22 +2654,13 @@ impl IsolationRuntime {
     ) -> Result<AppliedIsolationLaunchAwaitingAttachment, EngineError> {
         self.ensure_registered_generation_current()?;
         if let Some(scope) = scope.as_ref() {
-            let timeout = self.process_scope_control_timeout()?;
-            let provider = self.process_scope_provider.as_ref().ok_or_else(|| {
-                refused("retained scope has no admitted provider generation".to_owned())
-            })?;
-            provider.validate_scope(scope).map_err(refused)?;
-            if scope.recovery().control_timeout() != timeout {
-                return Err(refused(
-                    "retained process scope differs from the admitted control budget".to_owned(),
-                ));
-            }
+            self.validate_retained_scope(scope)?;
         }
         let applied = self.apply_with_provenance_current(
             request,
             context,
             RequestedLaunchLifecycle::AwaitAttachment,
-            scope.as_ref().map(|scope| scope.recovery()),
+            RetainedContainment::of(scope.as_ref()),
             Some(devices),
             None,
             None,
@@ -2666,7 +2710,7 @@ impl IsolationRuntime {
             request,
             context,
             RequestedLaunchLifecycle::AwaitAttachment,
-            None,
+            RetainedContainment::Group,
             Some(devices),
             None,
             Some(original_window),
@@ -2720,21 +2764,12 @@ impl IsolationRuntime {
         ingress
             .validate()
             .map_err(|error| refused(error.to_string()))?;
-        let timeout = self.process_scope_control_timeout()?;
-        let provider = self.process_scope_provider.as_ref().ok_or_else(|| {
-            refused("retained scope has no admitted provider generation".to_owned())
-        })?;
-        provider.validate_scope(&scope).map_err(refused)?;
-        if scope.recovery().control_timeout() != timeout {
-            return Err(refused(
-                "retained process scope differs from the admitted control budget".into(),
-            ));
-        }
+        self.validate_retained_scope(&scope)?;
         let applied = self.apply_with_provenance_current(
             request,
             context,
             RequestedLaunchLifecycle::AwaitAttachment,
-            Some(scope.recovery()),
+            RetainedContainment::of(Some(&scope)),
             None,
             Some(ingress),
             None,
@@ -2760,7 +2795,7 @@ impl IsolationRuntime {
         request: lillux::SubprocessRequest,
         context: IsolationLaunchContext<'_>,
         lifecycle: RequestedLaunchLifecycle,
-        process_scope: Option<&lillux::ProcessScopeRecovery>,
+        containment: RetainedContainment<'_>,
         selected_devices: Option<&lillux::CharacterDeviceSet>,
         loopback_ingress: Option<&IsolationLoopbackIngress>,
         original_occupancy: Option<lillux::time::OriginalNamespaceOccupancyHandoff>,
@@ -2781,7 +2816,7 @@ impl IsolationRuntime {
         if original_occupancy.is_some()
             && (self.state == IsolationRuntimeState::Disabled
                 || lifecycle != RequestedLaunchLifecycle::AwaitAttachment
-                || process_scope.is_some()
+                || containment != RetainedContainment::Group
                 || loopback_ingress.is_some())
         {
             return Err(refused("original occupancy cannot downgrade held enforced launch, acquire local scope or use an unrelated loopback transfer".into()));
@@ -5015,7 +5050,7 @@ impl IsolationRuntime {
             // read-only task-only proc even on a nested-capable node.
             proc_filesystem: match (
                 self.inspection.filesystem.proc_filesystem,
-                process_scope.is_some(),
+                containment.is_cgroup(),
             ) {
                 (ryeos_isolation_protocol::IsolationProcFilesystem::PidNamespaceNested, false) => {
                     ryeos_isolation_protocol::IsolationProcFilesystem::PidNamespace
@@ -5023,10 +5058,13 @@ impl IsolationRuntime {
                 (selected, _) => selected,
             },
             pid_namespace: IsolationPidNamespace::Isolated,
-            // Only a concrete retained scope replaces the strict group
+            // Only a concrete retained containment replaces the strict group
             // contract. Node capability/configuration alone cannot do so.
-            shared_process_group: process_scope.is_none(),
-            nested_sandbox: process_scope.is_some() && self.inspection.nested_sandbox(),
+            shared_process_group: containment == RetainedContainment::Group,
+            // A child sandbox needs whole-execution containment AND a nested
+            // proc ceiling; only the cgroup scope was designed for that. The
+            // PID-namespace init gets ordinary task-only proc.
+            nested_sandbox: containment.is_cgroup() && self.inspection.nested_sandbox(),
         };
         let required_capabilities = plan
             .validate(&authorities)
@@ -5394,6 +5432,18 @@ impl IsolationRuntime {
             policy.trusted_process_group_sessions,
             process_scope_authority_digest,
             process_scope_capabilities.clone(),
+            // Qualified only for an enforced execution runtime; a definition
+            // validator or disabled runtime launches nothing to contain.
+            if state == IsolationRuntimeState::Enforced
+                && matches!(scope_admission, ProcessScopeAdmission::Execution)
+            {
+                PidNamespaceContainmentQualification::probe()
+                    .graded_by(&policy.requires_capabilities)
+            } else {
+                PidNamespaceContainmentQualification::not_probed(
+                    "not probed: this runtime is not an enforced execution runtime",
+                )
+            },
         );
         Ok(Self {
             inspection: IsolationInspection {
@@ -10349,6 +10399,159 @@ mod tests {
             .unwrap();
         assert!(destroyed.destroyed);
         assert_eq!(destroyed.mount_identity, created.mount_identity);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn retained_containment_selects_the_group_contract_nested_authority_and_proc_surface() {
+        let app_root = tempfile::tempdir().unwrap();
+        let mut policy = IsolationPolicy::disabled_for_authoring();
+        policy.mode = IsolationMode::Enforce;
+        policy.backend = Some(resolved_backend().selection.clone());
+        policy.filesystem.readable = vec!["{verified_code}".to_string()];
+        policy.filesystem.writable = vec!["{project}".to_string()];
+        write_policy(app_root.path(), &policy);
+        let mut backend = resolved_backend();
+        backend.effective_capabilities = BTreeSet::from([
+            IsolationCapability::FilesystemPrivateRoot,
+            IsolationCapability::FilesystemFdReadOnly,
+            IsolationCapability::FilesystemFdWritable,
+            IsolationCapability::FilesystemOrderedOverlays,
+            IsolationCapability::FilesystemFixedParentViews,
+            IsolationCapability::FilesystemPrivateTmp,
+            IsolationCapability::FilesystemPidNamespaceProc,
+            IsolationCapability::DevicesMinimal,
+            IsolationCapability::EnvironmentExact,
+            IsolationCapability::NetworkIsolated,
+            IsolationCapability::NetworkHost,
+            IsolationCapability::ProcessHostPidNamespace,
+            IsolationCapability::ProcessIsolatedPidNamespace,
+            IsolationCapability::ProcessTargetPidReporting,
+            IsolationCapability::LifecycleSharedProcessGroup,
+            IsolationCapability::ProcessNestedSandbox,
+        ]);
+        backend.declaration.capabilities = backend.effective_capabilities.clone();
+        let mut runtime =
+            IsolationRuntime::load_with_backend(app_root.path(), Some(Arc::new(backend))).unwrap();
+        // A broader node ceiling than any one launch's retained authority.
+        runtime.inspection.filesystem.proc_filesystem =
+            ryeos_isolation_protocol::IsolationProcFilesystem::PidNamespaceNested;
+        runtime.inspection.requires_capabilities =
+            vec![lillux::process_control::CapabilityRequirement::from(
+                lillux::process_control::ISOLATION_NAMESPACES,
+            )];
+        assert!(
+            runtime.inspection.nested_sandbox(),
+            "fixture node must permit a nested sandbox so the PID-namespace case proves it is withheld"
+        );
+        let cgroup_recovery: lillux::ProcessScopeRecovery =
+            serde_json::from_value(serde_json::json!({
+                "version": 5, "control_timeout": {"secs": 1, "nanos": 0},
+                "configuration": {"version": 3, "backend": {
+                    "implementation": "linux_cgroup_v2", "parent": "/fixture/delegation"}},
+                "backend": {"implementation": "linux_cgroup_v2",
+                    "boot_id": "00000000-0000-4000-8000-000000000000",
+                    "parent": {"filesystem": {"device": 1}, "inode": 2},
+                    "directory": {"filesystem": {"device": 1}, "inode": 3},
+                    "name": "fixture-scope"}
+            }))
+            .unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let root = lillux::PinnedDirectory::open(project.path())
+            .unwrap()
+            .unwrap();
+        let root_identity = root.identity().unwrap();
+        let live_access = IsolationLiveAccessAuthority::DescriptorRootedFixedParents {
+            root: Arc::new(root),
+            root_identity,
+            denied_control_paths: ryeos_state::project_sync::live_execution_denied_control_paths()
+                .into_iter()
+                .map(PathBuf::from)
+                .collect(),
+            authorized_write_namespaces: vec!["project".to_string()],
+        };
+        let compile = |containment| {
+            let applied = runtime
+                .apply_with_provenance_current(
+                    lillux::SubprocessRequest {
+                        cmd: "/bin/true".to_string(),
+                        argv0: None,
+                        args: Vec::new(),
+                        cwd: Some(project.path().to_string_lossy().into_owned()),
+                        envs: Vec::new(),
+                        stdin_data: None,
+                        timeout: 1.0,
+                        limits: None,
+                        inherited_fds: Vec::new(),
+                        inherited_fd_mappings: Vec::new(),
+                        supervised_status: None,
+                    },
+                    IsolationLaunchContext {
+                        immutable_project: None,
+                        workspace_view: None,
+                        project_path: project.path(),
+                        project_authority: IsolationProjectAuthority::External,
+                        filesystem_authority_ceiling:
+                            IsolationFilesystemAuthorityCeiling::NodePolicy,
+                        network_authority_ceiling: IsolationNetworkAuthorityCeiling::NodePolicy,
+                        live_access: Some(&live_access),
+                        state_root: None,
+                        checkpoint_dir: None,
+                        checkpoint_authority: None,
+                        daemon_socket_path: None,
+                        bundle_roots: &[],
+                        node_trusted_keys_dir: None,
+                        verified_code: &[],
+                        verified_command: None,
+                        external_read_only_mounts: &[],
+                        writable_runtime_view_mounts: &[],
+                        producer_prepared_mounts: &[],
+                        target_channels: &[],
+                        item_ref: "tool:tests/containment",
+                        thread_id: "T-containment",
+                        verbatim_env_names: &[],
+                    },
+                    RequestedLaunchLifecycle::Run,
+                    containment,
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap();
+            let (bytes, _) = applied
+                .request
+                .inherited_fds
+                .last()
+                .unwrap()
+                .read_regular_file_stable_bounded(
+                    ryeos_isolation_protocol::MAX_REQUEST_BYTES as u64,
+                )
+                .unwrap();
+            let request: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            let plan = &request["plan"];
+            (
+                plan["shared_process_group"].as_bool().unwrap(),
+                plan["nested_sandbox"].as_bool().unwrap(),
+                plan["proc_filesystem"].as_str().unwrap().to_owned(),
+            )
+        };
+        // Strict group: the sandbox denies setsid/setpgid; no nested sandbox.
+        assert_eq!(
+            compile(RetainedContainment::Group),
+            (true, false, "pid_namespace".to_owned())
+        );
+        // Cgroup scope: retained externally, so descendants may nest sandboxes.
+        assert_eq!(
+            compile(RetainedContainment::Cgroup(&cgroup_recovery)),
+            (false, true, "pid_namespace_nested".to_owned())
+        );
+        // PID-namespace init: setsid/double-fork are permitted (no strict
+        // group), contained by the retained init; a nested sandbox would
+        // need a nested-proc ceiling this mechanism was not designed for.
+        assert_eq!(
+            compile(RetainedContainment::PidNamespaceInit),
+            (false, false, "pid_namespace".to_owned())
+        );
     }
 
     #[test]

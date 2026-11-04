@@ -578,6 +578,29 @@ pub struct CapabilityEvidence {
     pub basis: String,
 }
 
+/// Descendants of one execution die with its retained PID-namespace init.
+pub const TERMINATION_PID_NAMESPACE: &str = "termination:pid_namespace";
+/// The same retained init lets a restarted node recover and settle them.
+pub const RECOVERY_PID_NAMESPACE: &str = "recovery:pid_namespace";
+/// Never provided: namespace membership is not an atomic writer freeze.
+pub const QUIESCENCE_PID_NAMESPACE: &str = "quiescence:pid_namespace";
+/// Provider id of the retained PID-namespace init mechanism.
+pub const PID_NAMESPACE_PROVIDER: &str = "pid_namespace_init";
+
+/// Whether a `/proc/version` text names an emulated (gVisor) kernel. The one
+/// definition behind the host facts and every proof graded from them.
+pub fn kernel_version_is_gvisor(version: &str) -> bool {
+    version.to_ascii_lowercase().contains("gvisor")
+}
+
+/// The host's gVisor fact, read once from the kernel version text the host
+/// facts themselves read.
+pub fn host_kernel_is_gvisor() -> bool {
+    std::fs::read_to_string("/proc/version")
+        .map(|version| kernel_version_is_gvisor(&version))
+        .unwrap_or(false)
+}
+
 /// Jobs die with the node because the node is pid 1 of its pid namespace.
 pub const TERMINATION_ENCLOSURE: &str = "termination:enclosure";
 /// Jobs die with the node because the node is pid 1, or because its parent
@@ -2342,7 +2365,7 @@ mod linux {
     }
 
     fn kernel_kind(version: &str) -> &'static str {
-        if version.to_ascii_lowercase().contains("gvisor") {
+        if super::kernel_version_is_gvisor(version) {
             "gvisor"
         } else {
             "native"

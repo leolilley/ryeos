@@ -56,12 +56,22 @@ const MAX_PROBE_VALUE_BYTES: usize = 8 * 1024;
 #[serde(rename_all = "snake_case")]
 pub enum VerifierProcessSettlementAuthority {
     ScopeEmpty,
+    /// The retained containment of the verifier's descendants (its private
+    /// PID-namespace init) is gone, so every descendant, including one that
+    /// left the process group, is gone. Settlement is as complete as
+    /// `ScopeEmpty`; it names a different mechanism and, unlike a scope, was
+    /// never able to freeze the tree. A policy naming `scope_empty` therefore
+    /// does not accept it, while one naming this accepts either.
+    ContainmentEmpty,
     TrustedProcessGroupAbsent,
 }
 
 impl VerifierProcessSettlementAuthority {
     fn satisfies(self, minimum: Self) -> bool {
-        self == minimum || (self == Self::ScopeEmpty && minimum == Self::TrustedProcessGroupAbsent)
+        self == minimum
+            || (minimum == Self::TrustedProcessGroupAbsent
+                && matches!(self, Self::ScopeEmpty | Self::ContainmentEmpty))
+            || (minimum == Self::ContainmentEmpty && self == Self::ScopeEmpty)
     }
 }
 

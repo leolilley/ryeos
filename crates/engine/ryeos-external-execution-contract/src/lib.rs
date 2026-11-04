@@ -863,7 +863,7 @@ pub struct ExternalProviderDeclaration {
     pub protocol: String,
     pub targets: Vec<String>,
     pub connector: String,
-    pub connector_process_group: ExternalProviderConnectorProcessGroup,
+    pub connector_descendants: ExternalProviderConnectorDescendants,
     pub configuration_adapter: String,
     pub configuration_destination: String,
     /// Explicit opt-in on this same captured adapter, not a second executable.
@@ -871,14 +871,20 @@ pub struct ExternalProviderDeclaration {
     pub qualification_request_binding_protocol: Option<String>,
 }
 
-/// Process-control behavior of the signed provider's command environment.
-/// The controller must retain authority over every connector descendant;
-/// this is not a request to weaken its host isolation policy.
+/// Containment guarantee the signed provider's connector requires of the
+/// node for the processes it may leave behind. This is a declared need, not a
+/// host mode: the node reports which guarantees it can provide and admission
+/// compares the two.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ExternalProviderConnectorProcessGroup {
-    Inherited,
-    New,
+pub enum ExternalProviderConnectorDescendants {
+    /// Every descendant stays in the connector's process group; the
+    /// controller's group authority is sufficient.
+    InProcessGroup,
+    /// Descendants may leave the process group (new session, double fork,
+    /// nested PID namespace). The node must contain and provably settle every
+    /// one of them regardless.
+    Contained,
 }
 
 /// Signed bundle declaration for one external occurrence lifecycle adapter.
@@ -2738,7 +2744,7 @@ mod tests {
             protocol: PROVIDER_DECLARATION_PROTOCOL.into(),
             targets: vec!["x86_64-unknown-linux-gnu".into()],
             connector: "ryeos-external-candidate-connector".into(),
-            connector_process_group: ExternalProviderConnectorProcessGroup::New,
+            connector_descendants: ExternalProviderConnectorDescendants::Contained,
             configuration_adapter: "ryeos-codex-external-configuration".into(),
             configuration_destination: "environments.toml".into(),
             qualification_request_binding_protocol: None,

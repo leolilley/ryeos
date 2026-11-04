@@ -74,6 +74,41 @@ impl AuthenticatedUnixPeer {
         }
     }
 
+    /// Capture this peer's exact identity, with no process-group
+    /// requirement, and prove it is a member of `containment`. The peer's
+    /// retained pidfd is re-probed around the membership read (see
+    /// [`crate::ProcessScopeRecovery::contains_pinned_process`]).
+    pub fn contained_exact_process_identity(
+        &self,
+        containment: &crate::ProcessScopeRecovery,
+    ) -> Result<crate::ExactProcessIdentity> {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::AsFd as _;
+            let identity = crate::process_control::capture_contained_process_identity_from_pidfd(
+                u32::try_from(self.pid).context("authenticated peer PID is outside range")?,
+                self.pidfd.as_fd(),
+            )
+            .map_err(anyhow::Error::msg)?;
+            let member = containment
+                .contains_pinned_process(
+                    &identity,
+                    self.pidfd.as_fd(),
+                    containment.control_timeout(),
+                )
+                .map_err(anyhow::Error::msg)?;
+            if !member {
+                bail!("authenticated peer is not inside the retained containment");
+            }
+            Ok(identity)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = containment;
+            bail!("authenticated containment membership is unavailable on this OS")
+        }
+    }
+
     /// Diagnostic executable-name guard on an already-pinned peer. This is
     /// not content authentication (use executable_digest_exact for that).
     /// Linux comm is mutable and becomes an FD number after descriptor exec;

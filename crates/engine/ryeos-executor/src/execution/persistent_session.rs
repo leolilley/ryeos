@@ -2732,6 +2732,19 @@ fn validate_session_process_control(
         }
         (
             PersistentSessionProcessMode::ExclusiveSession,
+            PersistentSessionCleanupAuthority::DescendantContainment,
+        ) => {
+            // The node reports whether it can contain descendants, but this
+            // generic dedicated-session owner journals only a cgroup scope
+            // allocation. A containment-declaring session is launched by its
+            // own owner (the enforced qualification Worker), which retains the
+            // execution's PID-namespace init instead.
+            bail!(
+                "descendant-containment sessions are launched by their dedicated owner, not the generic dedicated-session path"
+            );
+        }
+        (
+            PersistentSessionProcessMode::ExclusiveSession,
             PersistentSessionCleanupAuthority::ExternalPlacementIncarnation,
         ) => {
             bail!("exclusive session requires protected external placement-incarnation authority");

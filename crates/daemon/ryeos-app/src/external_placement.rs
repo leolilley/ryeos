@@ -2609,16 +2609,23 @@ pub(crate) fn preflight_external_qualification_program(
             .require_qualification_request_binding()?;
     }
 
-    require_connector_process_group_authority(
-        provider.declaration().connector_process_group,
+    // The qualification local Worker launch binds the node's qualified
+    // containment unconditionally when isolation is enforced
+    // (`allocate_worker_containment`), so an `Enforced` admission here always
+    // has a containment bound to the launch that follows.
+    let admission = require_connector_descendant_containment(
+        provider.declaration().connector_descendants,
         state.isolation.is_enforced(),
-        state
+        &state
             .isolation
             .inspection()
             .process_scope_readiness
-            .trusted_exclusive_session
-            .ready,
+            .descendant_containment,
     )?;
+    tracing::info!(
+        ?admission,
+        "qualification connector descendant containment admitted"
+    );
     let access = binding.credential_access()?;
     let credential = access.decode(
         state
@@ -2737,15 +2744,21 @@ fn preflight_external_candidate_dependencies(
     // observation made after credential access or provider qualification.
     connectors.qualify(&contract)?;
     let provider = provider_configurations.qualify(&contract)?;
-    require_connector_process_group_authority(
-        provider.declaration().connector_process_group,
+    let admission = require_connector_descendant_containment(
+        provider.declaration().connector_descendants,
         isolation.is_enforced(),
-        isolation
+        &isolation
             .inspection()
             .process_scope_readiness
-            .trusted_exclusive_session
-            .ready,
+            .descendant_containment,
     )?;
+    // Nothing in this candidate flow binds a retained containment to its
+    // launch, so an enforced `contained` admission would be a promise with no
+    // mechanism behind it. Only the qualification Worker launch binds one.
+    ensure!(
+        !matches!(admission, ConnectorDescendantAdmission::Enforced(_)),
+        "signed provider connector declares `contained` descendants under enforced isolation, but this candidate launch binds no retained containment; only the enforced qualification Worker launch does"
+    );
     let credential = load_credential(binding)?;
     backends.qualify(
         &contract,
@@ -2755,19 +2768,49 @@ fn preflight_external_candidate_dependencies(
     Ok(())
 }
 
-fn require_connector_process_group_authority(
-    mode: ryeos_external_execution_contract::ExternalProviderConnectorProcessGroup,
+/// How a provider connector's declared descendant requirement was answered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConnectorDescendantAdmission {
+    /// The connector declared no escape-proof requirement.
+    NotRequired,
+    /// A qualified mechanism contains and settles every descendant, even one
+    /// that leaves the process group, under enforced isolation.
+    Enforced(ryeos_engine::isolation::DescendantContainmentGuarantee),
+    /// Weaker: node policy explicitly accepts a trusted controller
+    /// process-group session. A descendant that leaves the group is not
+    /// contained. Never selected as a fallback for a missing guarantee.
+    TrustedProcessGroup,
+}
+
+/// Compare the connector's declared descendant requirement with the
+/// guarantees this node reports. The refusal names the missing guarantee.
+fn require_connector_descendant_containment(
+    requirement: ryeos_external_execution_contract::ExternalProviderConnectorDescendants,
     enforced_isolation: bool,
-    trusted_session_ready: bool,
-) -> Result<()> {
-    use ryeos_external_execution_contract::ExternalProviderConnectorProcessGroup;
-    if mode == ExternalProviderConnectorProcessGroup::New {
-        ensure!(
-            !enforced_isolation && trusted_session_ready,
-            "signed provider connector requires a trusted controller process-group session; enforced strict-group isolation has no retained controller scope"
-        );
+    containment: &ryeos_engine::isolation::DescendantContainmentReadiness,
+) -> Result<ConnectorDescendantAdmission> {
+    use ryeos_external_execution_contract::ExternalProviderConnectorDescendants::{
+        Contained, InProcessGroup,
+    };
+    match (requirement, enforced_isolation) {
+        (InProcessGroup, _) => Ok(ConnectorDescendantAdmission::NotRequired),
+        (Contained, true) => match containment.enforced_guarantee() {
+            Some(guarantee) => Ok(ConnectorDescendantAdmission::Enforced(guarantee)),
+            None => bail!(
+                "signed provider connector declares `contained` descendants but this node reports no qualified descendant containment under enforced isolation (cgroup scope: unavailable; PID-namespace init: {}); the trusted process-group lane is a weaker guarantee accepted only by non-enforced nodes and is never a substitute under enforcement",
+                containment.pid_namespace.detail
+            ),
+        },
+        (Contained, false) if containment.trusted_process_group => {
+            tracing::warn!(
+                "provider connector descendants are held only by the trusted process-group lane: a descendant that leaves the process group is not contained"
+            );
+            Ok(ConnectorDescendantAdmission::TrustedProcessGroup)
+        }
+        (Contained, false) => bail!(
+            "signed provider connector declares `contained` descendants but this node has neither enforced isolation with a qualified containment nor an explicitly accepted trusted process-group lane"
+        ),
     }
-    Ok(())
 }
 
 /// Authenticate the one-use occurrence attachment capability.  This does not
@@ -9773,8 +9816,11 @@ pub mod test_support {
                 // occurrence identity form.
                 occurrence_id: format!("sbx-{}", &reserved.reservation.request_digest[..32]),
                 provider_observation_digest: lillux::sha256_hex(
-                    format!("composed-allocation:{}", reserved.reservation.request_digest)
-                        .as_bytes(),
+                    format!(
+                        "composed-allocation:{}",
+                        reserved.reservation.request_digest
+                    )
+                    .as_bytes(),
                 ),
             },
             ExternalObservationTiming::Startup {
@@ -13334,15 +13380,108 @@ mod tests {
     }
 
     #[test]
-    fn connector_process_group_requires_a_qualified_controller_session() {
-        use ryeos_external_execution_contract::ExternalProviderConnectorProcessGroup::{
-            Inherited, New,
+    fn connector_descendants_are_admitted_only_against_reported_guarantees() {
+        use ConnectorDescendantAdmission::{Enforced, NotRequired, TrustedProcessGroup};
+        use ryeos_engine::isolation::{
+            DescendantContainmentGuarantee::{CgroupScope, PidNamespaceInit},
+            DescendantContainmentReadiness, PidNamespaceContainmentQualification,
         };
-
-        assert!(require_connector_process_group_authority(Inherited, true, false).is_ok());
-        assert!(require_connector_process_group_authority(New, false, true).is_ok());
-        assert!(require_connector_process_group_authority(New, false, false).is_err());
-        assert!(require_connector_process_group_authority(New, true, true).is_err());
+        use ryeos_external_execution_contract::ExternalProviderConnectorDescendants::{
+            Contained, InProcessGroup,
+        };
+        let readiness =
+            |cgroup_scope, pid_namespace, trusted_process_group| DescendantContainmentReadiness {
+                cgroup_scope,
+                pid_namespace: if pid_namespace {
+                    PidNamespaceContainmentQualification::qualified_by(
+                        lillux::process_control::ProofSource::Measured,
+                        "probed",
+                    )
+                } else {
+                    PidNamespaceContainmentQualification::not_probed("unavailable")
+                },
+                trusted_process_group,
+            };
+        // (declared, enforced, cgroup, pid namespace, trusted lane) -> admission
+        let table = [
+            (InProcessGroup, true, false, false, false, Some(NotRequired)),
+            (
+                InProcessGroup,
+                false,
+                false,
+                false,
+                false,
+                Some(NotRequired),
+            ),
+            (Contained, true, false, false, false, None),
+            (Contained, true, false, false, true, None),
+            (
+                Contained,
+                true,
+                false,
+                true,
+                false,
+                Some(Enforced(PidNamespaceInit)),
+            ),
+            (
+                Contained,
+                true,
+                true,
+                false,
+                false,
+                Some(Enforced(CgroupScope)),
+            ),
+            (
+                Contained,
+                true,
+                true,
+                true,
+                true,
+                Some(Enforced(CgroupScope)),
+            ),
+            (Contained, false, true, true, false, None),
+            (Contained, false, false, false, false, None),
+            (
+                Contained,
+                false,
+                false,
+                false,
+                true,
+                Some(TrustedProcessGroup),
+            ),
+        ];
+        for (declared, enforced, cgroup, namespace, trusted, expected) in table {
+            let observed = require_connector_descendant_containment(
+                declared,
+                enforced,
+                &readiness(cgroup, namespace, trusted),
+            );
+            match expected {
+                Some(expected) => assert_eq!(
+                    observed.unwrap(),
+                    expected,
+                    "{declared:?} enforced={enforced} cgroup={cgroup} ns={namespace} trusted={trusted}"
+                ),
+                None => assert!(
+                    observed.unwrap_err().to_string().contains("contained"),
+                    "{declared:?} enforced={enforced} cgroup={cgroup} ns={namespace} trusted={trusted}"
+                ),
+            }
+        }
+        // The refusal names the missing guarantee and the probe's reason.
+        let error = require_connector_descendant_containment(
+            Contained,
+            true,
+            &readiness(false, false, false),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("no qualified descendant containment"),
+            "{error}"
+        );
+        assert!(error.contains("unavailable"), "{error}");
+        assert!(error.contains("weaker guarantee"), "{error}");
     }
 
     #[test]

@@ -198,6 +198,12 @@ pub struct SignedNodeCapabilityReport {
     pub signature: String,
 }
 
+use lillux::process_control::{
+    QUIESCENCE_PID_NAMESPACE as PID_NAMESPACE_QUIESCENCE,
+    RECOVERY_PID_NAMESPACE as PID_NAMESPACE_RECOVERY,
+    TERMINATION_PID_NAMESPACE as PID_NAMESPACE_TERMINATION,
+};
+
 /// Inputs from the running node that the host facts cannot know.
 pub struct ReportInputs<'a> {
     pub app_root: &'a Path,
@@ -249,6 +255,14 @@ impl NodeCapabilityReport {
             inputs.isolation,
             inputs.host_runtime_provider,
             host.gvisor(),
+        );
+        add_pid_namespace_containment(
+            &mut view,
+            &inputs
+                .isolation
+                .process_scope_readiness
+                .descendant_containment
+                .pid_namespace,
         );
         add_provider_environment(&mut view, inputs.provider_environment);
         add_credential_home(&mut view, &credential_home, established.as_deref());
@@ -644,6 +658,33 @@ fn add_scope_capabilities(
             }),
         );
     }
+}
+
+/// Descendant containment by the execution's retained PID-namespace init.
+/// Provided only when the enforced runtime's disposable probe showed that a
+/// setsid'd, double-forked and nested-namespace descendant all die with the
+/// init and the init's exit settles them. Quiescence is explicitly never
+/// provided: namespace membership is not an atomic writer freeze.
+fn add_pid_namespace_containment(
+    view: &mut HostCapabilities,
+    containment: &ryeos_engine::isolation::PidNamespaceContainmentQualification,
+) {
+    for name in [PID_NAMESPACE_TERMINATION, PID_NAMESPACE_RECOVERY] {
+        if containment.qualified {
+            view.provide(
+                name,
+                containment.source.clone(),
+                ryeos_engine::isolation::PidNamespaceContainmentQualification::PROVIDER,
+                containment.detail.clone(),
+            );
+        } else {
+            view.refuse(name, containment.detail.clone());
+        }
+    }
+    view.refuse(
+        PID_NAMESPACE_QUIESCENCE,
+        "a retained PID-namespace init terminates and settles descendants but cannot freeze them",
+    );
 }
 
 /// Grade the provider-delivered environment. The node cannot observe where
@@ -1068,6 +1109,50 @@ mod tests {
         let admitted = match_floor(std::slice::from_ref(&either), &keyed);
         assert_eq!(admitted.met_by[&either.label()].name, SECRETS_PROVIDER_ENV);
         assert!(!match_floor(std::slice::from_ref(&either), &bounded).admitted);
+    }
+
+    #[test]
+    fn pid_namespace_containment_is_reported_from_its_probe_and_never_as_quiescence() {
+        use ryeos_engine::isolation::PidNamespaceContainmentQualification as Probe;
+        let mut passed = view(&["time"], &[]);
+        add_pid_namespace_containment(
+            &mut passed,
+            &Probe::qualified_by(
+                lillux::process_control::ProofSource::Measured,
+                "probed".to_owned(),
+            ),
+        );
+        for name in [PID_NAMESPACE_TERMINATION, PID_NAMESPACE_RECOVERY] {
+            let evidence = &passed.provided[name];
+            assert_eq!(evidence.source, ProofSource::Measured);
+            assert_eq!(evidence.provider, "pid_namespace_init");
+        }
+        assert!(passed.missing[PID_NAMESPACE_QUIESCENCE].contains("cannot freeze"));
+        // Under gVisor the kernel answer is emulated: provider-attested only.
+        let mut emulated = view(&["time"], &[]);
+        add_pid_namespace_containment(
+            &mut emulated,
+            &Probe::qualified_by(
+                lillux::process_control::ProofSource::ProviderAttested,
+                "probed".to_owned(),
+            ),
+        );
+        assert_eq!(
+            emulated.provided[PID_NAMESPACE_TERMINATION].source,
+            ProofSource::ProviderAttested
+        );
+        // A floor accepting measured proof is met by a passed probe only.
+        let floor = floor(&[PID_NAMESPACE_TERMINATION, PID_NAMESPACE_RECOVERY]);
+        assert!(match_floor(&floor, &passed).admitted);
+        assert!(!match_floor(&floor, &emulated).admitted);
+        let mut failed = view(&["time"], &[]);
+        add_pid_namespace_containment(&mut failed, &Probe::not_probed("user namespaces refused"));
+        assert!(failed.provided.get(PID_NAMESPACE_TERMINATION).is_none());
+        assert_eq!(
+            failed.missing[PID_NAMESPACE_TERMINATION],
+            "user namespaces refused"
+        );
+        assert!(!match_floor(&floor, &failed).admitted);
     }
 
     #[cfg(target_os = "linux")]
