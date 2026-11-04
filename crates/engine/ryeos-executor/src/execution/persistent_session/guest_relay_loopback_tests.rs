@@ -19,6 +19,13 @@
 //! `RYEOS_GUEST_RELAY_LOOPBACK_BINDING` runs the node case on that node's
 //! installed products (read-only), with `..._BASE_SNAPSHOT` and
 //! `..._FILE_PRODUCT` as in the guest-start rehearsal.
+//!
+//! Three scenarios rehearse what live attempts have tripped on: a controller
+//! whose wall clock disagrees with the guest's (the guest freshness check,
+//! with and without its declared tolerance), and a supervisor that ends before
+//! it attaches (the owner's report of that end must reach the start failure).
+//! The clock offset is process-global, so run the cases one at a time
+//! (`--test-threads=1`); `scripts/rehearsal/guest-relay-loopback.sh` does.
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -125,8 +132,15 @@ fn first(
 
 /// Drive one composed loopback session from the first start advance to an
 /// applied candidate launch, or to the first step that did not complete.
-fn run_loopback(setup: &GuestRelayLoopbackSetup<'_>, root: &Path) -> Result<LoopbackOutcome> {
+fn run_loopback(
+    setup: &GuestRelayLoopbackSetup<'_>,
+    root: &Path,
+    controller_clock_offset_ms: i64,
+) -> Result<LoopbackOutcome> {
     let (_store_owner, mut state) = ryeos_app::state::test_support::build_bound(root)?;
+    // Everything the controller issues from here on carries its offset clock;
+    // the guest, a separate process, keeps the host's.
+    let _clock = ControllerClockOffset::install(controller_clock_offset_ms);
     let mut session = compose_guest_relay_loopback_session(&mut state, setup)?;
     let backend = std::sync::Arc::clone(&session.backend);
     let inputs = session
@@ -239,6 +253,24 @@ fn run_loopback(setup: &GuestRelayLoopbackSetup<'_>, root: &Path) -> Result<Loop
     })
 }
 
+/// Shifts this process's wall clock for its lifetime, one holder at a time.
+struct ControllerClockOffset(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+
+impl ControllerClockOffset {
+    fn install(offset_ms: i64) -> Self {
+        static HOLD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let hold = HOLD.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        lillux::time::set_wall_clock_test_offset_ms(offset_ms);
+        Self(hold)
+    }
+}
+
+impl Drop for ControllerClockOffset {
+    fn drop(&mut self) {
+        lillux::time::set_wall_clock_test_offset_ms(0);
+    }
+}
+
 fn print(outcome: &LoopbackOutcome) {
     eprintln!("{}", serde_json::to_string_pretty(outcome).unwrap());
 }
@@ -321,7 +353,24 @@ fn synthetic_requirement() -> ExternalCandidateRequirement {
     requirement
 }
 
+/// What a synthetic case varies from the baseline that reaches Ready.
+#[derive(Default)]
+struct Scenario {
+    fault: Option<GuestRelayLoopbackFault>,
+    /// Milliseconds the controller's wall clock is shifted from the guest's.
+    controller_clock_offset_ms: i64,
+    /// Run this executable as the supervisor instead of the real one.
+    supervisor: Option<&'static str>,
+}
+
 fn run_synthetic(fault: Option<GuestRelayLoopbackFault>) -> Option<LoopbackOutcome> {
+    run_scenario(Scenario {
+        fault,
+        ..Scenario::default()
+    })
+}
+
+fn run_scenario(scenario: Scenario) -> Option<LoopbackOutcome> {
     let (host, bin) = match executables() {
         Ok(found) => found,
         Err(reason) => {
@@ -358,7 +407,7 @@ fn run_synthetic(fault: Option<GuestRelayLoopbackFault>) -> Option<LoopbackOutco
                 private_source_max_inodes: 4096,
                 owner_timeout_seconds: 120,
             },
-            supervisor_executable: &bin.join(SUPERVISOR),
+            supervisor_executable: &bin.join(scenario.supervisor.unwrap_or(SUPERVISOR)),
             launcher_executable: &bin.join(LAUNCHER),
             requirement: synthetic_requirement(),
             product: &inputs.path().join("product"),
@@ -369,9 +418,10 @@ fn run_synthetic(fault: Option<GuestRelayLoopbackFault>) -> Option<LoopbackOutco
             network_inputs: synthetic_network(),
             work_parent: &work_parent(),
             host_executable: &host,
-            fault,
+            fault: scenario.fault,
         },
         root.path(),
+        scenario.controller_clock_offset_ms,
     )
     .unwrap();
     print(&outcome);
@@ -404,6 +454,93 @@ fn a_corrupted_attach_response_stops_at_the_attach_response() {
         panic!("a corrupted attach response reached Ready");
     };
     assert_eq!(step, LoopbackStep::AttachResponse);
+}
+
+/// Inside the tolerance the guest declares for its freshness checks, a
+/// controller clock that is ahead of or behind the guest's changes nothing.
+#[test]
+fn a_controller_clock_within_the_skew_tolerance_still_attaches() {
+    if std::env::var_os("RYEOS_GUEST_RELAY_LOOPBACK_APP_ROOT").is_some() {
+        return;
+    }
+    for offset_ms in [-30_000, 30_000] {
+        let Some(outcome) = run_scenario(Scenario {
+            controller_clock_offset_ms: offset_ms,
+            ..Scenario::default()
+        }) else {
+            return;
+        };
+        assert!(
+            matches!(outcome, LoopbackOutcome::Ready { .. }),
+            "a controller clock {offset_ms} ms off the guest's stopped the loopback: {outcome:?}"
+        );
+    }
+}
+
+/// Far outside the tolerance the guest refuses, and the refusal reaches the
+/// controller as the guest owner's own report of the step it refused at.
+#[test]
+fn a_controller_clock_far_outside_the_skew_tolerance_is_refused_by_name() {
+    if std::env::var_os("RYEOS_GUEST_RELAY_LOOPBACK_APP_ROOT").is_some() {
+        return;
+    }
+    let Some(outcome) = run_scenario(Scenario {
+        controller_clock_offset_ms: -3_600_000,
+        ..Scenario::default()
+    }) else {
+        return;
+    };
+    let LoopbackOutcome::Stopped {
+        message,
+        owner_stderr,
+        ..
+    } = outcome
+    else {
+        panic!("a controller clock an hour off the guest's reached Ready");
+    };
+    // What the controller can act on is the step the owner refused at; the
+    // observed difference and tolerance stay in the owner's own diagnostics.
+    assert!(
+        message.contains("admission_expired"),
+        "the start failure does not name the owner's refusal: {message}"
+    );
+    assert!(
+        owner_stderr.contains("guest clock is") && owner_stderr.contains("skew tolerance"),
+        "the owner's diagnostics do not name the clock: {owner_stderr}"
+    );
+}
+
+/// A supervisor that ends before it attaches: the guest owner reports the end
+/// through its mailbox, and the start failure carries that report.
+#[test]
+fn an_early_supervisor_exit_reaches_the_start_failure_through_the_owner_report() {
+    if std::env::var_os("RYEOS_GUEST_RELAY_LOOPBACK_APP_ROOT").is_some() {
+        return;
+    }
+    // The launcher is a real guest executable that is not a supervisor: it
+    // starts and refuses its arguments.
+    let Some(outcome) = run_scenario(Scenario {
+        supervisor: Some(LAUNCHER),
+        ..Scenario::default()
+    }) else {
+        return;
+    };
+    let LoopbackOutcome::Stopped {
+        message,
+        owner_stdout,
+        ..
+    } = outcome
+    else {
+        panic!("a supervisor that is not a supervisor reached Ready");
+    };
+    assert!(
+        owner_stdout.contains("supervisor_exit"),
+        "the owner never reported the supervisor's end: {owner_stdout}"
+    );
+    assert!(
+        message.contains("supervisor exited"),
+        "the start failure does not carry the owner's report of the supervisor's end: {message}"
+    );
 }
 
 /// One regular-file entry of an installed content manifest, either tier.
@@ -615,6 +752,7 @@ fn run_node(app: &Path, binding_id: &str, host: &Path) -> Result<LoopbackOutcome
             fault: None,
         },
         root.path(),
+        0,
     )
 }
 
