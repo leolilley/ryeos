@@ -10668,6 +10668,7 @@ mod tests {
                         workspace_view: None,
                         project_path: project.path(),
                         project_authority: IsolationProjectAuthority::External,
+                        captured_callback_socket: false,
                         filesystem_authority_ceiling:
                             IsolationFilesystemAuthorityCeiling::NodePolicy,
                         network_authority_ceiling: IsolationNetworkAuthorityCeiling::NodePolicy,
