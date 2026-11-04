@@ -12,7 +12,7 @@
 //!
 //! What the operator states is the provider facts (an installed binding to
 //! take them from, or backend, account, owner and API trust roots outright),
-//! the Render sandbox settings, the provider declaration id, the signed
+//! the adapter settings, the provider declaration id, the signed
 //! qualification policy reference, and the identities of the runtime product
 //! being qualified. Everything else is read from the node: the requirement
 //! digest and Worker profile hash from the signed policy the installed bundles
@@ -33,10 +33,10 @@ use serde_json::Value;
 
 use super::compose::{
     BundleArtifactFacts, CLEANUP_PROOF, ComposeLimits, ComposeTransportRequest,
-    ProducerSourceFacts, RELAY_NETWORK_POLICY, RENDER_BACKEND_ID, STORAGE_POLICY,
-    SelectedTransport, admit_signed_binding, bundle_artifact_facts, load_node_identity,
-    publish_signed_document, read_installed_binding, select_transport, sign_node_document,
-    validate_document_id, with_installed_bundles,
+    ProducerSourceFacts, RELAY_NETWORK_POLICY, STORAGE_POLICY, SelectedTransport,
+    admit_signed_binding, bundle_artifact_facts, load_node_identity, publish_signed_document,
+    read_installed_binding, select_transport, sign_node_document, validate_document_id,
+    with_installed_bundles,
 };
 use super::{
     BindingDocument, ExternalQualificationStructuredSessionBinding, ExternalWorkloadBinding,
@@ -53,9 +53,9 @@ use ryeos_state::external_execution::admission::{
 
 /// Schema of a qualification-only binding over the controller file relay.
 const QUALIFICATION_BINDING_SCHEMA: u32 = 18;
-/// Schema of the Render sandbox settings the installed adapter accepts.
-const RENDER_SETTINGS_SCHEMA: u64 = 2;
-/// Most trust roots the Render settings carry.
+/// Schema of the settings the installed adapter accepts.
+const QUALIFICATION_SETTINGS_SCHEMA: u64 = 2;
+/// Most trust roots the adapter settings carry.
 const MAX_SETTINGS_TLS_ROOTS: usize = 8;
 /// Largest signed qualification policy document the composer reads.
 const MAX_POLICY_BYTES: u64 = 1024 * 1024;
@@ -67,7 +67,7 @@ pub struct QualificationBindingRequest<'a> {
     /// it is rewritten.
     pub state_lock: &'a ryeos_node_runtime::state_lock::StateLock,
     pub id: String,
-    /// Where backend, account, Render owner and API trust roots come from.
+    /// Where backend, account, relay owner and API trust roots come from.
     pub facts_source: ProducerFactsSource,
     /// Reference of the signed qualification policy the installed bundles
     /// carry, as `config:<category>/<name>`.
@@ -208,17 +208,22 @@ pub(crate) fn compose_with_inputs(
     policy: &QualificationPolicyFacts,
 ) -> Result<QualificationBindingReport> {
     check_stated(&request)?;
-    ensure!(
-        facts.backend == RENDER_BACKEND_ID,
-        "a qualification session is placed over the controller file relay, which only the \
-         `{RENDER_BACKEND_ID}` backend provides; got `{}`",
-        facts.backend
-    );
+    // The backend must be installed, and must declare the relay scope setting
+    // that marks it as providing the controller file relay.
+    let artifacts =
+        bundle_artifact_facts(resolved, &request.provider_declaration_id, &facts.backend)?;
+    let scope_key = artifacts.relay_scope_setting.clone().with_context(|| {
+        format!(
+            "a qualification session is placed over the controller file relay, which the \
+             installed `{}` backend does not declare",
+            facts.backend
+        )
+    })?;
     let owner_id = facts
         .settings
-        .get("owner_id")
+        .get(scope_key.as_str())
         .and_then(Value::as_str)
-        .context("provider settings have no owner_id")?;
+        .with_context(|| format!("provider settings have no {scope_key}"))?;
     ensure!(
         identifier(owner_id, 256),
         "owner id must be 1..=256 characters of A-Z a-z 0-9 _ -"
@@ -229,23 +234,21 @@ pub(crate) fn compose_with_inputs(
         .and_then(Value::as_array)
         .filter(|roots| !roots.is_empty())
         .context(
-            "provider settings carry no tls_roots_der_base64; the Render sandbox settings need \
+            "provider settings carry no tls_roots_der_base64; the adapter settings need \
              the provider API trust roots",
         )?;
     ensure!(
         roots.len() <= MAX_SETTINGS_TLS_ROOTS && roots.iter().all(|root| root.as_str().is_some()),
         "provider settings must carry at most {MAX_SETTINGS_TLS_ROOTS} base64 trust roots"
     );
-    let settings = serde_json::json!({
-        "schema": RENDER_SETTINGS_SCHEMA,
-        "owner_id": owner_id,
+    let mut settings = serde_json::json!({
+        "schema": QUALIFICATION_SETTINGS_SCHEMA,
         "plan": request.plan,
         "region": request.region,
         "snapshot_id": request.snapshot_id,
         "tls_roots_der_base64": roots,
     });
-    let artifacts =
-        bundle_artifact_facts(resolved, &request.provider_declaration_id, &facts.backend)?;
+    settings[scope_key.as_str()] = Value::String(owner_id.to_owned());
     let declaration = resolved
         .provider_configurations
         .declaration_for_provider(&request.provider_declaration_id)?;
@@ -543,6 +546,7 @@ pub(crate) fn read_installed_policy_facts(
 
 #[cfg(test)]
 mod tests {
+    use super::super::compose::TEST_BACKEND_ID;
     use super::*;
     use crate::external_placement::compose_test_support as installed;
     use crate::node_config::sections::external_execution::compose::tests::root_pem;
@@ -652,7 +656,7 @@ mod tests {
         let (connector_hash, _) = installed::connector_coordinate(&node.connector);
         let backends = if backend {
             vec![installed::CoordinateOnlyBackend::shared(
-                RENDER_BACKEND_ID,
+                TEST_BACKEND_ID,
                 &"d".repeat(64),
                 SETTINGS_SCHEMA,
                 &"1".repeat(64),
@@ -686,8 +690,8 @@ mod tests {
 
     fn facts() -> ProducerSourceFacts {
         ProducerSourceFacts {
-            backend: RENDER_BACKEND_ID.into(),
-            account: "render-test".into(),
+            backend: TEST_BACKEND_ID.into(),
+            account: "test-account".into(),
             adapter_artifact_hash: "d".repeat(64),
             settings: serde_json::json!({
                 "schema": 2,
@@ -758,7 +762,7 @@ mod tests {
         let node = stopped_node();
         let report = compose(&node, |_| {}).unwrap();
         assert_eq!(report.id, BINDING_ID);
-        assert_eq!(report.backend, RENDER_BACKEND_ID);
+        assert_eq!(report.backend, TEST_BACKEND_ID);
         assert_eq!(report.requirement_digest, "a".repeat(64));
         assert_eq!(report.worker_profile_hash, "b".repeat(64));
         assert_eq!(report.snapshot_id, "snp-exact");
@@ -994,7 +998,7 @@ mod tests {
                 &|_| {},
                 policy()
             )
-            .contains("`render-sandbox-early-access` is not installed")
+            .contains("`test-lease-backend` is not installed")
         );
         // A canary-requesting policy needs the provider's opt-in; one that
         // asks for no canary does not.
@@ -1053,8 +1057,8 @@ mod tests {
         // provider facts, which here are stated and need the adapter.
         let mut req = request(&node, BINDING_ID);
         req.facts_source = ProducerFactsSource::Standalone(StandaloneProducerFacts {
-            backend: "render".into(),
-            account: "render-test".into(),
+            backend: TEST_BACKEND_ID.into(),
+            account: "test-account".into(),
             owner_id: "usr-test".into(),
             roots_pem: root_pem(),
         });
@@ -1075,8 +1079,8 @@ mod tests {
         let (owner, generation, backend, account) = loaded.credential_coordinates();
         assert_eq!(owner, report.capacity_owner);
         assert_eq!(generation, report.credential_generation);
-        assert_eq!(backend, RENDER_BACKEND_ID);
-        assert_eq!(account, "render-test");
+        assert_eq!(backend, TEST_BACKEND_ID);
+        assert_eq!(account, "test-account");
         assert_eq!(
             super::super::compose::installed_binding_credential_generation(
                 node.root.path(),
