@@ -450,7 +450,13 @@ impl IsolationInspection {
             lillux::ProcessScopeCapability::Termination,
             lillux::ProcessScopeCapability::Recovery,
         ] {
-            provide_scope_guarantee(&mut view, capability, containment.cgroup_scope, host, refusal);
+            provide_scope_guarantee(
+                &mut view,
+                capability,
+                containment.cgroup_scope,
+                host,
+                refusal,
+            );
         }
         add_pid_namespace_containment(&mut view, &containment.pid_namespace);
         view
@@ -883,9 +889,11 @@ mod tests {
             "{:?}",
             contained.missing
         );
-        assert!(contained.provided[CALLBACK_CAPTURED_COMPATIBLE]
-            .basis
-            .contains("node-level"));
+        assert!(
+            contained.provided[CALLBACK_CAPTURED_COMPATIBLE]
+                .basis
+                .contains("node-level")
+        );
         // Not enforced, trusted sessions accepted: only the weaker grade.
         let trusted = inspection(true, false).reported_guarantees(false, &native);
         assert_eq!(provided(&trusted), [SESSIONS_TRUSTED_PROCESS_GROUP]);
@@ -901,7 +909,11 @@ mod tests {
         let uncontained = inspection(false, false).reported_guarantees(true, &native);
         assert!(uncontained.provided.contains_key(ISOLATION_ENFORCED));
         assert!(!uncontained.provided.contains_key("termination:scope"));
-        assert!(!uncontained.provided.contains_key("termination:pid_namespace"));
+        assert!(
+            !uncontained
+                .provided
+                .contains_key("termination:pid_namespace")
+        );
         // Under gVisor the cgroup scope and the accepted trusted lane are
         // provider-attested, as the capability report grades them; a PID
         // namespace proof keeps the grade its probe gave it.
@@ -913,7 +925,10 @@ mod tests {
         let attested = inspection(false, true).reported_guarantees(true, &emulated);
         for name in ["termination:scope", "recovery:scope"] {
             let evidence = &attested.provided[name];
-            assert_eq!(evidence.source, lillux::process_control::ProofSource::ProviderAttested);
+            assert_eq!(
+                evidence.source,
+                lillux::process_control::ProofSource::ProviderAttested
+            );
             assert_eq!(evidence.provider, "host_runtime");
         }
         let attested_trusted = inspection(true, false).reported_guarantees(false, &emulated);
@@ -922,7 +937,8 @@ mod tests {
             lillux::process_control::ProofSource::ProviderAttested
         );
         // A bare requirement is a measured-only requirement, so it is not met.
-        let bare_requirement = lillux::process_control::CapabilityRequirement::from("termination:scope");
+        let bare_requirement =
+            lillux::process_control::CapabilityRequirement::from("termination:scope");
         assert!(attested.meets(&bare_requirement).is_err());
     }
 

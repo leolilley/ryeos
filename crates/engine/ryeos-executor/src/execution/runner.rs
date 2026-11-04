@@ -3135,13 +3135,15 @@ fn promoted_scoped_producer_commands(
 
 fn admitted_root_requires_process_scope(
     metadata: &ryeos_app::launch_metadata::RuntimeLaunchMetadata,
-) -> Result<bool> {
+) -> Result<ryeos_app::thread_lifecycle::ProcessContainmentRequirement> {
     metadata
         .sealed_root_request
         .as_ref()
-        .map(|sealed| sealed.requires_process_scope_for_qualification())
+        .map(|sealed| sealed.process_containment_for_qualification())
         .transpose()
-        .map(|required| required.unwrap_or(false))
+        .map(|required| {
+            required.unwrap_or(ryeos_app::thread_lifecycle::ProcessContainmentRequirement::None)
+        })
 }
 
 // Execution plumbing: each argument is a distinct leg of the thread's
@@ -5585,7 +5587,7 @@ pub async fn run_and_wait(
             original_snapshot_hash: wait_snapshot.as_deref(),
             state_root: wait_state_root.as_deref(),
             selected_resources: wait_selected_resources,
-            require_process_scope: wait_requires_process_scope,
+            process_containment: wait_requires_process_scope,
         })
     });
 
@@ -6980,7 +6982,7 @@ async fn dispatch_detached_bg_task(
             original_snapshot_hash: snap_for_spawn.as_deref(),
             state_root: state_root_for_spawn.as_deref(),
             selected_resources: bg_selected_resources,
-            require_process_scope: bg_requires_process_scope,
+            process_containment: bg_requires_process_scope,
         })
     })
     .await;

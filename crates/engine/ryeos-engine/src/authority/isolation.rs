@@ -44,13 +44,12 @@ pub use authority::{
 };
 pub use backend::{ResolvedIsolationBackend, VerifiedIsolationBackendCapture};
 pub use inspection::{
-    CALLBACK_CAPTURED_COMPATIBLE, FILESYSTEM_CAPTURED_EXECUTION, GuaranteeHost,
-    ISOLATION_ENFORCED, ISOLATION_PROVIDER, NODE_POLICY_PROVIDER, SESSIONS_TRUSTED_PROCESS_GROUP,
-    add_pid_namespace_containment, provide_scope_guarantee,
-    DescendantContainmentGuarantee, DescendantContainmentReadiness, IsolationBackendInspection,
-    IsolationBackendStatus, IsolationInspection, PidNamespaceContainmentQualification,
-    ProcessControlReadinessReason, ProcessScopeAuthorityStatus, ProcessScopeReadiness,
-    ProtocolProcessControlReadiness,
+    CALLBACK_CAPTURED_COMPATIBLE, DescendantContainmentGuarantee, DescendantContainmentReadiness,
+    FILESYSTEM_CAPTURED_EXECUTION, GuaranteeHost, ISOLATION_ENFORCED, ISOLATION_PROVIDER,
+    IsolationBackendInspection, IsolationBackendStatus, IsolationInspection, NODE_POLICY_PROVIDER,
+    PidNamespaceContainmentQualification, ProcessControlReadinessReason,
+    ProcessScopeAuthorityStatus, ProcessScopeReadiness, ProtocolProcessControlReadiness,
+    SESSIONS_TRUSTED_PROCESS_GROUP, add_pid_namespace_containment, provide_scope_guarantee,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use policy::TEST_ISOLATION_POLICY_RELATIVE_PATH;
@@ -10272,7 +10271,8 @@ mod tests {
         let mut policy = IsolationPolicy::disabled_for_authoring();
         policy.mode = IsolationMode::Enforce;
         policy.backend = Some(resolved_backend().selection.clone());
-        policy.filesystem.readable = vec!["{verified_code}".to_string(), "{daemon_socket}".to_string()];
+        policy.filesystem.readable =
+            vec!["{verified_code}".to_string(), "{daemon_socket}".to_string()];
         policy.filesystem.writable = vec!["{project}".to_string()];
         write_policy(app_root.path(), &policy);
 
@@ -10377,7 +10377,13 @@ mod tests {
                 .apply_with_provenance(request(), context(false, false, &[]))
                 .unwrap(),
         );
-        assert!(baseline.plan.mounts.iter().all(|m| m.destination.as_str() != socket_text));
+        assert!(
+            baseline
+                .plan
+                .mounts
+                .iter()
+                .all(|m| m.destination.as_str() != socket_text)
+        );
 
         // On the class: exactly one more mount, the socket entry, read-only,
         // backed by a descriptor authority; the parent directory is not mounted.
@@ -10394,7 +10400,13 @@ mod tests {
             .filter(|m| m.destination.as_str() == socket_text)
             .collect::<Vec<_>>();
         assert_eq!(mounts.len(), 1);
-        assert!(admitted.plan.mounts.iter().all(|m| m.destination.as_str() != parent_text));
+        assert!(
+            admitted
+                .plan
+                .mounts
+                .iter()
+                .all(|m| m.destination.as_str() != parent_text)
+        );
         assert!(admitted.authorities.iter().any(|authority| {
             authority.id == mounts[0].source
                 && authority.purpose == IsolationAuthorityPurpose::ReadOnlyMount
@@ -10405,9 +10417,11 @@ mod tests {
             .apply_with_provenance(request(), context(true, false, &[]))
             .err()
             .expect("captured launch off the class must refuse the socket");
-        assert!(error
-            .to_string()
-            .contains("captured execution context carries ambient filesystem authority"));
+        assert!(
+            error
+                .to_string()
+                .contains("captured execution context carries ambient filesystem authority")
+        );
 
         // On the class, other ambient authority is still refused.
         static ROOTS: std::sync::OnceLock<Vec<PathBuf>> = std::sync::OnceLock::new();
@@ -10416,9 +10430,11 @@ mod tests {
             .apply_with_provenance(request(), context(true, true, roots))
             .err()
             .expect("bundle roots stay refused under captured execution");
-        assert!(error
-            .to_string()
-            .contains("captured execution context carries ambient filesystem authority"));
+        assert!(
+            error
+                .to_string()
+                .contains("captured execution context carries ambient filesystem authority")
+        );
     }
 
     /// The captured verifier on the enforced lane: a read-only project, the
@@ -10533,7 +10549,9 @@ mod tests {
             .unwrap()
             .read_regular_file_stable_bounded(ryeos_isolation_protocol::MAX_REQUEST_BYTES as u64)
             .unwrap();
-        let plan = serde_json::from_slice::<AdapterLaunchRequest>(&bytes).unwrap().plan;
+        let plan = serde_json::from_slice::<AdapterLaunchRequest>(&bytes)
+            .unwrap()
+            .plan;
         let destinations = plan
             .mounts
             .iter()
@@ -10542,21 +10560,255 @@ mod tests {
         let socket_text = socket_path.to_string_lossy().into_owned();
         assert!(destinations.contains(&socket_text), "{destinations:?}");
         assert!(
-            destinations.iter().any(|d| d == "/ryeos/realizations/guest-runtime"),
+            destinations
+                .iter()
+                .any(|d| d == "/ryeos/realizations/guest-runtime"),
             "{destinations:?}"
         );
-        let project_text = project.path().canonicalize().unwrap().to_string_lossy().into_owned();
+        let project_text = project
+            .path()
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
         assert!(
-            destinations.iter().any(|d| d.ends_with(&project_text) || *d == project_text),
+            destinations
+                .iter()
+                .any(|d| d.ends_with(&project_text) || *d == project_text),
             "{project_text} not in {destinations:?}"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn contained_verifier_plan_keeps_readonly_project_runtime_mounts_and_callback_socket_under_pid_namespace_init()
+     {
+        let app_root = tempfile::tempdir().unwrap();
+        let mut policy = IsolationPolicy::disabled_for_authoring();
+        policy.mode = IsolationMode::Enforce;
+        policy.backend = Some(resolved_backend().selection.clone());
+        policy.filesystem.readable = vec![
+            "{verified_code}".to_string(),
+            "{daemon_socket}".to_string(),
+            "{project}".to_string(),
+        ];
+        policy.filesystem.writable = Vec::new();
+        write_policy(app_root.path(), &policy);
+        let mut backend = resolved_backend();
+        backend.effective_capabilities = BTreeSet::from([
+            IsolationCapability::FilesystemPrivateRoot,
+            IsolationCapability::FilesystemFdReadOnly,
+            IsolationCapability::FilesystemFdWritable,
+            IsolationCapability::FilesystemOrderedOverlays,
+            IsolationCapability::FilesystemFixedParentViews,
+            IsolationCapability::FilesystemPrivateTmp,
+            IsolationCapability::DevicesMinimal,
+            IsolationCapability::EnvironmentExact,
+            IsolationCapability::NetworkIsolated,
+            IsolationCapability::NetworkHost,
+            IsolationCapability::ProcessHostPidNamespace,
+            IsolationCapability::ProcessIsolatedPidNamespace,
+            IsolationCapability::ProcessTargetPidReporting,
+            IsolationCapability::LifecycleSharedProcessGroup,
+        ]);
+        backend.declaration.capabilities = backend.effective_capabilities.clone();
+        let socket_dir = tempfile::tempdir().unwrap();
+        let socket_path = socket_dir.path().join("daemon.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+        let runtime = IsolationRuntime::load_for_daemon(
+            app_root.path(),
+            &socket_path,
+            Some(Arc::new(backend)),
+        )
+        .unwrap();
+        assert!(runtime.inspection().admits_captured_filesystem());
+        let command = runtime
+            .capture_verified_command(Path::new("/bin/true"), None, None)
+            .unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let runtime_source = tempfile::tempdir().unwrap();
+        std::fs::write(runtime_source.path().join("member"), b"member").unwrap();
+        let pinned = lillux::PinnedDirectory::open(runtime_source.path())
+            .unwrap()
+            .unwrap();
+        let mount = IsolationReadOnlyMountAuthority::new_execution_runtime(
+            runtime_source.path().to_path_buf(),
+            PathBuf::from("/ryeos/realizations/guest-runtime"),
+            pinned.inherited_descriptor_authority().unwrap(),
+        );
+        let mounts = [mount];
+        let request = lillux::SubprocessRequest {
+            cmd: "/bin/true".to_string(),
+            argv0: None,
+            args: Vec::new(),
+            cwd: Some(project.path().to_string_lossy().into_owned()),
+            envs: Vec::new(),
+            stdin_data: None,
+            timeout: 1.0,
+            limits: None,
+            inherited_fds: Vec::new(),
+            inherited_fd_mappings: Vec::new(),
+            supervised_status: None,
+        };
+        // The verifier's PID-namespace init containment (the sealed policy's
+        // `containment_empty`), compiled together with the captured ceilings,
+        // pushed-head read-only project, runtime mounts and callback socket.
+        let applied = runtime
+            .apply_with_provenance_current(
+                request,
+                IsolationLaunchContext {
+                    immutable_project: None,
+                    workspace_view: None,
+                    project_path: project.path(),
+                    project_authority: IsolationProjectAuthority::ReadOnly,
+                    filesystem_authority_ceiling:
+                        IsolationFilesystemAuthorityCeiling::CapturedExecution,
+                    network_authority_ceiling: IsolationNetworkAuthorityCeiling::Isolated,
+                    live_access: None,
+                    state_root: None,
+                    checkpoint_dir: None,
+                    checkpoint_authority: None,
+                    daemon_socket_path: Some(&socket_path),
+                    captured_callback_socket: true,
+                    bundle_roots: &[],
+                    node_trusted_keys_dir: None,
+                    verified_code: &[],
+                    verified_command: Some(&command),
+                    external_read_only_mounts: &mounts,
+                    writable_runtime_view_mounts: &[],
+                    producer_prepared_mounts: &[],
+                    target_channels: &[],
+                    item_ref: "tool:tests/captured-verifier",
+                    thread_id: "T-captured-verifier",
+                    verbatim_env_names: &[],
+                },
+                RequestedLaunchLifecycle::Run,
+                RetainedContainment::PidNamespaceInit,
+                None,
+                None,
+                None,
+            )
+            .expect("the contained captured verifier launch must compile on the enforced lane");
+        let (bytes, _) = applied
+            .request
+            .inherited_fds
+            .last()
+            .unwrap()
+            .read_regular_file_stable_bounded(ryeos_isolation_protocol::MAX_REQUEST_BYTES as u64)
+            .unwrap();
+        let plan = serde_json::from_slice::<AdapterLaunchRequest>(&bytes)
+            .unwrap()
+            .plan;
+        // setsid/setpgid are permitted (no strict group), contained by the
+        // retained init; no nested sandbox and ordinary task-only proc.
+        assert!(!plan.shared_process_group);
+        assert!(!plan.nested_sandbox);
+        let destinations = plan
+            .mounts
+            .iter()
+            .map(|mount| mount.destination.as_str().to_owned())
+            .collect::<Vec<_>>();
+        let socket_text = socket_path.to_string_lossy().into_owned();
+        assert!(destinations.contains(&socket_text), "{destinations:?}");
+        assert!(
+            destinations
+                .iter()
+                .any(|d| d == "/ryeos/realizations/guest-runtime"),
+            "{destinations:?}"
+        );
+        let project_text = project
+            .path()
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert!(
+            destinations
+                .iter()
+                .any(|d| d.ends_with(&project_text) || *d == project_text),
+            "{project_text} not in {destinations:?}"
+        );
+    }
+
+    /// The rollout shape for a host with no delegated cgroup: scopes
+    /// unconfigured, the floor naming the PID-namespace containment instead of
+    /// any per-scope capability. Containment must not depend on
+    /// `process_scopes: required` or on `exclusive_session` readiness.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pid_namespace_containment_needs_no_configured_process_scopes() {
+        let app_root = tempfile::tempdir().unwrap();
+        let mut policy = IsolationPolicy::disabled_for_authoring();
+        policy.mode = IsolationMode::Enforce;
+        policy.backend = Some(resolved_backend().selection.clone());
+        policy.filesystem.readable = vec!["{verified_code}".to_string()];
+        policy.filesystem.writable = vec!["{project}".to_string()];
+        policy.trusted_process_group_sessions = true;
+        policy.requires_capabilities = [
+            "recovery:pid_namespace",
+            "termination:pid_namespace",
+            "time",
+        ]
+        .into_iter()
+        .map(lillux::process_control::CapabilityRequirement::from)
+        .collect();
+        assert!(matches!(
+            policy.process_scopes,
+            IsolationProcessScopePolicy::Unconfigured {}
+        ));
+        write_policy(app_root.path(), &policy);
+        let mut backend = resolved_backend();
+        backend.effective_capabilities = BTreeSet::from([
+            IsolationCapability::FilesystemPrivateRoot,
+            IsolationCapability::FilesystemFdReadOnly,
+            IsolationCapability::FilesystemFdWritable,
+            IsolationCapability::FilesystemOrderedOverlays,
+            IsolationCapability::FilesystemFixedParentViews,
+            IsolationCapability::FilesystemPrivateTmp,
+            IsolationCapability::DevicesMinimal,
+            IsolationCapability::EnvironmentExact,
+            IsolationCapability::NetworkIsolated,
+            IsolationCapability::NetworkHost,
+            IsolationCapability::ProcessHostPidNamespace,
+            IsolationCapability::ProcessIsolatedPidNamespace,
+            IsolationCapability::ProcessTargetPidReporting,
+            IsolationCapability::LifecycleSharedProcessGroup,
+        ]);
+        backend.declaration.capabilities = backend.effective_capabilities.clone();
+        let runtime =
+            IsolationRuntime::load_with_backend(app_root.path(), Some(Arc::new(backend))).unwrap();
+        let readiness = &runtime.inspection().process_scope_readiness;
+        // No scope policy, no provider: the cgroup lane is genuinely absent.
+        assert!(!readiness.exclusive_session.ready);
+        assert!(!readiness.descendant_containment.cgroup_scope);
+        if !readiness.descendant_containment.pid_namespace.qualified {
+            eprintln!(
+                "skipped: this host does not qualify PID-namespace containment: {}",
+                readiness.descendant_containment.pid_namespace.detail
+            );
+            return;
+        }
+        // Yet descendant containment is available, by the namespace init. This
+        // is the guarantee every admission (connector gate, Q Worker launch,
+        // verifier launch) consults.
+        assert_eq!(
+            readiness.descendant_containment.enforced_guarantee(),
+            Some(DescendantContainmentGuarantee::PidNamespaceInit)
+        );
+        // A PID-namespace scope is accepted at the engine seam without a
+        // process-scope provider or a control timeout.
+        runtime
+            .validate_retained_scope(&lillux::ProcessScope::pid_namespace_init())
+            .unwrap();
     }
 
     #[test]
     fn captured_filesystem_guarantee_follows_the_node_ceilings_not_the_enforced_bit() {
         let host = GuaranteeHost::default();
         let inspection = |readable: &[&str], writable: &[&str]| {
-            let mut inspection = IsolationRuntime::disabled_for_authoring().inspection().clone();
+            let mut inspection = IsolationRuntime::disabled_for_authoring()
+                .inspection()
+                .clone();
             inspection.filesystem.readable = readable.iter().map(|s| s.to_string()).collect();
             inspection.filesystem.writable = writable.iter().map(|s| s.to_string()).collect();
             inspection

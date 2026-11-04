@@ -19075,7 +19075,13 @@ impl RuntimeDb {
             let tx = conn.unchecked_transaction()?;
             let scope_only =
                 consume_thread_process_scope_reservation(&tx, thread_id, process_identity)?;
-            if process_identity.process_scope.is_some()
+            // A PID-namespace init is bound by the held launch itself, so no
+            // pre-contact reservation exists to consume for it; a cgroup
+            // scope without resources must have one.
+            if process_identity
+                .process_scope
+                .as_ref()
+                .is_some_and(|scope| !scope.is_pid_namespace_init())
                 && process_identity.resource_selections.is_empty()
                 && !scope_only
             {

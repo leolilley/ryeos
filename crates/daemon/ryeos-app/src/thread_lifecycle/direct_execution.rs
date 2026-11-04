@@ -3368,10 +3368,45 @@ pub struct SpawnItemParams<'a> {
     /// Exact node-selected launch authority. Selection has already crossed
     /// replay/admission; this owner binds it to the held process before release.
     pub selected_resources: crate::execution_resources::SelectedExecutionResources,
-    /// The accepted root's signed product claim requires a naturally empty
-    /// whole-descendant scope. Device selection is not a substitute for this
-    /// requirement, and an unscoped launch must refuse before process contact.
-    pub require_process_scope: bool,
+    /// What whole-descendant containment the accepted root's signed product
+    /// claim demands. Device selection is not a substitute for it, and an
+    /// uncontained launch must refuse before process contact.
+    pub process_containment: ProcessContainmentRequirement,
+}
+
+/// The containment a launch must run under, read from the sealed root's
+/// signed minimum verifier settlement; never a later policy lookup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessContainmentRequirement {
+    /// Nothing beyond the strict process group.
+    None,
+    /// A cgroup scope specifically (`scope_empty`).
+    CgroupScope,
+    /// Whole-descendant emptiness by whichever mechanism the node qualified
+    /// (`containment_empty`): a cgroup scope or the PID-namespace init.
+    AnyQualifiedContainment,
+}
+
+impl ProcessContainmentRequirement {
+    /// The qualified mechanism answering this requirement on this node, or the
+    /// refusal that names the missing guarantee.
+    fn select(
+        self,
+        containment: &ryeos_engine::isolation::DescendantContainmentReadiness,
+    ) -> Result<Option<ryeos_engine::isolation::DescendantContainmentGuarantee>> {
+        use ryeos_engine::isolation::DescendantContainmentGuarantee as Guarantee;
+        match self {
+            Self::None => Ok(None),
+            Self::CgroupScope => Ok(Some(Guarantee::CgroupScope)),
+            Self::AnyQualifiedContainment => match containment.enforced_guarantee() {
+                Some(guarantee) => Ok(Some(guarantee)),
+                None => bail!(
+                    "signed verifier policy demands `containment_empty` but this node reports no qualified descendant containment (cgroup scope: unavailable; PID-namespace init: {}); the trusted process-group lane is a weaker guarantee and is never a substitute",
+                    containment.pid_namespace.detail
+                ),
+            },
+        }
+    }
 }
 
 #[tracing::instrument(
@@ -3402,7 +3437,7 @@ pub fn spawn_item(
         thread_id,
         launch_owner,
         accounting_scope,
-        require_process_scope,
+        process_containment,
     ) = (|| -> Result<_> {
         let SpawnItemParams {
             state,
@@ -3434,7 +3469,7 @@ pub fn spawn_item(
             original_snapshot_hash: _,
             state_root,
             selected_resources,
-            require_process_scope,
+            process_containment,
         } = params;
         let app_root = roots
             .app_root
@@ -3677,11 +3712,29 @@ pub fn spawn_item(
             thread_id,
             launch_owner,
             accounting_scope,
-            require_process_scope,
+            process_containment,
         ))
     })()
     .map_err(SpawnItemFailure::before_contact)?;
-    let mut thread_scope = if require_process_scope && selected_resources.selections().is_empty() {
+    // Resource-bearing launches already run in the cgroup scope their
+    // resources need, which satisfies either requirement. Otherwise choose the
+    // mechanism now, before any process contact.
+    let selected_mechanism = if selected_resources.selections().is_empty() {
+        process_containment
+            .select(
+                &state
+                    .isolation
+                    .inspection()
+                    .process_scope_readiness
+                    .descendant_containment,
+            )
+            .map_err(SpawnItemFailure::before_contact)?
+    } else {
+        None
+    };
+    let mut thread_scope = if selected_mechanism
+        == Some(ryeos_engine::isolation::DescendantContainmentGuarantee::CgroupScope)
+    {
         Some(
             crate::execution_resources::prepare_thread_scope_only(state, thread_id, launch_owner)
                 .map_err(SpawnItemFailure::before_contact)?,
@@ -3689,6 +3742,11 @@ pub fn spawn_item(
     } else {
         None
     };
+    // The PID-namespace init is bound by the held launch itself: no cgroup
+    // allocation and no pre-contact reservation exist to journal.
+    let mut namespace_scope = (selected_mechanism
+        == Some(ryeos_engine::isolation::DescendantContainmentGuarantee::PidNamespaceInit))
+    .then(lillux::ProcessScope::pid_namespace_init);
     let mut resource_scope = crate::execution_resources::prepare_process_resource_scope(
         state,
         &selected_resources,
@@ -3696,8 +3754,24 @@ pub fn spawn_item(
         thread_id,
     )
     .map_err(SpawnItemFailure::before_contact)?;
-    let spawned_result = match (resource_scope.as_mut(), thread_scope.as_mut()) {
-        (Some(prepared), None) => engine.spawn_plan_in_scope_with_resources(
+    let spawned_result = match (
+        resource_scope.as_mut(),
+        thread_scope.as_mut(),
+        namespace_scope.take(),
+    ) {
+        (None, None, Some(scope)) => engine.spawn_plan_in_scope_with_resources(
+            &engine_ctx,
+            &plan,
+            scope,
+            selected_resources.selections(),
+            selected_resources.devices().map(Arc::as_ref),
+        ),
+        (_, _, Some(_)) => {
+            return Err(SpawnItemFailure::before_contact(anyhow!(
+                "item launch prepared conflicting process scopes"
+            )));
+        }
+        (Some(prepared), None, None) => engine.spawn_plan_in_scope_with_resources(
             &engine_ctx,
             &plan,
             prepared
@@ -3706,7 +3780,7 @@ pub fn spawn_item(
             selected_resources.selections(),
             selected_resources.devices().map(Arc::as_ref),
         ),
-        (None, Some(prepared)) => engine.spawn_plan_in_scope_with_resources(
+        (None, Some(prepared), None) => engine.spawn_plan_in_scope_with_resources(
             &engine_ctx,
             &plan,
             prepared
@@ -3715,13 +3789,13 @@ pub fn spawn_item(
             selected_resources.selections(),
             selected_resources.devices().map(Arc::as_ref),
         ),
-        (None, None) => engine.spawn_plan_with_resources(
+        (None, None, None) => engine.spawn_plan_with_resources(
             &engine_ctx,
             &plan,
             selected_resources.selections(),
             selected_resources.devices().map(Arc::as_ref),
         ),
-        (Some(_), Some(_)) => {
+        (Some(_), Some(_), None) => {
             return Err(SpawnItemFailure::before_contact(anyhow!(
                 "item launch prepared conflicting process scopes"
             )));
@@ -3848,6 +3922,73 @@ pub fn spawn_item(
             .map(|prepared| prepared.reservation().clone()),
         spawned,
     })
+}
+
+#[cfg(test)]
+mod process_containment_requirement_tests {
+    use super::ProcessContainmentRequirement as Requirement;
+    use ryeos_engine::isolation::{
+        DescendantContainmentGuarantee as Guarantee, DescendantContainmentReadiness,
+        PidNamespaceContainmentQualification as Namespace,
+    };
+
+    fn readiness(cgroup_scope: bool, namespace: bool) -> DescendantContainmentReadiness {
+        DescendantContainmentReadiness {
+            cgroup_scope,
+            pid_namespace: if namespace {
+                Namespace::qualified_by(lillux::process_control::ProofSource::Measured, "probed")
+            } else {
+                Namespace::not_probed("user namespaces refused")
+            },
+            trusted_process_group: true,
+        }
+    }
+
+    #[test]
+    fn each_demand_is_answered_by_the_mechanism_the_node_qualified() {
+        // `scope_empty` is a cgroup demand whatever else the node has.
+        for (cgroup, namespace) in [(true, true), (false, true), (false, false)] {
+            assert_eq!(
+                Requirement::CgroupScope
+                    .select(&readiness(cgroup, namespace))
+                    .unwrap(),
+                Some(Guarantee::CgroupScope)
+            );
+            assert_eq!(
+                Requirement::None
+                    .select(&readiness(cgroup, namespace))
+                    .unwrap(),
+                None
+            );
+        }
+        // `containment_empty` takes either mechanism, scope preferred.
+        let any = Requirement::AnyQualifiedContainment;
+        assert_eq!(
+            any.select(&readiness(true, true)).unwrap(),
+            Some(Guarantee::CgroupScope)
+        );
+        assert_eq!(
+            any.select(&readiness(true, false)).unwrap(),
+            Some(Guarantee::CgroupScope)
+        );
+        assert_eq!(
+            any.select(&readiness(false, true)).unwrap(),
+            Some(Guarantee::PidNamespaceInit)
+        );
+        // With neither it refuses, naming the missing guarantee and why the
+        // always-available trusted lane is not a substitute.
+        let error = any
+            .select(&readiness(false, false))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("containment_empty"), "{error}");
+        assert!(
+            error.contains("no qualified descendant containment"),
+            "{error}"
+        );
+        assert!(error.contains("user namespaces refused"), "{error}");
+        assert!(error.contains("never a substitute"), "{error}");
+    }
 }
 
 #[cfg(test)]
@@ -5574,11 +5715,9 @@ mod captured_verifier_admission_tests {
     #[test]
     fn the_shipped_contained_verifier_protocol_is_admitted_to_captured_execution() {
         let tool: serde_json::Value = serde_yaml::from_str(
-            &std::fs::read_to_string(
-                ryeos_engine::test_support::workspace_root().join(
-                    "bundles/codex/.ai/tools/codex/qualification/consumer-runtime-verifier.yaml",
-                ),
-            )
+            &std::fs::read_to_string(ryeos_engine::test_support::workspace_root().join(
+                "bundles/codex/.ai/tools/codex/qualification/consumer-runtime-verifier.yaml",
+            ))
             .unwrap(),
         )
         .unwrap();
