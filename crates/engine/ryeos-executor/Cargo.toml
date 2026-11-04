@@ -42,6 +42,7 @@ tracing = { workspace = true }
 libc = { workspace = true }
 
 [dev-dependencies]
+lillux = { workspace = true, features = ["test-support"] }
 ryeos-node-runtime = { workspace = true, features = ["test-support"] }
 ryeos-app = { workspace = true, features = ["test-support"] }
 ryeos-provider-contract = { workspace = true }

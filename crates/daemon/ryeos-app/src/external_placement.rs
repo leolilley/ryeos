@@ -14731,6 +14731,7 @@ mod tests {
                 GuestOwnerActivationReport::Refused {
                     step: Step::Install,
                     last_phase: Some(Step::Install),
+                    detail: None,
                 },
                 true,
             ),

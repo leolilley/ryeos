@@ -159,6 +159,7 @@ impl ExternalPlacementBackend for GuestRelayLoopbackBackend {
     fn lifecycle_capabilities(&self) -> BTreeSet<LifecycleCapability> {
         BTreeSet::from([
             LifecycleCapability::SupervisorActivation,
+            LifecycleCapability::ControllerFileRelay,
             LifecycleCapability::ExactAllocationReconciliation,
             LifecycleCapability::AuthoritativeNoOccurrence,
             LifecycleCapability::ExactActivationReconciliation,
@@ -185,6 +186,11 @@ impl ExternalPlacementBackend for GuestRelayLoopbackBackend {
 
     fn settings_schema_digest(&self) -> &str {
         &self.settings_schema_digest
+    }
+
+    /// The key the composed settings carry the relay's workspace scope under.
+    fn relay_scope_setting(&self) -> Option<&str> {
+        Some("owner_id")
     }
 
     fn qualify_offline(
@@ -344,7 +350,13 @@ impl ExternalPlacementBackend for GuestRelayLoopbackBackend {
             .as_mut()
             .context("loopback activation has no running guest")?;
         host.poll();
-        if let Some(code) = host.owner_exited() {
+        // Only an owner that ended before releasing its supervisor proves the
+        // supervisor never started: after release the owner reports held, and
+        // its later exit is the supervisor's end, which the relay learns from
+        // the owner's report file.
+        if let Some(code) = host.owner_exited()
+            && !host.owner_released_supervisor()
+        {
             return Ok(ExternalLifecycleObservation {
                 value: ExternalSupervisorActivationResolution::NotStarted {
                     provider_observation_digest: lillux::sha256_hex(
@@ -656,10 +668,25 @@ pub fn compose_guest_relay_loopback_session(
             },
             "remote_offline_operations": [],
         }))?;
+    // Issuing windows consults the node's execution admission policy; none
+    // of its optional requirements apply to a loopback.
+    let execution =
+        ryeos_node_runtime::node_policy::sections::execution::NodeExecutionAdmissionPolicy {
+            schema: 4,
+            max_live_fanout: 1,
+            max_private_materialization_copy_bytes: 1024 * 1024,
+            host_env_passthrough: vec![],
+            workload_client: None,
+            resource_authority: None,
+            producer_resource_ceiling: None,
+            external_lease_budget: None,
+            external_wall_clock_requirement: None,
+        };
     state.node_policy = Arc::new(
-        ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![Arc::new(
-            maintenance,
-        )]),
+        ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![
+            Arc::new(maintenance) as Arc<dyn ryeos_node_runtime::node_policy::ErasedNodePolicy>,
+            Arc::new(execution),
+        ]),
     );
 
     let inputs_directory = work.create_child(std::ffi::OsStr::new("inputs"), 0o700)?;
@@ -794,6 +821,7 @@ pub fn compose_guest_relay_loopback_session(
                 setup.relay.clone(),
             ),
             network_inputs: setup.network_inputs.clone(),
+            relay_scope_setting: backend.relay_scope_setting().map(str::to_owned),
         },
         supervisor_hash,
         launcher_hash,

@@ -29,6 +29,7 @@ use ryeos_external_execution_contract::guest_import_authorization::{
 };
 use ryeos_external_execution_contract::guest_owner_report::{
     GuestClockReport, GuestClockTrust, GuestOwnerReport, GuestOwnerStep as Step,
+    GuestRefusalDetail,
     GuestSupervisorExit, GuestSupervisorStatus, MAX_GUEST_SUPERVISOR_STDERR_TAIL_BYTES,
     RefusedAt as _,
 };
@@ -226,7 +227,7 @@ fn run(assignment_bytes: &[u8]) -> Result<()> {
         .refused_at(Step::ImportVerify)?;
     admitted
         .require_fresh_admission()
-        .refused_at(Step::AdmissionExpired)?;
+        .refused_with_detail(Step::AdmissionExpired)?;
     enter(Step::PackageIdentity);
     let upload = (|| -> Result<_> {
         let upload = activation
@@ -417,7 +418,14 @@ fn owner() -> Result<()> {
 
 fn main() {
     if let Err(error) = owner() {
-        report(GuestOwnerReport::Refused(Step::of(&error)));
+        // The chain's text goes out on the closed-word line as a bounded,
+        // sanitized tail; the controller shows it and never acts on it.
+        // Only a refusal site that vouched for its text sends any: the line
+        // otherwise names the closed step word and nothing else.
+        report(GuestOwnerReport::refused(
+            Step::of(&error),
+            GuestRefusalDetail::of(&error).unwrap_or_default(),
+        ));
         eprintln!("Error: {error:?}");
         std::process::exit(1);
     }
