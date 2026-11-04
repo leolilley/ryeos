@@ -273,7 +273,7 @@ impl Walker {
                     Err(error) => {
                         return StepOutcome::DispatchHardError(DispatchHardErrorOutcome {
                             item_id: Some(dispatched_item_id),
-                            error: format!("follow action has invalid product selections: {error}"),
+                            error: format!("follow action has invalid product selections: {error:#}"),
                             next_on_error: resolve_next_on_error(node, cfg),
                             elapsed_ms: elapsed,
                             cost: None,
@@ -334,7 +334,7 @@ impl Walker {
                     return StepOutcome::IntegrityFailed(IntegrityFailedOutcome {
                         item_id: Some(dispatched_item_id),
                         error: format!(
-                            "failed to canonicalize cache identity for node `{current}`: {error}"
+                            "failed to canonicalize cache identity for node `{current}`: {error:#}"
                         ),
                         elapsed_ms: elapsed,
                         cost: None,
@@ -1104,7 +1104,7 @@ impl Walker {
                     return StepOutcome::DispatchHardError(DispatchHardErrorOutcome {
                         item_id: Some(item_ref),
                         error: format!(
-                            "follow fanout item {index} has invalid product selections: {error}"
+                            "follow fanout item {index} has invalid product selections: {error:#}"
                         ),
                         next_on_error: resolve_next_on_error(node, cfg),
                         elapsed_ms: start.elapsed().as_millis() as u64,

@@ -268,13 +268,13 @@ impl RunHistoryBudgets {
 
     fn reject(&mut self, error: anyhow::Error) {
         if self.failure.is_none() {
-            self.failure = Some(format!("graph run history rejected: {error}"));
+            self.failure = Some(format!("graph run history rejected: {error:#}"));
         }
     }
 
     pub(super) fn reject_external(&mut self, error: impl std::fmt::Display) {
         if self.failure.is_none() {
-            self.failure = Some(format!("graph run history rejected: {error}"));
+            self.failure = Some(format!("graph run history rejected: {error:#}"));
         }
     }
 }

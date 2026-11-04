@@ -128,7 +128,7 @@ impl Walker {
                 CommitResult::Terminate(Box::new(continued_result))
             }
             Err(e) => {
-                let msg = format!("follow handoff failed: {e}");
+                let msg = format!("follow handoff failed: {e:#}");
                 self.commit_terminal(CommitTerminalInput {
                     graph_run_id,
                     steps: step,
@@ -249,7 +249,7 @@ impl Walker {
                 CommitResult::Terminate(Box::new(continued_result))
             }
             Err(e) => {
-                let msg = format!("follow cohort handoff failed: {e}");
+                let msg = format!("follow cohort handoff failed: {e:#}");
                 self.commit_terminal(CommitTerminalInput {
                     graph_run_id,
                     steps: step,
