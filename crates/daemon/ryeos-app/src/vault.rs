@@ -2100,6 +2100,7 @@ mod tests {
         let key_path = ryeos_vault::paths::default_vault_secret_key_path(state);
         let public_path = ryeos_vault::paths::default_vault_public_key_path(state);
         let store_path = default_sealed_store_path(state);
+        std::fs::create_dir_all(store_path.parent().unwrap().parent().unwrap()).unwrap();
         let old_key = lillux::vault::VaultSecretKey::generate();
         lillux::vault::write_secret_key(&key_path, &old_key).unwrap();
         lillux::vault::write_public_key(&public_path, &old_key.public_key()).unwrap();
