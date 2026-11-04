@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-30T21:07:10Z:2a359cd804d41ffa6260c9462000a3158d5f764bdb53ec5f85943d1f9c706267:z3aQ7otyAyDYIaDfWc6X+quHIeS9CIMJFNK6VKkSfJ7oXat+bCLbz1CaWF2Pk8q9LAhtqgdviLywImxoHNTWAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-04T04:58:11Z:ba7b7a5e90ffffec49e787be3bb345fa18f20a68b783ef077251bcaa57648a9d:iJjoDzsPE0ZV31dNmJkNmM2JSU2+3nLtKBuAUsEisuJeyvaOoHhNvnh3lK7+oiT4SWUSG7Mf2u1iSHxNMgUPBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: codex/qualification
 version: "1.0.0"
 description: >-
@@ -19,6 +19,9 @@ effects: live
 # isolation and may never hold daemon callback authority. This verifier produces no filesystem product, reads only
 # its pinned read-only project root and admitted mounts, and does all of its work through the callback protocol.
 filesystem_authority: node_policy
+# The verifier runs against the exact pinned snapshot its subject was captured from, a pushed-head project source;
+# the qualification callback protocol admits that only to a tool that declares it here.
+project_lane: pinned_snapshot
 required_caps: []
 external_product_slots:
   # The verifier inspects the unqualified guest owner through its own

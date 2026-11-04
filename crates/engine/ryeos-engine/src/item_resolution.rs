@@ -875,6 +875,7 @@ mod tests {
                 effect_class_ceiling: None,
                 workspace_access: None,
                 network_authority_ceiling: None,
+                pushed_head_declaration: None,
                 filesystem_authority_ceiling: None,
                 target: None,
                 endpoint: None,

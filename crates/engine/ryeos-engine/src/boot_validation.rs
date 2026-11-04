@@ -2009,6 +2009,7 @@ composed_value_contract:
                 allows_pushed_head: false,
                 allows_target_site: false,
                 allows_detached: false,
+                pushed_head_requires_declaration: false,
             },
             lifecycle: crate::protocols::descriptor::ProtocolLifecycle {
                 mode: LifecycleMode::DetachedOk,
@@ -2096,6 +2097,7 @@ composed_value_contract:
                 allows_pushed_head: false,
                 allows_target_site: false,
                 allows_detached: false,
+                pushed_head_requires_declaration: false,
             },
             lifecycle: crate::protocols::descriptor::ProtocolLifecycle {
                 mode: LifecycleMode::DetachedOk,

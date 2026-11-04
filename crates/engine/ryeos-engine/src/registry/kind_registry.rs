@@ -1034,6 +1034,20 @@ pub struct WorkspaceAccessDecl {
     pub path: Vec<String>,
 }
 
+/// Signed mechanical projection of whether a subject declares the
+/// pinned-snapshot project source, the one value `pinned_snapshot` at `path`.
+/// Generic dispatch follows only this kind-owned path; it never names a tool,
+/// worker, or authored field directly. Absence of the declaration or of the
+/// field means the subject does not declare it.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PushedHeadDeclarationDecl {
+    pub path: Vec<String>,
+}
+
+/// The only value a subject may author at a pushed-head declaration path.
+pub const PINNED_SNAPSHOT_PROJECT_LANE: &str = "pinned_snapshot";
+
 /// Signed mechanical projection of a subject's per-execution network ceiling.
 /// Generic plan compilation follows only this kind-owned composed-value path;
 /// it never names a tool, worker, provider, or authored field directly.
@@ -1254,6 +1268,10 @@ pub struct ExecutionSchema {
     /// Absence means this kind cannot author a narrower per-execution ceiling.
     #[serde(default)]
     pub network_authority_ceiling: Option<NetworkAuthorityCeilingDecl>,
+    /// Optional signed path to the composed subject's declaration that it runs
+    /// against a pinned project snapshot (a pushed-head project source).
+    #[serde(default)]
+    pub pushed_head_declaration: Option<PushedHeadDeclarationDecl>,
     /// Optional signed projection of a per-execution filesystem ceiling.
     /// A kind without this projection cannot author additional narrowing;
     /// parent and node restrictions still apply independently.
@@ -1496,6 +1514,31 @@ impl ExecutionSchema {
             None => Err(EngineError::SchemaLoaderError {
                 reason: format!(
                     "signed workspace-access projection `{}` resolved to a non-string value",
+                    declaration.path.join(".")
+                ),
+            }),
+        }
+    }
+
+    /// Whether the composed subject declares the pinned-snapshot project
+    /// source. A kind without a declaration, or a subject that omits the
+    /// field, does not declare it; any other authored value is refused.
+    pub fn project_pushed_head_declaration(&self, composed: &Value) -> Result<bool, EngineError> {
+        let Some(declaration) = self.pushed_head_declaration.as_ref() else {
+            return Ok(false);
+        };
+        let mut value = composed;
+        for segment in &declaration.path {
+            let Some(next) = value.get(segment) else {
+                return Ok(false);
+            };
+            value = next;
+        }
+        match value.as_str() {
+            Some(PINNED_SNAPSHOT_PROJECT_LANE) => Ok(true),
+            _ => Err(EngineError::SchemaLoaderError {
+                reason: format!(
+                    "signed pushed-head declaration `{}` must be `{PINNED_SNAPSHOT_PROJECT_LANE}`",
                     declaration.path.join(".")
                 ),
             }),
@@ -2891,6 +2934,7 @@ fn parse_execution_schema(
         "effect_class_ceiling",
         "workspace_access",
         "network_authority_ceiling",
+        "pushed_head_declaration",
         "filesystem_authority_ceiling",
         "target",
         "endpoint",
@@ -3186,6 +3230,30 @@ fn parse_execution_schema(
                 return Err(EngineError::SchemaLoaderError {
                     reason: format!(
                         "{display}: execution.network_authority_ceiling.path must contain canonical non-empty segments"
+                    ),
+                });
+            }
+            Some(declaration)
+        }
+        None => None,
+    };
+
+    let pushed_head_declaration = match execution_value.get("pushed_head_declaration") {
+        Some(value) => {
+            let declaration = serde_yaml::from_value::<PushedHeadDeclarationDecl>(value.clone())
+                .map_err(|error| EngineError::SchemaLoaderError {
+                    reason: format!(
+                        "{display}: invalid execution.pushed_head_declaration declaration: {error}"
+                    ),
+                })?;
+            if declaration.path.is_empty()
+                || declaration.path.iter().any(|segment| {
+                    segment.trim().is_empty() || segment.trim() != segment || segment.contains('.')
+                })
+            {
+                return Err(EngineError::SchemaLoaderError {
+                    reason: format!(
+                        "{display}: execution.pushed_head_declaration.path must contain canonical non-empty segments"
                     ),
                 });
             }
@@ -3529,6 +3597,7 @@ fn parse_execution_schema(
         effect_class_ceiling,
         workspace_access,
         network_authority_ceiling,
+        pushed_head_declaration,
         filesystem_authority_ceiling,
         target,
         endpoint,
@@ -5057,6 +5126,36 @@ execution:
                 .to_string()
                 .contains("unknown value")
         );
+    }
+
+    #[test]
+    fn pushed_head_declaration_follows_only_the_signed_kind_path() {
+        let execution = parse_exec("execution:\n  pushed_head_declaration:\n    path: [project_lane]\n  delegate:\n    via: runtime_registry\n").unwrap().unwrap();
+        assert!(!execution.project_pushed_head_declaration(&serde_json::json!({})).unwrap());
+        assert!(
+            execution
+                .project_pushed_head_declaration(&serde_json::json!({"project_lane": "pinned_snapshot"}))
+                .unwrap()
+        );
+        assert!(
+            execution
+                .project_pushed_head_declaration(&serde_json::json!({"project_lane": "live"}))
+                .is_err()
+        );
+        assert!(
+            execution
+                .project_pushed_head_declaration(&serde_json::json!({"project_lane": true}))
+                .is_err()
+        );
+        let unprojected = parse_exec("execution:\n  delegate: {via: runtime_registry}\n")
+            .unwrap()
+            .unwrap();
+        assert!(
+            !unprojected
+                .project_pushed_head_declaration(&serde_json::json!({"project_lane": "pinned_snapshot"}))
+                .unwrap()
+        );
+        assert!(parse_exec("execution:\n  pushed_head_declaration:\n    path: []\n  delegate: {via: runtime_registry}\n").is_err());
     }
 
     #[test]

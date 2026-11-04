@@ -400,18 +400,27 @@ fn validate_protocol_descriptor(
                 detail,
             })?;
     }
+    if desc.capabilities.pushed_head_requires_declaration && !desc.capabilities.allows_pushed_head {
+        return Err(ProtocolError::MalformedYaml {
+            path: path.to_owned(),
+            detail: "pushed_head_requires_declaration requires allows_pushed_head".to_owned(),
+        });
+    }
     // A qualification verifier runs against the exact pinned snapshot its subject was captured from, which the
-    // dispatcher classifies as a pushed head, so that capability stays open; remote and detached dispatch stay closed.
+    // dispatcher classifies as a pushed head. That capability is open only on the condition that the launched
+    // item declares the pinned-snapshot project source; remote and detached dispatch stay closed.
     if desc.qualification_callback.is_some()
         && (desc.callback_channel != CallbackChannel::Http
             || desc.execution_evidence.is_none()
             || desc.lifecycle.mode != crate::protocol_vocabulary::LifecycleMode::Managed
             || desc.capabilities.allows_target_site
-            || desc.capabilities.allows_detached)
+            || desc.capabilities.allows_detached
+            || desc.capabilities.allows_pushed_head
+                != desc.capabilities.pushed_head_requires_declaration)
     {
         return Err(ProtocolError::MalformedYaml {
             path: path.to_owned(),
-            detail: "qualification-only protocol requires managed HTTP callbacks, a projector and no remote or detached dispatch capability".to_owned(),
+            detail: "qualification-only protocol requires managed HTTP callbacks, a projector and no remote or detached dispatch capability, and a pushed head only on declaration".to_owned(),
         });
     }
 
@@ -546,7 +555,10 @@ mod tests {
             Some(crate::protocols::QualificationCallbackAuthority::RemoteConsumer);
         validate_protocol_descriptor(Path::new("/tmp/test.yaml"), &desc).unwrap();
         // the pinned lane's snapshot project is a pushed head; a qualification protocol may allow it
+        // an open pushed head without the declaration requirement is refused
         desc.capabilities.allows_pushed_head = true;
+        assert!(validate_protocol_descriptor(Path::new("/tmp/test.yaml"), &desc).is_err());
+        desc.capabilities.pushed_head_requires_declaration = true;
         validate_protocol_descriptor(Path::new("/tmp/test.yaml"), &desc).unwrap();
         desc.capabilities.allows_detached = true;
         assert!(validate_protocol_descriptor(Path::new("/tmp/test.yaml"), &desc).is_err());

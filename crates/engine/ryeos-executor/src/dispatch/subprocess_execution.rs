@@ -266,7 +266,7 @@ pub(crate) async fn dispatch_subprocess(
                 kind: current_ref.kind.clone(),
                 detail: "dispatch_subprocess called on a schema with no terminator".into(),
             })?;
-    let protocol_ref = match terminator {
+    let (protocol_ref, declares_pushed_head) = match terminator {
         TerminatorDecl::Subprocess { protocol } => {
             let verified = hop_verified.ok_or_else(|| DispatchError::SchemaMisconfigured {
                 kind: current_ref.kind.clone(),
@@ -295,12 +295,19 @@ pub(crate) async fn dispatch_subprocess(
                             .into(),
                 });
             }
-            protocol
+            let declares_pushed_head = exec
+                .project_pushed_head_declaration(&effective.composed_value)
+                .map_err(|error| DispatchError::SchemaMisconfigured {
+                    kind: current_ref.kind.clone(),
+                    detail: error.to_string(),
+                })?;
+            let protocol_ref = protocol
                 .resolve(&effective.composed_value)
                 .map_err(|detail| DispatchError::SchemaMisconfigured {
                     kind: current_ref.kind.clone(),
                     detail,
-                })?
+                })?;
+            (protocol_ref, declares_pushed_head)
         }
         TerminatorDecl::InProcess { .. } => {
             return Err(DispatchError::SchemaMisconfigured {
@@ -318,7 +325,11 @@ pub(crate) async fn dispatch_subprocess(
         .require(&protocol_ref)
         .map_err(|_| DispatchError::ProtocolNotRegistered(protocol_ref.clone()))?;
 
-    check_dispatch_capabilities(&protocol.descriptor.capabilities, request)?;
+    check_dispatch_capabilities(
+        &protocol.descriptor.capabilities,
+        request,
+        declares_pushed_head,
+    )?;
 
     use ryeos_engine::protocol_vocabulary::StdoutMode;
     if protocol.descriptor.stdout.mode == StdoutMode::Streaming && request.launch_mode == "detached"
