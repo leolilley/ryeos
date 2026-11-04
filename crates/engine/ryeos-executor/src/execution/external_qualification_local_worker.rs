@@ -96,10 +96,8 @@ fn allocate_worker_containment(
             cgroup_recovery: None,
         }),
         DescendantContainmentGuarantee::CgroupScope => {
-            let name = format!(
-                "qworker-{}",
-                &lillux::sha256_hex(placement.as_bytes())[..32]
-            );
+            let name =
+                ryeos_app::external_qualification_local::qualification_worker_scope_name(placement);
             let allocation = state.isolation.plan_process_scope(&name)?;
             let scope = state.isolation.allocate_process_scope(&allocation)?;
             let recovery = scope.recovery().clone();
@@ -805,11 +803,19 @@ pub(crate) fn start_external_qualification_local_worker_for_signed_request(
                         .attach_worker_process(&held.process_identity, &configuration_observation)
                     {
                         let reaped = held.abort_and_reap();
+                        // No Worker row names this scope, so nothing else
+                        // will retire it: prove it empty and remove it.
+                        let scope_retired = match (&reaped, scope_cleanup.as_ref()) {
+                            (Ok(_), Some(recovery)) => {
+                                Some(settle_unlaunched_scope(state, recovery))
+                            }
+                            _ => None,
+                        };
                         return Ok(LaunchOutcome::Failed {
                             error: fence_start_failure(
                                 owner,
                                 error.context(format!(
-                                    "Q held Worker attachment failed; reap: {reaped:?}"
+                                    "Q held Worker attachment failed; reap: {reaped:?}; scope: {scope_retired:?}"
                                 )),
                                 "Q held Worker attachment failed",
                             ),

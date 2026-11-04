@@ -736,6 +736,62 @@ pub fn mark_qualification_local_cleanup_unproved(
 /// connector have settled. Every effect follows its durable Q cleanup phase;
 /// an interrupted phase can be resumed only with this daemon's original
 /// workspace and state-root descriptors. This grants no qualification claim.
+/// Deterministic cgroup slot of one Q Worker, derived from its placement so a
+/// restarted daemon finds the same slot without any new journal row.
+pub fn qualification_worker_scope_name(placement: &str) -> String {
+    format!(
+        "qworker-{}",
+        &lillux::sha256_hex(placement.as_bytes())[..32]
+    )
+}
+
+/// Retire the Q Worker's cgroup slot if one can exist. Recovery rests on the
+/// existing Q rows and the provider's own recover/retire APIs:
+/// - a terminal Worker row names the exact recovery: retire it (idempotent,
+///   so a crash between the terminal commit and the retirement is repaired);
+/// - an attached row is a live owner and is refused;
+/// - no Worker row means the allocation never attached (crash or failed
+///   attach): the slot is re-planned by its deterministic name and discarded
+///   if empty. A populated slot is refused, never killed here.
+/// A node without a qualified cgroup scope has no slot to retire.
+pub fn retire_qualification_worker_scope_slot(state: &AppState, placement: &str) -> Result<()> {
+    match state.state_store.qualification_worker_process(placement)? {
+        Some(process) => {
+            ensure!(
+                process.phase == QualificationWorkerProcessPhase::Terminal,
+                "Q Worker scope slot belongs to a live attached Worker"
+            );
+            if let Some(scope) = process
+                .process_identity
+                .process_scope
+                .as_ref()
+                .filter(|scope| !scope.is_pid_namespace_init())
+            {
+                scope
+                    .retire_after_settlement()
+                    .map_err(anyhow::Error::msg)?;
+            }
+            Ok(())
+        }
+        None => {
+            if !state
+                .isolation
+                .inspection()
+                .process_scope_readiness
+                .descendant_containment
+                .cgroup_scope
+            {
+                return Ok(());
+            }
+            state
+                .isolation
+                .plan_process_scope(&qualification_worker_scope_name(placement))?
+                .discard_unlaunched()
+                .map_err(anyhow::Error::msg)
+        }
+    }
+}
+
 pub fn cleanup_qualification_local_worker(
     state: &AppState,
     placement: &str,
@@ -795,6 +851,9 @@ pub fn cleanup_qualification_local_worker(
                             "Q local cleanup lost an attached Worker process"
                         );
                     }
+                    // Restart repair: an allocated cgroup slot that never
+                    // attached, or a settled one whose retirement was lost.
+                    retire_qualification_worker_scope_slot(state, placement)?;
                     ensure!(
                         state.state_store.external_connector_retired(placement)?,
                         "Q local cleanup retains a live connector"
@@ -965,5 +1024,34 @@ mod canary_cleanup_tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod worker_scope_slot_tests {
+    use super::*;
+
+    #[test]
+    fn the_slot_is_a_deterministic_bounded_function_of_the_placement() {
+        let a = format!("Q-{}", "a".repeat(64));
+        let b = format!("Q-{}", "b".repeat(64));
+        let name = qualification_worker_scope_name(&a);
+        // A restarted daemon derives the same slot with no journal row.
+        assert_eq!(name, qualification_worker_scope_name(&a));
+        assert_ne!(name, qualification_worker_scope_name(&b));
+        // A bounded direct child accepted by the scope provider.
+        assert!(name.len() <= 160 && name.starts_with("qworker-"));
+        assert!(
+            name.bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        );
+    }
+
+    #[test]
+    fn a_node_without_a_cgroup_scope_has_no_slot_to_retire() {
+        let root = tempfile::tempdir().unwrap();
+        let (_store, state) = crate::state::test_support::build_bound(root.path()).unwrap();
+        // No Worker row and no qualified cgroup provider: nothing to discard.
+        retire_qualification_worker_scope_slot(&state, &format!("Q-{}", "c".repeat(64))).unwrap();
     }
 }
