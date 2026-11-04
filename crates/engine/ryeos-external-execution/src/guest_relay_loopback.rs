@@ -357,6 +357,12 @@ impl GuestRelayLoopbackHost {
         self.owner_exit
     }
 
+    /// Whether the owner reported that it released the supervisor. An owner
+    /// that exits after that has said nothing about the supervisor's absence.
+    pub fn owner_released_supervisor(&self) -> bool {
+        matches!(self.owner_terminal, Some(Ok(GuestOwnerTerminal::Held)))
+    }
+
     /// Ask the owner to cancel as a lost controller would, then end the host.
     pub fn stop(mut self) -> Result<GuestRelayLoopbackEnd> {
         let deadline =
@@ -423,9 +429,15 @@ fn remove_work(
 
 enum Input {
     Owner(String),
+    /// The owner's stdout reached end of file: every report line is forwarded.
+    OwnerClosed,
     Request(String),
     Closed,
 }
+
+/// How long after the owner exits its stdout may stay open (a descendant
+/// holding the pipe) before the exit is reported without waiting for it.
+const OWNER_STDOUT_CLOSE_GRACE: lillux::time::Duration = lillux::time::Duration::from_secs(1);
 
 /// Enclosed host body: start the owner over the laid-out `/ryeos` and serve
 /// requests from stdin until a stop or the controller closing it.
@@ -453,9 +465,10 @@ fn serve(plan: &HostPlan) -> Result<()> {
                 }
                 let text = String::from_utf8_lossy(&buffer[..read]).into_owned();
                 if owner_sender.send(Input::Owner(text)).is_err() {
-                    break;
+                    return;
                 }
             }
+            let _ = owner_sender.send(Input::OwnerClosed);
         })?;
     std::thread::Builder::new()
         .name("loopback-requests".into())
@@ -478,9 +491,14 @@ fn serve(plan: &HostPlan) -> Result<()> {
         }
     };
     let mut exited = false;
+    let mut stdout_closed = false;
+    // The owner's exit, held back until its stdout is fully forwarded so a
+    // terminal report line is never overtaken by the exit that follows it.
+    let mut exit_observed = None;
     loop {
         match receiver.recv_timeout(std::time::Duration::from_millis(5)) {
             Ok(Input::Owner(text)) => emit(&Message::OwnerStdout { text }),
+            Ok(Input::OwnerClosed) => stdout_closed = true,
             Ok(Input::Request(line)) => match serde_json::from_str::<Request>(&line) {
                 Ok(Request::Stop) => break,
                 Ok(request) => emit(&match handle(request) {
@@ -497,14 +515,28 @@ fn serve(plan: &HostPlan) -> Result<()> {
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
         }
         drain(&mut captured, POLL_INTERVAL);
-        if !exited && let Some(exit) = owner.try_exit().map_err(anyhow::Error::msg)? {
-            exited = true;
+        if !exited
+            && exit_observed.is_none()
+            && let Some(exit) = owner.try_exit().map_err(anyhow::Error::msg)?
+        {
             drain(&mut captured, lillux::time::Duration::from_millis(200));
-            emit(&Message::OwnerExited { code: exit.code });
+            exit_observed = Some((
+                exit.code,
+                lillux::time::MonotonicDeadline::after(OWNER_STDOUT_CLOSE_GRACE),
+            ));
+        }
+        if !exited
+            && let Some((code, grace)) = &exit_observed
+            && (stdout_closed || grace.has_elapsed())
+        {
+            exited = true;
+            emit(&Message::OwnerExited { code: *code });
         }
     }
-    while let Ok(Input::Owner(text)) = receiver.try_recv() {
-        emit(&Message::OwnerStdout { text });
+    while let Ok(input) = receiver.try_recv() {
+        if let Input::Owner(text) = input {
+            emit(&Message::OwnerStdout { text });
+        }
     }
     let owner_cleanup = if exited {
         "the owner had already exited".to_owned()
