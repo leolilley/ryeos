@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-04T09:32:59Z:838d7bb4c43e4289f2cff7c53ea45fa4038be68e5e92f0f16d588a00e4e83fab:juOdViQUO+c/XySx65PDusJeYF+W3KRJw+JLzSeImLfF7VTL5m9w3wmCJJTjYXYu28E3ptuzNdAnH7n+3qRECQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-04T09:38:33Z:3fe4ac8974e7cddbd19e922ecb28b645f10c13d4f393728283eb3625658e069d:ukNJ//KJXRymgvYNiq8zy9y7y+DrgLl7nErr0AKYrOBNiJaIXJpFexTsyrmVLTa8vnOCCjKJfHr8tFwK8uE6Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, isolation, security, subprocess, node-policy]
@@ -420,7 +420,9 @@ The narrow readable placeholders mean:
   Unix socket (it serves `runtime.*` only, never the control socket) when a typed launch fact requests callback IPC. RyeOS does not infer this
   authority from an environment-variable name. The requested path must equal
   the socket pinned at daemon startup, and the exact placeholder mount is
-  required; a surrounding directory is not substituted for it.
+  required; a surrounding directory is not substituted for it. A readable policy entry that equals or contains the daemon control
+  socket (for example its parent directory) is refused at launch by name, so
+  no entry can hand a sandbox the control socket.
 - `{bundle_roots}` expands to bundle roots verified for this execution.
 - `{node_trusted_keys}` conditionally exposes the node owner's trusted-key
   directory. The placeholder name matches the existing launch-envelope root.
