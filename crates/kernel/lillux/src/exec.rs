@@ -1183,6 +1183,15 @@ mod inherited_readonly_document_tests {
 
     #[test]
     fn inherited_document_requires_seals_and_uniquely_consumes_coordinate() {
+        // Repeating a consumed number is only meaningful while no sibling
+        // test can have been handed that number meanwhile, else the repeat
+        // adopts and closes the sibling's live descriptor.
+        if !fork_creation_custody_tests::run_isolated_in(
+            module_path!(),
+            "inherited_document_requires_seals_and_uniquely_consumes_coordinate",
+        ) {
+            return;
+        }
         let name = format!(
             "LILLUX_TEST_INHERITED_DOCUMENT_SEALS_{}",
             std::process::id()
@@ -12099,7 +12108,7 @@ fn spawn_deadline_failure(start: Instant) -> SubprocessResult {
 }
 
 #[cfg(all(test, unix))]
-mod fork_creation_custody_tests {
+pub(crate) mod fork_creation_custody_tests {
     use super::*;
 
     const ISOLATED_TEST: &str = "LILLUX_TEST_FORK_CUSTODY_ISOLATED";
@@ -12109,6 +12118,18 @@ mod fork_creation_custody_tests {
     /// a stranded window would refuse every later test's descriptor lease.
     /// Returns whether the caller is that fresh copy and must run the body.
     fn run_isolated(name: &str) -> bool {
+        run_isolated_in(module_path!(), name)
+    }
+
+    /// `run_isolated` for a test of any module, named by its `module_path!()`.
+    /// Beyond stranding the fork window, a test needs this when it forks
+    /// without exec, names a descriptor number it no longer owns, or asserts
+    /// the instant a descriptor's last holder lets go or the barrier is free:
+    /// in a shared process a sibling's pipe writer would stay open in the
+    /// fork, the stale number could already name a sibling's live descriptor,
+    /// and the kernel finishes a dying sibling's nested file releases a tick
+    /// after the sibling is reaped.
+    pub(crate) fn run_isolated_in(module: &str, name: &str) -> bool {
         if std::env::var_os(ISOLATED_TEST).is_some_and(|value| value == name) {
             return true;
         }
@@ -12116,7 +12137,7 @@ mod fork_creation_custody_tests {
         command
             .args([
                 "--exact",
-                &format!("exec::fork_creation_custody_tests::{name}"),
+                &format!("{}::{name}", module.split_once("::").map_or(module, |(_, path)| path)),
                 "--test-threads=1",
                 "--nocapture",
             ])
@@ -12311,6 +12332,9 @@ mod fork_creation_custody_tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn bounded_holder_reap_returns_status_and_kills_an_overrunning_child() {
+        if !run_isolated("bounded_holder_reap_returns_status_and_kills_an_overrunning_child") {
+            return;
+        }
         let exiting = unsafe { libc::fork() };
         assert!(exiting >= 0);
         if exiting == 0 {
@@ -14260,6 +14284,12 @@ mod native_terminal_existing_wait_tests {
 
     #[test]
     fn partial_record_requires_actual_eof_and_parse_failure_is_sticky() {
+        if !fork_creation_custody_tests::run_isolated_in(
+            module_path!(),
+            "partial_record_requires_actual_eof_and_parse_failure_is_sticky",
+        ) {
+            return;
+        }
         let (mut running, writer) = negative_owner();
         let mut file = writer.file();
         file.write_all(b"{\"schema\":").unwrap();
