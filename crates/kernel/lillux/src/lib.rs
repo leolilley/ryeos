@@ -12,6 +12,15 @@ pub mod inherited_pipes;
 pub mod invocation;
 pub mod json;
 pub mod local_ipc;
+
+/// Signal numbers applications name when asking Lillux-owned process
+/// authorities to signal; the OS spelling stays here.
+#[cfg(unix)]
+pub mod signal {
+    pub const SIGKILL: i32 = libc::SIGKILL;
+    pub const SIGTERM: i32 = libc::SIGTERM;
+    pub const SIGUSR1: i32 = libc::SIGUSR1;
+}
 pub mod locks;
 pub mod loopback;
 pub mod network;
@@ -103,7 +112,7 @@ pub use process_control::{
     require_administrator,
 };
 pub use process_control::{
-    ExactProcessIdentity, ExactProcessRoot, QuiescedProcessGroup, QuiescedProcesses,
+    ExactProcessIdentity, ExactProcessRoot, GroupBasis, QuiescedProcessGroup, QuiescedProcesses,
     capture_current_process_identity, capture_exact_process_identity, diagnostic_process_is_live,
     diagnostic_process_matches_executable_name, prepare_process_group_controller,
     quiesce_exact_process_group,

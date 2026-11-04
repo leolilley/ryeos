@@ -224,6 +224,7 @@ pub(super) fn recover_init(
         // Namespace authority never consumes the caller's group coordinates.
         group_leader_pid: init_pid,
         group_leader_start_time_ticks: init_start_time_ticks,
+        group_basis: crate::GroupBasis::ProcessGroup,
     };
     // Never classify from the /proc state letter: a thread-group leader that
     // exits while other threads run is `Z` with namespace members alive. The
@@ -322,8 +323,8 @@ pub fn pid_namespace_proof_source(gvisor: bool) -> super::host_capability::Proof
 
 /// The probe's outcome, run at most once per boot per process while its
 /// answer is stable. An allowed outcome and a refusal by a permanent errno
-/// (`EPERM`, `EINVAL`, `ENOSYS`: namespaces forbidden or unsupported by this
-/// kernel or policy) are cached; every other outcome (resource exhaustion,
+/// (`EPERM`, `EINVAL`, `ENOSYS`, `ENOSPC`, `EACCES`: namespaces forbidden,
+/// unsupported or capped by this kernel or policy) are cached; every other outcome (resource exhaustion,
 /// a busy fork window, any non-errno failure) is transient and is probed
 /// again by the next caller.
 ///
@@ -350,21 +351,32 @@ pub fn cached_pid_namespace_containment_probe() -> super::host_capability::Probe
         }
     }
     let outcome = probe_pid_namespace_containment();
-    let stable = match &outcome {
-        ProbeOutcome::Allowed => true,
-        ProbeOutcome::Refused { errno, .. } => {
-            matches!(*errno, libc::EPERM | libc::EINVAL | libc::ENOSYS)
-        }
-        ProbeOutcome::Unobservable { .. } => false,
-    };
     if let Some(boot) = boot
-        && stable
+        && probe_outcome_is_stable(&outcome)
     {
         *cache
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((boot, outcome.clone()));
     }
     outcome
+}
+
+/// Whether a probe outcome is a property of this kernel and boot (cacheable)
+/// rather than of the moment. Allowed is stable. A refusal is stable only
+/// when the kernel named a permanent policy or support errno for creating the
+/// namespaces. Resource exhaustion (`EAGAIN`, `ENOMEM`), a refusal carrying
+/// no errno (a pin or timing failure inside the probe, which a retry can
+/// clear) and an unobservable outcome are transient.
+fn probe_outcome_is_stable(outcome: &super::host_capability::ProbeOutcome) -> bool {
+    use super::host_capability::ProbeOutcome;
+    match outcome {
+        ProbeOutcome::Allowed => true,
+        ProbeOutcome::Refused { errno, .. } => matches!(
+            *errno,
+            libc::EPERM | libc::EINVAL | libc::ENOSYS | libc::ENOSPC | libc::EACCES
+        ),
+        ProbeOutcome::Unobservable { .. } => false,
+    }
 }
 
 /// Upper bound for the whole qualification probe, including its fork window.
@@ -796,6 +808,7 @@ mod tests {
             target_start_time_ticks: stat.start_time_ticks,
             group_leader_pid: stat.process_group as u32,
             group_leader_start_time_ticks: leader.start_time_ticks,
+            group_basis: crate::GroupBasis::ProcessGroup,
         }
     }
 
@@ -944,6 +957,32 @@ mod tests {
             .unwrap(),
             RecoveredInit::Gone
         ));
+    }
+
+    #[test]
+    fn only_kernel_stable_probe_outcomes_are_cached() {
+        use super::super::host_capability::ProbeOutcome;
+        let refused = |errno| ProbeOutcome::Refused {
+            errno,
+            reason: "x".to_owned(),
+        };
+        assert!(probe_outcome_is_stable(&ProbeOutcome::Allowed));
+        for permanent in [
+            libc::EPERM,
+            libc::EINVAL,
+            libc::ENOSYS,
+            libc::ENOSPC,
+            libc::EACCES,
+        ] {
+            assert!(probe_outcome_is_stable(&refused(permanent)), "{permanent}");
+        }
+        // Resource exhaustion and errno-less probe-internal failures retry.
+        for transient in [libc::EAGAIN, libc::ENOMEM, 0] {
+            assert!(!probe_outcome_is_stable(&refused(transient)), "{transient}");
+        }
+        assert!(!probe_outcome_is_stable(&ProbeOutcome::Unobservable {
+            reason: "busy".to_owned()
+        }));
     }
 
     #[test]

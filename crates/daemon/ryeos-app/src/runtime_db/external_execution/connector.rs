@@ -589,7 +589,7 @@ impl RuntimeDb {
             capability_generation,
             capability_hash,
             peer.identity(),
-            qualification_process::PeerBasis::Contained,
+            qualification_process::PeerBasis::Contained(peer.proven_against()),
         )
     }
 
@@ -599,7 +599,7 @@ impl RuntimeDb {
         capability_generation: &str,
         capability_hash: &str,
         peer: &lillux::ExactProcessIdentity,
-        basis: qualification_process::PeerBasis,
+        basis: qualification_process::PeerBasis<'_>,
     ) -> Result<bool> {
         self.conn.with_sql(|conn| {
             let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
@@ -640,7 +640,7 @@ impl RuntimeDb {
                         )?;
                     } else {
                         ensure!(
-                            basis == qualification_process::PeerBasis::Group,
+                            matches!(basis, qualification_process::PeerBasis::Group),
                             "a contained-peer admission belongs to a qualification Worker"
                         );
                     }
@@ -763,6 +763,7 @@ mod tests {
             target_start_time_ticks: ticks,
             group_leader_pid: pid,
             group_leader_start_time_ticks: ticks,
+            group_basis: lillux::GroupBasis::ProcessGroup,
         }
     }
 

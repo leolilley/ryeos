@@ -725,6 +725,10 @@ fn run_connector_owner(
 /// historical peer check is reachable only by peers admitted this way.
 pub(crate) struct ContainedQualificationPeer {
     identity: lillux::ExactProcessIdentity,
+    /// The exact containment record this membership was read against. The
+    /// durable admission compares it with the Worker row instead of
+    /// repeating the slow read under the state-store lock.
+    proven_against: lillux::ProcessScopeRecovery,
 }
 
 impl ContainedQualificationPeer {
@@ -734,7 +738,12 @@ impl ContainedQualificationPeer {
     ) -> Result<Self> {
         Ok(Self {
             identity: peer.contained_exact_process_identity(containment)?,
+            proven_against: containment.clone(),
         })
+    }
+
+    pub(crate) fn proven_against(&self) -> &lillux::ProcessScopeRecovery {
+        &self.proven_against
     }
 
     pub(crate) fn identity(&self) -> &lillux::ExactProcessIdentity {

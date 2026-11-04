@@ -61,6 +61,26 @@ pub use scope::{
 #[cfg(target_os = "linux")]
 use std::os::fd::AsRawFd;
 
+/// What the `group_leader_*` coordinates of an identity mean.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GroupBasis {
+    /// A real, pinned process-group leader. The default; absent from stored
+    /// identities, so every existing row and wire form is unchanged.
+    #[default]
+    ProcessGroup,
+    /// Membership in a retained containment is the authority and no group was
+    /// pinned: the coordinates repeat the process's own birth and name no
+    /// group. Nothing may signal, freeze or reopen a group from them.
+    Contained,
+}
+
+impl GroupBasis {
+    pub fn is_process_group(&self) -> bool {
+        matches!(self, Self::ProcessGroup)
+    }
+}
+
 /// Durable coordinates required to recover one exact process incarnation.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -70,6 +90,9 @@ pub struct ExactProcessIdentity {
     pub target_start_time_ticks: u64,
     pub group_leader_pid: u32,
     pub group_leader_start_time_ticks: u64,
+    /// See [`GroupBasis`].
+    #[serde(default, skip_serializing_if = "GroupBasis::is_process_group")]
+    pub group_basis: GroupBasis,
 }
 
 /// Descriptor-owned access to one exact live process's filesystem and mount
@@ -105,6 +128,7 @@ impl ExactProcessRoot {
         use std::os::fd::AsFd as _;
 
         identity.validate()?;
+        identity.require_process_group_basis()?;
         let pidfd = linux::open_pidfd(identity.target_pid)?;
         let observed = linux::capture_from_pidfd(
             identity.target_pid,
@@ -681,6 +705,18 @@ struct PinnedMember {
 }
 
 impl ExactProcessIdentity {
+    /// Group signalling, freezing and group-rooted access need a real pinned
+    /// leader. An identity captured by containment membership has none.
+    pub(crate) fn require_process_group_basis(&self) -> Result<(), String> {
+        if self.group_basis != GroupBasis::ProcessGroup {
+            return Err(
+                "identity was captured by containment membership and names no process group"
+                    .to_owned(),
+            );
+        }
+        Ok(())
+    }
+
     pub(crate) fn validate(&self) -> Result<(), String> {
         if self.boot_id.trim().is_empty()
             || self.target_pid <= 1
@@ -779,6 +815,10 @@ impl ExactProcessIdentity {
             target_start_time_ticks,
             group_leader_pid,
             group_leader_start_time_ticks,
+            // Reviewed: the persisted version-1 digest is unchanged for every
+            // existing identity, and a contained identity's coordinates are
+            // its own birth, so the basis does not enter the digest.
+            group_basis: _,
         } = self;
         let wire = Wire {
             boot_identity: boot_id,
@@ -1067,6 +1107,7 @@ mod linux {
         timeout: Duration,
     ) -> Result<QuiescedProcessGroup, String> {
         identity.validate()?;
+        identity.require_process_group_basis()?;
         let current_pid = std::process::id();
         let current_group = unsafe { libc::getpgrp() };
         if identity.target_pid == current_pid
@@ -1326,6 +1367,7 @@ mod linux {
             target_start_time_ticks: target.start_time_ticks,
             group_leader_pid,
             group_leader_start_time_ticks: group.start_time_ticks,
+            group_basis: crate::GroupBasis::ProcessGroup,
         })
     }
 
@@ -1351,6 +1393,7 @@ mod linux {
             target_start_time_ticks: target.start_time_ticks,
             group_leader_pid: target_pid,
             group_leader_start_time_ticks: target.start_time_ticks,
+            group_basis: super::GroupBasis::Contained,
         })
     }
 
@@ -1509,6 +1552,28 @@ mod contained_identity_tests {
         assert_eq!(identity.target_pid, pid);
         assert_eq!(identity.group_leader_pid, pid);
         identity.incarnation_digest().unwrap();
+        // The marker is type-level: it is stored only when contained (so
+        // every existing identity serializes unchanged) and no group
+        // operation accepts it.
+        assert_eq!(identity.group_basis, super::GroupBasis::Contained);
+        assert_eq!(
+            serde_json::to_value(&identity).unwrap()["group_basis"],
+            "contained"
+        );
+        let mut ordinary = identity.clone();
+        ordinary.group_basis = super::GroupBasis::ProcessGroup;
+        assert!(
+            serde_json::to_value(&ordinary)
+                .unwrap()
+                .get("group_basis")
+                .is_none()
+        );
+        let error = super::quiesce_exact_process_group(&identity, std::time::Duration::ZERO)
+            .err()
+            .expect("a contained identity names no group to freeze");
+        assert!(error.contains("names no process group"), "{error}");
+        let error = super::ExactProcessRoot::open(&identity).err().unwrap();
+        assert!(error.contains("names no process group"), "{error}");
     }
 }
 
@@ -1525,6 +1590,7 @@ mod tests {
                     target_start_time_ticks: ticks,
                     group_leader_pid: pid,
                     group_leader_start_time_ticks: ticks,
+                    group_basis: crate::GroupBasis::ProcessGroup,
                 };
                 let canonical = crate::canonical_json(&serde_json::json!({
                     "version": 1, "boot_identity": boot,
@@ -1546,6 +1612,7 @@ mod tests {
             target_start_time_ticks: 1,
             group_leader_pid: 2,
             group_leader_start_time_ticks: 1,
+            group_basis: crate::GroupBasis::ProcessGroup,
         };
         assert!(invalid.incarnation_digest_bytes().is_err());
     }
@@ -1559,6 +1626,7 @@ mod tests {
             target_start_time_ticks: 0,
             group_leader_pid: 0,
             group_leader_start_time_ticks: 0,
+            group_basis: crate::GroupBasis::ProcessGroup,
         };
         assert!(quiesce_exact_process_group(&identity, Duration::ZERO).is_err());
     }

@@ -354,24 +354,35 @@ pub(super) fn require_terminal_qualification_worker_process(
 /// group. Boot and group-leader birth identity prevent numeric PGID reuse
 /// from joining a different incarnation. This makes no containment claim.
 /// How a connector peer was proved to belong to its Worker.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PeerBasis {
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum PeerBasis<'a> {
     /// Member of the Worker's process group (the trusted lane).
     Group,
     /// Member of the Worker's retained containment, captured by the pinned
-    /// contained path.
-    Contained,
+    /// contained path against exactly this containment record.
+    Contained(&'a lillux::ProcessScopeRecovery),
 }
 
 fn require_basis_matches_holder(
-    basis: PeerBasis,
+    basis: PeerBasis<'_>,
     worker: &crate::process::ExecutionProcessIdentity,
 ) -> Result<()> {
-    ensure!(
-        (basis == PeerBasis::Contained) == worker.process_scope.is_some(),
-        "qualification connector peer was proved by a basis that does not match its Worker's holder"
-    );
-    Ok(())
+    match (basis, worker.process_scope.as_ref()) {
+        (PeerBasis::Group, None) => Ok(()),
+        // The slow membership read happened before this transaction, against
+        // the record the proof carries. Only that record's identity with the
+        // Worker row's is compared here.
+        (PeerBasis::Contained(proven), Some(held)) => {
+            ensure!(
+                proven == held,
+                "qualification connector peer was proved against a different containment than its Worker's"
+            );
+            Ok(())
+        }
+        _ => bail!(
+            "qualification connector peer was proved by a basis that does not match its Worker's holder"
+        ),
+    }
 }
 
 pub(super) fn require_attached_qualification_worker_process(
@@ -379,7 +390,7 @@ pub(super) fn require_attached_qualification_worker_process(
     reservation: &ExternalAllocationReservation,
     channel_binding_digest: &str,
     peer: &lillux::ExactProcessIdentity,
-    basis: PeerBasis,
+    basis: PeerBasis<'_>,
 ) -> Result<QualificationWorkerProcessRecord> {
     let record = read_process(conn, &reservation.placement_thread_id)?
         .context("qualification connector lost its attached local Worker")?;
@@ -394,16 +405,6 @@ pub(super) fn require_attached_qualification_worker_process(
     // retained peer of a contained Worker was proved against its containment.
     require_basis_matches_holder(basis, &record.process_identity)?;
     require_trusted_peer_group(&record.process_identity, peer)?;
-    if let Some(scope) = record.process_identity.process_scope.as_ref() {
-        // While the Worker is live, re-prove membership through the
-        // recovered scope for this exact incarnation.
-        ensure!(
-            scope
-                .contains_exact_process(peer, scope.control_timeout())
-                .map_err(anyhow::Error::msg)?,
-            "qualification connector peer is not inside its live Worker's retained containment"
-        );
-    }
     Ok(record)
 }
 
@@ -695,6 +696,7 @@ mod tests {
             target_start_time_ticks: 100,
             group_leader_pid: 40,
             group_leader_start_time_ticks: 100,
+            group_basis: lillux::GroupBasis::ProcessGroup,
         };
         let worker = crate::process::execution_process_identity_from_lillux(leader, None).unwrap();
         let peer = lillux::ExactProcessIdentity {
@@ -703,6 +705,7 @@ mod tests {
             target_start_time_ticks: 110,
             group_leader_pid: 40,
             group_leader_start_time_ticks: 100,
+            group_basis: lillux::GroupBasis::ProcessGroup,
         };
         require_trusted_peer_group(&worker, &peer).unwrap();
         let mut reused_group = peer.clone();
@@ -744,6 +747,7 @@ mod tests {
             target_start_time_ticks: 500,
             group_leader_pid: 77,
             group_leader_start_time_ticks: 500,
+            group_basis: lillux::GroupBasis::ProcessGroup,
         };
         require_trusted_peer_group(&worker, &detached).unwrap();
         // A process born before the Worker target cannot be a member.
@@ -769,6 +773,7 @@ mod tests {
                 target_start_time_ticks: 100,
                 group_leader_pid: 40,
                 group_leader_start_time_ticks: 100,
+                group_basis: lillux::GroupBasis::ProcessGroup,
             },
             None,
         )
@@ -788,9 +793,19 @@ mod tests {
         // peers only contained Workers. A group-proved peer can therefore
         // never be retained against a contained Worker, so the historical
         // containment branch is reachable only by contained admissions.
+        let held = contained.process_scope.clone().unwrap();
         require_basis_matches_holder(PeerBasis::Group, &trusted).unwrap();
-        require_basis_matches_holder(PeerBasis::Contained, &contained).unwrap();
+        require_basis_matches_holder(PeerBasis::Contained(&held), &contained).unwrap();
         assert!(require_basis_matches_holder(PeerBasis::Group, &contained).is_err());
-        assert!(require_basis_matches_holder(PeerBasis::Contained, &trusted).is_err());
+        assert!(require_basis_matches_holder(PeerBasis::Contained(&held), &trusted).is_err());
+        // A proof read against another containment is not this Worker's.
+        let mut other = held.clone();
+        other = serde_json::from_value({
+            let mut value = serde_json::to_value(&other).unwrap();
+            value["backend"]["init_pid"] = serde_json::json!(41);
+            value
+        })
+        .unwrap();
+        assert!(require_basis_matches_holder(PeerBasis::Contained(&other), &contained).is_err());
     }
 }
