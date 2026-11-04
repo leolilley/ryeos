@@ -111,7 +111,7 @@ pub fn accept_product_for_owner(
     let _permit = state
         .write_barrier
         .acquire_with_timeout(crate::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
-        .map_err(|error| anyhow::anyhow!("cannot acquire product receipt write permit: {error}"))?;
+        .map_err(|error| anyhow::anyhow!("cannot acquire product receipt write permit: {error:#}"))?;
     // Reuse the exact admission/submit publication owner with our existing
     // guard, not the StateStore wrapper that acquires a second guard.
     let published = state.state_store.with_state_db(|db| {

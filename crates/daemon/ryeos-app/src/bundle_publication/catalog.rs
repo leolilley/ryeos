@@ -84,7 +84,7 @@ pub fn stage_local_catalog_closure(
     let _permit = state
         .write_barrier
         .acquire_with_timeout(crate::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
-        .map_err(|error| anyhow::anyhow!("cannot acquire catalog staging permit: {error}"))?;
+        .map_err(|error| anyhow::anyhow!("cannot acquire catalog staging permit: {error:#}"))?;
     let authority = state.state_store.pinned_state_authority()?;
     let guard = authority.acquire_shared_guard()?;
     let cas = authority.cas_store()?;
@@ -562,7 +562,7 @@ pub fn publish_catalog(
     let _permit = state
         .write_barrier
         .acquire_with_timeout(crate::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
-        .map_err(|error| anyhow::anyhow!("cannot acquire catalog publication permit: {error}"))?;
+        .map_err(|error| anyhow::anyhow!("cannot acquire catalog publication permit: {error:#}"))?;
     let authority = state.state_store.pinned_state_authority()?;
     let guard = authority.acquire_shared_guard()?;
     let cas = authority.cas_store()?;
@@ -655,7 +655,7 @@ pub fn publish_catalog(
     );
     if let Err(error) = stage.finish_admitted(&guard, &request.candidate_attestation_hash) {
         tracing::warn!(
-            %error,
+            error = %format!("{error:#}"),
             staging_id = %stage.staging_id(),
             "catalog head published while its durable publication receipt remained retryable"
         );
@@ -749,7 +749,7 @@ fn checkpoint_catalog_head(
         // A failed local observation checkpoint must be repaired, but turning
         // this into a request failure would invite an ambiguous republish.
         tracing::warn!(
-            %error,
+            error = %format!("{error:#}"),
             %catalog_namespace,
             %target,
             "catalog published but local observation checkpoint did not advance"

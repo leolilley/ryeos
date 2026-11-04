@@ -308,7 +308,7 @@ fn stop_exact_attempt(
                             .scoped_child_attempt(&key.attempt_id)?
                             .context("scoped child disappeared after scope termination race")?;
                         if after.phase != ScopedChildPhase::Retired {
-                            observer_termination_error = Some(error.to_string());
+                            observer_termination_error = Some(format!("{error:#}"));
                         } else {
                             require_exact_retirement(&after)?;
                             return Ok(());

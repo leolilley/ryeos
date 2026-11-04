@@ -400,7 +400,7 @@ fn create(ctx: &SnapshotContext<'_>, message: Option<String>, allow_empty: bool)
     let _permit = state
         .write_barrier
         .acquire_with_timeout(crate::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
-        .map_err(|error| anyhow!("cannot acquire snapshot write permit: {error}"))?;
+        .map_err(|error| anyhow!("cannot acquire snapshot write permit: {error:#}"))?;
     let (initial_head, _) = heads(ctx)?;
     let current = initial_head
         .as_deref()

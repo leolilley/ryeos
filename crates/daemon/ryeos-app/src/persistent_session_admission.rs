@@ -72,7 +72,7 @@ pub fn retained_session_protocol(
         protocol_signer_fingerprint,
         &engine.node_trust_store,
     )
-    .map_err(|error| anyhow!("verify retained session protocol: {error}"))?;
+    .map_err(|error| anyhow!("verify retained session protocol: {error:#}"))?;
     ryeos_engine::protocols::validate_admitted_protocol_descriptor(protocol_ref, &descriptor)?;
     let session =
         validate_persistent_session_protocol(&descriptor).map_err(|error| anyhow!(error))?;
@@ -1074,7 +1074,7 @@ impl VerifiedTrustedPooledSessionInputs {
                 Ok(())
             }
             Err(error) => {
-                original.state = OriginalIsolationExpectationState::Refused(error.to_string());
+                original.state = OriginalIsolationExpectationState::Refused(format!("{error:#}"));
                 Err(error)
             }
         }

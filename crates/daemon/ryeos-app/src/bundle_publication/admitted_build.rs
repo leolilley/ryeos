@@ -80,7 +80,7 @@ pub fn load_installed_payload_ownership(
     let raw = String::from_utf8(bytes).context("payload ownership is not UTF-8")?;
     let (body, canonical_header) =
         lillux::signature::strip_canonical_signature_with_envelope(&raw, "#", None, false)
-            .map_err(|error| anyhow::anyhow!("noncanonical signature envelope: {error}"))?;
+            .map_err(|error| anyhow::anyhow!("noncanonical signature envelope: {error:#}"))?;
     anyhow::ensure!(
         canonical_header.is_some(),
         "payload ownership requires a trusted signature"

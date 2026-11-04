@@ -20,7 +20,7 @@ static EVENTS: OnceLock<Result<Vec<&'static str>, String>> = OnceLock::new();
 /// installed separately, so calling this first cannot foreclose it.
 pub fn install() -> anyhow::Result<()> {
     OBJECTS
-        .get_or_init(|| install_objects().map_err(|error| error.to_string()))
+        .get_or_init(|| install_objects().map_err(|error| format!("{error:#}")))
         .clone()
         .map_err(anyhow::Error::msg)
 }
@@ -39,7 +39,7 @@ pub fn install_with_event_contracts(
         .get_or_init(|| {
             ryeos_state::object_closure::install_event_payload_contracts(events)
                 .map(|()| requested.clone())
-                .map_err(|error| error.to_string())
+                .map_err(|error| format!("{error:#}"))
         })
         .clone()
         .map_err(anyhow::Error::msg)?;

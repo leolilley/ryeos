@@ -218,7 +218,7 @@ pub fn signal_thread(state: &AppState, thread_id: &str, mode: CascadeMode) -> Va
         Ok(Some(thread)) => thread,
         Ok(None) => return json!({ "thread_id": thread_id, "skipped": "no_thread_row" }),
         Err(e) => {
-            return json!({ "thread_id": thread_id, "skipped": "read_error", "error": e.to_string() });
+            return json!({ "thread_id": thread_id, "skipped": "read_error", "error": format!("{e:#}") });
         }
     };
     let stop_intent = match mode {
@@ -231,7 +231,7 @@ pub fn signal_thread(state: &AppState, thread_id: &str, mode: CascadeMode) -> Va
             return json!({
                 "thread_id": thread_id,
                 "skipped": "stop_tombstone_failed",
-                "error": error.to_string(),
+                "error": format!("{error:#}"),
             });
         }
     };
@@ -297,7 +297,7 @@ fn signal_descendant(state: &AppState, thread_id: &str, mode: CascadeMode) -> Va
         Ok(Some(thread)) => thread,
         Ok(None) => return json!({ "thread_id": thread_id, "skipped": "no_thread_row" }),
         Err(e) => {
-            return json!({ "thread_id": thread_id, "skipped": "read_error", "error": e.to_string() });
+            return json!({ "thread_id": thread_id, "skipped": "read_error", "error": format!("{e:#}") });
         }
     };
     let in_process_handler = thread

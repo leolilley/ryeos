@@ -70,7 +70,7 @@ pub fn parse_request<T: serde::de::DeserializeOwned>(
 
 impl From<serde_json::Error> for HandlerError {
     fn from(e: serde_json::Error) -> Self {
-        HandlerError::BadRequest(format!("{e}"))
+        HandlerError::BadRequest(format!("{e:#}"))
     }
 }
 

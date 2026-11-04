@@ -289,7 +289,7 @@ pub fn publish_activation_receipt(
     let _permit = state
         .write_barrier
         .acquire_with_timeout(crate::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
-        .map_err(|error| anyhow::anyhow!("cannot acquire activation write permit: {error}"))?;
+        .map_err(|error| anyhow::anyhow!("cannot acquire activation write permit: {error:#}"))?;
     let mut stage = authority
         .require_recovery()?
         .begin_staged_cas_roots_admitted(&guard, "managed-external-content-activation")?;
@@ -322,7 +322,7 @@ pub fn publish_activation_receipt(
         )
     })?;
     if let Err(error) = stage.finish_admitted(&guard) {
-        tracing::warn!(%error, activation_id = %operation.activation_id, "activation head published while temporary roots remained recoverable");
+        tracing::warn!(error = %format!("{error:#}"), activation_id = %operation.activation_id, "activation head published while temporary roots remained recoverable");
     }
     Ok(ManagedActivationPublication {
         activation_id: operation.activation_id.clone(),

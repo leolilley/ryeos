@@ -1108,7 +1108,7 @@ impl RuntimeLaunchMetadata {
             } else {
                 "launch source"
             };
-            anyhow::bail!("{role} admitted capsule invocation/resume validation: {error}");
+            anyhow::bail!("{role} admitted capsule invocation/resume validation: {error:#}");
         }
         let admitted_project_authority = self
             .admitted_project_authority
