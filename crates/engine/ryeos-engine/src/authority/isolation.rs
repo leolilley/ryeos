@@ -2932,7 +2932,7 @@ impl IsolationRuntime {
             if context.live_access.is_some()
                 || context.checkpoint_dir.is_some()
                 || context.checkpoint_authority.is_some()
-                || context.daemon_socket_path.is_some()
+                || (context.daemon_socket_path.is_some() && !context.captured_callback_socket)
                 || !context.bundle_roots.is_empty()
                 || context.node_trusted_keys_dir.is_some()
             {
@@ -4078,6 +4078,11 @@ impl IsolationRuntime {
                 context.filesystem_authority_ceiling
                     == IsolationFilesystemAuthorityCeiling::NodePolicy
                     || configured.as_str() == "{verified_code}"
+                    // A daemon-admitted captured-compatible callback keeps only
+                    // the pinned socket entry; resolution mounts that entry, never
+                    // its parent directory.
+                    || (context.captured_callback_socket
+                        && configured.as_str() == "{daemon_socket}")
                     || (context.project_authority == IsolationProjectAuthority::ReadOnly
                         && configured.as_str() == "{project}")
             });
@@ -8306,6 +8311,7 @@ mod tests {
                     checkpoint_dir: None,
                     checkpoint_authority: None,
                     daemon_socket_path: None,
+                    captured_callback_socket: false,
                     bundle_roots: &[],
                     node_trusted_keys_dir: None,
                     verified_code: std::slice::from_ref(command.identity()),
@@ -8393,6 +8399,7 @@ mod tests {
                     checkpoint_dir: None,
                     checkpoint_authority: None,
                     daemon_socket_path: None,
+                    captured_callback_socket: false,
                     bundle_roots: &[],
                     node_trusted_keys_dir: None,
                     verified_code: std::slice::from_ref(&captured),
@@ -8462,6 +8469,7 @@ mod tests {
                     checkpoint_dir: None,
                     checkpoint_authority: None,
                     daemon_socket_path: None,
+                    captured_callback_socket: false,
                     bundle_roots: &[],
                     node_trusted_keys_dir: None,
                     verified_code: &verified_code,
@@ -8592,6 +8600,7 @@ mod tests {
                     checkpoint_dir: None,
                     checkpoint_authority: None,
                     daemon_socket_path: None,
+                    captured_callback_socket: false,
                     bundle_roots: &[],
                     node_trusted_keys_dir: None,
                     verified_code: std::slice::from_ref(&verified),
@@ -9005,6 +9014,7 @@ mod tests {
                     checkpoint_dir: None,
                     checkpoint_authority: None,
                     daemon_socket_path: None,
+                    captured_callback_socket: false,
                     bundle_roots: &[],
                     node_trusted_keys_dir: None,
                     verified_code: &[],
@@ -9146,6 +9156,7 @@ mod tests {
                 checkpoint_dir: None,
                 checkpoint_authority: None,
                 daemon_socket_path: None,
+                captured_callback_socket: false,
                 bundle_roots: &[],
                 node_trusted_keys_dir: None,
                 verified_code: &[],
@@ -9399,6 +9410,7 @@ mod tests {
                     checkpoint_dir: None,
                     checkpoint_authority: None,
                     daemon_socket_path: None,
+                    captured_callback_socket: false,
                     bundle_roots: &[],
                     node_trusted_keys_dir: None,
                     verified_code: std::slice::from_ref(&captured),
@@ -9521,6 +9533,7 @@ mod tests {
                 checkpoint_dir: None,
                 checkpoint_authority: None,
                 daemon_socket_path: None,
+                captured_callback_socket: false,
                 bundle_roots: &[],
                 node_trusted_keys_dir: None,
                 verified_code: &[],
@@ -9586,6 +9599,7 @@ mod tests {
                     checkpoint_dir: None,
                     checkpoint_authority: None,
                     daemon_socket_path: None,
+                    captured_callback_socket: false,
                     bundle_roots: &[],
                     node_trusted_keys_dir: None,
                     verified_code: &[],
@@ -9679,6 +9693,7 @@ mod tests {
             checkpoint_dir: Some(&checkpoint_dir),
             checkpoint_authority: Some(&checkpoint_authority),
             daemon_socket_path: None,
+            captured_callback_socket: false,
             bundle_roots: &[],
             node_trusted_keys_dir: None,
             verified_code: &[],
@@ -9808,6 +9823,7 @@ mod tests {
             checkpoint_dir: None,
             checkpoint_authority: None,
             daemon_socket_path: None,
+            captured_callback_socket: false,
             bundle_roots: &[],
             node_trusted_keys_dir: None,
             verified_code: &[],
@@ -10068,6 +10084,7 @@ mod tests {
                     checkpoint_dir: None,
                     checkpoint_authority: None,
                     daemon_socket_path: None,
+                    captured_callback_socket: false,
                     bundle_roots: &[],
                     node_trusted_keys_dir: None,
                     verified_code: &[],
@@ -10149,6 +10166,7 @@ mod tests {
                     checkpoint_dir: None,
                     checkpoint_authority: None,
                     daemon_socket_path: None,
+                    captured_callback_socket: false,
                     bundle_roots: &[],
                     node_trusted_keys_dir: None,
                     verified_code: &[],
@@ -10206,6 +10224,7 @@ mod tests {
                 checkpoint_dir: None,
                 checkpoint_authority: None,
                 daemon_socket_path: None,
+                captured_callback_socket: false,
                 bundle_roots: &[],
                 node_trusted_keys_dir: Some(app_root.path()),
                 verified_code: &[],
@@ -10227,6 +10246,162 @@ mod tests {
                 .to_string()
                 .contains("captured execution context carries ambient filesystem authority")
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn captured_execution_carries_only_the_admitted_callback_socket() {
+        let app_root = tempfile::tempdir().unwrap();
+        let mut policy = IsolationPolicy::disabled_for_authoring();
+        policy.mode = IsolationMode::Enforce;
+        policy.backend = Some(resolved_backend().selection.clone());
+        policy.filesystem.readable = vec!["{verified_code}".to_string(), "{daemon_socket}".to_string()];
+        policy.filesystem.writable = vec!["{project}".to_string()];
+        write_policy(app_root.path(), &policy);
+
+        let mut backend = resolved_backend();
+        backend.effective_capabilities = BTreeSet::from([
+            IsolationCapability::FilesystemPrivateRoot,
+            IsolationCapability::FilesystemFdReadOnly,
+            IsolationCapability::FilesystemFdWritable,
+            IsolationCapability::FilesystemOrderedOverlays,
+            IsolationCapability::FilesystemFixedParentViews,
+            IsolationCapability::FilesystemPrivateTmp,
+            IsolationCapability::DevicesMinimal,
+            IsolationCapability::EnvironmentExact,
+            IsolationCapability::NetworkIsolated,
+            IsolationCapability::NetworkHost,
+            IsolationCapability::ProcessHostPidNamespace,
+            IsolationCapability::ProcessIsolatedPidNamespace,
+            IsolationCapability::ProcessTargetPidReporting,
+            IsolationCapability::LifecycleSharedProcessGroup,
+        ]);
+        backend.declaration.capabilities = backend.effective_capabilities.clone();
+        // A real Unix socket in its own directory, so a parent-directory mount
+        // would be distinguishable from the socket entry.
+        let socket_dir = tempfile::tempdir().unwrap();
+        let socket_path = socket_dir.path().join("daemon.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+        let runtime = IsolationRuntime::load_for_daemon(
+            app_root.path(),
+            &socket_path,
+            Some(Arc::new(backend)),
+        )
+        .unwrap();
+        let command = runtime
+            .capture_verified_command(Path::new("/bin/true"), None, None)
+            .unwrap();
+        let project = runtime
+            .runtime_workspaces
+            .as_ref()
+            .unwrap()
+            .open_or_create_child(std::ffi::OsStr::new("captured-callback"), 0o700)
+            .unwrap();
+        let request = || lillux::SubprocessRequest {
+            cmd: "/bin/true".to_string(),
+            argv0: None,
+            args: Vec::new(),
+            cwd: Some(project.path().to_string_lossy().into_owned()),
+            envs: Vec::new(),
+            stdin_data: None,
+            timeout: 1.0,
+            limits: None,
+            inherited_fds: Vec::new(),
+            inherited_fd_mappings: Vec::new(),
+            supervised_status: None,
+        };
+        let socket_ref: &Path = &socket_path;
+        let context = |with_socket: bool, admitted: bool, bundle_roots: &'static [PathBuf]| {
+            IsolationLaunchContext {
+                immutable_project: None,
+                workspace_view: None,
+                project_path: project.path(),
+                project_authority: IsolationProjectAuthority::EphemeralScratch,
+                filesystem_authority_ceiling:
+                    IsolationFilesystemAuthorityCeiling::CapturedExecution,
+                network_authority_ceiling: IsolationNetworkAuthorityCeiling::Isolated,
+                live_access: None,
+                state_root: None,
+                checkpoint_dir: None,
+                checkpoint_authority: None,
+                daemon_socket_path: with_socket.then_some(socket_ref),
+                captured_callback_socket: admitted,
+                bundle_roots,
+                node_trusted_keys_dir: None,
+                verified_code: &[],
+                verified_command: Some(&command),
+                external_read_only_mounts: &[],
+                writable_runtime_view_mounts: &[],
+                producer_prepared_mounts: &[],
+                target_channels: &[],
+                item_ref: "worker:tests/captured-callback",
+                thread_id: "T-captured-callback",
+                verbatim_env_names: &[],
+            }
+        };
+        let plan_of = |applied: AppliedIsolationLaunch| {
+            let (bytes, _) = applied
+                .request
+                .inherited_fds
+                .last()
+                .unwrap()
+                .read_regular_file_stable_bounded(
+                    ryeos_isolation_protocol::MAX_REQUEST_BYTES as u64,
+                )
+                .unwrap();
+            serde_json::from_slice::<AdapterLaunchRequest>(&bytes).unwrap()
+        };
+        let socket_text = socket_path.to_string_lossy().into_owned();
+        let parent_text = socket_dir.path().to_string_lossy().into_owned();
+
+        // Baseline: a captured launch without a socket.
+        let baseline = plan_of(
+            runtime
+                .apply_with_provenance(request(), context(false, false, &[]))
+                .unwrap(),
+        );
+        assert!(baseline.plan.mounts.iter().all(|m| m.destination.as_str() != socket_text));
+
+        // On the class: exactly one more mount, the socket entry, read-only,
+        // backed by a descriptor authority; the parent directory is not mounted.
+        let admitted = plan_of(
+            runtime
+                .apply_with_provenance(request(), context(true, true, &[]))
+                .unwrap(),
+        );
+        assert_eq!(admitted.plan.mounts.len(), baseline.plan.mounts.len() + 1);
+        let mounts = admitted
+            .plan
+            .mounts
+            .iter()
+            .filter(|m| m.destination.as_str() == socket_text)
+            .collect::<Vec<_>>();
+        assert_eq!(mounts.len(), 1);
+        assert!(admitted.plan.mounts.iter().all(|m| m.destination.as_str() != parent_text));
+        assert!(admitted.authorities.iter().any(|authority| {
+            authority.id == mounts[0].source
+                && authority.purpose == IsolationAuthorityPurpose::ReadOnlyMount
+        }));
+
+        // Off the class a captured launch carrying the socket is refused.
+        let error = runtime
+            .apply_with_provenance(request(), context(true, false, &[]))
+            .err()
+            .expect("captured launch off the class must refuse the socket");
+        assert!(error
+            .to_string()
+            .contains("captured execution context carries ambient filesystem authority"));
+
+        // On the class, other ambient authority is still refused.
+        static ROOTS: std::sync::OnceLock<Vec<PathBuf>> = std::sync::OnceLock::new();
+        let roots = ROOTS.get_or_init(|| vec![PathBuf::from("/ryeos-bundle-root")]);
+        let error = runtime
+            .apply_with_provenance(request(), context(true, true, roots))
+            .err()
+            .expect("bundle roots stay refused under captured execution");
+        assert!(error
+            .to_string()
+            .contains("captured execution context carries ambient filesystem authority"));
     }
 
     #[test]
@@ -10263,6 +10438,7 @@ mod tests {
                 checkpoint_dir: None,
                 checkpoint_authority: None,
                 daemon_socket_path: None,
+                captured_callback_socket: false,
                 bundle_roots: &[],
                 node_trusted_keys_dir: None,
                 verified_code: &[],
@@ -10371,6 +10547,7 @@ mod tests {
                     checkpoint_dir: None,
                     checkpoint_authority: None,
                     daemon_socket_path: None,
+                    captured_callback_socket: false,
                     bundle_roots: &[],
                     node_trusted_keys_dir: None,
                     verified_code: &[],
@@ -10574,6 +10751,7 @@ mod tests {
             checkpoint_dir: None,
             checkpoint_authority: None,
             daemon_socket_path: None,
+            captured_callback_socket: false,
             bundle_roots: &[],
             node_trusted_keys_dir: None,
             verified_code: &[],
@@ -10635,6 +10813,7 @@ mod tests {
             checkpoint_dir: None,
             checkpoint_authority: None,
             daemon_socket_path: None,
+            captured_callback_socket: false,
             bundle_roots: &[],
             node_trusted_keys_dir: None,
             verified_code: &[],
@@ -10687,6 +10866,7 @@ mod tests {
             checkpoint_dir: None,
             checkpoint_authority: None,
             daemon_socket_path: None,
+            captured_callback_socket: false,
             bundle_roots: &[],
             node_trusted_keys_dir: None,
             verified_code: &[],
@@ -10769,6 +10949,7 @@ mod tests {
                     checkpoint_dir: None,
                     checkpoint_authority: None,
                     daemon_socket_path: None,
+                    captured_callback_socket: false,
                     bundle_roots: &[],
                     node_trusted_keys_dir: None,
                     verified_code: &[],

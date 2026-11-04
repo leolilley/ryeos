@@ -2612,6 +2612,7 @@ pub(crate) async fn dispatch_method(
                     state_root: request.provenance.state_root_override(),
                     checkpoint_dir: None,
                     checkpoint_authority: None,
+                    captured_callback_socket: false,
                     daemon_socket_path: callback_ipc_requested
                         .then_some(envelope.callback.socket_path.as_path()),
                     bundle_roots: &bundle_roots,

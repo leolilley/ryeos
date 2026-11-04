@@ -344,6 +344,7 @@ mod tests {
             },
             callback_channel: CallbackChannel::Http,
             qualification_callback: None,
+            captured_compatible_callback: None,
             session: None,
             execution_evidence: None,
         }
@@ -378,6 +379,7 @@ mod tests {
             },
             callback_channel: CallbackChannel::None,
             qualification_callback: None,
+            captured_compatible_callback: None,
             session: None,
             execution_evidence: None,
         }

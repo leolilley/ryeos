@@ -415,6 +415,28 @@ fn validate_protocol_descriptor(
         });
     }
 
+    if let Some(class) = &desc.captured_compatible_callback {
+        let evidence_bounded = desc
+            .execution_evidence
+            .as_ref()
+            .is_some_and(|projector| projector.validate().is_ok() && projector.limits.max_calls == 1);
+        if desc.qualification_callback
+            != Some(crate::protocols::QualificationCallbackAuthority::RemoteConsumer)
+            || desc.callback_channel != CallbackChannel::Http
+            || desc.lifecycle.mode != crate::protocol_vocabulary::LifecycleMode::Managed
+            || desc.capabilities.allows_target_site
+            || desc.capabilities.allows_detached
+            || desc.session.is_some()
+            || !evidence_bounded
+            || !lillux::valid_hash(&class.surface_digest)
+        {
+            return Err(ProtocolError::MalformedYaml {
+                path: path.to_owned(),
+                detail: "captured-compatible callback requires the remote-consumer qualification callback with a closed surface digest, managed HTTP callbacks, a bounded single-call evidence projector, no session, and no remote or detached dispatch capability".to_owned(),
+            });
+        }
+    }
+
     Ok(())
 }
 
@@ -531,5 +553,75 @@ mod tests {
         desc.capabilities.allows_detached = false;
         desc.capabilities.allows_target_site = true;
         assert!(validate_protocol_descriptor(Path::new("/tmp/test.yaml"), &desc).is_err());
+    }
+
+    #[test]
+    fn captured_compatible_callback_requires_closed_bounded_qualification_contract() {
+        let mut desc = descriptor(
+            "http",
+            "  - { name: RYEOSD_SOCKET_PATH, source: callback_socket_path }\n  - { name: RYEOSD_CALLBACK_TOKEN, source: callback_token }\n",
+        );
+        desc.lifecycle.mode = crate::protocol_vocabulary::LifecycleMode::Managed;
+        desc.capabilities.allows_detached = false;
+        desc.execution_evidence = Some(
+            serde_yaml::from_str(
+                "handler: handler:ryeos/core/scoped-qualification-execution-evidence\nconfig: {}\nlimits:\n  max_request_bytes: 2097152\n  max_response_bytes: 2097152\n  max_events: 128\n  max_event_bytes: 65536\n  max_calls: 1\n  max_call_bytes: 65536\n",
+            )
+            .unwrap(),
+        );
+        let class = crate::protocols::CapturedCompatibleCallback {
+            surface_digest: "a".repeat(64),
+        };
+        let check = |desc: &ProtocolDescriptor| {
+            validate_protocol_descriptor(Path::new("/tmp/test.yaml"), desc)
+        };
+
+        // The class without a qualification callback authority is refused.
+        desc.captured_compatible_callback = Some(class.clone());
+        assert!(check(&desc).is_err());
+
+        desc.qualification_callback =
+            Some(crate::protocols::QualificationCallbackAuthority::RemoteConsumer);
+        check(&desc).unwrap();
+
+        // A surface identity that is not a SHA-256 digest does not name a closed surface.
+        let mut bad = desc.clone();
+        bad.captured_compatible_callback = Some(crate::protocols::CapturedCompatibleCallback {
+            surface_digest: "remote_consumer".into(),
+        });
+        assert!(check(&bad).is_err());
+
+        // Remote or detached dispatch, sessions and unbounded evidence are refused.
+        let mut bad = desc.clone();
+        bad.capabilities.allows_detached = true;
+        assert!(check(&bad).is_err());
+        let mut bad = desc.clone();
+        bad.capabilities.allows_target_site = true;
+        assert!(check(&bad).is_err());
+        let mut bad = desc.clone();
+        bad.execution_evidence = None;
+        assert!(check(&bad).is_err());
+        let mut bad = desc.clone();
+        bad.execution_evidence.as_mut().unwrap().limits.max_calls = 2;
+        assert!(check(&bad).is_err());
+
+        // The scoped-producer authority drives a daemon-owned process and never joins the class.
+        let mut bad = desc.clone();
+        bad.qualification_callback =
+            Some(crate::protocols::QualificationCallbackAuthority::ScopedProducer);
+        assert!(check(&bad).is_err());
+
+        // Ordinary tool callbacks cannot declare the class.
+        let mut bad = desc.clone();
+        bad.qualification_callback = None;
+        assert!(check(&bad).is_err());
+
+        // Unknown fields inside the class are rejected at parse time.
+        assert!(
+            serde_yaml::from_str::<crate::protocols::CapturedCompatibleCallback>(
+                "surface_digest: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nmethods: []\n"
+            )
+            .is_err()
+        );
     }
 }

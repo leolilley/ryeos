@@ -2015,6 +2015,7 @@ composed_value_contract:
             },
             callback_channel: CallbackChannel::None,
             qualification_callback: None,
+            captured_compatible_callback: None,
             session: None,
             execution_evidence: None,
         }
@@ -2101,6 +2102,7 @@ composed_value_contract:
             },
             callback_channel: CallbackChannel::None,
             qualification_callback: None,
+            captured_compatible_callback: None,
             session: None,
             execution_evidence: None,
         };

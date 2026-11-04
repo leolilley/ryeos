@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-30T21:46:42Z:fdd4aa1ea211f7115cab5ee13e94fe95c8741785a5cf145c2969317ec93308b4:gXAknsVqPSG8uG5013sfYDOJXVexY+MKj77E0IEzg2MfGeUfzX5+g+odn8Sd+oR+JSEQjd0PjlOAsGhK8UpXCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-03T23:31:28Z:2efaed3f12b8a9186edab485e67d91f0de3dc21bb84839acfddc37aba58f5f6f:j8m6BYFjhz601dN8eIl+/d0yRnQovixPAjCQqN6CkTue1QI+/9Az283/NVmynUmB7WHRFY38EsdkUZp7ug6jCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: protocol
 name: qualification_consumer_callback
 category: ryeos/core
@@ -27,6 +27,10 @@ lifecycle:
   mode: managed
 callback_channel: http
 qualification_callback: remote_consumer
+# Admits this protocol to captured execution. The digest is the identity of the closed four-method
+# consumer-verification surface the daemon issues for `remote_consumer`; admission refuses any mismatch.
+captured_compatible_callback:
+  surface_digest: 24a9c5e3fa4bede622a36401964cdc6a09b6852e3d45341e1102a2ec9598ee80
 execution_evidence:
   handler: handler:ryeos/core/scoped-qualification-execution-evidence
   config: { subordinate: remote_consumer }

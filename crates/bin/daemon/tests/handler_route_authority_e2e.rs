@@ -271,6 +271,7 @@ fn route_handler_fixed_scope_executes_handler_end_to_end() {
         isolation_checkpoint_dir: None,
         isolation_checkpoint_authority: None,
         isolation_daemon_socket_path: None,
+        isolation_captured_callback_socket: false,
         isolation_bundle_roots: Vec::new(),
         isolation_node_trusted_keys_dir: None,
         isolation_verified_code: vec![ryeos_engine::isolation::IsolationVerifiedCode {

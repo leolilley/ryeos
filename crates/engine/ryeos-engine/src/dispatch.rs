@@ -1220,6 +1220,7 @@ fn isolation_plan_request(
             checkpoint_dir: ctx.isolation_checkpoint_dir.as_deref(),
             checkpoint_authority: ctx.isolation_checkpoint_authority.as_deref(),
             daemon_socket_path: ctx.isolation_daemon_socket_path.as_deref(),
+            captured_callback_socket: ctx.isolation_captured_callback_socket,
             bundle_roots: if node_filesystem {
                 &ctx.isolation_bundle_roots
             } else {
@@ -1291,6 +1292,7 @@ fn isolation_plan_request_awaiting_attachment(
             checkpoint_dir: ctx.isolation_checkpoint_dir.as_deref(),
             checkpoint_authority: ctx.isolation_checkpoint_authority.as_deref(),
             daemon_socket_path: ctx.isolation_daemon_socket_path.as_deref(),
+            captured_callback_socket: ctx.isolation_captured_callback_socket,
             bundle_roots: if node_filesystem {
                 &ctx.isolation_bundle_roots
             } else {
@@ -1558,6 +1560,7 @@ mod tests {
             isolation_checkpoint_dir: None,
             isolation_checkpoint_authority: None,
             isolation_daemon_socket_path: None,
+            isolation_captured_callback_socket: false,
             isolation_bundle_roots: Vec::new(),
             isolation_node_trusted_keys_dir: None,
             isolation_verified_code: Vec::new(),

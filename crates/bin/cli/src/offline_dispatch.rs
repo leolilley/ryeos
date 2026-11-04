@@ -759,6 +759,7 @@ fn exec_tool(
                 checkpoint_dir: None,
                 checkpoint_authority: None,
                 daemon_socket_path: None,
+                captured_callback_socket: false,
                 bundle_roots: std::slice::from_ref(bundle_root),
                 node_trusted_keys_dir: Some(
                     &app_root
