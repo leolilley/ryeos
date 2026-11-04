@@ -985,20 +985,42 @@ fn write_iso8601_from_unix_secs(secs: u64, output: &mut dyn std::fmt::Write) -> 
     )
 }
 
+/// Milliseconds a test process shifts its own wall-clock reading by, to
+/// rehearse a clock that disagrees with another machine's. The reading is
+/// compiled into every build and is zero until test code installs a value:
+/// only the installer is gated behind `test-support`, and Lillux never
+/// consults the environment to decide it.
+static WALL_CLOCK_TEST_OFFSET_MS: std::sync::atomic::AtomicI64 =
+    std::sync::atomic::AtomicI64::new(0);
+
+/// Shift every [`timestamp_millis`] and [`unix_secs_now`] reading of this
+/// process by `offset_ms` (negative: the clock runs behind). Process-global:
+/// a test that installs one must not run beside tests that read the clock.
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_wall_clock_test_offset_ms(offset_ms: i64) {
+    WALL_CLOCK_TEST_OFFSET_MS.store(offset_ms, std::sync::atomic::Ordering::SeqCst);
+}
+
+fn wall_clock_test_offset_ms() -> i64 {
+    WALL_CLOCK_TEST_OFFSET_MS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Current wall-clock time as milliseconds since Unix epoch.
 pub fn timestamp_millis() -> i64 {
-    SystemTime::now()
+    (SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_millis() as i64
+        .as_millis() as i64)
+        .saturating_add(wall_clock_test_offset_ms())
 }
 
 /// Current wall-clock time as whole seconds since the Unix epoch.
 pub fn unix_secs_now() -> u64 {
-    SystemTime::now()
+    let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs()
+        .as_secs();
+    secs.saturating_add_signed(wall_clock_test_offset_ms() / 1_000)
 }
 
 /// The strict inverse of [`iso8601_from_unix_secs`]: accepts exactly the
