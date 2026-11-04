@@ -182,7 +182,7 @@ impl WorkloadClientChannel {
             })
         })();
         outcome.unwrap_or_else(|error| {
-            failure_response(&external_id, "broker-refused", &error.to_string())
+            failure_response(&external_id, "broker-refused", &format!("{error:#}"))
         })
     }
 }
