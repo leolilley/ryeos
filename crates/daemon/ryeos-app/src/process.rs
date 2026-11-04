@@ -105,16 +105,6 @@ pub struct ExecutionProcessIdentity {
 }
 
 impl ExecutionProcessIdentity {
-    /// Whether no cgroup scope retains this execution: it is either held by
-    /// the trusted process-group lane (no scope at all) or by its own retained
-    /// PID-namespace init. A cgroup scope is a different owner with different
-    /// quiescence and resource authority.
-    pub fn has_no_cgroup_scope(&self) -> bool {
-        self.process_scope
-            .as_ref()
-            .is_none_or(lillux::ProcessScopeRecovery::is_pid_namespace_init)
-    }
-
     pub fn pgid(&self) -> i64 {
         self.group_leader_pid
     }
@@ -1582,7 +1572,6 @@ mod tests {
     fn pid_namespace_contained_identity_settles_through_its_containment() {
         let identity = exited_pid_namespace_identity();
         validate_execution_process_identity_shape(&identity).unwrap();
-        assert!(identity.has_no_cgroup_scope());
         // Stored shape: the new backend is only a variant of the existing
         // nullable `process_scope` field and round-trips canonically.
         let json = lillux::canonical_json(&serde_json::to_value(&identity).unwrap()).unwrap();
@@ -1617,10 +1606,6 @@ mod tests {
             .err()
             .expect("a lost freeze cannot be recovered on a containment that never froze");
         assert!(error.to_string().contains("cannot quiesce"), "{error:#}");
-        // A cgroup-owned identity is a different owner.
-        let mut other = identity.clone();
-        other.process_scope = None;
-        assert!(other.has_no_cgroup_scope());
     }
 
     fn resource_binding_bare_identity() -> ExecutionProcessIdentity {

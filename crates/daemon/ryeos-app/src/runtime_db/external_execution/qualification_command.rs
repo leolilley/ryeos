@@ -657,8 +657,7 @@ impl RuntimeDb {
                 serde_json::from_str(&process.5).context("decode Q command process identity")?;
             crate::process::validate_execution_process_identity_shape(&process_identity)?;
             ensure!(
-                lillux::canonical_json(&serde_json::to_value(&process_identity)?)? == process.5
-                    && process_identity.has_no_cgroup_scope(),
+                lillux::canonical_json(&serde_json::to_value(&process_identity)?)? == process.5,
                 "Q command process identity is not its exact attachment"
             );
             let connector_state: (String, String) = tx.query_row(

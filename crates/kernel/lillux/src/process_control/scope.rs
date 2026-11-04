@@ -1785,6 +1785,31 @@ impl ProcessScopeRecovery {
         }
     }
 
+    /// Whether `process` is a member of this retained containment: inside the
+    /// recorded PID namespace, or inside the recorded cgroup scope, wherever
+    /// its process group or session now is. The caller must hold the
+    /// process's pidfd (as an authenticated peer does) across this call so the
+    /// numeric membership observation cannot name a recycled PID. A different
+    /// boot, an exited containment or any control failure is "not a member".
+    pub fn contains_process(
+        &self,
+        process: &super::ExactProcessIdentity,
+        timeout: Duration,
+    ) -> Result<bool, String> {
+        self.validate()?;
+        process.validate()?;
+        let recorded_boot = match &self.backend {
+            BackendRecovery::LinuxCgroupV2 { boot_id, .. }
+            | BackendRecovery::PidNamespaceInit { boot_id, .. } => boot_id,
+        };
+        if *recorded_boot != process.boot_id {
+            return Ok(false);
+        }
+        let timeout = timeout.min(self.control_timeout);
+        self.recover(timeout)?
+            .contains_member(process.target_pid, timeout)
+    }
+
     /// Whether this record names containment by a retained PID-namespace
     /// init rather than a cgroup scope.
     pub fn is_pid_namespace_init(&self) -> bool {
@@ -2108,6 +2133,27 @@ impl ProcessScope {
             #[cfg(target_os = "linux")]
             ScopeBackend::PidNamespaceInit(slot) => slot.get().map(|binding| &binding.recovery),
             _ => Some(&self.recovery),
+        }
+    }
+
+    /// Numeric membership of one pid in this scope; see
+    /// [`ProcessScopeRecovery::contains_process`] for the pinning contract.
+    fn contains_member(&self, pid: u32, timeout: Duration) -> Result<bool, String> {
+        match &self.backend {
+            #[cfg(target_os = "linux")]
+            ScopeBackend::LinuxCgroupV2(scope) => Ok(scope.require_member(pid, timeout).is_ok()),
+            #[cfg(target_os = "linux")]
+            ScopeBackend::PidNamespaceInit(slot) => {
+                match slot.get().and_then(|b| b.init.as_ref()) {
+                    Some(init) => init.contains_pid(pid),
+                    None => Ok(false),
+                }
+            }
+            #[cfg(not(target_os = "linux"))]
+            _ => {
+                let _ = (pid, timeout);
+                Err("process scope membership is unavailable on this OS".to_owned())
+            }
         }
     }
 
@@ -3413,6 +3459,63 @@ mod pid_namespace_containment {
         )
         .unwrap();
         assert!(recovery.is_empty(Duration::from_secs(1)).unwrap());
+    }
+
+    #[test]
+    #[ignore = "native Linux namespace qualification; uses host util-linux only as a test fixture"]
+    fn membership_is_the_namespace_not_the_process_group() {
+        let fixture = test_fixture::spawn();
+        let binding = bind_pid_namespace_init(fixture.init_pid, Duration::from_secs(5)).unwrap();
+        let recovery = binding.recovery.clone();
+        let identity_of = |pid: u32| {
+            let stat = crate::process_control::linux::read_process_stat(pid).unwrap();
+            let leader =
+                crate::process_control::linux::read_process_stat(stat.process_group as u32)
+                    .unwrap();
+            crate::ExactProcessIdentity {
+                boot_id: crate::process_control::linux::read_boot_id().unwrap(),
+                target_pid: pid,
+                target_start_time_ticks: stat.start_time_ticks,
+                group_leader_pid: stat.process_group as u32,
+                group_leader_start_time_ticks: leader.start_time_ticks,
+            }
+        };
+        let init_group = crate::process_control::linux::read_process_stat(fixture.init_pid)
+            .unwrap()
+            .process_group;
+        let detached_group = crate::process_control::linux::read_process_stat(fixture.detached)
+            .unwrap()
+            .process_group;
+        assert_ne!(init_group, detached_group, "the descendant left the group");
+        let timeout = Duration::from_secs(2);
+        // Members, including the setsid'd descendant and the nested-namespace one.
+        for pid in [fixture.init_pid, fixture.detached, fixture.nested] {
+            assert!(
+                recovery
+                    .contains_process(&identity_of(pid), timeout)
+                    .unwrap(),
+                "{pid}"
+            );
+        }
+        // This process and the launcher are not in the namespace.
+        for pid in [std::process::id(), fixture.wrapper.id()] {
+            assert!(
+                !recovery
+                    .contains_process(&identity_of(pid), timeout)
+                    .unwrap(),
+                "{pid}"
+            );
+        }
+        // Another boot is never membership.
+        let mut other_boot = identity_of(fixture.detached);
+        other_boot.boot_id = "00000000-0000-0000-0000-000000000000".to_owned();
+        assert!(!recovery.contains_process(&other_boot, timeout).unwrap());
+        recovery.terminate_and_wait(timeout).unwrap();
+        assert!(
+            !recovery
+                .contains_process(&identity_of(std::process::id()), timeout)
+                .unwrap()
+        );
     }
 
     #[test]

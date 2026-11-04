@@ -65,6 +65,70 @@ enum LaunchOutcome {
     },
 }
 
+/// The retained containment chosen for one enforced Worker launch.
+struct WorkerContainment {
+    scope: lillux::ProcessScope,
+    allocation: Option<lillux::ProcessScopeAllocation>,
+    /// Present only for a cgroup scope, which needs explicit retirement.
+    cgroup_recovery: Option<lillux::ProcessScopeRecovery>,
+}
+
+/// Select and prepare the node's qualified mechanism. A cgroup scope is
+/// planned and allocated through the runtime's admitted provider; the
+/// PID-namespace init is bound by the held launch itself. The Worker row
+/// persists the bound recovery at attachment either way.
+fn allocate_worker_containment(
+    state: &ryeos_app::state::AppState,
+    placement: &str,
+) -> Result<WorkerContainment> {
+    use ryeos_engine::isolation::DescendantContainmentGuarantee;
+    let guarantee = state
+        .isolation
+        .inspection()
+        .process_scope_readiness
+        .descendant_containment
+        .enforced_guarantee()
+        .context("enforced Q Worker has no qualified descendant containment")?;
+    match guarantee {
+        DescendantContainmentGuarantee::PidNamespaceInit => Ok(WorkerContainment {
+            scope: lillux::ProcessScope::pid_namespace_init(),
+            allocation: None,
+            cgroup_recovery: None,
+        }),
+        DescendantContainmentGuarantee::CgroupScope => {
+            let name = format!(
+                "qworker-{}",
+                &lillux::sha256_hex(placement.as_bytes())[..32]
+            );
+            let allocation = state.isolation.plan_process_scope(&name)?;
+            let scope = state.isolation.allocate_process_scope(&allocation)?;
+            let recovery = scope.recovery().clone();
+            Ok(WorkerContainment {
+                scope,
+                allocation: Some(allocation),
+                cgroup_recovery: Some(recovery),
+            })
+        }
+        DescendantContainmentGuarantee::TrustedProcessGroup => {
+            anyhow::bail!("the trusted process-group lane is not a Q enforced containment")
+        }
+    }
+}
+
+/// Prove a cgroup scope empty and remove it after a failed held spawn.
+fn settle_unlaunched_scope(
+    state: &ryeos_app::state::AppState,
+    recovery: &lillux::ProcessScopeRecovery,
+) -> Result<()> {
+    let timeout = state.isolation.process_scope_control_timeout()?;
+    recovery
+        .terminate_and_wait(timeout)
+        .map_err(anyhow::Error::msg)?;
+    recovery
+        .retire_after_settlement()
+        .map_err(anyhow::Error::msg)
+}
+
 fn fence_start_failure(
     owner: &QualificationLocalOwner<'_>,
     error: anyhow::Error,
@@ -678,6 +742,20 @@ pub(crate) fn start_external_qualification_local_worker_for_signed_request(
                     // Retain the original private directory through the held
                     // process lifetime; use the existing trusted launch path.
                     lifelines.push(Box::new(workspace_directory));
+                    // Enforced isolation retains the Worker's descendants by
+                    // whichever mechanism the node qualified: its cgroup
+                    // scope or the Worker's own PID-namespace init. The same
+                    // guarantee the connector gate admitted against.
+                    let containment = enforced
+                        .then(|| allocate_worker_containment(state, &placement))
+                        .transpose()?;
+                    let scope_cleanup = containment
+                        .as_ref()
+                        .and_then(|containment| containment.cgroup_recovery.clone());
+                    let (allocation, scope) = match containment {
+                        Some(containment) => (containment.allocation, Some(containment.scope)),
+                        None => (None, None),
+                    };
                     let spawned = plan.spawn_persistent_session_held(
                         state,
                         &spawn_workspace,
@@ -695,16 +773,22 @@ pub(crate) fn start_external_qualification_local_worker_for_signed_request(
                         &workspace_ready.launch_owner,
                         "qualification_local_worker",
                         &placement,
-                        None,
-                        // Descendant containment is the Worker's own
-                        // retained PID-namespace init; there is no cgroup
-                        // allocation to journal ahead of the held spawn.
-                        enforced.then(lillux::ProcessScope::pid_namespace_init),
+                        allocation.as_ref(),
+                        scope,
                         None,
                     );
                     let held = match spawned {
                         Ok(held) => held,
                         Err(error) => {
+                            let error = match scope_cleanup.as_ref() {
+                                Some(recovery) => match settle_unlaunched_scope(state, recovery) {
+                                    Ok(()) => error,
+                                    Err(cleanup) => error.context(format!(
+                                        "Q cgroup scope cleanup remains unproved: {cleanup:#}"
+                                    )),
+                                },
+                                None => error,
+                            };
                             return Ok(LaunchOutcome::Failed {
                                 error: fence_start_failure(
                                     owner,

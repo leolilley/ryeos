@@ -97,9 +97,11 @@ fn contained_worker_launch_admission(
         "enforced qualification Worker requires a signed captured-execution scratch workspace, not {:?}",
         protocol.workspace_authority
     );
+    // The protocol declares the need (descendant containment); the node's
+    // reported guarantee answers it by whichever mechanism it qualified.
     ensure!(
-        containment.pid_namespace.qualified,
-        "enforced qualification Worker runs under its retained PID-namespace init, which this node has not qualified: {}",
+        containment.enforced_guarantee().is_some(),
+        "enforced qualification Worker needs descendant containment, but this node reports no qualified mechanism (cgroup scope unavailable; PID-namespace init: {})",
         containment.pid_namespace.detail
     );
     Ok(())
@@ -352,5 +354,30 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("user namespaces refused"), "{error}");
+    }
+
+    #[test]
+    fn either_qualified_mechanism_answers_the_same_declared_need() {
+        let contained = protocol(Cleanup::DescendantContainment, Workspace::EphemeralScratch);
+        let readiness = |cgroup_scope, namespace| DescendantContainmentReadiness {
+            cgroup_scope,
+            pid_namespace: if namespace {
+                PidNamespaceContainmentQualification {
+                    qualified: true,
+                    detail: "probed".into(),
+                }
+            } else {
+                PidNamespaceContainmentQualification::not_probed("user namespaces refused")
+            },
+            trusted_process_group: false,
+        };
+        // Admission and launch agree: whatever the connector gate admits.
+        contained_worker_launch_admission(&contained, &readiness(true, false)).unwrap();
+        contained_worker_launch_admission(&contained, &readiness(false, true)).unwrap();
+        contained_worker_launch_admission(&contained, &readiness(true, true)).unwrap();
+        let error = contained_worker_launch_admission(&contained, &readiness(false, false))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("no qualified mechanism"), "{error}");
     }
 }

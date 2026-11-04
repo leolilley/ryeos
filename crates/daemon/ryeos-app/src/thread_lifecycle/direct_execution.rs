@@ -1869,18 +1869,11 @@ impl PreparedItemPlan {
                 ryeos_engine::isolation::IsolationProjectAuthority::RuntimeWorkspace
             }
         };
-        // A state root is session-private authority. It belongs to a runtime
-        // workspace, or to a dedicated execution whose descendants are held by
-        // its own retained PID-namespace init (captured-execution scratch).
-        if state_root.is_some()
-            && !matches!(
-                workspace_authority,
-                PersistentSessionWorkspaceAuthority::RuntimeWorkspace
-            )
-            && !process_scope
-                .as_ref()
-                .is_some_and(lillux::ProcessScope::is_pid_namespace_init)
-        {
+        if !persistent_session_state_root_admitted(
+            state_root.is_some(),
+            workspace_authority,
+            process_scope.is_some(),
+        ) {
             bail!("persistent-session state root requires runtime-workspace authority");
         }
         let filesystem_authority_ceiling = self.plan.filesystem_authority_ceiling;
@@ -2201,6 +2194,53 @@ impl PreparedItemPlan {
             resource_reservation,
             spawned,
         })
+    }
+}
+
+/// A state root is session-private authority: one daemon-owned child beneath
+/// the node state directory, pinned by descriptor and mounted alone (the
+/// isolation compiler refuses the node state directory itself, anything
+/// outside it and any sibling, drops every broader overlapping writable policy
+/// mount, and under captured execution refuses all ambient authority beside
+/// it). It belongs to a runtime workspace, or to a dedicated execution whose
+/// descendants are held by its own retained containment (captured-execution
+/// scratch). A pooled or uncontained scratch session has none.
+fn persistent_session_state_root_admitted(
+    has_state_root: bool,
+    workspace_authority: ryeos_engine::protocols::descriptor::PersistentSessionWorkspaceAuthority,
+    retained_containment: bool,
+) -> bool {
+    use ryeos_engine::protocols::descriptor::PersistentSessionWorkspaceAuthority::{
+        EphemeralScratch, RuntimeWorkspace,
+    };
+    !has_state_root
+        || matches!(workspace_authority, RuntimeWorkspace)
+        || (matches!(workspace_authority, EphemeralScratch) && retained_containment)
+}
+
+#[cfg(test)]
+mod state_root_authority_tests {
+    use super::persistent_session_state_root_admitted as admitted;
+    use ryeos_engine::protocols::descriptor::PersistentSessionWorkspaceAuthority::{
+        EphemeralScratch, RuntimeWorkspace,
+    };
+
+    #[test]
+    fn state_root_follows_a_runtime_workspace_or_a_retained_containment() {
+        // (has root, authority, contained) -> admitted
+        for (root, authority, contained, expected) in [
+            (false, EphemeralScratch, false, true),
+            (true, RuntimeWorkspace, false, true),
+            (true, RuntimeWorkspace, true, true),
+            (true, EphemeralScratch, true, true),
+            (true, EphemeralScratch, false, false),
+        ] {
+            assert_eq!(
+                admitted(root, authority, contained),
+                expected,
+                "root={root} {authority:?} contained={contained}"
+            );
+        }
     }
 }
 

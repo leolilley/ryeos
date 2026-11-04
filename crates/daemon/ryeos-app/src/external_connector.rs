@@ -784,16 +784,33 @@ fn run_authenticated_connector(
                         == state.state_store.external_execution_channel(placement)?.digest()?,
                 "qualification connector changed its attached Worker or channel"
             );
-            ensure!(
-                worker.process_identity.has_no_cgroup_scope(),
-                "qualification connector requires its trusted process-group owner or retained PID-namespace containment"
-            );
-            let group = u32::try_from(worker.process_identity.group_leader_pid)
-                .context("qualification connector Worker group is outside range")?;
-            // Lillux observes both the socket peer and group leader through
-            // pinned process descriptors. The connection transaction below
-            // rejoins their boot/group birth tuple to this retained Worker.
-            peer.exact_process_identity(Some(group))?
+            match worker.process_identity.process_scope.as_ref() {
+                // Trusted lane: the connector is held only by the Worker's
+                // process group. Lillux observes both the socket peer and
+                // group leader through pinned process descriptors; the
+                // connection transaction rejoins their boot/group birth
+                // tuple to this retained Worker.
+                None => {
+                    let group = u32::try_from(worker.process_identity.group_leader_pid)
+                        .context("qualification connector Worker group is outside range")?;
+                    peer.exact_process_identity(Some(group))?
+                }
+                // Retained containment: the connector may run in its own
+                // process group or session. Key on the containment itself.
+                // The peer's pidfd (held by `peer`) pins the incarnation
+                // while its membership in the retained PID namespace or
+                // cgroup scope is read.
+                Some(scope) => {
+                    let identity = peer.exact_process_identity(None)?;
+                    ensure!(
+                        scope
+                            .contains_process(&identity, scope.control_timeout())
+                            .map_err(anyhow::Error::msg)?,
+                        "qualification connector peer is not inside its Worker's retained containment"
+                    );
+                    identity
+                }
+            }
         } else {
             peer.exact_process_identity(None)?
         };

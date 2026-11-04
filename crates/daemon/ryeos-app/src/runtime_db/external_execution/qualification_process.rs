@@ -68,13 +68,9 @@ impl QualificationWorkerProcessRecord {
         }
         crate::process::validate_execution_process_identity_shape(&self.process_identity)?;
         self.provider_configuration.validate()?;
-        // Either the signed trusted process-group owner (no scope) or the
-        // enforced path's retained PID-namespace init. A cgroup scope was
-        // never allocated for a Q Worker, so it names no owner here.
-        ensure!(
-            self.process_identity.has_no_cgroup_scope(),
-            "qualification Worker requires its trusted process-group owner or retained PID-namespace containment"
-        );
+        // The owner is the trusted process-group lane (no scope) or the
+        // enforced path's retained descendant containment (PID-namespace
+        // init or cgroup scope); the shape check above validates its record.
         // Resource-financial settlement is not part of this Q-only journal.
         // Keep that authority closed until a Q resource owner is implemented.
         ensure!(
@@ -395,13 +391,22 @@ fn require_trusted_peer_group(
     crate::process::validate_execution_process_identity_shape(worker)?;
     peer.incarnation_digest().map_err(anyhow::Error::msg)?;
     ensure!(
-        worker.has_no_cgroup_scope()
-            && worker.boot_id == peer.boot_id
-            && worker.group_leader_pid == i64::from(peer.group_leader_pid)
-            && u64::try_from(worker.group_leader_start_time_ticks).ok()
-                == Some(peer.group_leader_start_time_ticks),
-        "qualification connector peer changed its trusted Worker group incarnation"
+        worker.boot_id == peer.boot_id,
+        "qualification connector peer belongs to another boot than its Worker"
     );
+    // The trusted lane holds the connector only by the Worker's process
+    // group. A Worker held by a retained containment (PID-namespace init or
+    // cgroup scope) instead had the peer's membership proved against that
+    // containment at connect time; the connector may sit in its own group or
+    // session, so the group leader is not part of that identity.
+    if worker.process_scope.is_none() {
+        ensure!(
+            worker.group_leader_pid == i64::from(peer.group_leader_pid)
+                && u64::try_from(worker.group_leader_start_time_ticks).ok()
+                    == Some(peer.group_leader_start_time_ticks),
+            "qualification connector peer changed its trusted Worker group incarnation"
+        );
+    }
     Ok(())
 }
 
@@ -664,5 +669,44 @@ mod tests {
         let mut other_group = peer;
         other_group.group_leader_pid = 39;
         assert!(require_trusted_peer_group(&worker, &other_group).is_err());
+    }
+
+    #[test]
+    fn contained_worker_peer_is_keyed_on_boot_not_on_the_worker_group() {
+        let (boot, _) = lillux::process_control::current_host_generation().unwrap();
+        let mut worker: crate::process::ExecutionProcessIdentity =
+            serde_json::from_value(serde_json::json!({
+                "schema_version": crate::process::PROCESS_IDENTITY_SCHEMA_VERSION,
+                "boot_id": boot, "target_pid": 40, "target_start_time_ticks": 100,
+                "group_leader_pid": 39, "group_leader_start_time_ticks": 90,
+                "process_scope": {
+                    "version": 5, "control_timeout": {"secs": 5, "nanos": 0},
+                    "configuration": {"version": 3, "backend": {"implementation": "pid_namespace_init"}},
+                    "backend": {"implementation": "pid_namespace_init", "boot_id": boot,
+                        "init_pid": 40, "init_start_time_ticks": 100,
+                        "namespace": {"device": 4, "inode": 9}}
+                },
+                "resource_selections": [], "resource_operations": [],
+                "resource_settlement_authority": null, "resource_allocation_limit": null,
+                "resource_occupancy_start": null, "resource_occupancy_limit": null,
+                "resource_cleanup_allowance_ms": null
+            }))
+            .unwrap();
+        // A connector that called setsid: its own group and session.
+        let detached = lillux::ExactProcessIdentity {
+            boot_id: boot.clone(),
+            target_pid: 77,
+            target_start_time_ticks: 500,
+            group_leader_pid: 77,
+            group_leader_start_time_ticks: 500,
+        };
+        require_trusted_peer_group(&worker, &detached).unwrap();
+        // Another boot is still refused.
+        let mut other_boot = detached.clone();
+        other_boot.boot_id = "00000000-0000-0000-0000-000000000000".into();
+        assert!(require_trusted_peer_group(&worker, &other_boot).is_err());
+        // The same peer is refused for a Worker held only by its group.
+        worker.process_scope = None;
+        assert!(require_trusted_peer_group(&worker, &detached).is_err());
     }
 }

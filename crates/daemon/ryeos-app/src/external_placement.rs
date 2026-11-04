@@ -2782,7 +2782,7 @@ fn require_connector_descendant_containment(
         (Contained, true) => match containment.enforced_guarantee() {
             Some(guarantee) => Ok(ConnectorDescendantAdmission::Enforced(guarantee)),
             None => bail!(
-                "signed provider connector declares `contained` descendants but this node reports no qualified descendant containment under enforced isolation (cgroup scope: unavailable; PID-namespace init: {})",
+                "signed provider connector declares `contained` descendants but this node reports no qualified descendant containment under enforced isolation (cgroup scope: unavailable; PID-namespace init: {}); the trusted process-group lane is a weaker guarantee accepted only by non-enforced nodes and is never a substitute under enforcement",
                 containment.pid_namespace.detail
             ),
         },
@@ -13466,6 +13466,7 @@ mod tests {
             "{error}"
         );
         assert!(error.contains("unavailable"), "{error}");
+        assert!(error.contains("weaker guarantee"), "{error}");
     }
 
     #[test]
