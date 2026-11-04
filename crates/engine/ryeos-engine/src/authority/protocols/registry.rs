@@ -420,7 +420,8 @@ fn validate_protocol_descriptor(
             .execution_evidence
             .as_ref()
             .is_some_and(|projector| projector.validate().is_ok() && projector.limits.max_calls == 1);
-        if desc.qualification_callback.is_none()
+        if desc.qualification_callback
+            != Some(crate::protocols::QualificationCallbackAuthority::RemoteConsumer)
             || desc.callback_channel != CallbackChannel::Http
             || desc.lifecycle.mode != crate::protocol_vocabulary::LifecycleMode::Managed
             || desc.capabilities.allows_target_site
@@ -431,7 +432,7 @@ fn validate_protocol_descriptor(
         {
             return Err(ProtocolError::MalformedYaml {
                 path: path.to_owned(),
-                detail: "captured-compatible callback requires a qualification callback with a closed surface digest, managed HTTP callbacks, a bounded single-call evidence projector, no session, and no remote or detached dispatch capability".to_owned(),
+                detail: "captured-compatible callback requires the remote-consumer qualification callback with a closed surface digest, managed HTTP callbacks, a bounded single-call evidence projector, no session, and no remote or detached dispatch capability".to_owned(),
             });
         }
     }
@@ -602,6 +603,12 @@ mod tests {
         assert!(check(&bad).is_err());
         let mut bad = desc.clone();
         bad.execution_evidence.as_mut().unwrap().limits.max_calls = 2;
+        assert!(check(&bad).is_err());
+
+        // The scoped-producer authority drives a daemon-owned process and never joins the class.
+        let mut bad = desc.clone();
+        bad.qualification_callback =
+            Some(crate::protocols::QualificationCallbackAuthority::ScopedProducer);
         assert!(check(&bad).is_err());
 
         // Ordinary tool callbacks cannot declare the class.

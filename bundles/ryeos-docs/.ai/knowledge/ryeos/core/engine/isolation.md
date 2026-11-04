@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-03T23:31:47Z:4076700cb4c8098bb54371b79a4f377c563ca76dba82d4b035b31973e58155b7:ZIuhu+oNjsV1jqXg7l75odYnLg0WHCgfOdjdwKGzzr09CxnOevkCYt6ZdnCx8fp0gcbzJMjd4UkdrYIgVQbICw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-04T00:27:55Z:90dedfaa6837e9d51880ca73a46c3dc6f75d438be4f3f07d3d3b62336af31bf2:8fuu3572LCtGjlcTg22cUM4vJkJqKnpFyECmMA424SZ1kRCJ7TcZSN7xrNNUKh6YA0yYlXESenGjbtLCBY25AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/engine
@@ -40,11 +40,13 @@ Captured execution excludes ambient system, bundle, trust and parent
 environment authority, and refuses daemon callback and thread-auth credentials
 except on one protocol class. A protocol may declare
 `captured_compatible_callback` with the digest of a closed callback
-method surface. The registry accepts the declaration only on a qualification
-callback protocol with managed HTTP callbacks, a bounded single-call evidence
-projector, no session and no remote or detached dispatch. Admission then
+method surface. The registry accepts the declaration only on the remote-consumer
+qualification callback protocol (never the scoped-producer one) with managed
+HTTP callbacks, a bounded single-call evidence projector, no session and no remote or detached dispatch. Admission then
 requires the declared digest to equal the digest of the surface the daemon
-itself issues for the protocol's qualification authority; any other callback
+itself issues for that authority. The sandbox then receives exactly the pinned
+daemon socket entry, read-only, and never its parent directory or any other
+ambient mount; any other callback
 protocol, including an ordinary tool callback, stays refused. The thread-auth
 credential only pairs with the callback bearer and never authorizes a method
 outside that bearer's closed surface, so the class grants no project-write,

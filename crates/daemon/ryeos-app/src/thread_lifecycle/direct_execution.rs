@@ -2207,7 +2207,13 @@ pub(crate) fn admit_captured_compatible_callback(
         .captured_compatible_callback
         .as_ref()
         .ok_or_else(refused)?;
-    let authority = descriptor.qualification_callback.ok_or_else(refused)?;
+    // Only the remote-consumer authority is a captured-compatible surface.
+    let authority = descriptor
+        .qualification_callback
+        .filter(|authority| {
+            *authority == ryeos_engine::protocols::QualificationCallbackAuthority::RemoteConsumer
+        })
+        .ok_or_else(refused)?;
     let issued =
         crate::callback_token::CallbackRuntimeMethodSurface::for_qualification_authority(authority)
             .exact_surface_digest()?;
@@ -3831,14 +3837,15 @@ mod tests {
             ))
             .is_err()
         );
-        // Surface equality follows the authority: the scoped digest admits only
-        // under the scoped authority.
-        admit_captured_compatible_callback(&captured_callback_protocol(
-            &scoped,
-            true,
-            "scoped_producer",
-        ))
-        .unwrap();
+        // The scoped-producer authority is never admitted, even with its own digest.
+        assert!(
+            admit_captured_compatible_callback(&captured_callback_protocol(
+                &scoped,
+                true,
+                "scoped_producer"
+            ))
+            .is_err()
+        );
         // Remote or detached capability reopens refusal.
         let mut detached = captured_callback_protocol(&remote, true, "remote_consumer");
         detached.capabilities.allows_detached = true;
