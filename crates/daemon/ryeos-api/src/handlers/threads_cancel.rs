@@ -44,7 +44,7 @@ pub async fn handle(
     let thread = state
         .state_store
         .get_thread(&req.thread_id)
-        .map_err(|e| HandlerError::Internal(e.to_string()))?
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?
         .ok_or(HandlerError::NotFound)?;
 
     // Ownership check: callers can only cancel their own threads.
@@ -69,14 +69,14 @@ pub async fn handle(
     if let Some(refusal) = state
         .state_store
         .in_process_handler_stop_refusal(&req.thread_id)
-        .map_err(|error| HandlerError::Internal(error.to_string()))?
+        .map_err(|error| HandlerError::Internal(format!("{error:#}")))?
     {
         return Err(in_process_stop_refusal_error(refusal, &req.thread_id));
     }
     let mut hosted_root_terminalization = if state
         .state_store
         .dedicated_session(&req.thread_id)
-        .map_err(|error| HandlerError::Internal(error.to_string()))?
+        .map_err(|error| HandlerError::Internal(format!("{error:#}")))?
         .is_some()
     {
         Some(
@@ -85,7 +85,7 @@ pub async fn handle(
                 &req.thread_id,
             )
             .await
-            .map_err(|error| HandlerError::Conflict(error.to_string()))?,
+            .map_err(|error| HandlerError::Conflict(format!("{error:#}")))?,
         )
     } else {
         None
@@ -98,7 +98,7 @@ pub async fn handle(
     let runtime = state
         .state_store
         .request_thread_stop(&req.thread_id, ryeos_app::state_store::StopIntent::Cancel)
-        .map_err(|error| HandlerError::Internal(error.to_string()))?;
+        .map_err(|error| HandlerError::Internal(format!("{error:#}")))?;
     let effective_intent = runtime.stop_intent.ok_or_else(|| {
         HandlerError::Internal(format!(
             "durable stop request for {} returned no effective intent",
@@ -259,7 +259,7 @@ pub async fn handle(
                         thread.status
                     )));
                 }
-                _ => return Err(HandlerError::Internal(e.to_string())),
+                _ => return Err(HandlerError::Internal(format!("{e:#}"))),
             }
         }
     };

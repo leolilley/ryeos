@@ -33,7 +33,7 @@ pub struct Request {
 pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value, HandlerError> {
     // Validate bundle name.
     super::bundle_install::validate_name(&req.bundle_name)
-        .map_err(|e| HandlerError::BadRequest(e.to_string()))?;
+        .map_err(|e| HandlerError::BadRequest(format!("{e:#}")))?;
 
     // Find the bundle path from node config.
     let bundle_path = state
@@ -60,18 +60,18 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value, Handler
     let authority = state
         .state_store
         .with_state_db(|db| db.pinned_authority())
-        .map_err(|error| HandlerError::Internal(error.to_string()))?;
+        .map_err(|error| HandlerError::Internal(format!("{error:#}")))?;
     let _cas_guard = authority
         .acquire_shared_guard()
-        .map_err(|error| HandlerError::Internal(error.to_string()))?;
+        .map_err(|error| HandlerError::Internal(format!("{error:#}")))?;
     let cas = authority
         .cas_store()
-        .map_err(|error| HandlerError::Internal(error.to_string()))?;
+        .map_err(|error| HandlerError::Internal(format!("{error:#}")))?;
     let _permit = state
         .write_barrier
         .acquire_with_timeout(ryeos_app::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
         .map_err(|error| {
-            HandlerError::Internal(format!("cannot acquire CAS write permit: {error}"))
+            HandlerError::Internal(format!("cannot acquire CAS write permit: {error:#}"))
         })?;
 
     // Walk the bundle tree, ingest each file into CAS.
@@ -87,7 +87,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value, Handler
         &mut tree_entries,
         0,
     )
-    .map_err(|e| HandlerError::Internal(e.to_string()))?;
+    .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
 
     Ok(serde_json::json!({
         "bundle_name": req.bundle_name,

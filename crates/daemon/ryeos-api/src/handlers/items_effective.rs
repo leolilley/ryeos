@@ -159,7 +159,7 @@ fn as_launched_block(state: &AppState, thread_id: &str, effective: &EffectiveIte
                 "reason": "no as-launched resolution digest recorded for this thread",
             });
         }
-        Err(e) => return json!({ "present": false, "reason": e.to_string() }),
+        Err(e) => return json!({ "present": false, "reason": format!("{e:#}") }),
     };
 
     // Current (freshly-resolved) content digests by resolved ref, to localize

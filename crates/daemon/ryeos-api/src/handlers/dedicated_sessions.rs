@@ -285,13 +285,13 @@ async fn candidate_result(
     state: Arc<AppState>,
 ) -> Result<Value, HandlerError> {
     req.validate()
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     ryeos_node_runtime::identity::validate_forwarding_origin_assertion(
         Some(&req.source_site_id),
         ctx.authorized_key_class,
         ctx.authenticated_origin_site_id.as_deref(),
     )
-    .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
+    .map_err(|error| HandlerError::Forbidden(format!("{error:#}")))?;
     let initial = owned_session(&state, &ctx, &req.chain_root_id)?;
     let placement_thread_id = initial.placement_thread_id.clone();
     let operation_lock = disposition_operation_lock(&placement_thread_id);
@@ -318,7 +318,7 @@ async fn candidate_result(
                 &session.placement_thread_id,
             )
             .await
-            .map_err(|error| HandlerError::BadRequest(error.to_string()))?,
+            .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?,
         )
     } else {
         None
@@ -427,7 +427,7 @@ async fn candidate_result(
         &session.placement_thread_id,
         completion_fence.command_sequence,
     )
-    .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let observed_fence = command
         .get("completion_fence")
         .cloned()
@@ -465,7 +465,7 @@ async fn candidate_result(
             &session.placement_thread_id,
             completion_fence.command_sequence,
         )
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
 
     let capture_operation_id = ryeos_state::objects::canonical_value_digest(&json!({
         "schema":"ryeos.hosted_candidate_capture_operation.v1",
@@ -2158,7 +2158,7 @@ async fn checkpoint(
         &session.placement_thread_id,
     )
     .await
-    .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let _profile_operation = ryeos_app::hosted_operation::acquire_credential_profile_operation(
         &session.credential_profile_id,
     )
@@ -2246,7 +2246,7 @@ async fn checkpoint(
     let settlement_digest = state
         .state_store
         .dedicated_session_checkpoint_settlement_digest(&placement_thread_id)
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     if let Some(accounting) = &state.accounting {
         if accounting
             .nonterminal_reservations()
@@ -2329,7 +2329,7 @@ async fn checkpoint(
         &portable_contract,
         upstream_session_id,
     )
-    .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let tree_bytes = tree.canonical_bytes().map_err(internal)?;
     let tree_hash = lillux::sha256_hex(&tree_bytes);
     let selector_contract_digest = lillux::sha256_hex(
@@ -2413,7 +2413,7 @@ async fn checkpoint(
                 }),
             },
         })
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     Ok(json!({
         "chain_root_id":session.chain_root_id,
         "placement_thread_id":placement_thread_id,
@@ -2483,7 +2483,7 @@ async fn resume(
         &source_thread_id,
     )
     .await
-    .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let profile_operation = ryeos_app::hosted_operation::acquire_credential_profile_operation(
         &source.credential_profile_id,
     )
@@ -2503,7 +2503,7 @@ async fn resume(
         ));
     }
     let checkpoint = load_worker_checkpoint(&state, &source.chain_root_id, &req.manifest_ref)
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     if checkpoint.restore.project_candidate_snapshot_hash != source.candidate_snapshot_hash {
         return Err(HandlerError::BadRequest(
             "checkpoint project candidate differs from the frozen source".into(),
@@ -2531,7 +2531,7 @@ async fn resume(
         state
             .state_store
             .verify_project_snapshot_closure(candidate)
-            .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+            .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     }
     let profile = state
         .state_store
@@ -2582,7 +2582,7 @@ async fn resume(
         ));
     }
     let predecessor_tree = load_worker_checkpoint_predecessor_tree(&state, &checkpoint.restore)
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let portable_install = ryeos_app::private_artifact_home::install_portable_state_conditionally(
         &state.config.runtime_state_dir(),
         &profile.home_id,
@@ -2591,11 +2591,11 @@ async fn resume(
         predecessor_tree.as_ref(),
         &checkpoint.tree,
     )
-    .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let settlement = state
         .state_store
         .dedicated_session_checkpoint_settlement_digest(&source_thread_id)
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     if settlement != checkpoint.restore.pending_contact_settlement_digest {
         return Err(HandlerError::BadRequest(
             "worker contact frontier changed after checkpoint".into(),
@@ -2733,7 +2733,7 @@ async fn resume(
                 .as_deref(),
             initial_events,
         )
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let prepared = prepared.with_persisted_birth_audit();
     drop(profile_operation);
     drop(root_operation);
@@ -2796,7 +2796,7 @@ async fn handoff_preflight(
         &source_thread_id,
     )
     .await
-    .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let _profile_operation = ryeos_app::hosted_operation::acquire_credential_profile_operation(
         &source.credential_profile_id,
     )
@@ -2838,7 +2838,7 @@ async fn handoff_preflight(
     }
     let checkpoint_manifest_hash =
         load_worker_checkpoint_predecessor(&state, &source.chain_root_id)
-            .map_err(|error| HandlerError::BadRequest(error.to_string()))?
+            .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?
             .map(|(manifest_hash, _)| manifest_hash)
             .ok_or_else(|| {
                 HandlerError::BadRequest(
@@ -2850,7 +2850,7 @@ async fn handoff_preflight(
         &source.chain_root_id,
         &format!("cas:{checkpoint_manifest_hash}"),
     )
-    .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     if checkpoint.restore.source_position.placement_thread_id != source_thread_id
         || checkpoint.restore.project_candidate_snapshot_hash != source.candidate_snapshot_hash
     {
@@ -2950,14 +2950,14 @@ async fn handoff_preflight(
         .map_err(internal)?;
     source_capsule
         .validate_durable_handoff_eligibility()
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let source_credential_profile_id = sealed
         .validate_worker_handoff_source(
             &source.owner_principal,
             state.threads.site_id(),
             &source_snapshot.origin_site_id,
         )
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     if source_credential_profile_id != source.credential_profile_id {
         return Err(HandlerError::BadRequest(
             "source launch capsule contradicts its hosted session authority".into(),
@@ -2976,10 +2976,10 @@ async fn handoff_preflight(
     )
     .map_err(internal)?;
     let loaded_remote = crate::remote::config::get_loaded_remote(&report.remotes, &req.remote)
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let binding =
         crate::remote::config::resolve_loaded_project_binding(&loaded_remote, &source_project_path)
-            .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+            .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     if binding.sync_scope != crate::remote::config::ProjectSyncScope::FullProject {
         return Err(HandlerError::BadRequest(
             "worker handoff preflight requires a configured full_project route".into(),
@@ -3008,7 +3008,7 @@ async fn handoff_preflight(
             &source.owner_principal,
             state.threads.site_id(),
         )
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?
         .map(|(hash, _attestation)| hash);
     let preflight_id = ryeos_state::objects::canonical_value_digest(&json!({
         "schema":"ryeos.worker_session_handoff_preflight_operation.v2",
@@ -3078,7 +3078,7 @@ async fn handoff_preflight(
         .map_err(internal)?;
     response
         .validate_against(&request, &target_key)
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let target_node_client =
         crate::remote::client::RemoteClient::from_remote_cfg(&state, &loaded_remote.config);
     let target_closure_options =
@@ -3139,7 +3139,7 @@ async fn handoff_preflight(
         &state,
         &target_closure.closure.large_object_hashes,
     )
-    .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let mut payload = crate::remote::import::closure_response_to_export_payload(
         &format!("worker-preflight:{preflight_id}"),
         &response.preflight_attestation_hash,
@@ -3152,7 +3152,7 @@ async fn handoff_preflight(
             entry,
             target_closure_options.limits(),
         )
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     }
     let operation = ryeos_app::worker_handoff::WorkerPlacementPreflightJobOperation::from_request(
         ryeos_app::worker_handoff::WorkerHandoffJobRole::Source,
@@ -3292,7 +3292,7 @@ async fn handoff(
             &source_thread_id,
         )
         .await
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let _profile_operation = ryeos_app::hosted_operation::acquire_credential_profile_operation(
         &source.credential_profile_id,
     )
@@ -3335,7 +3335,7 @@ async fn handoff(
     #[cfg(any(test, feature = "handoff-test-support"))]
     let checkpoint_started = lillux::time::MonotonicTimer::start();
     let checkpoint = load_worker_checkpoint(&state, &source.chain_root_id, &req.manifest_ref)
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     #[cfg(any(test, feature = "handoff-test-support"))]
     let checkpoint_load_ms = checkpoint_started.elapsed_millis();
     if checkpoint.restore.project_candidate_snapshot_hash != source.candidate_snapshot_hash {
@@ -3394,14 +3394,14 @@ async fn handoff(
         .map_err(internal)?;
     source_capsule
         .validate_durable_handoff_eligibility()
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let source_credential_profile_id = sealed
         .validate_worker_handoff_source(
             &source.owner_principal,
             state.threads.site_id(),
             &source_snapshot.origin_site_id,
         )
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     if source_credential_profile_id != source.credential_profile_id {
         return Err(HandlerError::BadRequest(
             "source launch capsule contradicts its hosted session authority".into(),
@@ -3420,10 +3420,10 @@ async fn handoff(
     )
     .map_err(internal)?;
     let loaded_remote = crate::remote::config::get_loaded_remote(&report.remotes, &req.remote)
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let binding =
         crate::remote::config::resolve_loaded_project_binding(&loaded_remote, &source_project_path)
-            .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+            .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     if binding.sync_scope != crate::remote::config::ProjectSyncScope::FullProject {
         return Err(HandlerError::BadRequest(
             "worker handoff requires a configured full_project route".into(),
@@ -3474,7 +3474,7 @@ async fn handoff(
     preflight_response
         .preflight_attestation
         .verify_with_key(&target_key)
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let preflight_evidence =
         ryeos_app::worker_handoff::WorkerPlacementPreflightEvidence::from_attestation(
             &preflight_response.preflight_attestation,
@@ -3525,7 +3525,7 @@ async fn handoff(
         &source_head.target_hash,
         &preflight_evidence.source_chain_head_hash,
     )
-    .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     drop(guard);
     #[cfg(any(test, feature = "handoff-test-support"))]
     let closure_verification_ms = closure_verification_started.elapsed_millis();
@@ -3566,7 +3566,7 @@ async fn handoff(
                     &source.chain_root_id,
                     scope,
                 )
-                .map_err(|error| HandlerError::BadRequest(error.to_string()))?,
+                .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?,
         ),
         (None, Some(_)) => {
             return Err(internal(
@@ -3782,7 +3782,7 @@ async fn handoff(
             .map_err(|error| internal(format!("decode target placement response: {error}")))?;
         prepared
             .validate_against(&prepare_request)
-            .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+            .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
 
         let target_node_client =
             crate::remote::client::RemoteClient::from_remote_cfg(&state, &loaded_remote.config);
@@ -3815,7 +3815,7 @@ async fn handoff(
             &state,
             &target_closure.closure.large_object_hashes,
         )
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
         let target_payload = crate::remote::import::closure_response_to_export_payload(
             &format!("worker-placement:{operation_id}"),
             &prepared.placement_attestation_hash,
@@ -3863,7 +3863,7 @@ async fn handoff(
         )
         .map_err(internal)?;
         verify_target_placement_attestation(&state, &loaded_remote.config, &prepared)
-            .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+            .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
         Ok((prepared, target_qualification_measurements))
     }
     .await;
@@ -3929,7 +3929,7 @@ async fn handoff(
                         })?,
                         target_scope,
                     )
-                    .map_err(|error| HandlerError::BadRequest(error.to_string()))?,
+                    .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?,
             )
         }
         (_, None) => None,
@@ -3978,7 +3978,7 @@ async fn handoff(
                     .map_err(internal)?,
             },
         )
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     root_terminalization.commit();
     if source_metadata.accounting_scope.is_some() {
         state
@@ -4443,7 +4443,7 @@ async fn resume_committed_handoff_locked(
     .map_err(internal)?;
     let loaded_remote =
         crate::remote::config::get_loaded_remote(&report.remotes, &operation.peer_remote_name)
-            .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+            .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     if loaded_remote.config.site_id != operation.target_site_id {
         return Err(HandlerError::BadRequest(
             "configured target site changed after source commit".into(),
@@ -4702,7 +4702,7 @@ async fn fetch_target_handoff_terminal_chain_closure(
         state,
         &response.closure.large_object_hashes,
     )
-    .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let entry = response
         .entries
         .iter()
@@ -5137,7 +5137,7 @@ pub async fn recover_durable_source_handoffs(state: &AppState) -> Result<usize> 
                     }
                     Ok(_) => continue,
                     Err(error) => {
-                        tracing::error!(job_id = %job.job_id, error = %error, "invalid source worker handoff job retained for operator inspection");
+                        tracing::error!(job_id = %job.job_id, error = %format!("{error:#}"), "invalid source worker handoff job retained for operator inspection");
                         continue;
                     }
                 };
@@ -5349,7 +5349,7 @@ pub async fn recover_durable_source_handoffs(state: &AppState) -> Result<usize> 
                         WORKER_SESSION_HANDOFF_PEER_CALL_TIMEOUT,
                     )
                     .await
-                    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                    .map_err(|error| anyhow::anyhow!(format!("{error:#}")))?;
                 let (terminal_result, _qualification_measurements): (
                     ryeos_app::worker_handoff::WorkerPlacementAdoptResult,
                     Option<Value>,
@@ -5435,7 +5435,7 @@ pub async fn recover_durable_source_handoffs(state: &AppState) -> Result<usize> 
                         ryeos_state::SyncJobAttemptState::Failed,
                         ryeos_state::SyncJobState::Retryable,
                         &latest.phase,
-                        Some(bounded_handoff_recovery_error(&error.to_string())),
+                        Some(bounded_handoff_recovery_error(&format!("{error:#}"))),
                         latest.result,
                     )
                     .map_err(|error| anyhow::anyhow!(error.to_string()))?;
@@ -5747,7 +5747,7 @@ async fn recover_pre_cut_source_handoff_abort(
                 WORKER_SESSION_HANDOFF_PEER_CALL_TIMEOUT,
             )
             .await
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            .map_err(|error| anyhow::anyhow!(format!("{error:#}")))?;
         let terminal_result: ryeos_app::worker_handoff::WorkerPlacementAbortResult =
             serde_json::from_value(value)?;
         validate_and_retain_target_abort_result(
@@ -5794,7 +5794,7 @@ async fn recover_pre_cut_source_handoff_abort(
                 ryeos_state::SyncJobAttemptState::Failed,
                 ryeos_state::SyncJobState::Retryable,
                 abort_progress.phase.as_str(),
-                Some(bounded_handoff_recovery_error(&error.to_string())),
+                Some(bounded_handoff_recovery_error(&format!("{error:#}"))),
                 Some(abort_progress.to_value()?),
             )
             .map_err(|error| anyhow::anyhow!(error.to_string()))?;
@@ -5983,7 +5983,7 @@ async fn command_observation(
         &session.placement_thread_id,
         req.command_sequence,
     )
-    .map_err(|error| HandlerError::BadRequest(error.to_string()))
+    .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))
 }
 
 async fn command(
@@ -6019,7 +6019,7 @@ async fn command(
                 &request_digest,
                 &payload,
             )
-            .map_err(|error| HandlerError::BadRequest(error.to_string()))?
+            .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?
             .is_none()
         {
             return Err(HandlerError::BadRequest(
@@ -6035,7 +6035,7 @@ async fn command(
         json!({"route_id":req.route_id,"payload":req.payload}),
     )
     .await
-    .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let object = result
         .as_object_mut()
         .ok_or_else(|| internal("worker command result is not an object"))?;
@@ -6612,7 +6612,7 @@ async fn resolve_approval(
         &placement_thread_id,
     )
     .await
-    .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let _credential_guard = ryeos_app::hosted_operation::acquire_credential_profile_causal_contact(
         &initial_session.credential_profile_id,
         &placement_thread_id,
@@ -6999,7 +6999,7 @@ async fn terminate(
         req.completion.as_ref(),
     )
     .await
-    .map_err(|error| HandlerError::BadRequest(error.to_string()))
+    .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))
 }
 
 #[derive(Debug, Deserialize)]
@@ -7422,7 +7422,7 @@ async fn start_candidate_operation(
                         reserved_thread_id,
                         &session.owner_principal,
                     )
-                    .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+                    .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
                 reserved_thread_id.clone()
             }
             "planning" => reserved_thread_id.clone(),
@@ -7795,7 +7795,7 @@ fn frozen_candidate_closure_evidence(
         [candidate_snapshot_hash.to_owned()],
         ryeos_state::object_closure::ObjectClosureLimits::for_project_snapshot_transport(),
     )
-    .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     if !closure.is_complete() || !closure.large_object_hashes.is_empty() {
         return Err(HandlerError::BadRequest(
             "candidate snapshot closure is incomplete or unsupported".into(),
@@ -7816,12 +7816,12 @@ fn frozen_candidate_closure_evidence(
         cas,
         candidate_snapshot_hash,
     )
-    .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let base = ryeos_state::project_materialization::VerifiedProjectSnapshotClosure::load(
         cas,
         &base_snapshot_hash,
     )
-    .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let mut paths = BTreeSet::new();
     paths.extend(candidate.tree().tree().files.keys().cloned());
     paths.extend(base.tree().tree().files.keys().cloned());
@@ -7857,7 +7857,7 @@ fn frozen_candidate_closure_evidence(
 
 fn candidate_validation_identity(candidate_snapshot_hash: &str) -> Result<String, HandlerError> {
     ryeos_app::thread_lifecycle::candidate_validation_identity(candidate_snapshot_hash)
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))
 }
 
 struct VerifiedCandidateSource {
@@ -9848,7 +9848,7 @@ async fn qualify_candidate(
             &qualification_operation_id,
             reserved_integration_launch,
         )
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     ryeos_app::authoritative_root_fact::append_once(
         &state,
         &qualification_root_id,
@@ -9879,7 +9879,7 @@ async fn qualify_candidate(
             &qualification_root_id,
             &qualification_operation_id,
         )
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     ryeos_app::dedicated_session_service::notify_projection_change(&session.placement_thread_id);
     Ok(json!({
         "chain_root_id":session.chain_root_id,
@@ -10196,7 +10196,7 @@ async fn discard(
             &disposition_root_id,
             &operation_id,
         )
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     ryeos_app::authoritative_root_fact::append_once(
         &state,
         &disposition_root_id,
@@ -10220,7 +10220,7 @@ async fn discard(
             &disposition_root_id,
             &operation_id,
         )
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     ryeos_app::dedicated_session_service::notify_projection_change(&session.placement_thread_id);
     Ok(json!({
         "chain_root_id":session.chain_root_id,
@@ -10409,7 +10409,7 @@ async fn publish(
             &invocation_root_id,
             &publication_operation_id,
         )
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let signer = ryeos_app::state_store::NodeIdentitySigner::from_identity(&state.identity);
     let current = state
         .state_store

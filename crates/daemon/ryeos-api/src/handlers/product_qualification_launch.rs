@@ -117,11 +117,11 @@ fn require_exact_admitted_fixed_pin(
         .get(kind)
         .and_then(|schema| schema.external_content_contract());
     let declarer = ryeos_engine::external_content::declaring_authority(resolution)
-        .map_err(|error| HandlerError::BadRequest(format!("verifier declarer: {error}")))?;
+        .map_err(|error| HandlerError::BadRequest(format!("verifier declarer: {error:#}")))?;
     let declarations = ryeos_engine::external_content::effective_external_content_declarations(
         resolution, contract, declarer,
     )
-    .map_err(|error| HandlerError::BadRequest(format!("verifier external content: {error}")))?
+    .map_err(|error| HandlerError::BadRequest(format!("verifier external content: {error:#}")))?
     .ok_or_else(|| HandlerError::BadRequest("verifier admitted no fixed pin".to_string()))?;
     let mut matches = declarations
         .iter()
@@ -188,9 +188,9 @@ async fn handle_source(
         QualificationLaunchSourceRequest::ActivatedContent(_) => CONTENT_REQUIRED_CAP,
     };
     req.validate()
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     ryeos_app::operator_authority::require_admitted_operator(&state, &ctx)
-        .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
+        .map_err(|error| HandlerError::Forbidden(format!("{error:#}")))?;
     state
         .authorizer
         .authorize(&ctx.scopes, &AuthorizationPolicy::require(required_cap))
@@ -298,7 +298,7 @@ async fn handle_source(
         } else {
             let (workspace, workspace_guard) =
                 create_isolated_no_project_workspace(&state, &checkout_id)
-                    .map_err(|error| HandlerError::Internal(error.to_string()))?;
+                    .map_err(|error| HandlerError::Internal(format!("{error:#}")))?;
             let project = resolve_project_context_off_thread(ResolveProjectContextRequest {
                 state: state.as_ref().clone(),
                 source: ProjectSource::LiveFs,
@@ -315,12 +315,12 @@ async fn handle_source(
             })?;
             let policy = ExecutionPolicy::projectless(ExecutionResponse::Accepted);
             policy.validate().map_err(|error| {
-                HandlerError::Internal(format!("qualification execution policy: {error}"))
+                HandlerError::Internal(format!("qualification execution policy: {error:#}"))
             })?;
             let project_authority = ryeos_state::objects::ExecutionProjectAuthority::projectless(
                 ryeos_state::objects::EnvironmentAuthority::None,
             )
-            .map_err(|error| HandlerError::Internal(format!("projectless authority: {error}")))?;
+            .map_err(|error| HandlerError::Internal(format!("projectless authority: {error:#}")))?;
             let provenance =
                 ryeos_app::execution_provenance::ExecutionProvenance::root_projectless(
                     project.effective_path.clone(),
@@ -329,7 +329,7 @@ async fn handle_source(
                     project_authority,
                 )
                 .map_err(|error| {
-                    HandlerError::Internal(format!("qualification provenance: {error}"))
+                    HandlerError::Internal(format!("qualification provenance: {error:#}"))
                 })?;
             (
                 project,
@@ -547,7 +547,7 @@ async fn handle_source(
             .policy
             .admitted_parameters_digest()
             .map_err(|error| {
-                HandlerError::Internal(format!("signed verifier parameters: {error}"))
+                HandlerError::Internal(format!("signed verifier parameters: {error:#}"))
             })?,
         verifier_ref: prepared.policy_source().policy.verifier_ref.clone(),
         verifier_effective_definition_digest: admitted_definition_digest,

@@ -4104,7 +4104,7 @@ async fn dispatch_release_graph(
                 if let Err(error) = authorities.complete_external(&task_operation_id, &result) {
                     tracing::error!(
                         operation_id = %task_operation_id,
-                        %error,
+                        error = %format!("{error:#}"),
                         "failed to record completed bundle release operation"
                     );
                 }

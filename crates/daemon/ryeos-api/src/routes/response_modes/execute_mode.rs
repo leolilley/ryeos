@@ -267,7 +267,7 @@ pub(crate) fn create_isolated_no_project_workspace(
         &state.config.runtime_root().cache(),
         &format!("no-project-{checkout_id}"),
     )
-    .map_err(|error| anyhow::anyhow!("create isolated no-project workspace: {error}"))
+    .map_err(|error| anyhow::anyhow!("create isolated no-project workspace: {error:#}"))
 }
 
 /// The node's startup provider environment and the principal requesting
@@ -997,7 +997,7 @@ impl CompiledResponseMode for CompiledExecuteMode {
             ctx.principal.authorized_key_class,
             ctx.principal.authenticated_origin_site_id.as_deref(),
         )
-        .map_err(|e| RouteDispatchError::Forbidden(e.to_string()))?;
+        .map_err(|e| RouteDispatchError::Forbidden(format!("{e:#}")))?;
         // HTTP only owns ingress/response adaptation, never a second admission.
         let accepted = ctx.request_parts.uri.path() == "/execute/launch";
         let outcome = admit_execution_with_publication(
@@ -1073,13 +1073,13 @@ async fn admit_execution_with_publication(
             state.threads.site_id(),
             &execution_origin_site_id,
         )
-        .map_err(|e| RouteDispatchError::Forbidden(e.to_string()))?;
+        .map_err(|e| RouteDispatchError::Forbidden(format!("{e:#}")))?;
     let caller_principal_id = principal.fingerprint.clone();
     let caller_scopes = principal.scopes.clone();
     request
         .execution_policy
         .validate()
-        .map_err(|error| RouteDispatchError::BadRequest(error.to_string()))?;
+        .map_err(|error| RouteDispatchError::BadRequest(format!("{error:#}")))?;
     request.launch_mode = match request.execution_policy.response {
         ExecutionResponse::Wait => "wait".to_string(),
         ExecutionResponse::Accepted => "accepted".to_string(),
@@ -1132,7 +1132,7 @@ async fn admit_execution_with_publication(
         return Ok(dispatch_error_response(error));
     }
     request.product_selections = ryeos_state::external_content::products::composition::canonicalize_product_selection_inputs(request.product_selections)
-        .map_err(|error| RouteDispatchError::BadRequest(error.to_string()))?;
+        .map_err(|error| RouteDispatchError::BadRequest(format!("{error:#}")))?;
     let no_project_requested = matches!(
         &request.execution_policy.project,
         ProjectExecutionPolicy::Projectless
@@ -1231,7 +1231,7 @@ async fn admit_execution_with_publication(
     let usage_subject_asserted_by = if let Some(subject) = &usage_subject {
         subject
             .validate()
-            .map_err(|e| RouteDispatchError::BadRequest(e.to_string()))?;
+            .map_err(|e| RouteDispatchError::BadRequest(format!("{e:#}")))?;
         let required_cap = format!("ryeos.execute.on_behalf_of.{}", subject.namespace);
         let policy = AuthorizationPolicy::require(&required_cap);
         state
@@ -1275,7 +1275,7 @@ async fn admit_execution_with_publication(
         .map_err(|error| {
             RouteDispatchError::BadRequest(format!("source observation task failed: {error}"))
         })?
-        .map_err(|error| RouteDispatchError::BadRequest(error.to_string()))?;
+        .map_err(|error| RouteDispatchError::BadRequest(format!("{error:#}")))?;
         let value = serde_json::to_value(observation)
             .map_err(|error| RouteDispatchError::BadRequest(error.to_string()))?;
         return Ok(json!({"result": value}).into());
@@ -1560,7 +1560,7 @@ async fn admit_execution_with_publication(
         &caller_scopes,
         &state,
     )
-    .map_err(|error| RouteDispatchError::BadRequest(error.to_string()))?;
+    .map_err(|error| RouteDispatchError::BadRequest(format!("{error:#}")))?;
     let ResolvedExecutionContract {
         provenance,
         lifecycle_authority,
@@ -1975,7 +1975,7 @@ async fn admit_execution_with_publication(
             destination_policy.target = ExecutionTarget::Here;
             destination_policy.validate().map_err(|error| {
                 RouteDispatchError::BadRequest(format!(
-                    "invalid destination execution policy: {error}"
+                    "invalid destination execution policy: {error:#}"
                 ))
             })?;
             let forward_req = crate::remote::forward::RemoteForwardRequest {

@@ -37,7 +37,7 @@ pub async fn handle(
     let resolution = state
         .state_store
         .cancel_launch_planning(&req.launch_id, &ctx.fingerprint)
-        .map_err(|error| HandlerError::Internal(error.to_string()))?
+        .map_err(|error| HandlerError::Internal(format!("{error:#}")))?
         .ok_or(HandlerError::NotFound)?;
     match resolution {
         LaunchCancellationResolution::Cancelled => Ok(planning_outcome(

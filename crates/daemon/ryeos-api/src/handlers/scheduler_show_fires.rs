@@ -34,15 +34,15 @@ pub async fn handle(
     state: Arc<AppState>,
 ) -> Result<Value, HandlerError> {
     let scheduler = crate::api_state::selected_scheduler(state.as_ref())
-        .map_err(|e| HandlerError::Internal(e.to_string()))?;
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
     let _read_guard = scheduler
         .acquire_read()
         .await
-        .map_err(|e| HandlerError::Internal(e.to_string()))?;
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
     let db = scheduler.scheduler_db();
     let spec = db
         .get_spec(&req.schedule_id)
-        .map_err(|e| HandlerError::Internal(e.to_string()))?
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?
         .ok_or(HandlerError::NotFound)?;
 
     ctx.require_owner(Some(spec.execution.principal_id()))?;
@@ -50,7 +50,7 @@ pub async fn handle(
     let limit = req.limit.clamp(1, 500);
     let (fires, total) = db
         .list_fires(&req.schedule_id, req.status.as_deref(), limit)
-        .map_err(|e| HandlerError::Internal(e.to_string()))?;
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
 
     let fire_entries: Vec<Value> = fires
         .iter()

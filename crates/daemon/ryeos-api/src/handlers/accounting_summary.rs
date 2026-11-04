@@ -182,11 +182,11 @@ pub async fn handle(
     let totals = state
         .state_store
         .summarize_provider_attempt_budget(&filter)
-        .map_err(|e| HandlerError::Internal(e.to_string()))?;
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
     let projection_bounds = state
         .state_store
         .provider_attempt_budget_projection_bounds()
-        .map_err(|e| HandlerError::Internal(e.to_string()))?;
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
 
     let (rows, next_cursor) = if req.detail {
         let limit = req.limit.unwrap_or(DEFAULT_LIMIT);
@@ -194,7 +194,7 @@ pub async fn handle(
         let rows = state
             .state_store
             .list_provider_attempt_budget(&filter, limit, after_attempt_id)
-            .map_err(|e| HandlerError::Internal(e.to_string()))?;
+            .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
         let next_cursor = (rows.len() as u32 == limit)
             .then(|| {
                 rows.last()

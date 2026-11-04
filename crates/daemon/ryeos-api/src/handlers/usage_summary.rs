@@ -70,7 +70,7 @@ pub async fn handle(
             settled_at_gte: req.settled_at_gte.as_deref(),
             settled_at_lt: req.settled_at_lt.as_deref(),
         })
-        .map_err(|e| HandlerError::Internal(e.to_string()))?
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?
         .into_iter()
         .map(|row| UsageSummaryResponseRow {
             namespace: row.namespace,
@@ -112,14 +112,14 @@ fn validate_filter_subject(
             subject: subject.to_string(),
         }
         .validate()
-        .map_err(|e| HandlerError::BadRequest(e.to_string()))?;
+        .map_err(|e| HandlerError::BadRequest(format!("{e:#}")))?;
     } else if let Some(namespace) = namespace {
         ryeos_state::UsageSubject {
             namespace: namespace.to_string(),
             subject: "_".to_string(),
         }
         .validate()
-        .map_err(|e| HandlerError::BadRequest(e.to_string()))?;
+        .map_err(|e| HandlerError::BadRequest(format!("{e:#}")))?;
     }
     Ok(())
 }

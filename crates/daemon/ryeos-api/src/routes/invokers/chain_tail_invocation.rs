@@ -64,7 +64,7 @@ impl CompiledRouteInvocation for CompiledChainTailInvocation {
             .state
             .state_store
             .get_thread(&chain_root_id)
-            .map_err(|e| RouteDispatchError::Internal(e.to_string()))?
+            .map_err(|e| RouteDispatchError::Internal(format!("{e:#}")))?
             .ok_or(RouteDispatchError::NotFound)?;
         let requested_by = root_detail
             .requested_by
@@ -132,7 +132,7 @@ impl CompiledRouteInvocation for CompiledChainTailInvocation {
                         Err(e) => {
                             yield Ok(error_envelope(
                                 "replay_failed",
-                                &format!("chain replay failed: {e}"),
+                                &format!("chain replay failed: {e:#}"),
                             ));
                             return;
                         }

@@ -32,18 +32,18 @@ pub async fn handle(
     state: Arc<AppState>,
 ) -> Result<Value, HandlerError> {
     let scheduler = crate::api_state::selected_scheduler(state.as_ref())
-        .map_err(|e| HandlerError::Internal(e.to_string()))?;
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
     let _mutation_guard = scheduler
         .acquire_mutation()
         .await
-        .map_err(|e| HandlerError::Internal(e.to_string()))?;
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
     let db = scheduler.scheduler_db();
     ryeos_scheduler_contract::validate_schedule_id(&req.schedule_id)
-        .map_err(|e| HandlerError::BadRequest(e.to_string()))?;
+        .map_err(|e| HandlerError::BadRequest(format!("{e:#}")))?;
 
     let spec = db
         .get_spec(&req.schedule_id)
-        .map_err(|e| HandlerError::Internal(e.to_string()))?
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?
         .ok_or(HandlerError::NotFound)?;
 
     ctx.require_owner(Some(spec.execution.principal_id()))?;
@@ -52,22 +52,22 @@ pub async fn handle(
         scheduler.app_root(),
         &req.schedule_id,
     )
-    .map_err(|e| HandlerError::Internal(e.to_string()))?;
+    .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
     let schedules_path = yaml_path
         .parent()
         .ok_or_else(|| HandlerError::Internal("schedule source has no parent".to_string()))?;
     let schedules_directory = lillux::PinnedDirectory::open(schedules_path)
-        .map_err(|e| HandlerError::Internal(e.to_string()))?
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?
         .ok_or_else(|| HandlerError::Internal("schedule source directory is absent".to_string()))?;
     let _source_lock = schedules_directory
         .lock_exclusive()
-        .map_err(|e| HandlerError::Internal(e.to_string()))?;
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
     let source_name = yaml_path
         .file_name()
         .ok_or_else(|| HandlerError::Internal("schedule source has no filename".to_string()))?;
     let source_file = schedules_directory
         .open_regular(source_name, false)
-        .map_err(|e| HandlerError::Internal(e.to_string()))?;
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
     // When present, the exact source currently represented by SQLite must be
     // trusted before an authenticated mutation is allowed to remove it. A
     // missing source is accepted as recovery of a prior crash after the
@@ -82,7 +82,7 @@ pub async fn handle(
             &content,
             scheduler.trust_store(),
         )
-        .map_err(|e| HandlerError::Internal(e.to_string()))?;
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
         if verified.spec_hash != spec.spec_hash {
             return Err(HandlerError::Internal(
                 "schedule source changed since it was projected".to_string(),
@@ -95,7 +95,7 @@ pub async fn handle(
     let mut disabled_spec = spec.clone();
     disabled_spec.enabled = false;
     db.upsert_spec(&disabled_spec)
-        .map_err(|e| HandlerError::Internal(e.to_string()))?;
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
     // Publish the fail-closed state before any fallible history work. The
     // timer may have cached the old enabled row, and must not dispatch it if a
     // purge fails after this point.
@@ -113,9 +113,9 @@ pub async fn handle(
         let fires_root = runtime_state_dir.join("schedules");
         let fires_dir = fires_root.join(&req.schedule_id);
         db.drain_fire_outbox(&runtime_state_dir)
-            .map_err(|e| HandlerError::Internal(e.to_string()))?;
+            .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
         db.begin_fire_retention()
-            .map_err(|e| HandlerError::Internal(e.to_string()))?;
+            .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
         let purge_result = (|| -> anyhow::Result<()> {
             match std::fs::symlink_metadata(&fires_root) {
                 Ok(metadata)
@@ -152,7 +152,7 @@ pub async fn handle(
                 Ok(())
             })();
             return Err(HandlerError::Internal(match repair {
-                Ok(()) => error.to_string(),
+                Ok(()) => format!("{error:#}"),
                 Err(repair_error) => {
                     format!("{error:#}; scheduler fire projection repair failed: {repair_error:#}")
                 }
@@ -163,10 +163,10 @@ pub async fn handle(
     if let Some(file) = source_file.as_ref() {
         schedules_directory
             .remove_if_same(source_name, file)
-            .map_err(|e| HandlerError::Internal(e.to_string()))?;
+            .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
     }
     db.delete_spec(&req.schedule_id)
-        .map_err(|e| HandlerError::Internal(e.to_string()))?;
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
 
     // Ping timer loop
     scheduler.notify_reload(Some(req.schedule_id.clone()));

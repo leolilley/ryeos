@@ -354,7 +354,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     let _permit = state
         .write_barrier
         .acquire_with_timeout(ryeos_app::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
-        .map_err(|e| anyhow::anyhow!("cannot acquire CAS write permit: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("cannot acquire CAS write permit: {e:#}"))?;
     let recovery = authority.require_recovery()?;
     let canonical_project_path =
         ryeos_executor::execution::project_source::canonical_project_ref(&req.project_path)

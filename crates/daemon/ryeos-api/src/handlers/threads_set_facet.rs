@@ -38,7 +38,7 @@ pub async fn handle(
     let thread = state
         .state_store
         .get_thread(&req.thread_id)
-        .map_err(|e| HandlerError::Internal(e.to_string()))?
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?
         .ok_or(HandlerError::NotFound)?;
     ctx.require_owner(thread.requested_by.as_deref())?;
 
@@ -64,7 +64,7 @@ pub async fn handle(
                 payload: json!({ "key": req.key, "value": req.value }),
             },
         })
-        .map_err(|e| HandlerError::Internal(e.to_string()))?;
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
 
     serde_json::to_value(record).map_err(|e| HandlerError::Internal(e.to_string()))
 }

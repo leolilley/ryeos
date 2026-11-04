@@ -629,7 +629,7 @@ fn validate_handler_source(source_ref: &str, route_id: &str) -> Result<String, R
         RouteConfigError::InvalidSourceConfig {
             id: route_id.into(),
             src: source_ref.into(),
-            reason: err.to_string(),
+            reason: format!("{err:#}"),
         }
     })?;
     Ok(bundle_id)

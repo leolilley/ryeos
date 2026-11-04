@@ -73,7 +73,7 @@ impl CompiledRouteInvocation for CompiledLaunchInvocation {
             ))
         })?;
         let product_selections = ryeos_state::external_content::products::composition::canonicalize_product_selection_inputs(product_selections)
-        .map_err(|error| RouteDispatchError::BadRequest(error.to_string()))?;
+        .map_err(|error| RouteDispatchError::BadRequest(format!("{error:#}")))?;
         if !product_selections.is_empty() && ctx.principal.is_none() {
             return Err(RouteDispatchError::BadRequest(
                 "product selectors require a configured local caller authority".to_string(),
@@ -114,7 +114,7 @@ impl CompiledRouteInvocation for CompiledLaunchInvocation {
 
         let thread_id = ryeos_app::thread_lifecycle::new_thread_id();
         ryeos_app::execution_policy::authorize_standard_local_live_execution(&principal_scopes)
-            .map_err(|error| RouteDispatchError::Forbidden(error.to_string()))?;
+            .map_err(|error| RouteDispatchError::Forbidden(format!("{error:#}")))?;
         let mut project_ctx = ryeos_executor::execution::project_source::resolve_project_context(
             &ctx.state,
             &ryeos_executor::execution::project_source::ProjectSource::LiveFs,
@@ -136,13 +136,13 @@ impl CompiledRouteInvocation for CompiledLaunchInvocation {
                 principal_scopes.clone(),
                 &ctx.state.isolation,
             )
-            .map_err(|error| RouteDispatchError::BadRequest(error.to_string()))?;
+            .map_err(|error| RouteDispatchError::BadRequest(format!("{error:#}")))?;
         let launch_provenance = ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
             project_ctx.effective_path.clone(),
             project_ctx.request_engine.clone(),
             resolved_authority.project.clone(),
         )
-        .map_err(|error| RouteDispatchError::BadRequest(error.to_string()))?;
+        .map_err(|error| RouteDispatchError::BadRequest(format!("{error:#}")))?;
 
         let preflight = crate::routes::launch::preflight_dispatch_launch(
             &ctx.state,

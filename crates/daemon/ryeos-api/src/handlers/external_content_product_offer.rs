@@ -209,7 +209,7 @@ fn stage_offer(
     let _permit = state
         .write_barrier
         .acquire_with_timeout(ryeos_app::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
-        .map_err(|error| anyhow::anyhow!("cannot acquire product offer write permit: {error}"))?;
+        .map_err(|error| anyhow::anyhow!("cannot acquire product offer write permit: {error:#}"))?;
     let recovery = pinned.require_recovery()?;
     let digest = stage_request_digest(
         &req.witness_hash,

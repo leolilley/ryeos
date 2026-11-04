@@ -27,17 +27,17 @@ pub async fn handle(
     state: Arc<AppState>,
 ) -> Result<Value, HandlerError> {
     let scheduler = crate::api_state::selected_scheduler(state.as_ref())
-        .map_err(|e| HandlerError::Internal(e.to_string()))?;
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
     let _mutation_guard = scheduler
         .acquire_mutation()
         .await
-        .map_err(|e| HandlerError::Internal(e.to_string()))?;
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
     let scheduler_db = scheduler.scheduler_db();
     ryeos_scheduler_contract::validate_schedule_id(&req.schedule_id)
-        .map_err(|e| HandlerError::BadRequest(e.to_string()))?;
+        .map_err(|e| HandlerError::BadRequest(format!("{e:#}")))?;
     let spec = scheduler_db
         .get_spec(&req.schedule_id)
-        .map_err(|e| HandlerError::Internal(e.to_string()))?
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?
         .ok_or(HandlerError::NotFound)?;
 
     // Same operator carve-out as scheduler_pause: node-owned schedules are
@@ -51,7 +51,7 @@ pub async fn handle(
 
     if spec.enabled {
         super::scheduler_register::verify_schedule_enabled(&scheduler, &spec, true)
-            .map_err(|e| HandlerError::Internal(e.to_string()))?;
+            .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
         return Ok(serde_json::json!({
             "schedule_id": req.schedule_id,
             "enabled": true,
@@ -59,10 +59,10 @@ pub async fn handle(
     }
 
     let rec = super::scheduler_register::rewrite_schedule_enabled(&scheduler, &spec, true)
-        .map_err(|e| HandlerError::Internal(e.to_string()))?;
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
     scheduler_db
         .upsert_spec(&rec)
-        .map_err(|e| HandlerError::Internal(e.to_string()))?;
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
 
     scheduler.notify_reload(Some(req.schedule_id.clone()));
 

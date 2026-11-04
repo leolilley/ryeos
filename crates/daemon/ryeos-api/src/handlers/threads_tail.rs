@@ -50,7 +50,7 @@ pub async fn handle(
     let thread = state
         .threads
         .get_thread_view(&req.thread_id)
-        .map_err(|e| HandlerError::Internal(e.to_string()))?;
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
     let Some(view) = thread else {
         // Mirror threads.get: null (not 403) for an unknown thread avoids
         // leaking existence to a non-owner.

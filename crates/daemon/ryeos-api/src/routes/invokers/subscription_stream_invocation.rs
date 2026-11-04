@@ -54,7 +54,7 @@ impl CompiledRouteInvocation for CompiledSubscriptionStreamInvocation {
             .state
             .state_store
             .get_thread(&thread_id)
-            .map_err(|e| RouteDispatchError::Internal(e.to_string()))?
+            .map_err(|e| RouteDispatchError::Internal(format!("{e:#}")))?
             .ok_or(RouteDispatchError::NotFound)?;
 
         let requested_by = match &thread_detail.requested_by {
@@ -96,7 +96,7 @@ impl CompiledRouteInvocation for CompiledSubscriptionStreamInvocation {
                     after_chain_seq: last_seen,
                     limit: replay_batch_size,
                 })
-                .map_err(|e| RouteDispatchError::Internal(e.to_string()));
+                .map_err(|e| RouteDispatchError::Internal(format!("{e:#}")));
 
             match replay_result {
                 Ok(result) => {
@@ -143,7 +143,7 @@ impl CompiledRouteInvocation for CompiledSubscriptionStreamInvocation {
                                 cursor = page_result.next_cursor;
                             }
                             Err(e) => {
-                                yield Ok(error_envelope("replay_paging_failed", &format!("replay paging failed: {e}")));
+                                yield Ok(error_envelope("replay_paging_failed", &format!("replay paging failed: {e:#}")));
                                 return;
                             }
                         }
@@ -210,7 +210,7 @@ impl CompiledRouteInvocation for CompiledSubscriptionStreamInvocation {
                                             }
                                         }
                                         Err(e) => {
-                                            lag_error = Some(format!("replay failed: {e}"));
+                                            lag_error = Some(format!("replay failed: {e:#}"));
                                             break;
                                         }
                                     }

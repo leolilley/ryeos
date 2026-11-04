@@ -81,7 +81,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     let _permit = state
         .write_barrier
         .acquire_with_timeout(ryeos_app::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
-        .map_err(|e| anyhow!("cannot acquire CAS write permit: {e}"))?;
+        .map_err(|e| anyhow!("cannot acquire CAS write permit: {e:#}"))?;
 
     if let Some(admitted_target) = stage.admitted_target_hash() {
         if admitted_target != req.snapshot_hash {
@@ -208,7 +208,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         }?;
     }
     if let Err(error) = stage.finish_admitted(&cas_guard, &req.snapshot_hash) {
-        tracing::warn!(%error, staging_id = %req.staging_id, "HEAD published but the durable upload receipt was not persisted; the active stage remains retryable");
+        tracing::warn!(error = %format!("{error:#}"), staging_id = %req.staging_id, "HEAD published but the durable upload receipt was not persisted; the active stage remains retryable");
     }
 
     tracing::info!(

@@ -206,7 +206,7 @@ impl CompiledResponseMode for CompiledJsonMode {
             }
             crate::handlers::objects_put::validate_raw_object_put_request(&ctx.body_raw).map_err(
                 |error| {
-                    RouteDispatchError::BadRequest(format!("invalid objects.put body: {error}"))
+                    RouteDispatchError::BadRequest(format!("invalid objects.put body: {error:#}"))
                 },
             )?;
         }
