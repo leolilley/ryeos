@@ -1996,7 +1996,15 @@ impl PidNamespaceBinding {
     fn wait_empty(&self, timeout: Duration) -> Result<(), String> {
         match &self.init {
             None => Ok(()),
-            Some(init) => init.wait_for_exit(timeout),
+            // Callers distinguish "still settling" from failure by this
+            // phrase, shared with every other scope backend.
+            Some(init) => init.wait_for_exit(timeout).map_err(|error| {
+                if error.contains("did not exit before deadline") {
+                    "PID namespace did not settle before deadline".to_owned()
+                } else {
+                    error
+                }
+            }),
         }
     }
 
@@ -2074,6 +2082,14 @@ impl ProcessScope {
             ),
             launch_available: true,
         }
+    }
+
+    /// Whether terminating this scope also ends the launcher (wrapper) that
+    /// spawned the contained tree. A cgroup scope holds the launcher; a
+    /// PID-namespace init holds only the target's descendants, so the
+    /// launcher's own process group is still cleaned by its owner.
+    pub(crate) fn contains_launcher(&self) -> bool {
+        !self.is_pid_namespace_init()
     }
 
     /// Whether this containment is the PID-namespace init mechanism rather
@@ -3241,6 +3257,19 @@ mod pid_namespace_containment {
         assert!(scope.is_empty().unwrap());
         scope.terminate_and_wait(Duration::from_secs(1)).unwrap();
         scope.wait_empty(Duration::from_secs(1)).unwrap();
+    }
+
+    #[test]
+    fn a_held_target_that_is_not_a_namespace_init_never_binds() {
+        // This process shares the caller's PID namespace, so it cannot be a
+        // private namespace's init; the held launch must refuse and stay
+        // unbound rather than retain a containment it does not have.
+        let scope = ProcessScope::pid_namespace_init();
+        let error = scope
+            .require_held_member(std::process::id(), Duration::from_secs(1))
+            .unwrap_err();
+        assert!(!error.is_empty());
+        assert!(scope.bound_recovery().is_none());
     }
 
     #[test]

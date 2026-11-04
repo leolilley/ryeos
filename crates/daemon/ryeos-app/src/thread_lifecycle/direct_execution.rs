@@ -1869,11 +1869,17 @@ impl PreparedItemPlan {
                 ryeos_engine::isolation::IsolationProjectAuthority::RuntimeWorkspace
             }
         };
+        // A state root is session-private authority. It belongs to a runtime
+        // workspace, or to a dedicated execution whose descendants are held by
+        // its own retained PID-namespace init (captured-execution scratch).
         if state_root.is_some()
             && !matches!(
                 workspace_authority,
                 PersistentSessionWorkspaceAuthority::RuntimeWorkspace
             )
+            && !process_scope
+                .as_ref()
+                .is_some_and(lillux::ProcessScope::is_pid_namespace_init)
         {
             bail!("persistent-session state root requires runtime-workspace authority");
         }

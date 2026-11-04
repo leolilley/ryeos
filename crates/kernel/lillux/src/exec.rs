@@ -8128,9 +8128,12 @@ impl RunningProcess {
     /// Returns the wrapper PID that owns the group.
     pub fn kill_retained_group_before_exit(&self) -> u32 {
         if let Some(scope) = &self.process_scope {
-            // A selected scope never degrades to numeric group signalling.
+            // A selected scope never degrades to numeric group signalling
+            // for the tree it contains.
             let _ = scope.terminate_and_wait(ATTACHMENT_ABORT_SETTLE_TIMEOUT);
-            return self.wrapper_pid;
+            if scope.contains_launcher() {
+                return self.wrapper_pid;
+            }
         }
         #[cfg(unix)]
         kill_owned_process_group(self.wrapper_pid, self.wrapper_pgid, !self.wrapper_reaped);
@@ -8431,7 +8434,13 @@ impl RunningProcess {
             self.groups_terminated = self.scope_cleanup_error.is_none();
             // An explicitly selected scope never degrades to numeric group
             // cleanup. Retain failed scope evidence for the durable owner.
-            return;
+            // A scope that does not contain the launcher (PID-namespace
+            // init) has settled only the target's tree; with its init gone,
+            // the launcher's own group is then cleaned below.
+            if self.scope_cleanup_error.is_some() || scope.contains_launcher() {
+                return;
+            }
+            self.groups_terminated = false;
         }
         #[cfg(unix)]
         {
@@ -8480,7 +8489,11 @@ impl RunningProcess {
             return Err(format!("execution scope cleanup remains unproved: {error}"));
         }
         #[cfg(target_os = "linux")]
-        let group_result = if self.process_scope.is_some() {
+        let group_result = if self
+            .process_scope
+            .as_ref()
+            .is_some_and(crate::ProcessScope::contains_launcher)
+        {
             // The scope's completed termination includes every descendant and
             // the wrapper. Reaping remains a separate owned-child obligation.
             Ok(())

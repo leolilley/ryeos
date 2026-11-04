@@ -256,7 +256,15 @@ impl NodeCapabilityReport {
             inputs.host_runtime_provider,
             host.gvisor(),
         );
-        add_pid_namespace_containment(&mut view, inputs.isolation, host.gvisor());
+        add_pid_namespace_containment(
+            &mut view,
+            &inputs
+                .isolation
+                .process_scope_readiness
+                .descendant_containment
+                .pid_namespace,
+            host.gvisor(),
+        );
         add_provider_environment(&mut view, inputs.provider_environment);
         add_credential_home(&mut view, &credential_home, established.as_deref());
         let mut capacity = BTreeMap::new();
@@ -660,13 +668,9 @@ fn add_scope_capabilities(
 /// provided: namespace membership is not an atomic writer freeze.
 fn add_pid_namespace_containment(
     view: &mut HostCapabilities,
-    isolation: &ryeos_engine::isolation::IsolationInspection,
+    containment: &ryeos_engine::isolation::PidNamespaceContainmentQualification,
     gvisor: bool,
 ) {
-    let containment = &isolation
-        .process_scope_readiness
-        .descendant_containment
-        .pid_namespace;
     let source = if gvisor {
         ProofSource::ProviderAttested
     } else {
@@ -1107,6 +1111,56 @@ mod tests {
         let admitted = match_floor(std::slice::from_ref(&either), &keyed);
         assert_eq!(admitted.met_by[&either.label()].name, SECRETS_PROVIDER_ENV);
         assert!(!match_floor(std::slice::from_ref(&either), &bounded).admitted);
+    }
+
+    #[test]
+    fn pid_namespace_containment_is_reported_from_its_probe_and_never_as_quiescence() {
+        use ryeos_engine::isolation::PidNamespaceContainmentQualification as Probe;
+        let mut passed = view(&["time"], &[]);
+        add_pid_namespace_containment(
+            &mut passed,
+            &Probe {
+                qualified: true,
+                detail: "probed".to_owned(),
+            },
+            false,
+        );
+        for name in [PID_NAMESPACE_TERMINATION, PID_NAMESPACE_RECOVERY] {
+            let evidence = &passed.provided[name];
+            assert_eq!(evidence.source, ProofSource::Measured);
+            assert_eq!(evidence.provider, "pid_namespace_init");
+        }
+        assert!(passed.missing[PID_NAMESPACE_QUIESCENCE].contains("cannot freeze"));
+        // Under gVisor the kernel answer is emulated: provider-attested only.
+        let mut emulated = view(&["time"], &[]);
+        add_pid_namespace_containment(
+            &mut emulated,
+            &Probe {
+                qualified: true,
+                detail: "probed".to_owned(),
+            },
+            true,
+        );
+        assert_eq!(
+            emulated.provided[PID_NAMESPACE_TERMINATION].source,
+            ProofSource::ProviderAttested
+        );
+        // A floor accepting measured proof is met by a passed probe only.
+        let floor = floor(&[PID_NAMESPACE_TERMINATION, PID_NAMESPACE_RECOVERY]);
+        assert!(match_floor(&floor, &passed).admitted);
+        assert!(!match_floor(&floor, &emulated).admitted);
+        let mut failed = view(&["time"], &[]);
+        add_pid_namespace_containment(
+            &mut failed,
+            &Probe::not_probed("user namespaces refused"),
+            false,
+        );
+        assert!(failed.provided.get(PID_NAMESPACE_TERMINATION).is_none());
+        assert_eq!(
+            failed.missing[PID_NAMESPACE_TERMINATION],
+            "user namespaces refused"
+        );
+        assert!(!match_floor(&floor, &failed).admitted);
     }
 
     #[cfg(target_os = "linux")]

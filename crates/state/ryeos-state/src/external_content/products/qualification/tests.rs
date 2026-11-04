@@ -821,6 +821,42 @@ fn signed_policy_distinguishes_scope_from_trusted_process_group_settlement() {
 }
 
 #[test]
+fn containment_empty_settlement_is_ordered_between_the_trusted_group_and_a_scope() {
+    use VerifierProcessSettlementAuthority::{ContainmentEmpty, ScopeEmpty, TrustedProcessGroupAbsent};
+    // (observed, minimum, accepted)
+    for (observed, minimum, accepted) in [
+        (ScopeEmpty, ScopeEmpty, true),
+        (ScopeEmpty, ContainmentEmpty, true),
+        (ScopeEmpty, TrustedProcessGroupAbsent, true),
+        (ContainmentEmpty, ScopeEmpty, false),
+        (ContainmentEmpty, ContainmentEmpty, true),
+        (ContainmentEmpty, TrustedProcessGroupAbsent, true),
+        (TrustedProcessGroupAbsent, ScopeEmpty, false),
+        (TrustedProcessGroupAbsent, ContainmentEmpty, false),
+        (TrustedProcessGroupAbsent, TrustedProcessGroupAbsent, true),
+    ] {
+        assert_eq!(
+            observed.satisfies(minimum),
+            accepted,
+            "{observed:?} against minimum {minimum:?}"
+        );
+    }
+    // The counterpart is data: a signed policy names it by its wire value.
+    assert_eq!(
+        serde_json::to_value(ContainmentEmpty).unwrap(),
+        json!("containment_empty")
+    );
+    let mut policy_wire = serde_json::to_value(policy()).unwrap();
+    policy_wire["minimum_verifier_process_settlement"] = json!("containment_empty");
+    assert_eq!(
+        ProductQualificationPolicy::from_value(&policy_wire)
+            .unwrap()
+            .minimum_verifier_process_settlement,
+        ContainmentEmpty
+    );
+}
+
+#[test]
 fn execution_proof_requires_exact_bounded_participants_and_contract_identity() {
     let direct = evidence();
     let mut wire = serde_json::to_value(&direct).unwrap();
