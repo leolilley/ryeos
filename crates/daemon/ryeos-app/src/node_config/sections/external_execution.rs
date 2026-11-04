@@ -1043,7 +1043,7 @@ impl RetainedExternalExecutionBinding {
                 configuration_adapter_artifact_bytes,
                 connector_artifact_hash,
                 connector_artifact_bytes,
-                relay_scope_setting: None,
+                relay_scope_setting: transport.relay_scope_setting,
             },
             limits: compose::ComposeLimits {
                 max_active: 1,
@@ -1118,6 +1118,9 @@ impl std::fmt::Debug for InstalledExternalExecutionBinding {
 pub struct ComposedTestTransport {
     pub selection: ExternalControllerTransportSelection,
     pub network_inputs: ExternalNetworkInputPolicy,
+    /// The adapter-settings key a file-relay selection's workspace scope is
+    /// carried under, as the adapter's signed declaration states it.
+    pub relay_scope_setting: Option<String>,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -1126,6 +1129,7 @@ impl From<ExternalControllerTransportContract> for ComposedTestTransport {
         Self {
             network_inputs: contract.network_inputs.clone(),
             selection: contract.into(),
+            relay_scope_setting: None,
         }
     }
 }
