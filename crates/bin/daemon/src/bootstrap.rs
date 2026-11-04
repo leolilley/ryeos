@@ -623,9 +623,11 @@ pub fn load_node_config_two_phase(
     Arc<NodePolicySnapshot>,
     Arc<ryeos_engine::isolation::IsolationRuntime>,
 )> {
+    // Isolation pins the callback-only socket: a sandboxed tool is shown that
+    // endpoint and never the operator control socket.
     load_node_config_two_phase_with_socket(
         config,
-        Some(&config.uds_path),
+        Some(&config.runtime_uds_path()),
         None,
         provider_environment,
     )
@@ -645,9 +647,11 @@ pub fn load_node_config_two_phase_with_host_runtime(
     Arc<NodePolicySnapshot>,
     Arc<ryeos_engine::isolation::IsolationRuntime>,
 )> {
+    // Isolation pins the callback-only socket: a sandboxed tool is shown that
+    // endpoint and never the operator control socket.
     load_node_config_two_phase_with_socket(
         config,
-        Some(&config.uds_path),
+        Some(&config.runtime_uds_path()),
         host_runtime,
         provider_environment,
     )

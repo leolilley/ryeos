@@ -1506,15 +1506,15 @@ fn run_signed_worker_admission_on(
         // and call back over its socket. The admission under test keeps the
         // engine isolation installed above.
         let admission_isolation = state.isolation.clone();
-        std::fs::create_dir_all(state.config.uds_path.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(state.config.runtime_uds_path().parent().unwrap()).unwrap();
         let _daemon_socket = {
             let _enter = runtime_host.enter();
-            tokio::net::UnixListener::bind(&state.config.uds_path)
+            tokio::net::UnixListener::bind(&state.config.runtime_uds_path())
                 .unwrap_or_else(|error| panic!("bind daemon socket: {error}"))
         };
         state.isolation = ryeos_node_runtime::engine_init::load_test_daemon_execution_isolation(
             root.path(),
-            &state.config.uds_path,
+            &state.config.runtime_uds_path(),
             &daemon_isolation_roots(),
             &ryeos_engine::test_support::live_trust_store(),
             composed_isolation_policy(),
@@ -3883,8 +3883,8 @@ async fn run_production_tls_candidate(
         )
         .unwrap();
     std::fs::create_dir_all(state.config.runtime_root().trusted_keys_dir()).unwrap();
-    std::fs::create_dir_all(state.config.uds_path.parent().unwrap()).unwrap();
-    let uds_listener = tokio::net::UnixListener::bind(&state.config.uds_path).unwrap();
+    std::fs::create_dir_all(state.config.runtime_uds_path().parent().unwrap()).unwrap();
+    let uds_listener = tokio::net::UnixListener::bind(&state.config.runtime_uds_path()).unwrap();
     let (candidate_authoring_bundle, authored_profile) = write_candidate_authoring_bundle(
         fixture_repository_source_root(),
         root.path(),
@@ -3952,7 +3952,7 @@ async fn run_production_tls_candidate(
     let trust = ryeos_engine::test_support::live_trust_store();
     state.isolation = ryeos_node_runtime::engine_init::load_test_daemon_execution_isolation(
         root.path(),
-        &state.config.uds_path,
+        &state.config.runtime_uds_path(),
         &daemon_isolation_roots(),
         &trust,
         isolation_policy,
@@ -4098,7 +4098,7 @@ async fn run_production_tls_candidate(
         );
         state.isolation = ryeos_node_runtime::engine_init::load_test_daemon_execution_isolation(
             root.path(),
-            &state.config.uds_path,
+            &state.config.runtime_uds_path(),
             &daemon_isolation_roots(),
             &trust,
             hosted_policy,
