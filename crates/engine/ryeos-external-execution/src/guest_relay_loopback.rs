@@ -270,7 +270,11 @@ impl GuestRelayLoopbackHost {
                     };
                 }
                 Some(Ok(GuestOwnerTerminal::Refused(step))) => {
-                    return GuestOwnerActivationReport::Refused { step, last_phase };
+                    return GuestOwnerActivationReport::Refused {
+                        step,
+                        last_phase,
+                        detail: self.owner_report.refusal_detail().map(str::to_owned),
+                    };
                 }
                 Some(Err(())) => return GuestOwnerActivationReport::MalformedReport { last_phase },
                 None => {}

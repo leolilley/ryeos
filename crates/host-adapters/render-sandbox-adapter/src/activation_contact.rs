@@ -106,6 +106,7 @@ fn observe_owner_report(
                         return GuestOwnerActivationReport::Refused {
                             step,
                             last_phase: stdout.last_phase(),
+                            detail: stdout.refusal_detail().map(str::to_owned),
                         };
                     }
                     Err(_) => {
@@ -807,7 +808,8 @@ mod tests {
             ])),
             GuestOwnerActivationReport::Refused {
                 step: Step::Install,
-                last_phase: Some(Step::Install)
+                last_phase: Some(Step::Install),
+                detail: None,
             }
         );
         assert_eq!(

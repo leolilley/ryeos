@@ -124,6 +124,12 @@ impl std::error::Error for GuestOwnerStep {}
 /// classified where it was created keeps that step.
 pub trait RefusedAt<T> {
     fn refused_at(self, step: GuestOwnerStep) -> Result<T>;
+
+    /// As [`RefusedAt::refused_at`], and the error's own text is vouched for
+    /// as free of private paths and secrets, so the refusal line may carry it
+    /// (bounded and sanitized) beside the closed step word. A site opts in:
+    /// no other error text ever leaves the guest.
+    fn refused_with_detail(self, step: GuestOwnerStep) -> Result<T>;
 }
 
 impl<T> RefusedAt<T> for Result<T> {
@@ -135,6 +141,39 @@ impl<T> RefusedAt<T> for Result<T> {
                 error.context(step)
             }
         })
+    }
+
+    fn refused_with_detail(self, step: GuestOwnerStep) -> Result<T> {
+        self.map_err(|error| {
+            if error.downcast_ref::<GuestOwnerStep>().is_some() {
+                error
+            } else {
+                let detail = GuestRefusalDetail(format!("{error:#}"));
+                error.context(detail).context(step)
+            }
+        })
+    }
+}
+
+/// The text of a refusal whose site vouched for it (see
+/// [`RefusedAt::refused_with_detail`]). For logs and error display only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuestRefusalDetail(pub String);
+
+impl fmt::Display for GuestRefusalDetail {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for GuestRefusalDetail {}
+
+impl GuestRefusalDetail {
+    /// The vouched text attached to an error, if its site attached one.
+    pub fn of(error: &anyhow::Error) -> Option<&str> {
+        error
+            .downcast_ref::<Self>()
+            .map(|detail| detail.0.as_str())
     }
 }
 
@@ -252,6 +291,30 @@ impl fmt::Display for GuestClockReport {
     }
 }
 
+/// The guest's own text reduced to a bounded printable tail: invalid UTF-8 is
+/// replaced, control characters never survive (a newline becomes a visible
+/// separator), and only the last bytes within the bound are kept. The result
+/// is untrusted text for logs and error display; nothing may act on it.
+pub fn sanitized_tail(raw: &[u8]) -> String {
+    const OMITTED: &str = "\u{2026}";
+    let mut text = String::new();
+    for character in String::from_utf8_lossy(raw).trim_end().chars() {
+        match character {
+            '\n' => text.push_str(" | "),
+            character if character.is_control() => text.push('?'),
+            character => text.push(character),
+        }
+    }
+    if text.len() > MAX_GUEST_SUPERVISOR_STDERR_TAIL_BYTES {
+        let mut start = text.len() - (MAX_GUEST_SUPERVISOR_STDERR_TAIL_BYTES - OMITTED.len());
+        while !text.is_char_boundary(start) {
+            start += 1;
+        }
+        text = format!("{OMITTED}{}", &text[start..]);
+    }
+    text
+}
+
 /// The released supervisor's end, as the owner observed it. The tail is
 /// untrusted text for logging only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -270,25 +333,9 @@ impl GuestSupervisorExit {
     /// control characters never survive (a newline becomes a visible
     /// separator), and only the last bytes within the bound are kept.
     pub fn from_raw_tail(status: GuestSupervisorStatus, raw: &[u8]) -> Self {
-        const OMITTED: &str = "\u{2026}";
-        let mut text = String::new();
-        for character in String::from_utf8_lossy(raw).trim_end().chars() {
-            match character {
-                '\n' => text.push_str(" | "),
-                character if character.is_control() => text.push('?'),
-                character => text.push(character),
-            }
-        }
-        if text.len() > MAX_GUEST_SUPERVISOR_STDERR_TAIL_BYTES {
-            let mut start = text.len() - (MAX_GUEST_SUPERVISOR_STDERR_TAIL_BYTES - OMITTED.len());
-            while !text.is_char_boundary(start) {
-                start += 1;
-            }
-            text = format!("{OMITTED}{}", &text[start..]);
-        }
         Self {
             status,
-            stderr_tail: text,
+            stderr_tail: sanitized_tail(raw),
             clock: None,
         }
     }
@@ -369,6 +416,9 @@ pub enum GuestOwnerReport {
     Phase(GuestOwnerStep),
     Held,
     Refused(GuestOwnerStep),
+    /// A refusal with the guest's own bounded, sanitized account of why. The
+    /// detail is untrusted text for logs and error display only.
+    RefusedWithDetail(GuestOwnerStep, String),
     SupervisorExit(GuestSupervisorExit),
 }
 
@@ -376,6 +426,7 @@ const HELD_LINE: &str = r#"{"guest_owner":"held"}"#;
 const PHASE_PREFIX: &str = r#"{"guest_owner":"phase","step":""#;
 const REFUSED_PREFIX: &str = r#"{"guest_owner":"refused","step":""#;
 const EXIT_PREFIX: &str = r#"{"guest_owner":"supervisor_exit""#;
+const REFUSED_OPEN: &str = r#"{"guest_owner":"refused""#;
 const STEP_SUFFIX: &str = r#""}"#;
 
 /// The longest accepted report line other than a supervisor exit, excluding
@@ -385,10 +436,45 @@ pub const MAX_GUEST_OWNER_REPORT_LINE_BYTES: usize = 128;
 /// line; phase repeats are bounded by the owner's own interval and lifetime.
 pub const MAX_GUEST_OWNER_REPORT_LINES: u32 = 8192;
 
+#[derive(Serialize)]
+struct RefusedDetailLine<'a> {
+    guest_owner: &'static str,
+    step: GuestOwnerStep,
+    detail: &'a str,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OwnedRefusedDetailLine {
+    guest_owner: String,
+    step: GuestOwnerStep,
+    detail: String,
+}
+
 impl GuestOwnerReport {
+    /// A refusal at `step`, carrying `detail` reduced to the bounded printable
+    /// tail; a refusal with no text to carry is the plain closed-word line.
+    pub fn refused(step: GuestOwnerStep, detail: &str) -> Self {
+        let detail = sanitized_tail(detail.as_bytes());
+        if detail.is_empty() {
+            Self::Refused(step)
+        } else {
+            Self::RefusedWithDetail(step, detail)
+        }
+    }
+
     /// The exact canonical line, newline included.
     pub fn line(&self) -> String {
         match self {
+            Self::RefusedWithDetail(step, detail) => format!(
+                "{}\n",
+                serde_json::to_string(&RefusedDetailLine {
+                    guest_owner: "refused",
+                    step: *step,
+                    detail,
+                })
+                .expect("refusal line serializes")
+            ),
             Self::Phase(step) => format!("{PHASE_PREFIX}{step}{STEP_SUFFIX}\n"),
             Self::Held => format!("{HELD_LINE}\n"),
             Self::Refused(step) => format!("{REFUSED_PREFIX}{step}{STEP_SUFFIX}\n"),
@@ -402,6 +488,9 @@ impl GuestOwnerReport {
         if line.starts_with(EXIT_PREFIX) {
             return GuestSupervisorExit::parse_line(line).map(Self::SupervisorExit);
         }
+        if line.starts_with(REFUSED_OPEN) && line.len() > MAX_GUEST_OWNER_REPORT_LINE_BYTES {
+            return Self::parse_refused_with_detail(line);
+        }
         ensure!(
             line.len() <= MAX_GUEST_OWNER_REPORT_LINE_BYTES,
             "guest owner report line exceeds its bound"
@@ -414,10 +503,37 @@ impl GuestOwnerReport {
                 .and_then(|rest| rest.strip_suffix(STEP_SUFFIX))
                 .and_then(GuestOwnerStep::from_word)
         };
-        step(PHASE_PREFIX)
+        match step(PHASE_PREFIX)
             .map(Self::Phase)
             .or_else(|| step(REFUSED_PREFIX).map(Self::Refused))
-            .ok_or_else(|| anyhow::anyhow!("guest owner stdout is not an exact report line"))
+        {
+            Some(report) => Ok(report),
+            None => Self::parse_refused_with_detail(line),
+        }
+    }
+
+    /// A refusal line that carries its detail: exact canonical bytes, the
+    /// detail bounded printable text, within the supervisor-exit line bound.
+    fn parse_refused_with_detail(line: &str) -> Result<Self> {
+        ensure!(
+            line.starts_with(REFUSED_OPEN) && line.len() <= MAX_GUEST_SUPERVISOR_EXIT_LINE_BYTES,
+            "guest owner stdout is not an exact report line"
+        );
+        let parsed: OwnedRefusedDetailLine = serde_json::from_str(line)
+            .map_err(|_| anyhow::anyhow!("guest owner stdout is not an exact report line"))?;
+        ensure!(
+            parsed.guest_owner == "refused"
+                && !parsed.detail.is_empty()
+                && parsed.detail.len() <= MAX_GUEST_SUPERVISOR_STDERR_TAIL_BYTES
+                && !parsed.detail.chars().any(char::is_control),
+            "guest owner refusal detail is not bounded printable text"
+        );
+        let report = Self::RefusedWithDetail(parsed.step, parsed.detail);
+        ensure!(
+            report.line().trim_end() == line,
+            "guest owner refusal line is not canonical"
+        );
+        Ok(report)
     }
 }
 
@@ -436,6 +552,7 @@ pub struct GuestOwnerStdout {
     pending: String,
     lines: u32,
     last_phase: Option<GuestOwnerStep>,
+    refusal_detail: Option<String>,
 }
 
 impl GuestOwnerStdout {
@@ -448,13 +565,33 @@ impl GuestOwnerStdout {
         self.last_phase
     }
 
+    /// The refusing step's own bounded, sanitized account, when its terminal
+    /// line carried one. Untrusted text for logs and error display only.
+    pub fn refusal_detail(&self) -> Option<&str> {
+        self.refusal_detail.as_deref()
+    }
+
+    /// The longest the line being accumulated may grow: only a refusal that
+    /// carries its detail may exceed the closed-word report line bound.
+    fn line_limit(&self, taken: &str) -> usize {
+        let starts = |prefix: &str| {
+            let mut head = self.pending.chars().chain(taken.chars());
+            prefix.chars().all(|expected| head.next() == Some(expected))
+        };
+        if starts(REFUSED_OPEN) {
+            MAX_GUEST_SUPERVISOR_EXIT_LINE_BYTES
+        } else {
+            MAX_GUEST_OWNER_REPORT_LINE_BYTES
+        }
+    }
+
     /// Append one chunk. Returns the terminal report once its line is complete.
     pub fn push(&mut self, mut chunk: &str) -> Result<Option<GuestOwnerTerminal>> {
         loop {
             let end = chunk.find('\n');
             let taken = &chunk[..end.unwrap_or(chunk.len())];
             ensure!(
-                self.pending.len().saturating_add(taken.len()) <= MAX_GUEST_OWNER_REPORT_LINE_BYTES,
+                self.pending.len().saturating_add(taken.len()) <= self.line_limit(taken),
                 "guest owner stdout exceeds its report line bound"
             );
             self.pending.push_str(taken);
@@ -472,6 +609,10 @@ impl GuestOwnerStdout {
                 GuestOwnerReport::Phase(step) => self.last_phase = Some(step),
                 GuestOwnerReport::Held => return Ok(Some(GuestOwnerTerminal::Held)),
                 GuestOwnerReport::Refused(step) => {
+                    return Ok(Some(GuestOwnerTerminal::Refused(step)));
+                }
+                GuestOwnerReport::RefusedWithDetail(step, detail) => {
+                    self.refusal_detail = Some(detail);
                     return Ok(Some(GuestOwnerTerminal::Refused(step)));
                 }
                 GuestOwnerReport::SupervisorExit(_) => {
@@ -573,6 +714,10 @@ pub enum GuestOwnerActivationReport {
     Refused {
         step: GuestOwnerStep,
         last_phase: Option<GuestOwnerStep>,
+        /// The refusing step's own bounded, sanitized account of why: the
+        /// guest's text, for logs and error display, never authority.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
     },
     /// The run stream carried the command's exit before any terminal line.
     ExitedBeforeReport { last_phase: Option<GuestOwnerStep> },
@@ -654,6 +799,11 @@ impl fmt::Display for GuestOwnerActivationReport {
                 ClockNote(exit.clock.as_ref())
             ),
             Self::Held { .. } => formatter.write_str("guest owner held"),
+            Self::Refused {
+                step,
+                detail: Some(detail),
+                ..
+            } => write!(formatter, "guest owner refused at {step}: {detail}"),
             Self::Refused { step, .. } => write!(formatter, "guest owner refused at {step}"),
             Self::ExitedBeforeReport { .. } => {
                 write!(formatter, "guest owner {last}; exited before held")
@@ -763,6 +913,102 @@ mod tests {
     }
 
     #[test]
+    fn a_refusal_carries_a_bounded_sanitized_detail_on_one_canonical_line() {
+        let step = GuestOwnerStep::AdmissionExpired;
+        let report = GuestOwnerReport::refused(
+            step,
+            "guest clock is 94 s past the controller's guest import admission deadline;\n\
+             declared skew tolerance 60 s; guest clock trust: unsynchronized\u{1b}[0m",
+        );
+        let expected = "guest clock is 94 s past the controller's guest import admission \
+                        deadline; | declared skew tolerance 60 s; guest clock trust: unsynchronized?[0m";
+        let line = report.line();
+        assert_eq!(
+            line,
+            format!(
+                "{{\"guest_owner\":\"refused\",\"step\":\"admission_expired\",\"detail\":\"{expected}\"}}\n"
+            )
+        );
+        assert!(line.len() > MAX_GUEST_OWNER_REPORT_LINE_BYTES);
+        assert_eq!(
+            GuestOwnerReport::parse_line(line.trim_end()).unwrap(),
+            report
+        );
+        // Split anywhere, the accumulator yields the terminal and the detail.
+        for cut in [5, 40, 100, line.len() / 2, line.len() - 2] {
+            let mut stdout = GuestOwnerStdout::new();
+            assert_eq!(stdout.push(&line[..cut]).unwrap(), None);
+            assert_eq!(
+                stdout.push(&line[cut..]).unwrap(),
+                Some(GuestOwnerTerminal::Refused(step))
+            );
+            assert_eq!(stdout.refusal_detail(), Some(expected));
+        }
+        // No text to carry is the closed-word line, byte for byte.
+        assert_eq!(
+            GuestOwnerReport::refused(step, "  \n").line(),
+            GuestOwnerReport::Refused(step).line()
+        );
+        // The detail is bounded at the tail bound, keeping the last bytes.
+        let long = "x".repeat(10_000) + "END";
+        let GuestOwnerReport::RefusedWithDetail(_, detail) =
+            GuestOwnerReport::refused(step, &long)
+        else {
+            panic!("a long detail was dropped");
+        };
+        assert_eq!(detail.len(), MAX_GUEST_SUPERVISOR_STDERR_TAIL_BYTES);
+        assert!(detail.ends_with("END"));
+        let line = GuestOwnerReport::RefusedWithDetail(step, detail).line();
+        assert!(line.len() <= MAX_GUEST_SUPERVISOR_EXIT_LINE_BYTES + 1);
+        assert!(GuestOwnerReport::parse_line(line.trim_end()).is_ok());
+    }
+
+    #[test]
+    fn only_a_site_that_vouches_for_its_text_sends_it() {
+        let step = GuestOwnerStep::AdmissionExpired;
+        let plain = Err::<(), _>(anyhow::anyhow!("/private/path secret"))
+            .refused_at(step)
+            .unwrap_err();
+        assert_eq!(GuestRefusalDetail::of(&plain), None);
+        let vouched = Err::<(), _>(anyhow::anyhow!("guest clock is 94 s past"))
+            .refused_with_detail(step)
+            .unwrap_err();
+        assert_eq!(GuestOwnerStep::of(&vouched), step);
+        assert_eq!(
+            GuestRefusalDetail::of(&vouched),
+            Some("guest clock is 94 s past")
+        );
+        // An error classified earlier keeps its step and sends nothing new.
+        let earlier = Err::<(), _>(plain)
+            .refused_with_detail(GuestOwnerStep::Stage)
+            .unwrap_err();
+        assert_eq!(GuestOwnerStep::of(&earlier), step);
+        assert_eq!(GuestRefusalDetail::of(&earlier), None);
+    }
+
+    #[test]
+    fn a_refusal_detail_that_is_not_exact_bounded_text_is_refused() {
+        let prefix = r#"{"guest_owner":"refused","step":"stage","detail":"#;
+        for line in [
+            format!("{prefix}\"\"}}"),
+            format!("{prefix}\"a\\u0007b\"}}"),
+            format!("{prefix}\"a\",\"x\":1}}"),
+            format!("{prefix}\"{}\"}}", "y".repeat(5000)),
+            format!(r#"{{"guest_owner":"refused","detail":"a","step":"stage"}}"#),
+            format!(r#"{{"guest_owner":"refused","step":"unknown","detail":"a"}}"#),
+            format!("{prefix}\"a\"}} "),
+        ] {
+            assert!(GuestOwnerReport::parse_line(&line).is_err(), "{line}");
+        }
+        // An oversize line that is not a refusal keeps the closed-word bound.
+        assert!(
+            GuestOwnerStdout::new()
+                .push(&format!(r#"{{"guest_owner":"phase","step":"{}"#, "z".repeat(200)))
+                .is_err()
+        );
+    }
+
+    #[test]
     fn stdout_accumulator_refuses_garbage_and_oversize() {
         assert!(
             GuestOwnerStdout::new()
@@ -813,10 +1059,20 @@ mod tests {
         assert_eq!(
             GuestOwnerActivationReport::Refused {
                 step: GuestOwnerStep::Install,
-                last_phase: Some(GuestOwnerStep::Install)
+                last_phase: Some(GuestOwnerStep::Install),
+                detail: None,
             }
             .to_string(),
             "guest owner refused at install"
+        );
+        assert_eq!(
+            GuestOwnerActivationReport::Refused {
+                step: GuestOwnerStep::AdmissionExpired,
+                last_phase: None,
+                detail: Some("guest clock is 94 s past the deadline".into()),
+            }
+            .to_string(),
+            "guest owner refused at admission_expired: guest clock is 94 s past the deadline"
         );
         assert!(
             GuestOwnerActivationReport::ExitedBeforeReport { last_phase: None }

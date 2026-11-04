@@ -498,11 +498,13 @@ fn a_controller_clock_far_outside_the_skew_tolerance_is_refused_by_name() {
     else {
         panic!("a controller clock an hour off the guest's reached Ready");
     };
-    // What the controller can act on is the step the owner refused at; the
-    // observed difference and tolerance stay in the owner's own diagnostics.
+    // The step the owner refused at, and its own bounded account of why: the
+    // observed difference, the tolerance and what the guest knows of its clock.
     assert!(
-        message.contains("admission_expired"),
-        "the start failure does not name the owner's refusal: {message}"
+        message.contains("guest owner refused at admission_expired: guest clock is")
+            && message.contains("declared skew tolerance 60 s")
+            && message.contains("guest clock trust:"),
+        "the start failure does not carry the owner's refusal detail: {message}"
     );
     assert!(
         owner_stderr.contains("guest clock is") && owner_stderr.contains("skew tolerance"),
