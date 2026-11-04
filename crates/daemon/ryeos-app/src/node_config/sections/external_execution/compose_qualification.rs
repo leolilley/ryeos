@@ -935,7 +935,7 @@ mod tests {
         };
         let mut other_backend = facts();
         other_backend.backend = "another-backend".into();
-        assert!(compose_facts(other_backend).contains("controller file relay"));
+        assert!(compose_facts(other_backend).contains("`another-backend` is not installed"));
         let mut no_owner = facts();
         no_owner
             .settings
