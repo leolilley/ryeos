@@ -141,7 +141,7 @@ fn read_signed_project_yaml(
         .map_err(|error| invalid(format!("signed project source is not UTF-8: {error}")))?;
     let (body, canonical_header) =
         lillux::signature::strip_canonical_signature_with_envelope(&raw, "#", None, false)
-            .map_err(|error| invalid(format!("noncanonical signature envelope: {error}")))?;
+            .map_err(|error| invalid(format!("noncanonical signature envelope: {error:#}")))?;
     if canonical_header.is_none() {
         return Err(invalid(
             "project source requires a trusted signature".into(),
@@ -327,7 +327,7 @@ fn load_and_verify_config_file_with_policy(
             lillux::read_regular_file_bounded_no_follow(path, MAX_CONFIG_SOURCE_BYTES).map_err(
                 |e| EngineError::InvalidRuntimeConfig {
                     path: path.display().to_string(),
-                    reason: format!("could not read config file: {e}"),
+                    reason: format!("could not read config file: {e:#}"),
                 },
             )?,
         )

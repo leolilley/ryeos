@@ -158,7 +158,7 @@ impl VerifiedIsolationBackendCapture {
             || !adapter
                 .handle
                 .same_file_identity(&self.backend.adapter_handle)
-                .map_err(|error| refused(format!("compare retained adapter capture: {error}")))?
+                .map_err(|error| refused(format!("compare retained adapter capture: {error:#}")))?
         {
             return Err(refused(
                 "verified adapter capture differs from retained backend".into(),
@@ -190,7 +190,7 @@ impl VerifiedIsolationBackendCapture {
                     .handle
                     .same_file_identity(&self.backend.artifact_handles[role])
                     .map_err(|error| {
-                        refused(format!("compare retained artifact capture: {error}"))
+                        refused(format!("compare retained artifact capture: {error:#}"))
                     })?
             {
                 return Err(refused(

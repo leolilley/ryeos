@@ -1316,7 +1316,7 @@ impl ExecutionSchema {
         limits
             .validate()
             .map_err(|error| EngineError::SchemaLoaderError {
-                reason: error.to_string(),
+                reason: format!("{error:#}"),
             })?;
         Ok(Some(limits))
     }
@@ -1333,7 +1333,7 @@ impl ExecutionSchema {
         let invalid = |reason: String| EngineError::SchemaLoaderError { reason };
         declaration
             .validate()
-            .map_err(|error| invalid(error.to_string()))?;
+            .map_err(|error| invalid(format!("{error:#}")))?;
         let mut value = composed;
         for segment in &declaration.path {
             let object = value.as_object().ok_or_else(|| {
@@ -1349,7 +1349,7 @@ impl ExecutionSchema {
                 .map_err(|error| invalid(format!("invalid signed execution endpoint: {error}")))?;
         endpoint
             .validate()
-            .map_err(|error| invalid(error.to_string()))?;
+            .map_err(|error| invalid(format!("{error:#}")))?;
         Ok(endpoint)
     }
 
@@ -1419,7 +1419,7 @@ impl ExecutionSchema {
         let (target, current) = if declaration.request_format.is_some() {
             crate::contracts::project_current_target_data(value).map_err(|error| {
                 EngineError::SchemaLoaderError {
-                    reason: format!("invalid signed current target: {error}"),
+                    reason: format!("invalid signed current target: {error:#}"),
                 }
             })?
         } else {
@@ -1436,7 +1436,7 @@ impl ExecutionSchema {
         target
             .validate_against_limits(declaration.limits)
             .map_err(|error| EngineError::SchemaLoaderError {
-                reason: format!("invalid signed execution target: {error}"),
+                reason: format!("invalid signed execution target: {error:#}"),
             })?;
         Ok((Some(target), current))
     }
@@ -3266,7 +3266,7 @@ fn parse_execution_schema(
                 .limits
                 .validate()
                 .map_err(|error| EngineError::SchemaLoaderError {
-                    reason: format!("{display}: invalid execution.target limits: {error}"),
+                    reason: format!("{display}: invalid execution.target limits: {error:#}"),
                 })?;
             Some(declaration)
         }
@@ -3282,7 +3282,7 @@ fn parse_execution_schema(
             declaration
                 .validate()
                 .map_err(|error| EngineError::SchemaLoaderError {
-                    reason: format!("{display}: {error}"),
+                    reason: format!("{display}: {error:#}"),
                 })?;
             Some(declaration)
         }

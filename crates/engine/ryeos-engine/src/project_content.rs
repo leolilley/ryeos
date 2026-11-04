@@ -104,7 +104,7 @@ impl AuthoritativeProjectContent for ryeos_state::PinnedProjectMaterialization {
             ))
         })?;
         self.authoritative_entries_under(prefix, recursive, max_entries)
-            .map_err(|error| EngineError::Internal(error.to_string()))?
+            .map_err(|error| EngineError::Internal(format!("{error:#}")))?
             .into_iter()
             .map(|(relative_path, file)| {
                 Ok(ProjectContentEntry {
@@ -129,7 +129,7 @@ impl AuthoritativeProjectContent for ryeos_state::PinnedProjectMaterialization {
             ))
         })?;
         self.authoritative_file_bounded(relative, max_bytes)
-            .map_err(|error| EngineError::Internal(error.to_string()))
+            .map_err(|error| EngineError::Internal(format!("{error:#}")))
     }
 
     fn validates_file(
@@ -138,12 +138,12 @@ impl AuthoritativeProjectContent for ryeos_state::PinnedProjectMaterialization {
         content_hash: &str,
     ) -> Result<bool, EngineError> {
         self.validates_observed_file(&self.path().join(relative_path), content_hash)
-            .map_err(|error| EngineError::Internal(error.to_string()))
+            .map_err(|error| EngineError::Internal(format!("{error:#}")))
     }
 
     fn validates_absence(&self, relative_path: &Path) -> Result<bool, EngineError> {
         self.validates_observed_absence(&self.path().join(relative_path))
-            .map_err(|error| EngineError::Internal(error.to_string()))
+            .map_err(|error| EngineError::Internal(format!("{error:#}")))
     }
 }
 

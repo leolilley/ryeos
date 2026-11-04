@@ -42,7 +42,7 @@ impl ExternalRealizationProof {
     fn new(realized: RealizedExternalContentSet) -> Result<Self, EngineError> {
         realized
             .validate()
-            .map_err(|error| EngineError::Internal(error.to_string()))?;
+            .map_err(|error| EngineError::Internal(format!("{error:#}")))?;
         Ok(Self { realized })
     }
 

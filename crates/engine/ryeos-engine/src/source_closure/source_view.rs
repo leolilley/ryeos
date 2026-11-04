@@ -318,7 +318,7 @@ impl AuthoritativeSourceContent for DirectorySourceContent<'_> {
 }
 
 fn engine_internal(error: anyhow::Error) -> crate::error::EngineError {
-    crate::error::EngineError::Internal(error.to_string())
+    crate::error::EngineError::Internal(format!("{error:#}"))
 }
 
 #[cfg(test)]

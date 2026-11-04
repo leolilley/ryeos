@@ -100,7 +100,7 @@ fn resolve_interpreter_with_env(
                 reason,
             };
             let selected = crate::external_content::parse_realization_command_ref(&command)
-                .map_err(|error| invalid(error.to_string()))?
+                .map_err(|error| invalid(format!("{error:#}")))?
                 .ok_or_else(|| {
                     invalid("interpreter must select a realization member".to_owned())
                 })?;

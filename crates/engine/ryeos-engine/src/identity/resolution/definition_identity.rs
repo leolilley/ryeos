@@ -137,7 +137,7 @@ impl DefinitionIdentityScope {
             let wrapped = serde_json::json!({ "composed": view });
             let projected = ryeos_state::external_content::products::composition::project_resolution_product_selections_for_identity(&wrapped)
                 .map_err(|error| EffectiveDefinitionDigestError(format!(
-                    "project effective-definition product selections: {error}"
+                    "project effective-definition product selections: {error:#}"
                 )))?;
             return serde_json::from_value(projected["composed"].clone()).map_err(|error| {
                 EffectiveDefinitionDigestError(format!(
@@ -814,7 +814,7 @@ impl DefinitionDiffBuilder {
                 .map(|set| set.unwrap_or_default())
                 .map_err(|error| {
                     EffectiveDefinitionDigestError(format!(
-                        "invalid external realization identity slot: {error}"
+                        "invalid external realization identity slot: {error:#}"
                     ))
                 })
         };
@@ -879,7 +879,7 @@ impl DefinitionDiffBuilder {
                 .transpose()
                 .map_err(|error| {
                     EffectiveDefinitionDigestError(format!(
-                        "invalid effective source closure identity slot: {error}"
+                        "invalid effective source closure identity slot: {error:#}"
                     ))
                 })
         };

@@ -425,7 +425,7 @@ fn resolve_item_full_inner(
                         return Err(EngineError::ItemResolutionUnavailable {
                             canonical_ref: ref_.to_string(),
                             path,
-                            source: std::io::Error::other(error.to_string()),
+                            source: std::io::Error::other(format!("{error:#}")),
                         });
                     }
                 },

@@ -858,13 +858,13 @@ pub fn pin_key(
     let key_file = target_dir.join(&key_name);
     let directory = lillux::PinnedDirectory::open_or_create(target_dir).map_err(|error| {
         EngineError::Internal(format!(
-            "cannot establish trust dir {}: {error}",
+            "cannot establish trust dir {}: {error:#}",
             target_dir.display()
         ))
     })?;
     let _lock = directory.lock_exclusive().map_err(|error| {
         EngineError::Internal(format!(
-            "cannot lock trust dir {}: {error}",
+            "cannot lock trust dir {}: {error:#}",
             target_dir.display()
         ))
     })?;
@@ -875,14 +875,14 @@ pub fn pin_key(
         .open_pinned_regular(std::ffi::OsStr::new(&key_name), false)
         .map_err(|error| {
             EngineError::Internal(format!(
-                "cannot inspect trust key {}: {error}",
+                "cannot inspect trust key {}: {error:#}",
                 key_file.display()
             ))
         })?
     {
         let observation = existing.observation().map_err(|error| {
             EngineError::Internal(format!(
-                "cannot observe trust key {}: {error}",
+                "cannot observe trust key {}: {error:#}",
                 key_file.display()
             ))
         })?;
@@ -890,7 +890,7 @@ pub fn pin_key(
             .read_stable_bounded(&observation, MAX_TRUST_DOCUMENT_BYTES)
             .map_err(|error| {
                 EngineError::Internal(format!(
-                    "existing trust doc {} cannot be read for idempotency check: {error} — remove it manually if intentional",
+                    "existing trust doc {} cannot be read for idempotency check: {error:#} — remove it manually if intentional",
                     key_file.display()
                 ))
             })?;
@@ -923,7 +923,7 @@ pub fn pin_key(
         )
         .map_err(|e| {
             EngineError::Internal(format!(
-                "cannot publish trust key {}: {e}",
+                "cannot publish trust key {}: {e:#}",
                 key_file.display(),
             ))
         })?;

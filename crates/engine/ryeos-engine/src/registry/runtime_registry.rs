@@ -1381,7 +1381,7 @@ fn validate_launch_contract(yaml_path: &Path, yaml: &RuntimeYaml) -> Result<(), 
             |error| EngineError::RuntimeYamlInvalid {
                 path: yaml_path.to_owned(),
                 reason: format!(
-                    "launch_contract.evidence_attachments.destination_prefix is invalid: {error}"
+                    "launch_contract.evidence_attachments.destination_prefix is invalid: {error:#}"
                 ),
             },
         )?;

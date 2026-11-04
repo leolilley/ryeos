@@ -814,7 +814,7 @@ fn validate_relative_path(label: &str, value: &str) -> anyhow::Result<()> {
         anyhow::bail!("{label} exceeds {MAX_ENTRY_PATH_BYTES} bytes");
     }
     ryeos_state::objects::validate_canonical_project_relative_path(value)
-        .map_err(|error| anyhow::anyhow!("{label}: {error}"))
+        .map_err(|error| anyhow::anyhow!("{label}: {error:#}"))
 }
 
 pub(crate) fn validate_declaration_id(id: &str) -> anyhow::Result<()> {
