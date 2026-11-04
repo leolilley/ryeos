@@ -1173,7 +1173,7 @@ fn prepare_owned_workspace_after_thread_birth(
                                 launch_owner,
                                 &identity,
                             )
-                            .map_err(|error| error.to_string())
+                            .map_err(|error| format!("{error:#}"))
                     }
                     #[cfg(not(target_os = "linux"))]
                     {
@@ -1809,7 +1809,7 @@ fn post_execution_foldback(
     let permit = state
         .write_barrier
         .acquire_with_timeout(ryeos_app::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
-        .map_err(|error| anyhow::anyhow!("acquire CAS write permit for fold-back: {error}"))?;
+        .map_err(|error| anyhow::anyhow!("acquire CAS write permit for fold-back: {error:#}"))?;
 
     // Fold back changes
     let (operational_shadow_paths, output_context) =
@@ -2133,7 +2133,7 @@ fn finalize_completion(
     match finalized {
         Ok(thread) => Ok(thread),
         Err(err) => {
-            tracing::error!(error = %err, "invalid completion during finalization");
+            tracing::error!(error = %format!("{err:#}"), "invalid completion during finalization");
             Err(ExecutionCleanupFailure {
                 operation: "finalize completion",
                 operation_error: err,

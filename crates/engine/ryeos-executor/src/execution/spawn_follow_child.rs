@@ -916,7 +916,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                 // successor/complete the waiting transition.
                 tracing::error!(
                     follow_key,
-                    error = %error,
+                    error = %format!("{error:#}"),
                     "follow suspension committed but waiter transition failed; accepted for reserved reconciliation"
                 );
                 admitted.clear();
@@ -955,7 +955,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                     // parent into an error response.
                     tracing::error!(
                         follow_key,
-                        error = %error,
+                        error = %format!("{error:#}"),
                         "follow launch-window admission failed after suspension; queued for sweep"
                     );
                 }
@@ -1691,7 +1691,7 @@ fn commit_follow_child_roots(
                         &child_thread_id,
                         json!({
                             "code": "child_link_failed",
-                            "reason": error.to_string(),
+                            "reason": format!("{error:#}"),
                         }),
                     );
                     match cleanup {

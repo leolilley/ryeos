@@ -566,7 +566,7 @@ pub async fn spawn_detached_child(
                     &child_thread_id,
                     json!({
                         "code": "child_link_failed",
-                        "reason": error.to_string(),
+                        "reason": format!("{error:#}"),
                     }),
                 );
                 match cleanup {
@@ -588,7 +588,7 @@ pub async fn spawn_detached_child(
                     Err(cleanup_error) => {
                         return Err(anyhow::anyhow!(
                             "detach: record child lineage under parent {parent_thread_id}: \
-                             {error}; conditional child cleanup also failed: {cleanup_error}"
+                             {error:#}; conditional child cleanup also failed: {cleanup_error}"
                         ));
                     }
                 }
@@ -632,7 +632,7 @@ pub async fn spawn_detached_child(
                     state,
                     &child_thread_id,
                     "launch_window_enqueue_failed",
-                    &error.to_string(),
+                    &format!("{error:#}"),
                 )?;
                 return Err(error).context("detach: enqueue child in launch window");
             }

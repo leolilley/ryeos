@@ -154,7 +154,7 @@ impl Drop for ThreadLaunchClaim {
             tracing::warn!(
                 thread_id = %self.thread_id,
                 claim_id = %self.claim_id,
-                error = %error,
+                error = %format!("{error:#}"),
                 "failed to release owned thread launch claim"
             );
         }

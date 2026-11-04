@@ -1473,7 +1473,7 @@ fn prepare_runtime_launch_inputs(
     .map_err(|error| {
         preparation_error(
             "product_selection_input_invalid",
-            error.to_string(),
+            format!("{error:#}"),
             LaunchPrepareErrorClass::Caller,
         )
     })?;
@@ -1958,7 +1958,7 @@ fn finish_runtime_launch_preparation_parts(
         request.validate().map_err(|error| {
             preparation_error(
                 "workload_client_request_invalid",
-                error.to_string(),
+                format!("{error:#}"),
                 LaunchPrepareErrorClass::Internal,
             )
         })?;
@@ -1970,7 +1970,7 @@ fn finish_runtime_launch_preparation_parts(
     .map_err(|error| {
         preparation_error(
             "workload_execution_product_selection_invalid",
-            error.to_string(),
+            format!("{error:#}"),
             LaunchPrepareErrorClass::Caller,
         )
     })?;
@@ -2092,7 +2092,7 @@ fn resolve_environment_contributions(
         contribution.validate().map_err(|error| {
             preparation_error(
                 "environment_contribution_invalid",
-                format!("environment contribution `{name}` is invalid: {error}"),
+                format!("environment contribution `{name}` is invalid: {error:#}"),
                 LaunchPrepareErrorClass::Internal,
             )
         })?;
@@ -2353,7 +2353,7 @@ fn resolve_execution_dependencies(
                 preparation_error(
                     "execution_dependency_authority_invalid",
                     format!(
-                        "execution dependency `{name}` has invalid declaring authority: {error}"
+                        "execution dependency `{name}` has invalid declaring authority: {error:#}"
                     ),
                     LaunchPrepareErrorClass::Configuration,
                 )
@@ -2369,7 +2369,7 @@ fn resolve_execution_dependencies(
         .map_err(|error| {
             preparation_error(
                 "execution_dependency_declaration_invalid",
-                format!("execution dependency `{name}` authored content shape is invalid: {error}"),
+                format!("execution dependency `{name}` authored content shape is invalid: {error:#}"),
                 LaunchPrepareErrorClass::Configuration,
             )
         })?
@@ -2395,7 +2395,7 @@ fn resolve_execution_dependencies(
         dependency.validate().map_err(|error| {
             preparation_error(
                 "execution_dependency_capture_invalid",
-                format!("execution dependency `{name}` capture is invalid: {error}"),
+                format!("execution dependency `{name}` capture is invalid: {error:#}"),
                 LaunchPrepareErrorClass::Internal,
             )
         })?;
@@ -2575,7 +2575,7 @@ fn resolve_content_dependencies(
             intersect_content_policy(external_policy, source_contract).map_err(|error| {
                 preparation_error(
                     "content_dependency_kind_contract_denied",
-                    error.to_string(),
+                    format!("{error:#}"),
                     LaunchPrepareErrorClass::Configuration,
                 )
             })?;
@@ -2584,7 +2584,7 @@ fn resolve_content_dependencies(
             ryeos_engine::external_content::declaring_authority(resolution).map_err(|error| {
                 preparation_error(
                     "content_dependency_authority_invalid",
-                    format!("content dependency `{name}` has invalid declaring authority: {error}"),
+                    format!("content dependency `{name}` has invalid declaring authority: {error:#}"),
                     LaunchPrepareErrorClass::Configuration,
                 )
             })?;
@@ -2596,7 +2596,7 @@ fn resolve_content_dependencies(
         .map_err(|error| {
             preparation_error(
                 "content_dependency_declaration_invalid",
-                format!("content dependency `{name}` authored shape is invalid: {error}"),
+                format!("content dependency `{name}` authored shape is invalid: {error:#}"),
                 LaunchPrepareErrorClass::Configuration,
             )
         })?
@@ -2663,7 +2663,7 @@ fn resolve_content_dependencies(
             .map_err(|error| {
                 preparation_error(
                     "content_dependency_target_contract_missing",
-                    error.to_string(),
+                    format!("{error:#}"),
                     LaunchPrepareErrorClass::Configuration,
                 )
             })?;
@@ -2680,7 +2680,7 @@ fn resolve_content_dependencies(
         dependency.validate().map_err(|error| {
             preparation_error(
                 "content_dependency_capture_invalid",
-                format!("content dependency `{name}` capture is invalid: {error}"),
+                format!("content dependency `{name}` capture is invalid: {error:#}"),
                 LaunchPrepareErrorClass::Internal,
             )
         })?;
