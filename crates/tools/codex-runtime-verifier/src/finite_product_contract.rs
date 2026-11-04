@@ -12,9 +12,14 @@ use std::collections::BTreeMap;
 /// (captured filesystem authority) and the trusted-lane Worker (node-policy
 /// authority). The consumer policy selected by the guarantees the node holds
 /// names exactly one, and the contract's target must equal it.
-const ACCEPTED_WORKER_REFS: [&str; 2] = [
-    "worker:codex/external-hosted-authoring",
-    "worker:codex/external-hosted-authoring-trusted-lane",
+/// Each Worker variant settles its session by a different mechanism, so the
+/// settlement the checker root must reach is per variant.
+const ACCEPTED_WORKERS: [(&str, &str); 2] = [
+    ("worker:codex/external-hosted-authoring", "containment_empty"),
+    (
+        "worker:codex/external-hosted-authoring-trusted-lane",
+        "trusted_process_group_absent",
+    ),
 ];
 
 pub const MAX_FINITE_PRODUCT_CONTRACT_BYTES: usize = 8 * 1024;
@@ -94,8 +99,10 @@ impl CheckerProgramSelector {
         ensure!(
             self.max_header_bytes == 2 * 1024 * 1024
                 && self.max_response_bytes == 64 * 1024
-                && self.required_root_settlement == "scope_empty",
-            "checker safety bounds or required scope changed"
+                && ACCEPTED_WORKERS
+                    .iter()
+                    .any(|(_, settlement)| *settlement == self.required_root_settlement),
+            "checker safety bounds or required settlement changed"
         );
         for id in [&self.runtime.id, &self.code.id] {
             ensure!(
@@ -240,8 +247,11 @@ impl FiniteProductContract {
             "unsupported finite product audit_edition"
         );
         ensure!(
-            ACCEPTED_WORKER_REFS.contains(&self.target.worker_ref.as_str()),
-            "unsupported finite product target.worker_ref"
+            ACCEPTED_WORKERS.iter().any(|(worker, settlement)| {
+                *worker == self.target.worker_ref
+                    && *settlement == self.semantic_checker.required_root_settlement
+            }),
+            "unsupported finite product target.worker_ref or a checker settlement its variant does not reach"
         );
         validate_canonical_hash(
             "finite product target.profile_hash",
@@ -476,7 +486,7 @@ mod tests {
               "library_path":"lib", "prefix_path":"python"},
             "code":{"id":"checker-code", "manifest_hash":"c".repeat(64),
               "script":{"path":"checker.py", "sha256":"7817bcd3937a3661ec8cff90e0fb7d2569ce04ba05af42047be3d4708837e56b", "bytes":29534}},
-            "max_header_bytes":2097152, "max_response_bytes":65536, "required_root_settlement":"scope_empty"
+            "max_header_bytes":2097152, "max_response_bytes":65536, "required_root_settlement":"containment_empty"
           },
           "permitted_controller_services": [
             "auth-model-config",
@@ -606,7 +616,14 @@ mod tests {
         let mut variant = value();
         variant["target"]["worker_ref"] =
             json!("worker:codex/external-hosted-authoring-trusted-lane");
+        // The contained settlement does not reach the trusted Worker's variant.
+        assert!(FiniteProductContract::parse(&bytes(&variant)).is_err());
+        variant["semantic_checker"]["required_root_settlement"] =
+            json!("trusted_process_group_absent");
         assert!(FiniteProductContract::parse(&bytes(&variant)).is_ok());
+        // ... and the trusted settlement does not reach the contained Worker.
+        variant["target"]["worker_ref"] = json!("worker:codex/external-hosted-authoring");
+        assert!(FiniteProductContract::parse(&bytes(&variant)).is_err());
         let mut other = value();
         other["target"]["worker_ref"] = json!("worker:codex/hosted-authoring");
         assert!(FiniteProductContract::parse(&bytes(&other)).is_err());

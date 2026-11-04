@@ -67,7 +67,8 @@ pub enum VerifierProcessSettlementAuthority {
 }
 
 impl VerifierProcessSettlementAuthority {
-    fn satisfies(self, minimum: Self) -> bool {
+    /// Whether a settlement of this authority meets a policy or checker `minimum`.
+    pub fn satisfies(self, minimum: Self) -> bool {
         self == minimum
             || (minimum == Self::TrustedProcessGroupAbsent
                 && matches!(self, Self::ScopeEmpty | Self::ContainmentEmpty))

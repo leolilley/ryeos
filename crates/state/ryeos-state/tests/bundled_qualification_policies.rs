@@ -288,3 +288,56 @@ fn shipped_codex_variants_refuse_a_node_holding_neither_and_an_ambiguous_one() {
     attested.provide("isolation:enforced", ProofSource::ProviderAttested, "test", "held");
     assert!(variants.select(&attested).is_err());
 }
+
+#[test]
+fn each_shipped_variant_requires_one_settlement_through_its_whole_chain() {
+    use ryeos_state::external_content::products::qualification::VerifierProcessSettlementAuthority::{
+        self as Settlement, ContainmentEmpty, ScopeEmpty, TrustedProcessGroupAbsent,
+    };
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let tool = |name: &str| -> Value {
+        let path = root.join("bundles/codex/.ai/tools/codex/qualification").join(name);
+        let document: Value = serde_yaml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        serde_json::from_str(document["config"]["args"][2].as_str().unwrap()).unwrap()
+    };
+    // (policy, verifier Tool, Worker, the settlements its node can reach)
+    let chains: [(&str, &str, &str, &[Settlement]); 2] = [
+        (
+            "consumer-qualification-policy.yaml",
+            "consumer-runtime-verifier.yaml",
+            "worker:codex/external-hosted-authoring",
+            &[ContainmentEmpty, ScopeEmpty],
+        ),
+        (
+            "consumer-qualification-policy-trusted-lane.yaml",
+            "consumer-runtime-verifier-trusted-lane.yaml",
+            "worker:codex/external-hosted-authoring-trusted-lane",
+            &[TrustedProcessGroupAbsent],
+        ),
+    ];
+    let parse = |value: &Value| -> Settlement { serde_json::from_value(value.clone()).unwrap() };
+    let mut minimums = Vec::new();
+    for (policy_file, verifier, worker, reachable) in chains {
+        let policy = codex_config(policy_file, "product_qualification_policy");
+        let contract = tool(verifier);
+        assert_eq!(contract["target"]["worker_ref"], worker);
+        let policy_minimum = parse(&policy["minimum_verifier_process_settlement"]);
+        let checker_minimum = parse(&contract["semantic_checker"]["required_root_settlement"]);
+        // The policy and the checker root require the same settlement, and
+        // every settlement the variant's node can reach meets both.
+        assert_eq!(policy_minimum, checker_minimum, "{policy_file}");
+        for reached in reachable {
+            assert!(reached.satisfies(policy_minimum), "{policy_file}: {reached:?}");
+            assert!(reached.satisfies(checker_minimum), "{policy_file}: {reached:?}");
+        }
+        minimums.push((policy_minimum, reachable));
+    }
+    // A settlement from the other variant's mechanism is refused.
+    let (contained_minimum, contained) = &minimums[0];
+    let (trusted_minimum, trusted) = &minimums[1];
+    for reached in *trusted {
+        assert!(!reached.satisfies(*contained_minimum), "{reached:?}");
+    }
+    let _ = contained;
+    assert_ne!(contained_minimum, trusted_minimum);
+}

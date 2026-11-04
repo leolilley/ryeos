@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ryeos:signed:2026-11-04T04:58:11Z:16f84f3e9204f2c7f81c939026212f15d5e1a1b9dbf3b8832066132aac3772b2:VJ8ZTs7ghnxCtC3QSaNanQaQsZwtxFsnGGfkGs8UD+d5qr5keoYT1QjFtWL7FlYJxeFnbCsbzNcCf7I5MHyHBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-04T06:11:51Z:eded34fafb0ee5315fb74ed3b693bad69385b46a7779722cf8963ea447363580:KJpiuGzlT0CQ9CzbO+A45nDqqW4p2eW86lbyHYl2BjHUzIFPOM6jAhD9t+Oz+IGC9+4cqWYvh03m+3iJ8PocBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Bundle-owned conformance tests for the pinned Codex integration data."""
 
 from __future__ import annotations
@@ -1376,6 +1376,8 @@ class CodexContractTests(unittest.TestCase):
                              "protocol:ryeos/core/qualification_consumer_callback")
             contract = json.loads(verifier["config"]["args"][2])
             self.assertEqual(contract["target"]["worker_ref"], "worker:codex/" + worker_id)
+            # The checker root must reach the settlement the policy requires.
+            self.assertEqual(contract["semantic_checker"]["required_root_settlement"], settlement)
             checker = yaml.safe_load((config / "semantic-checker-code-products.yaml").read_text())
             known = {**relationships, **{
                 item["name"]: item for item in checker["product_relationships"]["relationships"]

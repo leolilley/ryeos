@@ -1,3 +1,4 @@
+# ryeos:signed:2026-11-04T06:11:51Z:c6899b777870b7b438436046ebd66e78e7ec2d7a5f0120db776174b2b90ae59c:GnH2JsWD4AeuwzvVWFTUz3BJg/q9eQzYNQgNLFw3rx6Cnguj5tJhc5zzvw07URbkm1a6oGHSZnKhPbX+OuGQCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Build the canonical finite product contract literal for the verifier Tool.
 
 The literal is the third argument of consumer-runtime-verifier.yaml. It is
@@ -106,6 +107,12 @@ FIXED = {
     "worker_ref": "worker:codex/external-hosted-authoring",
 }
 # One verifier Tool exists per qualification variant, each targeting its variant's Worker.
+# The settlement each variant's Worker session reaches, which the checker root must reach too: the contained
+# Worker settles by its containment, the trusted-lane Worker by its process group.
+SETTLEMENT_BY_WORKER = {
+    "worker:codex/external-hosted-authoring": "containment_empty",
+    "worker:codex/external-hosted-authoring-trusted-lane": "trusted_process_group_absent",
+}
 VARIANTS = {
     "contained": (
         "consumer-runtime-verifier.yaml",
@@ -207,7 +214,7 @@ def build_contract(captured: dict, tool: Path = TOOL, worker: Path = WORKER, che
             },
             "max_header_bytes": 2 * 1024 * 1024,
             "max_response_bytes": 64 * 1024,
-            "required_root_settlement": "scope_empty",
+            "required_root_settlement": SETTLEMENT_BY_WORKER[worker_ref],
         },
     }
 
