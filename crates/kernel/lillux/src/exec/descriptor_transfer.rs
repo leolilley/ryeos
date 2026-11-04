@@ -550,6 +550,15 @@ mod tests {
         (read, inherited_descriptor_path(write).unwrap())
     }
 
+    /// The device and inode behind a descriptor number, or `None` when the
+    /// number is not open. Socket inodes are never reused while the process
+    /// lives, so a different or absent identity proves the original object
+    /// was closed even if another thread has since taken the number.
+    fn descriptor_identity(fd: std::os::fd::RawFd) -> Option<(u64, u64)> {
+        let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
+        (unsafe { libc::fstat(fd, &mut stat) } == 0).then_some((stat.st_dev as u64, stat.st_ino as u64))
+    }
+
     fn assert_no_writer_leaked(mut reader: File) {
         // No process-global fd counting: EOF proves every duplicate of this
         // exact pipe's writer is closed. A leak produces nonblocking EAGAIN.
@@ -1072,6 +1081,9 @@ mod tests {
     fn receive_deadline_returns_during_quiescence_and_deferred_close_settles_queued_rights() {
         let (receiver, child) = inherited_descriptor_transfer_pair().unwrap();
         let endpoint_fd = receiver.socket.file().as_raw_fd();
+        // A descriptor number can be reused by a parallel test once closed, so
+        // closure is proved by the kernel object's identity, never the number.
+        let endpoint_identity = descriptor_identity(endpoint_fd).unwrap();
         let (mut probe, writer) = pipe_probe();
         sender(child)
             .send(
@@ -1111,8 +1123,7 @@ mod tests {
         assert!(live_during_quiescence);
         assert_eq!(queued_writer.unwrap_err().kind(), io::ErrorKind::WouldBlock);
         assert_no_writer_leaked(probe);
-        assert_eq!(unsafe { libc::fcntl(endpoint_fd, libc::F_GETFD) }, -1);
-        assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::EBADF));
+        assert_ne!(descriptor_identity(endpoint_fd), Some(endpoint_identity));
         drop(settlement);
         // Release removed the exact registration, so reuse and re-registration
         // at this coordinate cannot collide with a stale deferred owner.
