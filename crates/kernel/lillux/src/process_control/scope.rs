@@ -1785,6 +1785,12 @@ impl ProcessScopeRecovery {
         }
     }
 
+    /// Whether this record names containment by a retained PID-namespace
+    /// init rather than a cgroup scope.
+    pub fn is_pid_namespace_init(&self) -> bool {
+        matches!(self.backend, BackendRecovery::PidNamespaceInit { .. })
+    }
+
     /// Whether this containment can hold a stable tree for a workspace
     /// observation. A PID-namespace init contains and settles descendants
     /// but cannot freeze them.

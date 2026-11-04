@@ -638,7 +638,18 @@ fn direct_process_settlement(
     }
     let authority = match settlement.kind {
         crate::runtime_db::ThreadProcessSettlementKind::ReapedScopeEmpty => {
-            VerifierProcessSettlementAuthority::ScopeEmpty
+            // The settlement kind records that a whole retained containment
+            // was proved empty; the retained recovery names the mechanism.
+            if settlement
+                .process_identity
+                .process_scope
+                .as_ref()
+                .is_some_and(lillux::ProcessScopeRecovery::is_pid_namespace_init)
+            {
+                VerifierProcessSettlementAuthority::ContainmentEmpty
+            } else {
+                VerifierProcessSettlementAuthority::ScopeEmpty
+            }
         }
         crate::runtime_db::ThreadProcessSettlementKind::ReapedGroupAbsent => {
             if !state

@@ -105,6 +105,16 @@ pub struct ExecutionProcessIdentity {
 }
 
 impl ExecutionProcessIdentity {
+    /// Whether no cgroup scope retains this execution: it is either held by
+    /// the trusted process-group lane (no scope at all) or by its own retained
+    /// PID-namespace init. A cgroup scope is a different owner with different
+    /// quiescence and resource authority.
+    pub fn has_no_cgroup_scope(&self) -> bool {
+        self.process_scope
+            .as_ref()
+            .is_none_or(lillux::ProcessScopeRecovery::is_pid_namespace_init)
+    }
+
     pub fn pgid(&self) -> i64 {
         self.group_leader_pid
     }
@@ -1538,6 +1548,76 @@ mod tests {
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
     use tempfile::TempDir;
+
+    /// An identity retained by its PID-namespace init whose init no longer
+    /// exists (a PID no kernel can allocate), so settlement is decided by the
+    /// containment record rather than by any numeric group.
+    fn exited_pid_namespace_identity() -> ExecutionProcessIdentity {
+        let boot = read_boot_id().unwrap();
+        let gone = i64::from(i32::MAX) - 1;
+        serde_json::from_value(serde_json::json!({
+            "schema_version": PROCESS_IDENTITY_SCHEMA_VERSION,
+            "boot_id": boot, "target_pid": gone,
+            "target_start_time_ticks": 200, "group_leader_pid": gone,
+            "group_leader_start_time_ticks": 190,
+            "process_scope": {
+                "version": 5, "control_timeout": {"secs": 5, "nanos": 0},
+                "configuration": {"version": 3, "backend": {"implementation": "pid_namespace_init"}},
+                "backend": {
+                    "implementation": "pid_namespace_init", "boot_id": boot,
+                    "init_pid": gone, "init_start_time_ticks": 200,
+                    "namespace": {"device": 4, "inode": 9}
+                }
+            },
+            "resource_selections": [], "resource_operations": [],
+            "resource_settlement_authority": null,
+            "resource_allocation_limit": null,
+            "resource_occupancy_start": null, "resource_occupancy_limit": null,
+            "resource_cleanup_allowance_ms": null
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn pid_namespace_contained_identity_settles_through_its_containment() {
+        let identity = exited_pid_namespace_identity();
+        validate_execution_process_identity_shape(&identity).unwrap();
+        assert!(identity.has_no_cgroup_scope());
+        // Stored shape: the new backend is only a variant of the existing
+        // nullable `process_scope` field and round-trips canonically.
+        let json = lillux::canonical_json(&serde_json::to_value(&identity).unwrap()).unwrap();
+        let back: ExecutionProcessIdentity = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, identity);
+        assert_eq!(
+            lillux::canonical_json(&serde_json::to_value(&back).unwrap()).unwrap(),
+            json
+        );
+        // The init is gone, so the kernel tore the namespace down with it.
+        assert_eq!(
+            execution_group_liveness(&identity),
+            IdentityLiveness::DeadOrStale
+        );
+        assert!(!execution_alive(&identity));
+        assert_reaped_process_group_absent(&identity).unwrap();
+        let killed = kill_by_action(&identity, ShutdownAction::Hard);
+        assert!(killed.success, "{}", killed.method);
+        assert_eq!(killed.method, "scope_terminated");
+        // Containment never quiesces; the refusal names why, whatever the
+        // node qualified for cgroup scopes.
+        let qualified = lillux::ProcessScopeCapability::ALL.into_iter().collect();
+        let error = quiesce_exact_process_group(&identity, &qualified, lillux::time::Duration::from_secs(1))
+            .err()
+            .expect("PID-namespace containment cannot be frozen");
+        assert!(error.to_string().contains("cannot quiesce"), "{error:#}");
+        let error = recover_quiesced_execution(&identity, lillux::time::Duration::from_secs(1))
+            .err()
+            .expect("a lost freeze cannot be recovered on a containment that never froze");
+        assert!(error.to_string().contains("cannot quiesce"), "{error:#}");
+        // A cgroup-owned identity is a different owner.
+        let mut other = identity.clone();
+        other.process_scope = None;
+        assert!(other.has_no_cgroup_scope());
+    }
 
     fn resource_binding_bare_identity() -> ExecutionProcessIdentity {
         serde_json::from_value(serde_json::json!({

@@ -68,9 +68,12 @@ impl QualificationWorkerProcessRecord {
         }
         crate::process::validate_execution_process_identity_shape(&self.process_identity)?;
         self.provider_configuration.validate()?;
+        // Either the signed trusted process-group owner (no scope) or the
+        // enforced path's retained PID-namespace init. A cgroup scope was
+        // never allocated for a Q Worker, so it names no owner here.
         ensure!(
-            self.process_identity.process_scope.is_none(),
-            "qualification Worker requires its signed trusted process-group owner"
+            self.process_identity.has_no_cgroup_scope(),
+            "qualification Worker requires its trusted process-group owner or retained PID-namespace containment"
         );
         // Resource-financial settlement is not part of this Q-only journal.
         // Keep that authority closed until a Q resource owner is implemented.
@@ -392,7 +395,7 @@ fn require_trusted_peer_group(
     crate::process::validate_execution_process_identity_shape(worker)?;
     peer.incarnation_digest().map_err(anyhow::Error::msg)?;
     ensure!(
-        worker.process_scope.is_none()
+        worker.has_no_cgroup_scope()
             && worker.boot_id == peer.boot_id
             && worker.group_leader_pid == i64::from(peer.group_leader_pid)
             && u64::try_from(worker.group_leader_start_time_ticks).ok()

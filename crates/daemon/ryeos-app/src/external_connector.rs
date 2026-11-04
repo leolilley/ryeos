@@ -785,8 +785,8 @@ fn run_authenticated_connector(
                 "qualification connector changed its attached Worker or channel"
             );
             ensure!(
-                worker.process_identity.process_scope.is_none(),
-                "qualification connector requires its signed trusted process-group owner"
+                worker.process_identity.has_no_cgroup_scope(),
+                "qualification connector requires its trusted process-group owner or retained PID-namespace containment"
             );
             let group = u32::try_from(worker.process_identity.group_leader_pid)
                 .context("qualification connector Worker group is outside range")?;

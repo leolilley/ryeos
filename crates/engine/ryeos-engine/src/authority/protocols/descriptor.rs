@@ -115,6 +115,12 @@ pub enum PersistentSessionCleanupAuthority {
     /// disposable, single-tenant placements; it is not containment and does
     /// not imply descendant-death proof against a hostile worker.
     TrustedProcessGroup,
+    /// The node retains authority over every descendant of one dedicated
+    /// worker, including ones that leave its process group, through a
+    /// containment it has qualified and reports (a cgroup scope or the
+    /// worker's retained PID-namespace init). A declared need, answered by
+    /// reported capability; it grants no quiescence.
+    DescendantContainment,
     /// A protected external supervisor owns one exact deployment occurrence.
     /// This does not claim authority over the provider's physical host.
     ExternalPlacementIncarnation,
@@ -312,6 +318,9 @@ pub fn validate_persistent_session_protocol(
             ) | (
                 PersistentSessionProcessMode::ExclusiveSession,
                 PersistentSessionCleanupAuthority::TrustedProcessGroup
+            ) | (
+                PersistentSessionProcessMode::ExclusiveSession,
+                PersistentSessionCleanupAuthority::DescendantContainment
             ) | (
                 PersistentSessionProcessMode::ExclusiveSession,
                 PersistentSessionCleanupAuthority::ExternalPlacementIncarnation
@@ -581,6 +590,7 @@ mod tests {
         for cleanup in [
             PersistentSessionCleanupAuthority::LocalProcessScope,
             PersistentSessionCleanupAuthority::TrustedProcessGroup,
+            PersistentSessionCleanupAuthority::DescendantContainment,
             PersistentSessionCleanupAuthority::ExternalPlacementIncarnation,
         ] {
             assert!(
@@ -591,6 +601,14 @@ mod tests {
                 .is_ok()
             );
         }
+        // Descendant containment belongs to one dedicated worker, never a pool.
+        assert!(
+            validate_persistent_session_protocol(&persistent_protocol(
+                PersistentSessionProcessMode::PooledRequests,
+                PersistentSessionCleanupAuthority::DescendantContainment,
+            ))
+            .is_err()
+        );
         assert!(
             validate_persistent_session_protocol(&persistent_protocol(
                 PersistentSessionProcessMode::ExclusiveSession,

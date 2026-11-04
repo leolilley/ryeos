@@ -786,7 +786,7 @@ pub(super) fn require_local_processes_settled(
             let identity: crate::process::ExecutionProcessIdentity = serde_json::from_str(&json)?;
             ensure!(
                 phase == "terminal"
-                    && identity.process_scope.is_none()
+                    && identity.has_no_cgroup_scope()
                     && record.worker_incarnation_digest.as_deref()
                         == Some(identity.owner_incarnation_digest()?.as_str()),
                 "qualification local cleanup lost exact terminal Worker evidence"
@@ -872,7 +872,7 @@ pub(super) fn validate_local_starts(conn: &Connection) -> Result<()> {
                             | QualificationLocalStartPhase::Closed
                     ) && record.worker_incarnation_digest.as_deref()
                         == Some(identity.owner_incarnation_digest()?.as_str())
-                        && identity.process_scope.is_none(),
+                        && identity.has_no_cgroup_scope(),
                     "qualification local start lost its exact Worker attachment"
                 );
             }
@@ -898,7 +898,7 @@ pub(super) fn attach_local_worker_tx(
         current.phase == QualificationLocalStartPhase::WorkspaceReady
             && current.directory_borrow_intent.is_some()
             && current.daemon_generation_id == daemon
-            && identity.process_scope.is_none(),
+            && identity.has_no_cgroup_scope(),
         "qualification Worker changed its one-use original directory"
     );
     require_current_start(tx, &current)?;

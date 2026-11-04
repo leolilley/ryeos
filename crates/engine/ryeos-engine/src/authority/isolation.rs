@@ -10403,6 +10403,160 @@ mod tests {
         assert_eq!(destroyed.mount_identity, created.mount_identity);
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn retained_containment_selects_the_group_contract_nested_authority_and_proc_surface() {
+        let app_root = tempfile::tempdir().unwrap();
+        let mut policy = IsolationPolicy::disabled_for_authoring();
+        policy.mode = IsolationMode::Enforce;
+        policy.backend = Some(resolved_backend().selection.clone());
+        policy.filesystem.readable = vec!["{verified_code}".to_string()];
+        policy.filesystem.writable = vec!["{project}".to_string()];
+        write_policy(app_root.path(), &policy);
+        let mut backend = resolved_backend();
+        backend.effective_capabilities = BTreeSet::from([
+            IsolationCapability::FilesystemPrivateRoot,
+            IsolationCapability::FilesystemFdReadOnly,
+            IsolationCapability::FilesystemFdWritable,
+            IsolationCapability::FilesystemOrderedOverlays,
+            IsolationCapability::FilesystemFixedParentViews,
+            IsolationCapability::FilesystemPrivateTmp,
+            IsolationCapability::FilesystemPidNamespaceProc,
+            IsolationCapability::DevicesMinimal,
+            IsolationCapability::EnvironmentExact,
+            IsolationCapability::NetworkIsolated,
+            IsolationCapability::NetworkHost,
+            IsolationCapability::ProcessHostPidNamespace,
+            IsolationCapability::ProcessIsolatedPidNamespace,
+            IsolationCapability::ProcessTargetPidReporting,
+            IsolationCapability::LifecycleSharedProcessGroup,
+            IsolationCapability::ProcessNestedSandbox,
+        ]);
+        backend.declaration.capabilities = backend.effective_capabilities.clone();
+        let mut runtime =
+            IsolationRuntime::load_with_backend(app_root.path(), Some(Arc::new(backend))).unwrap();
+        // A broader node ceiling than any one launch's retained authority.
+        runtime.inspection.filesystem.proc_filesystem =
+            ryeos_isolation_protocol::IsolationProcFilesystem::PidNamespaceNested;
+        runtime.inspection.requires_capabilities = vec![
+            lillux::process_control::CapabilityRequirement::from(
+                lillux::process_control::ISOLATION_NAMESPACES,
+            ),
+        ];
+        assert!(
+            runtime.inspection.nested_sandbox(),
+            "fixture node must permit a nested sandbox so the PID-namespace case proves it is withheld"
+        );
+        let cgroup_recovery: lillux::ProcessScopeRecovery =
+            serde_json::from_value(serde_json::json!({
+                "version": 5, "control_timeout": {"secs": 1, "nanos": 0},
+                "configuration": {"version": 3, "backend": {
+                    "implementation": "linux_cgroup_v2", "parent": "/fixture/delegation"}},
+                "backend": {"implementation": "linux_cgroup_v2",
+                    "boot_id": "00000000-0000-4000-8000-000000000000",
+                    "parent": {"filesystem": {"device": 1}, "inode": 2},
+                    "directory": {"filesystem": {"device": 1}, "inode": 3},
+                    "name": "fixture-scope"}
+            }))
+            .unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let root = lillux::PinnedDirectory::open(project.path())
+            .unwrap()
+            .unwrap();
+        let root_identity = root.identity().unwrap();
+        let live_access = IsolationLiveAccessAuthority::DescriptorRootedFixedParents {
+            root: Arc::new(root),
+            root_identity,
+            denied_control_paths: ryeos_state::project_sync::live_execution_denied_control_paths()
+                .into_iter()
+                .map(PathBuf::from)
+                .collect(),
+            authorized_write_namespaces: vec!["project".to_string()],
+        };
+        let compile = |containment| {
+            let applied = runtime
+                .apply_with_provenance_current(
+                    lillux::SubprocessRequest {
+                        cmd: "/bin/true".to_string(),
+                        argv0: None,
+                        args: Vec::new(),
+                        cwd: Some(project.path().to_string_lossy().into_owned()),
+                        envs: Vec::new(),
+                        stdin_data: None,
+                        timeout: 1.0,
+                        limits: None,
+                        inherited_fds: Vec::new(),
+                        inherited_fd_mappings: Vec::new(),
+                        supervised_status: None,
+                    },
+                    IsolationLaunchContext {
+                        immutable_project: None,
+                        workspace_view: None,
+                        project_path: project.path(),
+                        project_authority: IsolationProjectAuthority::External,
+                        filesystem_authority_ceiling:
+                            IsolationFilesystemAuthorityCeiling::NodePolicy,
+                        network_authority_ceiling: IsolationNetworkAuthorityCeiling::NodePolicy,
+                        live_access: Some(&live_access),
+                        state_root: None,
+                        checkpoint_dir: None,
+                        checkpoint_authority: None,
+                        daemon_socket_path: None,
+                        bundle_roots: &[],
+                        node_trusted_keys_dir: None,
+                        verified_code: &[],
+                        verified_command: None,
+                        external_read_only_mounts: &[],
+                        writable_runtime_view_mounts: &[],
+                        producer_prepared_mounts: &[],
+                        target_channels: &[],
+                        item_ref: "tool:tests/containment",
+                        thread_id: "T-containment",
+                        verbatim_env_names: &[],
+                    },
+                    RequestedLaunchLifecycle::Run,
+                    containment,
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap();
+            let (bytes, _) = applied
+                .request
+                .inherited_fds
+                .last()
+                .unwrap()
+                .read_regular_file_stable_bounded(
+                    ryeos_isolation_protocol::MAX_REQUEST_BYTES as u64,
+                )
+                .unwrap();
+            let request: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            let plan = &request["plan"];
+            (
+                plan["shared_process_group"].as_bool().unwrap(),
+                plan["nested_sandbox"].as_bool().unwrap(),
+                plan["proc_filesystem"].as_str().unwrap().to_owned(),
+            )
+        };
+        // Strict group: the sandbox denies setsid/setpgid; no nested sandbox.
+        assert_eq!(
+            compile(RetainedContainment::Group),
+            (true, false, "pid_namespace".to_owned())
+        );
+        // Cgroup scope: retained externally, so descendants may nest sandboxes.
+        assert_eq!(
+            compile(RetainedContainment::Cgroup(&cgroup_recovery)),
+            (false, true, "pid_namespace_nested".to_owned())
+        );
+        // PID-namespace init: setsid/double-fork are permitted (no strict
+        // group), contained by the retained init; a nested sandbox would
+        // need a nested-proc ceiling this mechanism was not designed for.
+        assert_eq!(
+            compile(RetainedContainment::PidNamespaceInit),
+            (false, false, "pid_namespace".to_owned())
+        );
+    }
+
     #[test]
     fn disabled_attachment_compilation_preserves_the_distinct_request_type() {
         let app_root = tempfile::tempdir().unwrap();

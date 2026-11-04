@@ -557,13 +557,24 @@ pub(crate) fn start_external_qualification_local_worker_for_signed_request(
                 {
                     let workspace_directory =
                         owner.borrow_workspace_directory(&workspace_ready, &workspace)?;
+                    // Enforced isolation runs the Worker over the captured
+                    // scratch root (the Q workspace's own named child of the
+                    // execution root) with no backend view, retained by its
+                    // PID-namespace init. Disabled isolation keeps the
+                    // trusted lane over the private project directory.
+                    let enforced = state.isolation.is_enforced();
+                    let spawn_workspace = if enforced {
+                        std::path::PathBuf::from(&workspace_ready.workspace_root)
+                    } else {
+                        workspace_path.clone()
+                    };
                     let (prepared_environment, writable_runtime_view_mounts) =
                         super::persistent_session::prepare_retained_session_process_environment(
                             &content.process_environment,
-                            &workspace_path,
-                            Some(&workspace_directory),
+                            &spawn_workspace,
+                            (!enforced).then_some(&workspace_directory),
                             session.protocol.workspace_authority,
-                            false,
+                            enforced,
                         )?;
 
                     let boot_identity = lillux::sha256_hex(workspace_ready.launch_owner.as_bytes());
@@ -669,7 +680,7 @@ pub(crate) fn start_external_qualification_local_worker_for_signed_request(
                     lifelines.push(Box::new(workspace_directory));
                     let spawned = plan.spawn_persistent_session_held(
                         state,
-                        &workspace_path,
+                        &spawn_workspace,
                         None,
                         mounts,
                         writable_runtime_view_mounts,
@@ -685,7 +696,10 @@ pub(crate) fn start_external_qualification_local_worker_for_signed_request(
                         "qualification_local_worker",
                         &placement,
                         None,
-                        None,
+                        // Descendant containment is the Worker's own
+                        // retained PID-namespace init; there is no cgroup
+                        // allocation to journal ahead of the held spawn.
+                        enforced.then(lillux::ProcessScope::pid_namespace_init),
                         None,
                     );
                     let held = match spawned {

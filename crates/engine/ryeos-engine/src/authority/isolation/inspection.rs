@@ -454,6 +454,95 @@ mod tests {
     }
 
     #[test]
+    fn descendant_containment_is_derived_from_qualified_facts_in_a_stable_preference() {
+        let digest = || Some(format!("sha256:{}", "c".repeat(64)));
+        let qualified = || PidNamespaceContainmentQualification {
+            qualified: true,
+            detail: "probed".to_owned(),
+        };
+        let classify = |policy, caps: BTreeSet<_>, authority, pid_namespace| {
+            ProcessScopeReadiness::classify(
+                policy,
+                BTreeSet::new(),
+                false,
+                authority,
+                caps,
+                pid_namespace,
+            )
+            .descendant_containment
+        };
+        // Termination and recovery suffice for containment: a cgroup
+        // provider that did not qualify the freeze still contains.
+        let cgroup = classify(
+            required_policy(),
+            [
+                lillux::ProcessScopeCapability::Termination,
+                lillux::ProcessScopeCapability::Recovery,
+            ]
+            .into(),
+            digest(),
+            PidNamespaceContainmentQualification::not_probed("refused"),
+        );
+        assert!(cgroup.cgroup_scope && !cgroup.pid_namespace.qualified);
+        assert_eq!(
+            cgroup.enforced_guarantee(),
+            Some(DescendantContainmentGuarantee::CgroupScope)
+        );
+        // An unqualified or absent provider is never containment.
+        for (policy, caps, authority) in [
+            (
+                required_policy(),
+                [lillux::ProcessScopeCapability::Termination].into(),
+                digest(),
+            ),
+            (required_policy(), complete_capabilities(), None),
+            (
+                IsolationProcessScopePolicy::Unconfigured {},
+                complete_capabilities(),
+                digest(),
+            ),
+        ] {
+            let readiness = classify(
+                policy,
+                caps,
+                authority,
+                PidNamespaceContainmentQualification::not_probed("refused"),
+            );
+            assert!(!readiness.cgroup_scope);
+            assert_eq!(readiness.enforced_guarantee(), None);
+        }
+        // The PID-namespace init answers when no scope provider does.
+        let namespace = classify(
+            IsolationProcessScopePolicy::Unconfigured {},
+            BTreeSet::new(),
+            None,
+            qualified(),
+        );
+        assert_eq!(
+            namespace.enforced_guarantee(),
+            Some(DescendantContainmentGuarantee::PidNamespaceInit)
+        );
+        // Both qualified: the scope is preferred; the trusted lane is never
+        // a guarantee of its own.
+        let both = classify(required_policy(), complete_capabilities(), digest(), qualified());
+        assert_eq!(
+            both.enforced_guarantee(),
+            Some(DescendantContainmentGuarantee::CgroupScope)
+        );
+        let trusted_only = ProcessScopeReadiness::classify(
+            IsolationProcessScopePolicy::Unconfigured {},
+            BTreeSet::new(),
+            true,
+            None,
+            BTreeSet::new(),
+            PidNamespaceContainmentQualification::not_probed("refused"),
+        )
+        .descendant_containment;
+        assert!(trusted_only.trusted_process_group);
+        assert_eq!(trusted_only.enforced_guarantee(), None);
+    }
+
+    #[test]
     fn readiness_reason_text_matches_its_wire_value() {
         for reason in [
             ProcessControlReadinessReason::NotRequired,

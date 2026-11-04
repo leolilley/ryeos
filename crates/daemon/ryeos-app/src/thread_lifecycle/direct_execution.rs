@@ -1934,6 +1934,17 @@ impl PreparedItemPlan {
                         scope.recovery(),
                     )?
                 }
+                (Some(scope), None) if scope.is_pid_namespace_init() => {
+                    // Containment by the retained PID-namespace init has no
+                    // cgroup to carry scope-wide limits or occupancy, so it
+                    // cannot own execution resources.
+                    if !selected_resources.selections().is_empty() {
+                        bail!(
+                            "PID-namespace containment cannot own execution resources; a cgroup scope is required"
+                        );
+                    }
+                    None
+                }
                 (None, None) => {
                     prepared_scope = crate::execution_resources::prepare_process_resource_scope(
                         state,
