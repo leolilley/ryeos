@@ -33,7 +33,7 @@ pub fn validate(request: EffectiveValidateRequest) -> HandlerResponse {
                 effect_authorizations: validation.effect_authorizations,
             },
         },
-        Err(error) => invalid("invalid_effective_graph", error.to_string()),
+        Err(error) => invalid("invalid_effective_graph", format!("{error:#}")),
     }
 }
 

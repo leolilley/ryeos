@@ -211,16 +211,16 @@ fn prepare_inner(
                 relationships,
             };
             let fact_value = fact.runtime_fact_value().map_err(|error| {
-                if error.to_string().contains("runtime-fact budget") {
+                if format!("{error:#}").contains("runtime-fact budget") {
                     wire_error(
                         "product_recipe_admission_too_large",
-                        error.to_string(),
+                        format!("{error:#}"),
                         LaunchPrepareErrorClass::Configuration,
                     )
                 } else {
                     wire_error(
                         "product_recipe_admission_invalid",
-                        error.to_string(),
+                        format!("{error:#}"),
                         LaunchPrepareErrorClass::Internal,
                     )
                 }
