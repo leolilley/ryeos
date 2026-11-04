@@ -15,7 +15,7 @@ directory durability is currently stronger on Unix than on non-Unix systems.
 | ------------ | ------------------------------------------------ | -------------------------------------------------------------------------------- |
 | **Execute**  | `lillux exec`                                    | Run/spawn/kill/status — full process lifecycle with timeouts                     |
 | **Memory**   | `lillux cas`                                     | Content-addressed storage — store, fetch, verify, existence check                |
-| **Identity** | `lillux identity`                                | Ed25519 signing/verification, keypair generation, sealed secret envelopes        |
+| **Identity** | `lillux identity`                                | Ed25519 signing/verification, keypair generation                                    |
 | **Time**     | `lillux time`                                    | Wall-clock timestamp, sleep                                                      |
 
 ## Attachment-before-execution API
@@ -87,11 +87,6 @@ lillux identity keypair generate --key-dir ~/.local/share/ryeos/.ai/config/keys/
 lillux identity keypair fingerprint --public-key public_key.pem
 lillux identity keypair box-fingerprint --public-key box_pub.pem
 
-# Identity — sealed envelopes
-echo '{"API_KEY":"sk-..."}' | lillux identity envelope seal --box-pub /path/to/box_pub.pem
-cat envelope.json | lillux identity envelope open --key-dir ~/.local/share/ryeos/.ai/config/keys/signing
-echo '{"API_KEY":"sk-..."}' | lillux identity envelope validate
-cat envelope.json | lillux identity envelope inspect
 
 # Time
 lillux time now
@@ -101,8 +96,6 @@ lillux time after --ms 1000
 ## Architecture
 
 Lillux is intentionally minimal — a single static binary with no runtime dependencies. Objects are stored with sharded paths (`root/objects/ab/cd/<hash>.json`), blobs separately (`root/blobs/ab/cd/<hash>`). JSON objects use the RyeOS canonical encoding before SHA-256 hashing: compact JSON, decoded object keys in lexicographic order, lowercase `\u` escapes for every non-ASCII scalar, and the exact `serde_json::Number` rendering. These bytes are an immutable persistence protocol, not RFC 8785/JCS; another implementation must reproduce them exactly rather than substituting its platform's default serializer.
-
-The Identity primitive includes sealed secret envelopes using single-use X25519 key agreement with HKDF-SHA256 key derivation and ChaCha20Poly1305 AEAD, with safety limits on env variable count, value size, and total payload. Reserved environment names and prefixes are rejected to prevent injection.
 
 Cross-platform: Unix (setsid for daemon spawning, SIGTERM/SIGKILL) and Windows (CREATE_NEW_PROCESS_GROUP, TerminateProcess).
 
