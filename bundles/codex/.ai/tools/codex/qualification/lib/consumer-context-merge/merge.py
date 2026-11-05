@@ -45,6 +45,7 @@ EMITTED_FIELDS = (
     "bundle_generation_identity",
     "verifier_parameters",
     "consumer_execution_context",
+    "consumer_verifier_selections",
 )
 CODEX_SIDE_FIELDS = (
     "controller",
@@ -99,6 +100,9 @@ def parse_emitted(document) -> dict:
         refuse("requires_guarantees must be a non-empty list")
     hex64(document["subject_manifest_hash"], "subject_manifest_hash")
     text(document["bundle_generation_identity"], "bundle_generation_identity")
+    # The selections feed the binding composition, never the policy, so they are held to shape only.
+    if not isinstance(document["consumer_verifier_selections"], dict):
+        refuse("consumer_verifier_selections must be an object")
     parameters = exact_keys(
         document["verifier_parameters"], ("external_candidate_qualification_context",),
         "emitted verifier_parameters",

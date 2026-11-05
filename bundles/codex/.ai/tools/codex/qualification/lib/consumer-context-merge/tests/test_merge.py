@@ -27,6 +27,7 @@ EMITTED = {
     "requires_guarantees": ["isolation:enforced"],
     "subject_manifest_hash": digest("a"),
     "bundle_generation_identity": "generation-synthetic-1",
+    "consumer_verifier_selections": {},
     "verifier_parameters": {
         "external_candidate_qualification_context": {
             "schema": "ryeos.external_candidate_qualification_context.v3",

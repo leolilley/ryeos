@@ -152,7 +152,7 @@ class AuthoringEnvironmentTests(unittest.TestCase):
         self.assertEqual(actual["baseline_config"], "authoring.config.toml")
         actual["baseline_config"] = original["baseline_config"]
         self.assertIn('approval_policy="never"', actual["workload_args"])
-        self.assertIn('default_permissions="danger-full-access"', actual["workload_args"])
+        self.assertIn('default_permissions=":danger-full-access"', actual["workload_args"])
         self.assertFalse(any(arg.startswith("permissions=") for arg in actual["workload_args"]))
         actual["workload_args"] = original["workload_args"]
         original_routes = {route["id"]: route for route in original["routes"]}
@@ -160,7 +160,7 @@ class AuthoringEnvironmentTests(unittest.TestCase):
             if route["id"] in ("session.start", "session.resume"):
                 self.assertIn({
                     "pointer": "/response/result/activePermissionProfile/id",
-                    "equals": "danger-full-access",
+                    "equals": ":danger-full-access",
                 }, route["response_predicates"])
                 self.assertIn({
                     "pointer": "/response/result/approvalPolicy",
@@ -178,7 +178,7 @@ class AuthoringEnvironmentTests(unittest.TestCase):
     def test_authoring_baseline_is_explicitly_unattended_and_unconfined(self):
         actual = tomllib.loads((SOURCE / "authoring.config.toml").read_text())
         self.assertEqual(actual["approval_policy"], "never")
-        self.assertEqual(actual["default_permissions"], "danger-full-access")
+        self.assertEqual(actual["default_permissions"], ":danger-full-access")
         self.assertNotIn("permissions", actual)
         self.assertEqual(actual["shell_environment_policy"]["filters"]["TMPDIR"], "include")
         self.assertTrue(actual["features"]["code_mode_host"])

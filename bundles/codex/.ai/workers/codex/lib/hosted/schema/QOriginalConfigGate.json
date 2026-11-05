@@ -131,7 +131,7 @@
         "check_for_update_on_startup": false,
         "approval_policy": "never",
         "approvals_reviewer": "user",
-        "default_permissions": "danger-full-access",
+        "default_permissions": ":danger-full-access",
         "web_search": "disabled",
         "allow_login_shell": false,
         "shell_environment_policy": {
@@ -205,7 +205,7 @@
           "const": "user"
         },
         "default_permissions": {
-          "const": "danger-full-access"
+          "const": ":danger-full-access"
         },
         "web_search": {
           "const": "disabled"
@@ -365,7 +365,7 @@
         "sandbox_mode": {},
         "sandbox_workspace_write": {},
         "default_permissions": {
-          "const": "danger-full-access"
+          "const": ":danger-full-access"
         },
         "permissions": {
           "const": null

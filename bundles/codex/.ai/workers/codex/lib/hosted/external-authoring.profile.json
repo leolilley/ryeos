@@ -57,7 +57,7 @@
     "-c",
     "approvals_reviewer=\"user\"",
     "-c",
-    "default_permissions=\"danger-full-access\"",
+    "default_permissions=\":danger-full-access\"",
     "-c",
     "web_search=\"disabled\"",
     "-c",
@@ -640,7 +640,7 @@
       "response_predicates": [
         {
           "pointer": "/response/result/activePermissionProfile/id",
-          "equals": "danger-full-access"
+          "equals": ":danger-full-access"
         },
         {
           "pointer": "/response/result/approvalsReviewer",
@@ -737,7 +737,7 @@
       "response_predicates": [
         {
           "pointer": "/response/result/activePermissionProfile/id",
-          "equals": "danger-full-access"
+          "equals": ":danger-full-access"
         },
         {
           "pointer": "/response/result/approvalsReviewer",

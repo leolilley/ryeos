@@ -520,7 +520,7 @@ class CodexContractTests(unittest.TestCase):
                     ]
                 )
             else:
-                self.assertEqual(baseline["default_permissions"], "danger-full-access")
+                self.assertEqual(baseline["default_permissions"], ":danger-full-access")
                 self.assertEqual(baseline["approval_policy"], "never")
                 self.assertFalse(
                     any(
@@ -533,7 +533,7 @@ class CodexContractTests(unittest.TestCase):
                     predicates = routes[route_id]["response_predicates"]
                     self.assertIn({
                         "pointer": "/response/result/activePermissionProfile/id",
-                        "equals": "danger-full-access",
+                        "equals": ":danger-full-access",
                     }, predicates)
                     self.assertIn({
                         "pointer": "/response/result/approvalPolicy",
