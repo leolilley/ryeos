@@ -248,6 +248,7 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
             args: &["--project-path".to_string(), project_path_string],
             cwd: project_path,
             project_path,
+            runtime_state_root: state_root.unwrap_or(project_path),
             project_state_scope,
             thread_id,
             callback: Some(&callback_bindings),

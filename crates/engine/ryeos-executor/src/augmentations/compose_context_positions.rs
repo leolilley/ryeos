@@ -730,6 +730,11 @@ pub async fn run(
             item_ref: runtime_item_ref.clone(),
             thread_id: child_thread_id.clone(),
             project_path: project_path.to_path_buf(),
+            runtime_state_root: cap
+                .provenance
+                .state_root_override()
+                .unwrap_or(project_path)
+                .to_path_buf(),
             acting_principal: principal_fingerprint.to_string(),
             cas_root: state
                 .state_store

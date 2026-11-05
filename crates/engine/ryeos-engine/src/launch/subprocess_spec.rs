@@ -64,6 +64,9 @@ pub struct SubprocessBuildRequest {
     pub item_ref: CanonicalRef,
     pub thread_id: String,
     pub project_path: PathBuf,
+    /// Directory this launch may write its own state into; see
+    /// `EnvInjectionSource::RuntimeStateRoot`.
+    pub runtime_state_root: PathBuf,
     pub acting_principal: String,
     pub cas_root: PathBuf,
     pub callback_token: Option<String>,

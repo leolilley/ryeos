@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-29T09:08:38Z:caf9eecbe5d3b5a51fec59e50700fdabbaa683f9a5547b23c0cee3941f81b34b:VWQoFYWO0g8aQWB+a5OOk6NCVbgyfFfm/K6aXm4501yqJdB53SNE8e0LKsJE7CfZyPzZruEKyOlS8NvR0sCDAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-05T03:59:09Z:ae6e62aec328aee4a79a1a5dc7786171692ac6857426a9b6d465331b72897ea9:M3DF4fDu3GLzxCveJlfscg8r6fm+NYpLQzDuHw6qONvCqRs9HBoKKsjxIW+WaBrc7BD8KGy+P4+waUH09qjwAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [reference, env, daemon, cli, runtimes, lifecycle]
@@ -58,6 +58,12 @@ logical project's durable state namespace. It stays stable when a pinned COW
 continuation relocates or advances its operational snapshot. It is empty for
 projectless execution and grants no state access by itself; the callback token
 still supplies authority.
+
+`RYEOSD_RUNTIME_STATE_ROOT` is the daemon-owned directory a launch may write its
+own state into, for a protocol that declares it. A read-only pinned project
+keeps this directory apart from the project, so it is the only writable path a
+captured launch on that project receives. It lasts as long as the launch and
+stays on the node: external placement refuses this binding.
 
 Engine-plan and lifecycle bindings can include `RYEOS_THREAD_ID`,
 `RYEOS_CHAIN_ROOT_ID`, `RYEOS_ITEM_PATH`, `RYEOS_ITEM_KIND`, `RYEOS_ITEM_REF`,

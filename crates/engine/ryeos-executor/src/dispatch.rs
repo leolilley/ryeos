@@ -2524,6 +2524,11 @@ pub(crate) async fn dispatch_method(
             item_ref: runtime_item_ref.clone(),
             thread_id: thread_id.clone(),
             project_path: request.project_path.to_path_buf(),
+            runtime_state_root: request
+                .provenance
+                .state_root_override()
+                .unwrap_or(request.project_path)
+                .to_path_buf(),
             acting_principal: request.acting_principal.to_string(),
             cas_root: state
                 .state_store

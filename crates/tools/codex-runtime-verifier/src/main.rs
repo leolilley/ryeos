@@ -888,13 +888,17 @@ async fn run_consumer_controller(
         .context("protected invoking verifier thread identity absent")?;
     ryeos_runtime::validate_runtime_thread_id(&thread_id).map_err(anyhow::Error::msg)?;
     let client = UdsRuntimeClient::from_env()?;
-    let project = lillux::PinnedDirectory::open(Path::new("."))?
-        .context("admitted verifier working directory absent")?;
+    // The working directory is the pinned project, which a captured launch
+    // cannot write. The controller's record lives in the launch's own state.
+    let state_root = std::env::var_os("RYEOSD_RUNTIME_STATE_ROOT")
+        .context("protected runtime state root absent")?;
+    let state = lillux::PinnedDirectory::open(Path::new(&state_root))?
+        .context("admitted verifier runtime state root absent")?;
     let name = format!("consumer-controller-{thread_id}");
-    let (private, invocation) = match project.open_child_directory(OsStr::new(&name))? {
+    let (private, invocation) = match state.open_child_directory(OsStr::new(&name))? {
         Some(directory) => (directory, ConsumerControllerInvocation::Recover),
         None => (
-            project.create_child(OsStr::new(&name), 0o700)?,
+            state.create_child(OsStr::new(&name), 0o700)?,
             ConsumerControllerInvocation::Fresh,
         ),
     };

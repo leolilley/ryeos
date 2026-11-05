@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-04T04:58:11Z:a6b80a691cdf1c19dfbd368fd54840aa8b927181c863aac8f7c76d7c20f5f12f:8kSSAhoqUpkDJb9ola5wj8qwTiqIAcoeBS2WIobZMHkXue70o99FhVxnk30gTw9ivOe0fvpt3sc3KKt+nXMgBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-05T03:59:09Z:d519f83363ce0059233d87691d62f3bd1b6cc5b66e53375ef5abba617f467690:e4RaiLw7kG9ICt7JTj0+6zGARv84aaALbKmovqdn5pqsNLYyrnt4TICWjVYSbfDJICoyhShkOgNARuB1KceiCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: protocol
 name: qualification_consumer_callback
 category: ryeos/core
@@ -17,6 +17,7 @@ env_injections:
   - { name: RYEOSD_THREAD_ID, source: thread_id }
   - { name: RYEOSD_PROJECT_STATE_SCOPE, source: project_state_scope }
   - { name: RYEOSD_THREAD_AUTH_TOKEN, source: thread_auth_token }
+  - { name: RYEOSD_RUNTIME_STATE_ROOT, source: runtime_state_root }
 # A qualification verifier on the pinned-snapshot project lane runs against the exact snapshot the subject was
 # captured from, so its project source is a pushed head. The capability is open only to an item that declares that
 # lane (project_lane: pinned_snapshot); remote and detached dispatch stay closed.

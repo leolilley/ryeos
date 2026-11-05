@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-04T00:27:55Z:90dedfaa6837e9d51880ca73a46c3dc6f75d438be4f3f07d3d3b62336af31bf2:8fuu3572LCtGjlcTg22cUM4vJkJqKnpFyECmMA424SZ1kRCJ7TcZSN7xrNNUKh6YA0yYlXESenGjbtLCBY25AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-05T03:59:09Z:8f3722c9106cd5e61d51ba7c900978fb334c7cf288fa771e06eebc27383d3ac8:fAlwc/UFDZubuSNHkeoXQidr44tktomqXlfg4Lu8lQkzLONl7vj97zinFQMMDs75l14YWpcKx93H9LK+6orjAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/engine
@@ -157,6 +157,7 @@ protocol and lifecycle bindings, not a list granted to every subprocess:
 | `RYEOSD_THREAD_AUTH_TOKEN` | Per-thread auth token |
 | `RYEOSD_THREAD_ID` | Thread identifier |
 | `RYEOSD_PROJECT_STATE_SCOPE` | Opaque logical-project state namespace; stable across pinned COW relocation and generation advance, empty for projectless execution, and never an authority token |
+| `RYEOSD_RUNTIME_STATE_ROOT` | Daemon-owned directory the launch may write its own state into, when its protocol declares it; mounted writable at this exact path |
 | `RYE_THREAD_ID` | Thread ID for tool primitives |
 | `RYEOS_ITEM_PATH` | Resolved item source path |
 | `RYEOS_ITEM_KIND` | Resolved item kind |

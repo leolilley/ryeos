@@ -3347,6 +3347,7 @@ fn build_protocol_launch_env(
         item_ref,
         thread_id: thread_id.to_string(),
         project_path: project_path.to_path_buf(),
+        runtime_state_root: callback_project_path.to_path_buf(),
         acting_principal: acting_principal.to_string(),
         cas_root,
         callback_token: callback_token.clone(),
