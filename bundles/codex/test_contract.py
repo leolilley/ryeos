@@ -262,6 +262,24 @@ class CodexContractTests(unittest.TestCase):
         self.assertLessEqual(len(literal.encode()), 8192)
         contract = json.loads(literal)
         self.assertEqual(literal, json.dumps(contract, sort_keys=True, separators=(",", ":")))
+        policy = yaml.safe_load(
+            (BUNDLE / ".ai/config/codex/consumer-qualification-policy.yaml").read_text()
+        )
+        contexts = []
+        def collect(node):
+            if isinstance(node, dict):
+                if "external_candidate_qualification_context" in node:
+                    contexts.append(node["external_candidate_qualification_context"])
+                for value in node.values():
+                    collect(value)
+            elif isinstance(node, list):
+                for value in node:
+                    collect(value)
+        collect(policy)
+        self.assertEqual(len(contexts), 1)
+        # The verifier refuses a contract that differs from its Worker's admitted content.
+        for key in ("profile_hash", "source_binding_hash", "source_content_manifest_hash"):
+            self.assertEqual(contract["target"][key], contexts[0][key], key)
         checker = contract["semantic_checker"]
         self.assertEqual(checker["runtime"]["id"], "checker-runtime")
         self.assertEqual(checker["runtime"]["manifest_hash"], runtime["digest"])
