@@ -259,7 +259,6 @@ impl ExternalQualificationLocalWorker {
         state: &ryeos_app::state::AppState,
     ) -> Result<()> {
         if self.retired {
-            ryeos_app::process::assert_reaped_process_group_absent(&self.process_identity)?;
             return ryeos_app::external_qualification_local::ensure_qualification_worker_terminal(
                 state,
                 self.ready.placement(),
@@ -281,7 +280,6 @@ impl ExternalQualificationLocalWorker {
             // exact pool entry. `Absent` carries no death proof by itself;
             // the attached process identity and terminal journal must still
             // independently verify its whole-group reap below.
-            ryeos_app::process::assert_reaped_process_group_absent(&self.process_identity)?;
             ryeos_app::external_qualification_local::ensure_qualification_worker_terminal(
                 state,
                 self.ready.placement(),
@@ -633,7 +631,9 @@ pub(crate) fn start_external_qualification_local_worker_for_signed_request(
                     let (prepared_environment, writable_runtime_view_mounts) =
                         super::persistent_session::prepare_retained_session_process_environment(
                             &content.process_environment,
-                            &spawn_workspace,
+                            // Beneath the workspace the Worker is told about,
+                            // where its bridge looks on either lane.
+                            &workspace_path,
                             (!enforced).then_some(&workspace_directory),
                             session.protocol.workspace_authority,
                             enforced,

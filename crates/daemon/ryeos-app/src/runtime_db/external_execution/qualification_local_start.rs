@@ -549,6 +549,19 @@ pub(super) fn canonical(record: &QualificationLocalStartRecord) -> Result<String
     Ok(json)
 }
 
+fn read_unreleased_custody(conn: &Connection, current_generation: &str) -> Result<Vec<String>> {
+    let mut statement = conn.prepare(
+        "SELECT placement_thread_id FROM external_qualification_local_start
+         WHERE json_type(record_json,'$.credential_custody')='object'
+           AND json_type(record_json,'$.credential_custody.released_at_ms')='null'
+           AND json_extract(record_json,'$.daemon_generation_id')!=?1
+         ORDER BY placement_thread_id",
+    )?;
+    Ok(statement
+        .query_map([current_generation], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
 pub(super) fn read_local_start(
     conn: &Connection,
     placement: &str,
@@ -1052,6 +1065,16 @@ impl RuntimeDb {
             tx.commit()?;
             Ok(next)
         })
+    }
+
+    /// Starts of an earlier daemon generation whose credential custody is still
+    /// held. Listing grants nothing: each release proves its own settlement.
+    pub(crate) fn unreleased_qualification_credential_custody(
+        &self,
+        current_generation: &str,
+    ) -> Result<Vec<String>> {
+        self.conn
+            .with_sql(|conn| read_unreleased_custody(conn, current_generation))
     }
 
     /// Read-only final pre-spawn gate. The app caller holds the Q occurrence
@@ -1931,6 +1954,29 @@ mod tests {
                 .unwrap(),
                 "successor"
             );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn restart_repair_lists_only_held_custody_of_an_earlier_generation() {
+        crate::runtime_db::test_native::with_transient(|conn| {
+            let reserved = fixture_journal(conn);
+            assert!(read_unreleased_custody(conn, "later").unwrap().is_empty());
+            let claimed = claim_fixture_credential(conn, &reserved);
+            assert_eq!(
+                read_unreleased_custody(conn, "later").unwrap(),
+                vec![claimed.placement_thread_id.clone()]
+            );
+            assert!(
+                read_unreleased_custody(conn, &claimed.daemon_generation_id)
+                    .unwrap()
+                    .is_empty()
+            );
+            let mut released = claimed.clone();
+            released.credential_custody.as_mut().unwrap().released_at_ms = Some(1);
+            transition(conn, &claimed, &released).unwrap();
+            assert!(read_unreleased_custody(conn, "later").unwrap().is_empty());
             Ok(())
         });
     }

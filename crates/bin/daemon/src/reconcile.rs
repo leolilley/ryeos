@@ -2310,6 +2310,16 @@ pub async fn reconcile_dedicated_worker_startup(state: &AppState) -> Result<()> 
             "settled local qualification Worker rows left attached by a previous daemon"
         );
     }
+    let released_qualification_credentials =
+        ryeos_app::external_qualification_local::release_settled_qualification_credential_custody(
+            state,
+        )?;
+    if released_qualification_credentials != 0 {
+        tracing::info!(
+            released_qualification_credentials,
+            "released Q credential custody a previous daemon left held"
+        );
+    }
     reconcile_process_resource_owners(state)?;
     quiesce_unattached_worker_scopes(state)?;
     quiesce_dedicated_workers(state)?;

@@ -19332,6 +19332,12 @@ impl StateStore {
             .collect())
     }
 
+    pub(crate) fn prior_generation_qualification_credential_custody(&self) -> Result<Vec<String>> {
+        self.lock()?
+            .runtime_db
+            .unreleased_qualification_credential_custody(runtime_db::daemon_generation_id())
+    }
+
     pub(crate) fn qualification_worker_process(
         &self,
         placement: &str,

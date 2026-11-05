@@ -88,17 +88,41 @@ pub fn release_qualification_worker_credential_custody(
     {
         return Ok(record);
     }
-    if let Some(process) = state.state_store.qualification_worker_process(placement)? {
+    // A terminal row is itself the death proof: settlement took it from a
+    // checked reap and then retired the Worker's scope, so a later live check
+    // would find no scope to ask.
+    if let Some(process) = state.state_store.qualification_worker_process(placement)?
+        && process.phase == QualificationWorkerProcessPhase::Attached
+    {
         crate::process::assert_reaped_process_group_absent(&process.process_identity)?;
-        if process.phase == QualificationWorkerProcessPhase::Attached {
-            state
-                .state_store
-                .settle_qualification_worker_process(placement)?;
-        }
+        state
+            .state_store
+            .settle_qualification_worker_process(placement)?;
     }
     state
         .state_store
         .release_qualification_local_credential_custody(placement)
+}
+
+/// Restart repair for credential custody a previous daemon left unreleased.
+/// Each release keeps its own settlement proof, so a start whose Worker death
+/// is still unproved stays held. Returns how many were released.
+pub fn release_settled_qualification_credential_custody(state: &AppState) -> Result<usize> {
+    let mut released = 0usize;
+    for placement in state
+        .state_store
+        .prior_generation_qualification_credential_custody()?
+    {
+        match release_qualification_worker_credential_custody(state, &placement) {
+            Ok(_) => released = released.saturating_add(1),
+            Err(error) => tracing::error!(
+                placement_thread_id = %placement,
+                error = %format!("{error:#}"),
+                "Q credential custody stays held: its Worker settlement is unproved"
+            ),
+        }
+    }
+    Ok(released)
 }
 
 fn fence_precreate_cleanup(
@@ -674,7 +698,9 @@ pub fn settle_qualification_worker_process(state: &AppState, placement: &str) ->
 
 /// A second process-local retirement observation can verify the already
 /// settled Q row without replaying its one-use terminal transition. This is
-/// only an exact death read; it confers no native or qualification claim.
+/// only an exact death read; it confers no native or qualification claim. The
+/// terminal row is the proof: its scope is already retired, so no caller can
+/// recheck the process live.
 pub fn ensure_qualification_worker_terminal(
     state: &AppState,
     placement: &str,
@@ -842,9 +868,6 @@ pub fn cleanup_qualification_local_worker(
                             placement,
                             &process.process_identity,
                         )?;
-                        crate::process::assert_reaped_process_group_absent(
-                            &process.process_identity,
-                        )?;
                     } else {
                         ensure!(
                             current.worker_incarnation_digest.is_none(),
@@ -938,7 +961,6 @@ fn retain_controller_canary_terminal_under_gate(
         .state_store
         .qualification_worker_process(placement)?
         .context("Q terminal canary has no exact process")?;
-    crate::process::assert_reaped_process_group_absent(&process.process_identity)?;
     ensure_qualification_worker_terminal(state, placement, &process.process_identity)?;
     ensure!(
         state.state_store.external_connector_retired(placement)?,
