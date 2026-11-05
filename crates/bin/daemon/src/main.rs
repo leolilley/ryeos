@@ -1183,6 +1183,11 @@ impl DaemonSelectedComposition {
         // Retain actual partial owners before allocating a propagation error.
         // Do not format/copy the original failure before composition custody.
         self.native_failure = Some(error);
+        // The propagated error names only the retention, so this is the one
+        // record of what actually refused the start.
+        if let Some(retained) = &self.native_failure {
+            tracing::error!(error = %format!("{retained:#}"), "live native startup refused");
+        }
         anyhow::anyhow!("live native startup refused; original failure custody retained")
     }
 
