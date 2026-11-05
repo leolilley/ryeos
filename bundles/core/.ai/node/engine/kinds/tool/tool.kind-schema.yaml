@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-04T04:58:11Z:8f8885d8e7802611f37decea97d7a0a546d75e3ab8d6f179c8af87966c7b360a:JAbNZhw0FoyNjHO3DibtodK4UtpJdDWVTwNSr6csLLxtrzSvxe37x4JJOS+0gXGb9dd5Us5vV91+L7/68JR1AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-05T02:38:41Z:c9effaae5ce846b25712e32b5a48772ef1e6f9752f47922235c327a7adfbeeb4:7pxUCnAZ6oaBGmg6oBvJ8k1wbmyYgPkWSyuj2d9tywFDkoyWTLvDsZ7Qv6GRFyS0Rw0e64eV+xcaak/RwwBbDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/tool"
 version: "1.3.0"
 location:
@@ -231,6 +231,9 @@ runtime:
     # Consumed only through the kind-owned workspace-access projection above.
     # Dispatch must not grow tool/provider-specific interpretations of it.
     - workspace_access
+    # Consumed by the kind-owned pushed-head declaration projection above; it
+    # is not a runtime-handler block.
+    - project_lane
     # Consumed by the kind-owned network-authority projection above; it is not
     # a runtime-handler block.
     - network_authority

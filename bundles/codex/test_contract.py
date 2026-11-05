@@ -1372,6 +1372,14 @@ class CodexContractTests(unittest.TestCase):
             # the captured-compatible protocol; the trusted one is node_policy.
             self.assertEqual(verifier["filesystem_authority"], verifier_authority)
             self.assertEqual(verifier["project_lane"], "pinned_snapshot")
+            # A top-level key the tool kind does not know refuses the plan build.
+            tool_runtime = yaml.safe_load((
+                BUNDLE.parent / "core/.ai/node/engine/kinds/tool/tool.kind-schema.yaml"
+            ).read_text())["runtime"]
+            known = set(tool_runtime["ignored_keys"]) | {
+                handler["type"] for handler in tool_runtime["handlers"]
+            }
+            self.assertEqual(sorted(set(verifier) - known), [])
             self.assertEqual(verifier["execution_protocol"],
                              "protocol:ryeos/core/qualification_consumer_callback")
             contract = json.loads(verifier["config"]["args"][2])
