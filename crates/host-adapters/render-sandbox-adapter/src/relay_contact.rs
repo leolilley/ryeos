@@ -62,6 +62,15 @@ pub(super) enum RenderRelayDownload {
     /// Exact HTTP 404 from the selected file GET. This does not distinguish
     /// a not-yet-written file from a missing or unreachable sandbox.
     HttpNotFound,
+    /// This read got no answer about the file. A download changes nothing, so
+    /// the caller may read again; an upload never takes this path.
+    Unavailable(String),
+}
+
+/// Statuses that say the provider could not answer now, not that a file is
+/// absent or that the request is wrong.
+fn download_status_is_transient(status: u16) -> bool {
+    matches!(status, 429 | 500 | 502 | 503 | 504)
 }
 
 /// An exact provider file path is supplied only by the controller transfer
@@ -293,7 +302,15 @@ impl<'a> RenderRelayFileContact<'a> {
         let operation = ProxyOperation::DownloadFile {
             remote_path: self.remote_path,
         };
-        let token = self.mint(operation).classed(FailClass::RelayContact)?;
+        let token = match self.mint(operation) {
+            Ok(token) => token,
+            Err(error) if FailClass::of(&error) == FailClass::RelayTransport => {
+                return Ok(RenderRelayDownload::Unavailable(
+                    "mint_transport".to_owned(),
+                ));
+            }
+            Err(error) => return Err(error).classed(FailClass::RelayContact),
+        };
         let request = proxy_request(
             self.settings,
             self.occurrence_id,
@@ -307,10 +324,17 @@ impl<'a> RenderRelayFileContact<'a> {
             self.cancellation,
         )
         .classed(FailClass::ProxyRoute)?;
-        let response = HttpClient::new(self.network.clone())
-            .execute(request)
-            .map_err(anyhow::Error::from)
-            .classed(FailClass::RelayTransport)?;
+        let Ok(response) = HttpClient::new(self.network.clone()).execute(request) else {
+            return Ok(RenderRelayDownload::Unavailable(
+                "read_transport".to_owned(),
+            ));
+        };
+        if download_status_is_transient(response.status) {
+            return Ok(RenderRelayDownload::Unavailable(format!(
+                "read_status:{}",
+                response.status
+            )));
+        }
         // Render's SDK names a missing-path error but does not document the
         // raw file-route status. Keep this exact 404 as a bounded pending
         // observation until an installed missing-file probe establishes it.
@@ -350,6 +374,16 @@ impl<'a> RenderRelayFileContact<'a> {
 mod tests {
     use super::*;
     use std::io::Read as _;
+
+    #[test]
+    fn only_statuses_that_say_nothing_about_the_file_are_read_again() {
+        for status in [429, 500, 502, 503, 504] {
+            assert!(download_status_is_transient(status), "{status}");
+        }
+        for status in [200, 400, 401, 403, 404, 410] {
+            assert!(!download_status_is_transient(status), "{status}");
+        }
+    }
 
     #[test]
     fn archive_is_one_private_member_owned_by_the_guest_account() {

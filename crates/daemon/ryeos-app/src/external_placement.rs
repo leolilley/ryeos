@@ -4958,6 +4958,19 @@ fn contact_external_relay_transfer(
             // previous PUT failed. A later attempt can only GET this slot.
             Ok(ExternalRelayFileContactProgress::PendingHttpNotFound(claimed_record))
         }
+        ryeos_external_execution_contract::relay_file::RelayFileAdapterResponse::DownloadUnavailable {
+            reason,
+            ..
+        } => {
+            // Like a 404, this proves nothing about the file, and the read
+            // deadline still bounds how long it may go on.
+            tracing::warn!(
+                placement = %claimed_record.intent.placement_thread_id,
+                reason = %reason,
+                "external relay read got no answer; reading again"
+            );
+            Ok(ExternalRelayFileContactProgress::PendingHttpNotFound(claimed_record))
+        }
         ryeos_external_execution_contract::relay_file::RelayFileAdapterResponse::Downloaded {
             bytes_base64,
             ..

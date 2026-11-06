@@ -242,6 +242,14 @@ pub enum RelayFileAdapterResponse {
     DownloadHttpNotFound {
         request_digest: String,
     },
+    /// This read did not get an answer about the file: a lost connection or a
+    /// provider status that says nothing about it. A download has no effect to
+    /// repeat, so the caller may read again until its own deadline.
+    DownloadUnavailable {
+        request_digest: String,
+        /// Short diagnostic code, never provider text.
+        reason: String,
+    },
     Downloaded {
         request_digest: String,
         bytes_base64: String,
@@ -277,6 +285,19 @@ impl RelayFileAdapterResponse {
                 actual == request_digest,
                 "relay file 404 changed request identity"
             ),
+            (
+                RelayFileEffect::Download,
+                Self::DownloadUnavailable {
+                    request_digest: actual,
+                    reason,
+                },
+            ) => {
+                ensure!(
+                    actual == request_digest,
+                    "relay file read changed request identity"
+                );
+                crate::diagnostic_reason(reason)?;
+            }
             (
                 RelayFileEffect::Download,
                 Self::Downloaded {
@@ -378,6 +399,31 @@ mod tests {
         assert!(download.validate().is_err());
         download.delivery_account = None;
         download.validate().unwrap();
+    }
+
+    #[test]
+    fn only_a_download_may_be_read_again_and_its_reason_stays_a_token() {
+        let digest = "d".repeat(64);
+        let response = |reason: &str| RelayFileAdapterResponse::DownloadUnavailable {
+            request_digest: digest.clone(),
+            reason: reason.into(),
+        };
+        response("read_status:503")
+            .validate_for(&upload(), &digest)
+            .unwrap_err();
+        let mut download = upload();
+        download.direction = RelayFileDirection::GuestToController;
+        download.remote_path = format!("{}/attach.request.json", download.mailbox_root);
+        download.effect = RelayFileEffect::Download;
+        download.delivery_account = None;
+        download.expected_sha256 = None;
+        download.expected_bytes = None;
+        response("read_status:503")
+            .validate_for(&download, &digest)
+            .unwrap();
+        response("provider said: secret")
+            .validate_for(&download, &digest)
+            .unwrap_err();
     }
 
     #[test]

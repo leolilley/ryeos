@@ -219,6 +219,12 @@ pub(super) fn operate() -> Result<()> {
             RenderRelayDownload::HttpNotFound => {
                 RelayFileAdapterResponse::DownloadHttpNotFound { request_digest }
             }
+            RenderRelayDownload::Unavailable(reason) => {
+                RelayFileAdapterResponse::DownloadUnavailable {
+                    request_digest,
+                    reason,
+                }
+            }
             RenderRelayDownload::Downloaded(bytes) => RelayFileAdapterResponse::Downloaded {
                 request_digest,
                 bytes_base64: base64::engine::general_purpose::STANDARD.encode(&bytes),

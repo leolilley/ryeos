@@ -1629,7 +1629,7 @@ impl LifecycleAdapterRequest {
 }
 
 /// A diagnostic code is a short token, so it cannot carry a provider body.
-fn diagnostic_reason(reason: &str) -> Result<()> {
+pub(crate) fn diagnostic_reason(reason: &str) -> Result<()> {
     ensure!(
         !reason.is_empty()
             && reason.len() <= 64
