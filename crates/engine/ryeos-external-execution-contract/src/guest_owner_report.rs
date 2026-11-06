@@ -171,9 +171,7 @@ impl std::error::Error for GuestRefusalDetail {}
 impl GuestRefusalDetail {
     /// The vouched text attached to an error, if its site attached one.
     pub fn of(error: &anyhow::Error) -> Option<&str> {
-        error
-            .downcast_ref::<Self>()
-            .map(|detail| detail.0.as_str())
+        error.downcast_ref::<Self>().map(|detail| detail.0.as_str())
     }
 }
 
@@ -266,7 +264,8 @@ impl GuestClockReport {
     /// Find the newest supervisor marker in raw standard-error bytes.
     pub fn observed_issue_lag_from_stderr(raw: &[u8]) -> Option<i64> {
         let text = String::from_utf8_lossy(raw);
-        let rest = &text[text.rfind(GUEST_CLOCK_ISSUE_LAG_MARKER)? + GUEST_CLOCK_ISSUE_LAG_MARKER.len()..];
+        let rest =
+            &text[text.rfind(GUEST_CLOCK_ISSUE_LAG_MARKER)? + GUEST_CLOCK_ISSUE_LAG_MARKER.len()..];
         let end = rest
             .char_indices()
             .find(|(index, character)| {
@@ -840,6 +839,7 @@ mod tests {
         assert!(ends(GuestOwnerActivationReport::Refused {
             step: GuestOwnerStep::Stage,
             last_phase,
+            detail: None,
         }));
         assert!(ends(GuestOwnerActivationReport::ExitedBeforeReport {
             last_phase
@@ -983,8 +983,7 @@ mod tests {
         );
         // The detail is bounded at the tail bound, keeping the last bytes.
         let long = "x".repeat(10_000) + "END";
-        let GuestOwnerReport::RefusedWithDetail(_, detail) =
-            GuestOwnerReport::refused(step, &long)
+        let GuestOwnerReport::RefusedWithDetail(_, detail) = GuestOwnerReport::refused(step, &long)
         else {
             panic!("a long detail was dropped");
         };
@@ -1035,7 +1034,10 @@ mod tests {
         // An oversize line that is not a refusal keeps the closed-word bound.
         assert!(
             GuestOwnerStdout::new()
-                .push(&format!(r#"{{"guest_owner":"phase","step":"{}"#, "z".repeat(200)))
+                .push(&format!(
+                    r#"{{"guest_owner":"phase","step":"{}"#,
+                    "z".repeat(200)
+                ))
                 .is_err()
         );
     }

@@ -1,0 +1,9 @@
+# ryeos:signed:2026-11-06T00:24:01Z:7b74d836cb4faf43d1714d388d5ac9e5c344ea8182e7264e4222662bb0ee65da:u0yGp33B1oGdYtoC6Umaa2dQVMlM/ppp65ile7+pKDvdjdYrgh5503ibSeXtISYgEz8RLnjVB3Ez25GJNK0LDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: external-execution.settle-unknown-allocation
+required_caps: ["ryeos.execute.service.external-execution/settle-unknown-allocation"]
+schema:
+  placement_thread_id: string
+  reason: string
+  evidence: string
+description: "State, as the operator, that one quarantined external allocation with no bound occurrence left nothing behind. Releases its capacity and records who said so, why, and on what evidence. Use only after checking the provider; the node cannot verify this statement."

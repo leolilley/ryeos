@@ -692,6 +692,7 @@ fn reconcile_allocation(
                 "allocation_absent",
                 &serde_json::json!({"request_digest": request_digest}),
             )?,
+            reason: "allocation_absent".into(),
         });
     };
     let record: AllocationRecord = read_document(&occurrence, ALLOCATION_FILE)?;

@@ -20795,6 +20795,26 @@ impl StateStore {
             .settle_external_no_occurrence(placement, evidence)
     }
 
+    /// An operator's statement that one unknown allocation outcome left no
+    /// occurrence. Returns the settled phase in its stored form.
+    pub fn settle_unknown_external_allocation(
+        &self,
+        placement: &str,
+        principal: &str,
+        reason: &str,
+        evidence: &str,
+    ) -> Result<String> {
+        let phase = self.lock()?.runtime_db.settle_unknown_external_allocation(
+            placement,
+            runtime_db::external_execution::ExternalOperatorStatement {
+                principal: principal.to_owned(),
+                reason: reason.to_owned(),
+                evidence: evidence.to_owned(),
+            },
+        )?;
+        Ok(format!("{phase:?}"))
+    }
+
     pub(crate) fn begin_external_supervisor_activation(
         &self,
         placement: &str,

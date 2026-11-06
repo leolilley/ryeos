@@ -1064,9 +1064,10 @@ pub struct ExternalAllocationOccurrence {
     pub provider_observation_digest: String,
 }
 
-/// Authoritative adapter evidence that the exact allocation request produced
-/// no occurrence. This is distinct from `NoContact`: provider contact happened,
-/// but exact reconciliation proved that no cleanup obligation exists.
+/// Authoritative evidence that the exact allocation request produced no
+/// occurrence. This is distinct from `NoContact`: provider contact happened,
+/// but exact reconciliation proved that no cleanup obligation exists. With
+/// `operator`, the fact is a named person's statement, not an adapter's.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ExternalNoOccurrenceEvidence {
@@ -1074,6 +1075,48 @@ pub(crate) struct ExternalNoOccurrenceEvidence {
     pub binding_hash: String,
     pub request_digest: String,
     pub provider_observation_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator: Option<ExternalOperatorStatement>,
+}
+
+/// Who settled an unknown allocation outcome, and on what grounds. The
+/// observation digest commits to this statement and to the exact request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ExternalOperatorStatement {
+    pub principal: String,
+    pub reason: String,
+    pub evidence: String,
+}
+
+impl ExternalOperatorStatement {
+    const MAX_FIELD_BYTES: usize = 4096;
+
+    fn validate(&self) -> Result<()> {
+        for (name, value) in [
+            ("principal", &self.principal),
+            ("reason", &self.reason),
+            ("evidence", &self.evidence),
+        ] {
+            ensure!(
+                !value.trim().is_empty() && value.len() <= Self::MAX_FIELD_BYTES,
+                "operator settlement {name} must be non-empty and at most {} bytes",
+                Self::MAX_FIELD_BYTES
+            );
+        }
+        Ok(())
+    }
+
+    fn digest(&self, reservation: &ExternalAllocationReservation) -> Result<String> {
+        Ok(lillux::sha256_hex(
+            lillux::canonical_json(&serde_json::json!({
+                "binding_hash": reservation.binding_hash,
+                "request_digest": reservation.request_digest,
+                "statement": self,
+            }))?
+            .as_bytes(),
+        ))
+    }
 }
 
 impl ExternalNoOccurrenceEvidence {
@@ -1083,6 +1126,13 @@ impl ExternalNoOccurrenceEvidence {
             || self.request_digest != reservation.request_digest
         {
             bail!("external no-occurrence evidence contradicts its reservation");
+        }
+        if let Some(statement) = &self.operator {
+            statement.validate()?;
+            ensure!(
+                self.provider_observation_digest == statement.digest(reservation)?,
+                "operator settlement digest does not commit to its statement"
+            );
         }
         validate_sha256(
             "external no-occurrence observation",
@@ -2586,7 +2636,9 @@ impl RuntimeDb {
 
     /// Settle a contacted allocation only from exact adapter testimony that
     /// the original request produced no occurrence. This is never inferred
-    /// from timeout, list results, 404, or a locally absent process.
+    /// from timeout, list results, 404, or a locally absent process. The one
+    /// other source is `settle_unknown_external_allocation`, where a named
+    /// operator states the fact and the evidence records them saying so.
     pub(crate) fn settle_external_no_occurrence(
         &self,
         placement: &str,
@@ -2635,6 +2687,46 @@ impl RuntimeDb {
             tx.commit()?;
             Ok(())
         })
+    }
+
+    /// Release one unknown outcome on an operator's explicit statement. Only a
+    /// quarantined allocation that never bound an occurrence qualifies: with an
+    /// occurrence id, termination is the exact path, and while contact is still
+    /// pending the original request may yet answer.
+    pub(crate) fn settle_unknown_external_allocation(
+        &self,
+        placement: &str,
+        statement: ExternalOperatorStatement,
+    ) -> Result<ExternalAllocationPhase> {
+        statement.validate()?;
+        let record = self
+            .external_allocation(placement)?
+            .context("external allocation is absent")?;
+        ensure!(
+            record.occurrence.is_none(),
+            "external allocation bound an occurrence; terminate it instead"
+        );
+        ensure!(
+            matches!(
+                record.phase,
+                ExternalAllocationPhase::Quarantined
+                    | ExternalAllocationPhase::ContactedNoOccurrence
+            ),
+            "external allocation is {:?}; only a quarantined outcome can be settled by an operator",
+            record.phase
+        );
+        let evidence = ExternalNoOccurrenceEvidence {
+            schema: 1,
+            binding_hash: record.reservation.binding_hash.clone(),
+            request_digest: record.reservation.request_digest.clone(),
+            provider_observation_digest: statement.digest(&record.reservation)?,
+            operator: Some(statement),
+        };
+        self.settle_external_no_occurrence(placement, &evidence)?;
+        Ok(self
+            .external_allocation(placement)?
+            .context("settled external allocation disappeared")?
+            .phase)
     }
 
     /// Persist the exact supervisor-start mutation before adapter contact.
@@ -4505,6 +4597,7 @@ pub(crate) mod tests {
             binding_hash: first.binding_hash.clone(),
             request_digest: first.request_digest.clone(),
             provider_observation_digest: "f".repeat(64),
+            operator: None,
         };
         let mut wrong = evidence.clone();
         wrong.request_digest = "0".repeat(64);
@@ -4524,6 +4617,68 @@ pub(crate) mod tests {
                 .is_err()
         );
 
+        let second = reservation(&db, "two");
+        reserve(&db, &second).unwrap();
+    }
+
+    #[test]
+    fn operator_settlement_releases_only_a_quarantined_unbound_outcome_and_keeps_the_statement() {
+        let dir = tempfile::tempdir().unwrap();
+        let db =
+            crate::runtime_db::test_native::TestRuntime::open(&dir.path().join("runtime.sqlite3"));
+        let first = reservation(&db, "one");
+        reserve(&db, &first).unwrap();
+        let statement = ExternalOperatorStatement {
+            principal: "fp:operator".into(),
+            reason: "the create left no sandbox".into(),
+            evidence: "provider list checked".into(),
+        };
+        // Reserved and contact-pending outcomes can still answer for themselves.
+        assert!(
+            db.settle_unknown_external_allocation("T-one", statement.clone())
+                .is_err()
+        );
+        db.claim_external_allocation_contact("T-one", &first.request_digest)
+            .unwrap();
+        assert!(
+            db.settle_unknown_external_allocation("T-one", statement.clone())
+                .is_err()
+        );
+        db.observe_external_lifecycle_pending("T-one", ExternalObservationTiming::Cleanup)
+            .unwrap();
+        let mut empty = statement.clone();
+        empty.reason = " ".into();
+        assert!(
+            db.settle_unknown_external_allocation("T-one", empty)
+                .is_err()
+        );
+        assert_eq!(
+            db.settle_unknown_external_allocation("T-one", statement.clone())
+                .unwrap(),
+            ExternalAllocationPhase::ContactedNoOccurrence
+        );
+        // A rerun of the same statement converges; a different one is refused.
+        db.settle_unknown_external_allocation("T-one", statement.clone())
+            .unwrap();
+        let mut other = statement.clone();
+        other.reason = "another reason".into();
+        assert!(
+            db.settle_unknown_external_allocation("T-one", other)
+                .is_err()
+        );
+        let retained: Option<ExternalNoOccurrenceEvidence> = db
+            .conn
+            .with_sql(|conn| {
+                read_canonical_evidence(
+                    conn,
+                    "external_execution_no_occurrence",
+                    "evidence_json",
+                    "T-one",
+                )
+            })
+            .unwrap();
+        assert_eq!(retained.unwrap().operator, Some(statement));
+        assert_eq!(db.conn.with_sql(read_guard).unwrap(), 0);
         let second = reservation(&db, "two");
         reserve(&db, &second).unwrap();
     }

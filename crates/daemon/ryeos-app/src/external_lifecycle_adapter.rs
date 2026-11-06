@@ -2430,11 +2430,28 @@ impl ExecutableExternalPlacementBackend {
             },
             LifecycleAdapterResponse::AllocationNoOccurrence {
                 provider_observation_digest,
+                reason,
                 ..
-            } => ExternalAllocationResolution::NoOccurrence {
-                provider_observation_digest,
-            },
-            LifecycleAdapterResponse::AllocationPending { .. } => {
+            } => {
+                tracing::warn!(
+                    placement = %reservation.placement_thread_id,
+                    reason = %reason,
+                    "external allocation produced no occurrence"
+                );
+                ExternalAllocationResolution::NoOccurrence {
+                    provider_observation_digest,
+                }
+            }
+            LifecycleAdapterResponse::AllocationPending { reason, .. } => {
+                // Reconciliation polls during startup; only the one create
+                // says what happened to the request.
+                if !reconcile {
+                    tracing::warn!(
+                        placement = %reservation.placement_thread_id,
+                        reason = %reason,
+                        "external allocation outcome is unknown"
+                    );
+                }
                 ExternalAllocationResolution::Pending
             }
             _ => anyhow::bail!("lifecycle adapter returned a non-allocation response"),
@@ -3175,7 +3192,7 @@ mod tests {
                 contact_deadline_ms: 100_000,
             },
         };
-        let valid = serde_json::json!({"outcome":"allocation_pending", "operation_id":"a".repeat(64), "request_digest":"a".repeat(64)});
+        let valid = serde_json::json!({"outcome":"allocation_pending", "operation_id":"a".repeat(64), "request_digest":"a".repeat(64), "reason":"create_no_response"});
         decode_operation_response(&serde_json::to_vec(&valid).unwrap(), &request).unwrap();
         for fault in ["variant", "field", "identity"] {
             let mut value = valid.clone();

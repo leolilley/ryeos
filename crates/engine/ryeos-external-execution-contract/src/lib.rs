@@ -1323,10 +1323,15 @@ pub enum LifecycleAdapterResponse {
         /// field name, the evidence may be a local pre-request transport fact
         /// rather than a response from the provider.
         provider_observation_digest: String,
+        /// Short diagnostic code. Compile-time words and status numbers only,
+        /// never provider text, credentials, URLs or settings.
+        reason: String,
     },
     AllocationPending {
         operation_id: String,
         request_digest: String,
+        /// Short diagnostic code; the same rule as on no-occurrence.
+        reason: String,
     },
     SupervisorStarted {
         operation_id: String,
@@ -1623,6 +1628,19 @@ impl LifecycleAdapterRequest {
     }
 }
 
+/// A diagnostic code is a short token, so it cannot carry a provider body.
+fn diagnostic_reason(reason: &str) -> Result<()> {
+    ensure!(
+        !reason.is_empty()
+            && reason.len() <= 64
+            && reason
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b':' | b'-')),
+        "allocation response carries an invalid diagnostic reason"
+    );
+    Ok(())
+}
+
 impl LifecycleAdapterResponse {
     pub fn validate_for(&self, request: &LifecycleAdapterRequest) -> Result<()> {
         request.validate()?;
@@ -1658,6 +1676,7 @@ impl LifecycleAdapterResponse {
                 Self::AllocationNoOccurrence {
                     request_digest,
                     provider_observation_digest,
+                    reason,
                     ..
                 },
             ) => {
@@ -1665,6 +1684,7 @@ impl LifecycleAdapterResponse {
                     request_digest == &reservation.request_digest,
                     "allocation response changed its request identity"
                 );
+                diagnostic_reason(reason)?;
                 digest(
                     provider_observation_digest,
                     "provider no-occurrence observation",
@@ -1673,13 +1693,17 @@ impl LifecycleAdapterResponse {
             (
                 LifecycleAdapterRequest::Allocate { reservation, .. }
                 | LifecycleAdapterRequest::ReconcileAllocation { reservation, .. },
-                Self::AllocationPending { request_digest, .. },
+                Self::AllocationPending {
+                    request_digest,
+                    reason,
+                    ..
+                },
             ) => {
                 ensure!(
                     request_digest == &reservation.request_digest,
                     "allocation response changed its request identity"
                 );
-                Ok(())
+                diagnostic_reason(reason)
             }
             (
                 LifecycleAdapterRequest::ActivateSupervisor { activation, .. }
@@ -2863,6 +2887,7 @@ mod tests {
         let wrong = LifecycleAdapterResponse::AllocationPending {
             operation_id: "allocation-1".into(),
             request_digest: "e".repeat(64),
+            reason: "create_no_response".into(),
         };
         assert!(wrong.validate_for(&request).is_err());
         let unknown = br#"{"operation":"allocate","common":{},"reservation":{},"extra":true}"#;

@@ -9372,6 +9372,7 @@ fn apply_reconciliation_resolution(
                     binding_hash: reservation.binding_hash.clone(),
                     request_digest: reservation.request_digest.clone(),
                     provider_observation_digest,
+                    operator: None,
                 },
             )?;
         }

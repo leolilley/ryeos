@@ -1,0 +1,13 @@
+# ryeos:signed:2026-11-06T00:23:47Z:bc04f42908c105e1ec4524295e3b479acefad16b64214d7a0d976829776a3ab5:PIlW0x0NXQNwEMLjzWIdzhiBeTJOpLpRoQqYmgf6fqx9tgCSXEUdqVLm9L5kMcgxbOOM8tQc1vcm43vZu8B8CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [external-execution, settle-unknown-allocation]
+description: Release one unknown external allocation outcome on the operator's statement, after checking the provider
+forms:
+  - slots:
+      - field: placement_thread_id
+      - field: reason
+      - field: evidence
+help:
+  usage: ryeos external-execution settle-unknown-allocation <placement> <reason> <evidence>
+dispatch:
+  kind: execute_ref
+  execute: service:external-execution/settle-unknown-allocation
