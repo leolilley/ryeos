@@ -58,8 +58,10 @@ const MAX_ROOTS: usize = 8;
 const MAX_ROOT_TOTAL_BYTES: usize = 256 * 1024;
 const MAX_ROOT_BYTES: usize = 64 * 1024;
 const MAX_NETWORK_INPUT_BYTES: usize = 64 * 1024;
-const SETUP_TIMEOUT: Duration = Duration::from_secs(5);
-const IDLE_TIMEOUT: Duration = Duration::from_secs(2);
+// A slow link or a busy provider is not a failure. Each call's absolute deadline
+// is the real bound; these only catch a connection that has stopped entirely.
+const SETUP_TIMEOUT: Duration = Duration::from_secs(30);
+const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Fixed part of the wait for a `/files/upload` reply, covering request
 /// handling that does not depend on the upload size.
 const UPLOAD_RESPONSE_WAIT_BASE: Duration = Duration::from_secs(15);
