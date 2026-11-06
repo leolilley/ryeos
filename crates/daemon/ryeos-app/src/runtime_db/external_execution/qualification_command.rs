@@ -559,6 +559,12 @@ fn turn_start_is_exact_replay(
     Ok(false)
 }
 
+/// The Worker starts its connector while it handles setup, so setup cannot wait
+/// for one. The turn contact is what requires it connected.
+fn connector_can_receive_setup(state: &str) -> bool {
+    matches!(state, "prepared" | "connected")
+}
+
 pub(super) fn validate_commands(conn: &Connection) -> Result<()> {
     let mut statement = conn.prepare(
         "SELECT placement_thread_id FROM external_qualification_worker_command
@@ -764,10 +770,10 @@ impl RuntimeDb {
             )?;
             ensure!(
                 channel_state == "running"
-                    && connector.0 == "connected"
+                    && connector_can_receive_setup(&connector.0)
                     && connector.1 == record.channel_binding_digest
                     && lillux::time::timestamp_millis() < channel.execution_deadline_ms,
-                "Q command lost its live connected channel before contact"
+                "Q setup lost its live channel before contact"
             );
             let now = lillux::time::timestamp_millis().max(record.reserved_at_ms);
             ensure!(
@@ -1315,6 +1321,13 @@ mod tests {
         QualificationWorkerCommandPhase, QualificationWorkerCommandRecord, prepare_progress_delta,
         turn_start_is_exact_replay,
     };
+
+    #[test]
+    fn setup_may_precede_the_connector_it_causes_but_never_follow_a_closed_one() {
+        assert!(super::connector_can_receive_setup("prepared"));
+        assert!(super::connector_can_receive_setup("connected"));
+        assert!(!super::connector_can_receive_setup("closed"));
+    }
 
     fn completed_unknown_record() -> QualificationWorkerCommandRecord {
         let hash = "a".repeat(64);

@@ -493,6 +493,8 @@ pub fn execute_signed_qualification_worker_request(
             if let Err(error) = setup {
                 return Err(fence_unknown_command(state, placement, error));
             }
+            // Setup returns without waiting for the connector it started.
+            wait_for_connector(state, placement, deadline)?;
             // Successful setup does not authorize a turn after revocation or
             // expiry. This independent gate verifies setup settlement too.
             let admission = root.authenticate_invocation(state)?;
@@ -586,6 +588,28 @@ fn validate_setup_final(body: &Value, wire_max_bytes: u32) -> Result<()> {
         }),
         "Q session setup cannot supply turn state testimony"
     );
+    Ok(())
+}
+
+/// How long a started connector gets to authenticate before the turn is refused.
+const CONNECTOR_CONNECT_WAIT: lillux::time::Duration = lillux::time::Duration::from_secs(30);
+
+fn wait_for_connector(
+    state: &AppState,
+    placement: &str,
+    deadline: lillux::time::MonotonicDeadline,
+) -> Result<()> {
+    let wait = lillux::time::MonotonicDeadline::after(CONNECTOR_CONNECT_WAIT).min(deadline);
+    while !state.state_store.external_connector_connected(placement)? {
+        ensure!(
+            !wait.has_elapsed(),
+            "Q Worker connector did not connect after setup"
+        );
+        lillux::time::sleep(
+            wait.remaining()
+                .min(lillux::time::Duration::from_millis(50)),
+        );
+    }
     Ok(())
 }
 

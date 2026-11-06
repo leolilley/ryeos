@@ -19305,6 +19305,25 @@ impl StateStore {
             .close_external_connector(placement, reason)
     }
 
+    /// Whether the one connector has authenticated. A closed connector can
+    /// never connect, so it is refused rather than reported as not yet.
+    pub(crate) fn external_connector_connected(&self, placement: &str) -> Result<bool> {
+        use runtime_db::external_execution::connector::ExternalConnectorPhase as Phase;
+        let record = self
+            .lock()?
+            .runtime_db
+            .external_connector(placement)?
+            .context("external connector is absent")?;
+        match record.phase {
+            Phase::Prepared => Ok(false),
+            Phase::Connected => Ok(true),
+            Phase::Closed => anyhow::bail!(
+                "external connector closed before it connected: {}",
+                record.close_reason.as_deref().unwrap_or("no recorded reason")
+            ),
+        }
+    }
+
     pub(crate) fn external_connector_retired(&self, placement: &str) -> Result<bool> {
         Ok(self
             .lock()?
