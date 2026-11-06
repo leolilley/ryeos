@@ -8,7 +8,7 @@
 //! was never sent, or the facade refused it before creating anything on a
 //! first and only contact.
 
-use std::time::Duration;
+use lillux::time::Duration;
 
 use ryeos_external_execution_contract::{
     AllocationReservation, BoundOccurrence, LifecycleAdapterResponse, LifecycleOperationCommon,
@@ -260,7 +260,7 @@ fn settle_untagged<T: FacadeTransport>(
             return true;
         }
         if attempt == 0 {
-            std::thread::sleep(context.untagged_settle);
+            lillux::time::sleep(context.untagged_settle);
         }
     }
     let _ = client.terminate_by_name(name);
@@ -370,7 +370,7 @@ pub fn reconcile_allocation<T: FacadeTransport>(
             observation.tags.get(POLICY_TAG),
         ) else {
             if observation.found && observation.tagged == Some(false) && attempt == 0 {
-                std::thread::sleep(context.untagged_settle);
+                lillux::time::sleep(context.untagged_settle);
                 continue;
             }
             break;

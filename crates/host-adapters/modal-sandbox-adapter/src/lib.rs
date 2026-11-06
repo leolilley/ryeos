@@ -52,7 +52,7 @@ const MAX_ROOT_TOTAL_BYTES: usize = 256 * 1024;
 const MAX_ROOT_BYTES: usize = 64 * 1024;
 const MAX_NETWORK_INPUT_BYTES: usize = 64 * 1024;
 /// How long a concurrent create is given to finish tagging its lease.
-const UNTAGGED_SETTLE: std::time::Duration = std::time::Duration::from_secs(2);
+const UNTAGGED_SETTLE: lillux::time::Duration = lillux::time::Duration::from_secs(2);
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
