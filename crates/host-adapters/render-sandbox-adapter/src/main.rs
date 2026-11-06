@@ -183,6 +183,7 @@ enum RenderSandboxStatus {
     Resuming,
     Running,
     Suspended,
+    Suspending,
     Terminated,
 }
 
@@ -266,6 +267,8 @@ struct RenderSandbox {
     id: String,
     #[serde(rename = "idleTimeoutSeconds")]
     idle_timeout_seconds: u32,
+    #[serde(default)]
+    name: Option<String>,
     #[serde(rename = "networkPolicy")]
     network_policy: RenderNetworkPolicy,
     plan: RenderSandboxPlan,
@@ -284,13 +287,19 @@ const MAX_IDLE_TIMEOUT_SECONDS: u32 = 86_400;
 
 impl RenderSandbox {
     /// The provider-assigned attributes that no request field pins: a positive
-    /// idle timeout within one day and a well-formed sandbox group id. The
+    /// idle timeout within one day, a well-formed sandbox group id and, when
+    /// present, a bounded printable name. The
     /// idle timeout is independent of `timeoutSeconds` (the live service
     /// reports 900 for a 600 second lifetime).
     fn provider_attributes_valid(&self) -> bool {
         (1..=MAX_IDLE_TIMEOUT_SECONDS).contains(&self.idle_timeout_seconds)
             && valid_sandbox_group_id(&self.sandbox_group_id)
+            && self.name.as_deref().is_none_or(valid_sandbox_name)
     }
+}
+
+fn valid_sandbox_name(value: &str) -> bool {
+    value.len() <= 1024 && !value.chars().any(char::is_control)
 }
 
 fn valid_sandbox_group_id(value: &str) -> bool {
@@ -2512,6 +2521,22 @@ mod offline_fixture_tests {
             from_json_slice_strict(running, usize::try_from(MAX_API_RESPONSE_BYTES).unwrap())
                 .unwrap();
         assert_eq!(polled.status, RenderSandboxStatus::Running);
+        // The provider's later `name` label parses on both shapes; a field it
+        // has not declared stays refused.
+        let mut named: serde_json::Value = serde_json::from_slice(created).unwrap();
+        named["name"] = serde_json::json!("label");
+        assert!(accepted_create_response(201, named.to_string().as_bytes(), &projection).is_some());
+        named["name"] = serde_json::Value::Null;
+        assert!(accepted_create_response(201, named.to_string().as_bytes(), &projection).is_some());
+        named["name"] = serde_json::json!("");
+        assert!(accepted_create_response(201, named.to_string().as_bytes(), &projection).is_some());
+        named["name"] = serde_json::json!("bad\nlabel");
+        assert!(accepted_create_response(201, named.to_string().as_bytes(), &projection).is_none());
+        named["name"] = serde_json::json!("x".repeat(1025));
+        assert!(accepted_create_response(201, named.to_string().as_bytes(), &projection).is_none());
+        named["name"] = serde_json::json!("label");
+        named["undeclared"] = serde_json::json!(true);
+        assert!(accepted_create_response(201, named.to_string().as_bytes(), &projection).is_none());
         let mut altered: serde_json::Value = serde_json::from_slice(created).unwrap();
         altered["idleTimeoutSeconds"] = serde_json::json!(0);
         assert!(
