@@ -1035,6 +1035,10 @@ pub struct ProviderConfigurationRequest {
     pub placement_thread_id: String,
     pub execution_binding_hash: String,
     pub connector_capability: String,
+    /// How long the workload may wait for the connector's first reply. The
+    /// reply can cross a relay whose round trips are far slower than a local
+    /// process, so a workload's default for a local peer does not apply.
+    pub connector_handshake_timeout_seconds: u64,
 }
 
 /// Controller-selected delivery of the already admitted connector image.
@@ -1082,6 +1086,10 @@ impl ProviderConfigurationRequest {
                 && self.connector_capability.len() <= 16 * 1024
                 && !self.connector_capability.chars().any(char::is_control),
             "provider connector capability is invalid"
+        );
+        ensure!(
+            (1..=3600).contains(&self.connector_handshake_timeout_seconds),
+            "provider connector handshake timeout is invalid"
         );
         Ok(())
     }

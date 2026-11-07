@@ -46,6 +46,9 @@ const CONNECTOR_RUNTIME_ENDPOINT_NAME: &str = "external-candidate-connector";
 const ACCEPT_POLL: Duration = Duration::from_millis(100);
 const RELAY_POLL: Duration = Duration::from_millis(10);
 const LOCAL_IO_TIMEOUT: Duration = Duration::from_secs(30);
+/// The first protocol reply crosses the external channel in both directions,
+/// and each crossing can include a retried read after a dropped connection.
+const CONNECTOR_HANDSHAKE_TIMEOUT_SECONDS: u64 = 120;
 // Local observation grace, not permission to abandon remote writer ownership.
 const RELAY_RETIREMENT_GRACE: Duration = Duration::from_secs(2);
 
@@ -259,6 +262,7 @@ fn connector_configuration(
         placement_thread_id: placement.to_owned(),
         execution_binding_hash: execution_binding_hash.to_owned(),
         connector_capability: capability.expose_for_connector_configuration().to_owned(),
+        connector_handshake_timeout_seconds: CONNECTOR_HANDSHAKE_TIMEOUT_SECONDS,
     };
     let request = lillux::sealed_memfd(
         c"ryeos-provider-configuration-request",

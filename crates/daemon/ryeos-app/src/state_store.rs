@@ -19305,8 +19305,9 @@ impl StateStore {
             .close_external_connector(placement, reason)
     }
 
-    /// Whether the one connector has authenticated. A closed connector can
-    /// never connect, so it is refused rather than reported as not yet.
+    /// Whether the one connector is authenticated and still open. A closed
+    /// connector cannot serve the workload, whether or not it ever connected,
+    /// so it is refused rather than reported as not yet.
     pub(crate) fn external_connector_connected(&self, placement: &str) -> Result<bool> {
         use runtime_db::external_execution::connector::ExternalConnectorPhase as Phase;
         let record = self
@@ -19318,8 +19319,11 @@ impl StateStore {
             Phase::Prepared => Ok(false),
             Phase::Connected => Ok(true),
             Phase::Closed => anyhow::bail!(
-                "external connector closed before it connected: {}",
-                record.close_reason.as_deref().unwrap_or("no recorded reason")
+                "external connector is closed: {}",
+                record
+                    .close_reason
+                    .as_deref()
+                    .unwrap_or("no recorded reason")
             ),
         }
     }
