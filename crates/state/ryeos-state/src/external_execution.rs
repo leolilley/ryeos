@@ -795,7 +795,14 @@ impl SignedExecutionFrame {
         let signed: Self =
             serde_json::from_slice(bytes).context("decode external execution frame")?;
         validate_frame(&signed.frame, binding)?;
-        require_lifetime()?;
+        // A channel's lifetime bounds the authority its frames carry. The
+        // owner's cancellation carries none: it only withdraws input, so it
+        // stays admissible after the lifetime ends. Otherwise a channel that
+        // expired before its owner could revoke it could never be fenced or
+        // settled.
+        if !is_owner_revocation(&signed.frame) {
+            require_lifetime()?;
+        }
         let canonical = lillux::canonical_json(&serde_json::to_value(&signed)?)?;
         ensure!(
             canonical.as_bytes() == bytes,
@@ -815,6 +822,11 @@ impl SignedExecutionFrame {
             canonical,
         })
     }
+}
+
+fn is_owner_revocation(frame: &ExecutionFrame) -> bool {
+    frame.direction == ChannelDirection::OwnerToSupervisor
+        && matches!(frame.payload, ExecutionChannelPayload::Cancel)
 }
 
 fn validate_frame(frame: &ExecutionFrame, binding: &ExecutionChannelBinding) -> Result<()> {

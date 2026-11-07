@@ -5050,6 +5050,50 @@ mod tests {
     }
 
     #[test]
+    fn owner_revocation_is_admitted_after_the_channel_lifetime() {
+        let now = lillux::time::timestamp_millis();
+        let (journal, binding, owner, _supervisor) =
+            setup_with_window(now - 120_000, now - 90_000, now - 60_000);
+        let placement = binding.placement_thread_id.clone();
+        journal.sql(|conn| {
+            let tx =
+                Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate).unwrap();
+            assert!(
+                prepare_frame(
+                    &tx,
+                    &TestOwner,
+                    &placement,
+                    ChannelDirection::OwnerToSupervisor,
+                    &owner,
+                    ExecutionChannelPayload::Release,
+                )
+                .is_err()
+            );
+            let cancel = prepare_frame(
+                &tx,
+                &TestOwner,
+                &placement,
+                ChannelDirection::OwnerToSupervisor,
+                &owner,
+                ExecutionChannelPayload::Cancel,
+            )
+            .unwrap();
+            assert!(
+                record_revocation(&tx, &TestOwner, &placement, cancel.canonical().as_bytes())
+                    .unwrap()
+            );
+            tx.commit().unwrap();
+            let tx =
+                Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate).unwrap();
+            assert!(
+                append_frame(&tx, &TestOwner, &placement, cancel.canonical().as_bytes()).unwrap()
+            );
+            tx.commit().unwrap();
+            assert!(revoked(conn, &binding.digest().unwrap()).unwrap());
+        });
+    }
+
+    #[test]
     fn claimed_input_finishes_historically_after_cancellation() {
         let (journal, binding, owner, supervisor) = setup();
         journal.sql(|conn| {
