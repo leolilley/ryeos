@@ -1840,6 +1840,40 @@ fn validate_applications(conn: &Connection) -> Result<()> {
 mod tests {
     use super::*;
 
+    /// One statement rewriting many rows keeps a statement journal, which
+    /// outgrows its memory spill limit here. The live store admits no file for
+    /// that journal, so settling a long relay journal depends on it staying in
+    /// memory.
+    #[test]
+    fn a_statement_journal_past_its_spill_limit_stays_off_disk_on_a_live_store() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = crate::runtime_db::test_native::TestRuntime::open(
+            &directory.path().join("runtime.sqlite3"),
+        );
+        store
+            .conn
+            .with_sql(|conn| {
+                conn.execute_batch(
+                    "CREATE TABLE statement_journal_probe(id INTEGER PRIMARY KEY, body BLOB NOT NULL);
+                     CREATE TRIGGER statement_journal_probe_guard
+                     BEFORE UPDATE ON statement_journal_probe WHEN NEW.id != OLD.id
+                     BEGIN SELECT RAISE(ABORT, 'probe row cannot move'); END;",
+                )?;
+                for id in 0..128 {
+                    conn.execute(
+                        "INSERT INTO statement_journal_probe VALUES(?1, zeroblob(3000))",
+                        [id],
+                    )?;
+                }
+                let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+                let changed = tx.execute("UPDATE statement_journal_probe SET body=zeroblob(3100)", [])?;
+                tx.commit()?;
+                assert_eq!(changed, 128);
+                Ok(())
+            })
+            .unwrap();
+    }
+
     #[test]
     fn exact_response_bytes_cannot_be_replaced_after_a_possible_upload() {
         crate::runtime_db::test_native::with_transient(|conn| {

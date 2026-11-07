@@ -3613,6 +3613,10 @@ impl OriginalNativeFactory {
             body.connection().busy_timeout(std::time::Duration::ZERO)?;
             body.connection().pragma_update(None, "mmap_size", 0)?;
             body.connection().pragma_update(None, "threads", 0)?;
+            // The bound VFS admits main and WAL roles only, so a statement
+            // journal or sorter that outgrows its memory spill limit has no
+            // file to open. Keep every temporary store in memory instead.
+            body.connection().pragma_update(None, "temp_store", 2)?;
             // The bound VFS admits main and WAL roles only, never a rollback
             // journal file, so a database this owner just created cannot take
             // its first write through one. It enters WAL through an in-memory
