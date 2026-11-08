@@ -21,7 +21,7 @@ use ryeos_runtime::authorizer::AuthorizationPolicy;
 use serde_json::Value;
 
 pub use ryeos_app::service_registry::ServiceAvailability;
-use ryeos_app::service_registry::{ServiceDescriptor, extract_endpoint, extract_required_caps};
+use ryeos_app::service_registry::ServiceDescriptor;
 use ryeos_app::standalone_audit;
 use ryeos_app::state::AppState;
 
@@ -781,9 +781,18 @@ pub async fn execute_service_verified(
         ) => None,
     };
 
-    // 3. Extract endpoint + required_caps
-    let endpoint = extract_endpoint(&verified.resolved.metadata.extra)?;
-    let required_caps = extract_required_caps(&verified.resolved.metadata.extra);
+    // 3. Admit the item: its space and trust class must be admitted for its
+    // kind, and it must name exactly its compiled handler's endpoint and caps.
+    // The endpoint run and the caps checked are the compiled descriptor's.
+    let crate::execution::launch_trust_gate::AdmittedService {
+        endpoint,
+        required_caps,
+    } = crate::execution::launch_trust_gate::admit_verified_service(
+        &verified,
+        &ctx.engine.kinds,
+        &state.node_policy,
+        state.service_descriptors,
+    )?;
     let authored_record_thread =
         ryeos_app::service_registry::extract_record_thread(&verified.resolved.metadata.extra)?;
     // A caller that pre-minted an externally subscribed ID has promised a

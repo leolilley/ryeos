@@ -118,6 +118,74 @@ pub(crate) fn trust_refusal(
     }
 }
 
+/// What an in-process service may run: the compiled handler's endpoint and
+/// the capabilities its compiled descriptor requires.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AdmittedService {
+    pub endpoint: String,
+    pub required_caps: Vec<String>,
+}
+
+/// Admit a verified service item for dispatch. The item must come from a
+/// space and carry a trust class its kind admits, and it must name exactly
+/// the endpoint and capabilities of the compiled handler descriptor for its
+/// ref: an item can select neither a different handler nor weaker caps. The
+/// returned endpoint and caps are the descriptor's.
+pub(crate) fn admit_verified_service(
+    verified: &ryeos_engine::contracts::VerifiedItem,
+    kinds: &KindRegistry,
+    node_policy: &NodePolicySnapshot,
+    descriptors: &[ryeos_app::service_registry::ServiceDescriptor],
+) -> Result<AdmittedService, DispatchError> {
+    let service_ref = verified.resolved.canonical_ref.to_string();
+    enforce_launch_trust(
+        kinds,
+        node_policy,
+        LaunchTrustSubject {
+            item_ref: &service_ref,
+            kind: &verified.resolved.kind,
+            space: verified.resolved.source_space,
+            class: verified.launch_trust_class(),
+            position: LaunchTrustPosition::Root,
+        },
+        None,
+    )?;
+    let descriptor = descriptors
+        .iter()
+        .find(|descriptor| descriptor.service_ref == service_ref)
+        .ok_or_else(|| DispatchError::LaunchPolicyForbidden {
+            code: "service_descriptor_missing".to_owned(),
+            message: format!("refusing to run `{service_ref}`: no compiled handler serves it"),
+            binding: None,
+        })?;
+    let endpoint = ryeos_app::service_registry::extract_endpoint(&verified.resolved.metadata.extra)
+        .map_err(|error| DispatchError::InvalidRef(service_ref.clone(), format!("{error:#}")))?;
+    let mut item_caps =
+        ryeos_app::service_registry::extract_required_caps(&verified.resolved.metadata.extra);
+    let mut compiled_caps: Vec<String> = descriptor
+        .required_caps
+        .iter()
+        .map(|cap| (*cap).to_owned())
+        .collect();
+    item_caps.sort();
+    compiled_caps.sort();
+    if endpoint != descriptor.endpoint || item_caps != compiled_caps {
+        return Err(DispatchError::LaunchPolicyForbidden {
+            code: "service_descriptor_mismatch".to_owned(),
+            message: format!(
+                "refusing to run `{service_ref}`: the item names endpoint `{endpoint}` and caps {item_caps:?}, \
+                 but its compiled handler serves `{}` with caps {compiled_caps:?}",
+                descriptor.endpoint
+            ),
+            binding: None,
+        });
+    }
+    Ok(AdmittedService {
+        endpoint: descriptor.endpoint.to_owned(),
+        required_caps: compiled_caps,
+    })
+}
+
 fn kind_launch_trust<'k>(
     kinds: &'k KindRegistry,
     kind: &str,

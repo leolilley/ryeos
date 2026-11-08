@@ -3107,6 +3107,14 @@ pub async fn dispatch_service(
                 })?,
             };
             refuse_in_process_node_requirements(&verified.resolved, item_ref)?;
+            // A service the gate would refuse is refused here too, so neither
+            // help output nor validation describes an inadmissible item.
+            let admitted = crate::execution::launch_trust_gate::admit_verified_service(
+                &verified,
+                &ctx.engine.kinds,
+                &state.node_policy,
+                state.service_descriptors,
+            )?;
             // validate_only: return schema info without invoking the handler.
             // This is the codepath triggered by `ryeos help <verb>` — the
             // handler body must NEVER be reached because it will fail on
@@ -3114,16 +3122,8 @@ pub async fn dispatch_service(
             if request.validate_only {
                 let description = verified.resolved.metadata.description.clone();
                 let input_schema = verified.resolved.metadata.extra.get("schema").cloned();
-                let endpoint = verified
-                    .resolved
-                    .metadata
-                    .extra
-                    .get("endpoint")
-                    .and_then(|v| v.as_str())
-                    .map(String::from);
-                let required_caps = ryeos_app::service_registry::extract_required_caps(
-                    &verified.resolved.metadata.extra,
-                );
+                let endpoint = Some(admitted.endpoint);
+                let required_caps = admitted.required_caps;
 
                 return Ok(json!({
                     "validated": true,
@@ -5980,6 +5980,12 @@ pub fn preflight_root_dispatch_with_remote_consumer(
                     refuse_in_process_node_requirements(
                         &subject.resolved,
                         &subject.resolved.canonical_ref.to_string(),
+                    )?;
+                    crate::execution::launch_trust_gate::admit_verified_service(
+                        &subject,
+                        &ctx.engine.kinds,
+                        &state.node_policy,
+                        state.service_descriptors,
                     )?;
                     return finish_root_dispatch_preflight(
                         RootDispatchClass::InProcess,
