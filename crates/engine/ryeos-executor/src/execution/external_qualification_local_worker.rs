@@ -243,6 +243,12 @@ impl ExternalQualificationLocalWorker {
             ) {
                 return Ok(outcome);
             }
+            // The turn is still pending, so a Worker that has ended can never
+            // finish it: fail now rather than at the unrelated deadline.
+            ryeos_app::external_qualification_local::ensure_qualification_worker_attached(
+                state,
+                self.ready.placement(),
+            )?;
             lillux::time::sleep(
                 deadline
                     .remaining()
@@ -371,7 +377,11 @@ impl ExternalQualificationLocalWorker {
             Err(error) => match self.ready.stop_relay() {
                 Ok(()) => Err(error),
                 Err(relay_error) => {
-                    Err(error.context(format!("Q relay shutdown also failed: {relay_error:#}")))
+                    Err(super::external_qualification_start::with_secondary_failure(
+                        error,
+                        "Q relay shutdown also failed",
+                        &relay_error,
+                    ))
                 }
             },
             Ok(()) => Ok(()),
@@ -381,9 +391,13 @@ impl ExternalQualificationLocalWorker {
             (Ok(()), Ok(())) => Ok(()),
             (Err(turn_error), Ok(())) => Err(turn_error),
             (Ok(()), Err(retirement_error)) => Err(retirement_error),
-            (Err(turn_error), Err(retirement_error)) => Err(turn_error.context(format!(
-                "Q Worker retirement also remained unproved: {retirement_error:#}"
-            ))),
+            (Err(turn_error), Err(retirement_error)) => {
+                Err(super::external_qualification_start::with_secondary_failure(
+                    turn_error,
+                    "Q Worker retirement also remained unproved",
+                    &retirement_error,
+                ))
+            }
         }
     }
 }
