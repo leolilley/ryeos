@@ -174,6 +174,12 @@ impl NodePolicySnapshot {
     }
 }
 
+/// The shipped `launch_trust` policy record, admitting nothing beyond each
+/// kind's default. Exact test snapshots include it wherever a launch is judged.
+pub fn default_launch_trust_record() -> Arc<dyn ErasedNodePolicy> {
+    Arc::new(sections::launch_trust::NodeLaunchTrustPolicy::admitting_nothing())
+}
+
 /// Compile one already validated raw generation through every registered
 /// policy compiler. Missing, duplicate, or unknown sections fail closed.
 pub fn compile_generation(

@@ -196,6 +196,7 @@ fn build_test_state_with_hosted_policy_choices(
     let (tmpdir, store_owner, mut state) = build_test_state();
     state.node_policy = Arc::new(
         ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![
+            ryeos_node_runtime::node_policy::default_launch_trust_record(),
             Arc::new(ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy()),
             Arc::new(test_object_closure_policy()),
             Arc::new(
@@ -275,6 +276,7 @@ fn build_app_state(
         external_candidate_imports: Arc::new(Default::default()),
         node_policy: Arc::new(
             ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![
+                ryeos_node_runtime::node_policy::default_launch_trust_record(),
                 Arc::new(
                     ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy(),
                 ),

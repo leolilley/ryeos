@@ -26,6 +26,7 @@ pub mod launch;
 pub(crate) mod launch_claim;
 pub mod launch_envelope;
 pub mod launch_preparation;
+pub(crate) mod launch_trust_gate;
 pub mod lillux_bridge;
 pub mod limits;
 pub mod persistent_session;

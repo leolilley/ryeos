@@ -31,6 +31,27 @@ pub struct NodeLaunchTrustPolicy {
 }
 
 impl NodeLaunchTrustPolicy {
+    /// The shipped default: the operator admits nothing beyond each kind's
+    /// default.
+    pub fn admitting_nothing() -> Self {
+        Self {
+            schema: 1,
+            admit: BTreeMap::new(),
+        }
+    }
+
+    /// A policy admitting `classes` for each named kind. Unvalidated; used to
+    /// build exact snapshots in tests.
+    pub fn admitting(entries: &[(&str, &[TrustClass])]) -> Self {
+        Self {
+            schema: 1,
+            admit: entries
+                .iter()
+                .map(|(kind, classes)| ((*kind).to_owned(), classes.to_vec()))
+                .collect(),
+        }
+    }
+
     pub fn validate(&self) -> anyhow::Result<()> {
         if self.schema != 1 {
             bail!("node launch_trust policy schema is not current");
