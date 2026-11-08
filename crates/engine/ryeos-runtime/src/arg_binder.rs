@@ -800,7 +800,7 @@ mod tests {
         );
         command.defaults.insert(
             "surface".into(),
-            serde_json::Value::String("surface:ryeos/ui/atlas".into()),
+            serde_json::Value::String("surface:ryeos/ui/base".into()),
         );
 
         let result =

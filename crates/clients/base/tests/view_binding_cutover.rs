@@ -17,22 +17,6 @@ use sha2::{Digest, Sha256};
 
 const VIEW_BEHAVIOR_GOLDENS: &[(&str, &str)] = &[
     (
-        "view:ryeos/atlas",
-        "b33426006813072a63292c0acd721d424bcd4444f468ea83a7de83fc6ff7bc78",
-    ),
-    (
-        "view:ryeos/backdrop/prism",
-        "9938fc2fa9aad536875cadadec0e338f51ebc790921c4203a3edabd6f26c4e0d",
-    ),
-    (
-        "view:ryeos/backdrop/prism-shards",
-        "94531cca69111546569b1ca89a75306cd3f7fa4710abcce522773569a4bdbffb",
-    ),
-    (
-        "view:ryeos/backdrop/splash",
-        "a360c148c3113573619ea3f9ab36e3ec946db37c042aa26c4cb0b4913ee9982e",
-    ),
-    (
         "view:ryeos/chain/timeline",
         "34ffad6a5653c12e482b04b42ac3935a5f05b1d9457141c3642f62353144a11e",
     ),
@@ -59,10 +43,6 @@ const VIEW_BEHAVIOR_GOLDENS: &[(&str, &str)] = &[
     (
         "view:ryeos/files/list",
         "1ea1638031a7d34ef9f6fb461f2225f4c4778a21514e65241729283951f179eb",
-    ),
-    (
-        "view:ryeos/graph/topology",
-        "95af9d33aceff94919f108a0b50bec214212cda043d7b98550c55ba0b0e9cc11",
     ),
     (
         "view:ryeos/home/overview",
@@ -435,7 +415,7 @@ fn every_bundled_view_resolves_and_validates_under_the_named_source_contract() {
     let files = yaml_files_below(&views_root);
     assert_eq!(
         files.len(),
-        52,
+        47,
         "authored inventory includes the Surfaces catalogue and session-details View"
     );
 

@@ -53,7 +53,7 @@ pub struct ViewBinding {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extends: Option<String>,
     /// One of the closed widget primitives: rows | text | document |
-    /// key_value | timeline | scene. Unknown widgets degrade visibly.
+    /// key_value | timeline. Unknown widgets degrade visibly.
     #[serde(default)]
     pub widget: String,
     /// The view item's authored `name:` (content, like `description`). Used

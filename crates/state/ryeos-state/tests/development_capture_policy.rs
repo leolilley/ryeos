@@ -32,7 +32,6 @@ fn development_source_policy_keeps_source_and_excludes_generated_payloads() {
         "nvim.log",
         ".ai/directives/test/replay-smoke.md",
         ".ai/tools/test/echo.yaml",
-        ".ai/surfaces/ryeos/ui/atlas.yaml",
         "tests/e2e/execute-stream-latency/.ai/state/threads/old/thread.json",
         "tests/e2e/execute-stream-latency/outputs/probe/samples.jsonl",
         "tests/e2e/manual-directives/.ai/state/threads/old/thread.json",

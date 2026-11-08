@@ -85,20 +85,7 @@ fn main() {
             "view:fixture/execution":{
                 "widget":"rows","title":"Execution","sources":source,
                 "body":{"heading":{"title":"Work in motion"},
-                    "supplement":{"frame_detail":"SAMPLE","footer":"Turn in progress · candidate not yet captured (sample)"},
-                    "scene":{"objects":[
-                        {"position":[46,-58,0],"to":[154,-58,0],"color":"#504945"},
-                        {"position":[154,-58,0],"to":[322,-25,0],"color":"#504945"},
-                        {"position":[154,-58,0],"to":[322,-90,0],"color":"#504945"},
-                        {"position":[46,-58,0],"scale":[11,11,1],"glyph":"square","color":"#a89984"},
-                        {"position":[154,-58,0],"scale":[15,15,1],"glyph":"diamond","color":"#fabd2f"},
-                        {"position":[322,-25,0],"scale":[5,5,1],"color":"#8ec07c"},
-                        {"position":[322,-90,0],"scale":[5,5,1],"color":"#8ec07c"},
-                        {"kind":"text","label":"SOURCE","position":[29,-91,0],"color":"#a89984"},
-                        {"kind":"text","label":"WORKER","position":[134,-106,0],"color":"#a89984"},
-                        {"kind":"text","label":"FORMAT","position":[267,-14,0],"color":"#a89984"},
-                        {"kind":"text","label":"CHECK","position":[267,-112,0],"color":"#a89984"}
-                    ]}},
+                    "supplement":{"frame_detail":"SAMPLE","footer":"Turn in progress · candidate not yet captured (sample)"}},
                 "projections":{"primary":"title","meta":"state","glyph":"glyph"}},
             "view:fixture/changes":{"widget":"rows","title":"Changes","sources":source,
                 "body":{"heading":{"title":"Working changes","summary":"Private workspace · not published"},

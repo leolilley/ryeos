@@ -21,11 +21,11 @@ use ryeos_executor::execution::effective_program_projection::{
 };
 use ryeos_executor::executor::ServiceAvailability;
 
+use super::signed_item_topology::{TopologyGraph, TopologyNode};
 use super::ui_field::{
     FieldEvidenceRef, FieldExpansionRequest, FieldFactEntity, FieldFactRelation, FieldFactSubject,
     FieldFactsBuilder, apply_bounded_expansions,
 };
-use super::ui_graph_topology::{TopologyGraph, TopologyNode};
 
 const SERVICE_REF: &str = "service:ui/ryeos-ui/field/project";
 const ENDPOINT: &str = "ui.ryeos.field.project";
@@ -63,7 +63,7 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
         crate::seat_auth::SeatCaller::Attachment(attachment) => Some(attachment.root_ref.clone()),
         crate::seat_auth::SeatCaller::Operator { .. } => None,
     };
-    let topology = super::ui_graph_topology::build_topology(
+    let topology = super::signed_item_topology::build_topology(
         &state,
         project_root.clone(),
         project_access.as_ref(),
@@ -210,10 +210,11 @@ fn project_facts(
                 provenance: builder.provenance(Vec::new()),
             })?;
             if let Some(projection) = projections.get(&node.id) {
-                let effective_topology = super::ui_graph_topology::build_effective_graph_topology(
-                    &projection.canonical_ref,
-                    &projection.resolution.composed.composed,
-                )?;
+                let effective_topology =
+                    super::signed_item_topology::build_effective_graph_topology(
+                        &projection.canonical_ref,
+                        &projection.resolution.composed.composed,
+                    )?;
                 let effective_ids = super::ui_field_definition::add_current_effective_definition(
                     &mut builder,
                     &projection.canonical_ref,
@@ -606,7 +607,7 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
 
 #[cfg(test)]
 mod tests {
-    use super::super::ui_graph_topology::{
+    use super::super::signed_item_topology::{
         NodeStatus, TopologyEdge, TopologyMetadata, TopologyNode, TopologyViewDefaults,
         TopologyViewFilters, TopologyViewHints,
     };

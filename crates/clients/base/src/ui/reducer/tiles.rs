@@ -214,7 +214,7 @@ impl RyeOsCore {
     }
 
     /// Whether a view works as a center lens: a real bound view that is
-    /// neither a scene backdrop nor a pure input line. An `input` block
+    /// not a pure input line. An `input` block
     /// alone does not disqualify — the thread history views carry live
     /// FILTER inputs and are the canonical center lenses; only a view
     /// with no content of its own (no source, no sections — the foot
@@ -226,7 +226,7 @@ impl RyeOsCore {
                 let input_only = binding.input.is_some()
                     && binding.sources.is_empty()
                     && binding.sections.is_empty();
-                binding.widget != "scene" && !input_only
+                !input_only
             })
     }
 
@@ -482,32 +482,6 @@ impl RyeOsCore {
         }
     }
 
-    pub(crate) fn set_tile_fold(
-        &mut self,
-        tile_id: TileId,
-        section: usize,
-        collapsed: bool,
-    ) -> bool {
-        let Some(tile) = self
-            .active_view_set_mut()
-            .and_then(|set| set.tiles.get_mut(&tile_id))
-        else {
-            return false;
-        };
-        match &mut tile.local {
-            ViewLocalState::GenericList {
-                collapsed: folds, ..
-            } => {
-                if collapsed {
-                    folds.insert(section)
-                } else {
-                    folds.remove(&section)
-                }
-            }
-            ViewLocalState::None | ViewLocalState::Field(_) => false,
-        }
-    }
-
     pub(crate) fn set_view_fold(
         &mut self,
         instance_key: &crate::ids::RyeOsViewInstanceKey,
@@ -723,6 +697,7 @@ impl RyeOsCore {
         false
     }
 
+    #[cfg(test)]
     pub(crate) fn add_center_tile(&mut self, view: ViewSpec) -> Vec<RyeOsEffect> {
         let Some(set_id) = self.active_view_set().map(|set| set.id) else {
             return Vec::new();
@@ -733,6 +708,7 @@ impl RyeOsCore {
         self.add_center_tile_under_binding(view, &attachment_id)
     }
 
+    #[cfg(test)]
     pub(crate) fn add_center_tile_under_binding(
         &mut self,
         view: ViewSpec,
@@ -1851,9 +1827,12 @@ mod tests {
         }
 
         // Fold section 0 (Threads).
+        let fold_instance = core.active_view_set().unwrap().tiles[&tile]
+            .instance_key
+            .clone();
         core.dispatch(RyeOsEvent::Ui {
-            event: RyeOsUiEvent::SetFold {
-                tile_id: key.clone(),
+            event: RyeOsUiEvent::SetViewFold {
+                instance_key: fold_instance,
                 section: 0,
                 collapsed: true,
             },
@@ -2025,23 +2004,6 @@ mod tests {
             !matches!(core.selection_attachments.get(&instance),Some(crate::ui::attachment::SelectionAttachment::Pinned {fingerprint,..}) if fingerprint=="old-lens"),
             "a different lens must not inherit the replaced subject attachment"
         );
-
-        // OpenNewView also collapses to a replace — no second tile.
-        core.dispatch(RyeOsEvent::Ui {
-            event: RyeOsUiEvent::Activate {
-                intent: RyeOsUiIntent::OpenNewView {
-                    view: ViewSpec {
-                        view_ref: "view:ryeos/items/space".to_string(),
-                    },
-                },
-            },
-        });
-        settle_structure(&mut core);
-        assert_eq!(
-            core.active_view_set().unwrap().tile_ids().len(),
-            1,
-            "OpenNewView does not add a tile in single-lens"
-        );
     }
 
     #[test]
@@ -2206,19 +2168,18 @@ mod tests {
     }
 
     #[test]
-    fn single_lens_cycle_tab_walks_the_library_skipping_scene_and_input() {
+    fn single_lens_cycle_tab_walks_the_library_skipping_input() {
         // In single-lens, Ctrl+←/→ (CycleTab) swaps the one center lens
-        // through the surface library — scene backdrops and the foot input
-        // are not lenses and are skipped.
+        // through the surface library — the foot input is not a lens and is
+        // skipped.
         let session = session_with_surface(serde_json::json!({
             "name": "lens-test",
             "tiling":{"mode":"single_lens"},
             "library": [
-                { "group": "Lenses", "views": ["view:a", "view:scene", "view:input", "view:b"] }
+                { "group": "Lenses", "views": ["view:a", "view:input", "view:b"] }
             ],
             "views": {
                 "view:a": { "widget": "rows", "sources": { "default": { "ref": "service:x", "params": {}, "collection": "rows" } } },
-                "view:scene": { "widget": "scene" },
                 "view:input": { "widget": "text", "input": { "id": "line" } },
                 "view:b": { "widget": "rows", "sources": { "default": { "ref": "service:x", "params": {}, "collection": "rows" } } }
             }
@@ -2227,7 +2188,7 @@ mod tests {
         let producer = claim_fixture_producer(&mut core);
         settle_pending_prefix(&mut core, &producer);
 
-        // The lens-able library excludes the scene backdrop and the input.
+        // The lens-able library excludes the input.
         assert_eq!(
             core.lens_library(),
             vec!["view:a".to_string(), "view:b".to_string()]
@@ -2289,15 +2250,7 @@ mod tests {
         });
         settle_structure(&mut core);
         let before = core.active_view_set().unwrap().tile_ids().len();
-        core.dispatch(RyeOsEvent::Ui {
-            event: RyeOsUiEvent::Activate {
-                intent: RyeOsUiIntent::OpenNewView {
-                    view: ViewSpec {
-                        view_ref: "view:ryeos/items/space".to_string(),
-                    },
-                },
-            },
-        });
+        core.add_center_tile(ViewSpec::bound("view:ryeos/items/space"));
 
         let effects = settle_structure(&mut core);
         let item_tile_count = core.active_view_set().unwrap()
@@ -2383,15 +2336,7 @@ mod tests {
             },
         });
         settle_structure(&mut core);
-        core.dispatch(RyeOsEvent::Ui {
-            event: RyeOsUiEvent::Activate {
-                intent: RyeOsUiIntent::OpenNewView {
-                    view: ViewSpec {
-                        view_ref: "view:test/files".to_string(),
-                    },
-                },
-            },
-        });
+        core.add_center_tile(ViewSpec::bound("view:test/files"));
         settle_structure(&mut core);
         let tile_id = core.active_view_set().unwrap().tile_ids()[1];
         core.dispatch(RyeOsEvent::Ui {
@@ -2587,25 +2532,9 @@ mod tests {
     #[test]
     fn opening_views_preserves_existing_split_instead_of_reapplying_recipe() {
         let mut core = structural_core();
-        core.dispatch(RyeOsEvent::Ui {
-            event: RyeOsUiEvent::Activate {
-                intent: RyeOsUiIntent::OpenNewView {
-                    view: ViewSpec {
-                        view_ref: "view:test/services".to_string(),
-                    },
-                },
-            },
-        });
+        core.add_center_tile(ViewSpec::bound("view:test/services"));
         settle_structure(&mut core);
-        core.dispatch(RyeOsEvent::Ui {
-            event: RyeOsUiEvent::Activate {
-                intent: RyeOsUiIntent::OpenNewView {
-                    view: ViewSpec {
-                        view_ref: "view:test/files".to_string(),
-                    },
-                },
-            },
-        });
+        core.add_center_tile(ViewSpec::bound("view:test/files"));
         settle_structure(&mut core);
 
         let Some(crate::layout::LayoutTree::Split {
@@ -3121,15 +3050,7 @@ mod tests {
             },
         });
         settle_structure(&mut core);
-        core.dispatch(RyeOsEvent::Ui {
-            event: RyeOsUiEvent::Activate {
-                intent: RyeOsUiIntent::OpenNewView {
-                    view: ViewSpec {
-                        view_ref: "view:test/files".to_string(),
-                    },
-                },
-            },
-        });
+        core.add_center_tile(ViewSpec::bound("view:test/files"));
         settle_structure(&mut core);
         let first_tab_tiles = core.active_view_set().unwrap().tile_ids().len();
 
@@ -3157,15 +3078,7 @@ mod tests {
             },
         });
         settle_structure(&mut core);
-        core.dispatch(RyeOsEvent::Ui {
-            event: RyeOsUiEvent::Activate {
-                intent: RyeOsUiIntent::OpenNewView {
-                    view: ViewSpec {
-                        view_ref: "view:ryeos/items/space".to_string(),
-                    },
-                },
-            },
-        });
+        core.add_center_tile(ViewSpec::bound("view:ryeos/items/space"));
 
         settle_structure(&mut core);
         core.dispatch(RyeOsEvent::Ui {

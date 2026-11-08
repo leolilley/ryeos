@@ -701,7 +701,7 @@ impl RyeOsCore {
                     let floor = self.data.source_floor.get(tile_id).copied().unwrap_or(0);
                     let stored = self.data.source_stored_epoch.get(tile_id).copied();
                     if result_id >= floor && stored.is_none_or(|s| result_id >= s) {
-                        self.apply_bound_source_projection(request, tile_id, &data);
+                        self.apply_bound_source_projection(request, &data);
                         let old = self.data.sources.get(tile_id).cloned();
                         self.note_source_row_changes(tile_id, old.as_ref(), &data);
                         self.data.sources.insert(tile_id.clone(), data);
@@ -737,7 +737,6 @@ impl RyeOsCore {
     fn apply_bound_source_projection(
         &mut self,
         request: &crate::ui::binding::UiBindingRequest,
-        source_key: &str,
         data: &serde_json::Value,
     ) {
         let crate::ui::binding::UiBindingCoordinate::Source { view_ref, channel } =
@@ -762,11 +761,11 @@ impl RyeOsCore {
             // the shared shell projection or warn for a successful fetch.
             return;
         }
-        // Mounted scenes read these roles back from their exact source key.
-        // Never copy a project attachment's scene facts into ambient/global
+        // Mounted views read this role back from their exact source key.
+        // Never copy a project attachment's dimension facts into global
         // state where another mounted project could overwrite them.
         if request.binding_attachment_id != self.root_attachment_id
-            && matches!(role.as_deref(), Some("dimension" | "topology"))
+            && role.as_deref() == Some("dimension")
         {
             return;
         }
@@ -779,29 +778,6 @@ impl RyeOsCore {
             Some("projects") => {
                 if let Ok(value) = serde_json::from_value(data.clone()) {
                     self.data.projects = Some(value);
-                }
-            }
-            Some("topology") => {
-                if let Ok(value) = serde_json::from_value(data.clone()) {
-                    self.data.topology = Some(value);
-                }
-            }
-            Some("items") => {
-                if let Ok(value) = serde_json::from_value(data.clone()) {
-                    if let Some(tile_id) = bound_source_tile_id(source_key) {
-                        self.data.tile_items.insert(tile_id, value);
-                    } else {
-                        self.data.items = Some(value);
-                    }
-                }
-            }
-            Some("file_space") => {
-                if let Ok(value) = serde_json::from_value(data.clone()) {
-                    if let Some(tile_id) = bound_source_tile_id(source_key) {
-                        self.data.tile_file_space.insert(tile_id, value);
-                    } else {
-                        self.data.file_space = Some(value);
-                    }
                 }
             }
             // File reads remain under their exact source-instance key in
@@ -1003,13 +979,6 @@ impl RyeOsCore {
             }
         }
     }
-}
-
-fn bound_source_tile_id(source_key: &str) -> Option<String> {
-    let key = crate::ui::source_key::RyeOsSourceInstanceKey::decode(source_key)?;
-    key.view_instance
-        .surface_tile_id()
-        .map(|tile| tile.0.to_string())
 }
 
 struct SubmittedDeliveryNotice {
@@ -2159,7 +2128,6 @@ mod tests {
         });
 
         assert!(core.data.dimension.is_none());
-        assert!(core.data.items.is_none());
         assert_eq!(core.ui.notices.len(), 1);
     }
 

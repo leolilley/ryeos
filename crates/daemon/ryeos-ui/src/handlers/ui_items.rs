@@ -23,7 +23,7 @@ use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::ItemSpace;
 use ryeos_executor::executor::ServiceAvailability;
 
-use super::ui_graph_topology::{classify_trust, label_for_bare_id, namespace_for_bare_id};
+use super::signed_item_topology::{classify_trust, label_for_bare_id, namespace_for_bare_id};
 
 // ── items.list types ───────────────────────────────────────────────
 
@@ -82,7 +82,7 @@ pub struct ItemSummary {
     pub source_path: String,
     pub executable: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub trust: Option<super::ui_graph_topology::TrustSummary>,
+    pub trust: Option<super::signed_item_topology::TrustSummary>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub shadowed: Vec<ShadowedSummary>,
 }
@@ -134,7 +134,7 @@ pub struct InspectedItem {
     pub space: String,
     pub executable: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub trust: Option<super::ui_graph_topology::TrustSummary>,
+    pub trust: Option<super::signed_item_topology::TrustSummary>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub shadowed: Vec<ShadowedSummary>,
 }

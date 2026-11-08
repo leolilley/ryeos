@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-19T22:29:40Z:77cbd7a0394f9bff0a6b3cfc43e940f04f81c0c23fa613f252b381e885968e7c:VOSZGfoKCJ3xAswQgILiTEJij8ldmknBjfH8tnkZKBHtQ9rS5fEFuOcIs9yBv++DlEpvtioVDR6tzKpLPorYBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-08T06:41:17Z:526f0e9658d8248e5de539b306b2dc03a8f52f5e7b06216ceea6dec9d97c4ae5:KlV/FnfrkFBGv6qKHLTrdZAcBatFjtBCoN66kHFmVdyfcqBbd+xYC1SCzB1ejiFWODzXnfIFLhDwe6sLRM+DCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-node
 title: Node
 version: "1.0.0"
@@ -35,7 +35,6 @@ tiles:
 style:
   border: thin
 
-backdrop: view:ryeos/backdrop/prism-shards
 
 library:
   - group: Inspection
@@ -55,6 +54,3 @@ library:
       - view:ryeos/node/gc
       - view:ryeos/commands/grammar
 
-ambient:
-  show_background: true
-  opacity: 1.0

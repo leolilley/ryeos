@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-19T22:29:40Z:bb0ec143e878661f427cf39de94da42c0253ff764ebf50ad6afe495db3f0dae4:vXHIY4jkrCRlaOYGReqicewXkbN6HE9IxNa3HkPK2IK/j80AmEHbEEsVdpYBWjO+b8nAFZrFhfZqA1M3EjRGCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-08T06:41:17Z:0751a2632c94088e898dc362b35a6513b614d021fb0f30c468f8e1984498c79a:kPkvEESwmQl0FwDTETi7GseMmD1KvpYDr+q+BojBCmz1EgUifUiXWUoiwrWSupqBHUxf9Ugm3rtJ2JX9zNYeDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-thread
 title: Thread
 version: "1.0.0"
@@ -57,10 +57,6 @@ input:
         project_path: "@session:project_root"
         ref_bindings:
           model: directive:ryeos/ops/base
-
-ambient:
-  show_background: true
-  opacity: 1.0
 
 affordances:
   - id: view.threads

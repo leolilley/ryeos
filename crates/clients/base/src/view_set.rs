@@ -20,8 +20,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 // ---------------------------------------------------------------------------
 
 /// A center tile: a `view:` item ref (views-as-content). Every product
-/// concept renders through this — graph/atlas included, via their
-/// `widget:`. Tiles are bindings, not code; this is the one uniform
+/// concept renders through this, via its `widget:`. Tiles are bindings, not code; this is the one uniform
 /// content form. The engine never names a specific view ref: which views
 /// exist is a content/surface concern, not engine code.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -190,8 +189,7 @@ impl ViewSpec {
     }
 
     pub fn initial_local_state(&self) -> ViewLocalState {
-        // Every bound tile gets list-local state; for the scene widgets
-        // (graph/atlas) the cursor is simply unused.
+        // Every bound tile gets list-local state.
         ViewLocalState::GenericList {
             cursor: 0,
             scroll: 0,
@@ -654,9 +652,8 @@ impl ViewSet {
             .unwrap_or_default()
     }
 
-    /// An empty center: no tiles. The backdrop scene shows behind the
-    /// (empty) center; closing the last tile returns here. There is no
-    /// "home" mode — this is a query over the canonical layout.
+    /// An empty center: no tiles. Closing the last tile returns
+    /// here. There is no "home" mode — this is a query over the canonical layout.
     pub fn center_is_empty(&self) -> bool {
         self.root.is_none()
     }

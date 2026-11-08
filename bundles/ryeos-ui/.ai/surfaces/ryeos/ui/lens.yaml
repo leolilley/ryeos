@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-19T22:29:40Z:18fcb47d54776b9deb23690b5dd6084cddac2457a15a38320937779ae9a41dbf:FyMpR0lnsqIOGeFCcOTRrr5v+IdpVosbX+BOWTi4nMrkJvhzveC1EQtIARu/zPHu2hAASqOAxv8n1k1iG8+2Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-08T06:41:16Z:8b945aa33d38234c5d75153788774da5544f5f29c6d4822ad02e002782b317b3:CpxUJrYFAtfufGpm8KD1po6qvuGZ6YTW6pATW0Z6fpvjmCw2KFRokJSXh/AGFACbfvLeFuL8iQm1JB8i9PzpCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-lens
 title: Lens
 version: "1.0.0"
@@ -18,28 +18,6 @@ sources:
   projects:
     ref: service:projects/list
     role: projects
-  topology:
-    ref: service:ui/graph/topology
-    role: topology
-  items:
-    ref: service:ui/ryeos-ui/items/list
-    role: items
-    params:
-      limit: 1000
-      project_path: "@session:project_root"
-    dynamic_parameters: [query, kind]
-    requires_project: true
-  file_space:
-    ref: service:ui/ryeos-ui/files/tree
-    role: file_space
-    params:
-      root: project
-      path: ""
-      max_depth: 8
-      max_entries: 3000
-      project_path: "@session:project_root"
-    dynamic_parameters: [root, path]
-    requires_project: true
   file_read:
     ref: service:ui/ryeos-ui/files/read
     role: file_read
@@ -58,14 +36,11 @@ tiling:
   stack: { arrange: vertical }
   insert: end
 
-# Start with the splash View; opening another View replaces the current lens.
-tiles:
-  - "view:ryeos/backdrop/splash"
+# Start empty; opening a View replaces the current lens.
+tiles: []
 
 style:
   border: thin
-
-backdrop: view:ryeos/backdrop/prism-shards
 
 # The full lens set as the launcher's tree — each group a foldable header,
 # every view under it launchable. Ctrl+←/→ cycles the flattened declared
@@ -95,7 +70,6 @@ library:
       - view:ryeos/node/remotes
       - view:ryeos/node/bundles
       - view:ryeos/node/gc
-      - view:ryeos/graph/topology
       - view:ryeos/commands/grammar
 
 input:
@@ -116,10 +90,6 @@ input:
         ref_bindings:
           model: directive:ryeos/ops/base
 
-ambient:
-  show_background: true
-  opacity: 0.35
-
 affordances:
   - id: view.threads
     label: Threads
@@ -132,7 +102,4 @@ affordances:
     category: View
   - id: view.item_inspector
     label: Inspector
-    category: View
-  - id: view.graph
-    label: Graph
     category: View

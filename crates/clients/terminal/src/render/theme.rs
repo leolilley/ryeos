@@ -17,7 +17,7 @@ pub const GOOD: Color = Color::Rgb(0x8e, 0xc0, 0x7c);
 pub const DANGER: Color = Color::Rgb(0xfb, 0x49, 0x34);
 
 // Content renders on the page background (BG), separated by borders —
-// consistent across the backdrop, input box, tiles, and dock slots. There
+// consistent across the input box, tiles, and dock slots. There
 // is no distinct PANEL fill for content; PANEL stays only for overlays
 // overlay, which deliberately stands out against the dimmed scrim.
 pub fn tone_style(tone: RyeOsTone) -> Style {

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-20T19:22:30Z:4c5d16287cbd796f47edfe38fac5232997ceb565f2298c8ad895ce15677f0e82:2TZ8j/ACp+t/wHyRYud20V+uevjBmKzAFwr91iiTlvkeWjGfM8khrVWnCA6FTV3HyoftqpkMTWzW0obrT3p/Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-08T06:40:44Z:879cccf224487f975f9d78cf5d368676d3567f8b311da42e71fc92e5269038e4:zFjOx9xZ7kK5D59POWlj7LlrS6Aw4ltnm9Ax6d7BHSTyb5LT/4VsuJfTNTnk46yvt60Mk/SqIZH+DjvcKjXrCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/surface"
 version: "2.0.0"
 location:
@@ -44,9 +44,6 @@ composer_config:
     - name: sources
       strategy: dict_merge_root_last
       expect_value_type: mapping
-    - name: ambient
-      strategy: dict_merge_root_last
-      expect_value_type: mapping
     - name: affordances
       strategy: keyed_seq_merge_root_last
       key: id
@@ -67,9 +64,6 @@ composer_config:
       strategy: keyed_seq_merge_root_last
       key: id
       expect_value_type: sequence
-    - name: backdrop
-      strategy: replace_root_last
-      expect_value_type: string
     - name: launch_entry
       strategy: replace_root_last
       expect_value_type: boolean
@@ -170,9 +164,6 @@ composed_value_contract:
               prim: string
               enum: [initial, on_demand]
             requires_project: { type: single, prim: boolean }
-    ambient:
-      type: single
-      prim: mapping
     affordances:
       type: single
       prim: sequence
@@ -253,9 +244,6 @@ composed_value_contract:
             label: { type: single, prim: string }
             view: { type: single, prim: string }
           optional: {}
-    backdrop:
-      type: single
-      prim: string
 
 metadata:
   rules:
