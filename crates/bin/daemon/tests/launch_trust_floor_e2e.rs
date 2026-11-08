@@ -223,3 +223,125 @@ async fn a_direct_tool_signed_by_an_unpinned_key_is_refused_by_default() {
         "the refusal names the class it saw: {body:#}"
     );
 }
+
+// ── Operator admission and narrow principals ────────────────────────────
+
+/// Replace the node-signed `launch_trust` policy section before the daemon
+/// starts, as `ryeos node policy-apply launch_trust` would.
+fn write_launch_trust_policy(
+    state_path: &Path,
+    node: &SigningKey,
+    body: &str,
+) -> anyhow::Result<()> {
+    let signed = lillux::signature::sign_content(body, node, "#", None);
+    std::fs::write(
+        state_path.join(".ai/node/policies/launch_trust.yaml"),
+        signed,
+    )?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_operator_admission_lets_an_unpinned_signer_run_for_that_kind_only() {
+    let plant = |state_path: &Path,
+                 _user: &Path,
+                 fixture: &common::fast_fixture::FastFixture|
+     -> anyhow::Result<()> {
+        write_launch_trust_policy(
+            state_path,
+            &fixture.node,
+            "schema: 1\nadmit:\n  tool:\n    - untrusted_project\n",
+        )
+    };
+    let (h, _fixture) = DaemonHarness::start_fast_with(plant, |_| {})
+        .await
+        .expect("start daemon admitting unpinned tools");
+    let project = tempfile::tempdir().expect("project tempdir");
+    let unpinned = SigningKey::from_bytes(&[0x5au8; 32]);
+    plant_gap_echo(project.path(), Some(&unpinned));
+
+    let (status, body) = execute_gap_echo(&h, project.path()).await;
+    assert!(status.is_success(), "status={status}; body={body:#}");
+    assert!(
+        body.to_string().contains("gap-b-check"),
+        "the admitted tool must run: {body:#}"
+    );
+
+    // Unsigned stays refused whatever the operator admits.
+    let unsigned_project = tempfile::tempdir().expect("project tempdir");
+    plant_gap_echo(unsigned_project.path(), None);
+    let (status, body) = execute_gap_echo(&h, unsigned_project.path()).await;
+    assert_refused(status, &body, "effective_trust_unsigned");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_node_refuses_to_start_on_an_admission_its_kinds_do_not_allow() {
+    let plant = |state_path: &Path,
+                 _user: &Path,
+                 fixture: &common::fast_fixture::FastFixture|
+     -> anyhow::Result<()> {
+        write_launch_trust_policy(
+            state_path,
+            &fixture.node,
+            "schema: 1\nadmit:\n  service:\n    - untrusted_project\n",
+        )
+    };
+    assert!(
+        DaemonHarness::start_fast_with(plant, |_| {}).await.is_err(),
+        "services admit no operator widening, so the daemon must refuse this policy"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_narrow_caller_cannot_reach_another_handler_through_a_planted_service() {
+    let plant = |state_path: &Path,
+                 _user: &Path,
+                 fixture: &common::fast_fixture::FastFixture|
+     -> anyhow::Result<()> {
+        common::fast_fixture::write_authorized_key_with_scopes(
+            state_path,
+            &fixture.user,
+            &fixture.node,
+            &[
+                "ryeos.execute.service.health/status",
+                ryeos_app::execution_policy::LIVE_PROJECT_READ_CAPABILITY,
+                ryeos_app::execution_policy::LIVE_PROJECT_WRITE_CAPABILITY,
+            ],
+        )
+    };
+    let (h, _fixture) = DaemonHarness::start_fast_with(plant, |_| {})
+        .await
+        .expect("start daemon with a narrow caller");
+    let project = tempfile::tempdir().expect("project tempdir");
+    let dir = project.path().join(".ai/services/health");
+    std::fs::create_dir_all(&dir).expect("create project services dir");
+    std::fs::write(
+        dir.join("status.yaml"),
+        "kind: service\nendpoint: remote.configure\nrequired_caps: []\n",
+    )
+    .expect("write planted service");
+
+    let (status, body) = h
+        .post_execute(
+            "service:health/status",
+            project.path().to_str().unwrap(),
+            serde_json::json!({}),
+        )
+        .await
+        .expect("post service:health/status as a narrow caller");
+    assert_health_report(status, &body);
+
+    let (status, body) = h
+        .post_execute(
+            "service:remote/configure",
+            project.path().to_str().unwrap(),
+            serde_json::json!({}),
+        )
+        .await
+        .expect("post service:remote/configure as a narrow caller");
+    assert_eq!(
+        status,
+        reqwest::StatusCode::FORBIDDEN,
+        "the narrow caller holds no remote.configure capability: {body:#}"
+    );
+}
