@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-29T09:51:28Z:5e23082edb9ef72e3a39a2fc5fccab718de96263e7840e9088aa8aedf1244113:ON+fOLDizxeAoHQD7RsmZTxj637HwjLsuk8Uh9NVz/LndKRxIkX1wFkkZsO+E5vsqr5yYpHDNjna7HQ6dyZyBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-08T06:40:08Z:34387339dc7100b89eb820665777b857513b026f5fafa9f34b47da58c584842e:kNfaI7JppjEimWh8GagmTI8mNDRJE9m4uDH6lh8VQpSCgdHyml6EiFs5xnLJe+3X5yQiTtDADzhpqa8sEdAMCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Repository capture intent, composed with the target's signed node patterns.
 # Git ignores are not snapshot authority. Keep source and the public developer
 # signing fixture, but never send local artifacts or nested worktrees as source.
@@ -12,7 +12,6 @@ exclusions:
   # Keep their files on disk; exclude them rather than inheriting Git ignores.
   - "/.ai/directives/test/replay-smoke.md"
   - "/.ai/tools/test/echo.yaml"
-  - "/.ai/surfaces/ryeos/ui/atlas.yaml"
   # Nested fixture nodes and generated runs are not authored test inputs.
   # Preserve the surrounding fixture Tools, directives, and test sources.
   - "/tests/e2e/execute-stream-latency/.ai/state/"

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-19T22:29:40Z:ee6de7fec471edb3042c96f4756d88223725ddbcdde83bb16011987eef412fbb:TP6TpqmQJeuOnolgT9ogKxc+VierDW4Yol4iZDpDTv7fxiZh2tXRr3w4W3gfsyAl2PchZTprYMY+CBcT+v9FDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-08T06:41:16Z:5a05e9f4e61cf85e47139d147cb3f30547ab6a27e01dc040945587ec5e8eb3bb:i9XNnVicK7K1h2vxnhLBaESZTc8sDsxmwYBNhYgI3Y2kSGRN5zymAyq5CZ5q6pqlzi9SCg93IrkfPrvIc6a9DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-assistant
 title: Assistant
 version: "3.1.0"
@@ -126,7 +126,6 @@ library:
       - view:ryeos/project/schedules
   - group: Execution
     views:
-      - view:ryeos/graph/topology
       - view:ryeos/thread/tree
       - view:ryeos/thread/transcript
       - view:ryeos/work/overview

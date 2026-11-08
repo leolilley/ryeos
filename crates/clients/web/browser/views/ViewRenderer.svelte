@@ -3,7 +3,6 @@
   import EmptyState from "../components/EmptyState.svelte";
   import RowDetails from "../components/RowDetails.svelte";
   import FieldView from "./FieldView.svelte";
-  import SceneView from "./SceneView.svelte";
   import TableHierarchy from "./TableHierarchy.svelte";
   import { dispatchUi } from "../runtime/context";
   interface Props { model: RyeOsViewVm; tileId: string; instanceKey: RyeOsViewInstanceKey }
@@ -149,8 +148,6 @@
         <p class="required-subject-waiting">Select a compatible subject in another open set.</p>
       {/if}
     </section>
-  {:else if model.type === "map" || model.type === "atlas"}
-    <SceneView scene={model.scene} />
   {:else if model.type === "field"}
     <FieldView field={model.field} {instanceKey} />
   {/if}

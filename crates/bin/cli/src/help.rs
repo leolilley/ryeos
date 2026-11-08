@@ -1263,7 +1263,7 @@ mod tests {
         let mut defaults = std::collections::BTreeMap::new();
         defaults.insert(
             "surface".to_string(),
-            serde_json::Value::String("surface:ryeos/ui/atlas".to_string()),
+            serde_json::Value::String("surface:ryeos/ui/base".to_string()),
         );
         let command = LoadedCommandDescriptor {
             command: ryeos_runtime::CommandDef {

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-19T22:29:40Z:2fc4de47e61a2f3c24ec9b2fca5b3cd6ba9f925f7f59876107c399b44f712395:t2Ln3a8PpSFYTC7zWAdyadhqi3H1O3JBfWpwGtT48xSUGuYpoQuQUmIjdsmSwQxSoWTihxsQtdaj92pAFHULAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-08T06:41:17Z:7b6ab22a2edfab37018b865b50fa6b2e9f9f90f5c8099b3ea01bf43d5a5f8779:AsQFdxeXaHxGrULW0rBJj/m9+6X4WzxYZFJnlFq3z707pEvUQ7RrLA02wDFifbBcB/3pjc+/oQSl6MC7fdThDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-workbench
 title: Workbench
 version: "1.0.0"
@@ -15,7 +15,6 @@ tiling:
   insert: end
 
 tiles:
-  - "view:ryeos/graph/topology"
   - "view:ryeos/threads/history"
 
 style:
@@ -43,8 +42,6 @@ library:
       - view:ryeos/node/remotes
       - view:ryeos/node/bundles
       - view:ryeos/node/gc
-      - view:ryeos/graph/topology
-      - view:ryeos/atlas
       - view:ryeos/commands/grammar
 
 input:
@@ -65,14 +62,7 @@ input:
         ref_bindings:
           model: directive:ryeos/ops/base
 
-ambient:
-  show_background: true
-  opacity: 1.0
-
 affordances:
-  - id: view.graph
-    label: Graph
-    category: View
   - id: view.threads
     label: Threads
     category: View

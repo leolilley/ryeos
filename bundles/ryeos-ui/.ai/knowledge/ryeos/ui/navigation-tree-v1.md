@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-10-19T22:29:39Z:cbe8ca469b3624ee6375f1b081084d1242d7e236fa5d07a4beabce2dc406e6a6:IpT2tnwZ67Zm4pCzO1ztwSnNm0tL72rKMqkepIXzytupTtXSA49ii3xJC8ahFibA7UBUSpgHXP54tA/KvypeAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-08T06:41:16Z:4f790999ef36e09092fd2e03b79e38b1b4ab2f709ed8f35e44b16fefcc22908a:IRNBPl2QohIfb+2XK2tUHtzDDKeVhJuUnQTnBBfaRT1uGToEAm8Y7dTv6AgehqffynVpMmc46caLr0L6Iq68AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/ryeos-ui"
 name: "navigation-tree-v1"
@@ -254,10 +254,6 @@ RyeOS UI
 |       |-- Remotes
 |       `-- Maintenance
 `-- Presentation
-    |-- Backdrop
-    |   |-- Crystal Scene
-    |   |-- Animated Empty Center
-    |   `-- Underlay Behind Tiles
     |-- Tile Style
     |   |-- Opaque
     |   |-- Translucent
@@ -445,9 +441,8 @@ surface:ryeos/ui/thread
         `-- optional conversation input view
 
 surface:ryeos/ui/thread-crystal
-`-- focused thread surface over the prism backdrop
-    |-- initial view set: view:ryeos/thread/transcript
-    `-- backdrop: view:ryeos/backdrop/prism
+`-- focused thread surface
+    `-- initial view set: view:ryeos/thread/transcript
 
 surface:ryeos/ui/workbench
 `-- project work surface
@@ -470,38 +465,9 @@ surface:ryeos/ui/node
     |-- events: view:ryeos/node/events
     `-- maintenance lenses
 
-surface:ryeos/ui/atlas
-`-- namespace and item topology
-
 surface:ryeos/ui/base
 `-- general home/library surface
 ```
-
-## Ambient Chat
-
-The empty center already draws the backdrop as content. A chat-over-crystal
-surface extends that idea: the backdrop remains visible as an underlay while
-the chat lens and input sit above it.
-
-The current concrete knob is a normal backdrop plus translucent ambient opacity:
-
-```yaml
-backdrop: view:ryeos/backdrop/prism
-
-ambient:
-  show_background: true
-  opacity: 0.35
-
-style:
-  border: hidden
-```
-
-When a populated center has a declared backdrop and `ambient.opacity` is between
-0 and 1, clients render the backdrop first and then draw the tile tree over it.
-Web can express this with real layering and translucent tile panels. Terminal
-preserves the already-drawn backdrop cells where tile rendering does not need to
-clear them. The contract is "background scene remains alive under the lens", not
-pixel-identical alpha blending across renderers.
 
 ## Driving Inspector
 

@@ -1,10 +1,9 @@
 <script lang="ts">
-  import type { RyeOsViewSetVm, RyeOsDockPlaneVm, RyeOsSceneModel } from "../generated";
+  import type { RyeOsViewSetVm, RyeOsDockPlaneVm } from "../generated";
   import DockSlot from "./DockSlot.svelte";
   import LayoutNode from "./LayoutNode.svelte";
-  import SceneView from "../views/SceneView.svelte";
-  interface Props { model: RyeOsViewSetVm | null; docks: RyeOsDockPlaneVm; backdrop: RyeOsSceneModel | null }
-  let { model, docks, backdrop }: Props = $props();
+  interface Props { model: RyeOsViewSetVm | null; docks: RyeOsDockPlaneVm }
+  let { model, docks }: Props = $props();
   const maximized = $derived(model?.root?.type === "tile" && model.root.maximized);
 </script>
 
@@ -20,8 +19,6 @@
       {#key model?.view_set_id}
         {#if model?.root}
           <LayoutNode model={model.root} guard={model.layout_guard} minRatio={model.split_min_ratio} maxRatio={model.split_max_ratio} />
-        {:else if backdrop}
-          <SceneView scene={backdrop} />
         {:else}
           <div class="view-set-backdrop" aria-label="Empty view set"></div>
         {/if}

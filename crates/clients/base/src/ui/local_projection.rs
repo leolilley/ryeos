@@ -51,8 +51,7 @@ fn global_or_exact_command(
     has_surface_origin: bool,
 ) -> bool {
     match intent {
-        RyeOsUiIntent::ToggleBackdropBreak
-        | RyeOsUiIntent::ToggleDock { .. }
+        RyeOsUiIntent::ToggleDock { .. }
         | RyeOsUiIntent::ToggleTopStatusBar
         | RyeOsUiIntent::ToggleBottomStatusBar
         | RyeOsUiIntent::OpenDialog { .. }
@@ -891,13 +890,12 @@ mod tests {
             "name":"library-order",
             "tiles":["view:test/home"],
             "library":[{"group":"Workbench","views":[
-                "view:test/beta","view:test/home","view:test/scene",
+                "view:test/beta","view:test/home",
                 "view:test/input","view:test/needs-selection"
             ]}],
             "views":{
                 "view:test/home":{"widget":"text","title":"Home","body":"Home"},
                 "view:test/beta":{"widget":"text","title":"Beta","body":"Beta"},
-                "view:test/scene":{"widget":"scene","title":"Backdrop"},
                 "view:test/input":{"widget":"text","title":"Input only","input":{"id":"line"}},
                 "view:test/needs-selection":{"widget":"text","title":"Needs selection","body":"@facet:selection.thread_id"}
             }
@@ -1035,9 +1033,13 @@ mod tests {
             command_focus(&core, Some(&key)),
         );
         assert!(
+            !commands.is_empty(),
+            "the palette still offers its shell commands"
+        );
+        assert!(
             commands
                 .iter()
-                .any(|choice| matches!(choice.intent, RyeOsUiIntent::ToggleBackdropBreak))
+                .all(|choice| choice.label != "Inspect selection")
         );
     }
 

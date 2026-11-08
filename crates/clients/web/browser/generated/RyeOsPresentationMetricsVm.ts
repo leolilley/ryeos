@@ -9,8 +9,6 @@
  */
 export interface RyeOsPresentationMetricsVm {
   tile_count: bigint;
-  scene_object_count: bigint;
-  item_count: bigint;
   thread_count: bigint;
   project_count: bigint;
   service_count: bigint;

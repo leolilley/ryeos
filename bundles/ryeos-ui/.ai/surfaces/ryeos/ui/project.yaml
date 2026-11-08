@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-19T22:29:40Z:8cbf2f115702752b31094c3cb444fb402d68a04d5a4eccf643fd64fd3aa5c4c9:iPIiVB3B6n6w+wk860oAf2DGW9AsAa+N7hYv6ocPmsDtEBxLE3hqURe/J2XfsSXS4d6c854ki/YYXTzr85HjBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-08T06:41:17Z:b223773168bdd2eb964c1577de17fe62305b7440f2ddc7517accc8d58217c424:pcKznC7HkFVi+oCLrNNZBQftX9TC9C2Nuu1Ap5jegivRtrL7lALws9Dv6bHJ7RGh7mDsFhDAACxC/AntFHuEDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-project
 title: Project
 version: "1.0.0"
@@ -23,7 +23,6 @@ tiles:
 style:
   border: thin
 
-backdrop: view:ryeos/backdrop/prism-shards
 
 library:
   - group: Inspection
@@ -59,10 +58,6 @@ input:
         project_path: "@session:project_root"
         ref_bindings:
           model: directive:ryeos/ops/base
-
-ambient:
-  show_background: true
-  opacity: 1.0
 
 affordances:
   - id: view.files

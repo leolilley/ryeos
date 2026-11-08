@@ -578,7 +578,7 @@ fn add_run_definition_versions(
         }];
         let family_id = format!("definition-family:{definition_ref}");
         let definition_id = format!("definition:{definition_ref}@{digest}");
-        let label = super::ui_graph_topology::label_for_bare_id(
+        let label = super::signed_item_topology::label_for_bare_id(
             definition_ref
                 .split_once(':')
                 .map_or(definition_ref.as_str(), |(_, bare)| bare),
@@ -808,7 +808,7 @@ fn add_run_source_closure(
     builder.add_entity(FieldFactEntity {
         id: source_id.clone(),
         kind: "admitted_source_closure".to_owned(),
-        label: super::ui_graph_topology::label_for_bare_id(
+        label: super::signed_item_topology::label_for_bare_id(
             binding
                 .owner
                 .canonical_ref
@@ -869,7 +869,7 @@ fn add_run_root_source(
     builder.add_entity(FieldFactEntity {
         id: source_id.clone(),
         kind: "source_version".to_string(),
-        label: super::ui_graph_topology::label_for_bare_id(
+        label: super::signed_item_topology::label_for_bare_id(
             source
                 .resolved_ref
                 .split_once(':')

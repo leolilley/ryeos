@@ -3627,52 +3627,6 @@ function from_html(content, flags) {
 	};
 }
 /**
-* @param {string} content
-* @param {number} flags
-* @param {'svg' | 'math'} ns
-* @returns {() => Node | Node[]}
-*/
-/*#__NO_SIDE_EFFECTS__*/
-function from_namespace(content, flags, ns = "svg") {
-	/**
-	* Whether or not the first item is a text/element node. If not, we need to
-	* create an additional comment node to act as `effect.nodes.start`
-	*/
-	var has_start = !content.startsWith("<!>");
-	var is_fragment = (flags & 1) !== 0;
-	var wrapped = `<${ns}>${has_start ? content : "<!>" + content}</${ns}>`;
-	/** @type {Element | DocumentFragment} */
-	var node;
-	return () => {
-		if (hydrating) {
-			assign_nodes(hydrate_node, null);
-			return hydrate_node;
-		}
-		if (!node) {
-			var root = /* @__PURE__ */ get_first_child(create_fragment_from_html(wrapped));
-			if (is_fragment) {
-				node = document.createDocumentFragment();
-				while (/* @__PURE__ */ get_first_child(root)) node.appendChild(/* @__PURE__ */ get_first_child(root));
-			} else node = /* @__PURE__ */ get_first_child(root);
-		}
-		var clone = node.cloneNode(true);
-		if (is_fragment) {
-			var start = /* @__PURE__ */ get_first_child(clone);
-			var end = clone.lastChild;
-			assign_nodes(start, end);
-		} else assign_nodes(clone, clone);
-		return clone;
-	};
-}
-/**
-* @param {string} content
-* @param {number} flags
-*/
-/*#__NO_SIDE_EFFECTS__*/
-function from_svg(content, flags) {
-	return /* @__PURE__ */ from_namespace(content, flags, "svg");
-}
-/**
 * Don't mark this as side-effect-free, hydration needs to walk all nodes
 * @param {any} value
 */
@@ -5469,8 +5423,8 @@ function dispatchUi() {
 }
 //#endregion
 //#region browser/app/Navigation.svelte
-var root$20 = /* @__PURE__ */ from_html(`<button><span class="navigation-glyph" aria-hidden="true">◇</span> <span class="navigation-copy"><strong> </strong></span></button>`);
-var root_1$15 = /* @__PURE__ */ from_html(`<button aria-label="Close view navigation"></button> <aside id="ryeos-navigation" aria-label="RyeOS view navigation"><div class="navigation-heading">Explorer <span> </span></div> <nav></nav></aside>`, 1);
+var root$18 = /* @__PURE__ */ from_html(`<button><span class="navigation-glyph" aria-hidden="true">◇</span> <span class="navigation-copy"><strong> </strong></span></button>`);
+var root_1$14 = /* @__PURE__ */ from_html(`<button aria-label="Close view navigation"></button> <aside id="ryeos-navigation" aria-label="RyeOS view navigation"><div class="navigation-heading">Explorer <span> </span></div> <nav></nav></aside>`, 1);
 function Navigation($$anchor, $$props) {
 	push($$props, true);
 	const dispatch = dispatchUi();
@@ -5501,7 +5455,7 @@ function Navigation($$anchor, $$props) {
 			first.focus();
 		}
 	}
-	var fragment = root_1$15();
+	var fragment = root_1$14();
 	event("keydown", $window, handleKeys);
 	var button = first_child(fragment);
 	let classes;
@@ -5512,7 +5466,7 @@ function Navigation($$anchor, $$props) {
 	reset(div);
 	var nav = sibling(div, 2);
 	each(nav, 21, () => $$props.model.items, (item) => item.id, ($$anchor, item) => {
-		var button_1 = root$20();
+		var button_1 = root$18();
 		let classes_2;
 		var span_1 = sibling(child(button_1), 2);
 		var text_1 = only_child(child(span_1), true);
@@ -5550,17 +5504,17 @@ function Navigation($$anchor, $$props) {
 delegate(["click"]);
 //#endregion
 //#region browser/app/Notices.svelte
-var root$19 = /* @__PURE__ */ from_html(`<div class="notice"><span> </span> <button aria-label="Dismiss notice">×</button></div>`);
-var root_1$14 = /* @__PURE__ */ from_html(`<aside class="notice-stack" aria-label="RyeOS notices" aria-live="polite" aria-atomic="false"></aside>`);
+var root$17 = /* @__PURE__ */ from_html(`<div class="notice"><span> </span> <button aria-label="Dismiss notice">×</button></div>`);
+var root_1$13 = /* @__PURE__ */ from_html(`<aside class="notice-stack" aria-label="RyeOS notices" aria-live="polite" aria-atomic="false"></aside>`);
 function Notices($$anchor, $$props) {
 	push($$props, true);
 	const dispatch = dispatchUi();
 	var fragment = comment();
 	var node = first_child(fragment);
 	var consequent = ($$anchor) => {
-		var aside = root_1$14();
+		var aside = root_1$13();
 		each(aside, 21, () => $$props.notices, (notice) => notice.id, ($$anchor, notice) => {
-			var div = root$19();
+			var div = root$17();
 			var span = child(div);
 			var text = only_child(span, true);
 			var button = sibling(span, 2);
@@ -5589,9 +5543,9 @@ function Notices($$anchor, $$props) {
 delegate(["click"]);
 //#endregion
 //#region browser/components/InputComposer.svelte
-var root$18 = /* @__PURE__ */ from_html(`<div class="composer-route"><span class="route-state">●</span><span> </span><span class="draft-state">DRAFT</span></div>`);
-var root_1$13 = /* @__PURE__ */ from_html(`<button>↑</button>`);
-var root_2$10 = /* @__PURE__ */ from_html(`<section><!> <textarea></textarea> <div class="composer-actions"><span> </span><!></div></section>`);
+var root$16 = /* @__PURE__ */ from_html(`<div class="composer-route"><span class="route-state">●</span><span> </span><span class="draft-state">DRAFT</span></div>`);
+var root_1$12 = /* @__PURE__ */ from_html(`<button>↑</button>`);
+var root_2$9 = /* @__PURE__ */ from_html(`<section><!> <textarea></textarea> <div class="composer-actions"><span> </span><!></div></section>`);
 function InputComposer($$anchor, $$props) {
 	push($$props, true);
 	const dispatch = dispatchUi();
@@ -5611,11 +5565,11 @@ function InputComposer($$anchor, $$props) {
 			}
 		});
 	}
-	var section = root_2$10();
+	var section = root_2$9();
 	let classes;
 	var node = child(section);
 	var consequent = ($$anchor) => {
-		var div = root$18();
+		var div = root$16();
 		var text_1 = only_child(sibling(child(div)), true);
 		next();
 		reset(div);
@@ -5632,7 +5586,7 @@ function InputComposer($$anchor, $$props) {
 	var text_2 = only_child(span_1, true);
 	var node_1 = sibling(span_1);
 	var consequent_1 = ($$anchor) => {
-		var button = root_1$13();
+		var button = root_1$12();
 		template_effect(() => {
 			set_attribute(button, "aria-label", `Send to ${$$props.model.route_label}`);
 			button.disabled = !$$props.model.submit_enabled;
@@ -5715,9 +5669,9 @@ delegate([
 ]);
 //#endregion
 //#region browser/components/EmptyState.svelte
-var root$17 = /* @__PURE__ */ from_html(`<div class="empty-state"><span>◇</span><strong> </strong><p> </p></div>`);
+var root$15 = /* @__PURE__ */ from_html(`<div class="empty-state"><span>◇</span><strong> </strong><p> </p></div>`);
 function EmptyState($$anchor, $$props) {
-	var div = root$17();
+	var div = root$15();
 	var strong = sibling(child(div));
 	var text = only_child(strong, true);
 	var text_1 = only_child(sibling(strong), true);
@@ -5730,17 +5684,17 @@ function EmptyState($$anchor, $$props) {
 }
 //#endregion
 //#region browser/components/RowDetails.svelte
-var root$16 = /* @__PURE__ */ from_html(`<div><dt> </dt> <dd> </dd></div>`);
-var root_1$12 = /* @__PURE__ */ from_html(`<dl class="row-details"></dl>`);
+var root$14 = /* @__PURE__ */ from_html(`<div><dt> </dt> <dd> </dd></div>`);
+var root_1$11 = /* @__PURE__ */ from_html(`<dl class="row-details"></dl>`);
 function RowDetails($$anchor, $$props) {
 	push($$props, true);
 	let label = prop($$props, "label", 3, "Details");
 	var fragment = comment();
 	var node = first_child(fragment);
 	var consequent = ($$anchor) => {
-		var dl = root_1$12();
+		var dl = root_1$11();
 		each(dl, 23, () => $$props.details, (detail, index) => `${detail.field}:${index}`, ($$anchor, detail) => {
-			var div = root$16();
+			var div = root$14();
 			var dt = child(div);
 			var text = only_child(dt, true);
 			var text_1 = only_child(sibling(dt, 2), true);
@@ -6580,9 +6534,9 @@ function contrastingTextColor(color) {
 }
 //#endregion
 //#region browser/views/GridPreview.svelte
-var root$15 = /* @__PURE__ */ from_html(`<p><strong> </strong><span> </span></p>`);
-var root_1$11 = /* @__PURE__ */ from_html(`<section class="field-grid-transcript"><div class="field-grid-transcript-nav"><button type="button">Previous rows</button> <span aria-live="polite"> </span> <button type="button">Next rows</button></div> <div class="field-grid-transcript-rows"></div></section>`);
-var root_2$9 = /* @__PURE__ */ from_html(`<figure class="field-preview"><figcaption> </figcaption> <canvas></canvas> <button type="button" class="field-grid-transcript-toggle"> </button> <!></figure>`);
+var root$13 = /* @__PURE__ */ from_html(`<p><strong> </strong><span> </span></p>`);
+var root_1$10 = /* @__PURE__ */ from_html(`<section class="field-grid-transcript"><div class="field-grid-transcript-nav"><button type="button">Previous rows</button> <span aria-live="polite"> </span> <button type="button">Next rows</button></div> <div class="field-grid-transcript-rows"></div></section>`);
+var root_2$8 = /* @__PURE__ */ from_html(`<figure class="field-preview"><figcaption> </figcaption> <canvas></canvas> <button type="button" class="field-grid-transcript-toggle"> </button> <!></figure>`);
 function GridPreview($$anchor, $$props) {
 	push($$props, true);
 	let canvas;
@@ -6594,7 +6548,7 @@ function GridPreview($$anchor, $$props) {
 	user_effect(() => {
 		if (canvas) drawIndexedGrid(canvas, $$props.preview, { scale: 9 });
 	});
-	var figure = root_2$9();
+	var figure = root_2$8();
 	var figcaption = child(figure);
 	var text = only_child(figcaption, true);
 	var canvas_1 = sibling(figcaption, 2);
@@ -6603,7 +6557,7 @@ function GridPreview($$anchor, $$props) {
 	var text_1 = only_child(button, true);
 	var node = sibling(button, 2);
 	var consequent = ($$anchor) => {
-		var section = root_1$11();
+		var section = root_1$10();
 		var div = child(section);
 		var button_1 = child(div);
 		var span = sibling(button_1, 2);
@@ -6612,7 +6566,7 @@ function GridPreview($$anchor, $$props) {
 		reset(div);
 		var div_1 = sibling(div, 2);
 		each(div_1, 21, () => get(transcript).rows, (row) => row.number, ($$anchor, row) => {
-			var p = root$15();
+			var p = root$13();
 			var strong = child(p);
 			var text_3 = only_child(strong);
 			var text_4 = only_child(sibling(strong), true);
@@ -6663,20 +6617,20 @@ function GridPreview($$anchor, $$props) {
 delegate(["click"]);
 //#endregion
 //#region browser/views/FieldView.svelte
-var root$14 = /* @__PURE__ */ from_html(`<button> </button>`);
-var root_1$10 = /* @__PURE__ */ from_html(`<button>Activate</button>`);
-var root_2$8 = /* @__PURE__ */ from_html(`<button>Clear</button>`);
-var root_3$8 = /* @__PURE__ */ from_html(`<!> <button> </button> <button> </button> <!>`, 1);
-var root_4$6 = /* @__PURE__ */ from_html(`<nav class="field-rail" aria-label="Durable execution events"></nav>`);
-var root_5$5 = /* @__PURE__ */ from_html(`<div class="field-empty-state" role="status"><strong> </strong><p> </p></div>`);
-var root_6$5 = /* @__PURE__ */ from_html(`<b>bounded</b>`);
-var root_7$5 = /* @__PURE__ */ from_html(`<b>error</b>`);
-var root_8$3 = /* @__PURE__ */ from_html(`<span> <small> </small><!><!></span>`);
-var root_9$3 = /* @__PURE__ */ from_html(`<span><b>subjects</b></span>`);
-var root_10$3 = /* @__PURE__ */ from_html(`<span><b>metrics</b></span>`);
-var root_11$2 = /* @__PURE__ */ from_html(`<span><b>provenance</b></span>`);
-var root_12$2 = /* @__PURE__ */ from_html(`<span><b>outside cut</b></span>`);
-var root_13$2 = /* @__PURE__ */ from_html(`<span><b>bounded search</b></span>`);
+var root$12 = /* @__PURE__ */ from_html(`<button> </button>`);
+var root_1$9 = /* @__PURE__ */ from_html(`<button>Activate</button>`);
+var root_2$7 = /* @__PURE__ */ from_html(`<button>Clear</button>`);
+var root_3$7 = /* @__PURE__ */ from_html(`<!> <button> </button> <button> </button> <!>`, 1);
+var root_4$5 = /* @__PURE__ */ from_html(`<nav class="field-rail" aria-label="Durable execution events"></nav>`);
+var root_5$4 = /* @__PURE__ */ from_html(`<div class="field-empty-state" role="status"><strong> </strong><p> </p></div>`);
+var root_6$4 = /* @__PURE__ */ from_html(`<b>bounded</b>`);
+var root_7$3 = /* @__PURE__ */ from_html(`<b>error</b>`);
+var root_8$2 = /* @__PURE__ */ from_html(`<span> <small> </small><!><!></span>`);
+var root_9$2 = /* @__PURE__ */ from_html(`<span><b>subjects</b></span>`);
+var root_10$2 = /* @__PURE__ */ from_html(`<span><b>metrics</b></span>`);
+var root_11$1 = /* @__PURE__ */ from_html(`<span><b>provenance</b></span>`);
+var root_12$1 = /* @__PURE__ */ from_html(`<span><b>outside cut</b></span>`);
+var root_13$1 = /* @__PURE__ */ from_html(`<span><b>bounded search</b></span>`);
 var root_14$1 = /* @__PURE__ */ from_html(`<span><b>bounded expansion</b></span>`);
 var root_15$1 = /* @__PURE__ */ from_html(`<p class="field-source-coordinate">Subject fingerprint <code> </code></p>`);
 var root_16$1 = /* @__PURE__ */ from_html(`<p>Truncated response — this is not the complete retained field.</p>`);
@@ -6780,7 +6734,7 @@ function FieldView($$anchor, $$props) {
 	var button_3 = sibling(button_2, 2);
 	var node = sibling(button_3, 2);
 	each(node, 17, () => $$props.field.groups, (group) => group.id, ($$anchor, group) => {
-		var button_4 = root$14();
+		var button_4 = root$12();
 		var text_3 = only_child(button_4);
 		template_effect(() => set_text(text_3, `${get(group).collapsed ? "▸" : "▾"} ${get(group).label ?? ""}`));
 		delegated("click", button_4, () => dispatch({
@@ -6793,7 +6747,7 @@ function FieldView($$anchor, $$props) {
 	});
 	var node_1 = sibling(node, 2);
 	each(node_1, 17, () => $$props.field.layers, (layer) => layer.id, ($$anchor, layer) => {
-		var button_5 = root$14();
+		var button_5 = root$12();
 		var text_4 = only_child(button_5);
 		template_effect(() => {
 			set_attribute(button_5, "aria-pressed", get(layer).visible);
@@ -6809,10 +6763,10 @@ function FieldView($$anchor, $$props) {
 	});
 	var node_2 = sibling(node_1, 2);
 	var consequent_2 = ($$anchor) => {
-		var fragment = root_3$8();
+		var fragment = root_3$7();
 		var node_3 = first_child(fragment);
 		var consequent = ($$anchor) => {
-			var button_6 = root_1$10();
+			var button_6 = root_1$9();
 			template_effect(() => set_attribute(button_6, "aria-label", `Activate ${get(selected).label}`));
 			delegated("click", button_6, () => activateEntity(get(selected).id));
 			append($$anchor, button_6);
@@ -6826,7 +6780,7 @@ function FieldView($$anchor, $$props) {
 		var text_6 = only_child(button_8, true);
 		var node_4 = sibling(button_8, 2);
 		var consequent_1 = ($$anchor) => {
-			var button_9 = root_2$8();
+			var button_9 = root_2$7();
 			delegated("click", button_9, () => dispatch({
 				type: "clear_field_expansion",
 				instance_key: $$props.instanceKey,
@@ -6862,9 +6816,9 @@ function FieldView($$anchor, $$props) {
 	reset(header);
 	var node_5 = sibling(header, 2);
 	var consequent_3 = ($$anchor) => {
-		var nav = root_4$6();
+		var nav = root_4$5();
 		each(nav, 21, () => $$props.field.replay.rail, index, ($$anchor, entry) => {
-			var button_10 = root$14();
+			var button_10 = root$12();
 			let classes;
 			var text_7 = only_child(button_10, true);
 			template_effect(() => {
@@ -6893,7 +6847,7 @@ function FieldView($$anchor, $$props) {
 	bind_this(canvas_1, ($$value) => canvas = $$value, () => canvas);
 	var node_6 = sibling(canvas_1, 2);
 	var consequent_4 = ($$anchor) => {
-		var div_3 = root_5$5();
+		var div_3 = root_5$4();
 		var strong_1 = child(div_3);
 		var text_8 = only_child(strong_1, true);
 		var text_9 = only_child(sibling(strong_1), true);
@@ -6916,20 +6870,20 @@ function FieldView($$anchor, $$props) {
 		var summary = child(details);
 		var node_8 = sibling(child(summary), 2);
 		each(node_8, 17, () => $$props.field.sources, (source) => source.name, ($$anchor, source) => {
-			var span_1 = root_8$3();
+			var span_1 = root_8$2();
 			var text_10 = child(span_1);
 			var small = sibling(text_10);
 			var text_11 = only_child(small, true);
 			var node_9 = sibling(small);
 			var consequent_5 = ($$anchor) => {
-				append($$anchor, root_6$5());
+				append($$anchor, root_6$4());
 			};
 			if_block(node_9, ($$render) => {
 				if (get(source).truncated) $$render(consequent_5);
 			});
 			var node_10 = sibling(node_9);
 			var consequent_6 = ($$anchor) => {
-				append($$anchor, root_7$5());
+				append($$anchor, root_7$3());
 			};
 			if_block(node_10, ($$render) => {
 				if (get(source).error) $$render(consequent_6);
@@ -6944,35 +6898,35 @@ function FieldView($$anchor, $$props) {
 		});
 		var node_11 = sibling(node_8, 2);
 		var consequent_7 = ($$anchor) => {
-			append($$anchor, root_9$3());
+			append($$anchor, root_9$2());
 		};
 		if_block(node_11, ($$render) => {
 			if ($$props.field.subjects.length) $$render(consequent_7);
 		});
 		var node_12 = sibling(node_11, 2);
 		var consequent_8 = ($$anchor) => {
-			append($$anchor, root_10$3());
+			append($$anchor, root_10$2());
 		};
 		if_block(node_12, ($$render) => {
 			if ($$props.field.metrics.length) $$render(consequent_8);
 		});
 		var node_13 = sibling(node_12, 2);
 		var consequent_9 = ($$anchor) => {
-			append($$anchor, root_11$2());
+			append($$anchor, root_11$1());
 		};
 		if_block(node_13, ($$render) => {
 			if ($$props.field.provenance.length) $$render(consequent_9);
 		});
 		var node_14 = sibling(node_13, 2);
 		var consequent_10 = ($$anchor) => {
-			append($$anchor, root_12$2());
+			append($$anchor, root_12$1());
 		};
 		if_block(node_14, ($$render) => {
 			if ($$props.field.replay.outside_cut.length) $$render(consequent_10);
 		});
 		var node_15 = sibling(node_14, 2);
 		var consequent_11 = ($$anchor) => {
-			append($$anchor, root_13$2());
+			append($$anchor, root_13$1());
 		};
 		if_block(node_15, ($$render) => {
 			if ($$props.field.search.truncated) $$render(consequent_11);
@@ -7283,7 +7237,7 @@ function FieldView($$anchor, $$props) {
 			});
 			var node_38 = sibling(node_37, 2);
 			each(node_38, 17, () => get(selectedRelations), (relation) => relation.id, ($$anchor, relation) => {
-				var button_11 = root$14();
+				var button_11 = root$12();
 				var text_37 = only_child(button_11, true);
 				template_effect(() => {
 					button_11.disabled = !get(relation).activate_intent;
@@ -7489,324 +7443,8 @@ delegate([
 	"dblclick"
 ]);
 //#endregion
-//#region browser/views/SceneView.svelte
-var root$13 = /* @__PURE__ */ from_html(`<button> </button>`);
-var root_1$9 = /* @__PURE__ */ from_html(`<div class="atlas-layers"></div> <div class="atlas-lenses" aria-label="Atlas lens"></div>`, 1);
-var root_2$7 = /* @__PURE__ */ from_html(`<div class="atlas-toolbar"><div class="atlas-identity"><strong> </strong><span> </span></div> <div class="atlas-projections" aria-label="Atlas projection"></div> <!></div>`);
-var root_3$7 = /* @__PURE__ */ from_svg(`<line></line>`);
-var root_4$5 = /* @__PURE__ */ from_svg(`<text> </text>`);
-var root_5$4 = /* @__PURE__ */ from_svg(`<polygon></polygon>`);
-var root_6$4 = /* @__PURE__ */ from_svg(`<rect></rect>`);
-var root_7$4 = /* @__PURE__ */ from_svg(`<circle></circle>`);
-var root_8$2 = /* @__PURE__ */ from_svg(`<title> </title>`);
-var root_9$2 = /* @__PURE__ */ from_svg(`<g><!><!></g>`);
-var root_10$2 = /* @__PURE__ */ from_svg(`<circle class="atlas-stack-item" r="0.055"><title> </title></circle>`);
-var root_11$1 = /* @__PURE__ */ from_svg(`<g><circle></circle><text> </text></g><!>`, 1);
-var root_12$1 = /* @__PURE__ */ from_svg(`<!><!>`, 1);
-var root_13$1 = /* @__PURE__ */ from_html(`<div class="scene-view"><!> <svg role="img" preserveAspectRatio="xMidYMid meet"><!><!></svg></div>`);
-function SceneView($$anchor, $$props) {
-	push($$props, true);
-	const dispatch = dispatchUi();
-	const points = /* @__PURE__ */ user_derived(() => $$props.scene.objects.flatMap((object) => [object.position, object.end].filter((point) => point != null)));
-	const bounds = /* @__PURE__ */ user_derived(() => {
-		const xs = get(points).map((point) => Number(point[0] ?? 0));
-		const ys = get(points).map((point) => -Number(point[1] ?? 0));
-		const minX = xs.length ? Math.min(...xs) : 0;
-		const maxX = xs.length ? Math.max(...xs) : 1;
-		const minY = ys.length ? Math.min(...ys) : 0;
-		const maxY = ys.length ? Math.max(...ys) : 1;
-		const scale = Math.max(.25, $$props.scene.camera.fov_degrees / 45);
-		const width = Math.max(40, maxX - minX + 40) * scale;
-		const height = Math.max(30, maxY - minY + 30) * scale;
-		return `${Number($$props.scene.camera.target[0] ?? 0) - width / 2} ${-Number($$props.scene.camera.target[1] ?? 0) - height / 2} ${width} ${height}`;
-	});
-	const accessibleLabel = /* @__PURE__ */ user_derived(() => $$props.scene.objects.flatMap((object) => object.label ? [object.label] : []).join("; ") || "Scene");
-	const activate = (intent) => intent && dispatch({
-		type: "activate",
-		intent
-	});
-	const radius = (object) => Math.max(1, Number(object.scale?.[0] ?? 5));
-	const x = (object) => Number(object.position?.[0] ?? 0);
-	const y = (object) => -Number(object.position?.[1] ?? 0);
-	const atlasNodes = /* @__PURE__ */ user_derived(() => new Map(($$props.scene.atlas?.nodes ?? []).map((node) => [node.id, node])));
-	const atlasBounds = /* @__PURE__ */ user_derived(() => {
-		const bounds = $$props.scene.atlas?.bounds;
-		if (!bounds) return "-10 -10 20 20";
-		const scale = Math.max(.25, $$props.scene.camera.fov_degrees / 45);
-		const width = Math.max(4, bounds.x_max - bounds.x_min + 4) * scale;
-		const height = Math.max(4, bounds.z_max - bounds.z_min + 4) * scale;
-		return `${Number($$props.scene.camera.target[0] ?? 0) - width / 2} ${Number($$props.scene.camera.target[2] ?? 0) - height / 2} ${width} ${height}`;
-	});
-	const atlasPoint = (position) => ({
-		x: Number(position[0] ?? 0),
-		y: Number(position[2] ?? position[1] ?? 0)
-	});
-	const actionById = /* @__PURE__ */ user_derived(() => new Map($$props.scene.actions.map((action) => [action.id, action])));
-	const actions = (group) => $$props.scene.actions.filter((action) => action.group === group);
-	const runAction = (action) => action && dispatch(action.event);
-	const keyAction = (event, action) => {
-		if (event.key === "Enter" || event.key === " ") {
-			event.preventDefault();
-			runAction(action);
-		}
-	};
-	var div = root_13$1();
-	var node_1 = child(div);
-	var consequent_1 = ($$anchor) => {
-		var div_1 = root_2$7();
-		var div_2 = child(div_1);
-		var strong = child(div_2);
-		var text = only_child(strong, true);
-		var text_1 = only_child(sibling(strong));
-		reset(div_2);
-		var div_3 = sibling(div_2, 2);
-		each(div_3, 21, () => actions("projection"), (action) => action.id, ($$anchor, action) => {
-			var button = root$13();
-			let classes;
-			var text_2 = only_child(button, true);
-			template_effect(() => {
-				set_attribute(button, "aria-pressed", get(action).active);
-				classes = set_class(button, 1, "", null, classes, { active: get(action).active });
-				set_text(text_2, get(action).label);
-			});
-			delegated("click", button, () => runAction(get(action)));
-			append($$anchor, button);
-		});
-		reset(div_3);
-		var node_2 = sibling(div_3, 2);
-		var consequent = ($$anchor) => {
-			var fragment = root_1$9();
-			var div_4 = first_child(fragment);
-			each(div_4, 21, () => actions("layer"), (action) => action.id, ($$anchor, action) => {
-				var button_1 = root$13();
-				let classes_1;
-				var text_3 = only_child(button_1, true);
-				template_effect(() => {
-					set_attribute(button_1, "aria-pressed", get(action).active);
-					classes_1 = set_class(button_1, 1, "", null, classes_1, { active: get(action).active });
-					set_text(text_3, get(action).label);
-				});
-				delegated("click", button_1, () => runAction(get(action)));
-				append($$anchor, button_1);
-			});
-			reset(div_4);
-			var div_5 = sibling(div_4, 2);
-			each(div_5, 21, () => actions("lens"), (action) => action.id, ($$anchor, action) => {
-				var button_2 = root$13();
-				let classes_2;
-				var text_4 = only_child(button_2, true);
-				template_effect(() => {
-					set_attribute(button_2, "aria-pressed", get(action).active);
-					classes_2 = set_class(button_2, 1, "", null, classes_2, { active: get(action).active });
-					set_text(text_4, get(action).label);
-				});
-				delegated("click", button_2, () => runAction(get(action)));
-				append($$anchor, button_2);
-			});
-			reset(div_5);
-			append($$anchor, fragment);
-		};
-		if_block(node_2, ($$render) => {
-			if ($$props.scene.atlas.projection === "ai_space") $$render(consequent);
-		});
-		reset(div_1);
-		template_effect(() => {
-			set_text(text, $$props.scene.atlas.root_label);
-			set_text(text_1, `${$$props.scene.atlas.nodes.length ?? ""} regions`);
-		});
-		append($$anchor, div_1);
-	};
-	if_block(node_1, ($$render) => {
-		if ($$props.scene.atlas) $$render(consequent_1);
-	});
-	var svg = sibling(node_1, 2);
-	let classes_3;
-	var node_3 = child(svg);
-	each(node_3, 17, () => $$props.scene.objects, (object) => object.id, ($$anchor, object) => {
-		const r = /* @__PURE__ */ user_derived(() => radius(get(object)));
-		const ox = /* @__PURE__ */ user_derived(() => x(get(object)));
-		const oy = /* @__PURE__ */ user_derived(() => y(get(object)));
-		const end = /* @__PURE__ */ user_derived(() => get(object).end);
-		var g = root_9$2();
-		let classes_4;
-		var node_4 = child(g);
-		var consequent_2 = ($$anchor) => {
-			var line = root_3$7();
-			template_effect(($0, $1) => {
-				set_attribute(line, "x1", get(ox));
-				set_attribute(line, "y1", get(oy));
-				set_attribute(line, "x2", $0);
-				set_attribute(line, "y2", $1);
-				set_attribute(line, "stroke", get(object).color);
-			}, [() => Number(get(end)[0] ?? 0), () => -Number(get(end)[1] ?? 0)]);
-			append($$anchor, line);
-		};
-		var consequent_3 = ($$anchor) => {
-			var text_5 = root_4$5();
-			var text_6 = only_child(text_5, true);
-			template_effect(() => {
-				set_attribute(text_5, "x", get(ox));
-				set_attribute(text_5, "y", get(oy));
-				set_attribute(text_5, "fill", get(object).color);
-				set_text(text_6, get(object).label ?? "");
-			});
-			append($$anchor, text_5);
-		};
-		var consequent_4 = ($$anchor) => {
-			var polygon = root_5$4();
-			template_effect(() => {
-				set_attribute(polygon, "points", `${get(ox)},${get(oy) - get(r)} ${get(ox) + get(r)},${get(oy)} ${get(ox)},${get(oy) + get(r)} ${get(ox) - get(r)},${get(oy)}`);
-				set_attribute(polygon, "stroke", get(object).color);
-			});
-			append($$anchor, polygon);
-		};
-		var consequent_5 = ($$anchor) => {
-			var rect = root_6$4();
-			template_effect(() => {
-				set_attribute(rect, "x", get(ox) - get(r));
-				set_attribute(rect, "y", get(oy) - get(r));
-				set_attribute(rect, "width", get(r) * 2);
-				set_attribute(rect, "height", get(r) * 2);
-				set_attribute(rect, "stroke", get(object).color);
-			});
-			append($$anchor, rect);
-		};
-		var alternate = ($$anchor) => {
-			var circle = root_7$4();
-			template_effect(() => {
-				set_attribute(circle, "cx", get(ox));
-				set_attribute(circle, "cy", get(oy));
-				set_attribute(circle, "r", get(r));
-				set_attribute(circle, "stroke", get(object).color);
-			});
-			append($$anchor, circle);
-		};
-		if_block(node_4, ($$render) => {
-			if (get(end)) $$render(consequent_2);
-			else if (get(object).kind === "text") $$render(consequent_3, 1);
-			else if (get(object).glyph === "diamond") $$render(consequent_4, 2);
-			else if (get(object).glyph === "square") $$render(consequent_5, 3);
-			else $$render(alternate, -1);
-		});
-		var node_5 = sibling(node_4);
-		var consequent_6 = ($$anchor) => {
-			var title = root_8$2();
-			var text_7 = only_child(title, true);
-			template_effect(() => set_text(text_7, get(object).label));
-			append($$anchor, title);
-		};
-		if_block(node_5, ($$render) => {
-			if (get(object).label && get(object).kind !== "text") $$render(consequent_6);
-		});
-		reset(g);
-		template_effect(() => {
-			set_attribute(g, "data-tone", get(object).tone);
-			set_attribute(g, "opacity", get(object).opacity);
-			set_attribute(g, "role", get(object).intent ? "button" : void 0);
-			set_attribute(g, "tabindex", get(object).intent ? 0 : void 0);
-			classes_4 = set_class(g, 0, "", null, classes_4, { interactive: get(object).intent != null });
-		});
-		delegated("click", g, () => activate(get(object).intent));
-		delegated("keydown", g, (event) => {
-			if (event.key === "Enter" || event.key === " ") {
-				event.preventDefault();
-				activate(get(object).intent);
-			}
-		});
-		append($$anchor, g);
-	});
-	var node_6 = sibling(node_3);
-	var consequent_8 = ($$anchor) => {
-		var fragment_1 = root_12$1();
-		var node_7 = first_child(fragment_1);
-		each(node_7, 17, () => $$props.scene.atlas.links, (link) => link.id, ($$anchor, link) => {
-			const from = /* @__PURE__ */ user_derived(() => get(atlasNodes).get(get(link).from));
-			const to = /* @__PURE__ */ user_derived(() => get(atlasNodes).get(get(link).to));
-			var fragment_2 = comment();
-			var node_8 = first_child(fragment_2);
-			var consequent_7 = ($$anchor) => {
-				const start = /* @__PURE__ */ user_derived(() => atlasPoint(get(from).position));
-				const end = /* @__PURE__ */ user_derived(() => atlasPoint(get(to).position));
-				var line_1 = root_3$7();
-				template_effect(() => {
-					set_attribute(line_1, "x1", get(start).x);
-					set_attribute(line_1, "y1", get(start).y);
-					set_attribute(line_1, "x2", get(end).x);
-					set_attribute(line_1, "y2", get(end).y);
-					set_attribute(line_1, "data-kind", get(link).kind);
-				});
-				append($$anchor, line_1);
-			};
-			if_block(node_8, ($$render) => {
-				if (get(from) && get(to)) $$render(consequent_7);
-			});
-			append($$anchor, fragment_2);
-		});
-		each(sibling(node_7), 17, () => $$props.scene.atlas.nodes, (node) => node.id, ($$anchor, node) => {
-			const point = /* @__PURE__ */ user_derived(() => atlasPoint(get(node).position));
-			const nodeAction = /* @__PURE__ */ user_derived(() => get(actionById).get(`node:${get(node).id}`));
-			var fragment_3 = root_11$1();
-			var g_1 = first_child(fragment_3);
-			let classes_5;
-			var circle_1 = child(g_1);
-			var text_8 = sibling(circle_1);
-			var text_9 = only_child(text_8, true);
-			reset(g_1);
-			each(sibling(g_1), 19, () => get(node).stack.slice(0, 4), (item) => item.id, ($$anchor, item, index) => {
-				const itemAction = /* @__PURE__ */ user_derived(() => get(actionById).get(`item:${get(item).id}`));
-				var circle_2 = root_10$2();
-				var text_10 = only_child(child(circle_2), true);
-				reset(circle_2);
-				template_effect(() => {
-					set_attribute(circle_2, "data-kind", get(item).kind);
-					set_attribute(circle_2, "cx", get(point).x + get(index) * .11);
-					set_attribute(circle_2, "cy", get(point).y - .24);
-					set_attribute(circle_2, "role", get(itemAction) ? "button" : void 0);
-					set_attribute(circle_2, "tabindex", get(itemAction) ? 0 : void 0);
-					set_text(text_10, get(item).canonical_ref);
-				});
-				delegated("click", circle_2, () => runAction(get(itemAction)));
-				delegated("keydown", circle_2, (event) => keyAction(event, get(itemAction)));
-				append($$anchor, circle_2);
-			});
-			template_effect(($0) => {
-				classes_5 = set_class(g_1, 0, "atlas-node", null, classes_5, {
-					selected: get(node).state.selected,
-					highlighted: get(node).state.highlighted,
-					dimmed: get(node).state.dimmed
-				});
-				set_attribute(g_1, "role", get(nodeAction) ? "button" : void 0);
-				set_attribute(g_1, "tabindex", get(nodeAction) ? 0 : void 0);
-				set_attribute(circle_1, "cx", get(point).x);
-				set_attribute(circle_1, "cy", get(point).y);
-				set_attribute(circle_1, "r", $0);
-				set_attribute(text_8, "x", get(point).x + .28);
-				set_attribute(text_8, "y", get(point).y + .08);
-				set_text(text_9, get(node).label);
-			}, [() => Math.max(.18, .16 + get(node).stack.length * .045)]);
-			delegated("click", g_1, () => runAction(get(nodeAction)));
-			delegated("keydown", g_1, (event) => keyAction(event, get(nodeAction)));
-			append($$anchor, fragment_3);
-		});
-		append($$anchor, fragment_1);
-	};
-	if_block(node_6, ($$render) => {
-		if ($$props.scene.atlas) $$render(consequent_8);
-	});
-	reset(svg);
-	reset(div);
-	template_effect(() => {
-		set_attribute(svg, "viewBox", $$props.scene.atlas ? get(atlasBounds) : get(bounds));
-		set_attribute(svg, "aria-label", $$props.scene.atlas ? `${$$props.scene.atlas.root_label} atlas` : get(accessibleLabel));
-		classes_3 = set_class(svg, 0, "", null, classes_3, { "atlas-canvas": $$props.scene.atlas != null });
-	});
-	append($$anchor, div);
-	pop();
-}
-delegate(["click", "keydown"]);
-//#endregion
 //#region browser/views/TableHierarchy.svelte
-var root$12 = /* @__PURE__ */ from_html(`<span aria-hidden="true"> </span>`);
+var root$11 = /* @__PURE__ */ from_html(`<span aria-hidden="true"> </span>`);
 var root_1$8 = /* @__PURE__ */ from_html(`<button class="tree-fold svelte-5rokht"> </button>`);
 var root_2$6 = /* @__PURE__ */ from_html(`<span aria-hidden="true">─</span>`);
 var root_3$6 = /* @__PURE__ */ from_html(`<span class="table-hierarchy svelte-5rokht"><!> <span aria-hidden="true"> </span> <!></span>`);
@@ -7815,7 +7453,7 @@ function TableHierarchy($$anchor, $$props) {
 	var span = root_3$6();
 	var node = child(span);
 	each(node, 17, () => $$props.hierarchy.ancestor_continues ?? [], index, ($$anchor, continues) => {
-		var span_1 = root$12();
+		var span_1 = root$11();
 		var text = only_child(span_1, true);
 		template_effect(() => set_text(text, get(continues) ? "│" : "\xA0"));
 		append($$anchor, span_1);
@@ -7852,14 +7490,14 @@ function TableHierarchy($$anchor, $$props) {
 delegate(["click"]);
 //#endregion
 //#region browser/views/ViewRenderer.svelte
-var root$11 = /* @__PURE__ */ from_html(`<div class="source-status" role="status"><!> </div>`);
+var root$10 = /* @__PURE__ */ from_html(`<div class="source-status" role="status"><!> </div>`);
 var root_1$7 = /* @__PURE__ */ from_html(`<div> </div>`);
 var root_2$5 = /* @__PURE__ */ from_html(`<div class="text-view"></div>`);
 var root_3$5 = /* @__PURE__ */ from_html(`<small>bounded preview</small>`);
 var root_4$4 = /* @__PURE__ */ from_html(`<article class="document-view"><header><span> </span><!></header> <pre> </pre></article>`);
 var root_5$3 = /* @__PURE__ */ from_html(`<small> </small>`);
 var root_6$3 = /* @__PURE__ */ from_html(`<span class="row-meta"> </span>`);
-var root_7$3 = /* @__PURE__ */ from_html(`<button class="row-disclosure"> </button>`);
+var root_7$2 = /* @__PURE__ */ from_html(`<button class="row-disclosure"> </button>`);
 var root_8$1 = /* @__PURE__ */ from_html(`<div class="view-record-line"><button><span class="row-glyph"> </span> <span class="row-copy"><strong> </strong><!></span> <!></button> <!></div> <!>`, 1);
 var root_9$1 = /* @__PURE__ */ from_html(`<div class="view-record" role="listitem"><!></div>`);
 var root_10$1 = /* @__PURE__ */ from_html(`<div class="rows-view" role="list"></div>`);
@@ -7917,7 +7555,7 @@ function ViewRenderer($$anchor, $$props) {
 	var div = root_31();
 	var node = child(div);
 	var consequent_1 = ($$anchor) => {
-		var div_1 = root$11();
+		var div_1 = root$10();
 		var node_1 = child(div_1);
 		var consequent = ($$anchor) => {
 			append($$anchor, text("Last observation (stale) ·"));
@@ -8023,7 +7661,7 @@ function ViewRenderer($$anchor, $$props) {
 				reset(button);
 				var node_7 = sibling(button, 2);
 				var consequent_8 = ($$anchor) => {
-					var button_1 = root_7$3();
+					var button_1 = root_7$2();
 					var text_9 = only_child(button_1, true);
 					template_effect(() => {
 						set_attribute(button_1, "aria-label", `${get(row).expanded ? "Collapse" : "Expand"} ${get(row).primary}`);
@@ -8153,7 +7791,7 @@ function ViewRenderer($$anchor, $$props) {
 			var div_14 = sibling(node_13, 2);
 			var node_15 = child(div_14);
 			var consequent_14 = ($$anchor) => {
-				var button_3 = root_7$3();
+				var button_3 = root_7$2();
 				var text_13 = only_child(button_3, true);
 				template_effect(() => {
 					set_attribute(button_3, "aria-label", `${get(row).expanded ? "Collapse" : "Expand"} row`);
@@ -8271,7 +7909,7 @@ function ViewRenderer($$anchor, $$props) {
 			reset(button_4);
 			var node_21 = sibling(button_4, 2);
 			var consequent_22 = ($$anchor) => {
-				var button_5 = root_7$3();
+				var button_5 = root_7$2();
 				var text_20 = only_child(button_5, true);
 				template_effect(() => {
 					set_attribute(button_5, "aria-label", `${$$props.model.entry_expanded?.[index] ? "Collapse" : "Expand"} timeline entry`);
@@ -8328,7 +7966,7 @@ function ViewRenderer($$anchor, $$props) {
 			reset(button_6);
 			var node_23 = sibling(button_6, 2);
 			var consequent_26 = ($$anchor) => {
-				var div_21 = root$11();
+				var div_21 = root$10();
 				var node_24 = child(div_21);
 				var consequent_25 = ($$anchor) => {
 					append($$anchor, text("Last observation (stale) ·"));
@@ -8358,7 +7996,7 @@ function ViewRenderer($$anchor, $$props) {
 					reset(button_7);
 					var node_27 = sibling(button_7);
 					var consequent_27 = ($$anchor) => {
-						var button_8 = root_7$3();
+						var button_8 = root_7$2();
 						var text_27 = only_child(button_8, true);
 						template_effect(() => {
 							set_attribute(button_8, "aria-label", `${get(row).expanded ? "Collapse" : "Expand"} ${get(row).primary}`);
@@ -8483,11 +8121,6 @@ function ViewRenderer($$anchor, $$props) {
 		append($$anchor, section_2);
 	};
 	var consequent_34 = ($$anchor) => {
-		SceneView($$anchor, { get scene() {
-			return $$props.model.scene;
-		} });
-	};
-	var consequent_35 = ($$anchor) => {
 		FieldView($$anchor, {
 			get field() {
 				return $$props.model.field;
@@ -8506,8 +8139,7 @@ function ViewRenderer($$anchor, $$props) {
 		else if ($$props.model.type === "sections") $$render(consequent_30, 5);
 		else if ($$props.model.type === "placeholder") $$render(consequent_31, 6);
 		else if ($$props.model.type === "required_subject") $$render(consequent_33, 7);
-		else if ($$props.model.type === "map" || $$props.model.type === "atlas") $$render(consequent_34, 8);
-		else if ($$props.model.type === "field") $$render(consequent_35, 9);
+		else if ($$props.model.type === "field") $$render(consequent_34, 8);
 	});
 	reset(div);
 	template_effect(() => set_attribute(div, "data-view", $$props.model.type));
@@ -8539,7 +8171,7 @@ function restoreDialogFocus(panel, opener) {
 }
 //#endregion
 //#region browser/app/DialogLayer.svelte
-var root$10 = /* @__PURE__ */ from_html(`<div class="dialog-scrim" role="presentation"><div class="dialog-panel" role="dialog" aria-modal="true" tabindex="-1"><header><h2> </h2> <button class="dialog-close">×</button></header> <div class="dialog-content"><!> <!> <!></div></div></div>`);
+var root$9 = /* @__PURE__ */ from_html(`<div class="dialog-scrim" role="presentation"><div class="dialog-panel" role="dialog" aria-modal="true" tabindex="-1"><header><h2> </h2> <button class="dialog-close">×</button></header> <div class="dialog-content"><!> <!> <!></div></div></div>`);
 function DialogLayer($$anchor, $$props) {
 	push($$props, true);
 	let panel;
@@ -8565,7 +8197,7 @@ function DialogLayer($$anchor, $$props) {
 			close();
 		} else if (event.key === "Tab") trapDialogTab(panel, event);
 	}
-	var div = root$10();
+	var div = root$9();
 	var div_1 = child(div);
 	var header = child(div_1);
 	var h2 = child(header);
@@ -8625,1679 +8257,6 @@ function DialogLayer($$anchor, $$props) {
 }
 delegate(["click", "keydown"]);
 //#endregion
-//#region \0vite/preload-helper.js
-var scriptRel = "modulepreload";
-var assetsURL = function(dep) {
-	return "/ui/assets/" + dep;
-};
-var seen = {};
-var __vitePreload = function preload(baseModule, deps, importerUrl) {
-	let promise = Promise.resolve();
-	if (deps && deps.length > 0) {
-		const links = document.getElementsByTagName("link");
-		const cspNonceMeta = document.querySelector("meta[property=csp-nonce]");
-		const cspNonce = cspNonceMeta?.nonce || cspNonceMeta?.getAttribute("nonce");
-		function allSettled(promises) {
-			return Promise.all(promises.map((p) => Promise.resolve(p).then((value) => ({
-				status: "fulfilled",
-				value
-			}), (reason) => ({
-				status: "rejected",
-				reason
-			}))));
-		}
-		function importMetaResolve(specifier) {
-			if (import.meta.resolve) return import.meta.resolve(specifier);
-			return new URL(
-				specifier,
-				/** #__KEEP__ */
-				import.meta.url
-			).href;
-		}
-		promise = allSettled(deps.map((dep) => {
-			dep = assetsURL(dep, importerUrl);
-			dep = importMetaResolve(dep);
-			if (dep in seen) return;
-			seen[dep] = true;
-			const isCss = dep.endsWith(".css");
-			for (let i = links.length - 1; i >= 0; i--) {
-				const link = links[i];
-				if (link.href === dep && (!isCss || link.rel === "stylesheet")) return;
-			}
-			const link = document.createElement("link");
-			link.rel = isCss ? "stylesheet" : scriptRel;
-			if (!isCss) link.as = "script";
-			link.crossOrigin = "";
-			link.href = dep;
-			if (cspNonce) link.setAttribute("nonce", cspNonce);
-			document.head.appendChild(link);
-			if (isCss) return new Promise((res, rej) => {
-				link.addEventListener("load", res);
-				link.addEventListener("error", () => rej(/* @__PURE__ */ new Error(`Unable to preload CSS for ${dep}`)));
-			});
-		}).filter((p) => p !== void 0));
-	}
-	function handlePreloadError(err) {
-		const e = new Event("vite:preloadError", { cancelable: true });
-		e.payload = err;
-		window.dispatchEvent(e);
-		if (!e.defaultPrevented) throw err;
-	}
-	return promise.then((res) => {
-		for (const item of res || []) {
-			if (item.status !== "rejected") continue;
-			handlePreloadError(item.reason);
-		}
-		return baseModule().catch(handlePreloadError);
-	});
-};
-//#endregion
-//#region browser/visuals/ryeos_ambient_scene.js
-var THREE = null;
-var G = {
-	bg: 1908769,
-	orange: 14048526,
-	yellow: 16432431,
-	blue: 8627608,
-	aqua: 9355388,
-	purple: 13862555,
-	fg: 15457202,
-	bg2: 5261637
-};
-var FLAT_ATLAS_MIN_ZOOM = .35;
-var FLAT_ATLAS_MAX_ZOOM = 6;
-function mountRyeOsAmbientScene(canvas, sceneModel = {}, options = {}) {
-	let runtime = null;
-	let latestSceneModel = sceneModel;
-	let latestOptions = options;
-	let disposed = false;
-	__vitePreload(() => import("./ryeos_three.js").then((n) => n.t).then((module) => {
-		if (disposed || !canvas.isConnected) return;
-		THREE = module;
-		runtime = startRyeOsAmbientScene(canvas, latestSceneModel, latestOptions);
-	}), []).catch((error) => {
-		console.warn("RyeOS ambient scene disabled; Three.js failed to load", error);
-		canvas.dataset.ambientUnavailable = "true";
-	});
-	return {
-		update(nextSceneModel = {}, nextOptions = latestOptions) {
-			latestSceneModel = nextSceneModel;
-			latestOptions = nextOptions;
-			runtime?.update(nextSceneModel, nextOptions);
-		},
-		dispose() {
-			disposed = true;
-			runtime?.dispose();
-		}
-	};
-}
-function startRyeOsAmbientScene(canvas, sceneModel = {}, options = {}) {
-	const platform = ambientPlatform(options.platform);
-	const namespaceAtlas = options.mode === "namespace_atlas" || options.mode === "atlas_2d" || options.mode === "atlas_paper_3d";
-	const atlasStyle = options.atlasStyle || (options.mode === "atlas_paper_3d" ? "paper_3d" : "flat_2d");
-	const renderer = new THREE.WebGLRenderer({
-		canvas,
-		antialias: true,
-		alpha: false
-	});
-	renderer.setPixelRatio(Math.min(platform.devicePixelRatio(), 2));
-	renderer.setClearColor(G.bg, 1);
-	const scene = new THREE.Scene();
-	scene.fog = new THREE.FogExp2(G.bg, namespaceAtlas ? .0018 : .004);
-	const camera = namespaceAtlas ? new THREE.OrthographicCamera(-18, 18, 18, -18, .1, 1e3) : new THREE.PerspectiveCamera(55, 1, .1, 1e3);
-	const root = new THREE.Group();
-	scene.add(root);
-	const state = {
-		theta: 0,
-		phi: namespaceAtlas ? .18 : Math.PI / 2.2,
-		radius: namespaceAtlas ? 38 : 45,
-		homeTheta: 0,
-		homePhi: namespaceAtlas ? .18 : Math.PI / 2.2,
-		homeRadius: namespaceAtlas ? 38 : 45,
-		flatPanX: 0,
-		flatPanZ: 0,
-		flatZoom: 1,
-		homeFlatPanX: 0,
-		homeFlatPanZ: 0,
-		homeFlatZoom: 1,
-		spinVelTheta: namespaceAtlas ? 0 : .0012,
-		spinVelPhi: 0,
-		zoomVel: 0,
-		resetting: false,
-		dragging: false,
-		didDrag: false,
-		lastX: 0,
-		lastY: 0,
-		remotes: [],
-		semanticSignature: "",
-		namespaceAtlas,
-		atlasStyle,
-		atlasInteractive: [],
-		atlasAnimated: [],
-		atlasFocusables: [],
-		atlasHover: null,
-		atlasFocus: options.atlasFocus || null,
-		latestSceneModel: sceneModel,
-		canvas,
-		pointerNdc: new THREE.Vector2(2, 2),
-		disposed: false
-	};
-	const spinners = [];
-	const shard = namespaceAtlas ? null : makeShard();
-	if (shard) root.add(shard.group);
-	if (!namespaceAtlas) addRingBands(root, spinners);
-	const fragments = namespaceAtlas ? [] : makeFragments(root, platform.random);
-	const streams = namespaceAtlas ? null : makeStreams(root, platform.random);
-	const stars = namespaceAtlas ? null : makeStars(scene, platform.random);
-	const semanticLayer = new THREE.Group();
-	root.add(semanticLayer);
-	const raycaster = namespaceAtlas ? new THREE.Raycaster() : null;
-	if (raycaster) raycaster.domElement = canvas;
-	const resize = () => {
-		const rect = canvas.getBoundingClientRect();
-		const viewport = platform.viewport();
-		const width = Math.max(1, Math.floor(rect.width || viewport.width));
-		const height = Math.max(1, Math.floor(rect.height || viewport.height));
-		renderer.setSize(width, height, false);
-		camera.aspect = width / height;
-		if (namespaceAtlas) {
-			const aspect = width / height;
-			const halfHeight = 18;
-			camera.left = -18 * aspect;
-			camera.right = halfHeight * aspect;
-			camera.top = halfHeight;
-			camera.bottom = -18;
-		}
-		camera.updateProjectionMatrix();
-	};
-	const updateCamera = () => {
-		if (isFlatAtlas(state)) {
-			camera.position.set(state.flatPanX, 38, state.flatPanZ + .01);
-			camera.up.set(0, 0, -1);
-			camera.lookAt(state.flatPanX, 0, state.flatPanZ);
-			camera.zoom = state.flatZoom;
-			camera.updateProjectionMatrix();
-			return;
-		}
-		if (namespaceAtlas) {
-			camera.position.set(0, state.radius, .01);
-			camera.up.set(0, 0, -1);
-			camera.lookAt(0, 0, 0);
-			camera.zoom = 38 / Math.max(12, state.radius);
-			camera.updateProjectionMatrix();
-			return;
-		}
-		const x = state.radius * Math.sin(state.phi) * Math.sin(state.theta);
-		const y = state.radius * Math.cos(state.phi);
-		const z = state.radius * Math.sin(state.phi) * Math.cos(state.theta);
-		camera.position.set(x, y, z);
-		camera.up.set(0, Math.sin(state.phi) >= 0 ? 1 : -1, 0);
-		camera.lookAt(0, 0, 0);
-	};
-	const onPointerDown = (event) => {
-		if (event.button !== 0) return;
-		if (state.namespaceAtlas) updatePointerNdc(state, event);
-		state.dragging = true;
-		state.didDrag = false;
-		state.resetting = false;
-		state.lastX = event.clientX;
-		state.lastY = event.clientY;
-		if (isFlatAtlas(state)) {
-			state.spinVelTheta = 0;
-			state.spinVelPhi = 0;
-			state.zoomVel = 0;
-		}
-		canvas.setPointerCapture?.(event.pointerId);
-	};
-	const onPointerMove = (event) => {
-		if (state.namespaceAtlas) updatePointerNdc(state, event);
-		if (!state.dragging) return;
-		const dx = event.clientX - state.lastX;
-		const dy = event.clientY - state.lastY;
-		state.lastX = event.clientX;
-		state.lastY = event.clientY;
-		if (Math.abs(dx) + Math.abs(dy) > 2) state.didDrag = true;
-		if (isFlatAtlas(state)) {
-			dispatchAtlasNavigate(state);
-			const units = atlasWorldUnitsPerPixel(camera, canvas);
-			state.flatPanX -= dx * units;
-			state.flatPanZ -= dy * units;
-			return;
-		}
-		state.spinVelTheta = dx * .004;
-		state.spinVelPhi = -dy * .004;
-	};
-	const onPointerUp = (event) => {
-		if (state.namespaceAtlas && !state.didDrag && state.atlasHover) dispatchAtlasSelect(state, state.atlasHover);
-		state.dragging = false;
-		canvas.releasePointerCapture?.(event.pointerId);
-	};
-	const onPointerLeave = () => {
-		if (!namespaceAtlas) return;
-		state.pointerNdc.set(2, 2);
-		setAtlasHover(state, null);
-	};
-	const onWheel = (event) => {
-		event.preventDefault();
-		state.resetting = false;
-		if (isFlatAtlas(state)) {
-			dispatchAtlasNavigate(state);
-			const before = flatAtlasPointUnderCursor(state, camera, canvas, event);
-			state.flatZoom = clamp(state.flatZoom * Math.exp(-event.deltaY * .0012), FLAT_ATLAS_MIN_ZOOM, FLAT_ATLAS_MAX_ZOOM);
-			const after = flatAtlasPointUnderCursor(state, camera, canvas, event);
-			state.flatPanX += before.x - after.x;
-			state.flatPanZ += before.z - after.z;
-			return;
-		}
-		state.zoomVel += event.deltaY * .008;
-		state.spinVelTheta += namespaceAtlas ? 0 : event.deltaX * 4e-4;
-	};
-	const onKeyDown = (event) => {
-		if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey) return;
-		if (event.key?.toLowerCase() !== "r") return;
-		if (event.target?.closest?.("input, textarea, select, [contenteditable='true']")) return;
-		state.resetting = true;
-		state.dragging = false;
-		state.spinVelTheta = 0;
-		state.spinVelPhi = 0;
-		state.zoomVel = 0;
-	};
-	canvas.addEventListener("pointerdown", onPointerDown);
-	canvas.addEventListener("pointermove", onPointerMove);
-	canvas.addEventListener("pointerup", onPointerUp);
-	canvas.addEventListener("pointercancel", onPointerUp);
-	canvas.addEventListener("pointerleave", onPointerLeave);
-	canvas.addEventListener("wheel", onWheel, { passive: false });
-	platform.eventTarget.addEventListener("keydown", onKeyDown);
-	platform.eventTarget.addEventListener("resize", resize);
-	let frame = null;
-	let last = platform.now();
-	const animate = (now) => {
-		if (state.disposed) return;
-		const reducedMotion = platform.reducedMotion();
-		frame = reducedMotion ? null : platform.requestFrame(animate);
-		resize();
-		Math.min((now - last) / 1e3, .05);
-		last = now;
-		const t = reducedMotion ? 0 : now / 1e3;
-		if (state.resetting) {
-			const lerpSpeed = .045;
-			if (isFlatAtlas(state)) {
-				state.flatPanX += (state.homeFlatPanX - state.flatPanX) * lerpSpeed;
-				state.flatPanZ += (state.homeFlatPanZ - state.flatPanZ) * lerpSpeed;
-				state.flatZoom += (state.homeFlatZoom - state.flatZoom) * lerpSpeed;
-				if (Math.abs(state.flatPanX - state.homeFlatPanX) + Math.abs(state.flatPanZ - state.homeFlatPanZ) + Math.abs(state.flatZoom - state.homeFlatZoom) < .005) state.resetting = false;
-			} else {
-				state.theta += (state.homeTheta - state.theta) * lerpSpeed;
-				state.phi += (state.homePhi - state.phi) * lerpSpeed;
-				state.radius += (state.homeRadius - state.radius) * lerpSpeed;
-				if (Math.abs(state.theta - state.homeTheta) + Math.abs(state.phi - state.homePhi) + Math.abs(state.radius - state.homeRadius) < .01) state.resetting = false;
-			}
-		} else if (!isFlatAtlas(state)) {
-			state.theta += state.spinVelTheta;
-			state.phi += state.spinVelPhi;
-		}
-		if (!state.dragging && !state.resetting) {
-			state.spinVelTheta = state.spinVelTheta * .965 + (namespaceAtlas ? 0 : 4e-5);
-			state.spinVelPhi *= .965;
-		}
-		if (!state.resetting) {
-			state.radius = Math.max(12, Math.min(120, state.radius + state.zoomVel));
-			state.zoomVel *= .9;
-		}
-		stars?.update(t);
-		streams?.update(t);
-		if (shard) {
-			shard.group.rotation.y = t * .065;
-			shard.group.rotation.x = Math.sin(t * .045) * .08;
-			shard.group.rotation.z = Math.cos(t * .035) * .05;
-			shard.group.position.y = Math.sin(t * .48) * .7;
-			shard.glow.material.uniforms.time.value = t;
-		}
-		for (const spinner of spinners) {
-			spinner.group.rotation.y += spinner.spinY * .28;
-			spinner.group.position.y = (shard?.group.position.y || 0) * spinner.bob;
-		}
-		for (const frag of fragments) {
-			const a = frag.angle + t * frag.speed + frag.phase;
-			frag.group.position.set(Math.cos(a) * frag.radius, frag.height + Math.sin(t * .06 + frag.phase) * .35, Math.sin(a) * frag.radius);
-			frag.group.rotation.x += frag.rx * .18;
-			frag.group.rotation.y += frag.ry * .18;
-			frag.group.rotation.z += frag.rz * .18;
-		}
-		root.position.y = namespaceAtlas ? 0 : Math.sin(t * .08) * .2;
-		root.rotation.y = namespaceAtlas ? 0 : t * .0015;
-		for (const remote of state.remotes) {
-			remote.marker.rotation.y = -root.rotation.y;
-			remote.marker.scale.setScalar(.85 + Math.sin(t * 1.8 + remote.phase) * .08);
-		}
-		animateAtlasMarkers(state, t);
-		updateCamera();
-		updateAtlasHover(state, camera, raycaster);
-		renderer.render(scene, camera);
-	};
-	const api = {
-		update(nextSceneModel = {}, nextOptions = {}) {
-			state.latestSceneModel = nextSceneModel;
-			if (state.namespaceAtlas) state.atlasStyle = nextOptions.atlasStyle || state.atlasStyle;
-			state.atlasFocus = nextOptions.atlasFocus || null;
-			updateSemanticObjects(semanticLayer, state, nextSceneModel);
-			applyAtlasFocus(state);
-			if (platform.reducedMotion() && frame === null) frame = platform.requestFrame(animate);
-		},
-		dispose() {
-			state.disposed = true;
-			canvas.removeEventListener("pointerdown", onPointerDown);
-			canvas.removeEventListener("pointermove", onPointerMove);
-			canvas.removeEventListener("pointerup", onPointerUp);
-			canvas.removeEventListener("pointercancel", onPointerUp);
-			canvas.removeEventListener("pointerleave", onPointerLeave);
-			canvas.removeEventListener("wheel", onWheel);
-			platform.eventTarget.removeEventListener("keydown", onKeyDown);
-			platform.eventTarget.removeEventListener("resize", resize);
-			if (frame !== null) platform.cancelFrame(frame);
-			disposeObject(scene);
-			renderer.dispose();
-		}
-	};
-	resize();
-	updateCamera();
-	frame = platform.requestFrame(animate);
-	api.update(sceneModel);
-	return api;
-}
-function ambientPlatform(overrides = {}) {
-	const eventTarget = overrides.eventTarget || window;
-	return {
-		random: overrides.random || Math.random,
-		now: overrides.now || (() => performance.now()),
-		requestFrame: overrides.requestFrame || ((callback) => requestAnimationFrame(callback)),
-		cancelFrame: overrides.cancelFrame || ((frame) => cancelAnimationFrame(frame)),
-		eventTarget,
-		devicePixelRatio: overrides.devicePixelRatio || (() => window.devicePixelRatio || 1),
-		viewport: overrides.viewport || (() => ({
-			width: window.innerWidth,
-			height: window.innerHeight
-		})),
-		reducedMotion: overrides.reducedMotion || (() => window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true)
-	};
-}
-function makeShard() {
-	const group = new THREE.Group();
-	const vertices = [
-		[
-			0,
-			2.2,
-			.1
-		],
-		[
-			.4,
-			1.3,
-			.3
-		],
-		[
-			-.35,
-			1.5,
-			-.2
-		],
-		[
-			.7,
-			.4,
-			.5
-		],
-		[
-			-.65,
-			.35,
-			-.4
-		],
-		[
-			.55,
-			.2,
-			-.6
-		],
-		[
-			-.5,
-			.5,
-			.55
-		],
-		[
-			.2,
-			-.3,
-			.7
-		],
-		[
-			-.3,
-			-.2,
-			-.6
-		],
-		[
-			.6,
-			-.6,
-			.1
-		],
-		[
-			-.55,
-			-.7,
-			-.2
-		],
-		[
-			.15,
-			-1.8,
-			.15
-		],
-		[
-			-.25,
-			-1.4,
-			.3
-		],
-		[
-			.45,
-			-1.2,
-			-.35
-		]
-	].map(([x, y, z]) => new THREE.Vector3(x, y, z));
-	const faces = [
-		[
-			0,
-			1,
-			2,
-			0
-		],
-		[
-			0,
-			1,
-			3,
-			0
-		],
-		[
-			0,
-			2,
-			6,
-			1
-		],
-		[
-			0,
-			2,
-			4,
-			1
-		],
-		[
-			1,
-			3,
-			5,
-			1
-		],
-		[
-			2,
-			4,
-			8,
-			2
-		],
-		[
-			1,
-			2,
-			6,
-			3
-		],
-		[
-			3,
-			5,
-			9,
-			1
-		],
-		[
-			4,
-			6,
-			10,
-			2
-		],
-		[
-			5,
-			8,
-			13,
-			3
-		],
-		[
-			6,
-			7,
-			12,
-			0
-		],
-		[
-			7,
-			9,
-			11,
-			0
-		],
-		[
-			3,
-			6,
-			7,
-			2
-		],
-		[
-			4,
-			8,
-			10,
-			3
-		],
-		[
-			5,
-			9,
-			13,
-			1
-		],
-		[
-			8,
-			10,
-			12,
-			2
-		],
-		[
-			9,
-			11,
-			13,
-			0
-		],
-		[
-			10,
-			11,
-			12,
-			1
-		],
-		[
-			7,
-			10,
-			12,
-			3
-		],
-		[
-			9,
-			10,
-			11,
-			2
-		],
-		[
-			3,
-			7,
-			9,
-			1
-		],
-		[
-			4,
-			6,
-			12,
-			0
-		],
-		[
-			1,
-			3,
-			6,
-			3
-		],
-		[
-			2,
-			4,
-			6,
-			2
-		]
-	];
-	const colors = [
-		new THREE.Color(G.orange),
-		new THREE.Color(G.yellow),
-		new THREE.Color(G.aqua),
-		new THREE.Color(1709844)
-	];
-	const positions = [];
-	const vertexColors = [];
-	for (const [a, b, c, ci] of faces) {
-		const color = colors[ci];
-		const brightness = ci === 3 ? .025 : .09;
-		for (const v of [
-			vertices[a],
-			vertices[b],
-			vertices[c]
-		]) {
-			positions.push(v.x, v.y, v.z);
-			vertexColors.push(color.r * brightness, color.g * brightness, color.b * brightness);
-		}
-	}
-	const geo = new THREE.BufferGeometry();
-	geo.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
-	geo.setAttribute("color", new THREE.Float32BufferAttribute(vertexColors, 3));
-	group.add(new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
-		vertexColors: true,
-		transparent: true,
-		opacity: .92,
-		side: THREE.DoubleSide
-	})));
-	const edges = /* @__PURE__ */ new Map();
-	for (const [a, b, c, ci] of faces) for (const [i, j] of [
-		[a, b],
-		[b, c],
-		[a, c]
-	]) {
-		const key = i < j ? `${i}_${j}` : `${j}_${i}`;
-		const existing = edges.get(key);
-		if (!existing || ci < existing.ci) edges.set(key, {
-			i,
-			j,
-			ci
-		});
-	}
-	const edgeColors = [
-		G.orange,
-		G.yellow,
-		G.aqua,
-		G.purple
-	];
-	for (const { i, j, ci } of edges.values()) group.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([vertices[i], vertices[j]]), lineMat(ci === 3 ? G.bg2 : edgeColors[ci], ci === 3 ? .2 : [
-		1,
-		.85,
-		.7,
-		.5
-	][ci])));
-	const glow = new THREE.Mesh(new THREE.SphereGeometry(2.8, 24, 24), new THREE.ShaderMaterial({
-		uniforms: { time: { value: 0 } },
-		transparent: true,
-		depthWrite: false,
-		side: THREE.BackSide,
-		vertexShader: `varying vec3 vN; varying vec3 vP; void main(){vN=normalize(normalMatrix*normal);vP=position;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.);}`,
-		fragmentShader: `uniform float time; varying vec3 vN; varying vec3 vP; void main(){float rim=pow(1.-abs(dot(vN,vec3(0,0,1))),1.8);float pulse=.5+.5*sin(time*.6+vP.y*1.2);float y=clamp((vP.y+2.5)/5.,0.,1.);vec3 c=mix(vec3(.996,.502,.098),vec3(.98,.741,.184),y);gl_FragColor=vec4(c,rim*pulse*.35);}`
-	}));
-	glow.scale.set(1, 1.2, 1);
-	group.add(glow);
-	return {
-		group,
-		glow
-	};
-}
-function addRingBands(root, spinners) {
-	const defs = [
-		[
-			.4,
-			.3,
-			"circ",
-			4.5,
-			90,
-			G.orange,
-			.9,
-			.024,
-			1.4
-		],
-		[
-			1.1,
-			.5,
-			"circ",
-			5.2,
-			90,
-			G.orange,
-			.75,
-			-.019,
-			.3
-		],
-		[
-			.785,
-			.4,
-			"poly",
-			5.8,
-			6,
-			G.yellow,
-			.7,
-			.015,
-			.9
-		],
-		[
-			1,
-			-.8,
-			"circ",
-			4.8,
-			90,
-			G.yellow,
-			.6,
-			-.013,
-			1.8
-		],
-		[
-			.15,
-			0,
-			"circ",
-			12,
-			110,
-			G.aqua,
-			.65,
-			.008,
-			.5
-		],
-		[
-			1.45,
-			.3,
-			"circ",
-			14,
-			110,
-			G.aqua,
-			.55,
-			-.007,
-			1.6
-		],
-		[
-			.7,
-			-.6,
-			"poly",
-			11,
-			8,
-			G.yellow,
-			.5,
-			.006,
-			.2
-		],
-		[
-			1.1,
-			1,
-			"circ",
-			13,
-			110,
-			G.blue,
-			.4,
-			-.005,
-			1.1
-		],
-		[
-			.2,
-			0,
-			"circ",
-			22,
-			140,
-			G.blue,
-			.3,
-			.003,
-			.7
-		],
-		[
-			.9,
-			.5,
-			"poly",
-			28,
-			8,
-			G.purple,
-			.22,
-			-.0025,
-			1.3
-		],
-		[
-			1.4,
-			-.3,
-			"dash",
-			25,
-			90,
-			G.purple,
-			.18,
-			.002,
-			.4
-		],
-		[
-			.4,
-			1.2,
-			"circ",
-			35,
-			160,
-			G.bg2,
-			.15,
-			-.0015,
-			1
-		],
-		[
-			1.2,
-			.8,
-			"poly",
-			42,
-			12,
-			G.bg2,
-			.1,
-			.001,
-			.15
-		]
-	];
-	for (const [rx, rz, shape, r, sides, color, opacity, spinY, bob] of defs) {
-		const mesh = shape === "dash" ? dashedRing(r, sides, color, opacity) : ring(shape === "poly" ? polyPoints(sides, r) : circlePoints(r, sides), color, opacity);
-		const group = new THREE.Group();
-		group.rotation.set(rx, 0, rz);
-		group.add(mesh);
-		root.add(group);
-		spinners.push({
-			group,
-			spinY,
-			bob
-		});
-	}
-}
-function makeFragments(root, random) {
-	return [
-		[
-			5,
-			.8,
-			3.14,
-			.25,
-			.018
-		],
-		[
-			5.5,
-			-.4,
-			2.8,
-			.18,
-			.02
-		],
-		[
-			4.8,
-			.3,
-			4.2,
-			.3,
-			.016
-		],
-		[
-			5.2,
-			-.7,
-			.8,
-			.2,
-			.022
-		],
-		[
-			9,
-			1.5,
-			2.5,
-			.4,
-			.012
-		],
-		[
-			10.5,
-			-1.2,
-			3.8,
-			.35,
-			.01
-		],
-		[
-			8.5,
-			.5,
-			3,
-			.5,
-			.011
-		],
-		[
-			11,
-			-2,
-			.5,
-			.3,
-			.013
-		],
-		[
-			18,
-			2.5,
-			.7,
-			.6,
-			.005
-		],
-		[
-			22,
-			-1.8,
-			2,
-			.55,
-			.004
-		],
-		[
-			16,
-			.8,
-			3.5,
-			.7,
-			.006
-		],
-		[
-			20,
-			-3,
-			1.2,
-			.45,
-			.003
-		]
-	].map(([radius, height, phase, scale, speed], index) => {
-		const group = miniShard(scale, radius > 14 ? .48 : .78);
-		root.add(group);
-		return {
-			group,
-			radius,
-			height,
-			phase,
-			angle: index * .9,
-			speed,
-			rx: (random() - .5) * .012,
-			ry: (random() - .5) * .016,
-			rz: (random() - .5) * .01
-		};
-	});
-}
-function miniShard(scale, opacity) {
-	const verts = [
-		[
-			0,
-			.7,
-			.1
-		],
-		[
-			.5,
-			.1,
-			.3
-		],
-		[
-			-.4,
-			.15,
-			-.2
-		],
-		[
-			.25,
-			-.4,
-			.35
-		],
-		[
-			-.3,
-			-.5,
-			.1
-		],
-		[
-			.4,
-			.2,
-			-.4
-		]
-	].map(([x, y, z]) => new THREE.Vector3(x, y, z));
-	const faces = [
-		[
-			0,
-			1,
-			2,
-			0
-		],
-		[
-			0,
-			2,
-			5,
-			1
-		],
-		[
-			1,
-			3,
-			4,
-			2
-		],
-		[
-			2,
-			3,
-			4,
-			3
-		],
-		[
-			0,
-			1,
-			5,
-			1
-		],
-		[
-			3,
-			4,
-			5,
-			0
-		]
-	];
-	const group = new THREE.Group();
-	const edgeColors = [
-		G.orange,
-		G.yellow,
-		G.aqua,
-		G.purple
-	];
-	for (const [a, b, c, ci] of faces) group.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([
-		verts[a],
-		verts[b],
-		verts[c],
-		verts[a]
-	]), lineMat(edgeColors[ci], opacity)));
-	group.scale.setScalar(scale);
-	return group;
-}
-function makeStreams(root, random) {
-	const count = 480;
-	const positions = new Float32Array(count * 3);
-	const sizes = new Float32Array(count);
-	const colors = new Float32Array(count * 3);
-	const phases = new Float32Array(count);
-	const defs = [
-		new THREE.Color(G.orange),
-		new THREE.Color(G.aqua),
-		new THREE.Color(G.yellow),
-		new THREE.Color(G.purple)
-	];
-	for (let i = 0; i < count; i++) {
-		phases[i] = random();
-		sizes[i] = .8 + random() * 1.5;
-		const c = defs[i % defs.length];
-		const fade = .3 + random() * .7;
-		colors[i * 3] = c.r * fade;
-		colors[i * 3 + 1] = c.g * fade;
-		colors[i * 3 + 2] = c.b * fade;
-	}
-	const geo = new THREE.BufferGeometry();
-	geo.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
-	geo.setAttribute("size", new THREE.Float32BufferAttribute(sizes, 1));
-	geo.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
-	const mat = pointMaterial(.6, 150);
-	const points = new THREE.Points(geo, mat);
-	root.add(points);
-	return { update(t) {
-		for (let i = 0; i < count; i++) {
-			const stream = i % 4;
-			const phase = (phases[i] + t * .08) % 1;
-			const spin = [
-				1,
-				-.8,
-				.6,
-				-1.1
-			][stream];
-			const tiltX = [
-				.3,
-				1.2,
-				.7,
-				-.4
-			][stream];
-			const tiltZ = [
-				.2,
-				-.5,
-				.9,
-				1.3
-			][stream];
-			const r = 1 + phase * 18;
-			const angle = phase * Math.PI * 4 * spin + i * .5;
-			const h = (phase - .5) * 6;
-			let x = Math.cos(angle) * r, y = h, z = Math.sin(angle) * r;
-			const cx = Math.cos(tiltX), sx = Math.sin(tiltX), cz = Math.cos(tiltZ), sz = Math.sin(tiltZ);
-			const y2 = y * cx - z * sx, z2 = y * sx + z * cx;
-			positions[i * 3] = x * cz - y2 * sz;
-			positions[i * 3 + 1] = x * sz + y2 * cz;
-			positions[i * 3 + 2] = z2;
-			const life = phase < .1 ? phase / .1 : phase > .85 ? (1 - phase) / .15 : 1;
-			sizes[i] = (.5 + phase * 1.5) * life;
-		}
-		geo.attributes.position.needsUpdate = true;
-		geo.attributes.size.needsUpdate = true;
-	} };
-}
-function makeStars(scene, random) {
-	const count = 2200;
-	const positions = new Float32Array(count * 3);
-	const sizes = new Float32Array(count);
-	const colors = new Float32Array(count * 3);
-	const baseSizes = new Float32Array(count);
-	const freqs = new Float32Array(count);
-	const phases = new Float32Array(count);
-	for (let i = 0; i < count; i++) {
-		const theta = random() * Math.PI * 2;
-		const phi = Math.acos(2 * random() - 1);
-		const r = 60 + random() * 320;
-		positions[i * 3] = r * Math.sin(phi) * Math.cos(theta);
-		positions[i * 3 + 1] = r * Math.sin(phi) * Math.sin(theta);
-		positions[i * 3 + 2] = r * Math.cos(phi);
-		baseSizes[i] = sizes[i] = .4 + random() * 2.2;
-		freqs[i] = .3 + random() * 2.5;
-		phases[i] = random() * Math.PI * 2;
-		const tint = random();
-		if (tint < .72) {
-			const b = .48 + random() * .46;
-			colors[i * 3] = b;
-			colors[i * 3 + 1] = b * .92;
-			colors[i * 3 + 2] = b * .74;
-		} else if (tint < .84) {
-			colors[i * 3] = .86;
-			colors[i * 3 + 1] = .55;
-			colors[i * 3 + 2] = .28;
-		} else if (tint < .94) {
-			colors[i * 3] = .7;
-			colors[i * 3 + 1] = .52;
-			colors[i * 3 + 2] = .34;
-		} else {
-			colors[i * 3] = .42;
-			colors[i * 3 + 1] = .52;
-			colors[i * 3 + 2] = .56;
-		}
-	}
-	const geo = new THREE.BufferGeometry();
-	geo.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
-	geo.setAttribute("size", new THREE.Float32BufferAttribute(sizes, 1));
-	geo.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
-	const points = new THREE.Points(geo, pointMaterial(.75, 200));
-	scene.add(points);
-	return { update(t) {
-		for (let i = 0; i < count; i++) sizes[i] = baseSizes[i] * (.55 + .45 * Math.sin(t * freqs[i] + phases[i]));
-		geo.attributes.size.needsUpdate = true;
-		points.rotation.y = t * 3e-4;
-		points.rotation.x = t * 1e-4;
-	} };
-}
-function updateSemanticObjects(layer, state, sceneModel) {
-	const signature = semanticSignature(sceneModel, state.namespaceAtlas);
-	if (signature === state.semanticSignature) return;
-	state.semanticSignature = signature;
-	disposeLayer(layer);
-	state.remotes = [];
-	state.atlasInteractive = [];
-	state.atlasAnimated = [];
-	state.atlasFocusables = [];
-	state.atlasHover = null;
-	if (state.namespaceAtlas && sceneModel?.atlas) {
-		updateAtlasObjects(layer, sceneModel.atlas, state);
-		return;
-	}
-	if (state.namespaceAtlas) return;
-	const objects = (sceneModel?.objects || []).filter((object) => object.kind !== "local_node");
-	objects.forEach((object, index) => {
-		const marker = semanticMarker(object);
-		const position = object.position || [
-			0,
-			0,
-			0
-		];
-		marker.position.set(position[0] || 0, position[1] || 0, position[2] || 0);
-		if (object.kind === "remote_node") {
-			const angle = index / Math.max(1, objects.length) * Math.PI * 2;
-			marker.position.set(Math.cos(angle) * 7.5, .8 + index * .08, Math.sin(angle) * 7.5);
-			state.remotes.push({
-				marker,
-				phase: angle
-			});
-		}
-		layer.add(marker);
-	});
-}
-function semanticSignature(sceneModel, namespaceAtlas = false) {
-	if (namespaceAtlas && sceneModel?.atlas) {
-		const nodes = sceneModel.atlas.nodes || [];
-		const ui = sceneModel.atlas.ui || {};
-		return `atlas:${sceneModel.atlas.selected_ref || ""}:${(ui.visible_layers || []).join(",")}:${ui.active_lens || "none"}:` + nodes.map((node) => [
-			node.id,
-			node.stack?.length || 0,
-			node.state?.selected ? "s" : "",
-			node.state?.highlighted ? "h" : "",
-			node.state?.dimmed ? "d" : ""
-		].join("/")).join(";") + `:${sceneModel.atlas.regions?.length || 0}:${sceneModel.atlas.links?.length || 0}`;
-	}
-	return (sceneModel?.objects || []).map((object) => [
-		object.id,
-		object.kind,
-		object.color,
-		object.label,
-		object.scale?.[0],
-		object.position?.join(":")
-	].join("|")).join(";");
-}
-function updateAtlasObjects(layer, atlas, state = {}) {
-	const group = new THREE.Group();
-	group.userData.sceneObjectKind = "namespace_atlas";
-	const nodes = atlas?.nodes || [];
-	const nodeByKey = new Map(nodes.map((node) => [node.namespace_key || "", node]));
-	const nodeById = new Map(nodes.map((node) => [node.id || "", node]));
-	const radiusScale = atlas?.bounds?.radius_max ? Math.min(3.2, 14 / Math.max(1, atlas.bounds.radius_max)) : 1.6;
-	for (const node of nodes) {
-		if (!node.path?.length) continue;
-		const anchor = atlasVec(node.position, radiusScale, .04);
-		const marker = atlasFolderMarker(node);
-		marker.position.copy(anchor);
-		registerAtlasMarker(state, marker, node);
-		registerAtlasFocusable(state, marker, {
-			type: "folder",
-			folderId: node.id,
-			folderPath: node.namespace_key || ""
-		});
-		group.add(marker);
-	}
-	for (const node of nodes) {
-		if (!node.path?.length) continue;
-		const parentKey = node.path.slice(0, -1).join("/");
-		const parent = nodeByKey.get(parentKey);
-		if (!parent) continue;
-		const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints([atlasVec(parent.position, radiusScale, 0), atlasVec(node.position, radiusScale, 0)]), lineMat(node.stack?.length ? G.yellow : G.bg2, node.stack?.length ? .28 : .16));
-		registerAtlasFocusable(state, line, {
-			type: "branch",
-			folderId: node.id,
-			folderPath: node.namespace_key || "",
-			parentPath: parent.namespace_key || ""
-		});
-		group.add(line);
-	}
-	const rootAnchor = atlasVec(nodeByKey.get("")?.position || [
-		0,
-		0,
-		0
-	], radiusScale, .03);
-	const rootHub = new THREE.Group();
-	rootHub.position.copy(rootAnchor);
-	rootHub.add(new THREE.Mesh(new THREE.SphereGeometry(.18, 20, 14), new THREE.MeshBasicMaterial({
-		color: G.orange,
-		transparent: true,
-		opacity: .82
-	})));
-	const rootRing = new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(circlePoints(.42, 44)), lineMat(G.yellow, .7));
-	rootRing.rotation.x = Math.PI / 2;
-	rootHub.add(rootRing);
-	rootHub.userData.baseScale = 1;
-	rootHub.userData.pulse = .18;
-	rootHub.userData.phase = 0;
-	state.atlasAnimated?.push(rootHub);
-	group.add(rootHub);
-	for (const region of atlas?.regions || []) {
-		const radiusMin = Math.max(.2, (region.radius_min || 0) * radiusScale);
-		const radiusMax = Math.max(radiusMin + .2, (region.radius_max || region.radius_min || 1) * radiusScale);
-		const start = region.angle_start || 0;
-		const end = region.angle_end || start;
-		group.add(arcLine(radiusMax, start, end, G.purple, .34));
-		group.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(Math.cos(start) * radiusMin, .02, Math.sin(start) * radiusMin), new THREE.Vector3(Math.cos(start) * radiusMax, .02, Math.sin(start) * radiusMax)]), lineMat(G.purple, .18)));
-		group.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(Math.cos(end) * radiusMin, .02, Math.sin(end) * radiusMin), new THREE.Vector3(Math.cos(end) * radiusMax, .02, Math.sin(end) * radiusMax)]), lineMat(G.purple, .18)));
-	}
-	for (const link of atlas?.links || []) {
-		const from = nodeById.get(link.from);
-		const to = nodeById.get(link.to);
-		if (!from || !to) continue;
-		group.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([atlasVec(from.position, radiusScale, .42), atlasVec(to.position, radiusScale, .42)]), lineMat(G.yellow, .62)));
-	}
-	for (const node of nodes) {
-		if (!node.path?.length && !(node.stack || []).length) continue;
-		const stack = node.stack || [];
-		const anchor = atlasVec(node.position, radiusScale, 0);
-		if (!stack.length && !node.state?.selected && !node.state?.highlighted) continue;
-		if (!stack.length) {
-			const bead = new THREE.Mesh(new THREE.SphereGeometry(.05, 8, 6), new THREE.MeshBasicMaterial({
-				color: G.yellow,
-				transparent: true,
-				opacity: node.state?.selected ? .65 : .38
-			}));
-			bead.position.copy(anchor);
-			group.add(bead);
-			continue;
-		}
-		const haloOpacity = node.state?.selected ? .95 : node.state?.highlighted ? .7 : node.state?.dimmed ? .16 : .42;
-		const halo = new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(circlePoints(.18 + stack.length * .025, 28)), lineMat(node.state?.selected ? G.yellow : G.orange, haloOpacity));
-		halo.position.copy(anchor);
-		halo.rotation.x = Math.PI / 2;
-		group.add(halo);
-		for (const item of stack) {
-			const marker = atlasStackMarker(item, node.state || {});
-			const offset = (item.y_offset || 0) * .55;
-			marker.position.set(anchor.x, anchor.y + .12 + offset, anchor.z);
-			registerAtlasMarker(state, marker, node);
-			registerAtlasFocusable(state, marker, {
-				type: "item",
-				ref: atlasItemRef(item),
-				kind: item.kind || "other",
-				folderId: node.id,
-				folderPath: node.namespace_key || "",
-				interaction: item.interaction || null
-			});
-			group.add(marker);
-		}
-	}
-	layer.add(group);
-}
-function atlasVec(position = [
-	0,
-	0,
-	0
-], scale = 1, yOffset = 0) {
-	return new THREE.Vector3((position[0] || 0) * scale, (position[1] || 0) + yOffset, (position[2] || 0) * scale);
-}
-function atlasFolderMarker(node) {
-	const isRootFolder = (node.path?.length || 0) === 1;
-	const hasItems = (node.stack || []).length > 0;
-	const branch = (node.angle_end || 0) - (node.angle_start || 0);
-	const radius = isRootFolder ? .16 : hasItems ? .105 : .07;
-	const color = node.state?.selected ? G.yellow : node.state?.highlighted ? G.orange : isRootFolder ? G.aqua : hasItems ? G.fg : G.bg2;
-	const opacity = node.state?.dimmed ? .18 : isRootFolder ? .76 : hasItems ? .5 : .34;
-	const marker = new THREE.Mesh(new THREE.SphereGeometry(radius, isRootFolder ? 18 : 12, isRootFolder ? 12 : 8), new THREE.MeshBasicMaterial({
-		color,
-		transparent: true,
-		opacity
-	}));
-	marker.userData.sceneObjectId = node.id;
-	marker.userData.sceneObjectKind = isRootFolder ? "atlas_root_folder" : "atlas_folder";
-	marker.userData.sceneObjectLabel = node.namespace_key || node.label || "folder";
-	marker.userData.atlasInteraction = node.interaction || null;
-	marker.userData.baseScale = 1;
-	marker.userData.hoverScale = isRootFolder ? 1.65 : 1.9;
-	marker.userData.pulse = node.state?.selected || node.state?.highlighted ? .18 : isRootFolder ? .08 : 0;
-	marker.userData.phase = branch * 3;
-	return marker;
-}
-function registerAtlasMarker(state, marker, node) {
-	if (!state) return;
-	state.atlasInteractive?.push(marker);
-	if (marker.userData.pulse || node.state?.selected || node.state?.highlighted) state.atlasAnimated?.push(marker);
-}
-function registerAtlasFocusable(state, object, meta = {}) {
-	if (!state || !object) return;
-	object.userData.atlasFocus = meta;
-	if (meta.interaction) object.userData.atlasInteraction = meta.interaction;
-	object.userData.baseOpacity ??= object.material?.opacity;
-	object.traverse?.((child) => {
-		child.userData.atlasFocus = meta;
-		child.userData.baseOpacity ??= child.material?.opacity;
-	});
-	state.atlasFocusables?.push(object);
-}
-function isFlatAtlas(state) {
-	return state.namespaceAtlas && state.atlasStyle === "flat_2d";
-}
-function atlasWorldUnitsPerPixel(camera, canvas) {
-	const rect = canvas.getBoundingClientRect();
-	const height = Math.max(1, rect.height);
-	return (camera.top - camera.bottom) / height / Math.max(.001, camera.zoom || 1);
-}
-function flatAtlasPointUnderCursor(state, camera, canvas, event) {
-	const rect = canvas.getBoundingClientRect();
-	const x01 = rect.width ? (event.clientX - rect.left) / rect.width : .5;
-	const y01 = rect.height ? (event.clientY - rect.top) / rect.height : .5;
-	const ndcX = x01 * 2 - 1;
-	const ndcY = -(y01 * 2 - 1);
-	const halfW = (camera.right - camera.left) / 2 / Math.max(.001, state.flatZoom);
-	const halfH = (camera.top - camera.bottom) / 2 / Math.max(.001, state.flatZoom);
-	return {
-		x: state.flatPanX + ndcX * halfW,
-		z: state.flatPanZ - ndcY * halfH
-	};
-}
-function updatePointerNdc(state, event) {
-	const rect = event.currentTarget.getBoundingClientRect();
-	const x = rect.width ? (event.clientX - rect.left) / rect.width : .5;
-	const y = rect.height ? (event.clientY - rect.top) / rect.height : .5;
-	state.pointerNdc.set(x * 2 - 1, -(y * 2 - 1));
-}
-function updateAtlasHover(state, camera, raycaster) {
-	if (!state.namespaceAtlas || !raycaster || !state.atlasInteractive?.length) return;
-	raycaster.setFromCamera(state.pointerNdc, camera);
-	setAtlasHover(state, raycaster.intersectObjects(state.atlasInteractive, true)[0]?.object || null);
-}
-function clamp(value, min, max) {
-	return Math.min(max, Math.max(min, value));
-}
-function setAtlasHover(state, next) {
-	if (state.atlasHover === next) return;
-	if (state.atlasHover) {
-		const base = state.atlasHover.userData.baseScale || 1;
-		state.atlasHover.scale.setScalar(base);
-		if (state.atlasHover.material?.opacity !== void 0 && state.atlasHover.userData.baseOpacity !== void 0) state.atlasHover.material.opacity = state.atlasHover.userData.baseOpacity;
-	}
-	state.atlasHover = next;
-	dispatchAtlasHover(state, next);
-	if (next) {
-		next.userData.baseOpacity ??= next.material?.opacity;
-		next.scale.setScalar(next.userData.hoverScale || 1.5);
-		if (next.material?.opacity !== void 0) next.material.opacity = Math.min(1, next.material.opacity + .22);
-	}
-	applyAtlasFocus(state);
-}
-function dispatchAtlasHover(state, object) {
-	state.canvas?.dispatchEvent(new CustomEvent("ryeos-atlas-hover", { detail: object ? {
-		id: object.userData.sceneObjectId,
-		kind: object.userData.sceneObjectKind,
-		label: object.userData.sceneObjectLabel,
-		path: object.userData.atlasFocus?.folderPath || "",
-		interaction: object.userData.atlasInteraction || object.userData.atlasFocus?.interaction || null
-	} : null }));
-}
-function dispatchAtlasSelect(state, object) {
-	state.canvas?.dispatchEvent(new CustomEvent("ryeos-atlas-select", { detail: object ? {
-		id: object.userData.sceneObjectId,
-		kind: object.userData.sceneObjectKind,
-		label: object.userData.sceneObjectLabel,
-		path: object.userData.atlasFocus?.folderPath || "",
-		interaction: object.userData.atlasInteraction || object.userData.atlasFocus?.interaction || null,
-		sceneModel: state.latestSceneModel
-	} : null }));
-}
-function dispatchAtlasNavigate(state) {
-	state.canvas?.dispatchEvent(new CustomEvent("ryeos-atlas-navigate"));
-}
-function applyAtlasFocus(state) {
-	if (!state.namespaceAtlas || !state.atlasFocusables?.length) return;
-	const focus = state.atlasFocus;
-	for (const object of state.atlasFocusables) {
-		const active = !focus || atlasFocusRelated(focus, object.userData.atlasFocus || {});
-		object.traverse?.((child) => applyAtlasFocusMaterial(child, active, Boolean(focus)));
-		applyAtlasFocusMaterial(object, active, Boolean(focus));
-	}
-}
-function applyAtlasFocusMaterial(object, active, hasFocus) {
-	const material = object.material;
-	if (!material || material.opacity === void 0) return;
-	object.userData.baseOpacity ??= material.opacity;
-	if (!hasFocus) material.opacity = object.userData.baseOpacity;
-	else material.opacity = active ? Math.min(1, object.userData.baseOpacity + .18) : Math.max(.08, object.userData.baseOpacity * .25);
-}
-function atlasFocusRelated(focus, meta) {
-	if (!focus) return true;
-	if (focus.type === "kind") return meta.kind === focus.kind;
-	if (focus.type === "item") {
-		const ref = focus.ref || focus.id || "";
-		return Boolean(ref) && meta.ref === ref;
-	}
-	if (focus.type === "folder") {
-		const focusPath = focus.path || "";
-		return meta.folderId === focus.id || meta.folderPath === focusPath || focusPath && meta.folderPath?.startsWith(`${focusPath}/`) || focusPath && meta.parentPath?.startsWith(focusPath);
-	}
-	return true;
-}
-function animateAtlasMarkers(state, t) {
-	for (const marker of state.atlasAnimated || []) {
-		if (marker === state.atlasHover) continue;
-		const pulse = marker.userData.pulse || 0;
-		if (!pulse) continue;
-		const base = marker.userData.baseScale || 1;
-		const phase = marker.userData.phase || 0;
-		marker.scale.setScalar(base + Math.sin(t * 2.4 + phase) * pulse);
-	}
-}
-function atlasStackMarker(item, state) {
-	const kind = item.kind || "other";
-	const color = atlasKindColor(kind);
-	const scope = item.scope || "unknown";
-	const scopeOpacity = scope === "system" ? .44 : scope === "user" ? .54 : .62;
-	const opacity = state.selected ? .98 : state.highlighted ? .86 : state.dimmed ? .18 : scopeOpacity;
-	let geometry;
-	switch (kind) {
-		case "directive":
-			geometry = new THREE.OctahedronGeometry(.16, 0);
-			break;
-		case "tool":
-			geometry = new THREE.TorusGeometry(.15, .018, 8, 28);
-			break;
-		case "knowledge":
-			geometry = new THREE.DodecahedronGeometry(.14, 0);
-			break;
-		case "config":
-			geometry = new THREE.BoxGeometry(.18, .035, .18);
-			break;
-		case "file":
-			geometry = new THREE.BoxGeometry(.13, .02, .18);
-			break;
-		default: geometry = new THREE.SphereGeometry(.12, 10, 8);
-	}
-	const material = new THREE.MeshBasicMaterial({
-		color,
-		transparent: true,
-		opacity,
-		wireframe: kind !== "config" && kind !== "file"
-	});
-	const marker = new THREE.Mesh(geometry, material);
-	marker.userData.sceneObjectId = atlasItemRef(item);
-	marker.userData.sceneObjectKind = kind;
-	marker.userData.sceneObjectLabel = item.label;
-	return marker;
-}
-function atlasItemRef(item = {}) {
-	return item.canonical_ref || item.id || item.label || "";
-}
-function arcLine(radius, start, end, color, opacity) {
-	const points = [];
-	const segments = Math.max(8, Math.ceil(Math.abs(end - start) * 24));
-	for (let i = 0; i <= segments; i++) {
-		const angle = start + (end - start) * (i / segments);
-		points.push(new THREE.Vector3(Math.cos(angle) * radius, .02, Math.sin(angle) * radius));
-	}
-	return new THREE.Line(new THREE.BufferGeometry().setFromPoints(points), lineMat(color, opacity));
-}
-function atlasKindColor(kind) {
-	switch (kind) {
-		case "directive": return G.purple;
-		case "tool": return G.aqua;
-		case "knowledge": return G.yellow;
-		case "config": return G.blue;
-		case "file": return G.fg;
-		default: return G.fg;
-	}
-}
-function semanticMarker(object) {
-	const color = colorValue(object.color || "#fabd2f");
-	const opacity = object.opacity ?? .82;
-	const size = Math.max(.35, object.scale?.[0] || .8);
-	let geometry;
-	let material = new THREE.MeshBasicMaterial({
-		color,
-		wireframe: true,
-		transparent: true,
-		opacity
-	});
-	switch (object.kind) {
-		case "project_core":
-			geometry = new THREE.IcosahedronGeometry(.5 * size, 1);
-			material = new THREE.MeshBasicMaterial({
-				color,
-				transparent: true,
-				opacity: .18 + opacity * .22
-			});
-			break;
-		case "space_ring":
-			geometry = new THREE.TorusGeometry(3 * size, .025, 8, 96);
-			break;
-		case "item_cluster":
-			geometry = new THREE.DodecahedronGeometry(.48 * size, 0);
-			break;
-		case "thread_flow":
-			geometry = new THREE.TorusKnotGeometry(.38 * size, .018, 80, 8);
-			break;
-		case "schedule_pulse":
-			geometry = new THREE.OctahedronGeometry(.42 * size, 0);
-			break;
-		case "service_beacon":
-			geometry = new THREE.ConeGeometry(.36 * size, .82 * size, 4);
-			break;
-		case "remote_node":
-			geometry = new THREE.OctahedronGeometry(.38 * size, 0);
-			break;
-		case "link":
-			geometry = new THREE.BoxGeometry(.92 * size, .025, .025);
-			material = new THREE.MeshBasicMaterial({
-				color,
-				transparent: true,
-				opacity: Math.min(opacity, .44)
-			});
-			break;
-		default: geometry = new THREE.SphereGeometry(.32 * size, 12, 8);
-	}
-	const marker = new THREE.Mesh(geometry, material);
-	marker.userData.sceneObjectId = object.id;
-	marker.userData.sceneObjectKind = object.kind;
-	marker.userData.sceneObjectLabel = object.label;
-	return marker;
-}
-function disposeLayer(layer) {
-	for (const child of layer.children) disposeObject(child);
-	layer.clear();
-}
-function disposeObject(object) {
-	object.traverse?.((child) => {
-		child.geometry?.dispose?.();
-		if (Array.isArray(child.material)) child.material.forEach((material) => material.dispose?.());
-		else child.material?.dispose?.();
-	});
-}
-function circlePoints(r, segs) {
-	return Array.from({ length: segs + 1 }, (_, i) => {
-		const a = i / segs * Math.PI * 2;
-		return new THREE.Vector3(Math.cos(a) * r, 0, Math.sin(a) * r);
-	});
-}
-function polyPoints(sides, r) {
-	return circlePoints(r, sides);
-}
-function ring(points, color, opacity) {
-	return new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(points), lineMat(color, opacity));
-}
-function dashedRing(r, segs, color, opacity) {
-	const positions = [];
-	for (let i = 0; i < segs; i++) {
-		if (i % 2 === 0) continue;
-		const a1 = i / segs * Math.PI * 2;
-		const a2 = (i + 1) / segs * Math.PI * 2;
-		for (let s = 0; s <= 4; s++) {
-			const a = a1 + (a2 - a1) * (s / 4);
-			positions.push(Math.cos(a) * r, 0, Math.sin(a) * r);
-		}
-	}
-	const geo = new THREE.BufferGeometry();
-	geo.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
-	return new THREE.LineSegments(geo, lineMat(color, opacity));
-}
-function lineMat(color, opacity) {
-	return new THREE.LineBasicMaterial({
-		color,
-		opacity,
-		transparent: true
-	});
-}
-function pointMaterial(alpha, scale) {
-	return new THREE.ShaderMaterial({
-		vertexShader: `attribute float size; varying vec3 vColor; void main(){vColor=color;vec4 mvPos=modelViewMatrix*vec4(position,1.0);gl_PointSize=size*(${scale.toFixed(1)}/-mvPos.z);gl_Position=projectionMatrix*mvPos;}`,
-		fragmentShader: `varying vec3 vColor; void main(){float d=length(gl_PointCoord-.5)*2.;float a=(1.-smoothstep(0.,1.,d))*${alpha.toFixed(2)};gl_FragColor=vec4(vColor,a);}`,
-		transparent: true,
-		depthWrite: false,
-		blending: THREE.AdditiveBlending,
-		vertexColors: true
-	});
-}
-function colorValue(value) {
-	if (typeof value === "string" && value.startsWith("#")) return parseInt(value.slice(1), 16);
-	return G.aqua;
-}
-//#endregion
-//#region browser/app/AmbientLayer.svelte
-var root$9 = /* @__PURE__ */ from_html(`<div class="ambient-layer" aria-hidden="true"><canvas></canvas></div>`);
-function AmbientLayer($$anchor, $$props) {
-	push($$props, true);
-	let canvas;
-	let controller = null;
-	const options = /* @__PURE__ */ user_derived(() => ({
-		mode: $$props.ambient.mode,
-		...$$props.ambient.atlas ? { atlasStyle: $$props.ambient.atlas.style } : {}
-	}));
-	onMount(() => {
-		controller = mountRyeOsAmbientScene(canvas, $$props.scene, get(options));
-		return () => {
-			controller?.dispose();
-			controller = null;
-		};
-	});
-	user_effect(() => {
-		controller?.update($$props.scene, get(options));
-	});
-	var div = root$9();
-	bind_this(child(div), ($$value) => canvas = $$value, () => canvas);
-	reset(div);
-	template_effect(() => set_style(div, `--ambient-opacity:${$$props.ambient.opacity ?? 1}`));
-	append($$anchor, div);
-	pop();
-}
-//#endregion
 //#region browser/app/StatusBar.svelte
 var root$8 = /* @__PURE__ */ from_html(`<span> </span>`);
 var root_1$6 = /* @__PURE__ */ from_html(`<footer class="status-bar"><!> <span class="key-hint"> </span> <button class="ryeos-launcher svelte-19xwx1o" data-focus-key="shell:launch">RyeOS</button></footer>`);
@@ -10344,7 +8303,7 @@ var root_3$4 = /* @__PURE__ */ from_html(`<div><!> <button class="surface-close 
 var root_4$3 = /* @__PURE__ */ from_html(`<details class="surface-picker svelte-8hxs5n"><summary aria-label="Select an open Surface" class="svelte-8hxs5n"><!> <span> </span><span class="surface-chevron svelte-8hxs5n" aria-hidden="true">⌄</span></summary> <div class="surface-choices svelte-8hxs5n" role="group" aria-label="Open Surfaces"></div></details>`);
 var root_5$2 = /* @__PURE__ */ from_html(`<span> </span>`);
 var root_6$2 = /* @__PURE__ */ from_html(`<button class="system-navigation" aria-controls="ryeos-navigation">Views</button>`);
-var root_7$2 = /* @__PURE__ */ from_html(`<header class="system-bar svelte-8hxs5n"><div class="system-context svelte-8hxs5n" role="group" aria-label="Surface context" tabindex="-1"><!></div> <div class="system-state"><span> </span> <span class="transport"> </span> <!></div></header>`);
+var root_7$1 = /* @__PURE__ */ from_html(`<header class="system-bar svelte-8hxs5n"><div class="system-context svelte-8hxs5n" role="group" aria-label="Surface context" tabindex="-1"><!></div> <div class="system-state"><span> </span> <span class="transport"> </span> <!></div></header>`);
 function SystemBar($$anchor, $$props) {
 	push($$props, true);
 	const dispatch = dispatchUi();
@@ -10393,7 +8352,7 @@ function SystemBar($$anchor, $$props) {
 		const picker = event.currentTarget.closest("details");
 		if (picker?.open) dismissSurfacePicker(picker);
 	}
-	var header = root_7$2();
+	var header = root_7$1();
 	var div = child(header);
 	var node = child(div);
 	var consequent_2 = ($$anchor) => {
@@ -10704,44 +8663,35 @@ function ViewSetStrip($$anchor, $$props) {
 delegate(["keydown", "click"]);
 //#endregion
 //#region browser/components/ViewSupplement.svelte
-var root$5 = /* @__PURE__ */ from_html(`<section class="view-supplement-scene" aria-label="View topology"><!></section>`);
-var root_1$3 = /* @__PURE__ */ from_html(`<header> </header>`);
-var root_2$2 = /* @__PURE__ */ from_html(`<div><span> </span><code> </code></div>`);
-var root_3$2 = /* @__PURE__ */ from_html(`<section class="view-supplement-excerpt"><!> <div class="view-supplement-code"></div></section>`);
-var root_4$1 = /* @__PURE__ */ from_html(`<strong> </strong>`);
-var root_5$1 = /* @__PURE__ */ from_html(`<div><span> </span><small> </small></div>`);
-var root_6$1 = /* @__PURE__ */ from_html(`<footer class="view-supplement-footer"><!> <!></footer>`);
-var root_7$1 = /* @__PURE__ */ from_html(`<!> <!>`, 1);
+var root$5 = /* @__PURE__ */ from_html(`<header> </header>`);
+var root_1$3 = /* @__PURE__ */ from_html(`<div><span> </span><code> </code></div>`);
+var root_2$2 = /* @__PURE__ */ from_html(`<section class="view-supplement-excerpt"><!> <div class="view-supplement-code"></div></section>`);
+var root_3$2 = /* @__PURE__ */ from_html(`<strong> </strong>`);
+var root_4$1 = /* @__PURE__ */ from_html(`<div><span> </span><small> </small></div>`);
+var root_5$1 = /* @__PURE__ */ from_html(`<footer class="view-supplement-footer"><!> <!></footer>`);
+var root_6$1 = /* @__PURE__ */ from_html(`<!> <!>`, 1);
 function ViewSupplement($$anchor, $$props) {
 	push($$props, true);
 	var fragment = comment();
 	var node = first_child(fragment);
-	var consequent = ($$anchor) => {
-		var section = root$5();
-		SceneView(child(section), { get scene() {
-			return $$props.model.scene;
-		} });
-		reset(section);
-		append($$anchor, section);
-	};
-	var consequent_5 = ($$anchor) => {
-		var fragment_1 = root_7$1();
-		var node_2 = first_child(fragment_1);
-		var consequent_2 = ($$anchor) => {
-			var section_1 = root_3$2();
-			var node_3 = child(section_1);
-			var consequent_1 = ($$anchor) => {
-				var header = root_1$3();
+	var consequent_4 = ($$anchor) => {
+		var fragment_1 = root_6$1();
+		var node_1 = first_child(fragment_1);
+		var consequent_1 = ($$anchor) => {
+			var section = root_2$2();
+			var node_2 = child(section);
+			var consequent = ($$anchor) => {
+				var header = root$5();
 				var text = only_child(header, true);
 				template_effect(() => set_text(text, $$props.model.excerpt_title));
 				append($$anchor, header);
 			};
-			if_block(node_3, ($$render) => {
-				if ($$props.model.excerpt_title) $$render(consequent_1);
+			if_block(node_2, ($$render) => {
+				if ($$props.model.excerpt_title) $$render(consequent);
 			});
-			var div = sibling(node_3, 2);
+			var div = sibling(node_2, 2);
 			each(div, 21, () => $$props.model.excerpt, index, ($$anchor, row) => {
-				var div_1 = root_2$2();
+				var div_1 = root_1$3();
 				var span = child(div_1);
 				var text_1 = only_child(span, true);
 				var text_2 = only_child(sibling(span), true);
@@ -10754,28 +8704,28 @@ function ViewSupplement($$anchor, $$props) {
 				append($$anchor, div_1);
 			});
 			reset(div);
-			reset(section_1);
-			template_effect(() => set_attribute(section_1, "aria-label", $$props.model.excerpt_title || "Excerpt"));
-			append($$anchor, section_1);
+			reset(section);
+			template_effect(() => set_attribute(section, "aria-label", $$props.model.excerpt_title || "Excerpt"));
+			append($$anchor, section);
 		};
-		if_block(node_2, ($$render) => {
-			if ($$props.model.excerpt.length) $$render(consequent_2);
+		if_block(node_1, ($$render) => {
+			if ($$props.model.excerpt.length) $$render(consequent_1);
 		});
-		var node_4 = sibling(node_2, 2);
-		var consequent_4 = ($$anchor) => {
-			var footer = root_6$1();
-			var node_5 = child(footer);
-			var consequent_3 = ($$anchor) => {
-				var strong = root_4$1();
+		var node_3 = sibling(node_1, 2);
+		var consequent_3 = ($$anchor) => {
+			var footer = root_5$1();
+			var node_4 = child(footer);
+			var consequent_2 = ($$anchor) => {
+				var strong = root_3$2();
 				var text_3 = only_child(strong, true);
 				template_effect(() => set_text(text_3, $$props.model.footer));
 				append($$anchor, strong);
 			};
-			if_block(node_5, ($$render) => {
-				if ($$props.model.footer) $$render(consequent_3);
+			if_block(node_4, ($$render) => {
+				if ($$props.model.footer) $$render(consequent_2);
 			});
-			each(sibling(node_5, 2), 17, () => $$props.model.footer_rows, index, ($$anchor, row) => {
-				var div_2 = root_5$1();
+			each(sibling(node_4, 2), 17, () => $$props.model.footer_rows, index, ($$anchor, row) => {
+				var div_2 = root_4$1();
 				var span_1 = child(div_2);
 				var text_4 = only_child(span_1, true);
 				var text_5 = only_child(sibling(span_1), true);
@@ -10790,14 +8740,13 @@ function ViewSupplement($$anchor, $$props) {
 			reset(footer);
 			append($$anchor, footer);
 		};
-		if_block(node_4, ($$render) => {
-			if ($$props.model.footer || $$props.model.footer_rows.length) $$render(consequent_4);
+		if_block(node_3, ($$render) => {
+			if ($$props.model.footer || $$props.model.footer_rows.length) $$render(consequent_3);
 		});
 		append($$anchor, fragment_1);
 	};
 	if_block(node, ($$render) => {
-		if ($$props.phase === "content" && $$props.model.scene) $$render(consequent);
-		else if ($$props.phase === "footer") $$render(consequent_5, 1);
+		if ($$props.phase === "footer") $$render(consequent_4);
 	});
 	append($$anchor, fragment);
 	pop();
@@ -11398,48 +9347,42 @@ function ViewSet($$anchor, $$props) {
 				}
 			});
 		};
-		var consequent_3 = ($$anchor) => {
-			SceneView($$anchor, { get scene() {
-				return $$props.backdrop;
-			} });
-		};
 		var alternate = ($$anchor) => {
 			append($$anchor, root$1());
 		};
 		if_block(node_5, ($$render) => {
 			if ($$props.model?.root) $$render(consequent_2);
-			else if ($$props.backdrop) $$render(consequent_3, 1);
 			else $$render(alternate, -1);
 		});
 		append($$anchor, fragment_4);
 	});
 	reset(section);
 	var node_6 = sibling(section, 2);
-	var consequent_4 = ($$anchor) => {
-		var fragment_7 = comment();
-		key(first_child(fragment_7), () => $$props.docks.right.instance_key, ($$anchor) => {
+	var consequent_3 = ($$anchor) => {
+		var fragment_6 = comment();
+		key(first_child(fragment_6), () => $$props.docks.right.instance_key, ($$anchor) => {
 			DockSlot($$anchor, { get model() {
 				return $$props.docks.right;
 			} });
 		});
-		append($$anchor, fragment_7);
+		append($$anchor, fragment_6);
 	};
 	if_block(node_6, ($$render) => {
-		if (!get(maximized) && $$props.docks.right) $$render(consequent_4);
+		if (!get(maximized) && $$props.docks.right) $$render(consequent_3);
 	});
 	reset(div);
 	var node_8 = sibling(div, 2);
-	var consequent_5 = ($$anchor) => {
-		var fragment_9 = comment();
-		key(first_child(fragment_9), () => $$props.docks.bottom.instance_key, ($$anchor) => {
+	var consequent_4 = ($$anchor) => {
+		var fragment_8 = comment();
+		key(first_child(fragment_8), () => $$props.docks.bottom.instance_key, ($$anchor) => {
 			DockSlot($$anchor, { get model() {
 				return $$props.docks.bottom;
 			} });
 		});
-		append($$anchor, fragment_9);
+		append($$anchor, fragment_8);
 	};
 	if_block(node_8, ($$render) => {
-		if (!get(maximized) && $$props.docks.bottom) $$render(consequent_5);
+		if (!get(maximized) && $$props.docks.bottom) $$render(consequent_4);
 	});
 	reset(main);
 	template_effect(() => classes = set_class(main, 1, "view-set", null, classes, {
@@ -11451,7 +9394,7 @@ function ViewSet($$anchor, $$props) {
 }
 //#endregion
 //#region browser/app/RyeOs.svelte
-var root = /* @__PURE__ */ from_html(`<div><!> <!> <!> <div><!> <!></div> <!> <!> <!></div>`);
+var root = /* @__PURE__ */ from_html(`<div><!> <!> <div><!> <!></div> <!> <!> <!></div>`);
 function RyeOs($$anchor, $$props) {
 	push($$props, true);
 	let replacement = /* @__PURE__ */ state(null);
@@ -11486,23 +9429,9 @@ function RyeOs($$anchor, $$props) {
 	let classes;
 	set_style(div, "", {}, { "--system-height": "24px" });
 	var node = child(div);
-	var consequent = ($$anchor) => {
-		AmbientLayer($$anchor, {
-			get ambient() {
-				return get(envelope).view_model.session.ambient;
-			},
-			get scene() {
-				return get(envelope).scene_model;
-			}
-		});
-	};
-	if_block(node, ($$render) => {
-		if (get(envelope).view_model.session.ambient.show_background) $$render(consequent);
-	});
-	var node_1 = sibling(node, 2);
 	{
 		let $0 = /* @__PURE__ */ user_derived(() => get(envelope).view_model.navigation.items.length > 0);
-		SystemBar(node_1, {
+		SystemBar(node, {
 			get chrome() {
 				return get(envelope).view_model.chrome;
 			},
@@ -11521,14 +9450,14 @@ function RyeOs($$anchor, $$props) {
 			onToggleNavigation: toggleNavigation
 		});
 	}
-	var node_2 = sibling(node_1, 2);
-	ViewSetStrip(node_2, { get model() {
+	var node_1 = sibling(node, 2);
+	ViewSetStrip(node_1, { get model() {
 		return get(envelope).view_model.presentation.chrome.top_bar;
 	} });
-	var div_1 = sibling(node_2, 2);
+	var div_1 = sibling(node_1, 2);
 	let classes_1;
-	var node_3 = child(div_1);
-	var consequent_1 = ($$anchor) => {
+	var node_2 = child(div_1);
+	var consequent = ($$anchor) => {
 		Navigation($$anchor, {
 			get model() {
 				return get(envelope).view_model.navigation;
@@ -11539,30 +9468,27 @@ function RyeOs($$anchor, $$props) {
 			onClose: closeNavigation
 		});
 	};
-	if_block(node_3, ($$render) => {
-		if (get(envelope).view_model.navigation.items.length > 0) $$render(consequent_1);
+	if_block(node_2, ($$render) => {
+		if (get(envelope).view_model.navigation.items.length > 0) $$render(consequent);
 	});
-	ViewSet(sibling(node_3, 2), {
+	ViewSet(sibling(node_2, 2), {
 		get model() {
 			return get(envelope).view_model.view_set;
 		},
 		get docks() {
 			return get(envelope).view_model.docks;
-		},
-		get backdrop() {
-			return get(envelope).view_model.backdrop;
 		}
 	});
 	reset(div_1);
-	var node_5 = sibling(div_1, 2);
-	StatusBar(node_5, { get model() {
+	var node_4 = sibling(div_1, 2);
+	StatusBar(node_4, { get model() {
 		return get(envelope).view_model.presentation.chrome.status_bar;
 	} });
-	var node_6 = sibling(node_5, 2);
-	Notices(node_6, { get notices() {
+	var node_5 = sibling(node_4, 2);
+	Notices(node_5, { get notices() {
 		return get(envelope).view_model.notices;
 	} });
-	each(sibling(node_6, 2), 17, () => get(envelope).view_model.dialogs, (dialog) => dialog.instance_key, ($$anchor, dialog) => {
+	each(sibling(node_5, 2), 17, () => get(envelope).view_model.dialogs, (dialog) => dialog.instance_key, ($$anchor, dialog) => {
 		DialogLayer($$anchor, { get model() {
 			return get(dialog);
 		} });
@@ -13527,6 +11453,73 @@ function awaitBootRecovery(root, runtime, failure, signal, options = {}) {
 		if (signal?.aborted) abort();
 	});
 }
+//#endregion
+//#region \0vite/preload-helper.js
+var scriptRel = "modulepreload";
+var assetsURL = function(dep) {
+	return "/ui/assets/" + dep;
+};
+var seen = {};
+var __vitePreload = function preload(baseModule, deps, importerUrl) {
+	let promise = Promise.resolve();
+	if (deps && deps.length > 0) {
+		const links = document.getElementsByTagName("link");
+		const cspNonceMeta = document.querySelector("meta[property=csp-nonce]");
+		const cspNonce = cspNonceMeta?.nonce || cspNonceMeta?.getAttribute("nonce");
+		function allSettled(promises) {
+			return Promise.all(promises.map((p) => Promise.resolve(p).then((value) => ({
+				status: "fulfilled",
+				value
+			}), (reason) => ({
+				status: "rejected",
+				reason
+			}))));
+		}
+		function importMetaResolve(specifier) {
+			if (import.meta.resolve) return import.meta.resolve(specifier);
+			return new URL(
+				specifier,
+				/** #__KEEP__ */
+				import.meta.url
+			).href;
+		}
+		promise = allSettled(deps.map((dep) => {
+			dep = assetsURL(dep, importerUrl);
+			dep = importMetaResolve(dep);
+			if (dep in seen) return;
+			seen[dep] = true;
+			const isCss = dep.endsWith(".css");
+			for (let i = links.length - 1; i >= 0; i--) {
+				const link = links[i];
+				if (link.href === dep && (!isCss || link.rel === "stylesheet")) return;
+			}
+			const link = document.createElement("link");
+			link.rel = isCss ? "stylesheet" : scriptRel;
+			if (!isCss) link.as = "script";
+			link.crossOrigin = "";
+			link.href = dep;
+			if (cspNonce) link.setAttribute("nonce", cspNonce);
+			document.head.appendChild(link);
+			if (isCss) return new Promise((res, rej) => {
+				link.addEventListener("load", res);
+				link.addEventListener("error", () => rej(/* @__PURE__ */ new Error(`Unable to preload CSS for ${dep}`)));
+			});
+		}).filter((p) => p !== void 0));
+	}
+	function handlePreloadError(err) {
+		const e = new Event("vite:preloadError", { cancelable: true });
+		e.payload = err;
+		window.dispatchEvent(e);
+		if (!e.defaultPrevented) throw err;
+	}
+	return promise.then((res) => {
+		for (const item of res || []) {
+			if (item.status !== "rejected") continue;
+			handlePreloadError(item.reason);
+		}
+		return baseModule().catch(handlePreloadError);
+	});
+};
 //#endregion
 //#region browser/runtime/wasm-api.ts
 async function loadWasm() {

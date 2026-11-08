@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-19T22:29:40Z:60d0f2957c65b8b2f7cfbb82876493a0caa14b9c512c95f932517cf4c5225529:fZuwlqy6iOKwlMpuF/qc4w15kFXoHnmLuxRb8oGQv+SDh/3NTh2LWSzs9ZhkZ643yElMhSX347wKrH5deTYDBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-08T06:41:16Z:503d84a901528b0ffcf204d31670db52b534fe86b5b2880dc5c52fded5ee1e0b:NA4lkKUk/P33HmyeCztesucEEUPlEwxFqMOrmgnW/wiyw/wo66R+VKnYWBdCCvX/4yoIbQ3WgwbQ1mvsXGbQCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-base
 title: Home
 version: "1.0.0"
@@ -24,9 +24,3 @@ tiles: []
 
 style:
   border: thin
-
-backdrop: view:ryeos/backdrop/prism-shards
-
-ambient:
-  show_background: true
-  opacity: 0.35

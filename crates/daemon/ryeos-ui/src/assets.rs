@@ -185,12 +185,6 @@ mod tests {
         assert!(!ryeos_ui.bytes.is_empty());
         assert!(ryeos_ui.content_type.contains("javascript"));
 
-        let three = provider
-            .get("ui/assets/ryeos_three.js")
-            .expect("ryeos_three.js must be embedded");
-        assert!(!three.bytes.is_empty());
-        assert!(three.content_type.contains("javascript"));
-
         let wasm = provider
             .get("ui/assets/ryeos_web_bg.wasm")
             .expect("ryeos_web_bg.wasm must be embedded");
