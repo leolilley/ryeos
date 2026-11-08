@@ -1349,12 +1349,11 @@ fn is_already_validly_signed_operator(
         return false;
     };
 
-    let signed_body = lillux::signature::content_to_sign(body, envelope.after_shebang);
     lillux::signature::is_valid_signature_for(
         &header.content_hash,
         &header.signature_b64,
         &header.signer_fingerprint,
-        signed_body,
+        body,
         verifying_key,
         fingerprint,
     )

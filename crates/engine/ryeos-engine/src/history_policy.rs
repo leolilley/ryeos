@@ -305,24 +305,16 @@ pub fn resolve_launch_policy_from_resolution(
         });
     }
     // Resolution strips only the signature line before exposing raw_content,
-    // so a format signed after its shebang keeps the shebang in raw_content
-    // while the signature covers the body below it. A signed item is bound
-    // by hashing the part of raw_content its format signs; an unsigned item
-    // has no signature line, so its whole source is the bound content.
-    let (expected_verified_digest, actual_verified_digest) =
-        match verified_item.resolved.signature_header.as_ref() {
-            Some(header) => (
-                header.content_hash.clone(),
-                lillux::signature::content_hash(lillux::signature::content_to_sign(
-                    &resolution.root.raw_content,
-                    verified_item.resolved.source_format.signature.after_shebang,
-                )),
-            ),
-            None => (
-                verified_item.resolved.content_hash.clone(),
-                resolution.root.raw_content_digest.clone(),
-            ),
-        };
+    // and a signature covers every byte of its file except that line, shebang
+    // included. raw_content's digest therefore equals the signed hash for a
+    // signed item, and the whole source hash for an unsigned one.
+    let expected_verified_digest = verified_item
+        .resolved
+        .signature_header
+        .as_ref()
+        .map(|header| header.content_hash.as_str())
+        .unwrap_or(verified_item.resolved.content_hash.as_str());
+    let actual_verified_digest = resolution.root.raw_content_digest.as_str();
     if actual_verified_digest != expected_verified_digest {
         return Err(EngineError::InvalidMetadata {
             canonical_ref: canonical_item_ref.clone(),
@@ -1040,10 +1032,10 @@ mod tests {
         }
     }
 
-    /// A `.py` item signed after its shebang: the signature covers the body
-    /// below the shebang, while the bytes the runtime parses keep the
-    /// shebang. The adapter must compare the signed body, not the whole file.
-    fn shebang_item(signed_body: &str) -> VerifiedItem {
+    /// A `.py` item whose signature line sits below its shebang. The
+    /// signature covers the whole file except that line, so the signed hash
+    /// is the digest of the raw content the runtime parses, shebang included.
+    fn shebang_item(signed_content: &str) -> VerifiedItem {
         let mut item = verified_item(TrustClass::Trusted);
         item.resolved.source_format.extension = ".py".to_string();
         item.resolved.source_format.signature.after_shebang = true;
@@ -1051,50 +1043,48 @@ mod tests {
             .signature_header
             .as_mut()
             .unwrap()
-            .content_hash = lillux::signature::content_hash(signed_body);
+            .content_hash = lillux::signature::content_hash(signed_content);
         item
     }
 
-    #[test]
-    fn resolution_adapter_accepts_a_signed_body_behind_a_shebang() {
-        let body = "print('hello')\n";
-        let item = shebang_item(body);
-        let resolution = shebang_resolution(&item, format!("#!/usr/bin/env python3\n{body}"));
-        let result = resolve_launch_policy_from_resolution(
-            &item,
-            &resolution,
+    const SIGNED_SHEBANG_SOURCE: &str = "#!/usr/bin/env python3\nprint('hello')\n";
+
+    fn adapter_error(item: &VerifiedItem, raw_content: &str) -> Option<String> {
+        resolve_launch_policy_from_resolution(
+            item,
+            &shebang_resolution(item, raw_content.to_string()),
             &KindRegistry::empty(),
             &ResolvedNodeThreadHistoryPolicy::test_policy(),
-        );
-        if let Err(error) = result {
+        )
+        .err()
+        .map(|error| error.to_string())
+    }
+
+    #[test]
+    fn resolution_adapter_accepts_a_signed_file_with_a_shebang() {
+        let item = shebang_item(SIGNED_SHEBANG_SOURCE);
+        if let Some(error) = adapter_error(&item, SIGNED_SHEBANG_SOURCE) {
             assert!(
-                !error
-                    .to_string()
-                    .contains("content changed after verification"),
-                "signed body behind a shebang was treated as changed: {error}"
+                !error.contains("content changed after verification"),
+                "a signed file with a shebang was treated as changed: {error}"
             );
         }
     }
 
     #[test]
-    fn resolution_adapter_rejects_a_changed_body_behind_a_shebang() {
-        let item = shebang_item("print('hello')\n");
-        let resolution = shebang_resolution(
-            &item,
-            "#!/usr/bin/env python3\nprint('tampered')\n".to_string(),
-        );
-        let error = resolve_launch_policy_from_resolution(
-            &item,
-            &resolution,
-            &KindRegistry::empty(),
-            &ResolvedNodeThreadHistoryPolicy::test_policy(),
-        )
-        .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("content changed after verification")
-        );
+    fn resolution_adapter_rejects_a_changed_body_below_a_shebang() {
+        let item = shebang_item(SIGNED_SHEBANG_SOURCE);
+        let error = adapter_error(&item, "#!/usr/bin/env python3\nprint('tampered')\n")
+            .expect("a changed body must be refused");
+        assert!(error.contains("content changed after verification"));
+    }
+
+    #[test]
+    fn resolution_adapter_rejects_a_changed_shebang() {
+        let item = shebang_item(SIGNED_SHEBANG_SOURCE);
+        let error = adapter_error(&item, "#!/bin/sh\nprint('hello')\n")
+            .expect("a changed shebang must be refused");
+        assert!(error.contains("content changed after verification"));
     }
 
     #[test]

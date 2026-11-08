@@ -1842,7 +1842,10 @@ pem = "ed25519:{key_b64}"
         let envelope = shebang_envelope();
 
         let hash = content_hash_after_signature(&content, &envelope).unwrap();
-        assert_eq!(hash, sha256_hex(body.as_bytes()));
+        assert_eq!(
+            hash,
+            sha256_hex(format!("#!/usr/bin/env python3\n{body}").as_bytes())
+        );
     }
 
     #[test]

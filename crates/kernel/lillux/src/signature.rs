@@ -55,9 +55,16 @@ pub fn sign_content_at_with_options(
     signed_at: &str,
     after_shebang: bool,
 ) -> String {
-    let (shebang, signed_body) = split_shebang_body(body, after_shebang);
+    let (shebang, rest) = split_shebang_body(body, after_shebang);
     let newline = preferred_newline(body);
-    let hash = content_hash(signed_body);
+    // The signature covers every byte of the file except its own line, so a
+    // shebang is signed like the rest of the body; `after_shebang` decides
+    // only where the signature line sits.
+    let signed_content = match shebang {
+        Some(shebang) => format!("{shebang}{newline}{rest}"),
+        None => rest.to_owned(),
+    };
+    let hash = content_hash(&signed_content);
     let signature: ed25519_dalek::Signature = signing_key.sign(hash.as_bytes());
     let sig_b64 = base64::engine::general_purpose::STANDARD.encode(signature.to_bytes());
     let fp = compute_fingerprint(&signing_key.verifying_key());
@@ -68,8 +75,8 @@ pub fn sign_content_at_with_options(
     };
 
     match shebang {
-        Some(shebang) => format!("{shebang}{newline}{sig_line}{newline}{signed_body}"),
-        None => format!("{sig_line}{newline}{signed_body}"),
+        Some(shebang) => format!("{shebang}{newline}{sig_line}{newline}{rest}"),
+        None => format!("{sig_line}{newline}{rest}"),
     }
 }
 
@@ -216,10 +223,6 @@ pub fn sign_content_with_options(
         &crate::time::iso8601_now(),
         after_shebang,
     )
-}
-
-pub fn content_to_sign(body: &str, after_shebang: bool) -> &str {
-    split_shebang_body(body, after_shebang).1
 }
 
 fn split_shebang_body(body: &str, after_shebang: bool) -> (Option<&str>, &str) {
@@ -500,8 +503,12 @@ pub fn content_hash_after_signature(
 
     for idx in candidates {
         if is_signature_line(lines[idx], prefix, suffix) {
+            let mut line_start = 0;
             let mut offset = 0;
-            for line in lines.iter().take(idx + 1) {
+            for (position, line) in lines.iter().take(idx + 1).enumerate() {
+                if position == idx {
+                    line_start = offset;
+                }
                 offset += line.len();
                 let pos = offset;
                 if pos < content.len() {
@@ -516,8 +523,12 @@ pub fn content_hash_after_signature(
                     }
                 }
             }
-            let after = &content[offset..];
-            return Some(crate::cas::sha256_hex(after.as_bytes()));
+            // Signed content is the whole file without its signature line:
+            // a shebang above the line is covered like the body below it.
+            let mut signed = Vec::with_capacity(content.len() - (offset - line_start));
+            signed.extend_from_slice(&content.as_bytes()[..line_start]);
+            signed.extend_from_slice(&content.as_bytes()[offset..]);
+            return Some(crate::cas::sha256_hex(&signed));
         }
     }
 
@@ -643,9 +654,24 @@ mod tests {
         assert_eq!(lines.next().unwrap(), "# ryeos-tool:");
 
         let header = parse_signature_line(sig_line, "#", None).unwrap();
+        assert_eq!(header.content_hash, content_hash(body));
         assert_eq!(
-            header.content_hash,
-            content_hash("# ryeos-tool:\n#   category: example\n")
+            content_hash_after_signature(&signed, "#", None, true).unwrap(),
+            content_hash(body)
+        );
+    }
+
+    #[test]
+    fn a_shebang_edited_after_signing_changes_the_signed_hash() {
+        let sk = SigningKey::from_bytes(&[42u8; 32]);
+        let body = "#!/usr/bin/env python3\nprint('hello')\n";
+        let signed =
+            sign_content_at_with_options(body, &sk, "#", None, "2026-01-01T00:00:00Z", true);
+        let header = parse_signature_line(signed.lines().nth(1).unwrap(), "#", None).unwrap();
+        let edited = signed.replacen("#!/usr/bin/env python3", "#!/bin/sh", 1);
+        assert_ne!(
+            content_hash_after_signature(&edited, "#", None, true).unwrap(),
+            header.content_hash
         );
     }
 
@@ -786,6 +812,7 @@ mod tests {
     fn content_hash_after_signature_with_shebang() {
         let sk = SigningKey::from_bytes(&[42u8; 32]);
         let body = "actual content\n";
+        let shebang = "#!/usr/bin/env python3\n";
         let sig_line = {
             let hash = content_hash(body);
             let sig: ed25519_dalek::Signature = sk.sign(hash.as_bytes());
@@ -793,9 +820,9 @@ mod tests {
             let fp = compute_fingerprint(&sk.verifying_key());
             format!("# ryeos:signed:2026-04-10T00:00:00Z:{hash}:{sig_b64}:{fp}")
         };
-        let content = format!("#!/usr/bin/env python3\n{sig_line}\n{body}");
+        let content = format!("{shebang}{sig_line}\n{body}");
         let hash = content_hash_after_signature(&content, "#", None, true).unwrap();
-        assert_eq!(hash, content_hash(body));
+        assert_eq!(hash, content_hash(&format!("{shebang}{body}")));
     }
 
     #[test]
