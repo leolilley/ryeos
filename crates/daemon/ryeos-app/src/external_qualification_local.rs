@@ -734,6 +734,24 @@ pub fn ensure_qualification_worker_terminal(
     Ok(())
 }
 
+/// Fail promptly when the Q Worker is no longer the attached, live process:
+/// its settled row means the process ended (or was retired) and no pending
+/// command can complete. The reason carries the supervisor's bounded exit
+/// status and any bridge refusal note, never process output.
+pub fn ensure_qualification_worker_attached(state: &AppState, placement: &str) -> Result<()> {
+    let process = state
+        .state_store
+        .qualification_worker_process(placement)?
+        .context("Q local Worker has no retained process")?;
+    if process.phase == QualificationWorkerProcessPhase::Attached {
+        return Ok(());
+    }
+    match state.persistent_sessions.exclusive_exit_reason(placement) {
+        Some(reason) => bail!("qualification Worker exited before the command completed: {reason}"),
+        None => bail!("qualification Worker exited before the command completed"),
+    }
+}
+
 pub fn mark_qualification_local_cleanup_unproved(
     state: &AppState,
     placement: &str,
