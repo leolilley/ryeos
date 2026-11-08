@@ -6,9 +6,15 @@ mod app;
 mod render;
 mod render_text;
 mod terminal;
-mod transport;
 
 use std::io::{self, IsTerminal};
+use std::rc::Rc;
+
+use ryeos_client_base::ui::BrowserSession;
+use ryeos_client_runtime::platform::native::{MintRequest, NativePlatform};
+use ryeos_client_runtime::platform::{Auth, EstablishMode, Platform};
+use ryeos_client_runtime::runtime::StartMode;
+use ryeos_client_runtime::seat::RetainedClaim;
 
 /// Pre-launch messages go to stderr before the alternate screen opens, in the
 /// same plain line form as the CLI's non-terminal diagnostics.
@@ -168,48 +174,87 @@ fn main() {
             Some("use ryeos tui to select the authored terminal presentation"),
         )
     });
-    let runtime = tokio::runtime::Runtime::new().unwrap_or_else(|error| {
-        exit_with_error(format!("failed to create terminal runtime: {error}"), None)
-    });
-    runtime.block_on(async {
-        let client = transport::daemon::DaemonClient::try_connect()
-            .await
-            .unwrap_or_else(|error| {
-                exit_with_error(format!("daemon connection failed: {error}"),
-                    Some("check ryeos node status"),
-                )
-            });
-        let resume_id = match options {
-            LaunchOptions::Fresh { presentation, project } => {
-                let admitted = client.mint_ui_session(&presentation, project.as_deref()).await;
-                if let Err(error) = admitted {
-                    exit_with_error(format!("failed to initialize UI session: {error}"), None);
-                }
-                None
+    // One thread: the runtime's tasks are local (not `Send`) and share state
+    // with the loop that folds them.
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap_or_else(|error| {
+            exit_with_error(format!("failed to create terminal runtime: {error}"), None)
+        });
+    let local = tokio::task::LocalSet::new();
+    local.block_on(&runtime, async {
+        let mint = match &options {
+            LaunchOptions::Fresh {
+                presentation,
+                project,
+            } => Some(MintRequest {
+                config_ref: presentation.clone(),
+                project_path: project.clone(),
+            }),
+            LaunchOptions::Resume { .. } => None,
+        };
+        let platform = Rc::new(NativePlatform::connect(mint).await.unwrap_or_else(|error| {
+            exit_with_error(
+                format!("daemon connection failed: {error}"),
+                Some("check ryeos node status"),
+            )
+        }));
+        let (established, mode) = match options {
+            LaunchOptions::Fresh { .. } => {
+                let established = platform
+                    .auth()
+                    .establish(EstablishMode::Fresh)
+                    .await
+                    .unwrap_or_else(|error| {
+                        exit_with_error(format!("failed to initialize UI session: {error}"), None)
+                    });
+                (established, StartMode::Fresh)
             }
             LaunchOptions::Resume { presentation_id } => {
                 let credential = prompt_session_id().unwrap_or_else(|error| {
-                    exit_with_error(format!("cannot read private UI session credential: {error}"), None)
+                    exit_with_error(
+                        format!("cannot read private UI session credential: {error}"),
+                        None,
+                    )
                 });
-                client.adopt_ui_session(&credential).unwrap_or_else(|error| {
-                    exit_with_error(format!("invalid UI session credential: {error}"), None)
-                });
-                let session = client.current_ui_session().await.unwrap_or_else(|error| {
-                    exit_with_error(format!("UI session authentication failed: {error}"), None)
-                });
-                if session.session_id != credential {
-                    exit_with_error("authenticated UI session did not match the supplied credential", None);
-                }
-                if session.presentations.iter().filter(|membership| membership.presentation_id == presentation_id).count() != 1 {
-                    exit_with_error("authenticated UI session has no unique membership for that presentation ID", None);
-                }
-                Some(presentation_id)
+                let established = platform
+                    .auth()
+                    .establish(EstablishMode::Adopt(credential))
+                    .await
+                    .unwrap_or_else(|error| {
+                        exit_with_error(format!("UI session authentication failed: {error}"), None)
+                    });
+                (
+                    established,
+                    StartMode::Retained {
+                        presentation_id,
+                        claim: RetainedClaim::ResumeRelinquished,
+                    },
+                )
             }
         };
-        if let Err(error) = app::run(Vec::new(), client, resume_id).await {
-            exit_with_error(format!("terminal presentation failed: {error}"),
+        let session =
+            serde_json::from_value::<BrowserSession>(established.current).unwrap_or_else(|error| {
+                exit_with_error(format!("UI session record is unreadable: {error}"), None)
+            });
+        if let StartMode::Retained {
+            presentation_id, ..
+        } = &mode
+            && session
+                .presentations
+                .iter()
+                .filter(|membership| membership.presentation_id == *presentation_id)
+                .count()
+                != 1
+        {
+            exit_with_error(
+                "authenticated UI session has no unique membership for that presentation ID",
                 None,
             );
+        }
+        if let Err(error) = app::run(Vec::new(), platform, session, mode).await {
+            exit_with_error(format!("terminal presentation failed: {error}"), None);
         }
     });
 }

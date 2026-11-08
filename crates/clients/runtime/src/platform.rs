@@ -19,6 +19,9 @@ use std::time::Duration;
 
 use crate::error::RuntimeError;
 
+#[cfg(not(target_arch = "wasm32"))]
+pub mod native;
+
 /// The host: one value bundling every seam.
 pub trait Platform {
     type Clock: Clock;
