@@ -286,9 +286,15 @@ async fn a_node_refuses_to_start_on_an_admission_its_kinds_do_not_allow() {
             "schema: 1\nadmit:\n  service:\n    - untrusted_project\n",
         )
     };
+    let error = match DaemonHarness::start_fast_with(plant, |_| {}).await {
+        Ok(_) => {
+            panic!("services admit no operator widening, so the daemon must refuse this policy")
+        }
+        Err(error) => format!("{error:#}"),
+    };
     assert!(
-        DaemonHarness::start_fast_with(plant, |_| {}).await.is_err(),
-        "services admit no operator widening, so the daemon must refuse this policy"
+        error.contains("launch_trust"),
+        "the daemon must refuse for the launch_trust policy, not another reason: {error}"
     );
 }
 
