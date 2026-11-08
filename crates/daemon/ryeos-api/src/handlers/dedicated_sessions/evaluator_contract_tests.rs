@@ -269,6 +269,7 @@ config_schema: {type: object, properties: {}, additionalProperties: false}
                     subject_resolution_authority: &context.subject_resolution_authority,
                     resolution_cache: None,
                     ref_binding_resolution_timings: None,
+                    node_policy: None,
                 },
             )?;
             let artifact = AdmittedLaunchArtifactIdentity::ManagedRuntime {

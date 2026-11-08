@@ -501,6 +501,12 @@ pub struct PrepareRuntimeLaunchRequest<'a> {
     pub resolution_cache: Option<PreparedResolutionCacheContext<'a>>,
     pub ref_binding_resolution_timings:
         Option<&'a ryeos_app::launch_stage_timings::LaunchStageTimings>,
+    /// Current node policy, whose launch_trust section widens the runtime's
+    /// primary trust list within what the primary's kind lets an operator
+    /// admit. Diagnostics without a node pass `None` and judge against the
+    /// runtime's own list.
+    pub node_policy:
+        Option<&'a std::sync::Arc<ryeos_node_runtime::node_policy::NodePolicySnapshot>>,
 }
 
 #[derive(Clone, Copy)]
@@ -588,6 +594,7 @@ struct OwnedPrepareRuntimeLaunchRequest {
     subject_resolution_authority: ryeos_engine::contracts::SubjectResolutionAuthority,
     resolution_cache: Option<OwnedPreparedResolutionCacheContext>,
     ref_binding_resolution_timings: Option<ryeos_app::launch_stage_timings::LaunchStageTimings>,
+    node_policy: Option<std::sync::Arc<ryeos_node_runtime::node_policy::NodePolicySnapshot>>,
 }
 
 impl OwnedPrepareRuntimeLaunchRequest {
@@ -612,6 +619,7 @@ impl OwnedPrepareRuntimeLaunchRequest {
                 }
             }),
             ref_binding_resolution_timings: request.ref_binding_resolution_timings.cloned(),
+            node_policy: request.node_policy.cloned(),
         }
     }
 
@@ -638,6 +646,7 @@ impl OwnedPrepareRuntimeLaunchRequest {
             subject_resolution_authority: &self.subject_resolution_authority,
             resolution_cache: cache_context,
             ref_binding_resolution_timings: self.ref_binding_resolution_timings.as_ref(),
+            node_policy: self.node_policy.as_ref(),
         })
     }
 }
@@ -1478,6 +1487,28 @@ fn prepare_runtime_launch_inputs(
         )
     })?;
     let contract = &request.runtime.yaml.launch_contract;
+    let primary_allowed_trust = match request.node_policy {
+        Some(node_policy) => {
+            let primary_kind = ryeos_engine::canonical_ref::CanonicalRef::parse(
+                &request.primary.root.resolved_ref,
+            )
+            .map_err(|error| {
+                DispatchError::InvalidRef(
+                    request.primary.root.resolved_ref.clone(),
+                    error.to_string(),
+                )
+            })?
+            .kind;
+            super::launch_trust_gate::effective_launch_trust(
+                &request.engine.kinds,
+                node_policy,
+                &primary_kind,
+                Some(&contract.primary_allowed_trust),
+            )?
+            .admitted
+        }
+        None => contract.primary_allowed_trust.clone(),
+    };
     validate_prepared_item(
         PreparedItemRole::Primary,
         &request.primary.root.resolved_ref,
@@ -1485,7 +1516,7 @@ fn prepare_runtime_launch_inputs(
         request.primary.effective_trust_class,
         &contract.primary_allowed_kinds,
         &contract.primary_allowed_spaces,
-        &contract.primary_allowed_trust,
+        &primary_allowed_trust,
     )?;
     let effective_ref_bindings = project_effective_ref_bindings(
         &contract.ref_bindings,

@@ -1331,6 +1331,7 @@ fn project_method_payload(
     ctx: &ExecutionContext,
     request: &DispatchRequest<'_>,
     admitted_root: Option<&ryeos_app::thread_lifecycle::RootExecutionAdmission>,
+    node_policy: &ryeos_node_runtime::node_policy::NodePolicySnapshot,
 ) -> Result<Value, DispatchError> {
     if ctx
         .plan_ctx
@@ -1395,7 +1396,9 @@ fn project_method_payload(
             };
 
             crate::execution::launch::enforce_effective_trust(
-                resolution_output.effective_trust_class,
+                &ctx.engine.kinds,
+                node_policy,
+                &resolution_output,
                 &canonical_ref.to_string(),
                 kind,
             )?;
@@ -1419,18 +1422,16 @@ fn project_method_payload(
                 )
             })?;
             // Corpus scope changes the projected payload, not the trust
-            // boundary: the invoked root remains executable authority and
-            // receives the same typed unsigned-policy rejection as every
-            // other subprocess launch.
-            if matches!(
-                root.trust_class,
-                ryeos_engine::contracts::TrustClass::Unsigned
-            ) {
-                return Err(crate::execution::launch::effective_trust_unsigned_error(
-                    &canonical_ref.to_string(),
-                    kind,
-                ));
-            }
+            // boundary: the invoked root remains executable authority and is
+            // judged by the same launch trust gate as every other launch.
+            crate::execution::launch_trust_gate::enforce_direct_root(
+                &ctx.engine.kinds,
+                node_policy,
+                &canonical_ref.to_string(),
+                kind,
+                root.resolved.source_space,
+                root.launch_trust_class(),
+            )?;
 
             let (items_by_ref, edges) = project_corpus(kind, request, ctx, admitted_root)?;
             serde_json::json!({ "items_by_ref": items_by_ref, "edges": edges })
@@ -2057,6 +2058,7 @@ pub(crate) async fn dispatch_method(
             ctx,
             request,
             Some(&root_admission),
+            &state.node_policy,
         )?;
         method_runtime_config_snapshot_off_thread(
             kind,
@@ -2085,7 +2087,9 @@ pub(crate) async fn dispatch_method(
     // boundary.
     match method_decl.scope {
         MethodScope::SingleRoot => crate::execution::launch::enforce_effective_trust(
-            root_admission.resolution_output().effective_trust_class,
+            &ctx.engine.kinds,
+            &state.node_policy,
+            root_admission.resolution_output(),
             &canonical_ref.to_string(),
             kind,
         )?,
@@ -2097,15 +2101,14 @@ pub(crate) async fn dispatch_method(
                         .to_string(),
                 )
             })?;
-            if matches!(
-                root.trust_class,
-                ryeos_engine::contracts::TrustClass::Unsigned
-            ) {
-                return Err(crate::execution::launch::effective_trust_unsigned_error(
-                    &canonical_ref.to_string(),
-                    kind,
-                ));
-            }
+            crate::execution::launch_trust_gate::enforce_direct_root(
+                &ctx.engine.kinds,
+                &state.node_policy,
+                &canonical_ref.to_string(),
+                kind,
+                root.resolved.source_space,
+                root.launch_trust_class(),
+            )?;
         }
     }
 
@@ -2384,6 +2387,7 @@ pub(crate) async fn dispatch_method(
             ctx,
             request,
             Some(&root_admission),
+            &state.node_policy,
         )?;
         root_admission
             .ensure_matches_subject(&ctx.engine, history_subject, thread_profile_str)
@@ -4773,6 +4777,7 @@ pub async fn prepare_admitted_launch_contract(
             trust_store: &request_snapshot.trust_store,
             principal: &ctx.plan_ctx.requested_by,
             subject_resolution_authority: &subject_authority,
+            node_policy: Some(&state.node_policy),
             resolution_cache: Some(
                 crate::execution::launch_preparation::PreparedResolutionCacheContext {
                     cache: &state.resolution_cache,
@@ -4975,6 +4980,7 @@ fn prepare_launch_contract_with_cache(
             subject_resolution_authority: &ctx.plan_ctx.subject_resolution_authority,
             resolution_cache,
             ref_binding_resolution_timings: None,
+            node_policy: None,
         },
     )
     .map(Some)

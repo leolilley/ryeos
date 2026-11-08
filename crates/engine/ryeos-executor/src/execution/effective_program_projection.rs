@@ -277,12 +277,13 @@ impl<'a> EffectiveProgramProjectionSession<'a> {
         let kind = resolved.kind.clone();
         let (resolution, _, _) = closure.into_parts();
 
-        super::launch::enforce_effective_trust(
+        // A projection launches nothing, so it refuses only unsigned work; the
+        // refusal stays the typed launch-policy error, never an internal one.
+        super::launch::refuse_unsigned_effective_trust(
             resolution.effective_trust_class,
             &canonical_ref.to_string(),
             &kind,
-        )
-        .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?;
+        )?;
         let execution = self
             .engine
             .kinds

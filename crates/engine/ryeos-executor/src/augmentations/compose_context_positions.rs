@@ -284,7 +284,7 @@ pub async fn run(
                         }
                         // A trust rejection is an authored authority failure, not
                         // a cache miss. It must remain fail-closed.
-                        enforce_current_trust(&per_root, target_kind)?;
+                        enforce_current_trust(engine, state, &per_root, target_kind)?;
                         apply_projection(
                             resolution,
                             output_derived,
@@ -360,7 +360,7 @@ pub async fn run(
                                 }
                                 continue 'authority;
                             }
-                            enforce_current_trust(&per_root, target_kind)?;
+                            enforce_current_trust(engine, state, &per_root, target_kind)?;
                             apply_projection(
                                 resolution,
                                 output_derived,
@@ -1447,11 +1447,13 @@ fn resolve_compose_authority(
         };
         let resolution_output = closure.output();
         crate::execution::launch::enforce_effective_trust(
-            resolution_output.effective_trust_class,
+            &engine.kinds,
+            &state.node_policy,
+            resolution_output,
             requested_ref,
             target_kind,
         )
-        .map_err(|error| LaunchAugmentationError::EffectiveTrustRejected(error.to_string()))?;
+        .map_err(|error| LaunchAugmentationError::EffectiveTrustRejected(Box::new(error)))?;
         per_root.insert((*requested_ref).to_string(), resolution_output.clone());
         referenced_closures.push((cache_key, closure));
     }
@@ -2095,16 +2097,20 @@ fn digest_json(value: &Value) -> Result<String, LaunchAugmentationError> {
 }
 
 fn enforce_current_trust(
+    engine: &ryeos_engine::engine::Engine,
+    state: &ryeos_app::state::AppState,
     per_root: &BTreeMap<String, ResolutionOutput>,
     target_kind: &str,
 ) -> Result<(), LaunchAugmentationError> {
     for (root_ref, output) in per_root {
         crate::execution::launch::enforce_effective_trust(
-            output.effective_trust_class,
+            &engine.kinds,
+            &state.node_policy,
+            output,
             root_ref,
             target_kind,
         )
-        .map_err(|error| LaunchAugmentationError::EffectiveTrustRejected(error.to_string()))?;
+        .map_err(|error| LaunchAugmentationError::EffectiveTrustRejected(Box::new(error)))?;
     }
     Ok(())
 }
