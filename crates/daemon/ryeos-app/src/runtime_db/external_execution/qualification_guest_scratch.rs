@@ -296,6 +296,75 @@ pub(super) fn require_created_for_allocation(
     Ok(())
 }
 
+/// Pure join of a frozen cleanup basis to the allocation it names. The basis
+/// pins identity (request digest, admitted capsule, bound occurrence, owner);
+/// the allocation must be settled now, in any settled phase. A settlement
+/// that only arrived after the basis was frozen is still the same allocation.
+/// An occurrence bound after an occurrence-less basis may have run a guest
+/// against this scratch, so it is accepted only as a Terminated allocation,
+/// whose termination and terminal evidence the caller then validates.
+fn require_settled_allocation_identity(
+    record: &QualificationGuestScratchRecord,
+    allocation_request_digest: &str,
+    occurrence_id: Option<&str>,
+    allocation: &ExternalAllocationRecord,
+) -> Result<()> {
+    let ExternalAllocationOwner::QualificationCandidate(owner) = &allocation.reservation.owner
+    else {
+        anyhow::bail!("Q scratch cleanup changed its allocation kind");
+    };
+    ensure!(
+        allocation.phase.is_settled()
+            && allocation.reservation.request_digest == allocation_request_digest
+            && allocation.reservation.admitted_capsule_hash
+                == record.coordinate.accepted_capsule_hash
+            && match (
+                occurrence_id,
+                allocation
+                    .occurrence
+                    .as_ref()
+                    .map(|item| item.occurrence_id.as_str()),
+            ) {
+                (Some(frozen), Some(current)) => frozen == current,
+                (None, None) => true,
+                (None, Some(_)) => allocation.phase == ExternalAllocationPhase::Terminated,
+                (Some(_), None) => false,
+            }
+            && owner.coordinate == record.coordinate
+            && owner.qualification_operation_id == record.qualification_operation_id
+            && owner.qualification_occurrence.occurrence_id == record.qualification_occurrence_id
+            && owner.operator_principal == record.owner_principal
+            && owner.program.digest()? == record.program_digest,
+        "Q scratch cleanup changed its exact settled allocation"
+    );
+    Ok(())
+}
+
+/// Freeze the allocation identity a cleanup intent will be proved against.
+/// An allocation the provider may still hold cannot be frozen: the cleanup is
+/// deferred and retried once the retained owner has settled it.
+fn freeze_cleanup_basis(
+    allocation: Option<&ExternalAllocationRecord>,
+) -> Result<QualificationGuestScratchCleanupBasis> {
+    if let Some(allocation) = allocation {
+        ensure!(
+            allocation.phase.is_settled(),
+            "Q scratch cleanup awaits settlement of its provider allocation"
+        );
+    }
+    Ok(match allocation {
+        None => QualificationGuestScratchCleanupBasis::NoAllocation,
+        Some(allocation) => QualificationGuestScratchCleanupBasis::SettledAllocation {
+            allocation_request_digest: allocation.reservation.request_digest.clone(),
+            settled_phase: allocation.phase,
+            occurrence_id: allocation
+                .occurrence
+                .as_ref()
+                .map(|item| item.occurrence_id.clone()),
+        },
+    })
+}
+
 fn require_cleanup_basis(
     conn: &Connection,
     record: &QualificationGuestScratchRecord,
@@ -322,35 +391,17 @@ fn require_cleanup_basis(
         (
             QualificationGuestScratchCleanupBasis::SettledAllocation {
                 allocation_request_digest,
-                settled_phase,
                 occurrence_id,
+                ..
             },
             Some(allocation),
         ) => {
-            let ExternalAllocationOwner::QualificationCandidate(owner) =
-                &allocation.reservation.owner
-            else {
-                anyhow::bail!("Q scratch cleanup changed its allocation kind");
-            };
-            ensure!(
-                allocation.phase.is_settled()
-                    && allocation.phase == *settled_phase
-                    && allocation.reservation.request_digest == *allocation_request_digest
-                    && allocation.reservation.admitted_capsule_hash
-                        == record.coordinate.accepted_capsule_hash
-                    && allocation
-                        .occurrence
-                        .as_ref()
-                        .map(|item| item.occurrence_id.as_str())
-                        == occurrence_id.as_deref()
-                    && owner.coordinate == record.coordinate
-                    && owner.qualification_operation_id == record.qualification_operation_id
-                    && owner.qualification_occurrence.occurrence_id
-                        == record.qualification_occurrence_id
-                    && owner.operator_principal == record.owner_principal
-                    && owner.program.digest()? == record.program_digest,
-                "Q scratch cleanup changed its exact settled allocation"
-            );
+            require_settled_allocation_identity(
+                record,
+                allocation_request_digest,
+                occurrence_id.as_deref(),
+                allocation,
+            )?;
             validate_lifecycle_evidence(conn, allocation)?;
             let local =
                 qualification_local_start::read_local_start(conn, &record.placement_thread_id)?;
@@ -504,6 +555,28 @@ impl RuntimeDb {
         placement: &str,
     ) -> Result<Option<QualificationGuestScratchRecord>> {
         self.conn.with_sql(|conn| read_scratch(conn, placement))
+    }
+
+    /// Unclosed scratches whose provider allocation is settled. Their cleanup
+    /// was refused or never reached while the allocation was unsettled, and
+    /// can now be proved; allocation-less scratches belong to a live start.
+    pub(crate) fn settled_unclosed_qualification_guest_scratch_placements(
+        &self,
+    ) -> Result<Vec<String>> {
+        self.conn.with_sql(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT s.placement_thread_id
+                 FROM external_qualification_guest_scratch s
+                 JOIN external_execution_allocation a
+                   ON a.placement_thread_id=s.placement_thread_id
+                 WHERE s.phase!='closed'
+                   AND a.phase IN ('no_contact','contacted_no_occurrence','terminated')
+                 ORDER BY s.placement_thread_id",
+            )?;
+            Ok(statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?)
+        })
     }
 
     /// A retry may report transport completion only for the same one-use Q
@@ -688,14 +761,7 @@ impl RuntimeDb {
                     && current.daemon_generation_id == daemon_generation_id(),
                 "Q guest scratch cleanup changed its current original custody"
             );
-            let basis = match read(&tx, &current.placement_thread_id)? {
-                None => QualificationGuestScratchCleanupBasis::NoAllocation,
-                Some(allocation) => QualificationGuestScratchCleanupBasis::SettledAllocation {
-                    allocation_request_digest: allocation.reservation.request_digest,
-                    settled_phase: allocation.phase,
-                    occurrence_id: allocation.occurrence.map(|item| item.occurrence_id),
-                },
-            };
+            let basis = freeze_cleanup_basis(read(&tx, &current.placement_thread_id)?.as_ref())?;
             let mut next = current.clone();
             next.phase = QualificationGuestScratchPhase::CleanupIntent;
             next.cleanup_basis = Some(basis);
@@ -983,5 +1049,137 @@ mod tests {
             },
         );
         Ok(())
+    }
+
+    /// A real Q allocation row (bound, with its occurrence) and the scratch
+    /// record that names it, built by the local-start fixture.
+    fn allocation_fixture() -> (QualificationGuestScratchRecord, ExternalAllocationRecord) {
+        crate::runtime_db::test_native::with_transient(|conn| {
+            let local = qualification_local_start::tests::fixture_retained_credential_journal(conn);
+            let allocation = read(conn, &local.placement_thread_id).unwrap().unwrap();
+            let ExternalAllocationOwner::QualificationCandidate(owner) =
+                &allocation.reservation.owner
+            else {
+                unreachable!()
+            };
+            let record = QualificationGuestScratchRecord {
+                placement_thread_id: local.placement_thread_id.clone(),
+                qualification_operation_id: owner.qualification_operation_id.clone(),
+                coordinate: owner.coordinate.clone(),
+                qualification_occurrence_id: owner.qualification_occurrence.occurrence_id.clone(),
+                owner_principal: owner.operator_principal.clone(),
+                daemon_generation_id: daemon_generation_id().into(),
+                program_digest: owner.program.digest().unwrap(),
+                scratch_root: "/unused".into(),
+                phase: QualificationGuestScratchPhase::Created,
+                cleanup_basis: None,
+                removed_at_ms: None,
+                closed_at_ms: None,
+                created_at_ms: 1,
+                updated_at_ms: 1,
+            };
+            Ok((record, allocation))
+        })
+    }
+
+    fn check(
+        record: &QualificationGuestScratchRecord,
+        basis: &QualificationGuestScratchCleanupBasis,
+        allocation: &ExternalAllocationRecord,
+    ) -> Result<()> {
+        let QualificationGuestScratchCleanupBasis::SettledAllocation {
+            allocation_request_digest,
+            occurrence_id,
+            ..
+        } = basis
+        else {
+            unreachable!()
+        };
+        require_settled_allocation_identity(
+            record,
+            allocation_request_digest,
+            occurrence_id.as_deref(),
+            allocation,
+        )
+    }
+
+    fn settled(
+        allocation: &ExternalAllocationRecord,
+        phase: ExternalAllocationPhase,
+    ) -> ExternalAllocationRecord {
+        let mut next = allocation.clone();
+        next.phase = phase;
+        next
+    }
+
+    #[test]
+    fn cleanup_requested_on_unsettled_allocation_proves_once_it_settles_terminated() {
+        let (record, bound) = allocation_fixture();
+        let quarantined = settled(&bound, ExternalAllocationPhase::Quarantined);
+        // The start failure asks for cleanup while the provider still holds
+        // the allocation; no basis may be frozen from that moment.
+        assert!(freeze_cleanup_basis(Some(&quarantined)).is_err());
+        // Retained cleanup then terminates it; the retry freezes and proves.
+        let terminated = settled(&bound, ExternalAllocationPhase::Terminated);
+        let basis = freeze_cleanup_basis(Some(&terminated)).unwrap();
+        check(&record, &basis, &terminated).unwrap();
+    }
+
+    #[test]
+    fn basis_pins_identity_not_the_phase_of_the_moment() {
+        let (record, bound) = allocation_fixture();
+        let terminated = settled(&bound, ExternalAllocationPhase::Terminated);
+        let basis = freeze_cleanup_basis(Some(&terminated)).unwrap();
+        // The same identity settled through a different settled phase still
+        // proves; an unsettled allocation never does.
+        let QualificationGuestScratchCleanupBasis::SettledAllocation { occurrence_id, .. } = &basis
+        else {
+            unreachable!()
+        };
+        let mut other = basis.clone();
+        if let QualificationGuestScratchCleanupBasis::SettledAllocation { settled_phase, .. } =
+            &mut other
+        {
+            *settled_phase = ExternalAllocationPhase::NoContact;
+        }
+        assert!(occurrence_id.is_some());
+        check(&record, &other, &terminated).unwrap();
+        let quarantined = settled(&bound, ExternalAllocationPhase::Quarantined);
+        assert!(check(&record, &basis, &quarantined).is_err());
+    }
+
+    #[test]
+    fn different_request_digest_or_owner_is_still_refused() {
+        let (record, bound) = allocation_fixture();
+        let terminated = settled(&bound, ExternalAllocationPhase::Terminated);
+        let basis = freeze_cleanup_basis(Some(&terminated)).unwrap();
+        let mut other_digest = terminated.clone();
+        other_digest.reservation.request_digest = "f".repeat(64);
+        assert!(check(&record, &basis, &other_digest).is_err());
+        let mut other_owner = record.clone();
+        other_owner.owner_principal = "fp:someone-else".into();
+        assert!(check(&other_owner, &basis, &terminated).is_err());
+        let mut other_operation = record.clone();
+        other_operation.qualification_operation_id = "4".repeat(64);
+        assert!(check(&other_operation, &basis, &terminated).is_err());
+    }
+
+    #[test]
+    fn basis_without_occurrence_accepts_a_later_bound_allocation_only_when_terminated_because_a_guest_may_have_used_the_scratch()
+     {
+        let (record, bound) = allocation_fixture();
+        let no_occurrence = QualificationGuestScratchCleanupBasis::SettledAllocation {
+            allocation_request_digest: bound.reservation.request_digest.clone(),
+            settled_phase: ExternalAllocationPhase::ContactedNoOccurrence,
+            occurrence_id: None,
+        };
+        // A guest may have used the scratch under the later occurrence, so a
+        // non-terminal settlement carrying one is not the frozen identity.
+        let no_contact = settled(&bound, ExternalAllocationPhase::ContactedNoOccurrence);
+        assert!(check(&record, &no_occurrence, &no_contact).is_err());
+        // Terminated with its occurrence is accepted by the identity join;
+        // the caller then requires the termination and terminal evidence.
+        let terminated = settled(&bound, ExternalAllocationPhase::Terminated);
+        check(&record, &no_occurrence, &terminated).unwrap();
     }
 }

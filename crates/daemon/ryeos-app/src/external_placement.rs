@@ -7686,6 +7686,22 @@ pub fn recover_external_candidate_cleanups(
             Err(error) => report.failures.push((placement, format!("{error:#}"))),
         }
     }
+    // A Q start that failed while its allocation was still unsettled could
+    // not prove its guest-input scratch cleanup then. Now that the retained
+    // owner above may have settled it, prove the cleanup through the original
+    // custody; scratches whose allocation is still unsettled wait.
+    for placement in state
+        .state_store
+        .settled_unclosed_qualification_guest_scratch_placements()?
+    {
+        if let Err(error) =
+            crate::external_qualification_guest_scratch::cleanup_original_qualification_guest_scratch(
+                state, &placement,
+            )
+        {
+            report.failures.push((placement, format!("{error:#}")));
+        }
+    }
     Ok(report)
 }
 

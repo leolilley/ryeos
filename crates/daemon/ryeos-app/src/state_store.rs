@@ -19386,6 +19386,14 @@ impl StateStore {
             .qualification_guest_scratch(placement)
     }
 
+    pub(crate) fn settled_unclosed_qualification_guest_scratch_placements(
+        &self,
+    ) -> Result<Vec<String>> {
+        self.lock()?
+            .runtime_db
+            .settled_unclosed_qualification_guest_scratch_placements()
+    }
+
     pub(crate) fn completed_qualification_guest_scratch_transport(
         &self,
         placement: &str,

@@ -1513,7 +1513,7 @@ impl RuntimeDb {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
 
     fn fixture_record() -> QualificationLocalStartRecord {
@@ -1630,7 +1630,9 @@ mod tests {
     // This fixture serves the real retained readers, unlike fixture_journal's
     // deliberately partial rows for isolated SQL trigger tests. It supplies no
     // admission token, provider contact, process, or successful held attachment.
-    fn fixture_retained_credential_journal(conn: &Connection) -> QualificationLocalStartRecord {
+    pub(in crate::runtime_db::external_execution) fn fixture_retained_credential_journal(
+        conn: &Connection,
+    ) -> QualificationLocalStartRecord {
         use base64::{Engine as _, engine::general_purpose::STANDARD};
         use ryeos_external_execution_contract::{
             restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate,
