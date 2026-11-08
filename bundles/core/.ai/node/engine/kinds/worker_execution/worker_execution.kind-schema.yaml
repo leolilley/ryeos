@@ -9,6 +9,12 @@ location:
 resolution: []
 effective_trust:
   include_references: false
+# Which spaces and trust classes may supply a launch root of this kind.
+# Only signed bundles supply this kind; a project or node file is ignored.
+launch_trust:
+  allowed_spaces: [bundle]
+  allowed_trust: [trusted_bundle]
+  operator_may_admit: []
 execution:
   delegate:
     via: runtime_registry

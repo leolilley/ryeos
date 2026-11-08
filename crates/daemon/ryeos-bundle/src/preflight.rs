@@ -2470,6 +2470,7 @@ strict_fields: warn
             inventory_kinds: vec![],
             inventory_schema_keys: vec![],
             inventory_policy: Default::default(),
+            launch_trust: None,
         }
     }
 

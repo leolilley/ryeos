@@ -9,6 +9,12 @@ location:
 effective_trust:
   include_references: false
 resolution: []
+# Which spaces and trust classes may supply a launch root of this kind.
+# Only signed bundles supply this kind; a project or node file is ignored.
+launch_trust:
+  allowed_spaces: [bundle]
+  allowed_trust: [trusted_bundle]
+  operator_may_admit: []
 execution:
   terminator:
     kind: subprocess
@@ -52,7 +58,7 @@ composed_value_contract:
             elements:
               type: single
               prim: string
-              enum: [trusted_bundle, trusted_project, untrusted_project, unsigned]
+              enum: [trusted_bundle, trusted_project, untrusted_project]
           ref_bindings: { type: single, prim: mapping }
           preparation: { type: single, prim: mapping }
           config_inputs: { type: single, prim: mapping }

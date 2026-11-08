@@ -147,6 +147,9 @@ formats:
     parser: parser:ryeos/core/yaml/yaml
     signature:
       prefix: \"#\"
+launch_trust:
+  allowed_spaces: [bundle, project]
+  allowed_trust: [trusted_bundle, trusted_project]
 execution:
   thread_profile:
     name: node_run
@@ -272,6 +275,9 @@ formats:
     signature:
       prefix: \"<!--\"
       suffix: \"-->\"
+launch_trust:
+  allowed_spaces: [bundle, project]
+  allowed_trust: [trusted_bundle, trusted_project]
 execution:
   thread_profile:
     name: directive_run

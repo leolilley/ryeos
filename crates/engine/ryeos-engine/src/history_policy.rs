@@ -711,6 +711,7 @@ mod tests {
             inventory_kinds: Vec::new(),
             inventory_schema_keys: Vec::new(),
             inventory_policy: Default::default(),
+            launch_trust: None,
         }
     }
 

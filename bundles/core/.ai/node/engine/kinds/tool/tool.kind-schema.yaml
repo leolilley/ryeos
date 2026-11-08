@@ -7,6 +7,12 @@ location:
 effective_trust:
   include_references: false
 resolution: []
+# Which spaces and trust classes may supply a launch root of this kind.
+# Work signed by an unpinned key runs only where node policy admits it.
+launch_trust:
+  allowed_spaces: [bundle, project]
+  allowed_trust: [trusted_bundle, trusted_project]
+  operator_may_admit: [untrusted_project]
 execution:
   source_closure:
     derived: effective_source_closure

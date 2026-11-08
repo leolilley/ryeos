@@ -10,6 +10,12 @@ resolution:
   - step: resolve_references
 effective_trust:
   include_references: false
+# Which spaces and trust classes may supply a launch root of this kind.
+# Work signed by an unpinned key runs only where node policy admits it.
+launch_trust:
+  allowed_spaces: [bundle, project]
+  allowed_trust: [trusted_bundle, trusted_project]
+  operator_may_admit: [untrusted_project]
 execution:
   # Method-dispatch execution model. The daemon resolves the requested
   # method (default: `compose`) against the declared methods, validates

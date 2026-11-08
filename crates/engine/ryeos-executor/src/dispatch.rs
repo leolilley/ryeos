@@ -6824,6 +6824,9 @@ location:
 resolution: []
 effective_trust:
   include_references: false
+launch_trust:
+  allowed_spaces: [bundle, project]
+  allowed_trust: [trusted_bundle, trusted_project]
 execution:
   terminator:
     kind: subprocess
@@ -6856,6 +6859,9 @@ location:
 resolution: []
 effective_trust:
   include_references: false
+launch_trust:
+  allowed_spaces: [bundle, project]
+  allowed_trust: [trusted_bundle, trusted_project]
 execution:
   terminator:
     kind: in_process
@@ -7888,6 +7894,9 @@ location:
 resolution: []
 effective_trust:
   include_references: false
+launch_trust:
+  allowed_spaces: [bundle, project]
+  allowed_trust: [trusted_bundle, trusted_project]
 execution:
   terminator:
     kind: subprocess

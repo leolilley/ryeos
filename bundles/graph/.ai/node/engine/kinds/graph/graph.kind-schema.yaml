@@ -10,6 +10,12 @@ resolution:
   - step: resolve_extends_chain
 effective_trust:
   include_references: false
+# Which spaces and trust classes may supply a launch root of this kind.
+# Work signed by an unpinned key runs only where node policy admits it.
+launch_trust:
+  allowed_spaces: [bundle, project]
+  allowed_trust: [trusted_bundle, trusted_project]
+  operator_may_admit: [untrusted_project]
 execution:
   # Kind-owned location of the graph author's durable-effect ceiling. The
   # generic dispatcher projects this signed field exactly as it does for

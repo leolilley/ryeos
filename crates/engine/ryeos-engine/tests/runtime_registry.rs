@@ -76,6 +76,9 @@ location:
 resolution: []
 effective_trust:
   include_references: false
+launch_trust:
+  allowed_spaces: [bundle, project]
+  allowed_trust: [trusted_bundle, trusted_project]
 execution:
   delegate:
     via: runtime_registry
@@ -626,6 +629,9 @@ location:
 resolution: []
 effective_trust:
   include_references: false
+launch_trust:
+  allowed_spaces: [bundle, project]
+  allowed_trust: [trusted_bundle, trusted_project]
 execution:
   terminator:
     kind: subprocess
@@ -759,4 +765,18 @@ abi_version: "v3"
         }
         other => panic!("expected RuntimeServesKindNoExecution, got: {other:?}"),
     }
+}
+
+#[test]
+fn launch_contract_trust_lists_may_not_admit_unsigned() {
+    let body = FULL_RUNTIME_YAML.replace(
+        "  primary_allowed_trust: [trusted_bundle, trusted_project]",
+        "  primary_allowed_trust: [trusted_bundle, unsigned]",
+    );
+    assert_ne!(
+        body, FULL_RUNTIME_YAML,
+        "fixture must carry the replaced line"
+    );
+    let err = parse_via_registry(&body).unwrap_err();
+    assert!(err.to_string().contains("unsigned"), "{err}");
 }
