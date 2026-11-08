@@ -1425,23 +1425,24 @@ mod tests {
     }
 
     #[test]
-    fn resolve_extension_priority() {
+    fn resolve_finds_an_item_in_any_declared_format() {
         let project_root = tempdir();
-        // .py is listed first, so it should win even though .yaml also exists
+        // Only the second declared format exists: every format is probed,
+        // and the single match resolves. Two formats of one name in one
+        // folder are refused (see two_formats_of_one_name_in_one_folder_are_refused).
         let schema = make_kind_schema(
             "tools",
             vec![(".py", "python/tool-header"), (".yaml", "yaml/yaml")],
         );
 
-        write_item(&project_root, "tools", "my_tool", ".py", "# python");
         write_item(&project_root, "tools", "my_tool", ".yaml", "name: yaml");
 
         let roots = ResolutionRoots::from_flat(Some(project_root), vec![]);
         let ref_ = CanonicalRef::parse("tool:my_tool").unwrap();
 
         let (path, _, ext) = resolve_item(&roots, &schema, &ref_).unwrap();
-        assert_eq!(ext, ".py");
-        assert!(path.to_string_lossy().ends_with(".py"));
+        assert_eq!(ext, ".yaml");
+        assert!(path.to_string_lossy().ends_with(".yaml"));
     }
 
     #[test]
