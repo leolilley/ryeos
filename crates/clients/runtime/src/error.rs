@@ -7,6 +7,16 @@
 
 use ryeos_client_base::ui::RyeOsUiError;
 
+/// Which start check refused a seat that was already claimed and is left open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SeatOpenStage {
+    /// The replayed seat history was not accepted by the core, so whether the
+    /// claimed owner is safe to give back is uncertain.
+    ReplayAcceptance,
+    /// The reducer did not positively accept the claimed producer.
+    ProducerReadiness,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RuntimeError {
     /// The daemon answered with a non-2xx status. Carries the daemon's own
@@ -41,6 +51,16 @@ pub enum RuntimeError {
     /// An unrecoverable protocol or invariant violation.
     #[error("{0}")]
     Fatal(String),
+
+    /// A claimed seat was refused during start and deliberately not given
+    /// back; its lease lifecycle settles it. Carries the seat thread so the
+    /// host can name it.
+    #[error("{message}")]
+    SeatLeftOpen {
+        thread_id: String,
+        stage: SeatOpenStage,
+        message: String,
+    },
 
     /// A request the runtime refused to build or send.
     #[error("UI binding request: {0}")]

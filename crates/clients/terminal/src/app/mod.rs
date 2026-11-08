@@ -20,6 +20,8 @@ use crossterm::event::{Event, EventStream, KeyEventKind};
 use futures_util::StreamExt;
 use ryeos_client_base::ui::{BrowserSession, BrowserViewport, RyeOsEvent};
 use ryeos_client_runtime::ClientRuntime;
+use ryeos_client_runtime::RuntimeError;
+use ryeos_client_runtime::error::SeatOpenStage;
 use ryeos_client_runtime::inbox::WakeFn;
 use ryeos_client_runtime::platform::native::NativePlatform;
 use ryeos_client_runtime::replay::CoreConfig;
@@ -73,7 +75,9 @@ pub async fn run(
     {
         Ok(started) => started,
         Err(error) => {
+            // Restore the terminal first so the diagnostic is readable.
             drop(term.take());
+            report_open_seat(&error);
             return Err(error.into());
         }
     };
@@ -222,6 +226,9 @@ pub async fn run(
                 runtime.submit(effects);
                 // The runtime renews seat presence on its own cadence from here.
                 runtime.after_mutation(&core);
+                for message in runtime.take_layout_errors() {
+                    core.notice(message, ryeos_client_base::ui::view_model::RyeOsTone::Warn);
+                }
                 dirty = true;
             }
             _ = async {
@@ -263,6 +270,25 @@ pub async fn run(
         return Err(error);
     }
     Ok(())
+}
+
+/// Say, on stderr, which claimed seat start left open and why. The terminal
+/// is already restored when this runs.
+fn report_open_seat(error: &RuntimeError) {
+    let RuntimeError::SeatLeftOpen {
+        thread_id, stage, ..
+    } = error
+    else {
+        return;
+    };
+    match stage {
+        SeatOpenStage::ReplayAcceptance => eprintln!(
+            "RyeOS retained replay failed; seat {thread_id} remains open because replay acceptance is uncertain"
+        ),
+        SeatOpenStage::ProducerReadiness => eprintln!(
+            "RyeOS producer readiness refused for seat {thread_id}; claimed owner remains lifecycle-owned"
+        ),
+    }
 }
 
 /// The error a stopped seat ends the session with. The terminal has no

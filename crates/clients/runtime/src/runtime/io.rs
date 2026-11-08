@@ -9,6 +9,12 @@ impl<P: Platform + 'static> ClientRuntime<P> {
     // Seat I/O
     // -----------------------------------------------------------------
 
+    fn is_active_producer(&self, producer: &UiPresentationProducer) -> bool {
+        self.seat
+            .as_ref()
+            .is_some_and(|seat| seat.producer == *producer)
+    }
+
     pub(super) fn fail(&mut self, reason: StopReason) {
         self.shared.delivery.borrow_mut().blocked = true;
         if self.pending_stop.is_none() {
@@ -83,7 +89,8 @@ impl<P: Platform + 'static> ClientRuntime<P> {
         if self.closing {
             return;
         }
-        let desired = core.focused_input_route().chain_root;
+        let route = core.focused_input_route();
+        let desired = route.chain_root.or(route.thread);
         if desired == self.tail_chain {
             return;
         }
@@ -116,6 +123,12 @@ impl<P: Platform + 'static> ClientRuntime<P> {
         let Some(producer) = self.shared.current_producer() else {
             return;
         };
+        // Only the active seat's own producer writes: while a replacement is
+        // being folded the shared producer is already the successor's, and
+        // the predecessor core's events must not be appended under it.
+        if !self.is_active_producer(&producer) {
+            return;
+        }
         let (blocked, first, limit) = {
             let delivery = self.shared.delivery.borrow();
             (
@@ -184,6 +197,9 @@ impl<P: Platform + 'static> ClientRuntime<P> {
         let Some(producer) = self.shared.current_producer() else {
             return;
         };
+        if !self.is_active_producer(&producer) {
+            return;
+        }
         self.last_touch_ms = now;
         self.touch_inflight = true;
         let shared = self.shared.clone();
@@ -280,5 +296,41 @@ impl<P: Platform + 'static> ClientRuntime<P> {
             self.maybe_touch();
         }
         self.queue_seat_sync(core);
+        self.persist_layout(core);
+    }
+
+    /// Save the arrangement after an accepted edit, debounced.
+    fn persist_layout(&mut self, core: &RyeOsCore) {
+        let now = self.now_ms();
+        let store = self.shared.platform.store();
+        self.layout.observe(
+            now,
+            core.layout_preference_key().ok(),
+            || core.export_layout_preferences(),
+            store,
+        );
+        self.layout.write_due(now, store);
+    }
+
+    /// Load the cached arrangement for the core's current scope and apply it.
+    /// Nothing stored, or no scope yet, restores nothing.
+    pub fn restore_layout_preferences(
+        &mut self,
+        core: &mut RyeOsCore,
+    ) -> Result<Vec<RyeOsEffect>, RuntimeError> {
+        let Ok(key) = core.layout_preference_key() else {
+            return Ok(Vec::new());
+        };
+        let Some(saved) = self.shared.platform.store().get(&key) else {
+            return Ok(Vec::new());
+        };
+        core.restore_layout_preferences(&saved)
+            .map_err(RuntimeError::Fatal)
+    }
+
+    /// Layout-preference errors (a failed export or write) since the last
+    /// call. A failed write stays pending and is retried at the next flush.
+    pub fn take_layout_errors(&mut self) -> Vec<String> {
+        self.layout.take_errors()
     }
 }

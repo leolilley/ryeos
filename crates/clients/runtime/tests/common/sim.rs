@@ -155,6 +155,14 @@ impl FakeSpawner {
     pub fn live(&self) -> usize {
         self.tasks.borrow().len()
     }
+
+    /// End every task without finishing it, as a panicked or dropped task
+    /// ends: it reports finished and never delivers anything.
+    pub fn abort_all(&self) {
+        for (_, flags) in self.tasks.borrow().iter() {
+            flags.aborted.set(true);
+        }
+    }
 }
 
 impl Spawner for FakeSpawner {

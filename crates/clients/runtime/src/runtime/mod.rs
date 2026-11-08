@@ -43,10 +43,11 @@ use crate::api::{MAX_SEAT_BATCH_EVENTS, chain_events_stream_path, session_events
 use crate::effects::{
     AdapterHandler, EffectEnv, execute_batch, failure_result, unsupported_adapter,
 };
-use crate::error::RuntimeError;
+use crate::error::{RuntimeError, SeatOpenStage};
 use crate::history::{HistoryCompletion, LiveEvent, LiveHistory, SeatCoordinate};
 use crate::inbox::{Idle, Inbox, InboxPayload, Stream, StreamTag, TaskResult, WakeFn};
-use crate::platform::{Clock, Platform, Spawner, TaskHandle};
+use crate::layout::LayoutPersistence;
+use crate::platform::{Clock, Platform, Spawner, Store, TaskHandle};
 use crate::recovery::{ReconnectChoice, ensure_settled, observe_for_reconnect, reconcile_pending};
 use crate::replay::{
     CoreConfig, ReplayCommit, new_core, replay_acknowledged_events, require_producer_ready,
@@ -63,6 +64,8 @@ use crate::streams::{TaskOf, focused_tail_payload, spawn_hints, spawn_tail};
 
 mod fold;
 mod io;
+#[cfg(test)]
+mod tests;
 
 pub use crate::seat::SeatStart as StartMode;
 
@@ -150,6 +153,15 @@ enum SeatTask<P: Platform> {
     },
 }
 
+/// The start failure for a claimed seat whose replay the core did not accept.
+fn left_open(coordinate: &SeatCoordinate, message: String) -> RuntimeError {
+    RuntimeError::SeatLeftOpen {
+        thread_id: coordinate.thread_id.clone(),
+        stage: SeatOpenStage::ReplayAcceptance,
+        message,
+    }
+}
+
 fn session_id_of(core: &RyeOsCore) -> Option<String> {
     core.data
         .session
@@ -195,6 +207,7 @@ pub struct ClientRuntime<P: Platform + 'static> {
     last_touch_ms: u64,
     closing: bool,
     pending_stop: Option<StopReason>,
+    layout: LayoutPersistence,
 }
 
 impl<P: Platform + 'static> ClientRuntime<P> {
@@ -232,6 +245,7 @@ impl<P: Platform + 'static> ClientRuntime<P> {
             last_touch_ms: 0,
             closing: false,
             pending_stop: None,
+            layout: LayoutPersistence::default(),
         }
     }
 
@@ -342,10 +356,16 @@ impl<P: Platform + 'static> ClientRuntime<P> {
         let (mut core, replay_effects) = match built {
             Ok(built) => built,
             Err(error) => {
-                if resumed {
-                    // After a replay the core refused, whether the claimed
-                    // owner is safe to give back is uncertain; its lease
-                    // lifecycle settles it.
+                // Which claimed seats are given back: a fresh seat is
+                // relinquished when admission or the singleton initialization
+                // replay failed (nothing of the user's is on it). A retained
+                // seat is never relinquished after a replay the core refused,
+                // and neither is any seat whose replay acceptance or producer
+                // readiness was refused (`SeatLeftOpen`): in those cases whether
+                // the claimed owner is safe to give back is uncertain, so its
+                // lease lifecycle settles it and the host is told which seat
+                // stays open.
+                if resumed || matches!(error, RuntimeError::SeatLeftOpen { .. }) {
                     self.shared.fence(&producer);
                 } else {
                     let _ = relinquish_claimed_seat(
@@ -367,9 +387,13 @@ impl<P: Platform + 'static> ClientRuntime<P> {
         });
         if let Err(message) = require_producer_ready(&core, &producer, next_engine_seq) {
             self.shared.fence(&producer);
-            return Err(RuntimeError::Fatal(message));
+            return Err(RuntimeError::SeatLeftOpen {
+                thread_id: producer.thread_id.clone(),
+                stage: SeatOpenStage::ProducerReadiness,
+                message,
+            });
         }
-        let start_effects = if resumed {
+        let mut start_effects = if resumed {
             let mut merged = replay_effects;
             merged.extend(producer_effects);
             core.initial_effects_after_cold_replay(merged)
@@ -396,6 +420,11 @@ impl<P: Platform + 'static> ClientRuntime<P> {
         self.spawn_live(claimed.history, producer);
         self.restart_hints(&core);
         self.sync_tail(&core);
+        // Restore the cached arrangement of the scope the core already
+        // projects. A refused restore leaves the admitted structure as it is.
+        if let Ok(restored) = self.restore_layout_preferences(&mut core) {
+            start_effects.extend(restored);
+        }
         Ok((core, start_effects))
     }
 
@@ -421,16 +450,25 @@ impl<P: Platform + 'static> ClientRuntime<P> {
         let key = self
             .shared
             .retention_key_for(&session.session_id, presentation_id);
+        // Bounded whatever the host's steady-state policy is: this runs before
+        // the host's event loop, where nothing could interrupt an unbounded
+        // retry. When the budget is spent the retained record stays in the
+        // store and the start fails clearly, so the user can try again later.
         let reconciled = reconcile_retained_append(
             self.platform(),
             &session.session_id,
             &binding.coordinate,
             &coordinate,
             &key,
-            self.retry,
+            RetryPolicy::WEB,
         )
         .await
-        .map_err(|failure| RuntimeError::Fatal(failure.message().to_owned()))?;
+        .map_err(|failure| {
+            RuntimeError::Fatal(format!(
+                "the previous run's retained seat append could not be settled before the claim; it is kept for the next start: {}",
+                failure.message()
+            ))
+        })?;
         if let Some(reconciled) = reconciled {
             let record = reconciled.record;
             retention::clear_matching(
@@ -473,7 +511,10 @@ impl<P: Platform + 'static> ClientRuntime<P> {
                         "authenticated UI session changed during retained seat replay".to_owned(),
                     ));
                 }
-                match candidate.commit(completion, None).map_err(fatal)? {
+                let committed = candidate
+                    .commit(completion, None)
+                    .map_err(|message| left_open(coordinate, message))?;
+                match committed {
                     ReplayCommit::Cold {
                         core,
                         replay_effects,
@@ -498,7 +539,8 @@ impl<P: Platform + 'static> ClientRuntime<P> {
                 let effects = core
                     .replay_authenticated_seat_events(vec![*initialization])
                     .map_err(fatal)?;
-                core.require_replayed_initialization().map_err(fatal)?;
+                core.require_replayed_initialization()
+                    .map_err(|message| left_open(coordinate, message))?;
                 Ok((core, effects))
             }
         }
@@ -588,6 +630,15 @@ impl<P: Platform + 'static> ClientRuntime<P> {
         self.hints_task = None;
         self.tail_task = None;
         self.tail_chain = None;
+        // Hint and tail messages already queued belong to streams that no
+        // longer run; fresh tags make the drain drop them.
+        self.hints_tag = self.stamp();
+        self.tail_tag = self.stamp();
+        self.inbox
+            .set_current(Stream::Hints, self.hints_tag.clone());
+        self.inbox
+            .set_current(Stream::FocusedTail, self.tail_tag.clone());
+        self.layout.flush(self.shared.platform.store());
         self.reproof_task = None;
         self.reproof_generation = None;
     }
@@ -595,7 +646,12 @@ impl<P: Platform + 'static> ClientRuntime<P> {
     /// The final local fence of a clean close: every local seat event is in
     /// the acknowledged prefix, no append or touch is in flight and no effect
     /// is pending. The host bounds how long it waits for this.
-    pub fn may_close(&self, core: &RyeOsCore) -> bool {
+    ///
+    /// It first reaps effect tasks that ended without a result, so a panicked
+    /// task yields failure results (folded by the next `drain`, which the
+    /// inbox's wake announces) and cannot hold the close until the deadline.
+    pub fn may_close(&mut self, core: &RyeOsCore) -> bool {
+        self.reap_batches();
         may_close_seat(
             core.seat.events().len(),
             core.acknowledged_seat_prefix_len(),

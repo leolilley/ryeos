@@ -249,6 +249,11 @@ fn parse_ack(
 
 /// Send `encoded` to `seat/append` until a valid acknowledgement, a definite
 /// refusal or the policy's budget. Every attempt sends the same bytes.
+///
+/// `still_current` is asked after every unsuccessful reply and again after
+/// each backoff: once it is false (the producer was replaced or fenced, or the
+/// delivery no longer holds this append) the retry stops with an unknown
+/// outcome instead of resending bytes nobody is waiting for.
 pub async fn post_append_exactly<P: Platform>(
     platform: &P,
     context: &AuthContext,
@@ -256,7 +261,13 @@ pub async fn post_append_exactly<P: Platform>(
     expected: &ExpectedAck,
     staged: &[WireSeatEvent],
     policy: RetryPolicy,
+    still_current: &dyn Fn() -> bool,
 ) -> AppendResult {
+    let superseded = || {
+        AppendFailure::Unknown(
+            "seat append retry stopped: its delivery is no longer current".to_owned(),
+        )
+    };
     let mut authentication_reconciled = false;
     let mut malformed = 0_u32;
     let mut attempt = 1_u32;
@@ -282,6 +293,9 @@ pub async fn post_append_exactly<P: Platform>(
                     if let Err(message) = reconcile_authentication(platform, context).await {
                         return Err(AppendFailure::Refused(message));
                     }
+                    if !still_current() {
+                        return Err(superseded());
+                    }
                     continue;
                 }
                 if !append_outcome_unknown(&error) {
@@ -293,10 +307,16 @@ pub async fn post_append_exactly<P: Platform>(
                 }
             }
         };
+        if !still_current() {
+            return Err(superseded());
+        }
         if !policy.allows_another(attempt) {
             return Err(AppendFailure::Unknown(unknown));
         }
         crate::platform::Clock::sleep(platform.clock(), policy.delay(attempt)).await;
+        if !still_current() {
+            return Err(superseded());
+        }
         attempt += 1;
     }
 }
@@ -362,8 +382,12 @@ pub async fn send_append<P: Platform>(
             key,
         )
     };
+    // Only the producer that failed is fenced: a late failure of a
+    // predecessor must not block the successor's delivery.
     let block = |failure: AppendFailure| {
-        shared.delivery.borrow_mut().blocked = true;
+        if shared.is_current(captured) {
+            shared.delivery.borrow_mut().blocked = true;
+        }
         failure
     };
 
@@ -440,6 +464,8 @@ pub async fn send_append<P: Platform>(
             }
             Some(_) => {}
             None => {
+                // Chosen behaviour: the retention write is synchronous and a
+                // refused write is fatal, so an unwritable store ends the session.
                 if let Err(error) = retention::retain(platform.store(), &key, &record) {
                     delivery.blocked = true;
                     return Err(AppendFailure::Fatal(error.to_string()));
@@ -465,7 +491,25 @@ pub async fn send_append<P: Platform>(
         root,
         coordinate,
     };
-    let result = post_append_exactly(platform, &context, &encoded, &expected, &wire, policy).await;
+    let still_current = || {
+        let delivery = shared.delivery.borrow();
+        !delivery.blocked
+            && shared.is_current(captured)
+            && delivery
+                .pending
+                .as_ref()
+                .is_some_and(|pending| pending.record == record && pending.events == events)
+    };
+    let result = post_append_exactly(
+        platform,
+        &context,
+        &encoded,
+        &expected,
+        &wire,
+        policy,
+        &still_current,
+    )
+    .await;
     let ack = match result {
         Ok(ack) => ack,
         Err(failure) => return Err(block(failure)),
@@ -480,7 +524,9 @@ pub async fn send_append<P: Platform>(
         && !delivery.blocked
         && shared.is_current(captured);
     if !still_ours {
-        delivery.blocked = true;
+        if shared.is_current(captured) {
+            delivery.blocked = true;
+        }
         return Err(AppendFailure::Unknown(
             "seat append lost its retained identity before acknowledgement".to_owned(),
         ));
@@ -631,6 +677,7 @@ pub async fn reconcile_retained_append<P: Platform>(
                 &expected,
                 &events,
                 policy,
+                &|| true,
             )
             .await?
         }

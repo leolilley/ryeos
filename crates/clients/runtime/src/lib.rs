@@ -25,6 +25,7 @@ pub mod effects;
 pub mod error;
 pub mod history;
 pub mod inbox;
+pub mod layout;
 pub mod platform;
 pub mod recovery;
 pub mod replay;
@@ -36,3 +37,11 @@ pub mod streams;
 
 pub use error::RuntimeError;
 pub use runtime::ClientRuntime;
+
+// The in-crate flow tests drive a `ClientRuntime` through its private state and
+// share the integration tests' deterministic platform.
+#[cfg(test)]
+extern crate self as ryeos_client_runtime;
+#[cfg(test)]
+#[path = "../tests/common/sim.rs"]
+mod sim;

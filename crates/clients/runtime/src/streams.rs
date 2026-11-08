@@ -198,6 +198,8 @@ async fn read_hints<P: Platform>(
                     return false;
                 }
             }
+            // Chosen behaviour: `message` frames are forwarded like the web does,
+            // and an undecodable payload is skipped rather than dispatched as null.
             "ui_intent.applied" | "message" => {
                 if let Ok(payload) = decode_strict(&frame.data)
                     && !inbox.push(tag.clone(), InboxPayload::DaemonEvent(payload))

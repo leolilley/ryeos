@@ -540,6 +540,7 @@ fn append_retry_vectors() {
             &expected,
             &staged,
             RetryPolicy::WEB,
+            &|| true,
         ));
 
         let expected_result = &case["expected"];

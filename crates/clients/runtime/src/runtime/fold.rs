@@ -10,6 +10,8 @@ impl<P: Platform + 'static> ClientRuntime<P> {
     /// Fold everything asynchronous work produced, in order, into the core.
     pub fn drain(&mut self, core: &mut RyeOsCore) -> Drained {
         let mut out = Drained::default();
+        // Chosen behaviour: effects emitted before a turnover in this drain are
+        // still submitted, under the successor's tag; the core ignores their results.
         self.reap_batches();
         for message in self.inbox.drain() {
             // A fold earlier in this batch can turn the streams over; what it
@@ -66,7 +68,7 @@ impl<P: Platform + 'static> ClientRuntime<P> {
                     frame,
                 } => {
                     let route = core.focused_input_route();
-                    let chain = route.chain_root.as_deref();
+                    let chain = route.chain_root.as_deref().or(route.thread.as_deref());
                     let thread = route.thread.as_deref().or(chain);
                     if chain != Some(chain_root_id.as_str()) {
                         continue;
@@ -189,7 +191,7 @@ impl<P: Platform + 'static> ClientRuntime<P> {
             producer,
             next_engine_seq,
         }));
-        self.tracker.reset(core.seat.events().len());
+        self.tracker.reset(core.acknowledged_seat_prefix_len());
         self.last_touch_ms = self.now_ms();
         self.restart_hints(core);
         self.sync_tail(core);
