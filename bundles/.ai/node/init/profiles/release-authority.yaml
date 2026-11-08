@@ -364,6 +364,11 @@ policies:
         verified_artifact_file_bytes: 268435456
         verified_artifact_total_bytes: 1073741824
         verified_artifact_files: 4096
+  # Trust classes the operator admits for launch roots beyond each kind's
+  # default, per kind (only what the kind schema lets an operator admit).
+  launch_trust:
+    schema: 1
+    admit: {}
   ingest_ignore:
     schema: 2
     patterns:

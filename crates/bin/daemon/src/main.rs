@@ -4437,6 +4437,10 @@ async fn run(
                 max_live_fanout = execution_limits.max_live_fanout,
                 "node execution limits armed"
             );
+            node_policy_snapshot
+                .require::<ryeos_node_runtime::node_policy::sections::launch_trust::NodeLaunchTrustPolicy>()?
+                .check_against_kinds(&engine.kinds)
+                .context("node launch_trust policy does not fit the installed kinds")?;
             tracing::info!(
                 max_private_materialization_copy_bytes = private_copy_limit,
                 "node private materialization limit armed"

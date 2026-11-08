@@ -72,6 +72,7 @@ impl NodePolicyTable {
             Box::new(sections::hosted::HostedNodePolicySection),
             Box::new(sections::ingest_ignore::IngestIgnorePolicySection),
             Box::new(sections::isolation::IsolationPolicySection),
+            Box::new(sections::launch_trust::NodeLaunchTrustPolicySection),
             Box::new(sections::maintenance::NodeMaintenancePolicySection),
             Box::new(sections::native_capacity::NodeNativeCapacityPolicySection),
             Box::new(sections::object_closure::NodeObjectClosurePolicySection),
