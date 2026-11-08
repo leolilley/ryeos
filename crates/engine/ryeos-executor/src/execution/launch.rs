@@ -4724,9 +4724,11 @@ async fn prepare_managed_launch_authority(
     };
     super::admitted_trust::validate_managed_current_trust(
         engine,
+        &params.state.node_policy,
         current_trust_store,
         &resolution,
         &prepared_launch,
+        &selected_runtime.yaml.launch_contract.primary_allowed_trust,
     )
     .map_err(BuildAndLaunchError::Internal)?;
     let evidence_publication = super::persistent_session::prepare_or_verify_evidence_attachments(

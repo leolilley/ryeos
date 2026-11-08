@@ -895,6 +895,10 @@ pub struct TerminalExecutorDecl {
 pub struct ResolvedTerminalExecutor {
     pub terminal_ref: String,
     pub kind: TerminalExecutorKind,
+    /// The signed source authority of every executor-chain hop walked to
+    /// the terminal, in order, so a launch can judge each hop's space and
+    /// trust class before anything runs.
+    pub chain_authorities: Vec<crate::contracts::PlanTrustAuthority>,
 }
 
 /// Walk the executor chain from `starting_executor_id` to its terminal and
@@ -1007,6 +1011,7 @@ fn resolve_terminal_executor_with_project_authority(
     Ok(ResolvedTerminalExecutor {
         terminal_ref: last.resolved_ref.clone(),
         kind: decl.kind,
+        chain_authorities: terminal.verified_chain.clone(),
     })
 }
 

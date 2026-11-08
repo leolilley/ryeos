@@ -3517,35 +3517,41 @@ fn reject_tool_declared_capabilities(
 /// (parse, bundle-id grammar, signed-manifest backing, subset check).
 fn derive_manifest_runtime_caps(
     resolved_item: &ResolvedItem,
+    trust_class: ryeos_engine::resolution::TrustClass,
     item_ref: &str,
     ctx: &ExecutionContext,
 ) -> Result<Vec<String>, DispatchError> {
     let requires_value = resolved_item.metadata.extra.get("requires");
     reject_tool_declared_capabilities(requires_value, item_ref)?;
+    if resolved_item.source_space == ryeos_engine::contracts::ItemSpace::Node {
+        return Err(DispatchError::InvalidRef(
+            item_ref.to_string(),
+            "node-local configuration cannot be dispatched as a tool".to_string(),
+        ));
+    }
     // Tool schemas use the identity composer and have no inheritance chain, so
-    // a node-verified installed root item is the complete effective trust
-    // provenance. Managed graph/directive launches pass their actual composed
-    // trust fold at their callsite below.
-    mint_runtime_capability_caps(
-        requires_value,
-        resolved_item,
-        match resolved_item.source_space {
-            ryeos_engine::contracts::ItemSpace::Bundle => {
-                ryeos_engine::resolution::TrustClass::TrustedBundle
-            }
-            ryeos_engine::contracts::ItemSpace::Project => {
-                ryeos_engine::resolution::TrustClass::TrustedProject
-            }
-            ryeos_engine::contracts::ItemSpace::Node => {
-                return Err(DispatchError::InvalidRef(
-                    item_ref.to_string(),
-                    "node-local configuration cannot be dispatched as a tool".to_string(),
-                ));
-            }
-        },
-        &ctx.engine,
-    )
-    .map_err(|reason| DispatchError::InvalidRef(item_ref.to_string(), reason))
+    // the root item's own verified class is its complete effective trust: a
+    // project tool that is unsigned or signed by an unpinned key mints no
+    // runtime caps from its project manifest.
+    mint_runtime_capability_caps(requires_value, resolved_item, trust_class, &ctx.engine)
+        .map_err(|reason| DispatchError::InvalidRef(item_ref.to_string(), reason))
+}
+
+/// The class a test fixture item carries when it stands for a signed,
+/// pinned item of its space.
+#[cfg(test)]
+fn fixture_trust(item: &ResolvedItem) -> ryeos_engine::resolution::TrustClass {
+    match item.source_space {
+        ryeos_engine::contracts::ItemSpace::Bundle => {
+            ryeos_engine::resolution::TrustClass::TrustedBundle
+        }
+        ryeos_engine::contracts::ItemSpace::Project => {
+            ryeos_engine::resolution::TrustClass::TrustedProject
+        }
+        ryeos_engine::contracts::ItemSpace::Node => {
+            ryeos_engine::resolution::TrustClass::TrustedNode
+        }
+    }
 }
 
 /// Judge a tool item's `requires.node` list and its declared credential
@@ -3583,10 +3589,11 @@ fn admit_tool_node_requirements(
 fn admit_tool_launch(
     node: &impl ryeos_app::node_requirement_admission::NodeCapabilitySource,
     resolved_item: &ResolvedItem,
+    trust_class: ryeos_engine::resolution::TrustClass,
     item_ref: &str,
     ctx: &ExecutionContext,
 ) -> Result<Vec<String>, DispatchError> {
-    let caps = derive_manifest_runtime_caps(resolved_item, item_ref, ctx)?;
+    let caps = derive_manifest_runtime_caps(resolved_item, trust_class, item_ref, ctx)?;
     admit_tool_node_requirements(node, resolved_item, item_ref)?;
     Ok(caps)
 }
@@ -6033,7 +6040,25 @@ pub fn preflight_root_dispatch_with_remote_consumer(
                             // prove fails before a thread_id is minted, not in
                             // the background after 202.
                             if let Some(v) = verified.as_ref() {
-                                admit_tool_launch(state, &v.resolved, &hop_ref.to_string(), ctx)?;
+                                // The root is judged before any admission is
+                                // minted, so an inadmissible tool is refused
+                                // before its secrets are looked up or a
+                                // thread id exists.
+                                crate::execution::launch_trust_gate::enforce_direct_root(
+                                    &ctx.engine.kinds,
+                                    &state.node_policy,
+                                    &hop_ref.to_string(),
+                                    &hop_ref.kind,
+                                    v.resolved.source_space,
+                                    v.launch_trust_class(),
+                                )?;
+                                admit_tool_launch(
+                                    state,
+                                    &v.resolved,
+                                    v.launch_trust_class(),
+                                    &hop_ref.to_string(),
+                                    ctx,
+                                )?;
                                 // A method-dispatch wrapper's accepted form is
                                 // a pre-minted target method thread, not a
                                 // wrapper subprocess thread. Resolve the chain
@@ -7340,8 +7365,13 @@ runtime_authority:
             })),
         );
 
-        let caps = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
-            .unwrap();
+        let caps = derive_manifest_runtime_caps(
+            &resolved.resolved_item,
+            fixture_trust(&resolved.resolved_item),
+            &resolved.item_ref,
+            &ctx,
+        )
+        .unwrap();
         assert_eq!(
             caps,
             vec![
@@ -7371,8 +7401,13 @@ runtime_authority:
             } } }
         }));
 
-        let caps = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
-            .unwrap();
+        let caps = derive_manifest_runtime_caps(
+            &resolved.resolved_item,
+            fixture_trust(&resolved.resolved_item),
+            &resolved.item_ref,
+            &ctx,
+        )
+        .unwrap();
         assert_eq!(
             caps,
             vec!["ryeos.author.knowledge.runtime-authored/*".to_string()]
@@ -7419,9 +7454,14 @@ runtime_authority:
         // automatic grant.
         let resolved = resolved_tool(&bundle, "tool:example-bundle/send");
         assert!(
-            derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
-                .unwrap()
-                .is_empty()
+            derive_manifest_runtime_caps(
+                &resolved.resolved_item,
+                fixture_trust(&resolved.resolved_item),
+                &resolved.item_ref,
+                &ctx
+            )
+            .unwrap()
+            .is_empty()
         );
     }
 
@@ -7455,8 +7495,13 @@ runtime_authority:
                 } } }
             })),
         );
-        let err = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
-            .unwrap_err();
+        let err = derive_manifest_runtime_caps(
+            &resolved.resolved_item,
+            fixture_trust(&resolved.resolved_item),
+            &resolved.item_ref,
+            &ctx,
+        )
+        .unwrap_err();
         assert!(
             err.to_string()
                 .contains("not declared in the signed manifest"),
@@ -7480,8 +7525,13 @@ runtime_authority:
                 } } }
             })),
         );
-        let caps = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
-            .unwrap();
+        let caps = derive_manifest_runtime_caps(
+            &resolved.resolved_item,
+            fixture_trust(&resolved.resolved_item),
+            &resolved.item_ref,
+            &ctx,
+        )
+        .unwrap();
         assert_eq!(
             caps,
             vec![
@@ -7505,8 +7555,13 @@ runtime_authority:
                 } } }
             })),
         );
-        let caps = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
-            .unwrap();
+        let caps = derive_manifest_runtime_caps(
+            &resolved.resolved_item,
+            fixture_trust(&resolved.resolved_item),
+            &resolved.item_ref,
+            &ctx,
+        )
+        .unwrap();
         assert_eq!(
             caps,
             vec!["ryeos.create.project-snapshots.live".to_string()]
@@ -7529,8 +7584,13 @@ runtime_authority:
                 } } }
             })),
         );
-        let caps = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
-            .unwrap();
+        let caps = derive_manifest_runtime_caps(
+            &resolved.resolved_item,
+            fixture_trust(&resolved.resolved_item),
+            &resolved.item_ref,
+            &ctx,
+        )
+        .unwrap();
         assert_eq!(
             caps,
             vec!["ryeos.author.knowledge.runtime-authored/foo".to_string()],
@@ -7554,8 +7614,13 @@ runtime_authority:
                 } } }
             })),
         );
-        let err = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
-            .unwrap_err();
+        let err = derive_manifest_runtime_caps(
+            &resolved.resolved_item,
+            fixture_trust(&resolved.resolved_item),
+            &resolved.item_ref,
+            &ctx,
+        )
+        .unwrap_err();
         assert!(
             err.to_string()
                 .contains("not declared in the signed manifest"),
@@ -7583,8 +7648,13 @@ runtime_authority:
                 } } }
             })),
         );
-        let err = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
-            .unwrap_err();
+        let err = derive_manifest_runtime_caps(
+            &resolved.resolved_item,
+            fixture_trust(&resolved.resolved_item),
+            &resolved.item_ref,
+            &ctx,
+        )
+        .unwrap_err();
         assert!(
             err.to_string()
                 .contains("not declared in the signed manifest"),
@@ -7607,8 +7677,13 @@ runtime_authority:
                 } } }
             })),
         );
-        let err = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
-            .unwrap_err();
+        let err = derive_manifest_runtime_caps(
+            &resolved.resolved_item,
+            fixture_trust(&resolved.resolved_item),
+            &resolved.item_ref,
+            &ctx,
+        )
+        .unwrap_err();
         assert!(
             err.to_string()
                 .contains("required signed bundle manifest is missing"),
@@ -7645,8 +7720,13 @@ runtime_authority:
                 } } }
             })),
         );
-        let err = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
-            .unwrap_err();
+        let err = derive_manifest_runtime_caps(
+            &resolved.resolved_item,
+            fixture_trust(&resolved.resolved_item),
+            &resolved.item_ref,
+            &ctx,
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("identity mismatch"), "got: {err}");
     }
 
@@ -7696,8 +7776,13 @@ runtime_authority:
             } } }
         }));
 
-        let caps = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
-            .unwrap();
+        let caps = derive_manifest_runtime_caps(
+            &resolved.resolved_item,
+            fixture_trust(&resolved.resolved_item),
+            &resolved.item_ref,
+            &ctx,
+        )
+        .unwrap();
         assert_eq!(
             caps,
             vec!["ryeos.append.bundle-events.example-bundle/example_event".to_string()],
@@ -7745,8 +7830,13 @@ runtime_authority:
             } } }
         }));
 
-        let caps = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
-            .unwrap();
+        let caps = derive_manifest_runtime_caps(
+            &resolved.resolved_item,
+            fixture_trust(&resolved.resolved_item),
+            &resolved.item_ref,
+            &ctx,
+        )
+        .unwrap();
         assert_eq!(
             caps,
             vec!["ryeos.append.bundle-events.example-bundle/example_event".to_string()],
@@ -7776,8 +7866,13 @@ runtime_authority:
             })),
         );
 
-        let err = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
-            .unwrap_err();
+        let err = derive_manifest_runtime_caps(
+            &resolved.resolved_item,
+            fixture_trust(&resolved.resolved_item),
+            &resolved.item_ref,
+            &ctx,
+        )
+        .unwrap_err();
         assert!(
             err.to_string().contains("contradicts typed bundle root"),
             "source-space labels alone must not establish installed provenance: {err}"
@@ -7801,8 +7896,13 @@ runtime_authority:
                 } } }
             })),
         );
-        let err = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
-            .unwrap_err();
+        let err = derive_manifest_runtime_caps(
+            &resolved.resolved_item,
+            fixture_trust(&resolved.resolved_item),
+            &resolved.item_ref,
+            &ctx,
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("unsafe character"), "got: {err}");
 
         let resolved = resolved_tool_with_extra(
@@ -7816,8 +7916,13 @@ runtime_authority:
                 } } }
             })),
         );
-        let err = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
-            .unwrap_err();
+        let err = derive_manifest_runtime_caps(
+            &resolved.resolved_item,
+            fixture_trust(&resolved.resolved_item),
+            &resolved.item_ref,
+            &ctx,
+        )
+        .unwrap_err();
         assert!(
             err.to_string().contains("must match [A-Za-z0-9_]+"),
             "got: {err}"
@@ -7840,8 +7945,13 @@ runtime_authority:
                 } } }
             })),
         );
-        let err = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
-            .unwrap_err();
+        let err = derive_manifest_runtime_caps(
+            &resolved.resolved_item,
+            fixture_trust(&resolved.resolved_item),
+            &resolved.item_ref,
+            &ctx,
+        )
+        .unwrap_err();
         assert!(
             err.to_string().contains("at least one operation"),
             "got: {err}"
@@ -7881,8 +7991,13 @@ runtime_authority:
             "token bundle identity must follow the resolved canonical ref, not item_ref"
         );
         // Caps are minted under that same identity.
-        let caps = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
-            .unwrap();
+        let caps = derive_manifest_runtime_caps(
+            &resolved.resolved_item,
+            fixture_trust(&resolved.resolved_item),
+            &resolved.item_ref,
+            &ctx,
+        )
+        .unwrap();
         assert_eq!(
             caps,
             vec!["ryeos.append.bundle-events.example-bundle/example_event".to_string()]
@@ -7992,8 +8107,13 @@ requires:
         resolved.resolved_item.metadata = metadata;
 
         // 5. Exact manifest-backed subset is derived end-to-end.
-        let caps = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
-            .unwrap();
+        let caps = derive_manifest_runtime_caps(
+            &resolved.resolved_item,
+            fixture_trust(&resolved.resolved_item),
+            &resolved.item_ref,
+            &ctx,
+        )
+        .unwrap();
         assert_eq!(
             caps,
             vec!["ryeos.append.bundle-events.example-bundle/example_event".to_string()],
@@ -8074,9 +8194,13 @@ requires:
                 "tool:example-bundle/send",
                 requires_extra(json!({ "capabilities": { "declared": declared } })),
             );
-            let err =
-                derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
-                    .unwrap_err();
+            let err = derive_manifest_runtime_caps(
+                &resolved.resolved_item,
+                fixture_trust(&resolved.resolved_item),
+                &resolved.item_ref,
+                &ctx,
+            )
+            .unwrap_err();
             assert!(
                 err.to_string()
                     .contains("cannot self-declare action authority"),
@@ -8101,9 +8225,14 @@ requires:
         );
 
         assert!(
-            derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
-                .unwrap()
-                .is_empty()
+            derive_manifest_runtime_caps(
+                &resolved.resolved_item,
+                fixture_trust(&resolved.resolved_item),
+                &resolved.item_ref,
+                &ctx
+            )
+            .unwrap()
+            .is_empty()
         );
     }
 
@@ -8159,6 +8288,7 @@ requires:
         let caps = admit_tool_launch(
             &node_reporting(report),
             &resolved.resolved_item,
+            fixture_trust(&resolved.resolved_item),
             &resolved.item_ref,
             &ctx,
         )
@@ -8170,6 +8300,7 @@ requires:
         admit_tool_launch(
             &ryeos_app::extension_state::ExtensionState::new(),
             &plain.resolved_item,
+            fixture_trust(&plain.resolved_item),
             &plain.item_ref,
             &ctx,
         )
@@ -8197,6 +8328,7 @@ requires:
         let error = admit_tool_launch(
             &node_reporting(report),
             &resolved.resolved_item,
+            fixture_trust(&resolved.resolved_item),
             &resolved.item_ref,
             &ctx,
         )
@@ -8220,6 +8352,7 @@ requires:
         let error = admit_tool_launch(
             &ryeos_app::extension_state::ExtensionState::new(),
             &resolved.resolved_item,
+            fixture_trust(&resolved.resolved_item),
             &resolved.item_ref,
             &ctx,
         )

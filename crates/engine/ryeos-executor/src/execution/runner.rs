@@ -9099,6 +9099,7 @@ async fn run_existing_recovered_thread(
         .map_err(|error| guard.fail_before_spawn(error))?;
     super::admitted_trust::validate_direct_current_trust(
         &engine,
+        &state.node_policy,
         &current_trust_store,
         primary_resolution,
         prepared_plan.execution_plan(),

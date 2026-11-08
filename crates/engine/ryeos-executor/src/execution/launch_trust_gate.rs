@@ -118,6 +118,58 @@ pub(crate) fn trust_refusal(
     }
 }
 
+/// Refuse a direct launch root that its kind does not admit.
+pub(crate) fn enforce_direct_root(
+    kinds: &KindRegistry,
+    node_policy: &NodePolicySnapshot,
+    item_ref: &str,
+    kind: &str,
+    space: ItemSpace,
+    class: TrustClass,
+) -> Result<(), DispatchError> {
+    enforce_launch_trust(
+        kinds,
+        node_policy,
+        LaunchTrustSubject {
+            item_ref,
+            kind,
+            space,
+            class,
+            position: LaunchTrustPosition::Root,
+        },
+        None,
+    )
+}
+
+/// Refuse a launch whose executor chain passes through any hop its kind
+/// does not admit. Every hop is judged, so an unsigned or unpinned item can
+/// stand in for neither a runtime nor the subprocess terminal.
+pub(crate) fn enforce_executor_chain(
+    kinds: &KindRegistry,
+    node_policy: &NodePolicySnapshot,
+    chain: &[ryeos_engine::contracts::PlanTrustAuthority],
+) -> Result<(), DispatchError> {
+    for authority in chain {
+        let hop = ryeos_engine::canonical_ref::CanonicalRef::parse(&authority.canonical_ref)
+            .map_err(|error| {
+                DispatchError::InvalidRef(authority.canonical_ref.clone(), error.to_string())
+            })?;
+        enforce_launch_trust(
+            kinds,
+            node_policy,
+            LaunchTrustSubject {
+                item_ref: &authority.canonical_ref,
+                kind: &hop.kind,
+                space: authority.source_space,
+                class: authority.trust_class,
+                position: LaunchTrustPosition::Hop(&authority.canonical_ref),
+            },
+            None,
+        )?;
+    }
+    Ok(())
+}
+
 /// What an in-process service may run: the compiled handler's endpoint and
 /// the capabilities its compiled descriptor requires.
 #[derive(Debug, Clone, PartialEq, Eq)]
