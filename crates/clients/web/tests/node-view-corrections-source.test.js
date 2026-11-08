@@ -94,7 +94,7 @@ test("session details remain an ordinary Rust projection in each shared presenta
   const view = await read("../../../../bundles/ryeos-ui/.ai/views/ryeos/ui/session-details.yaml");
   assert.match(view, /local_projection: session_details/);
   assert.doesNotMatch(view, /sources:|affordances:/);
-  for (const name of ["presentation", "terminal-presentation", "atlas-presentation"]) {
+  for (const name of ["presentation", "terminal-presentation"]) {
     const config = await read(`../../../../bundles/ryeos-ui/.ai/config/ryeos/ui/${name}.yaml`);
     assert.match(config, /id: session, title: Session details, view: "view:ryeos\/ui\/session-details"/);
   }

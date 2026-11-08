@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ryeos:signed:2026-10-26T23:17:07Z:ba1d2160a7ed75b7ffd95c326bef24f497ed825cd594a695f76f6d4e0b843296:sRVHWotKEkua3XfU65zykqC8HSO0RUYaZ7xBRMJbIR7yxhNISwZ+Fc9Nhm04Q52u/HMj1AovgWZPbmQq1MqFAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-08T06:40:08Z:3b7068d51563a9239d2c7885ed0035b29f7b73808d1bb44a869fbf8a74584a0b:5RqKUrKdR0hqO/VsrjjA8JyG3FsB0y8AiywbWsVrcX+j7uSqa2qy3jcuuFwcmccNH4aDdqh3OYUAz8kUO5sFAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 set -euo pipefail
 
 mode="${1:---check}"
@@ -39,13 +39,11 @@ sed -i 's/[[:space:]]\+$//' "$stage/renderer"/*.js "$stage/renderer"/*.css
 cp "$web/browser/index.html" "$stage/final/index.html"
 cp "$stage/renderer/ryeos_ui.js" "$stage/final/ryeos_ui.js"
 cp "$stage/renderer/ryeos_ui.css" "$stage/final/ryeos_ui.css"
-cp "$stage/renderer/ryeos_three.js" "$stage/final/ryeos_three.js"
 cp "$stage/wasm/ryeos_web.js" "$stage/final/ryeos_web.js"
 cp "$stage/wasm/ryeos_web_bg.wasm" "$stage/final/ryeos_web_bg.wasm"
 
 expected=(
   index.html
-  ryeos_three.js
   ryeos_ui.css
   ryeos_ui.js
   ryeos_web.js

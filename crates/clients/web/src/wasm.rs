@@ -1,8 +1,8 @@
 //! WASM bridge for RyeOS browser clients.
 //!
 //! RyeOS is the only product model: Rust owns state, reducer, effects,
-//! semantic view model, and scene model; browser JavaScript owns adapters
-//! for fetch/EventSource/DOM/Three.js and returns events/effect results.
+//! semantic view model, browser JavaScript owns adapters
+//! for fetch/EventSource/DOM and returns events/effect results.
 
 use serde::Serialize;
 use wasm_bindgen::JsCast;
@@ -410,7 +410,7 @@ pub fn ryeos_open_saved_view_set_template(encoded: &str) -> Result<JsValue, JsVa
     })
 }
 
-/// Start RyeOS, returning the semantic view/scene models and initial effects.
+/// Start RyeOS, returning the semantic view model and initial effects.
 #[wasm_bindgen]
 pub fn ryeos_start(
     session_json: JsValue,
@@ -530,21 +530,6 @@ pub fn ryeos_view_model() -> Result<JsValue, JsValue> {
         to_js_value(
             &core.envelope(Vec::new()).view_model,
             "serialize RyeOS view model",
-        )
-    })
-}
-
-/// Return the current RyeOS scene model without mutating state.
-#[wasm_bindgen]
-pub fn ryeos_scene_model() -> Result<JsValue, JsValue> {
-    RYEOS_UI.with(|state| {
-        let state = state.borrow();
-        let core = state
-            .as_ref()
-            .ok_or_else(|| JsValue::from_str("RyeOS has not been started"))?;
-        to_js_value(
-            &core.envelope(Vec::new()).scene_model,
-            "serialize RyeOS scene model",
         )
     })
 }

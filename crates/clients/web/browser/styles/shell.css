@@ -1,5 +1,4 @@
 .ryeos-shell { position: relative; isolation: isolate; display: grid; grid-template-rows: var(--system-height) var(--strip-height) minmax(0, 1fr) var(--status-height); height: 100%; background: var(--bg); }
-.ryeos-shell > :not(.ambient-layer) { position: relative; z-index: 1; }
 .ryeos-shell.without-set-strip { --strip-height: 0px; }
 .ryeos-shell.without-status-bar { --status-height: 0px; }
 .ryeos-shell > .system-bar { grid-row: 1; }
@@ -11,8 +10,6 @@
 .view-set-rename { display: flex; align-items: center; gap: 4px; padding: 0 8px; }
 .view-set-rename input { width: 150px; min-width: 0; padding: 6px; border: 1px solid var(--accent); background: var(--plane); color: var(--text); font: inherit; }
 .view-set-rename button { padding: 6px; color: var(--text); }
-.ambient-layer { position: absolute; inset: 0; z-index: 0; opacity: var(--ambient-opacity); pointer-events: none; overflow: hidden; }
-.ambient-layer canvas { display: block; width: 100%; height: 100%; }
 .system-bar { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 14px; padding: 0 12px; border-bottom: 1px solid var(--line); background: #1b1e1f; }
 .brand { display: flex; align-items: center; gap: 7px; color: var(--text); font-size: 13px; letter-spacing: -.02em; }
 .brand-mark { color: var(--accent-bright); font-size: 14px; }

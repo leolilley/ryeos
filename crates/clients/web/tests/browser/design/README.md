@@ -41,9 +41,7 @@ The latest web pass separates frame headers from group tabs, uses an inset
 composer, and keeps session diagnostics in the bottom strip's disclosure.
 The next pass adds static `body.supplement` content: frame label/detail, footer
 and optional field/value footer rows, and a titled code excerpt (field/value/tone
-lines). An adjacent `body.scene` uses the existing scene compiler; its compact
-SVG projection draws the same points, segments, labels and glyphs, not a separate
-execution graph. Row and section projections may select `glyph` and `secondary`
+lines). Row and section projections may select `glyph` and `secondary`
 fields from their source records. All strings render as text, never HTML.
 
 The preview deliberately uses the reference's sample content so visual spacing
