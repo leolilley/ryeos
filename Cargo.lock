@@ -2974,6 +2974,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryeos-client-runtime"
+version = "0.1.0"
+dependencies = [
+ "ryeos-client-base",
+ "ryeos-ui-presentation-contract",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "ryeos-client-terminal"
 version = "0.1.0"
 dependencies = [

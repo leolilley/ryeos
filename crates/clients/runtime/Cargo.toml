@@ -1,0 +1,17 @@
+[package]
+name = "ryeos-client-runtime"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+description = "Shared client runtime: seat protocol, exact JSON, effect inbox and retention, independent of any platform"
+
+[dependencies]
+ryeos-client-base = { workspace = true }
+ryeos-ui-presentation-contract = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true
