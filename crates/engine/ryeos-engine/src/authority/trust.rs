@@ -1334,10 +1334,9 @@ mod tests {
         shebang: &str,
     ) -> String {
         let envelope = shebang_envelope();
-        // Content after signature line = body
-        // But with shebang, the signature line is line 2.
-        // Content hash is over everything after the signature line.
-        let content_hash = sha256_hex(body.as_bytes());
+        // The signature line is line 2, below the shebang; the content hash
+        // covers every byte except that line, shebang included.
+        let content_hash = sha256_hex(format!("{shebang}\n{body}").as_bytes());
         let signature: Signature = signing_key.sign(content_hash.as_bytes());
         let sig_b64 = base64::engine::general_purpose::STANDARD.encode(signature.to_bytes());
         let timestamp = "2026-04-10T00:00:00Z";

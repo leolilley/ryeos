@@ -24,7 +24,6 @@ pub(crate) enum LaunchTrustPosition<'a> {
     Root,
     Hop(&'a str),
     Ancestor(&'a str),
-    Referenced(&'a str),
 }
 
 impl std::fmt::Display for LaunchTrustPosition<'_> {
@@ -33,7 +32,6 @@ impl std::fmt::Display for LaunchTrustPosition<'_> {
             Self::Root => formatter.write_str("the launch root"),
             Self::Hop(item) => write!(formatter, "executor hop `{item}`"),
             Self::Ancestor(item) => write!(formatter, "ancestor `{item}`"),
-            Self::Referenced(item) => write!(formatter, "referenced item `{item}`"),
         }
     }
 }
