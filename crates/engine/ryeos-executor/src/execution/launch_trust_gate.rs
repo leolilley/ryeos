@@ -290,6 +290,222 @@ mod tests {
         assert!(!effective.admits(TrustClass::Unsigned));
     }
 
+    const SERVICE_KIND_SCHEMA: &str = "location:
+  directory: services
+effective_trust:
+  include_references: false
+resolution: []
+launch_trust:
+  allowed_spaces: [bundle]
+  allowed_trust: [trusted_bundle]
+  operator_may_admit: []
+execution:
+  terminator:
+    kind: in_process
+    registry: services
+  thread_profile:
+    name: service_run
+formats:
+  - extensions: [\".yaml\"]
+    parser: parser:ryeos/core/yaml/yaml
+    signature:
+      prefix: \"#\"
+composer: handler:ryeos/core/identity
+composed_value_contract:
+  root_type: mapping
+  required: {}
+";
+
+    fn service_kinds() -> (tempfile::TempDir, KindRegistry) {
+        let key = lillux::crypto::SigningKey::from_bytes(&[7u8; 32]);
+        let verifying_key = key.verifying_key();
+        let trust_store = ryeos_engine::trust::TrustStore::from_signers(vec![
+            ryeos_engine::trust::TrustedSigner {
+                fingerprint: ryeos_engine::trust::compute_fingerprint(&verifying_key),
+                verifying_key,
+                label: None,
+            },
+        ]);
+        let root = tempfile::tempdir().unwrap();
+        let kind_dir = root.path().join("service");
+        std::fs::create_dir_all(&kind_dir).unwrap();
+        std::fs::write(
+            kind_dir.join("service.kind-schema.yaml"),
+            lillux::signature::sign_content(SERVICE_KIND_SCHEMA, &key, "#", None),
+        )
+        .unwrap();
+        let kinds = KindRegistry::load_base(&[root.path().to_path_buf()], &trust_store).unwrap();
+        (root, kinds)
+    }
+
+    fn noop_handler(
+        _params: serde_json::Value,
+        _context: ryeos_app::handler_context::HandlerContext,
+        _state: Arc<ryeos_app::state::AppState>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = anyhow::Result<serde_json::Value>> + Send>,
+    > {
+        Box::pin(async { Ok(serde_json::Value::Null) })
+    }
+
+    const HEALTH: ryeos_app::service_registry::ServiceDescriptor =
+        ryeos_app::service_registry::ServiceDescriptor {
+            service_ref: "service:health/status",
+            endpoint: "health.status",
+            availability: ryeos_app::service_registry::ServiceAvailability::Both,
+            required_caps: &["ryeos.execute.service.health/status"],
+            handler: noop_handler,
+        };
+
+    fn service_item(
+        space: ItemSpace,
+        trust: ryeos_engine::contracts::TrustClass,
+        endpoint: &str,
+        caps: &[&str],
+    ) -> ryeos_engine::contracts::VerifiedItem {
+        use ryeos_engine::contracts::{
+            ItemMetadata, ItemSourceRoot, ResolvedItem, ResolvedSourceFormat, SignatureEnvelope,
+            SubjectResolutionAuthority, VerifiedItem,
+        };
+        let mut metadata = ItemMetadata::default();
+        metadata
+            .extra
+            .insert("endpoint".to_owned(), serde_json::json!(endpoint));
+        metadata
+            .extra
+            .insert("required_caps".to_owned(), serde_json::json!(caps));
+        VerifiedItem {
+            resolved: ResolvedItem {
+                canonical_ref: ryeos_engine::canonical_ref::CanonicalRef::parse(
+                    "service:health/status",
+                )
+                .unwrap(),
+                kind: "service".to_owned(),
+                source_path: "/root/.ai/services/health/status.yaml".into(),
+                source_space: space,
+                source_root: match space {
+                    ItemSpace::Project => ItemSourceRoot::Project,
+                    _ => ItemSourceRoot::Bundle {
+                        name: "core".to_owned(),
+                    },
+                },
+                resolved_from: "test".to_owned(),
+                shadowed: Vec::new(),
+                probed_absent: Vec::new(),
+                materialized_project_root: None,
+                subject_resolution_authority: SubjectResolutionAuthority::Projectless,
+                raw_content_digest: "digest".to_owned(),
+                content_hash: "digest".to_owned(),
+                signature_header: None,
+                source_format: ResolvedSourceFormat {
+                    extension: ".yaml".to_owned(),
+                    parser: "parser:ryeos/core/yaml/yaml".to_owned(),
+                    signature: SignatureEnvelope {
+                        prefix: "#".to_owned(),
+                        suffix: None,
+                        after_shebang: false,
+                    },
+                },
+                metadata,
+            },
+            signer: None,
+            trust_class: trust,
+            pinned_version: None,
+        }
+    }
+
+    fn admit(
+        kinds: &KindRegistry,
+        item: &ryeos_engine::contracts::VerifiedItem,
+    ) -> Result<AdmittedService, DispatchError> {
+        let policy = NodePolicySnapshot::from_test_records(vec![
+            ryeos_node_runtime::node_policy::default_launch_trust_record(),
+        ]);
+        admit_verified_service(item, kinds, &policy, &[HEALTH])
+    }
+
+    fn refusal_code(result: Result<AdmittedService, DispatchError>) -> String {
+        match result {
+            Err(DispatchError::LaunchPolicyForbidden { code, .. }) => code,
+            other => panic!("expected a launch-policy refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_bundle_service_matching_its_descriptor_runs_the_descriptor() {
+        use ryeos_engine::contracts::TrustClass as Verdict;
+        let (_root, kinds) = service_kinds();
+        let item = service_item(
+            ItemSpace::Bundle,
+            Verdict::Trusted,
+            "health.status",
+            &["ryeos.execute.service.health/status"],
+        );
+        let admitted = admit(&kinds, &item).unwrap();
+        assert_eq!(admitted.endpoint, "health.status");
+        assert_eq!(
+            admitted.required_caps,
+            ["ryeos.execute.service.health/status"]
+        );
+    }
+
+    #[test]
+    fn a_service_naming_another_handler_or_weaker_caps_is_refused() {
+        use ryeos_engine::contracts::TrustClass as Verdict;
+        let (_root, kinds) = service_kinds();
+        let other_handler = service_item(
+            ItemSpace::Bundle,
+            Verdict::Trusted,
+            "remote.configure",
+            &["ryeos.execute.service.health/status"],
+        );
+        assert_eq!(
+            refusal_code(admit(&kinds, &other_handler)),
+            "service_descriptor_mismatch"
+        );
+        let no_caps = service_item(ItemSpace::Bundle, Verdict::Trusted, "health.status", &[]);
+        assert_eq!(
+            refusal_code(admit(&kinds, &no_caps)),
+            "service_descriptor_mismatch"
+        );
+    }
+
+    #[test]
+    fn project_and_unsigned_services_are_refused() {
+        use ryeos_engine::contracts::TrustClass as Verdict;
+        let (_root, kinds) = service_kinds();
+        let caps = ["ryeos.execute.service.health/status"];
+        let project = service_item(ItemSpace::Project, Verdict::Trusted, "health.status", &caps);
+        assert_eq!(
+            refusal_code(admit(&kinds, &project)),
+            "launch_space_refused"
+        );
+        let unsigned = service_item(ItemSpace::Bundle, Verdict::Unsigned, "health.status", &caps);
+        assert_eq!(
+            refusal_code(admit(&kinds, &unsigned)),
+            "effective_trust_unsigned"
+        );
+    }
+
+    #[test]
+    fn a_service_without_a_compiled_handler_is_refused() {
+        use ryeos_engine::contracts::TrustClass as Verdict;
+        let (_root, kinds) = service_kinds();
+        let item = service_item(
+            ItemSpace::Bundle,
+            Verdict::Trusted,
+            "health.status",
+            &["ryeos.execute.service.health/status"],
+        );
+        let policy = NodePolicySnapshot::from_test_records(vec![
+            ryeos_node_runtime::node_policy::default_launch_trust_record(),
+        ]);
+        assert_eq!(
+            refusal_code(admit_verified_service(&item, &kinds, &policy, &[])),
+            "service_descriptor_missing"
+        );
+    }
+
     #[test]
     fn a_snapshot_without_the_section_fails_closed() {
         let snapshot = NodePolicySnapshot::from_test_records(Vec::new());
