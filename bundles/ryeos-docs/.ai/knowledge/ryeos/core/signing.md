@@ -3,7 +3,7 @@
 ---
 category: ryeos/core
 tags: [fundamentals, signing, trust, integrity, compilation]
-version: "3.0.0"
+version: "3.1.0"
 description: >
   How signing and trust work in Rye OS — Ed25519 signatures,
   content hashing, path anchoring, the trust store, the signed
@@ -50,6 +50,12 @@ The envelope prefix and suffix vary by file type:
 | YAML (`*.yaml`) | `#` | (none) |
 | Markdown (`*.md`) | `<!--` | `-->` |
 | Other | Configurable via `SignatureEnvelope` | (none) |
+
+The signed content is every byte of the file except the signature line
+itself. For scripts with a shebang (`.py`, `.sh`), the signature line
+sits on the second line, below the shebang, and the shebang is signed
+like the rest of the file: changing the interpreter line after signing
+breaks the signature.
 
 ### Concrete examples
 
@@ -99,6 +105,65 @@ Sign after creating or editing any item:
 
 Unsigned or modified items produce an error with a clear
 message telling you exactly what to fix.
+
+## What Launches
+
+Verification tells you an item's trust class. Launching decides whether
+that class may run:
+
+| Trust class | Meaning | Launches by default |
+|---|---|---|
+| `trusted_bundle` | Signed by a pinned publisher key, from an installed bundle | Yes |
+| `trusted_project` | Signed by a pinned key, from the project | Where the kind admits projects |
+| `untrusted_project` | Signed, but by a key that is not pinned | **No** — only if node policy admits it |
+| `unsigned` | No signature, or one that does not verify | **Never** |
+
+The rule holds on every path that runs something: direct tools, executor
+hops, in-process services, method dispatch (knowledge), compose, managed
+launches (directives, graphs), schedules and recovery. A refusal is a
+403 with code `effective_trust_unsigned` or `effective_trust_refused`,
+naming the class it saw and the classes admitted.
+
+**Each kind declares what it admits.** Every root-executable kind schema
+carries a signed `launch_trust` block:
+
+| Kinds | Spaces | Admitted by default | Operator may add |
+|---|---|---|---|
+| tool, directive, graph, knowledge | bundle, project | `trusted_bundle`, `trusted_project` | `untrusted_project` |
+| service, client, runtime, worker_execution | bundle | `trusted_bundle` | nothing |
+
+An item found in a space its kind does not admit is never a candidate: a
+project file named like a bundle service is ignored (and reported as
+shadowed), and the bundle service still answers. A service also runs only
+its compiled handler, under the capabilities its compiled descriptor
+requires, whatever the item names.
+
+**Admitting an unpinned signer is the operator's explicit choice.** The
+node policy section `launch_trust` (node-signed, under
+`<system>/.ai/node/policies/`) admits classes per kind, and only those the
+kind allows:
+
+```yaml
+schema: 1
+admit:
+  tool: [untrusted_project]
+```
+
+Apply it to a stopped node with `ryeos node policy-apply launch_trust
+<file>`. Admission is by class, not by signer: admitting
+`untrusted_project` for a kind admits every item of that kind signed by
+any key, in every project on the node. Withdrawing it also stops work
+admitted under it from resuming.
+
+**What this does not cover yet.** A key placed in a project's
+`.ai/config/keys/trusted/` counts as pinned for that project, so writing
+that directory is still enough to make an item `trusted_project`. Live
+runs may write `.ai/tools/` and `.ai/services/`: an item planted there is
+inert unless it is signed by a pinned key.
+
+**One name, one item.** Two files with the same name and different
+formats in one folder (for example `x.py` and `x.yaml`) are refused as
+ambiguous rather than one silently winning.
 
 ## Trust Store
 
