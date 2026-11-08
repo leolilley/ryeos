@@ -1262,6 +1262,74 @@
       },
       "observations": [],
       "ceremony_clear": false
+    },
+    {
+      "method": "thread/environment/connected",
+      "schema": "schema/EnvironmentConnectionNotification.json",
+      "event_type": "workload.environment_connected",
+      "durable": true,
+      "payload": {
+        "op": "object",
+        "fields": {
+          "observed": {
+            "op": "literal",
+            "value": true
+          }
+        }
+      },
+      "observations": [],
+      "ceremony_clear": false
+    },
+    {
+      "method": "thread/environment/disconnected",
+      "schema": "schema/EnvironmentConnectionNotification.json",
+      "event_type": "workload.environment_disconnected",
+      "durable": true,
+      "payload": {
+        "op": "object",
+        "fields": {
+          "observed": {
+            "op": "literal",
+            "value": true
+          }
+        }
+      },
+      "observations": [],
+      "ceremony_clear": false
+    },
+    {
+      "method": "thread/compacted",
+      "schema": "schema/ContextCompactedNotification.json",
+      "event_type": "workload.context_compacted",
+      "durable": true,
+      "payload": {
+        "op": "object",
+        "fields": {
+          "observed": {
+            "op": "literal",
+            "value": true
+          }
+        }
+      },
+      "observations": [],
+      "ceremony_clear": false
+    },
+    {
+      "method": "guardianWarning",
+      "schema": "schema/GuardianWarningNotification.json",
+      "event_type": "workload.guardian_warning",
+      "durable": true,
+      "payload": {
+        "op": "object",
+        "fields": {
+          "observed": {
+            "op": "literal",
+            "value": true
+          }
+        }
+      },
+      "observations": [],
+      "ceremony_clear": false
     }
   ],
   "ignored_notifications": {
@@ -1278,7 +1346,11 @@
     "serverRequest/resolved": "schema/ServerRequestResolvedNotification.json",
     "model/rerouted": "schema/ModelReroutedNotification.json",
     "model/verification": "schema/ModelVerificationNotification.json",
-    "remoteControl/status/changed": "schema/RemoteControlStatusChangedNotification.json"
+    "remoteControl/status/changed": "schema/RemoteControlStatusChangedNotification.json",
+    "turn/moderationMetadata": "schema/TurnModerationMetadataNotification.json",
+    "model/safetyBuffering/updated": "schema/ModelSafetyBufferingUpdatedNotification.json",
+    "item/commandExecution/terminalInteraction": "schema/TerminalInteractionNotification.json",
+    "thread/goal/updated": "schema/ThreadGoalUpdatedNotification.json"
   },
   "server_requests": [
     {
