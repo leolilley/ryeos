@@ -1395,6 +1395,9 @@ impl DaemonSelectedComposition {
         }))?;
         let latch = factory.service_refusal_latch();
         self.service_stop.latch = Some(Arc::clone(&latch));
+        if let Ok(ready) = factory.ready_factory() {
+            spawn_native_work_watch(ready);
+        }
         tokio::spawn(async move {
             let mut stop_requested = false;
             loop {
@@ -1410,8 +1413,9 @@ impl DaemonSelectedComposition {
                     ryeosd::request_shutdown();
                     stop_requested = true;
                 }
-                if latch.bits() & ryeos_node::native_capacity::service_refusal::FACT != 0 {
-                    record_service_refusal_inhibition(&state_dir);
+                let bits = latch.bits();
+                if bits & ryeos_node::native_capacity::service_refusal::FACT != 0 {
+                    record_service_refusal_inhibition(&state_dir, bits);
                     break;
                 }
             }
@@ -3108,11 +3112,52 @@ impl ServiceStopState {
 /// Record the restart inhibition for a fact refusal the service latch just
 /// reported. The first recorded cause is kept, so the stop's later record of
 /// the same refusal changes nothing.
-fn record_service_refusal_inhibition(state_dir: &std::path::Path) {
+/// Report how much of the incarnation's prepaid native work service SQL has
+/// spent, once at each threshold, so an incarnation that will not reach its
+/// window edge is visible long before its work runs out.
+fn spawn_native_work_watch(factory: Arc<lillux_sqlite::OriginalNativeFactory>) {
+    const THRESHOLDS_PERCENT: [u64; 3] = [50, 75, 90];
+    tokio::spawn(async move {
+        let mut reported = 0usize;
+        let mut tick = tokio::time::interval(Duration::from_secs(30));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        while reported < THRESHOLDS_PERCENT.len() {
+            tick.tick().await;
+            let Ok(snapshot) = factory.budget_snapshot() else {
+                return;
+            };
+            let service_limit = snapshot
+                .allocator_steps_limit
+                .saturating_sub(snapshot.cleanup_reserved);
+            if service_limit == 0 {
+                return;
+            }
+            let spent_percent = snapshot.allocator_steps.saturating_mul(100) / service_limit;
+            while reported < THRESHOLDS_PERCENT.len()
+                && spent_percent >= THRESHOLDS_PERCENT[reported]
+            {
+                tracing::warn!(
+                    allocator_steps = snapshot.allocator_steps,
+                    service_limit,
+                    spent_percent,
+                    "native work spent by service SQL passed a threshold of this incarnation's allowance"
+                );
+                reported += 1;
+            }
+        }
+    });
+}
+
+fn record_service_refusal_inhibition(state_dir: &std::path::Path, bits: u8) {
+    let detail = if bits & ryeos_node::native_capacity::service_refusal::WORK_EXHAUSTED != 0 {
+        "this incarnation spent its prepaid native work before its service-window edge"
+    } else {
+        "native service refused a durable admission fact"
+    };
     match lifecycle_marker::inhibit_restart(
         state_dir,
         ServiceStopOutcome::ServiceRefusalStop.reason(),
-        Some("native service refused a durable admission fact"),
+        Some(detail),
     ) {
         Ok(()) => tracing::warn!(
             "restart inhibited before the drain; the next start is refused until `ryeos node allow-restart`"
@@ -6256,7 +6301,7 @@ async fn run_periodic_recovery(state: AppState) -> Result<()> {
         let pass_result = run_periodic_recovery_pass(&state).await;
         if let Err(error) = pass_result {
             tracing::error!(
-                error = %error,
+                error = %format!("{error:#}"),
                 "periodic recovery pass failed; durable recovery state preserved and daemon remains available"
             );
         }

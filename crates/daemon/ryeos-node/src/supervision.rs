@@ -1047,6 +1047,16 @@ impl InstalledService {
         self.supervisor.request_down()
     }
 
+    /// The supervisor ends its exact service process after a graceful stop
+    /// could not. Durable down intent first, so nothing relaunches it.
+    pub fn force_down(&self) -> Result<()> {
+        let _gate = self.gate()?;
+        self.check_binding()?;
+        self.supervisor.check_available()?;
+        self.set_desired(DesiredState::Down)?;
+        self.supervisor.force_down()
+    }
+
     /// Self-inhibition by the placed controller as it exits: record the
     /// service as wanted down and keep the supervisor from restarting it,
     /// without signalling the exiting controller.

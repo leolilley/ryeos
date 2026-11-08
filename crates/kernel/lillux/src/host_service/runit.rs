@@ -177,6 +177,13 @@ impl HostServiceController for RunitService {
         // to the running process; `down` would signal it mid-exit.
         self.control("once")
     }
+    fn force_down(&self) -> Result<()> {
+        // `down` records the want; `kill` has runsv send its own child the
+        // definitive signal, so the exact service process ends and nothing
+        // relaunches it.
+        self.control("down")?;
+        self.control("kill")
+    }
     fn capture_upgrade_state(&self) -> Result<serde_json::Value> {
         Ok(serde_json::to_value(RunitUpgradeState {
             schema_version: 1,

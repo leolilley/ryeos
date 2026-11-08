@@ -165,7 +165,19 @@ pub async fn stop_with_progress(
     // shutdown coordinator as Ctrl-C.
     let target = match pre_pinned_target {
         Some(target) => target,
-        None => pin_live_daemon(env).await?,
+        None => match pin_live_daemon(env).await {
+            Ok(target) => target,
+            // A daemon that closed its control socket and then held, unable
+            // to prove its own drain, cannot be pinned. Its supervisor still
+            // owns the exact process: under `--force` it ends it, and the
+            // marker pid is never promoted into signal authority.
+            Err(error) => match &service {
+                Some(service) if supervisor_force_applies(&initial, opts.force) => {
+                    return force_through_supervisor(env, service, &opts, observer).await;
+                }
+                _ => return Err(error),
+            },
+        },
     };
     if let Some(service) = &service {
         // Pin first: native down may make the authenticated socket disappear.
@@ -229,6 +241,50 @@ pub async fn stop_with_progress(
                 bail!("daemon remained live after pidfd SIGKILL escalation");
             }
             bail!("timed out waiting for graceful shutdown; try: ryeos stop --force");
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// Whether an unpinnable daemon is the supervisor's to end: the operator
+/// asked for force, and the node reports a live-but-unusable or running
+/// process rather than one already gone.
+fn supervisor_force_applies(initial: &LifecycleStatus, force: bool) -> bool {
+    force
+        && matches!(
+            initial,
+            LifecycleStatus::Unresponsive { .. } | LifecycleStatus::Running { .. }
+        )
+}
+
+/// End a daemon its supervisor owns when its control socket is gone, then
+/// wait until the node no longer reports a live process. The result is
+/// daemon-exit evidence only; worker-tree settlement stays with the next
+/// start's recovery.
+async fn force_through_supervisor(
+    env: &LocalLifecycleEnv,
+    service: &crate::supervision::InstalledService,
+    opts: &StopOptions,
+    mut observer: Option<&mut dyn LifecycleProgressObserver>,
+) -> Result<StopReport> {
+    service.force_down()?;
+    let deadline = Instant::now() + opts.timeout;
+    loop {
+        let status = crate::status::status(env).await?;
+        observe(&mut observer, &status);
+        match status {
+            LifecycleStatus::Running { .. }
+            | LifecycleStatus::Unresponsive { .. }
+            | LifecycleStatus::Starting { .. } => {}
+            status => {
+                return Ok(StopReport {
+                    status,
+                    already_stopped: false,
+                });
+            }
+        }
+        if Instant::now() >= deadline {
+            bail!("daemon remained live after the supervisor's definitive termination");
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
@@ -367,6 +423,36 @@ mod tests {
             crate::lifecycle_marker::LaunchRoute::Direct,
         );
         (LocalLifecycleEnv::from_config(config), state)
+    }
+
+    #[test]
+    fn only_a_forced_stop_of_a_live_or_unusable_daemon_goes_through_the_supervisor() {
+        use crate::metadata::DaemonMetadata;
+        use crate::status::StaleDiagnostics;
+        let root = std::path::PathBuf::from("/tmp/example");
+        let unusable = LifecycleStatus::Unresponsive {
+            metadata: DaemonMetadata {
+                pid: Some(4242),
+                bind: None,
+                uds_path: None,
+                started_at: None,
+                version: None,
+                revision: None,
+                build_date: None,
+                app_root: root.clone(),
+            },
+            diagnostics: StaleDiagnostics {
+                message: "lifecycle control is live but unusable".into(),
+            },
+        };
+        assert!(supervisor_force_applies(&unusable, true));
+        assert!(!supervisor_force_applies(&unusable, false));
+        let stopped = LifecycleStatus::Stopped {
+            app_root: root,
+            capacity: None,
+            capacity_error: None,
+        };
+        assert!(!supervisor_force_applies(&stopped, true));
     }
 
     #[tokio::test]

@@ -29,8 +29,10 @@ pub mod service_refusal {
     pub const BOUNDARY_REFUSED: u8 = 2;
     /// The planned service-window edge was reached.
     pub const WINDOW_EDGE: u8 = 4;
+    /// The incarnation's prepaid native work was spent before its edge.
+    pub const WORK_EXHAUSTED: u8 = 8;
     /// Bits that record a fact refusal rather than the planned edge.
-    pub const FACT: u8 = PRODUCER_ABANDONED | BOUNDARY_REFUSED;
+    pub const FACT: u8 = PRODUCER_ABANDONED | BOUNDARY_REFUSED | WORK_EXHAUSTED;
 }
 
 /// Callback run on the first latch of an incarnation, and once more on the
@@ -206,7 +208,19 @@ impl OriginalNativeAdmissionAuthority for LiveNativeAuthority {
         // verification runs at operation boundaries.
         self.require_unlatched()?;
         self.require_service_edge()?;
-        self.budget.debit_steps(steps, false)
+        // Spent work is a fact of this incarnation: latch it, so the stop
+        // that follows drains without service SQL instead of asking the
+        // exhausted pool to prove its own cleanup. Contention latches nothing.
+        self.budget.debit_steps(steps, false).map_err(|error| {
+            if error
+                .chain()
+                .any(|cause| cause.is::<lillux_sqlite::NativeWorkExhausted>())
+            {
+                self.latch(service_refusal::WORK_EXHAUSTED);
+                return error;
+            }
+            self.latch_refusal(error)
+        })
     }
 
     fn refuse_service(&self) {
@@ -1099,5 +1113,30 @@ mod service_refusal_latch_tests {
         latch.latch(service_refusal::PRODUCER_ABANDONED);
         assert_eq!(wakes.load(Ordering::SeqCst), 2);
         assert_ne!(latch.bits() & service_refusal::FACT, 0);
+    }
+
+    #[test]
+    fn spent_work_is_a_fact_that_wakes_the_daemon_once() {
+        let clock = lillux::time::RetainedOccupancyClock::capture().unwrap();
+        let limit =
+            lillux::time::OccupancyLimit::new(clock.start().clone(), 3_600_000_000_000).unwrap();
+        let edge = clock
+            .service_edge(&limit, lillux::time::Duration::from_secs(60))
+            .unwrap();
+        let latch = ServiceRefusalLatch::new(edge);
+        let wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = Arc::clone(&wakes);
+        latch
+            .wake
+            .set(Box::new(move || {
+                counted.fetch_add(1, Ordering::SeqCst);
+            }))
+            .map_err(|_| "wake set")
+            .unwrap();
+        latch.latch(service_refusal::WORK_EXHAUSTED);
+        assert_eq!(wakes.load(Ordering::SeqCst), 1);
+        assert_ne!(latch.bits() & service_refusal::FACT, 0);
+        latch.latch(service_refusal::BOUNDARY_REFUSED);
+        assert_eq!(wakes.load(Ordering::SeqCst), 1);
     }
 }
