@@ -96,6 +96,12 @@ pub struct NativeIncarnationEnvelope {
     /// planned graceful stop, while service SQL is still admitted. Required:
     /// greater than zero and shorter than the service window.
     pub rollover_drain_margin_ms: u64,
+    /// Spent service work that begins the same planned graceful stop as the
+    /// time margin: when the work charged to service SQL reaches
+    /// `units.allocator_steps - units.cleanup_steps - rollover_work_margin_steps`
+    /// the incarnation rolls over instead of running its prepaid work dry.
+    /// Required: greater than zero and smaller than the service work envelope.
+    pub rollover_work_margin_steps: u64,
     /// Original cleanup steps transferred to the outside mapping owner.
     /// Bounds syscall attempts, not a promise that cleanup always succeeds.
     pub host_release_steps: u64,
@@ -204,6 +210,7 @@ pub enum NativeCapacityPolicyRefusal {
     Allowance,
     Recovery,
     RolloverMargin,
+    RolloverWorkMargin,
     Renewal,
 }
 impl std::fmt::Display for NativeCapacityPolicyRefusal {
@@ -220,6 +227,7 @@ impl std::fmt::Display for NativeCapacityPolicyRefusal {
                 Self::Allowance => "native account allowance cannot fund the incarnation",
                 Self::Recovery => "capacity recovery allowance is invalid or overflows",
                 Self::RolloverMargin => "native rollover drain margin must be positive and shorter than the service window",
+                Self::RolloverWorkMargin => "native rollover work margin must be positive and smaller than the service work envelope",
                 Self::Renewal => "native capacity renewal bound must be absent or a positive epoch count",
                 Self::Units(_) => unreachable!(),
             }),
@@ -264,6 +272,13 @@ impl NativeIncarnationEnvelope {
                 >= self.maximum_occupancy_ms - self.cleanup_occupancy_ms
         {
             return Err(NativeCapacityPolicyRefusal::RolloverMargin);
+        }
+        // Validated units guarantee cleanup_steps < allocator_steps.
+        if self.rollover_work_margin_steps == 0
+            || self.rollover_work_margin_steps
+                >= self.units.allocator_steps - self.units.cleanup_steps
+        {
+            return Err(NativeCapacityPolicyRefusal::RolloverWorkMargin);
         }
         Ok(())
     }
@@ -351,6 +366,7 @@ mod outside_cleanup_tests {
                 maximum_occupancy_ms: 7_200_000,
                 cleanup_occupancy_ms: 120_000,
                 rollover_drain_margin_ms: 90_000,
+                rollover_work_margin_steps: 2_000_000,
                 host_release_steps: 64,
                 outside_cleanup_steps: 32_768,
             },
@@ -378,6 +394,60 @@ mod outside_cleanup_tests {
         assert!(policy.validate().is_err());
         policy.incarnation.outside_cleanup_steps = u64::MAX;
         assert!(policy.validate().is_err());
+    }
+
+    #[test]
+    fn every_shipped_profile_carries_a_valid_rollover_work_margin() {
+        let profiles = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../bundles/.ai/node/init/profiles");
+        let mut checked = 0;
+        for entry in std::fs::read_dir(&profiles).expect("init profiles directory") {
+            let path = entry.expect("profile entry").path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("yaml") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("profile text");
+            let profile: serde_json::Value = serde_yaml::from_str(&text).expect("profile YAML");
+            let Some(document) = profile.pointer("/policies/native_capacity") else {
+                continue;
+            };
+            let policy: NodeNativeCapacityPolicy =
+                serde_json::from_value(document.clone()).expect("native capacity policy");
+            policy
+                .validate()
+                .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+            checked += 1;
+        }
+        assert!(
+            checked > 0,
+            "no shipped profile carries a native capacity policy"
+        );
+    }
+
+    #[test]
+    fn rollover_work_margin_is_required_and_bounded_by_the_service_work_envelope() {
+        let mut policy = policy();
+        policy.validate().unwrap();
+        let mut encoded = serde_json::to_value(&policy).unwrap();
+        encoded["incarnation"]
+            .as_object_mut()
+            .unwrap()
+            .remove("rollover_work_margin_steps");
+        assert!(serde_json::from_value::<NodeNativeCapacityPolicy>(encoded).is_err());
+        policy.incarnation.rollover_work_margin_steps = 0;
+        assert_eq!(
+            policy.validate(),
+            Err(NativeCapacityPolicyRefusal::RolloverWorkMargin)
+        );
+        let envelope =
+            policy.incarnation.units.allocator_steps - policy.incarnation.units.cleanup_steps;
+        policy.incarnation.rollover_work_margin_steps = envelope;
+        assert_eq!(
+            policy.validate(),
+            Err(NativeCapacityPolicyRefusal::RolloverWorkMargin)
+        );
+        policy.incarnation.rollover_work_margin_steps = envelope - 1;
+        policy.validate().unwrap();
     }
 
     #[test]

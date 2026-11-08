@@ -47,17 +47,17 @@ pub use account::reissue::{
 pub use account::{CapacityAccountSummary, inspect_capacity_account};
 pub use factory::{
     LiveNativeFactory, LiveNativeFactoryFailure, LiveNativeProducerPreparationFailure,
-    LiveNativeProducerPublicationFailure, LiveProducerControlCensus, ServiceRefusalLatch,
-    ServiceRefusalWake, service_refusal,
+    LiveNativeProducerPublicationFailure, LiveProducerControlCensus, PlannedMarginWake,
+    ServiceRefusalLatch, ServiceRefusalWake, service_refusal,
 };
 #[cfg(target_os = "linux")]
 pub use reservation::OperatorLockCustody;
-pub use reservation::RolloverClaim;
 pub use reservation::{
     FinalizedLiveNative, LiveNativeCapacityReservation, LiveNativeCapacityReservationFailure,
     SettledLiveNative, quote_operator_lock_handoff, required_cleanup_occupancy,
     required_rollover_drain_margin,
 };
+pub use reservation::{PlannedMargin, RolloverClaim, work_margin_reached};
 
 const MAX_COMPLETION_BYTES: u64 = 256 * 1024;
 

@@ -1387,10 +1387,8 @@ impl DaemonSelectedComposition {
             latched.notify.notify_one();
         }))?;
         let margin = Arc::clone(&signal);
-        factory.arm_service_window_timers(Box::new(move || {
-            margin
-                .margin_reached
-                .store(true, std::sync::atomic::Ordering::SeqCst);
+        factory.arm_service_window_timers(Box::new(move |kind| {
+            margin.note_margin(kind);
             margin.notify.notify_one();
         }))?;
         let latch = factory.service_refusal_latch();
@@ -1405,9 +1403,7 @@ impl DaemonSelectedComposition {
                 if !stop_requested {
                     tracing::warn!(
                         latched = signal.latched.load(std::sync::atomic::Ordering::SeqCst),
-                        margin_reached = signal
-                            .margin_reached
-                            .load(std::sync::atomic::Ordering::SeqCst),
+                        margin_reached = signal.margin().map(|kind| kind.name()),
                         "native service latch or planned window requests an orderly stop"
                     );
                     ryeosd::request_shutdown();
@@ -3055,8 +3051,41 @@ impl ServiceStopOutcome {
 #[derive(Default)]
 struct ServiceStopSignal {
     latched: std::sync::atomic::AtomicBool,
-    margin_reached: std::sync::atomic::AtomicBool,
+    // 0 until a planned margin is reached, then the first margin's code.
+    margin_reached: std::sync::atomic::AtomicU8,
     notify: tokio::sync::Notify,
+}
+
+impl ServiceStopSignal {
+    const MARGIN_TIME: u8 = 1;
+    const MARGIN_WORK: u8 = 2;
+
+    /// Record the planned margin that was reached; the first one is kept.
+    fn note_margin(&self, kind: ryeos_node::native_capacity::PlannedMargin) {
+        use ryeos_node::native_capacity::PlannedMargin;
+        let code = match kind {
+            PlannedMargin::Time => Self::MARGIN_TIME,
+            PlannedMargin::Work => Self::MARGIN_WORK,
+        };
+        let _ = self.margin_reached.compare_exchange(
+            0,
+            code,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        );
+    }
+
+    fn margin(&self) -> Option<ryeos_node::native_capacity::PlannedMargin> {
+        use ryeos_node::native_capacity::PlannedMargin;
+        match self
+            .margin_reached
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            Self::MARGIN_TIME => Some(PlannedMargin::Time),
+            Self::MARGIN_WORK => Some(PlannedMargin::Work),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -3082,12 +3111,7 @@ impl ServiceStopState {
         let bits = self.latch.as_ref().map_or(0, |latch| latch.observe());
         if bits & service_refusal::FACT != 0 {
             Some(ServiceStopOutcome::ServiceRefusalStop)
-        } else if bits & service_refusal::WINDOW_EDGE != 0
-            || self
-                .signal
-                .margin_reached
-                .load(std::sync::atomic::Ordering::SeqCst)
-        {
+        } else if bits & service_refusal::WINDOW_EDGE != 0 || self.signal.margin().is_some() {
             Some(ServiceStopOutcome::ServiceWindowRollover)
         } else {
             None
@@ -3100,12 +3124,20 @@ impl ServiceStopState {
     fn rollover_claim(&self) -> Option<ryeos_node::native_capacity::RolloverClaim> {
         use ryeos_node::native_capacity::service_refusal;
         let bits = self.latch.as_ref().map_or(0, |latch| latch.observe());
+        // A stop on the planned edge alone is the time margin's rollover.
+        let margin = self
+            .signal
+            .margin()
+            .unwrap_or(ryeos_node::native_capacity::PlannedMargin::Time);
         (bits & service_refusal::FACT == 0
             && matches!(
                 self.outcome(),
                 Some(ServiceStopOutcome::ServiceWindowRollover)
             ))
-        .then_some(ryeos_node::native_capacity::RolloverClaim { latch_bits: bits })
+        .then_some(ryeos_node::native_capacity::RolloverClaim {
+            latch_bits: bits,
+            margin,
+        })
     }
 }
 
@@ -5684,6 +5716,11 @@ async fn run(
         Some(ServiceStopOutcome::ServiceWindowRollover) => {
             tracing::warn!(
                 shutdown_outcome = "service_window_rollover",
+                planned_margin = composition
+                    .service_stop
+                    .signal
+                    .margin()
+                    .map_or("edge", |kind| kind.name()),
                 "native service window rolled over; orderly stop complete and the next incarnation may start"
             );
         }

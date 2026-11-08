@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-28T04:00:46Z:3307157c07004e34a9e680a229995476f31f7926625f1736d0f740e22dc3c00f:EUmHttQ1a7rSBlALEbu2ZJD5QKDtt1CE58cg5Gk3Y3BPZh/KLsTHPu6sgKujx0YSljxgovOMx4J/udPxqH3CCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-08T06:55:06Z:e792fd327ee1f4c0fc8ce089c178abc2d5fcefe7571ab2f18b5f84004ae883fc:40iCcdhm57GyozG3Iq4rUg/2pAdq/zspUPcZlZjDMyOOKZJ9PoUPd5wRHjmkQTdmW0SsYZ1OqpYaQKavIObhDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Core profile: the substrate alone.
 schema: 1
 exact_bundles:
@@ -31,6 +31,9 @@ policies:
       maximum_occupancy_ms: 7200000
       cleanup_occupancy_ms: 120000
       rollover_drain_margin_ms: 90000
+      # Spent work that begins the same planned rollover: when service work
+      # reaches allocator_steps - cleanup_steps - this, the node stops orderly.
+      rollover_work_margin_steps: 2000000
       # Finite syscall-attempt allowance; no cleanup-success guarantee.
       host_release_steps: 64
       # Explicit share of cleanup_steps; never duplicates the paid envelope.

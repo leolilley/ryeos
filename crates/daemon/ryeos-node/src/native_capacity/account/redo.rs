@@ -567,6 +567,7 @@ pub(super) mod controls {
                 maximum_occupancy_ms: 60_000,
                 cleanup_occupancy_ms: 10_000,
                 rollover_drain_margin_ms: 5_000,
+                rollover_work_margin_steps: 1_000,
                 host_release_steps: 64,
                 outside_cleanup_steps: 1024,
             },

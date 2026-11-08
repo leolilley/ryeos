@@ -834,6 +834,7 @@ mod controls {
                     maximum_occupancy_ms: 3,
                     cleanup_occupancy_ms: 1,
                     rollover_drain_margin_ms: 1,
+                    rollover_work_margin_steps: 1,
                     host_release_steps: 2,
                     outside_cleanup_steps: 1,
                 },
