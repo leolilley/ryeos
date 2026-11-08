@@ -3227,8 +3227,9 @@ impl StructuredWorkload {
                     .find(|rule| rule.method == method)
                     .cloned()
                     .ok_or_else(|| {
-                        anyhow!("unknown structured-session server request `{method}`")
-                            .context(RefusalClass::UnknownServerRequest)
+                        anyhow::Error::new(RefusalClass::UnknownServerRequest).context(format!(
+                            "unknown structured-session server request `{method}`"
+                        ))
                     })?;
                 self.validate_schema(&rule.schema, message.get("params").unwrap_or(&Value::Null))?;
                 if self.server_requests.len() >= MAX_PENDING_SERVER_REQUESTS {
@@ -3330,8 +3331,9 @@ impl StructuredWorkload {
                     .find(|rule| rule.method == method)
                     .cloned()
                     .ok_or_else(|| {
-                        anyhow!("unknown structured-session notification `{method}`")
-                            .context(RefusalClass::UnknownNotification)
+                        anyhow::Error::new(RefusalClass::UnknownNotification).context(format!(
+                            "unknown structured-session notification `{method}`"
+                        ))
                     })?;
                 self.validate_schema(&rule.schema, message.get("params").unwrap_or(&Value::Null))?;
                 if !rule.durable {
@@ -4187,10 +4189,11 @@ fn validate_schema_from_map(
         .map_err(|error| anyhow!("compile admitted JSON schema `{identity}`: {error}"))?;
     if validator.validate(value).is_err() {
         let instance_digest = ryeos_state::objects::canonical_value_digest(value)?;
-        return Err(anyhow!(
+        // The class rides beneath the message, so the refusal still reads as
+        // what was refused while the class stays reachable by downcast.
+        return Err(anyhow::Error::new(RefusalClass::SchemaViolation).context(format!(
             "structured-session value failed schema `{identity}` (instance digest {instance_digest})"
-        )
-        .context(RefusalClass::SchemaViolation));
+        )));
     }
     Ok(())
 }
@@ -5916,7 +5919,12 @@ server.serve_forever()
                 "params":{"body":"credential-bearing-payload"}
             }))
             .unwrap_err();
-        assert!(error.to_string().contains("unknown_notification"));
+        assert!(
+            error
+                .to_string()
+                .contains("unknown structured-session notification `turn/moderationMetadata`")
+        );
+        assert!(error.downcast_ref::<RefusalClass>().is_some());
         let (batch, _, _) = events
             .lock()
             .unwrap()
