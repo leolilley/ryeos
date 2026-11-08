@@ -405,10 +405,8 @@ fn resolve_item_full_inner(
         }
 
         let kind_dir = root.ai_root.join(&kind_schema.directory);
-        for ext_spec in &kind_schema.extensions {
-            let path = kind_dir.join(format!("{}{}", ref_.bare_id, ext_spec.ext));
-            tracing::trace!(candidate = %path.display(), label = %root.label, "checking candidate path");
-            let is_file = match (root.space, project_authority) {
+        let candidate_exists = |path: &Path| -> Result<bool, EngineError> {
+            match (root.space, project_authority) {
                 (ItemSpace::Project, Some((project_root, content))) => {
                     if root.ai_root != project_root.join(crate::AI_DIR) {
                         return Err(EngineError::Internal(format!(
@@ -424,21 +422,23 @@ fn resolve_item_full_inner(
                             project_root.display()
                         ))
                     })?;
-                    !content.validates_absence(relative)?
+                    Ok(!content.validates_absence(relative)?)
                 }
-                _ => match lillux::inspect_optional_entry_no_follow(&path) {
-                    Ok(Some(lillux::secure_fs::PinnedEntryType::Regular)) => true,
-                    Ok(None) => false,
-                    Ok(Some(_)) => false,
-                    Err(error) => {
-                        return Err(EngineError::ItemResolutionUnavailable {
-                            canonical_ref: ref_.to_string(),
-                            path,
-                            source: std::io::Error::other(error.to_string()),
-                        });
-                    }
+                _ => match lillux::inspect_optional_entry_no_follow(path) {
+                    Ok(Some(lillux::secure_fs::PinnedEntryType::Regular)) => Ok(true),
+                    Ok(None) | Ok(Some(_)) => Ok(false),
+                    Err(error) => Err(EngineError::ItemResolutionUnavailable {
+                        canonical_ref: ref_.to_string(),
+                        path: path.to_path_buf(),
+                        source: std::io::Error::other(error.to_string()),
+                    }),
                 },
-            };
+            }
+        };
+        for (ext_index, ext_spec) in kind_schema.extensions.iter().enumerate() {
+            let path = kind_dir.join(format!("{}{}", ref_.bare_id, ext_spec.ext));
+            tracing::trace!(candidate = %path.display(), label = %root.label, "checking candidate path");
+            let is_file = candidate_exists(&path)?;
             if is_file && !space_admitted {
                 tracing::warn!(
                     item_ref = %ref_,
@@ -460,6 +460,34 @@ fn resolve_item_full_inner(
             }
             if is_file {
                 if winner.is_none() {
+                    // One name, one item: a second format of the same name in
+                    // the winning folder is refused rather than silently
+                    // ranked, and each later format's absence is a dependency
+                    // so a collision appearing later is never served from a
+                    // stale resolution.
+                    let relative = |extension: &str| {
+                        PathBuf::from(format!(
+                            "{}/{}/{}{}",
+                            crate::AI_DIR,
+                            kind_schema.directory,
+                            ref_.bare_id,
+                            extension
+                        ))
+                    };
+                    for later in &kind_schema.extensions[ext_index + 1..] {
+                        let sibling = kind_dir.join(format!("{}{}", ref_.bare_id, later.ext));
+                        if candidate_exists(&sibling)? {
+                            return Err(EngineError::AmbiguousResolution {
+                                canonical_ref: ref_.to_string(),
+                                space: format!("{} ({})", root.space.as_str(), root.label),
+                                candidates: vec![relative(&ext_spec.ext), relative(&later.ext)],
+                            });
+                        }
+                        probed_absent.push(ProbedAbsence {
+                            space: root.space,
+                            path: sibling,
+                        });
+                    }
                     winner = Some((
                         path,
                         root.space,
@@ -475,12 +503,11 @@ fn resolve_item_full_inner(
                         path,
                     });
                 }
-                break; // Only match one extension per root (first ext wins)
+                break; // A root supplies at most one candidate.
             } else if winner.is_none() {
                 // Absent at a precedence >= the (not-yet-found) winner: a
                 // negative dependency. If this exact path (or an earlier
-                // sibling) appears, it becomes the new winner. Absences after
-                // the winner is found cannot change the winner, so skip them.
+                // sibling) appears, it becomes the new winner.
                 probed_absent.push(ProbedAbsence {
                     space: root.space,
                     path,
@@ -1031,6 +1058,71 @@ mod tests {
         ));
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn two_formats_of_one_name_in_one_folder_are_refused() {
+        let root = tempdir();
+        let schema = make_kind_schema(
+            "tools",
+            vec![(".py", "python/tool-header"), (".yaml", "yaml")],
+        );
+        write_item(&root, "tools", "demo/x", ".py", "# python");
+        write_item(&root, "tools", "demo/x", ".yaml", "executor_id: run");
+        let roots = ResolutionRoots::from_flat(None, vec![root.clone()]);
+        let item = CanonicalRef::parse("tool:demo/x").unwrap();
+        match resolve_item_full(&roots, &schema, &item) {
+            Err(EngineError::AmbiguousResolution { candidates, .. }) => {
+                assert_eq!(
+                    candidates,
+                    [
+                        PathBuf::from(".ai/tools/demo/x.py"),
+                        PathBuf::from(".ai/tools/demo/x.yaml")
+                    ]
+                );
+            }
+            other => panic!("expected an ambiguous-format refusal, got {other:?}"),
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_single_format_records_its_later_siblings_as_absences() {
+        let root = tempdir();
+        let schema = make_kind_schema(
+            "tools",
+            vec![(".py", "python/tool-header"), (".yaml", "yaml")],
+        );
+        write_item(&root, "tools", "demo/x", ".py", "# python");
+        let roots = ResolutionRoots::from_flat(None, vec![root.clone()]);
+        let item = CanonicalRef::parse("tool:demo/x").unwrap();
+        let result = resolve_item_full(&roots, &schema, &item).unwrap();
+        assert!(
+            result
+                .probed_absent
+                .iter()
+                .any(|absence| absence.path.ends_with("tools/demo/x.yaml"))
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn the_same_name_across_roots_is_a_shadow_not_a_collision() {
+        let project = tempdir();
+        let bundle = tempdir();
+        let schema = make_kind_schema(
+            "tools",
+            vec![(".py", "python/tool-header"), (".yaml", "yaml")],
+        );
+        write_item(&project, "tools", "demo/x", ".yaml", "executor_id: run");
+        write_item(&bundle, "tools", "demo/x", ".py", "# python");
+        let roots = ResolutionRoots::from_flat(Some(project.clone()), vec![bundle.clone()]);
+        let item = CanonicalRef::parse("tool:demo/x").unwrap();
+        let result = resolve_item_full(&roots, &schema, &item).unwrap();
+        assert_eq!(result.winner_space, ItemSpace::Project);
+        assert_eq!(result.shadowed.len(), 1);
+        fs::remove_dir_all(project).unwrap();
+        fs::remove_dir_all(bundle).unwrap();
     }
 
     fn bundle_only_schema() -> KindSchema {
