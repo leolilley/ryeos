@@ -13,6 +13,9 @@ use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 use ryeos_client_runtime::error::RuntimeError;
+use ryeos_client_runtime::history::{
+    HistoryClaim, HistorySink, LiveHistory, SeatCoordinate, read_history,
+};
 use ryeos_client_runtime::platform::{
     Auth, ByteSource, Clock, Elapsed, EstablishMode, EstablishedSession, MemoryStore, Platform,
     ReplacementMode, Spawner, TaskHandle, Transport,
@@ -528,4 +531,77 @@ pub fn poll_once<F: Future>(future: F) -> Option<F::Output> {
         Poll::Ready(value) => Some(value),
         Poll::Pending => None,
     }
+}
+
+// ---------------------------------------------------------------------------
+// A completed history stream
+// ---------------------------------------------------------------------------
+
+struct DiscardSink;
+
+impl HistorySink for DiscardSink {
+    fn stage_events(&mut self, _records: &[serde_json::Value]) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn stage_transfer_proof(&mut self, _proof: &serde_json::Value) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn stage_cancellation_proof(&mut self, _proof: &serde_json::Value) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+/// A seat-history stream proved to its completion fence (an initialization
+/// row and an active producer row on seat `P`/`R`/`T`) that stays open for
+/// live events. Stands in for the live reader a claim hands over.
+pub fn open_history(platform: &Rc<FakePlatform>) -> LiveHistory<ChunkSource> {
+    let (zero, a, b) = ("0".repeat(64), "a".repeat(64), "b".repeat(64));
+    let operation = "11111111-1111-8111-8111-111111111111";
+    let frame = |event: &str, data: String| format!("event: {event}\ndata: {data}\n\n");
+    let begin = frame(
+        "ui_seat.replay.begin.v1",
+        r#"{"schema":1,"presentation_id":"P","chain_root_id":"R","thread_id":"T"}"#.to_owned(),
+    );
+    let initialization = format!(
+        r#"{{"event_hash":"{a}","thread_id":"T","chain_root_id":"R","thread_seq":2,"prev_thread_event_hash":"{zero}","chain_seq":3,"event_type":"ui_seat.presentation_initialized.v1","payload":{{}}}}"#
+    );
+    let producer = format!(
+        r#"{{"event_hash":"{b}","thread_id":"T","chain_root_id":"R","thread_seq":3,"prev_thread_event_hash":"{a}","chain_seq":4,"event_type":"ui_seat.producer.v3","payload":{{"schema_version":"ryeos.ui.seat.producer.v3","operation_id":"{operation}","producer_incarnation":"{b}","next_engine_seq":0,"state":"active","request":{{"action":"claim","operation_id":"{operation}","presentation_id":"P","chain_root_id":"R","thread_id":"T"}}}}}}"#
+    );
+    let events = frame(
+        "ui_seat.replay.events.v1",
+        format!(r#"{{"schema":1,"events":[{initialization},{producer}]}}"#),
+    );
+    let complete = frame(
+        "ui_seat.replay.complete.v1",
+        format!(r#"{{"schema":1,"tip_hash":"{b}","thread_seq":3,"event_count":2}}"#),
+    );
+    let queue = chunk_queue(
+        [begin, events, complete]
+            .into_iter()
+            .map(|text| Chunk::Bytes(text.into_bytes())),
+    );
+    platform.transport.push_history(Ok((queue, true)));
+    let coordinate = SeatCoordinate {
+        presentation_id: "P".to_owned(),
+        chain_root_id: "R".to_owned(),
+        thread_id: "T".to_owned(),
+    };
+    let claim = HistoryClaim {
+        operation_id: operation.to_owned(),
+        producer_incarnation: b,
+        next_engine_seq: 0,
+        request: None,
+    };
+    platform
+        .sim()
+        .run(read_history(
+            &platform.transport,
+            &coordinate,
+            &claim,
+            &mut DiscardSink,
+        ))
+        .expect("the scripted history completes")
 }

@@ -477,3 +477,203 @@ impl<P: Platform> SeatShared<P> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hex(character: char) -> String {
+        character.to_string().repeat(64)
+    }
+
+    fn testimony() -> VerifiedAppend {
+        VerifiedAppend {
+            operation_id: "operation-1".to_owned(),
+            producer_incarnation: hex('a'),
+            first_engine_seq: 4,
+            last_engine_seq: 5,
+            event_count: 2,
+            payload_digest: hex('d'),
+            event_hash: hex('e'),
+            thread_seq: 9,
+        }
+    }
+
+    /// The receipt that agrees with [`testimony`].
+    fn receipt() -> AckSummary {
+        AckSummary {
+            operation_id: "operation-1".to_owned(),
+            producer_incarnation: hex('a'),
+            first_engine_seq: 4,
+            last_engine_seq: 5,
+            event_count: 2,
+            payload_digest: hex('d'),
+            receipt_event_hash: hex('e'),
+            receipt_thread_seq: 9,
+        }
+    }
+
+    fn pending() -> PendingAppend {
+        PendingAppend {
+            record: RetainedPendingAppend {
+                schema_version: "version".to_owned(),
+                session_id: "session".to_owned(),
+                presentation_id: "presentation".to_owned(),
+                chain_root_id: "chain".to_owned(),
+                thread_id: "thread".to_owned(),
+                producer_incarnation: hex('a'),
+                operation_id: "operation-1".to_owned(),
+                first_engine_seq: "4".to_owned(),
+                last_engine_seq: "5".to_owned(),
+                event_count: 2,
+                payload_digest: hex('d'),
+                encoded_request: "{}".to_owned(),
+            },
+            events: Vec::new(),
+        }
+    }
+
+    /// Testimony for an operation nobody sent or acknowledged is refused and
+    /// leaves no memory behind.
+    #[test]
+    fn verified_testimony_for_an_unknown_operation_is_refused() {
+        let mut delivery = SeatDelivery::default();
+        assert!(!delivery.accept_verified(&testimony()));
+        assert!(!delivery.contradicts_verified(&AckSummary {
+            receipt_thread_seq: 99,
+            ..receipt()
+        }));
+    }
+
+    /// Testimony must match the pending append on every identity field.
+    #[test]
+    fn verified_testimony_must_match_the_pending_append_exactly() {
+        let deviations: [(&str, fn(&mut VerifiedAppend)); 6] = [
+            ("operation", |t| t.operation_id = "operation-2".to_owned()),
+            ("producer", |t| t.producer_incarnation = hex('b')),
+            ("first sequence", |t| t.first_engine_seq = 3),
+            ("last sequence", |t| t.last_engine_seq = 6),
+            ("event count", |t| t.event_count = 3),
+            ("digest", |t| t.payload_digest = hex('c')),
+        ];
+        for (field, deviate) in deviations {
+            let mut delivery = SeatDelivery {
+                pending: Some(pending()),
+                ..SeatDelivery::default()
+            };
+            let mut other = testimony();
+            deviate(&mut other);
+            assert!(!delivery.accept_verified(&other), "{field}");
+        }
+        let mut delivery = SeatDelivery {
+            pending: Some(pending()),
+            ..SeatDelivery::default()
+        };
+        assert!(delivery.accept_verified(&testimony()));
+    }
+
+    /// Testimony about an acknowledged operation is accepted only when its
+    /// event hash and thread position agree with the receipt.
+    #[test]
+    fn verified_testimony_must_agree_with_the_acknowledged_receipt() {
+        let mut delivery = SeatDelivery::default();
+        delivery.remember_receipt(receipt());
+        assert!(delivery.accept_verified(&testimony()));
+
+        let mut other_hash = testimony();
+        other_hash.event_hash = hex('f');
+        assert!(!delivery.accept_verified(&other_hash));
+        let mut other_position = testimony();
+        other_position.thread_seq = 10;
+        assert!(!delivery.accept_verified(&other_position));
+
+        // A pending append with the same identity does not launder a
+        // contradicted receipt.
+        delivery.pending = Some(pending());
+        assert!(!delivery.accept_verified(&other_hash));
+        assert!(!delivery.accept_verified(&other_position));
+    }
+
+    /// Once testimony was accepted for an operation, an acknowledgement that
+    /// disagrees with it is a contradiction; one that agrees, or that names
+    /// another operation, is not.
+    #[test]
+    fn an_acknowledgement_must_agree_with_earlier_testimony() {
+        let mut delivery = SeatDelivery {
+            pending: Some(pending()),
+            ..SeatDelivery::default()
+        };
+        assert!(delivery.accept_verified(&testimony()));
+
+        assert!(!delivery.contradicts_verified(&receipt()));
+        assert!(delivery.contradicts_verified(&AckSummary {
+            receipt_event_hash: hex('f'),
+            ..receipt()
+        }));
+        assert!(delivery.contradicts_verified(&AckSummary {
+            receipt_thread_seq: 10,
+            ..receipt()
+        }));
+        assert!(!delivery.contradicts_verified(&AckSummary {
+            operation_id: "operation-2".to_owned(),
+            receipt_thread_seq: 10,
+            ..receipt()
+        }));
+    }
+
+    /// A fresh producer starts with no remembered receipts or testimony.
+    #[test]
+    fn a_new_producer_forgets_receipts_and_testimony() {
+        let mut delivery = SeatDelivery {
+            pending: Some(pending()),
+            ..SeatDelivery::default()
+        };
+        delivery.remember_receipt(receipt());
+        assert!(delivery.accept_verified(&testimony()));
+
+        delivery.reset_for(
+            SeatCoordinate {
+                presentation_id: "presentation".to_owned(),
+                chain_root_id: "chain".to_owned(),
+                thread_id: "thread".to_owned(),
+            },
+            "session",
+            UiBindingAttachmentCoordinate {
+                binding_attachment_id: "root".to_owned(),
+                binding_generation: 1,
+                binding_digest: "digest".to_owned(),
+            },
+            "key".to_owned(),
+            0,
+            1_000,
+        );
+        delivery.pending = None;
+        assert!(!delivery.accept_verified(&testimony()));
+        assert!(!delivery.contradicts_verified(&AckSummary {
+            receipt_thread_seq: 10,
+            ..receipt()
+        }));
+    }
+
+    /// Only the most recent receipts are remembered.
+    #[test]
+    fn remembered_receipts_are_bounded() {
+        let mut delivery = SeatDelivery::default();
+        for index in 0..=REMEMBERED_RECEIPTS {
+            delivery.remember_receipt(AckSummary {
+                operation_id: format!("operation-{index}"),
+                ..receipt()
+            });
+        }
+        let testimony_for = |index: usize| VerifiedAppend {
+            operation_id: format!("operation-{index}"),
+            ..testimony()
+        };
+        assert!(
+            !delivery.accept_verified(&testimony_for(0)),
+            "oldest evicted"
+        );
+        assert!(delivery.accept_verified(&testimony_for(1)));
+        assert!(delivery.accept_verified(&testimony_for(REMEMBERED_RECEIPTS)));
+    }
+}
