@@ -446,3 +446,70 @@ fn now_unix() -> u64 {
         .map(|d| d.as_secs())
         .unwrap_or(0)
 }
+
+fn token_file_paths(
+    state: &ryeos_app::state::AppState,
+    token: &str,
+) -> (std::path::PathBuf, std::path::PathBuf) {
+    let hash = lillux::cas::sha256_hex(token.as_bytes());
+    let toml = admission_token_path(&state.config.app_root, &hash);
+    let claimed = toml.with_extension("claimed");
+    (toml, claimed)
+}
+
+#[tokio::test]
+async fn admission_claim_failed_grant_write_leaves_token_claimable() {
+    let (tmp, _state_owner, mut state) = test_state::build_test_state_with_hosted_policy(600);
+    let token = "test-admission-token-write-failure";
+    write_admission_token_file(&state, token, PUSH_SCOPES, None, 600);
+    let claimant = lillux::crypto::SigningKey::generate(&mut rand::rngs::OsRng);
+
+    // A regular file where the grant directory should be makes the grant
+    // write fail after the token has been consumed.
+    let blocker = tmp.path().join("auth-blocker");
+    std::fs::write(&blocker, b"not a directory").unwrap();
+    let mut broken = (*state.config).clone();
+    broken.authorized_keys_dir = blocker;
+    state.config = Arc::new(broken);
+
+    let (toml, claimed) = token_file_paths(&state, token);
+    assert!(toml.is_file());
+    let req = signed_claim_request(&state, token, &claimant, PUSH_SCOPES, Some("dev-machine"));
+    let result = admission_claim::handle(req, Arc::new(state)).await;
+
+    assert!(
+        matches!(result, Err(HandlerError::Internal(_))),
+        "{result:?}"
+    );
+    assert!(toml.is_file(), "token must be claimable again");
+    assert!(!claimed.exists(), "consumed marker must be rolled back");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn admission_claim_concurrent_claims_with_different_keys_admit_exactly_one() {
+    let (_tmp, _state_owner, state) = test_state::build_test_state_with_hosted_policy(600);
+    let token = "test-admission-token-race";
+    write_admission_token_file(&state, token, PUSH_SCOPES, None, 600);
+    let first_key = lillux::crypto::SigningKey::generate(&mut rand::rngs::OsRng);
+    let second_key = lillux::crypto::SigningKey::generate(&mut rand::rngs::OsRng);
+    let first = signed_claim_request(&state, token, &first_key, PUSH_SCOPES, Some("one"));
+    let second = signed_claim_request(&state, token, &second_key, PUSH_SCOPES, Some("two"));
+    let state = Arc::new(state);
+
+    let a = tokio::spawn(admission_claim::handle(first, state.clone()));
+    let b = tokio::spawn(admission_claim::handle(second, state.clone()));
+    let results = [a.await.unwrap(), b.await.unwrap()];
+
+    let admitted = results.iter().filter(|r| r.is_ok()).count();
+    let forbidden = results
+        .iter()
+        .filter(|r| matches!(r, Err(HandlerError::Forbidden(_))))
+        .count();
+    assert_eq!((admitted, forbidden), (1, 1), "{results:?}");
+    let grants = std::fs::read_dir(&state.config.authorized_keys_dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|e| e.path().extension().is_some_and(|x| x == "toml"))
+        .count();
+    assert_eq!(grants, 1);
+}

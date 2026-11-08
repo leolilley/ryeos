@@ -157,7 +157,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
 
     let created_at = lillux::time::iso8601_now();
     let auth_dir = state.config.authorized_keys_dir.clone();
-    ryeos_node_runtime::identity::write_authorized_remote_node_key_toml(
+    let write_result = ryeos_node_runtime::identity::write_authorized_remote_node_key_toml(
         &auth_dir,
         &fingerprint,
         &key_b64,
@@ -170,8 +170,15 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
         &created_at,
         &req.origin_site_id,
         state.identity.signing_key(),
-    )
-    .map_err(|e| {
+    );
+    // The token rename above is the single-winner point and must stay first.
+    // If the grant was not written, give the token back so the claim can be
+    // retried instead of burning the one-time token.
+    if write_result.is_err() {
+        restore_token_file(&token_path);
+    }
+    write_result
+        .map_err(|e| {
         if matches!(
             e.downcast_ref::<ryeos_node_runtime::identity::AuthorizedKeyCreateError>(),
             Some(ryeos_node_runtime::identity::AuthorizedKeyCreateError::AlreadyExists)
@@ -225,6 +232,20 @@ fn consume_token_file(path: &Path) -> HandlerResult<()> {
             HandlerError::Internal(format!("failed to consume admission token: {e}"))
         }
     })
+}
+
+/// Undo `consume_token_file` after a failed grant write. A failed rename-back
+/// is logged with the token path; the caller still returns the write error.
+fn restore_token_file(path: &Path) {
+    let claimed = path.with_extension("claimed");
+    if let Err(error) = std::fs::rename(&claimed, path) {
+        tracing::error!(
+            token_path = %path.display(),
+            claimed_path = %claimed.display(),
+            %error,
+            "admission grant write failed and the consumed token could not be restored"
+        );
+    }
 }
 
 fn hosted_admission_token_ttl_secs(state: &AppState) -> HandlerResult<u64> {
