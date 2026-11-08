@@ -440,6 +440,144 @@ pub(crate) trait ExternalPlacementBackend: Send + Sync + std::fmt::Debug {
     }
 }
 
+/// An installed successor generation speaking for a placement admitted under
+/// a generation that is no longer installed. It observes and terminates that
+/// placement through the successor, handing it the placement's contract with
+/// the successor's own artifacts in place of the admitted ones; every other
+/// operation keeps the trait's refusal, so it can never allocate, activate or
+/// relay.
+#[derive(Debug)]
+struct SuccessorCleanupBackend {
+    successor: Arc<dyn ExternalPlacementBackend>,
+    admitted_artifact_hash: String,
+}
+
+impl SuccessorCleanupBackend {
+    fn successor_contract(
+        &self,
+        contract: &ExternalPlacementBackendContract,
+    ) -> Result<ExternalPlacementBackendContract> {
+        ensure!(
+            contract.backend == self.successor.backend_id()
+                && contract.backend_artifact_hash == self.admitted_artifact_hash
+                && contract.settings_schema_digest == self.successor.settings_schema_digest(),
+            "successor cleanup was handed another placement's contract"
+        );
+        let (supervisor_hash, supervisor_bytes) = self.successor.supervisor_artifact();
+        let (launcher_hash, launcher_bytes) = self.successor.launcher_artifact();
+        let mut successor = contract.clone();
+        successor.backend_artifact_hash = self.successor.artifact_hash().to_owned();
+        successor.backend_artifact_bytes = self.successor.artifact_bytes();
+        successor.supervisor_artifact_hash = supervisor_hash.to_owned();
+        successor.supervisor_artifact_bytes = supervisor_bytes;
+        successor.launcher_artifact_hash = launcher_hash.to_owned();
+        successor.launcher_artifact_bytes = launcher_bytes;
+        Ok(successor)
+    }
+}
+
+impl ExternalPlacementBackend for SuccessorCleanupBackend {
+    fn backend_id(&self) -> &str {
+        self.successor.backend_id()
+    }
+
+    fn artifact_hash(&self) -> &str {
+        self.successor.artifact_hash()
+    }
+
+    fn artifact_bytes(&self) -> u64 {
+        self.successor.artifact_bytes()
+    }
+
+    fn supervisor_artifact(&self) -> (&str, u64) {
+        self.successor.supervisor_artifact()
+    }
+
+    fn launcher_artifact(&self) -> (&str, u64) {
+        self.successor.launcher_artifact()
+    }
+
+    fn settings_schema_digest(&self) -> &str {
+        self.successor.settings_schema_digest()
+    }
+
+    fn lifecycle_capabilities(&self) -> BTreeSet<LifecycleCapability> {
+        self.successor.lifecycle_capabilities()
+    }
+
+    fn qualify_offline(
+        &self,
+        contract: &ExternalPlacementBackendContract,
+        credential: &PlacementCredential,
+    ) -> Result<()> {
+        self.successor
+            .qualify_offline(&self.successor_contract(contract)?, credential)
+    }
+
+    fn prepare_guest_package(
+        &self,
+        _contract: &ExternalPlacementBackendContract,
+        _reservation: &ExternalAllocationReservation,
+        _occurrence: &ExternalAllocationOccurrence,
+        _bootstrap: &ryeos_state::external_execution::transport::ExternalSupervisorBootstrap,
+        _guest_inputs: &ryeos_external_execution::guest_inputs::ExternalGuestInputAuthority,
+        _activation_request_digest: &str,
+        _parent: &lillux::PinnedDirectory,
+        _deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<SupervisorGuestPackage> {
+        bail!("a successor generation only observes and terminates an older placement")
+    }
+
+    fn reconcile_allocation(
+        &self,
+        contract: &ExternalPlacementBackendContract,
+        credential: &PlacementCredential,
+        reservation: &ExternalAllocationReservation,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<ExternalLifecycleObservation<ExternalAllocationResolution>> {
+        self.successor.reconcile_allocation(
+            &self.successor_contract(contract)?,
+            credential,
+            reservation,
+            deadline,
+        )
+    }
+
+    fn terminate(
+        &self,
+        contract: &ExternalPlacementBackendContract,
+        credential: &PlacementCredential,
+        reservation: &ExternalAllocationReservation,
+        occurrence: &ExternalAllocationOccurrence,
+        intent: &ExternalTerminationIntent,
+    ) -> Result<ExternalTerminationResolution> {
+        self.successor.terminate(
+            &self.successor_contract(contract)?,
+            credential,
+            reservation,
+            occurrence,
+            intent,
+        )
+    }
+
+    fn reconcile_termination(
+        &self,
+        contract: &ExternalPlacementBackendContract,
+        credential: &PlacementCredential,
+        reservation: &ExternalAllocationReservation,
+        occurrence: &ExternalAllocationOccurrence,
+        intent: &ExternalTerminationIntent,
+    ) -> Result<ExternalTerminationResolution> {
+        self.successor.reconcile_termination(
+            &self.successor_contract(contract)?,
+            credential,
+            reservation,
+            occurrence,
+            intent,
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ExternalAllocationResolution {
     Bound {
@@ -1663,8 +1801,15 @@ impl ExternalPlacementBackendRegistry {
             }
         };
         // Retained cleanup must remain possible when startup capability is
-        // absent. Individual reconciliation claims are checked at settlement.
+        // absent, and after the generation it was admitted under has been
+        // replaced. Individual reconciliation claims are checked at settlement.
+        let backend = if cleanup_only {
+            self.cleanup_generation(contract)?
+        } else {
+            self.installed(contract)?
+        };
         self.qualify_dependencies(
+            backend,
             contract,
             credential,
             if cleanup_only {
@@ -1681,13 +1826,13 @@ impl ExternalPlacementBackendRegistry {
     /// program compilation. This grants neither contact nor guest execution.
     fn qualify_dependencies(
         &self,
+        backend: Arc<dyn ExternalPlacementBackend>,
         contract: &ExternalPlacementBackendContract,
         credential: &PlacementCredential,
         mut required: BTreeSet<LifecycleCapability>,
         require_activation: bool,
         runtime_basis: RuntimeAdmissionBasis,
     ) -> Result<Arc<dyn ExternalPlacementBackend>> {
-        let backend = self.installed(contract)?;
         ensure!(
             credential.backend() == contract.backend && credential.account() == contract.account,
             "protected placement credential has the wrong canonical account"
@@ -1765,6 +1910,55 @@ impl ExternalPlacementBackendRegistry {
             ))
             .cloned()
             .context("exact signed external placement backend generation is not installed")
+    }
+
+    /// The generation that may clean up a placement admitted under
+    /// `contract`. The exact signed generation when it is installed; otherwise
+    /// the one installed generation of the same backend, provided it reads the
+    /// same settings schema, held to observation and termination only. A
+    /// cleanup operation can only withdraw: a successor that misreads the
+    /// placement fails to settle it and cannot settle it wrongly, and it holds
+    /// no authority the installed generation does not already hold for new
+    /// placements. Every installed generation speaks the one lifecycle
+    /// protocol the node admits.
+    fn cleanup_generation(
+        &self,
+        contract: &ExternalPlacementBackendContract,
+    ) -> Result<Arc<dyn ExternalPlacementBackend>> {
+        if let Ok(exact) = self.installed(contract) {
+            return Ok(exact);
+        }
+        let mut generations = self
+            .backends
+            .iter()
+            .filter(|((id, _), _)| *id == contract.backend)
+            .map(|(_, backend)| backend);
+        let successor = generations.next().with_context(|| {
+            format!(
+                "exact signed external placement backend generation is not installed, and no generation of `{}` is",
+                contract.backend
+            )
+        })?;
+        ensure!(
+            generations.next().is_none(),
+            "external lifecycle backend `{}` has more than one installed generation; none may speak for an older placement",
+            contract.backend
+        );
+        ensure!(
+            successor.settings_schema_digest() == contract.settings_schema_digest,
+            "the installed generation of `{}` reads a different settings schema than the placement was admitted under",
+            contract.backend
+        );
+        tracing::warn!(
+            backend = %contract.backend,
+            admitted_generation = %contract.backend_artifact_hash,
+            cleanup_generation = %successor.artifact_hash(),
+            "external placement cleanup uses the installed successor generation"
+        );
+        Ok(Arc::new(SuccessorCleanupBackend {
+            successor: Arc::clone(successor),
+            admitted_artifact_hash: contract.backend_artifact_hash.clone(),
+        }))
     }
 
     fn contact_gate(&self, placement: &str) -> Result<Arc<AtomicBool>> {
@@ -2473,6 +2667,7 @@ fn preflight_external_direct_dependencies(
     qualify_runtime(&retained)?;
     let credential = load_credential(binding)?;
     backends.qualify_dependencies(
+        backends.installed(&contract)?,
         &contract,
         &credential,
         BTreeSet::new(),
@@ -11793,7 +11988,7 @@ mod tests {
 
     fn prepared_fixture(
         store: Arc<crate::state_store::StateStore>,
-        backend: Arc<FaultBackend>,
+        backend: Arc<dyn ExternalPlacementBackend>,
         reservation: &ExternalAllocationReservation,
         binding: &RetainedExternalExecutionBinding,
         gate: Arc<AtomicBool>,
@@ -12865,6 +13060,234 @@ mod tests {
             )
             .unwrap();
         }
+    }
+
+    /// A lifecycle generation that accepts only contracts naming its own
+    /// artifact, and records the artifact each termination was handed.
+    #[derive(Debug)]
+    struct GenerationBackend {
+        artifact: String,
+        settings_schema: String,
+        terminated_with: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl GenerationBackend {
+        fn new(artifact: char, settings_schema: &str) -> Self {
+            Self {
+                artifact: artifact.to_string().repeat(64),
+                settings_schema: settings_schema.to_owned(),
+                terminated_with: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl ExternalPlacementBackend for GenerationBackend {
+        fn backend_id(&self) -> &str {
+            "fixture"
+        }
+
+        fn artifact_hash(&self) -> &str {
+            &self.artifact
+        }
+
+        fn artifact_bytes(&self) -> u64 {
+            4096
+        }
+
+        fn supervisor_artifact(&self) -> (&str, u64) {
+            (
+                "1111111111111111111111111111111111111111111111111111111111111111",
+                4096,
+            )
+        }
+
+        fn launcher_artifact(&self) -> (&str, u64) {
+            (
+                "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                4096,
+            )
+        }
+
+        fn settings_schema_digest(&self) -> &str {
+            &self.settings_schema
+        }
+
+        fn lifecycle_capabilities(&self) -> BTreeSet<LifecycleCapability> {
+            all_lifecycle_capabilities()
+        }
+
+        fn qualify_offline(
+            &self,
+            contract: &ExternalPlacementBackendContract,
+            _credential: &PlacementCredential,
+        ) -> Result<()> {
+            ensure!(
+                contract.backend_artifact_hash == self.artifact
+                    && contract.settings_schema_digest == self.settings_schema,
+                "generation was handed another generation's contract"
+            );
+            Ok(())
+        }
+
+        fn prepare_guest_package(
+            &self,
+            _contract: &ExternalPlacementBackendContract,
+            _reservation: &ExternalAllocationReservation,
+            _occurrence: &ExternalAllocationOccurrence,
+            _bootstrap: &ryeos_state::external_execution::transport::ExternalSupervisorBootstrap,
+            _guest_inputs: &ryeos_external_execution::guest_inputs::ExternalGuestInputAuthority,
+            _activation_request_digest: &str,
+            _parent: &lillux::PinnedDirectory,
+            _deadline: lillux::time::MonotonicDeadline,
+        ) -> Result<SupervisorGuestPackage> {
+            bail!("generation fixture prepares no guest package")
+        }
+
+        fn allocate(
+            &self,
+            _contract: &ExternalPlacementBackendContract,
+            _credential: &PlacementCredential,
+            _reservation: &ExternalAllocationReservation,
+            _deadline: lillux::time::MonotonicDeadline,
+        ) -> Result<ExternalLifecycleObservation<ExternalAllocationResolution>> {
+            panic!("a cleanup generation was asked to allocate")
+        }
+
+        fn terminate(
+            &self,
+            contract: &ExternalPlacementBackendContract,
+            credential: &PlacementCredential,
+            _reservation: &ExternalAllocationReservation,
+            _occurrence: &ExternalAllocationOccurrence,
+            _intent: &ExternalTerminationIntent,
+        ) -> Result<ExternalTerminationResolution> {
+            self.qualify_offline(contract, credential)?;
+            self.terminated_with
+                .lock()
+                .unwrap()
+                .push(contract.backend_artifact_hash.clone());
+            Ok(ExternalTerminationResolution::Terminal {
+                provider_observation_digest: "2".repeat(64),
+            })
+        }
+    }
+
+    #[test]
+    fn a_successor_generation_terminates_an_older_placement_and_starts_nothing() {
+        let (_store_owner, store, reservation, binding, lifetime, _) = placement_store_fixture();
+        let contract = binding.backend_contract();
+        let credential = credential(&InstalledExternalExecutionBinding::test_fixture());
+        let admitted = Arc::new(FaultBackend {
+            artifact: contract.backend_artifact_hash.clone(),
+            ..FaultBackend::new()
+        });
+        let gate = Arc::new(AtomicBool::new(false));
+        let prepared = |backend: Arc<dyn ExternalPlacementBackend>| {
+            prepared_fixture(
+                store.clone(),
+                backend,
+                &reservation,
+                &binding,
+                gate.clone(),
+                lifetime.clone(),
+            )
+        };
+        assert!(
+            advance_prepared_external_start(prepared(admitted.clone()), test_startup_deadline())
+                .is_err()
+        );
+        assert_eq!(
+            advance_prepared_external_start(prepared(admitted), test_startup_deadline()).unwrap(),
+            ExternalCandidateStartProgress::OccurrenceBound,
+        );
+
+        // The admitting generation is replaced: only its successor remains.
+        let successor = Arc::new(GenerationBackend::new(
+            'e',
+            &contract.settings_schema_digest,
+        ));
+        let registry =
+            ExternalPlacementBackendRegistry::from_backends(vec![successor.clone()]).unwrap();
+        let admitted_program = AdmittedExternalExecutionProgram::StructuredSession(program());
+        assert!(
+            registry
+                .qualify(&contract, &credential, &admitted_program)
+                .is_err(),
+            "a successor generation cannot start work under an older binding"
+        );
+        let cleanup = registry
+            .qualify_for_cleanup(&contract, &credential, &admitted_program)
+            .unwrap();
+        assert!(
+            cleanup
+                .allocate(
+                    &contract,
+                    &credential,
+                    &reservation,
+                    test_startup_deadline()
+                )
+                .is_err()
+        );
+
+        let ExternalPlacementContactDecision::Reconcile(reconciliation) =
+            prepared(cleanup).claim().unwrap()
+        else {
+            panic!("bound occurrence lost cleanup authority")
+        };
+        let settled = reconciliation.terminate_or_reconcile().unwrap();
+        assert_eq!(settled.phase, ExternalAllocationPhase::Terminated);
+        assert_eq!(
+            *successor.terminated_with.lock().unwrap(),
+            vec!["e".repeat(64)],
+            "the successor terminates under its own artifact identity"
+        );
+    }
+
+    #[test]
+    fn only_one_successor_reading_the_same_settings_schema_may_clean_up() {
+        let binding = InstalledExternalExecutionBinding::test_fixture();
+        let contract = binding.backend_contract();
+        let credential = credential(&binding);
+        let program = AdmittedExternalExecutionProgram::StructuredSession(program());
+        let schema = contract.settings_schema_digest.clone();
+
+        let other_schema = ExternalPlacementBackendRegistry::from_backends(vec![Arc::new(
+            GenerationBackend::new('e', &"4".repeat(64)),
+        )])
+        .unwrap();
+        assert!(
+            other_schema
+                .qualify_for_cleanup(&contract, &credential, &program)
+                .is_err()
+        );
+
+        let ambiguous = ExternalPlacementBackendRegistry::from_backends(vec![
+            Arc::new(GenerationBackend::new('e', &schema)),
+            Arc::new(GenerationBackend::new('f', &schema)),
+        ])
+        .unwrap();
+        assert!(
+            ambiguous
+                .qualify_for_cleanup(&contract, &credential, &program)
+                .is_err()
+        );
+
+        let exact = ExternalPlacementBackendRegistry::from_backends(vec![
+            Arc::new(FaultBackend {
+                artifact: contract.backend_artifact_hash.clone(),
+                ..FaultBackend::new()
+            }),
+            Arc::new(GenerationBackend::new('e', &schema)),
+        ])
+        .unwrap();
+        assert_eq!(
+            exact
+                .qualify_for_cleanup(&contract, &credential, &program)
+                .unwrap()
+                .artifact_hash(),
+            contract.backend_artifact_hash,
+            "the exact admitted generation cleans up whenever it is installed"
+        );
     }
 
     #[test]
