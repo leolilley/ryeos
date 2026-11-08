@@ -390,9 +390,18 @@ fn resolve_item_full_inner(
     let mut searched_spaces = Vec::new();
 
     for root in &roots.ordered {
-        let space_label = root.space.as_str().to_owned();
-        if !searched_spaces.contains(&space_label) {
-            searched_spaces.push(space_label);
+        // A kind that names the spaces allowed to supply it never takes a
+        // candidate from another space. A file there is reported, so a
+        // planted item is visible, but it can neither win nor shadow.
+        let space_admitted = kind_schema
+            .launch_trust
+            .as_ref()
+            .is_none_or(|launch_trust| launch_trust.admits_space(root.space));
+        if space_admitted {
+            let space_label = root.space.as_str().to_owned();
+            if !searched_spaces.contains(&space_label) {
+                searched_spaces.push(space_label);
+            }
         }
 
         let kind_dir = root.ai_root.join(&kind_schema.directory);
@@ -430,6 +439,25 @@ fn resolve_item_full_inner(
                     }
                 },
             };
+            if is_file && !space_admitted {
+                tracing::warn!(
+                    item_ref = %ref_,
+                    ignored = %path.display(),
+                    space = root.space.as_str(),
+                    "ignoring a candidate from a space this kind does not admit"
+                );
+                shadowed.push(ShadowedCandidate {
+                    label: root.label.clone(),
+                    space: root.space,
+                    path,
+                });
+                break;
+            }
+            if !space_admitted {
+                // Nothing in this space can change the winner, so its
+                // absences are not dependencies of the resolution.
+                continue;
+            }
             if is_file {
                 if winner.is_none() {
                     winner = Some((
@@ -632,6 +660,14 @@ fn enumerate_kind_refs_inner(
     let mut seen = HashSet::new();
     let mut refs = Vec::new();
     for root in &roots.ordered {
+        // Enumeration lists only what resolution could select.
+        if kind_schema
+            .launch_trust
+            .as_ref()
+            .is_some_and(|launch_trust| !launch_trust.admits_space(root.space))
+        {
+            continue;
+        }
         let kind_dir = root.ai_root.join(&kind_schema.directory);
         let mut relative_files = Vec::new();
         match (root.space, project_authority) {
@@ -995,6 +1031,79 @@ mod tests {
         ));
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    fn bundle_only_schema() -> KindSchema {
+        let mut schema = make_kind_schema("services", vec![(".yaml", "yaml")]);
+        schema.launch_trust = Some(crate::kind_registry::launch_trust::LaunchTrustPolicy {
+            allowed_spaces: vec![ItemSpace::Bundle],
+            allowed_trust: vec![crate::resolution::TrustClass::TrustedBundle],
+            operator_may_admit: Vec::new(),
+        });
+        schema
+    }
+
+    #[test]
+    fn a_project_file_never_wins_for_a_bundle_only_kind_and_is_reported() {
+        let project = tempdir();
+        let bundle = tempdir();
+        write_item(
+            &project,
+            "services",
+            "health/status",
+            ".yaml",
+            "endpoint: remote.list",
+        );
+        write_item(
+            &bundle,
+            "services",
+            "health/status",
+            ".yaml",
+            "endpoint: health.status",
+        );
+        let roots = ResolutionRoots::from_flat(Some(project.clone()), vec![bundle.clone()]);
+        let schema = bundle_only_schema();
+        let item = CanonicalRef::parse("service:health/status").unwrap();
+
+        let result = resolve_item_full(&roots, &schema, &item).unwrap();
+        assert_eq!(result.winner_space, ItemSpace::Bundle);
+        assert!(result.winner_path.starts_with(&bundle));
+        assert_eq!(result.shadowed.len(), 1);
+        assert_eq!(result.shadowed[0].space, ItemSpace::Project);
+        assert!(
+            result
+                .probed_absent
+                .iter()
+                .all(|absence| absence.space != ItemSpace::Project)
+        );
+        assert_eq!(enumerate_kind_refs(&roots, &schema, "service").len(), 1);
+
+        fs::remove_dir_all(project).unwrap();
+        fs::remove_dir_all(bundle).unwrap();
+    }
+
+    #[test]
+    fn a_project_only_item_of_a_bundle_only_kind_is_not_found() {
+        let project = tempdir();
+        let bundle = tempdir();
+        write_item(
+            &project,
+            "services",
+            "planted/x",
+            ".yaml",
+            "endpoint: remote.configure",
+        );
+        let roots = ResolutionRoots::from_flat(Some(project.clone()), vec![bundle.clone()]);
+        let schema = bundle_only_schema();
+        let item = CanonicalRef::parse("service:planted/x").unwrap();
+        assert!(matches!(
+            resolve_item_full(&roots, &schema, &item),
+            Err(EngineError::ItemNotFound { .. })
+        ));
+        assert!(enumerate_kind_refs(&roots, &schema, "service").is_empty());
+
+        fs::remove_dir_all(project).unwrap();
+        fs::remove_dir_all(bundle).unwrap();
     }
 
     fn registered_pair() -> (PathBuf, PathBuf, Vec<RegisteredBundleRoot>) {
