@@ -437,6 +437,9 @@ impl DispatchError {
             Self::PreBirthAdmissionRefused(error) => return error.http_status(),
             _ => {}
         }
+        if source_owner_trust_refusal(self).is_some() {
+            return StatusCode::FORBIDDEN;
+        }
         match self {
             Self::InvalidRef(..)
             | Self::AliasCycle { .. }
@@ -523,6 +526,13 @@ impl DispatchError {
             Self::PreBirthAdmissionRefused(error) => return error.code(),
             _ => {}
         }
+        if let Some(refusal) = source_owner_trust_refusal(self) {
+            return if refusal.unsigned {
+                "effective_trust_unsigned"
+            } else {
+                "effective_trust_refused"
+            };
+        }
         match self {
             Self::InvalidRef(..) => "invalid_ref",
             Self::NotRootExecutable { .. } => "not_root_executable",
@@ -597,6 +607,20 @@ impl DispatchError {
             Self::LaunchPreparationFailed { classification, .. } => classification == "unavailable",
             _ => false,
         }
+    }
+}
+
+/// A source-owner signature refusal raised below the dispatch layer travels
+/// as an internal error's cause; it is still a launch-policy refusal and is
+/// reported as one.
+fn source_owner_trust_refusal(
+    error: &DispatchError,
+) -> Option<&ryeos_app::source_closure_admission::SourceOwnerTrustRefused> {
+    match error {
+        DispatchError::Internal(error) => error.chain().find_map(|cause| {
+            cause.downcast_ref::<ryeos_app::source_closure_admission::SourceOwnerTrustRefused>()
+        }),
+        _ => None,
     }
 }
 
@@ -874,5 +898,29 @@ mod tests {
         assert_eq!(details.errors[0].path, "launch.mode");
         assert_eq!(details.errors[0].code, "enum_mismatch");
         assert_eq!(details.warnings[0].code, "unexpected_field");
+    }
+
+    #[test]
+    fn a_source_owner_trust_refusal_is_a_launch_policy_refusal() {
+        let unsigned = DispatchError::Internal(
+            anyhow::Error::new(
+                ryeos_app::source_closure_admission::SourceOwnerTrustRefused {
+                    unsigned: true,
+                    detail: "source file `x.py` is unsigned".to_owned(),
+                },
+            )
+            .context("verify owner-signed files"),
+        );
+        assert_eq!(unsigned.http_status(), StatusCode::FORBIDDEN);
+        assert_eq!(unsigned.code(), "effective_trust_unsigned");
+        let unpinned = DispatchError::Internal(anyhow::Error::new(
+            ryeos_app::source_closure_admission::SourceOwnerTrustRefused {
+                unsigned: false,
+                detail: "source file `x.py` has no current owner testimony".to_owned(),
+            },
+        ));
+        assert_eq!(unpinned.code(), "effective_trust_refused");
+        let other = DispatchError::Internal(anyhow::anyhow!("disk full"));
+        assert_eq!(other.http_status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 }
