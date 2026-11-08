@@ -604,11 +604,14 @@ pub(crate) enum ExternalSupervisorActivationResolution {
     NotStarted {
         provider_observation_digest: String,
     },
-    /// First activation may carry the adapter's report of the guest owner.
+    /// First activation may carry the adapter's report of the guest owner,
+    /// or, when a step failed before the owner reported, the step and a
+    /// bounded reason.
     Pending {
         guest_owner: Option<
             ryeos_external_execution_contract::guest_owner_report::GuestOwnerActivationReport,
         >,
+        contact_failure: Option<ryeos_external_execution_contract::UncertaintyReason>,
     },
 }
 
@@ -8747,7 +8750,10 @@ impl ExternalPlacementReconciliation {
         if !owns_contact
             && !matches!(
                 resolution,
-                ExternalSupervisorActivationResolution::Pending { guest_owner: None }
+                ExternalSupervisorActivationResolution::Pending {
+                    guest_owner: None,
+                    ..
+                }
             )
         {
             require_lifecycle_capability(
@@ -8756,6 +8762,7 @@ impl ExternalPlacementReconciliation {
             )?;
         }
         let mut guest_owner = None;
+        let mut contact_failure = None;
         if let Some((activation_state, provider_observation_digest)) = match resolution {
             ExternalSupervisorActivationResolution::Started {
                 provider_observation_digest,
@@ -8765,8 +8772,10 @@ impl ExternalPlacementReconciliation {
             } => Some(("not_started", provider_observation_digest)),
             ExternalSupervisorActivationResolution::Pending {
                 guest_owner: report,
+                contact_failure: failure,
             } => {
                 guest_owner = report;
+                contact_failure = failure;
                 None
             }
         } {
@@ -8787,6 +8796,17 @@ impl ExternalPlacementReconciliation {
                 },
             )?;
         } else {
+            if let Some(failure) = &contact_failure {
+                // The adapter's own account of the step that failed before
+                // the guest owner reported: fixed words, logged, never acted on.
+                tracing::warn!(
+                    placement,
+                    class = failure.class.as_str(),
+                    detail = %failure.detail,
+                    deadline_exceeded,
+                    "external activation first contact failed before the guest owner reported"
+                );
+            }
             if let Some(report) = &guest_owner {
                 let outcome = serde_json::to_value(report)
                     .ok()
@@ -11222,6 +11242,7 @@ mod tests {
                 return Ok(ExternalLifecycleObservation {
                     value: ExternalSupervisorActivationResolution::Pending {
                         guest_owner: Some(report),
+                        contact_failure: None,
                     },
                     deadline_exceeded: false,
                 });
@@ -11247,9 +11268,10 @@ mod tests {
                     "not_started" => ExternalSupervisorActivationResolution::NotStarted {
                         provider_observation_digest: "4".repeat(64),
                     },
-                    "pending" => {
-                        ExternalSupervisorActivationResolution::Pending { guest_owner: None }
-                    }
+                    "pending" => ExternalSupervisorActivationResolution::Pending {
+                        guest_owner: None,
+                        contact_failure: None,
+                    },
                     _ => bail!("fixture selected an unknown activation resolution"),
                 },
                 deadline_exceeded: false,

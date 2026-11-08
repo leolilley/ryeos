@@ -327,6 +327,7 @@ impl ExternalPlacementBackend for GuestRelayLoopbackBackend {
         Ok(ExternalLifecycleObservation {
             value: ExternalSupervisorActivationResolution::Pending {
                 guest_owner: Some(report),
+                contact_failure: None,
             },
             deadline_exceeded: false,
         })
@@ -367,7 +368,10 @@ impl ExternalPlacementBackend for GuestRelayLoopbackBackend {
             });
         }
         Ok(ExternalLifecycleObservation {
-            value: ExternalSupervisorActivationResolution::Pending { guest_owner: None },
+            value: ExternalSupervisorActivationResolution::Pending {
+                guest_owner: None,
+                contact_failure: None,
+            },
             deadline_exceeded: false,
         })
     }

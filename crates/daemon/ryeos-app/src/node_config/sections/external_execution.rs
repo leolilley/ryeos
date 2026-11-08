@@ -456,7 +456,7 @@ impl BindingDocument {
         );
         ensure!(
             (1..=60).contains(&self.contact_timeout_seconds)
-                && (1..=300).contains(&self.observation_timeout_seconds)
+                && (1..=900).contains(&self.observation_timeout_seconds)
                 && (1..=600).contains(&self.cleanup_timeout_seconds),
             "placement binding lifecycle deadlines exceed bounds"
         );
@@ -1832,10 +1832,7 @@ mod workload_binding_tests {
         for (field, bad) in [
             ("acceptance_hash", "not-a-hash"),
             ("acceptance_policy_ref", "tool:test/snapshot-acceptance"),
-            (
-                "acceptance_policy_ref",
-                "config:test/snapshot-acceptance@1",
-            ),
+            ("acceptance_policy_ref", "config:test/snapshot-acceptance@1"),
         ] {
             let mut wrong = qualified.clone();
             let remote = wrong
