@@ -90,14 +90,16 @@ pub fn session_events_path(session_id: &str) -> Result<String, RuntimeError> {
     Ok(format!("{SESSION_EVENTS_PREFIX}{session_id}"))
 }
 
-/// Live tail of one chain root and its child threads.
+/// Live tail of one chain root and its child threads. Frames are
+/// `{ "event_type": ..., "payload": <persisted event record> }`; the route is
+/// authenticated by the browser session, like the session hint stream.
 pub fn chain_events_stream_path(chain_root_id: &str) -> Result<String, RuntimeError> {
     if !valid_segment(chain_root_id) {
         return Err(RuntimeError::BindingRequest(
             "chain root id is invalid".to_owned(),
         ));
     }
-    Ok(format!("/chains/{chain_root_id}/events/stream"))
+    Ok(format!("/ui/events/chain/{chain_root_id}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -427,7 +429,10 @@ mod tests {
             "/ui/events/session/abc-1"
         );
         assert!(session_events_path("a/b").is_err());
-        assert!(chain_events_stream_path("T-1").is_ok());
+        assert_eq!(
+            chain_events_stream_path("T-1").unwrap(),
+            "/ui/events/chain/T-1"
+        );
         assert!(chain_events_stream_path("a/../b").is_err());
     }
 

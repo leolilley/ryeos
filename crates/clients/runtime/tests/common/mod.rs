@@ -7,6 +7,8 @@
 
 #![allow(dead_code)]
 
+pub mod sim;
+
 use std::path::PathBuf;
 
 use ryeos_client_runtime::RuntimeError;

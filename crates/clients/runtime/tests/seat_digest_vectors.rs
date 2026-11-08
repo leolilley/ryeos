@@ -24,8 +24,7 @@ fn seat_digest_vectors() {
     let mut checked = 0;
     for case in load("seat-digest") {
         let name = name_of(&case);
-        if let Some(reason) = skip_reason(name) {
-            eprintln!("skip {name}: {reason}");
+        if skip_reason(name).is_some() {
             continue;
         }
         match typed(&case["input"]) {
@@ -48,8 +47,7 @@ fn seat_digest_vectors() {
                     "{name}: refused but a digest was expected"
                 );
             }
-            Err(Untyped::Unrepresentable(why)) => {
-                eprintln!("skip {name}: {why} has no serde_json::Value form");
+            Err(Untyped::Unrepresentable(_)) => {
                 continue;
             }
         }

@@ -1,19 +1,38 @@
 //! The shared client runtime.
 //!
-//! One implementation of the seat protocol's client side: exact JSON, request
-//! construction, the ordered effect inbox and the retained pending append,
-//! written against small platform traits so the terminal, the browser and a
-//! native window drive the same code.
+//! One implementation of the seat protocol's client side, written against
+//! small platform traits so the terminal, the browser and a native window
+//! drive the same code:
 //!
-//! This slice holds the parts that need no async runtime and no platform
-//! binding. Platform bindings are selected by target architecture, never by
-//! cargo feature.
+//! * [`codec`], [`api`], [`error`], [`retention`]: exact JSON, request
+//!   construction, the single error type and the retained pending append;
+//! * [`sse`], [`history`], [`replay`]: the event-stream parser, seat history
+//!   consumption and the private replay candidate over the shared core;
+//! * [`admission`], [`seat`]: which seat a session names, and the seat state
+//!   machine (claim, append, touch, relinquish, reproof, replacement);
+//! * [`streams`], [`effects`], [`inbox`], [`recovery`]: hints and tails, effect
+//!   execution, the ordered inbox, and what to offer when a seat is lost;
+//! * [`runtime`]: [`ClientRuntime`], the object a host drives.
+//!
+//! Platform bindings (HTTP, timers, storage) are selected by target
+//! architecture, never by cargo feature; this crate itself touches no clock,
+//! thread or I/O except through [`platform`].
 
+pub mod admission;
 pub mod api;
 pub mod codec;
+pub mod effects;
 pub mod error;
+pub mod history;
 pub mod inbox;
 pub mod platform;
+pub mod recovery;
+pub mod replay;
 pub mod retention;
+pub mod runtime;
+pub mod seat;
+pub mod sse;
+pub mod streams;
 
 pub use error::RuntimeError;
+pub use runtime::ClientRuntime;

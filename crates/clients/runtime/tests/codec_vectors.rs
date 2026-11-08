@@ -55,13 +55,11 @@ fn json_exactness_vectors() {
     let mut checked = 0;
     for case in load("json-exactness") {
         let name = name_of(&case);
-        if let Some(reason) = skip_reason(name) {
-            eprintln!("skip {name}: {reason}");
+        if skip_reason(name).is_some() {
             continue;
         }
         let function = case["function"].as_str().expect("function");
         let Some(outcome) = run(function, &case["input"]) else {
-            eprintln!("skip {name}: input has no serde_json::Value form");
             continue;
         };
         let expected = &case["expected"];

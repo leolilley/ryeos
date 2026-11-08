@@ -165,6 +165,14 @@ pub trait Store {
     fn set(&self, key: &str, value: &str) -> Result<(), RuntimeError>;
 
     fn remove(&self, key: &str);
+
+    /// True when the host keeps keys where the session id (a bearer
+    /// credential) must not appear, such as file names. The runtime then names
+    /// the pending-append record by the session id's SHA-256 instead of the
+    /// session id.
+    fn hashes_session_keys(&self) -> bool {
+        false
+    }
 }
 
 /// In-memory [`Store`] for tests and for hosts with no durable storage.

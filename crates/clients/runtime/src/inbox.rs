@@ -68,8 +68,15 @@ pub enum InboxPayload {
     Hint(Value),
     /// The hint kinds seen in one coalescing window, first seen first.
     HintFlush(Vec<String>),
-    /// A frame of the focused chain tail for one thread.
-    ThreadTail { thread_id: String, frame: Value },
+    /// A decoded frame of the chain tail opened for `chain_root_id`, before
+    /// the focus predicate.
+    ThreadTail { chain_root_id: String, frame: Value },
+    /// A typed UI intent or untyped message from the session stream.
+    DaemonEvent(Value),
+    /// The session stream came back after a gap; every hint of the gap is lost.
+    Resubscribed,
+    /// The result of a seat task (append, touch, live history, reproof).
+    Task(TaskResult),
     TransportState {
         channel: RyeOsTransportChannel,
         freshness: RyeOsTransportFreshness,
@@ -88,16 +95,56 @@ impl InboxPayload {
     pub fn stream(&self) -> Stream {
         match self {
             Self::EffectResults(_) => Stream::Effects,
-            Self::Hint(_) | Self::HintFlush(_) => Stream::Hints,
+            Self::Hint(_) | Self::HintFlush(_) | Self::DaemonEvent(_) | Self::Resubscribed => {
+                Stream::Hints
+            }
             Self::ThreadTail { .. } => Stream::FocusedTail,
             Self::TransportState { channel, .. } => match channel {
                 RyeOsTransportChannel::Hints => Stream::Hints,
                 RyeOsTransportChannel::FocusedTail => Stream::FocusedTail,
                 RyeOsTransportChannel::Session => Stream::Seat,
             },
-            Self::SeatAck(_) | Self::ProducerReady(_) => Stream::Seat,
+            Self::SeatAck(_) | Self::ProducerReady(_) | Self::Task(_) => Stream::Seat,
             Self::Wake => Stream::Control,
         }
+    }
+}
+
+/// A type-erased value handed from a task to the reducer exactly once. It is
+/// cloneable and comparable by identity so the message stays an ordinary
+/// value; only the first `take` of the right type yields the contents.
+#[derive(Clone)]
+pub struct TaskResult(Rc<RefCell<Option<Box<dyn std::any::Any>>>>);
+
+impl TaskResult {
+    /// Wrap `value` for delivery.
+    pub fn new<T: std::any::Any>(value: T) -> Self {
+        Self(Rc::new(RefCell::new(Some(Box::new(value)))))
+    }
+
+    /// Take the contents if they are a `T`; otherwise leave them in place.
+    pub fn take<T: std::any::Any>(&self) -> Option<T> {
+        let mut slot = self.0.borrow_mut();
+        let boxed = slot.take()?;
+        match boxed.downcast::<T>() {
+            Ok(value) => Some(*value),
+            Err(other) => {
+                *slot = Some(other);
+                None
+            }
+        }
+    }
+}
+
+impl std::fmt::Debug for TaskResult {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("TaskResult")
+    }
+}
+
+impl PartialEq for TaskResult {
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.0, &other.0)
     }
 }
 
@@ -272,6 +319,11 @@ impl Inbox {
             (self.wake)();
         }
         queued
+    }
+
+    /// True when `tag` is the tag `stream` currently accepts.
+    pub fn accepts(&self, stream: Stream, tag: &StreamTag) -> bool {
+        self.state.borrow().is_current(stream, tag)
     }
 
     /// Take every queued message whose tag is still current, oldest first.
