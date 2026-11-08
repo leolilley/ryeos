@@ -218,6 +218,11 @@ impl ExternalQualificationLocalWorker {
                 .cap_execution_deadline(lillux::time::MonotonicDeadline::after(
                     lillux::time::Duration::from_millis(u64::try_from(remaining_ms)?),
                 ));
+        // The pool notices an ended Worker on its own one-second tick, so the
+        // attachment check that follows it needs no finer cadence than that.
+        const ATTACHMENT_CHECK_INTERVAL: lillux::time::Duration =
+            lillux::time::Duration::from_secs(1);
+        let mut attachment_checked = lillux::time::MonotonicTimer::start();
         loop {
             ensure!(
                 !deadline.has_elapsed(),
@@ -245,10 +250,13 @@ impl ExternalQualificationLocalWorker {
             }
             // The turn is still pending, so a Worker that has ended can never
             // finish it: fail now rather than at the unrelated deadline.
-            ryeos_app::external_qualification_local::ensure_qualification_worker_attached(
-                state,
-                self.ready.placement(),
-            )?;
+            if attachment_checked.elapsed() >= ATTACHMENT_CHECK_INTERVAL {
+                ryeos_app::external_qualification_local::ensure_qualification_worker_attached(
+                    state,
+                    self.ready.placement(),
+                )?;
+                attachment_checked = lillux::time::MonotonicTimer::start();
+            }
             lillux::time::sleep(
                 deadline
                     .remaining()
