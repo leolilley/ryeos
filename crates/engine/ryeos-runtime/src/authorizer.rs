@@ -1,7 +1,7 @@
 //! Unified capability authorization.
 //!
 //! Single evaluator for all capability checks across the system.
-//! One implementation of matching logic (exact, `*`, `?`, prefix wildcards).
+//! One implementation of matching logic (exact, `*`, prefix wildcards).
 //!
 //! Wire format: `ryeos.<verb>.<kind>.<subject>`
 //!
@@ -338,14 +338,13 @@ impl Default for Authorizer {
 /// - Global wildcard (`*` matches everything)
 /// - Prefix wildcard (`ryeos.execute.service.*` matches `ryeos.execute.service.bundle/install`)
 /// - Path-prefix wildcard (`ryeos.execute.service.bundle/*` matches `ryeos.execute.service.bundle/install`)
-/// - Single-char wildcard (`?` matches exactly one character)
 ///
 /// Non-wildcard characters are literal: a `.` in the granted pattern
 /// does not match `/`, so dot-form grants cannot satisfy slash-form
 /// canonical caps.
 ///
-/// Special regex chars in the granted pattern are escaped; only `*` and `?`
-/// are treated as wildcards.
+/// Special regex chars in the granted pattern are escaped; only `*` is a
+/// wildcard. `?` is literal, and grant writers refuse it.
 pub fn cap_matches(granted: &str, required: &str) -> bool {
     ryeos_state::capability::grant_matches(granted, required)
 }
@@ -614,8 +613,8 @@ mod tests {
     }
 
     #[test]
-    fn single_char_wildcard() {
-        assert!(cap_matches(
+    fn question_mark_is_not_a_wildcard() {
+        assert!(!cap_matches(
             "ryeos.execute.tool.rye/?/fs_read",
             "ryeos.execute.tool.rye/x/fs_read"
         ));

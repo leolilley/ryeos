@@ -28,7 +28,7 @@ mod tests {
     #[test]
     fn literal_children_use_glob_semantics() {
         assert!(capability_pattern_covers("a.b.*", "a.b.c"));
-        assert!(capability_pattern_covers("a.?.c", "a.b.c"));
+        assert!(!capability_pattern_covers("a.?.c", "a.b.c"));
         assert!(!capability_pattern_covers("a.b.*", "a.x.c"));
     }
 

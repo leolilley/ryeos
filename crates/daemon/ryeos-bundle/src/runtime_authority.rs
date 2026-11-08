@@ -887,9 +887,8 @@ mod tests {
 
     #[test]
     fn screens_out_partial_wildcard_grants_as_malformed() {
-        // The authorizer's matcher would honor these against a runtime-authority
-        // requirement, but they are not canonical scopes (`*`/`?` only as a
-        // whole `*` segment) — they must be refused before classification.
+        // Partial wildcards are not canonical scopes (`*` only as a whole
+        // segment, `?` never) and must be refused before classification.
         for grant in [
             "ryeos.p*.vault.*",
             "ryeos.put.vau*.*",
@@ -1232,9 +1231,8 @@ mod tests {
             ["ryeos.author.knowledge.runtime-authored/foo?".to_string()]
                 .into_iter()
                 .collect();
-        // `foo?` would glob-"match" the literal `foo*`, but `foo*` authorizes
-        // names `foo?` never grants — the wildcard request must be declared
-        // verbatim, so this fails closed.
+        // `foo?` is a literal name and grants nothing that `foo*` authorizes,
+        // so the wildcard request must be declared verbatim and fails closed.
         assert!(!manifest_backs_requested_cap(
             &manifest,
             "ryeos.author.knowledge.runtime-authored/foo*"

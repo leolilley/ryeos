@@ -417,12 +417,11 @@ mod tests {
         );
     }
 
-    const WILDCARD_GRANTS: [&str; 5] = [
+    const WILDCARD_GRANTS: [&str; 4] = [
         "*",
         "ryeos.*",
         "ryeos.receive.*",
         "ryeos.receive.provider_env.*",
-        "ryeos.receive.provider_env.b_?ey",
     ];
 
     #[test]
