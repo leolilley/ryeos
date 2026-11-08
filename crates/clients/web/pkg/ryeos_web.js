@@ -241,18 +241,6 @@ export function ryeos_restore_layout_preferences(encoded) {
 }
 
 /**
- * Return the current RyeOS scene model without mutating state.
- * @returns {any}
- */
-export function ryeos_scene_model() {
-    const ret = wasm.ryeos_scene_model();
-    if (ret[2]) {
-        throw takeFromExternrefTable0(ret[1]);
-    }
-    return takeFromExternrefTable0(ret[0]);
-}
-
-/**
  * Derive the identity of one frozen transport batch in the shared Rust owner.
  * @param {any} identity
  * @returns {string}
@@ -343,7 +331,7 @@ export function ryeos_stage_seat_transfer_proof(proof_json) {
 }
 
 /**
- * Start RyeOS, returning the semantic view/scene models and initial effects.
+ * Start RyeOS, returning the semantic view model and initial effects.
  * @param {any} session_json
  * @param {string} presentation_id
  * @param {any} viewport_json
@@ -481,10 +469,6 @@ function __wbg_get_imports() {
             const ret = Object.entries(arg0);
             return ret;
         },
-        __wbg_fromCodePoint_4592108dc134086a: function() { return handleError(function (arg0) {
-            const ret = String.fromCodePoint(arg0 >>> 0);
-            return ret;
-        }, arguments); },
         __wbg_from_0dbf29f09e7fb200: function(arg0) {
             const ret = Array.from(arg0);
             return ret;

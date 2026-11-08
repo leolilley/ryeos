@@ -81,7 +81,6 @@ button:focus-visible, textarea:focus-visible { outline: 1px solid var(--accent-b
 }
 @layer shell{
 .ryeos-shell { position: relative; isolation: isolate; display: grid; grid-template-rows: var(--system-height) var(--strip-height) minmax(0, 1fr) var(--status-height); height: 100%; background: var(--bg); }
-.ryeos-shell > :not(.ambient-layer) { position: relative; z-index: 1; }
 .ryeos-shell.without-set-strip { --strip-height: 0px; }
 .ryeos-shell.without-status-bar { --status-height: 0px; }
 .ryeos-shell > .system-bar { grid-row: 1; }
@@ -93,8 +92,6 @@ button:focus-visible, textarea:focus-visible { outline: 1px solid var(--accent-b
 .view-set-rename { display: flex; align-items: center; gap: 4px; padding: 0 8px; }
 .view-set-rename input { width: 150px; min-width: 0; padding: 6px; border: 1px solid var(--accent); background: var(--plane); color: var(--text); font: inherit; }
 .view-set-rename button { padding: 6px; color: var(--text); }
-.ambient-layer { position: absolute; inset: 0; z-index: 0; opacity: var(--ambient-opacity); pointer-events: none; overflow: hidden; }
-.ambient-layer canvas { display: block; width: 100%; height: 100%; }
 .system-bar { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 14px; padding: 0 12px; border-bottom: 1px solid var(--line); background: #1b1e1f; }
 .brand { display: flex; align-items: center; gap: 7px; color: var(--text); font-size: 13px; letter-spacing: -.02em; }
 .brand-mark { color: var(--accent-bright); font-size: 14px; }
@@ -203,8 +200,6 @@ button:focus-visible, textarea:focus-visible { outline: 1px solid var(--accent-b
 .content-heading h1 { margin: 14px 0 10px; max-width: 720px; font-size: clamp(28px, 3vw, 46px); font-weight: 400; letter-spacing: -.04em; }
 .content-heading p { max-width: 620px; color: var(--text); line-height: 1.6; }
 .heading-meta { margin-top: 17px; }
-.view-supplement-scene { flex: 0 1 42%; min-height: 150px; border-bottom: 1px solid var(--line); }
-.view-supplement-scene .scene-view, .view-supplement-scene .scene-view svg { min-height: 150px; }
 .view-supplement-excerpt { flex: 0 1 auto; max-height: 38%; overflow: auto; border-top: 1px solid var(--line); font-family: var(--font-data); }
 .view-supplement-excerpt > header, .view-supplement-footer > strong { display: block; padding: 8px 12px; color: var(--muted); font: 9px var(--font-data); letter-spacing: .08em; text-transform: uppercase; }
 .view-supplement-code > div { display: grid; grid-template-columns: 42px minmax(0, 1fr); min-height: 20px; padding: 2px 12px; color: var(--muted); font-size: 10px; line-height: 1.55; }
@@ -307,24 +302,7 @@ button:focus-visible, textarea:focus-visible { outline: 1px solid var(--accent-b
 .source-status { padding: 6px 9px; color: var(--muted); font: 11px var(--font-data); overflow-wrap: anywhere; }
 .timeline-entry { display: flex; justify-content: space-between; flex: 1; width: calc(100% - var(--indent) * 18px); min-width: 0; margin-left: calc(var(--indent) * 18px); padding: 12px 15px; border-left: 1px solid var(--line); color: var(--text); text-align: left; }.timeline-entry.selected { border-color: var(--accent-bright); background: var(--plane-selected); }.timeline-entry small { color: var(--muted); }.timeline-separator { color: var(--faint); font: 9px var(--font-data); text-transform: uppercase; }
 .sections-view section > button { display: flex; justify-content: space-between; width: 100%; min-height: 40px; padding: 0 10px; border-bottom: 1px solid var(--line-strong); color: var(--text); }.sections-view section > button.selected { color: var(--yellow); }
-.scene-view, .field-view { position: relative; width: 100%; height: 100%; min-height: 240px; overflow: hidden; }
-.scene-view svg { display: block; width: 100%; height: 100%; min-height: 240px; }
-.scene-view svg line, .scene-view svg polygon, .scene-view svg rect, .scene-view svg circle { fill: var(--plane); vector-effect: non-scaling-stroke; stroke-width: 1; }
-.scene-view svg text { font: 5px var(--font-data); }
-.scene-view svg g.interactive { cursor: pointer; }
-.scene-view svg g.interactive:focus { outline: none; filter: brightness(1.35); }
-.atlas-toolbar { position: absolute; z-index: 2; inset: 12px 14px auto; display: flex; align-items: center; gap: 14px; min-height: 34px; border-bottom: 1px solid var(--line); }
-.atlas-identity { display: grid; min-width: 130px; }.atlas-identity strong { font-weight: 500; }.atlas-identity span { color: var(--muted); font: 8px var(--font-data); text-transform: uppercase; }
-.atlas-projections, .atlas-layers { display: flex; gap: 3px; }
-.atlas-toolbar button { padding: 5px 7px; border: 1px solid transparent; color: var(--muted); font: 9px var(--font-data); }
-.atlas-toolbar button.active { border-color: var(--line-strong); color: var(--yellow); background: var(--plane-selected); }
-.scene-view .atlas-canvas { padding-top: 42px; }
-.atlas-canvas line { stroke: var(--line-strong); stroke-width: .035; }
-.atlas-node circle { fill: var(--plane-raised); stroke: var(--faint); stroke-width: .035; vector-effect: non-scaling-stroke; }
-.atlas-node text { fill: var(--text); font: .32px var(--font-data); }
-.atlas-node.selected circle, .atlas-node.highlighted circle { stroke: var(--yellow); }.atlas-node.dimmed { opacity: .28; }
-.atlas-node[role="button"] { cursor: pointer; }.atlas-node[role="button"]:focus { outline: none; filter: brightness(1.35); }
-.atlas-stack-item[data-kind="directive"] { fill: var(--orange); }.atlas-stack-item[data-kind="tool"] { fill: var(--yellow); }.atlas-stack-item[data-kind="knowledge"] { fill: var(--green); }.atlas-stack-item[data-kind="config"] { fill: var(--blue); }
+.field-view { position: relative; width: 100%; height: 100%; min-height: 240px; overflow: hidden; }
 .field-stage, .field-stage canvas { width: 100%; height: 100%; min-height: 240px; }
 .field-stage canvas { display: block; }
 .field-toolbar { position: absolute; z-index: 2; inset: 0 0 auto; display: grid; grid-template-columns: auto 1fr minmax(120px, 220px); gap: 10px; align-items: center; padding: 8px 10px; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--plane) 94%, transparent); }
