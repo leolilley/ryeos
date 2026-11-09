@@ -1242,6 +1242,20 @@ fn relay_connector_input(
             .checked_add(1)
             .context("external connector input sequence overflow")?;
         let Some(bytes) = frame.protocol_bytes()? else {
+            // The peer's stdin ended. Carry that to the guest so the
+            // candidate's stdin closes too; the output relay keeps running
+            // until the guest's own EOF, which is the connector's normal end.
+            if let Err(error) =
+                crate::external_placement::request_external_protocol_input_close(state, placement)
+            {
+                let _ = write_shared_frame(
+                    writer,
+                    &ExternalConnectorServerFrame::Fault {
+                        code: ExternalConnectorFault::InputUncertain,
+                    },
+                );
+                return Err(error).context("retain external connector input closure");
+            }
             return Ok(());
         };
         let remote = match author_external_protocol_input(state, placement, &bytes) {

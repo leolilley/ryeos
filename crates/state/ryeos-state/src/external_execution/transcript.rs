@@ -101,6 +101,11 @@ impl ChannelPhase {
             ProtocolBytes { .. } if self == Self::Running && before_execution_deadline => {
                 Self::Running
             }
+            // Closing the candidate's input is ordinary input, not a stop:
+            // the channel keeps running until the candidate's own EOF.
+            ProtocolInputClosed if self == Self::Running && before_execution_deadline => {
+                Self::Running
+            }
             // These are bounded observations, not executable input. They may
             // drain after cancellation/deadline until channel expiry.
             CommandOutput { .. } if matches!(self, Self::Running | Self::Stopping) => self,
@@ -464,6 +469,25 @@ mod tests {
         assert!(
             ChannelPhase::Ready
                 .advance(None, &ExecutionChannelPayload::ProtocolEof, false)
+                .is_err()
+        );
+        // The owner's input closure is ordinary input: admitted only while
+        // running before the execution deadline, and it keeps the channel
+        // running until the candidate's own EOF.
+        assert_eq!(
+            ChannelPhase::Running
+                .advance(None, &ExecutionChannelPayload::ProtocolInputClosed, true)
+                .unwrap(),
+            ChannelPhase::Running
+        );
+        assert!(
+            ChannelPhase::Running
+                .advance(None, &ExecutionChannelPayload::ProtocolInputClosed, false)
+                .is_err()
+        );
+        assert!(
+            phase
+                .advance(None, &ExecutionChannelPayload::ProtocolInputClosed, true)
                 .is_err()
         );
         assert!(phase.permits_pending_input());

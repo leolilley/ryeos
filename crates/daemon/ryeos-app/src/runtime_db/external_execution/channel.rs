@@ -511,6 +511,66 @@ impl RuntimeDb {
         })
     }
 
+    /// Author the owner's one protocol input closure for a structured-session
+    /// channel, or return the already retained one. The guest closes the
+    /// candidate's stdin when it applies this frame; a candidate that ends on
+    /// EOF then exits and the guest signs its stdout EOF, which is what lets
+    /// the local connector retire normally. The transcript rules admit the
+    /// frame only while the channel runs before its execution deadline.
+    pub(crate) fn ensure_external_protocol_input_closed(
+        &self,
+        placement: &str,
+        signing_key: &lillux::crypto::SigningKey,
+    ) -> Result<AuthenticatedExecutionFrame> {
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+            let binding = load_binding(&tx, placement)?;
+            ensure!(
+                matches!(
+                    binding.execution_mode,
+                    ryeos_state::external_execution::ExternalExecutionMode::StructuredSession {}
+                        | ryeos_state::external_execution::ExternalExecutionMode::QualificationStructuredSession {}
+                ),
+                "protocol input closure requires a structured-session channel"
+            );
+            NodeJournalOwner.require_owner(&tx, &binding)?;
+            let binding_digest = binding.digest()?;
+            let retained = {
+                let mut statement = tx.prepare(
+                    "SELECT frame_json FROM external_execution_frame
+                 WHERE binding_digest=?1 AND direction='owner_to_supervisor'
+                   AND json_extract(frame_json,'$.frame.payload.kind')='protocol_input_closed'
+                 ORDER BY sequence",
+                )?;
+                statement
+                    .query_map([&binding_digest], |row| row.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            ensure!(
+                retained.len() <= 1,
+                "external channel retained competing protocol input closures"
+            );
+            let frame = if let Some(wire) = retained.into_iter().next() {
+                SignedExecutionFrame::decode_and_verify(
+                    wire.as_bytes(),
+                    &binding,
+                    binding.issued_at_ms,
+                )?
+            } else {
+                journal::author_frame(
+                    &tx,
+                    &NodeJournalOwner,
+                    placement,
+                    ChannelDirection::OwnerToSupervisor,
+                    signing_key,
+                    ExecutionChannelPayload::ProtocolInputClosed,
+                )?
+            };
+            tx.commit()?;
+            Ok(frame)
+        })
+    }
+
     /// Author exactly one completion-bound quiesce request, or return the
     /// already retained request after a retry/restart. A different completion
     /// coordinate can never replace or follow the first one.
@@ -5266,6 +5326,43 @@ pub(super) mod tests {
             })
             .unwrap();
         assert_eq!(quiesces, 1);
+    }
+
+    #[test]
+    fn protocol_input_closure_is_exactly_one_per_channel() {
+        let root = tempfile::tempdir().unwrap();
+        let db =
+            crate::runtime_db::test_native::TestRuntime::open(&root.path().join("runtime.sqlite3"));
+        let (binding, owner, supervisor) = setup(&db);
+        let placement = &binding.placement_thread_id;
+        ready(&db, &binding, &supervisor);
+        db.admit_external_ready_and_author_release(placement, &owner, test_startup_deadline())
+            .unwrap()
+            .unwrap();
+        let first = db
+            .ensure_external_protocol_input_closed(placement, &owner)
+            .unwrap();
+        let replay = db
+            .ensure_external_protocol_input_closed(placement, &owner)
+            .unwrap();
+        assert_eq!(first.canonical(), replay.canonical());
+        assert!(matches!(
+            first.frame().payload,
+            ExecutionChannelPayload::ProtocolInputClosed
+        ));
+        let closures: i64 = db
+            .conn
+            .with_sql(|connection| {
+                Ok(connection.query_row(
+                    "SELECT COUNT(*) FROM external_execution_frame
+                 WHERE binding_digest=?1 AND direction='owner_to_supervisor'
+                   AND json_extract(frame_json,'$.frame.payload.kind')='protocol_input_closed'",
+                    [binding.digest().unwrap()],
+                    |row| row.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(closures, 1);
     }
 
     #[test]

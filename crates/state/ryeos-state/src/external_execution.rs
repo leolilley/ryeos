@@ -286,6 +286,13 @@ pub enum ExecutionChannelPayload {
     ProtocolBytes {
         bytes_base64: String,
     },
+    /// The owner has no more session protocol input: the guest closes the
+    /// candidate's stdin once every earlier protocol frame is applied, so a
+    /// candidate that ends on EOF can exit and its stdout EOF can be
+    /// observed. Structured-session modes only, at most once per channel.
+    /// It is not cancellation, quiescence or completion: the candidate keeps
+    /// running until its own exit or a later owner command.
+    ProtocolInputClosed,
     /// Candidate protocol stdout reached EOF. This is an endpoint transport
     /// observation, not candidate success, writer exclusion, or cleanup.
     ProtocolEof,
@@ -496,7 +503,7 @@ impl ExecutionChannelPayload {
         use ExecutionChannelPayload::*;
         let owner_only = matches!(
             self,
-            Release | Quiesce { .. } | QualificationComplete { .. } | Cancel
+            Release | Quiesce { .. } | QualificationComplete { .. } | Cancel | ProtocolInputClosed
         );
         let supervisor_only = matches!(
             self,
@@ -520,12 +527,14 @@ impl ExecutionChannelPayload {
             "owner cannot author supervisor observations"
         );
         ensure!(
-            !matches!(self, ProtocolBytes { .. } | ProtocolEof)
-                || matches!(
-                    binding.execution_mode,
-                    ExternalExecutionMode::StructuredSession {}
-                        | ExternalExecutionMode::QualificationStructuredSession {}
-                ),
+            !matches!(
+                self,
+                ProtocolBytes { .. } | ProtocolEof | ProtocolInputClosed
+            ) || matches!(
+                binding.execution_mode,
+                ExternalExecutionMode::StructuredSession {}
+                    | ExternalExecutionMode::QualificationStructuredSession {}
+            ),
             "direct command channel cannot carry session protocol"
         );
         ensure!(
@@ -672,7 +681,7 @@ impl ExecutionChannelPayload {
                 );
                 hash(peer_frame_digest)?;
             }
-            Release | ProtocolEof | Cancel | Stopped { .. } => {}
+            Release | ProtocolInputClosed | ProtocolEof | Cancel | Stopped { .. } => {}
         }
         Ok(())
     }
@@ -1496,6 +1505,10 @@ mod tests {
                 ChannelDirection::SupervisorToOwner,
                 ExecutionChannelPayload::ProtocolEof,
             ),
+            (
+                ChannelDirection::OwnerToSupervisor,
+                ExecutionChannelPayload::ProtocolInputClosed,
+            ),
         ] {
             let mut value = frame(&binding);
             value.direction = direction;
@@ -1513,6 +1526,12 @@ mod tests {
                 ExecutionChannelPayload::Quiesce {
                     completion_request_digest: "a".repeat(64),
                 },
+            ),
+            // The input closure is an owner command; a supervisor cannot
+            // author it.
+            (
+                ChannelDirection::SupervisorToOwner,
+                ExecutionChannelPayload::ProtocolInputClosed,
             ),
             (
                 ChannelDirection::SupervisorToOwner,
@@ -1577,6 +1596,10 @@ mod tests {
                 ExecutionChannelPayload::ProtocolBytes {
                     bytes_base64: STANDARD.encode(b"input"),
                 },
+            ),
+            (
+                ChannelDirection::OwnerToSupervisor,
+                ExecutionChannelPayload::ProtocolInputClosed,
             ),
             (
                 ChannelDirection::SupervisorToOwner,

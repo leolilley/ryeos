@@ -19348,6 +19348,30 @@ impl StateStore {
             }))
     }
 
+    /// How the placement's one local connector stands: absent, still open, or
+    /// closed with the relay's recorded reason. `completed` means the guest's
+    /// protocol EOF was delivered to the live peer; every other reason is an
+    /// abnormal end.
+    pub fn external_connector_settlement(
+        &self,
+        placement: &str,
+    ) -> Result<ExternalConnectorSettlement> {
+        Ok(
+            match self.lock()?.runtime_db.external_connector(placement)? {
+                None => ExternalConnectorSettlement::Absent,
+                Some(record)
+                    if record.phase
+                        == runtime_db::external_execution::connector::ExternalConnectorPhase::Closed =>
+                {
+                    ExternalConnectorSettlement::Closed {
+                        reason: record.close_reason,
+                    }
+                }
+                Some(_) => ExternalConnectorSettlement::Open,
+            },
+        )
+    }
+
     /// Local qualification Worker rows that a previous daemon generation left
     /// `Attached`, as (placement, exact process identity). Start recovery
     /// proves each group dead and then settles exactly that row.
@@ -20788,6 +20812,19 @@ impl StateStore {
         self.lock()?
             .runtime_db
             .author_external_owner_revocation(placement, signing_key)
+    }
+
+    /// The owner's one protocol input closure for a structured-session
+    /// channel, authored once and returned on every later call.
+    pub(crate) fn ensure_external_protocol_input_closed(
+        &self,
+        placement: &str,
+        signing_key: &lillux::crypto::SigningKey,
+    ) -> Result<ryeos_state::external_execution::AuthenticatedExecutionFrame> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .ensure_external_protocol_input_closed(placement, signing_key)
     }
 
     pub(crate) fn ensure_external_candidate_quiesce(
@@ -36176,3 +36213,12 @@ mod qualification_transcript_publication_tests;
 #[cfg(test)]
 #[path = "state_store/seat_cut_tests.rs"]
 mod seat_cut_tests;
+
+/// The durable standing of a placement's local connector, read by the Q
+/// runner between the Worker's turn and its retirement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExternalConnectorSettlement {
+    Absent,
+    Open,
+    Closed { reason: Option<String> },
+}

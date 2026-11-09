@@ -3569,6 +3569,61 @@ pub fn author_external_channel_command(
     })
 }
 
+/// Tell the guest the owner has no more session protocol input, so it closes
+/// the candidate's stdin. For a candidate that ends on EOF this is what ends
+/// the session normally: the candidate exits, the guest signs its stdout EOF,
+/// the relay delivers that EOF to the live connector peer and the connector
+/// closes `completed`. Authored once per channel; a repeat returns the
+/// retained frame. This is neither cancellation nor completion and makes no
+/// claim about the candidate.
+pub fn request_external_protocol_input_close(
+    state: &AppState,
+    placement: &str,
+) -> Result<ExternalChannelOutboundFrame> {
+    use crate::runtime_db::external_execution::ExternalAllocationOwner;
+    state
+        .controller_lifetime
+        .ensure_protects_app_root(&state.config.app_root)?;
+    let allocation = state
+        .state_store
+        .external_allocation(placement)?
+        .context("protocol input closure has no retained allocation")?;
+    let author = || {
+        let access = ExternalChannelAuthorityAccess::new(
+            &allocation.reservation.channel_authority_generation,
+        )?;
+        let authority = access.decode(
+            state
+                .vault
+                .external_channel_authority(&access)
+                .context("read protected channel signer")?,
+        )?;
+        let binding = state.state_store.external_execution_channel(placement)?;
+        ensure!(
+            binding.owner_public_key == authority.owner_public_key()
+                && binding.execution_binding_hash == allocation.reservation.binding_hash,
+            "protocol input closure changed protected channel authority"
+        );
+        let frame = state
+            .state_store
+            .ensure_external_protocol_input_closed(placement, authority.owner_signing_key())?;
+        Ok(ExternalChannelOutboundFrame {
+            sequence: frame.frame().sequence,
+            frame_digest: frame.digest().to_owned(),
+            canonical_wire: frame.canonical().as_bytes().to_vec(),
+        })
+    };
+    match &allocation.reservation.owner {
+        // A Q occurrence serializes every controller write with its other
+        // occurrence contacts, exactly as its completion request does.
+        ExternalAllocationOwner::QualificationCandidate(owner) => {
+            let operation_id = owner.qualification_operation_id.clone();
+            crate::hosted_operation::with_qualification_occurrence_contact(&operation_id, author)
+        }
+        _ => author(),
+    }
+}
+
 /// Request the Q guest's native scope stop only after the retained local
 /// Worker process and connector have settled. This is a controller operation
 /// under the same restored-occurrence exclusion as provider termination; the
