@@ -1320,6 +1320,32 @@ fn run_execution_history_reset_command(
                 },
             },
         ),
+        crate::tty::Row::key_value(
+            "Q local custody settled",
+            match &report.qualification_custody {
+                None => "none open".to_owned(),
+                Some(custody) => format!(
+                    "{} Q local start(s): {} workspace root(s) and {} state root(s) {}, {} absent; {} guest scratch row(s): {} root(s) {}, {} absent",
+                    custody.local_starts,
+                    custody.workspace_roots_removed,
+                    custody.state_roots_removed,
+                    if custody.performed {
+                        "removed"
+                    } else {
+                        "to remove"
+                    },
+                    custody.workspace_roots_absent + custody.state_roots_absent,
+                    custody.scratch_rows,
+                    custody.scratch_roots_removed,
+                    if custody.performed {
+                        "removed"
+                    } else {
+                        "to remove"
+                    },
+                    custody.scratch_roots_absent,
+                ),
+            },
+        ),
         crate::tty::Row::key_value("reservation released", report.released_sha256.clone()),
         crate::tty::Row::key_value(
             "interrupted attempts settled",

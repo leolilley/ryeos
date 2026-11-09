@@ -922,6 +922,10 @@ pub struct ExecutionHistoryResetReport {
     /// preview, would discard) under the operator's attested reboot.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lifetime_fence_discard: Option<crate::runtime_db::LifetimeFenceDiscard>,
+    /// Q local custody no daemon generation could close, settled by this
+    /// reset before the cut (previewed on a dry run); `None` when no Q row
+    /// was open.
+    pub qualification_custody: Option<crate::runtime_db::ColdQualificationCustodyReport>,
 }
 
 /// Census durability pins the native host's release ended.
@@ -2202,6 +2206,7 @@ fn run_execution_history_reset_owned(
         .issue_copy_work(&offline_policy, &identity)
         .map_err(|error| quota_claim.retain_failure(error, QuotaFailurePhase::Admission))?;
     let mut lifetime_fence_preview = None;
+    let mut qualification_custody_preview = None;
     let (
         mut runtime_db,
         observed_runtime_schema_epoch,
@@ -2242,7 +2247,8 @@ fn run_execution_history_reset_owned(
             let fence = db
                 .unreadable_lifetime_fence_decision(options.unreadable_lifetime_fence())
                 .context("inspect the scope lifetime fence")?;
-            Ok((epoch, reset_required, accounting, fence))
+            let custody = db.cold_qualification_custody().cloned();
+            Ok((epoch, reset_required, accounting, fence, custody))
         })();
         match db.close_owned_inspection() {
             Ok((closed, reference)) => {
@@ -2262,9 +2268,10 @@ fn run_execution_history_reset_owned(
                 ));
             }
         }
-        let (epoch, reset_required, accounting, fence) = inspected
+        let (epoch, reset_required, accounting, fence, custody) = inspected
             .map_err(|error| quota_claim.retain_failure(error, QuotaFailurePhase::Acquisition))?;
         lifetime_fence_preview = fence;
+        qualification_custody_preview = custody;
         (None, epoch, reset_required, Some(accounting))
     } else {
         let permit = inspection_custody
@@ -2289,6 +2296,10 @@ fn run_execution_history_reset_owned(
         let reset_required = db.requires_explicit_history_reset();
         (Some(db), epoch, reset_required, None)
     };
+    let qualification_custody = runtime_db
+        .as_ref()
+        .and_then(|db| db.cold_qualification_custody().cloned())
+        .or(qualification_custody_preview);
     offline_policy
         .require_held()
         .map_err(|error| quota_claim.retain_failure(error, QuotaFailurePhase::Admission))?;
@@ -2515,6 +2526,7 @@ fn run_execution_history_reset_owned(
             recovered,
             durability_pins,
             lifetime_fence_discard: lifetime_fence_preview,
+            qualification_custody,
             app_root: config.app_root,
             dry_run: options.dry_run,
             performed: false,
@@ -3135,6 +3147,7 @@ fn run_execution_history_reset_owned(
         recovered,
         durability_pins,
         lifetime_fence_discard,
+        qualification_custody,
         app_root: config.app_root,
         dry_run: false,
         performed: true,

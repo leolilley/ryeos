@@ -1646,7 +1646,7 @@ impl RuntimeDb {
 pub(super) mod tests {
     use super::*;
 
-    fn fixture_record() -> QualificationLocalStartRecord {
+    pub(in crate::runtime_db) fn fixture_record() -> QualificationLocalStartRecord {
         let placement = format!("Q-{}", "1".repeat(64));
         let root = "T-qualification-root";
         let capsule = "2".repeat(64);

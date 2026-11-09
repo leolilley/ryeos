@@ -53,6 +53,8 @@ pub(crate) use qualification_guest_scratch::{
     QualificationGuestScratchPhase, QualificationGuestScratchRecord,
 };
 pub(super) use qualification_local_start::JOURNAL_SQL as QUALIFICATION_LOCAL_START_SQL;
+#[cfg(test)]
+pub(in crate::runtime_db) use qualification_local_start::tests::fixture_record as fixture_local_start_record;
 pub use qualification_local_start::{
     QualificationLocalCredentialCustody, QualificationLocalStartPhase,
     QualificationLocalStartRecord, QualificationWorkspaceBorrowIntent,

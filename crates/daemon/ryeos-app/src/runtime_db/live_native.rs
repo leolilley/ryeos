@@ -221,6 +221,7 @@ impl RuntimeDb {
             _directory_lock: Some(namespace),
             _inspection_copy: None,
             _inspection_sql: None,
+            cold_qualification_custody: None,
         })
     }
 }
