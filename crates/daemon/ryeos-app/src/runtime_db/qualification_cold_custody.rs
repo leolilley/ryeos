@@ -81,9 +81,115 @@ impl ColdQualificationCustodyReport {
     }
 }
 
-enum ChildOutcome {
+/// What one recorded child's settlement found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChildOutcome {
+    /// The child was present and (when performing) removed.
     Removed,
+    /// Nothing under that name.
     Absent,
+}
+
+/// The node-private parents every Q directory lives under, opened once from
+/// the pinned runtime state directory. A parent that does not exist yet means
+/// every child under it is absent.
+pub(crate) struct QualificationCustodyParents {
+    pub(crate) executions: Option<lillux::PinnedDirectory>,
+    pub(crate) state_parent: Option<lillux::PinnedDirectory>,
+    pub(crate) scratch_parent: Option<lillux::PinnedDirectory>,
+}
+
+impl QualificationCustodyParents {
+    pub(crate) fn open(root: &lillux::PinnedDirectory) -> Result<Self> {
+        root.ensure_path_binding()?;
+        let cache = root.open_child_directory(OsStr::new("cache"))?;
+        let child = |name: &str| -> Result<Option<lillux::PinnedDirectory>> {
+            cache
+                .as_ref()
+                .map(|cache| cache.open_child_directory(OsStr::new(name)))
+                .transpose()
+                .map(Option::flatten)
+        };
+        Ok(Self {
+            executions: child("executions")?,
+            state_parent: child("qualification-local")?,
+            scratch_parent: root.open_child_directory(OsStr::new("qualification-guest-inputs"))?,
+        })
+    }
+
+    /// Remove (or verify) the two roots of one Q local start. The workspace
+    /// root must carry the recorded project identity when the row has one.
+    pub(crate) fn settle_local_start(
+        &self,
+        record: &QualificationLocalStartRecord,
+        perform: bool,
+    ) -> Result<(ChildOutcome, ChildOutcome)> {
+        let workspace = remove_recorded_child(
+            self.executions.as_ref(),
+            &record.workspace_id,
+            &record.workspace_root,
+            record.workspace_identity.as_ref(),
+            perform,
+        )
+        .with_context(|| format!("Q workspace of {}", record.placement_thread_id))?;
+        let state = remove_recorded_child(
+            self.state_parent.as_ref(),
+            &record.workspace_id,
+            &record.state_root,
+            None,
+            perform,
+        )
+        .with_context(|| format!("Q state root of {}", record.placement_thread_id))?;
+        Ok((workspace, state))
+    }
+
+    /// Remove the workspace root of one Q local start (the prior-generation
+    /// pass, between its cleanup intent and its workspace-removed receipt).
+    pub(crate) fn settle_local_start_workspace(
+        &self,
+        record: &QualificationLocalStartRecord,
+    ) -> Result<ChildOutcome> {
+        remove_recorded_child(
+            self.executions.as_ref(),
+            &record.workspace_id,
+            &record.workspace_root,
+            record.workspace_identity.as_ref(),
+            true,
+        )
+        .with_context(|| format!("Q workspace of {}", record.placement_thread_id))
+    }
+
+    /// Remove the state root of one Q local start (between its
+    /// workspace-removed and state-removed receipts).
+    pub(crate) fn settle_local_start_state_root(
+        &self,
+        record: &QualificationLocalStartRecord,
+    ) -> Result<ChildOutcome> {
+        remove_recorded_child(
+            self.state_parent.as_ref(),
+            &record.workspace_id,
+            &record.state_root,
+            None,
+            true,
+        )
+        .with_context(|| format!("Q state root of {}", record.placement_thread_id))
+    }
+
+    /// Remove (or verify) one Q guest scratch root.
+    pub(crate) fn settle_scratch(
+        &self,
+        record: &QualificationGuestScratchRecord,
+        perform: bool,
+    ) -> Result<ChildOutcome> {
+        remove_recorded_child(
+            self.scratch_parent.as_ref(),
+            &record.placement_thread_id,
+            &record.scratch_root,
+            None,
+            perform,
+        )
+        .with_context(|| format!("Q guest scratch of {}", record.placement_thread_id))
+    }
 }
 
 /// Settle, preview or refuse every Q local start and guest scratch row that
@@ -131,7 +237,7 @@ pub(super) fn settle_open_qualification_custody(
         QualificationCustodyDisposition::Preview(root) => (root, false),
         QualificationCustodyDisposition::Settle(root) => (root, true),
     };
-    root.ensure_path_binding()?;
+    let parents = QualificationCustodyParents::open(root)?;
     let mut report = ColdQualificationCustodyReport {
         performed: perform,
         ..Default::default()
@@ -140,17 +246,6 @@ pub(super) fn settle_open_qualification_custody(
         require_scratch_allocation_settled(conn, record)?;
     }
 
-    let cache = root.open_child_directory(OsStr::new("cache"))?;
-    let executions = cache
-        .as_ref()
-        .map(|cache| cache.open_child_directory(OsStr::new("executions")))
-        .transpose()?
-        .flatten();
-    let state_parent = cache
-        .as_ref()
-        .map(|cache| cache.open_child_directory(OsStr::new("qualification-local")))
-        .transpose()?
-        .flatten();
     for record in &local_starts {
         report.local_starts += 1;
         let workspace_may_exist = !matches!(
@@ -163,14 +258,7 @@ pub(super) fn settle_open_qualification_custody(
             record.phase,
             QualificationLocalStartPhase::StateRemoved | QualificationLocalStartPhase::Closed
         );
-        let workspace = settle_child(
-            executions.as_ref(),
-            &record.workspace_id,
-            &record.workspace_root,
-            record.workspace_identity.as_ref(),
-            perform,
-        )
-        .with_context(|| format!("Q workspace of {}", record.placement_thread_id))?;
+        let (workspace, state) = parents.settle_local_start(record, perform)?;
         match workspace {
             ChildOutcome::Removed if !workspace_may_exist => bail!(
                 "Q workspace of {} is recorded as removed but is still present",
@@ -179,14 +267,6 @@ pub(super) fn settle_open_qualification_custody(
             ChildOutcome::Removed => report.workspace_roots_removed += 1,
             ChildOutcome::Absent => report.workspace_roots_absent += 1,
         }
-        let state = settle_child(
-            state_parent.as_ref(),
-            &record.workspace_id,
-            &record.state_root,
-            None,
-            perform,
-        )
-        .with_context(|| format!("Q state root of {}", record.placement_thread_id))?;
         match state {
             ChildOutcome::Removed if !state_may_exist => bail!(
                 "Q state root of {} is recorded as removed but is still present",
@@ -198,18 +278,9 @@ pub(super) fn settle_open_qualification_custody(
         report.placements.insert(record.placement_thread_id.clone());
     }
 
-    let scratch_parent = root.open_child_directory(OsStr::new("qualification-guest-inputs"))?;
     for record in &scratches {
         report.scratch_rows += 1;
-        let outcome = settle_child(
-            scratch_parent.as_ref(),
-            &record.placement_thread_id,
-            &record.scratch_root,
-            None,
-            perform,
-        )
-        .with_context(|| format!("Q guest scratch of {}", record.placement_thread_id))?;
-        match outcome {
+        match parents.settle_scratch(record, perform)? {
             ChildOutcome::Removed => report.scratch_roots_removed += 1,
             ChildOutcome::Absent => report.scratch_roots_absent += 1,
         }
@@ -264,8 +335,11 @@ fn require_scratch_allocation_settled(
 
 /// Remove (or, without `perform`, verify) one recorded child of the node's
 /// private parent. The recorded path must be exactly that child; a recorded
-/// project identity must match the child's `project` directory.
-fn settle_child(
+/// project identity must match the child's `project` directory. The caller
+/// holds the exclusion the parent's writers honour (the daemon's state lock,
+/// or the stopped node's reset), so the child cannot be replaced between its
+/// observation and its removal.
+pub(crate) fn remove_recorded_child(
     parent: Option<&lillux::PinnedDirectory>,
     name: &str,
     recorded_path: &str,

@@ -340,6 +340,53 @@ fn require_settled_allocation_identity(
     Ok(())
 }
 
+fn read_prior_generation_open(
+    conn: &Connection,
+    current_generation: &str,
+) -> Result<Vec<QualificationGuestScratchRecord>> {
+    let mut statement = conn.prepare(
+        "SELECT record_json FROM external_qualification_guest_scratch
+         WHERE phase!='closed'
+           AND json_extract(record_json,'$.daemon_generation_id')!=?1
+         ORDER BY placement_thread_id",
+    )?;
+    let rows = statement
+        .query_map([current_generation], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    rows.iter()
+        .map(|json| serde_json::from_str(json).context("decode prior-generation Q guest scratch"))
+        .collect()
+}
+
+/// Which daemon generation drives a scratch's cleanup transitions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ScratchCleanupOwner {
+    /// The creating generation, through its original pinned descriptor.
+    Original,
+    /// A later generation. The creating one is dead with its descriptors, so
+    /// the StateStore's prior-generation wrappers remove the root by its
+    /// recorded coordinate under the node-private parent instead.
+    PriorGeneration,
+}
+
+fn require_scratch_cleanup_owner(
+    current: &QualificationGuestScratchRecord,
+    owner: ScratchCleanupOwner,
+) -> Result<()> {
+    let original = current.daemon_generation_id == daemon_generation_id();
+    match owner {
+        ScratchCleanupOwner::Original => ensure!(
+            original,
+            "Q guest scratch belongs to a previous daemon generation; only the prior-generation pass settles it"
+        ),
+        ScratchCleanupOwner::PriorGeneration => ensure!(
+            !original,
+            "Q guest scratch belongs to this daemon generation; its original custody drives its cleanup"
+        ),
+    }
+    Ok(())
+}
+
 /// Freeze the allocation identity a cleanup intent will be proved against.
 /// An allocation the provider may still hold cannot be frozen: the cleanup is
 /// deferred and retried once the retained owner has settled it.
@@ -557,11 +604,14 @@ impl RuntimeDb {
         self.conn.with_sql(|conn| read_scratch(conn, placement))
     }
 
-    /// Unclosed scratches whose provider allocation is settled. Their cleanup
-    /// was refused or never reached while the allocation was unsettled, and
-    /// can now be proved; allocation-less scratches belong to a live start.
+    /// Unclosed scratches of this daemon generation whose provider allocation
+    /// is settled. Their cleanup was refused or never reached while the
+    /// allocation was unsettled, and can now be proved through the original
+    /// custody; allocation-less scratches belong to a live start, and rows of
+    /// earlier generations go to the prior-generation pass.
     pub(crate) fn settled_unclosed_qualification_guest_scratch_placements(
         &self,
+        current_generation: &str,
     ) -> Result<Vec<String>> {
         self.conn.with_sql(|conn| {
             let mut statement = conn.prepare(
@@ -570,13 +620,24 @@ impl RuntimeDb {
                  JOIN external_execution_allocation a
                    ON a.placement_thread_id=s.placement_thread_id
                  WHERE s.phase!='closed'
+                   AND json_extract(s.record_json,'$.daemon_generation_id')=?1
                    AND a.phase IN ('no_contact','contacted_no_occurrence','terminated')
                  ORDER BY s.placement_thread_id",
             )?;
             Ok(statement
-                .query_map([], |row| row.get::<_, String>(0))?
+                .query_map([current_generation], |row| row.get::<_, String>(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?)
         })
+    }
+
+    /// Unclosed scratches a previous daemon generation created. Their original
+    /// descriptors died with it; only the prior-generation pass settles them.
+    pub(crate) fn prior_generation_open_qualification_guest_scratch(
+        &self,
+        current_generation: &str,
+    ) -> Result<Vec<QualificationGuestScratchRecord>> {
+        self.conn
+            .with_sql(|conn| read_prior_generation_open(conn, current_generation))
     }
 
     /// A retry may report transport completion only for the same one-use Q
@@ -747,6 +808,14 @@ impl RuntimeDb {
         &self,
         expected: &QualificationGuestScratchRecord,
     ) -> Result<QualificationGuestScratchRecord> {
+        self.begin_qualification_guest_scratch_cleanup_with(expected, ScratchCleanupOwner::Original)
+    }
+
+    pub(crate) fn begin_qualification_guest_scratch_cleanup_with(
+        &self,
+        expected: &QualificationGuestScratchRecord,
+        owner: ScratchCleanupOwner,
+    ) -> Result<QualificationGuestScratchRecord> {
         self.conn.with_sql(|conn| {
             let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let current = read_scratch(&tx, &expected.placement_thread_id)?
@@ -757,10 +826,10 @@ impl RuntimeDb {
                         current.phase,
                         QualificationGuestScratchPhase::Reserved
                             | QualificationGuestScratchPhase::Created
-                    )
-                    && current.daemon_generation_id == daemon_generation_id(),
+                    ),
                 "Q guest scratch cleanup changed its current original custody"
             );
+            require_scratch_cleanup_owner(&current, owner)?;
             let basis = freeze_cleanup_basis(read(&tx, &current.placement_thread_id)?.as_ref())?;
             let mut next = current.clone();
             next.phase = QualificationGuestScratchPhase::CleanupIntent;
@@ -780,16 +849,27 @@ impl RuntimeDb {
         &self,
         expected: &QualificationGuestScratchRecord,
     ) -> Result<QualificationGuestScratchRecord> {
+        self.record_qualification_guest_scratch_removed_with(
+            expected,
+            ScratchCleanupOwner::Original,
+        )
+    }
+
+    pub(crate) fn record_qualification_guest_scratch_removed_with(
+        &self,
+        expected: &QualificationGuestScratchRecord,
+        owner: ScratchCleanupOwner,
+    ) -> Result<QualificationGuestScratchRecord> {
         self.conn.with_sql(|conn| {
             let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let current = read_scratch(&tx, &expected.placement_thread_id)?
                 .context("Q guest scratch removal lost its original row")?;
             ensure!(
                 current == *expected
-                    && current.phase == QualificationGuestScratchPhase::CleanupIntent
-                    && current.daemon_generation_id == daemon_generation_id(),
+                    && current.phase == QualificationGuestScratchPhase::CleanupIntent,
                 "Q guest scratch removal changed its current cleanup intent"
             );
+            require_scratch_cleanup_owner(&current, owner)?;
             require_cleanup_basis(&tx, &current)?;
             let mut next = current.clone();
             next.phase = QualificationGuestScratchPhase::Removed;
@@ -805,16 +885,23 @@ impl RuntimeDb {
         &self,
         expected: &QualificationGuestScratchRecord,
     ) -> Result<QualificationGuestScratchRecord> {
+        self.close_qualification_guest_scratch_with(expected, ScratchCleanupOwner::Original)
+    }
+
+    pub(crate) fn close_qualification_guest_scratch_with(
+        &self,
+        expected: &QualificationGuestScratchRecord,
+        owner: ScratchCleanupOwner,
+    ) -> Result<QualificationGuestScratchRecord> {
         self.conn.with_sql(|conn| {
             let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let current = read_scratch(&tx, &expected.placement_thread_id)?
                 .context("Q guest scratch close lost its original row")?;
             ensure!(
-                current == *expected
-                    && current.phase == QualificationGuestScratchPhase::Removed
-                    && current.daemon_generation_id == daemon_generation_id(),
+                current == *expected && current.phase == QualificationGuestScratchPhase::Removed,
                 "Q guest scratch close changed its physical removal receipt"
             );
+            require_scratch_cleanup_owner(&current, owner)?;
             require_cleanup_basis(&tx, &current)?;
             let mut next = current.clone();
             next.phase = QualificationGuestScratchPhase::Closed;
@@ -1181,5 +1268,63 @@ mod tests {
         // the caller then requires the termination and terminal evidence.
         let terminated = settled(&bound, ExternalAllocationPhase::Terminated);
         check(&record, &no_occurrence, &terminated).unwrap();
+    }
+
+    #[test]
+    fn cleanup_owner_is_exactly_one_generation() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let (_parent, record) = fixture(root.path())?;
+        // The fixture row is this generation's: only the original owner may drive it.
+        require_scratch_cleanup_owner(&record, ScratchCleanupOwner::Original)?;
+        ensure!(
+            require_scratch_cleanup_owner(&record, ScratchCleanupOwner::PriorGeneration).is_err(),
+            "a live generation's scratch was offered to the prior-generation pass"
+        );
+        // A second row, as a dead generation left it; its immutable fields
+        // cannot be edited in place, so it is inserted beside the fixture's.
+        let mut dead = record.clone();
+        dead.daemon_generation_id = "daemon-1-dead".into();
+        dead.qualification_operation_id = "2".repeat(64);
+        dead.placement_thread_id =
+            ryeos_state::external_execution::qualification_session::qualification_candidate_placement_key(
+                &dead.coordinate,
+                &dead.qualification_operation_id,
+            )?;
+        dead.scratch_root = std::path::Path::new(&record.scratch_root)
+            .with_file_name(&dead.placement_thread_id)
+            .to_str()
+            .unwrap()
+            .into();
+        dead.phase = QualificationGuestScratchPhase::Created;
+        require_scratch_cleanup_owner(&dead, ScratchCleanupOwner::PriorGeneration)?;
+        ensure!(
+            require_scratch_cleanup_owner(&dead, ScratchCleanupOwner::Original).is_err(),
+            "a dead generation's scratch was offered to original custody"
+        );
+        // The lists split the same way.
+        crate::runtime_db::test_native::read_existing(
+            &root.path().join("scratch.sqlite3"),
+            |conn| {
+                conn.execute(
+                    "INSERT INTO runtime_snapshot_qualification VALUES (?1)",
+                    [&dead.qualification_operation_id],
+                )?;
+                conn.execute(
+                    "INSERT INTO external_qualification_guest_scratch VALUES (?1,?2,'created',?3,1,1)",
+                    params![dead.placement_thread_id, dead.qualification_operation_id, canonical(&dead)?],
+                )?;
+                let prior = read_prior_generation_open(conn, daemon_generation_id())?;
+                ensure!(
+                    prior == vec![dead.clone()],
+                    "dead generation's row not listed for the pass"
+                );
+                ensure!(
+                    read_prior_generation_open(conn, "daemon-1-dead")? == vec![record.clone()],
+                    "the dead generation's own row was listed as prior, or this generation's was not"
+                );
+                Ok(())
+            },
+        );
+        Ok(())
     }
 }

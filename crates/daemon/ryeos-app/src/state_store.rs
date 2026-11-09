@@ -19390,6 +19390,135 @@ impl StateStore {
             .prior_generation_qualification_local_starts(runtime_db::daemon_generation_id())
     }
 
+    // Prior-generation Q settlement. The rows below were created by a daemon
+    // generation that is dead, so no process holds their descriptors; the
+    // `qualification_cold_settlement` pass removes their directories by
+    // recorded coordinate under the node-private parents and drives the
+    // ordinary transitions without process-local custody. Every wrapper
+    // refuses a row of this generation: its original custody owns it.
+
+    fn require_prior_generation(daemon_generation_id: &str) -> Result<()> {
+        anyhow::ensure!(
+            daemon_generation_id != runtime_db::daemon_generation_id(),
+            "Q row belongs to this daemon generation; its original custody drives its cleanup"
+        );
+        Ok(())
+    }
+
+    /// The node-private parents of every Q directory, for the
+    /// prior-generation pass and nothing else.
+    pub(crate) fn qualification_custody_parents(
+        &self,
+    ) -> Result<runtime_db::qualification_cold_custody::QualificationCustodyParents> {
+        runtime_db::qualification_cold_custody::QualificationCustodyParents::open(
+            self.state_authority.runtime_directory(),
+        )
+    }
+
+    pub(crate) fn prior_generation_open_qualification_guest_scratch(
+        &self,
+    ) -> Result<Vec<runtime_db::external_execution::QualificationGuestScratchRecord>> {
+        self.lock()?
+            .runtime_db
+            .prior_generation_open_qualification_guest_scratch(runtime_db::daemon_generation_id())
+    }
+
+    pub(crate) fn begin_qualification_guest_scratch_cleanup_prior_generation(
+        &self,
+        expected: &runtime_db::external_execution::QualificationGuestScratchRecord,
+    ) -> Result<runtime_db::external_execution::QualificationGuestScratchRecord> {
+        Self::require_prior_generation(&expected.daemon_generation_id)?;
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .begin_qualification_guest_scratch_cleanup_with(
+                expected,
+                runtime_db::external_execution::ScratchCleanupOwner::PriorGeneration,
+            )
+    }
+
+    pub(crate) fn record_qualification_guest_scratch_removed_prior_generation(
+        &self,
+        expected: &runtime_db::external_execution::QualificationGuestScratchRecord,
+    ) -> Result<runtime_db::external_execution::QualificationGuestScratchRecord> {
+        Self::require_prior_generation(&expected.daemon_generation_id)?;
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .record_qualification_guest_scratch_removed_with(
+                expected,
+                runtime_db::external_execution::ScratchCleanupOwner::PriorGeneration,
+            )
+    }
+
+    pub(crate) fn close_qualification_guest_scratch_prior_generation(
+        &self,
+        expected: &runtime_db::external_execution::QualificationGuestScratchRecord,
+    ) -> Result<runtime_db::external_execution::QualificationGuestScratchRecord> {
+        Self::require_prior_generation(&expected.daemon_generation_id)?;
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .close_qualification_guest_scratch_with(
+                expected,
+                runtime_db::external_execution::ScratchCleanupOwner::PriorGeneration,
+            )
+    }
+
+    pub(crate) fn begin_qualification_local_cleanup_prior_generation(
+        &self,
+        expected: &runtime_db::external_execution::QualificationLocalStartRecord,
+    ) -> Result<runtime_db::external_execution::QualificationLocalStartRecord> {
+        Self::require_prior_generation(&expected.daemon_generation_id)?;
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .begin_qualification_local_cleanup(expected)
+    }
+
+    pub(crate) fn authorize_qualification_workspace_removal_prior_generation(
+        &self,
+        expected: &runtime_db::external_execution::QualificationLocalStartRecord,
+    ) -> Result<()> {
+        Self::require_prior_generation(&expected.daemon_generation_id)?;
+        self.lock()?
+            .runtime_db
+            .authorize_qualification_workspace_removal(expected)
+    }
+
+    pub(crate) fn record_qualification_workspace_removed_prior_generation(
+        &self,
+        expected: &runtime_db::external_execution::QualificationLocalStartRecord,
+    ) -> Result<runtime_db::external_execution::QualificationLocalStartRecord> {
+        Self::require_prior_generation(&expected.daemon_generation_id)?;
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .record_qualification_workspace_removed(expected)
+    }
+
+    pub(crate) fn record_qualification_state_root_removed_prior_generation(
+        &self,
+        expected: &runtime_db::external_execution::QualificationLocalStartRecord,
+    ) -> Result<runtime_db::external_execution::QualificationLocalStartRecord> {
+        Self::require_prior_generation(&expected.daemon_generation_id)?;
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .record_qualification_state_root_removed(expected)
+    }
+
+    pub(crate) fn close_qualification_local_start_prior_generation(
+        &self,
+        expected: &runtime_db::external_execution::QualificationLocalStartRecord,
+    ) -> Result<runtime_db::external_execution::QualificationLocalStartRecord> {
+        Self::require_prior_generation(&expected.daemon_generation_id)?;
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .close_qualification_local_start(expected)
+    }
+
     pub(crate) fn qualification_worker_process(
         &self,
         placement: &str,
@@ -19420,7 +19549,9 @@ impl StateStore {
     ) -> Result<Vec<String>> {
         self.lock()?
             .runtime_db
-            .settled_unclosed_qualification_guest_scratch_placements()
+            .settled_unclosed_qualification_guest_scratch_placements(
+                runtime_db::daemon_generation_id(),
+            )
     }
 
     pub(crate) fn completed_qualification_guest_scratch_transport(

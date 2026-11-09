@@ -7719,6 +7719,16 @@ pub fn recover_external_candidate_cleanups(
             report.failures.push((placement, format!("{error:#}")));
         }
     }
+    // Rows a dead daemon generation left open: no running daemon holds their
+    // descriptors, so they are settled by recorded coordinate instead.
+    match crate::qualification_cold_settlement::settle_prior_generation_qualification_custody(state)
+    {
+        Ok(settled) => report.failures.extend(settled.failures),
+        Err(error) => report.failures.push((
+            "prior-generation Q custody".to_owned(),
+            format!("{error:#}"),
+        )),
+    }
     Ok(report)
 }
 

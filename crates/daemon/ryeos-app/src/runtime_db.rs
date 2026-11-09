@@ -1975,7 +1975,7 @@ impl FollowWaiterSummary {
 // replace it with the best-effort daemon PID/exit marker or a cgroup path scan.
 const SCOPE_LIFETIME_FENCE_FIRST_EPOCH: u32 = 30;
 
-mod qualification_cold_custody;
+pub(crate) mod qualification_cold_custody;
 pub use qualification_cold_custody::ColdQualificationCustodyReport;
 pub(crate) use qualification_cold_custody::QualificationCustodyDisposition;
 const SCOPE_LIFETIME_FENCE_SQL: &str = r#"CREATE TABLE execution_lifetime_fence (
