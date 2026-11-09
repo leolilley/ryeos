@@ -73,7 +73,7 @@ impl Default for ComposeLimits {
             contact_timeout_seconds: 30,
             observation_timeout_seconds: 120,
             cleanup_timeout_seconds: 300,
-            native_work_steps: 2_000_000,
+            native_work_steps: super::DEFAULT_NATIVE_WORK_STEPS,
             max_workspace_bytes: 1024 * 1024 * 1024,
             max_export_bytes: 512 * 1024 * 1024,
             max_transfer_bytes: 1024 * 1024 * 1024,

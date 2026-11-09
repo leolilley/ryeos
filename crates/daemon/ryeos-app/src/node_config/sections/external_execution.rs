@@ -25,6 +25,13 @@ pub const SECTION_NAME: &str = "external_execution";
 /// Upper bound on the native work one placement may declare: a thousand
 /// times the largest envelope an incarnation is issued today.
 pub(crate) const MAX_NATIVE_WORK_STEPS: u64 = 1_000_000_000_000;
+/// The native work a placement declares when its binding states none: a
+/// tenth of the incarnation envelope the shipped profiles issue.
+pub(crate) const DEFAULT_NATIVE_WORK_STEPS: u64 = 2_000_000;
+
+fn default_native_work_steps() -> u64 {
+    DEFAULT_NATIVE_WORK_STEPS
+}
 pub struct ExternalExecutionSection;
 
 /// Workload-specific authority in one node-signed placement binding. Direct
@@ -376,7 +383,10 @@ struct BindingDocument {
     cleanup_timeout_seconds: u32,
     /// Prepaid native work (SQL VM steps) one placement may spend on the
     /// node across its whole life. A fresh placement is admitted only when
-    /// the daemon incarnation has at least this much left.
+    /// the daemon incarnation has at least this much left. A document that
+    /// does not state it declares [`DEFAULT_NATIVE_WORK_STEPS`], the same
+    /// figure a compose without an explicit limit writes.
+    #[serde(default = "default_native_work_steps")]
     native_work_steps: u64,
     max_workspace_bytes: u64,
     max_export_bytes: u64,
