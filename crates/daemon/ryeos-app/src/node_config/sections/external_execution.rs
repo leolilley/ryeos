@@ -22,6 +22,9 @@ pub mod compose_qualification;
 pub mod provision;
 
 pub const SECTION_NAME: &str = "external_execution";
+/// Upper bound on the native work one placement may declare: a thousand
+/// times the largest envelope an incarnation is issued today.
+pub(crate) const MAX_NATIVE_WORK_STEPS: u64 = 1_000_000_000_000;
 pub struct ExternalExecutionSection;
 
 /// Workload-specific authority in one node-signed placement binding. Direct
@@ -371,6 +374,10 @@ struct BindingDocument {
     contact_timeout_seconds: u32,
     observation_timeout_seconds: u32,
     cleanup_timeout_seconds: u32,
+    /// Prepaid native work (SQL VM steps) one placement may spend on the
+    /// node across its whole life. A fresh placement is admitted only when
+    /// the daemon incarnation has at least this much left.
+    native_work_steps: u64,
     max_workspace_bytes: u64,
     max_export_bytes: u64,
     max_transfer_bytes: u64,
@@ -459,6 +466,10 @@ impl BindingDocument {
                 && (1..=900).contains(&self.observation_timeout_seconds)
                 && (1..=600).contains(&self.cleanup_timeout_seconds),
             "placement binding lifecycle deadlines exceed bounds"
+        );
+        ensure!(
+            (1..=MAX_NATIVE_WORK_STEPS).contains(&self.native_work_steps),
+            "placement binding declares native work outside bounds"
         );
         ensure!(
             self.storage_policy == "ephemeral_private_candidate_v1"
@@ -553,6 +564,7 @@ impl BindingDocument {
             contact_timeout_seconds: self.contact_timeout_seconds,
             observation_timeout_seconds: self.observation_timeout_seconds,
             cleanup_timeout_seconds: self.cleanup_timeout_seconds,
+            native_work_steps: self.native_work_steps,
             max_workspace_bytes: self.max_workspace_bytes,
             max_export_bytes: self.max_export_bytes,
             max_transfer_bytes: self.max_transfer_bytes,
@@ -614,6 +626,7 @@ pub(crate) struct ExternalPlacementBackendContract {
     pub(crate) contact_timeout_seconds: u32,
     pub(crate) observation_timeout_seconds: u32,
     pub(crate) cleanup_timeout_seconds: u32,
+    pub(crate) native_work_steps: u64,
     pub(crate) max_workspace_bytes: u64,
     pub(crate) max_export_bytes: u64,
     pub(crate) max_transfer_bytes: u64,
@@ -912,6 +925,7 @@ impl RetainedExternalExecutionBinding {
             contact_timeout_seconds: 30,
             observation_timeout_seconds: 60,
             cleanup_timeout_seconds: 120,
+            native_work_steps: 2_000_000,
             max_workspace_bytes: 1024,
             max_export_bytes: 512,
             max_transfer_bytes: 2048,
@@ -1056,6 +1070,7 @@ impl RetainedExternalExecutionBinding {
                 contact_timeout_seconds: 60,
                 observation_timeout_seconds: 60,
                 cleanup_timeout_seconds: 120,
+                native_work_steps: 2_000_000,
                 max_workspace_bytes: 16 * 1024 * 1024,
                 max_export_bytes: 8 * 1024 * 1024,
                 max_transfer_bytes: 16 * 1024 * 1024,

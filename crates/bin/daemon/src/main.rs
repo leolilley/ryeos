@@ -4904,6 +4904,12 @@ async fn run(
                         config.app_root.clone(),
                         format!("sha256:{}", node_policy_snapshot.generation_digest()),
                     )));
+                    // A fresh external placement is admitted only while this
+                    // incarnation's remaining prepaid native work and service
+                    // window cover what the placement's binding declares.
+                    if let Some(factory) = composition.native_factory.clone() {
+                        ext.insert(Arc::new(native_service_headroom_reader(factory)));
+                    }
                     let publication_policy = node_policy_snapshot
                         .require::<ryeos_node_runtime::node_policy::sections::bundle_publication::BundlePublicationPolicy>()?
                         .clone();
@@ -7135,6 +7141,29 @@ fn defer_attached(deferred: &mut DeferredRows, item: &DrainAttached) {
 /// nothing this daemon does while it runs makes them stand. Only a failure
 /// to read the report file, the node identity or the host generation is an
 /// unreadable report, which a later attempt may read.
+/// What remains of the live native factory's prepaid work and service
+/// window, read at each admission. The work left is the envelope less the
+/// cleanup reserve less what service SQL has spent; the time left runs to
+/// the deadline by which this incarnation's service SQL must end. Once the
+/// factory refuses service, every read refuses, and so does every fresh
+/// placement.
+fn native_service_headroom_reader(
+    factory: Arc<ryeos_node::native_capacity::LiveNativeFactory>,
+) -> ryeos_app::native_headroom::NativeServiceHeadroomReader {
+    ryeos_app::native_headroom::NativeServiceHeadroomReader::new(move || {
+        let budget = factory.ready_factory()?.budget_snapshot()?;
+        let work_steps = budget
+            .allocator_steps_limit
+            .saturating_sub(budget.cleanup_reserved)
+            .saturating_sub(budget.allocator_steps);
+        let service_seconds = factory.original_sql_deadline()?.remaining().as_secs();
+        Ok(ryeos_app::native_headroom::NativeServiceHeadroom {
+            work_steps,
+            service_seconds,
+        })
+    })
+}
+
 fn node_capability_report_reader(
     app_root: std::path::PathBuf,
     policy_generation: String,

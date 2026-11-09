@@ -5892,6 +5892,13 @@ impl<'a> ExternalPlacementOwner<'a> {
             .state
             .external_placement_backends
             .contact_gate(placement)?;
+        if fresh {
+            crate::native_headroom::admit_fresh_placement_headroom(
+                self.state,
+                "external direct placement",
+                crate::native_headroom::NativeWorkNeed::of_contract(&contract),
+            )?;
+        }
         let record = if fresh {
             self.state.state_store.reserve_external_direct_allocation(
                 &reservation,
@@ -6222,6 +6229,11 @@ impl<'a> ExternalPlacementOwner<'a> {
                     .context("external placement startup deadline overflow")?,
             }
         };
+        crate::native_headroom::admit_fresh_placement_headroom(
+            self.state,
+            "external session placement",
+            crate::native_headroom::NativeWorkNeed::of_contract(&contract),
+        )?;
         let record = match &lease_charge {
             Some(charge) => self.state.state_store.reserve_external_lease_allocation(
                 &reservation,
@@ -6690,6 +6702,11 @@ pub fn prepare_external_qualification_start_for_invocation<'a>(
         .context("external qualification reservation lost its accepted Worker content")?
         .definitions
         .bundle_generation_identity;
+    crate::native_headroom::admit_fresh_placement_headroom(
+        state,
+        "external qualification start",
+        crate::native_headroom::NativeWorkNeed::of_contract(&contract),
+    )?;
     state.engine.with_checked_bundle_generation(|generation| {
         ensure!(
             generation.request_engine_generation_identity() == expected_generation,

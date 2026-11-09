@@ -62,6 +62,7 @@ pub mod launch_stage_timings;
 pub mod live_input_queue;
 pub mod managed_external_content;
 pub mod managed_external_content_operation;
+pub mod native_headroom;
 pub mod node_config;
 pub mod node_requirement_admission;
 pub mod object_contracts;
