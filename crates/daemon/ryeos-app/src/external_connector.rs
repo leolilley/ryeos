@@ -34,7 +34,10 @@ use crate::external_placement::{
     ExternalProtocolOutput, InstalledExternalCandidateConnector, author_external_protocol_input,
     claim_external_protocol_output,
 };
-use crate::runtime_db::external_execution::connector::ExternalConnectorPreparation;
+use crate::process::IdentityLiveness;
+use crate::runtime_db::external_execution::connector::{
+    ExternalConnectorPhase, ExternalConnectorPreparation,
+};
 use crate::state::AppState;
 use crate::temp_dir_guard::TempDirGuard;
 use crate::vault::external_connector::{
@@ -354,6 +357,89 @@ fn create_listener() -> Result<(
 
 /// Prepare the one local connector only after the remote occurrence has
 /// authenticated, reached Ready, and received its exact Release.
+/// Close every connector row an ended daemon generation left open. A relay
+/// owner is a thread of the daemon that prepared the row, so after a restart
+/// no open row has an owner. The old owner writes the closure itself unless
+/// its daemon could no longer write service SQL (a native-capacity latch);
+/// then the row stays `connected`, and because an allocation cannot settle
+/// while a connector is open, every cleanup pass for that placement is
+/// refused and its Q credential custody stays held. Each row is judged by
+/// [`dispose_open_connector`]; a retained row is reported. Runs after the
+/// dead generation's Worker groups were settled, which is what ends the
+/// peers. Returns how many rows were closed.
+pub fn close_connectors_left_by_prior_generations(state: &AppState) -> Result<usize> {
+    let mut closed = 0usize;
+    for record in state.state_store.open_external_connectors()? {
+        let placement = record.placement_thread_id.clone();
+        let liveness = record
+            .peer_process_identity
+            .as_ref()
+            .map(crate::process::exact_process_liveness);
+        let reason = match dispose_open_connector(record.phase, liveness) {
+            OpenConnectorDisposition::Close(reason) => reason,
+            OpenConnectorDisposition::Retain(why) => {
+                tracing::error!(
+                    placement = %placement,
+                    "external connector left open by a previous daemon stays open: {why}"
+                );
+                continue;
+            }
+        };
+        state
+            .state_store
+            .close_external_connector(&placement, reason)
+            .with_context(|| format!("close external connector left open for {placement}"))?;
+        tracing::warn!(
+            placement = %placement,
+            reason,
+            "closed external connector left open by a previous daemon"
+        );
+        closed = closed.saturating_add(1);
+    }
+    Ok(closed)
+}
+
+/// What start recovery does with one connector row it found open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OpenConnectorDisposition {
+    /// Close it with this reason.
+    Close(&'static str),
+    /// Leave it open; the text says why.
+    Retain(&'static str),
+}
+
+/// Judge one open connector row from its phase and, for a connected row,
+/// the liveness of its exact peer. A `prepared` row never had a peer and is
+/// abandoned. A `connected` row is closed as `peer_absent` once its peer is
+/// proved dead or stale; a peer still alive, one this host cannot prove, or
+/// a connected row with no peer identity keeps the row, exactly as an
+/// unproved Worker group keeps its row. A closed row is not open.
+pub(crate) fn dispose_open_connector(
+    phase: ExternalConnectorPhase,
+    peer_liveness: Option<IdentityLiveness>,
+) -> OpenConnectorDisposition {
+    match (phase, peer_liveness) {
+        (ExternalConnectorPhase::Prepared, _) => {
+            OpenConnectorDisposition::Close("startup_abandoned")
+        }
+        (ExternalConnectorPhase::Connected, Some(IdentityLiveness::DeadOrStale)) => {
+            OpenConnectorDisposition::Close("peer_absent")
+        }
+        (ExternalConnectorPhase::Connected, Some(IdentityLiveness::Alive)) => {
+            OpenConnectorDisposition::Retain("its peer process is still alive")
+        }
+        (ExternalConnectorPhase::Connected, Some(IdentityLiveness::Unavailable)) => {
+            OpenConnectorDisposition::Retain("its peer liveness is unproved on this host")
+        }
+        (ExternalConnectorPhase::Connected, None) => {
+            OpenConnectorDisposition::Retain("its peer identity is absent")
+        }
+        (ExternalConnectorPhase::Closed, _) => {
+            OpenConnectorDisposition::Retain("it is already closed")
+        }
+    }
+}
+
 pub fn prepare_external_candidate_connector(
     state: &AppState,
     placement: &str,
@@ -1395,6 +1481,37 @@ mod tests {
         .unwrap();
         let error = run_output_and_settle_input(&server, input, || Ok(())).unwrap_err();
         assert!(error.to_string().contains("input owner panicked"));
+    }
+
+    #[test]
+    fn an_open_connector_closes_only_when_its_peer_is_proved_gone() {
+        use ExternalConnectorPhase::{Closed, Connected, Prepared};
+        use OpenConnectorDisposition::{Close, Retain};
+        assert_eq!(
+            dispose_open_connector(Prepared, None),
+            Close("startup_abandoned")
+        );
+        assert_eq!(
+            dispose_open_connector(Prepared, Some(IdentityLiveness::Alive)),
+            Close("startup_abandoned")
+        );
+        assert_eq!(
+            dispose_open_connector(Connected, Some(IdentityLiveness::DeadOrStale)),
+            Close("peer_absent")
+        );
+        assert!(matches!(
+            dispose_open_connector(Connected, Some(IdentityLiveness::Alive)),
+            Retain(_)
+        ));
+        assert!(matches!(
+            dispose_open_connector(Connected, Some(IdentityLiveness::Unavailable)),
+            Retain(_)
+        ));
+        assert!(matches!(dispose_open_connector(Connected, None), Retain(_)));
+        assert!(matches!(
+            dispose_open_connector(Closed, Some(IdentityLiveness::DeadOrStale)),
+            Retain(_)
+        ));
     }
 
     #[test]

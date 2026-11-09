@@ -1085,6 +1085,45 @@ fn lillux_process_identity(
     })
 }
 
+/// Liveness of one exact process identity captured by Lillux, such as a
+/// connector peer: the PID must still name the same incarnation of the same
+/// boot, and a process-group peer must still sit in its recorded group. A
+/// reused PID or another boot is dead; a host without pidfd evidence is
+/// unavailable and never counts as dead.
+pub fn exact_process_liveness(identity: &lillux::ExactProcessIdentity) -> IdentityLiveness {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = identity;
+        IdentityLiveness::Unavailable
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        pin_liveness(pin_exact(identity))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn pin_exact(
+    identity: &lillux::ExactProcessIdentity,
+) -> std::result::Result<PinnedProcess, IdentityPinError> {
+    let pid = i64::from(identity.target_pid);
+    let pin = open_pidfd(pid)?;
+    let boot_id = read_boot_id().map_err(|_| IdentityPinError::Unavailable)?;
+    if boot_id != identity.boot_id {
+        return Err(IdentityPinError::Stale);
+    }
+    let stat = read_verified_process_stat(pid, pin.pidfd.as_fd())?;
+    let same_incarnation =
+        u64::try_from(stat.start_time_ticks).ok() == Some(identity.target_start_time_ticks);
+    let same_group = !identity.group_basis.is_process_group()
+        || stat.pgrp == i64::from(identity.group_leader_pid);
+    if !same_incarnation || !same_group {
+        return Err(IdentityPinError::Stale);
+    }
+    Ok(pin)
+}
+
 /// Whether the persisted target still names the exact live incarnation.
 pub fn execution_alive(identity: &ExecutionProcessIdentity) -> bool {
     execution_liveness(identity) == IdentityLiveness::Alive
@@ -2563,6 +2602,38 @@ mod tests {
         std::thread::sleep(Duration::from_millis(50));
 
         assert_eq!(interrupt_process(&identity), SignalResult::AlreadyDead);
+    }
+
+    #[test]
+    fn exact_identity_liveness_follows_the_pidfd_and_the_boot() {
+        let tmp = TempDir::new().unwrap();
+        let (mut child, identity, _marker) = spawn_usr1_target(&tmp);
+        let exact = lillux_process_identity(&identity).unwrap();
+        assert_eq!(exact_process_liveness(&exact), IdentityLiveness::Alive);
+        let other_boot = lillux::ExactProcessIdentity {
+            boot_id: "not-this-boot".to_string(),
+            ..exact.clone()
+        };
+        assert_eq!(
+            exact_process_liveness(&other_boot),
+            IdentityLiveness::DeadOrStale
+        );
+        let other_incarnation = lillux::ExactProcessIdentity {
+            target_start_time_ticks: exact.target_start_time_ticks + 1,
+            ..exact.clone()
+        };
+        assert_eq!(
+            exact_process_liveness(&other_incarnation),
+            IdentityLiveness::DeadOrStale
+        );
+
+        let _ = unsafe { libc::kill(-(identity.pgid() as i32), lillux::signal::SIGKILL) };
+        let _ = child.wait();
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(
+            exact_process_liveness(&exact),
+            IdentityLiveness::DeadOrStale
+        );
     }
 
     #[test]

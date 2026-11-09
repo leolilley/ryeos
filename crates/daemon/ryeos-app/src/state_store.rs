@@ -19328,6 +19328,15 @@ impl StateStore {
         }
     }
 
+    /// Connector rows still `prepared` or `connected`. Relay owners are
+    /// threads of the daemon that prepared them, so during start recovery
+    /// every row listed here was left open by an ended daemon generation.
+    pub(crate) fn open_external_connectors(
+        &self,
+    ) -> Result<Vec<runtime_db::external_execution::connector::ExternalConnectorRecord>> {
+        self.lock()?.runtime_db.open_external_connectors()
+    }
+
     pub(crate) fn external_connector_retired(&self, placement: &str) -> Result<bool> {
         Ok(self
             .lock()?

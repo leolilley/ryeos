@@ -5173,6 +5173,9 @@ async fn run(
             startup.progress(|snapshot| {
                 snapshot.recovery_threads = Some(active_reconcile.active_thread_ids.len() as u64);
             })?;
+            advance_external_candidate_cleanups_after_reconcile(app_state)
+                .await
+                .context("advance predecessor external candidate cleanups")?;
             let recovery_thread_targets = active_reconcile.active_thread_ids;
             let resume_intents = active_reconcile.resume_intents;
             if ryeosd::shutdown_requested() {
@@ -6383,9 +6386,10 @@ async fn run_bootstrap_source_cleanup_recovery(state: AppState) -> Result<()> {
 /// Settle the predecessor controller generation before Ready can release new
 /// external execution. Import runs first so a sealed result that was already
 /// delivered remains authoritative; fencing then makes every surviving
-/// occurrence cleanup-only. Cleanup failures remain durably quarantined and
-/// are retried by the periodic pass, but discovery/fencing failures abort
-/// startup rather than admitting work beside an unfenced predecessor.
+/// occurrence cleanup-only. Discovery/fencing failures abort startup rather
+/// than admitting work beside an unfenced predecessor. The retained cleanups
+/// themselves advance in [`advance_external_candidate_cleanups_after_reconcile`],
+/// once thread reconciliation has settled the predecessor's local rows.
 async fn recover_external_candidates_before_ready(state: &AppState) -> Result<()> {
     let recovered = state
         .external_candidate_imports
@@ -6414,15 +6418,26 @@ async fn recover_external_candidates_before_ready(state: &AppState) -> Result<()
         );
     }
 
+    Ok(())
+}
+
+/// Advance every retained external candidate cleanup once, still before
+/// Ready. This runs after thread reconciliation on purpose: a quarantined
+/// allocation cannot settle while its placement keeps a local Worker row or
+/// an open connector, and those rows are what thread reconciliation settles
+/// for a dead daemon generation. A pass before that point refuses every such
+/// cleanup and leaves it to the periodic pass. Cleanup failures remain
+/// durably quarantined and are retried periodically. Bootstrap sources are
+/// already durably fenced by their own journal; their provider cleanup runs
+/// after Ready under a separate supervised owner, so a provider timeout
+/// cannot hold the startup gate.
+async fn advance_external_candidate_cleanups_after_reconcile(state: &AppState) -> Result<()> {
     log_external_candidate_cleanup_recovery(
         recover_external_candidate_cleanups_async(state.clone())
             .await
             .context("advance startup external candidate cleanup")?,
         "startup",
     );
-    // Bootstrap sources are already durably fenced by their own journal.
-    // Their provider cleanup runs after Ready under a separate supervised
-    // owner, so a provider timeout cannot hold the startup gate.
     Ok(())
 }
 
