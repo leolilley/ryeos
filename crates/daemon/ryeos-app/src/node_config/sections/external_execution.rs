@@ -28,10 +28,6 @@ pub(crate) const MAX_NATIVE_WORK_STEPS: u64 = 1_000_000_000_000;
 /// The native work a placement declares when its binding states none: a
 /// tenth of the incarnation envelope the shipped profiles issue.
 pub(crate) const DEFAULT_NATIVE_WORK_STEPS: u64 = 2_000_000;
-
-fn default_native_work_steps() -> u64 {
-    DEFAULT_NATIVE_WORK_STEPS
-}
 pub struct ExternalExecutionSection;
 
 /// Workload-specific authority in one node-signed placement binding. Direct
@@ -384,10 +380,12 @@ struct BindingDocument {
     /// Prepaid native work (SQL VM steps) one placement may spend on the
     /// node across its whole life. A fresh placement is admitted only when
     /// the daemon incarnation has at least this much left. A document that
-    /// does not state it declares [`DEFAULT_NATIVE_WORK_STEPS`], the same
-    /// figure a compose without an explicit limit writes.
-    #[serde(default = "default_native_work_steps")]
-    native_work_steps: u64,
+    /// states none declares [`DEFAULT_NATIVE_WORK_STEPS`], the figure a
+    /// compose without an explicit limit writes; it is kept absent rather
+    /// than filled in, because a retained binding generation must
+    /// re-canonicalize to the exact bytes the node retained.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    native_work_steps: Option<u64>,
     max_workspace_bytes: u64,
     max_export_bytes: u64,
     max_transfer_bytes: u64,
@@ -478,7 +476,8 @@ impl BindingDocument {
             "placement binding lifecycle deadlines exceed bounds"
         );
         ensure!(
-            (1..=MAX_NATIVE_WORK_STEPS).contains(&self.native_work_steps),
+            self.native_work_steps
+                .is_none_or(|steps| (1..=MAX_NATIVE_WORK_STEPS).contains(&steps)),
             "placement binding declares native work outside bounds"
         );
         ensure!(
@@ -574,7 +573,7 @@ impl BindingDocument {
             contact_timeout_seconds: self.contact_timeout_seconds,
             observation_timeout_seconds: self.observation_timeout_seconds,
             cleanup_timeout_seconds: self.cleanup_timeout_seconds,
-            native_work_steps: self.native_work_steps,
+            native_work_steps: self.native_work_steps.unwrap_or(DEFAULT_NATIVE_WORK_STEPS),
             max_workspace_bytes: self.max_workspace_bytes,
             max_export_bytes: self.max_export_bytes,
             max_transfer_bytes: self.max_transfer_bytes,
@@ -935,7 +934,7 @@ impl RetainedExternalExecutionBinding {
             contact_timeout_seconds: 30,
             observation_timeout_seconds: 60,
             cleanup_timeout_seconds: 120,
-            native_work_steps: 2_000_000,
+            native_work_steps: Some(2_000_000),
             max_workspace_bytes: 1024,
             max_export_bytes: 512,
             max_transfer_bytes: 2048,
@@ -1553,6 +1552,41 @@ mod workload_binding_tests {
             },
         );
         document
+    }
+
+    #[test]
+    fn a_retained_binding_without_native_work_round_trips_exactly_and_declares_the_default() {
+        let retained = RetainedExternalExecutionBinding::test_fixture();
+        // The row a node retained before the field existed: the same
+        // document signed without it, so its canonical bytes carry no key.
+        let mut before = retained.clone();
+        before.document.native_work_steps = None;
+        let key = lillux::crypto::SigningKey::from_bytes(&[37; 32]);
+        let body = serde_yaml::to_string(&before.document).unwrap();
+        before.signed_source =
+            lillux::signature::sign_content_at(&body, &key, "#", None, "2026-09-20T00:00:00Z");
+        before.digest = binding_digest(&before.id, &before.signer, &before.signed_source).unwrap();
+        before.capacity_owner = capacity_owner(&before.signer, &before.document).unwrap();
+        let json = before.canonical_json().unwrap();
+        assert!(!json.contains("native_work_steps"));
+        let decoded: RetainedExternalExecutionBinding = serde_json::from_str(&json).unwrap();
+        assert!(decoded == before);
+        assert_eq!(decoded.canonical_json().unwrap(), json);
+        assert_eq!(
+            decoded.backend_contract().native_work_steps,
+            DEFAULT_NATIVE_WORK_STEPS
+        );
+        // A composed binding states it, and the statement survives.
+        assert_eq!(
+            retained.backend_contract().native_work_steps,
+            retained.document.native_work_steps.unwrap()
+        );
+        assert!(
+            retained
+                .canonical_json()
+                .unwrap()
+                .contains("native_work_steps")
+        );
     }
 
     #[test]
