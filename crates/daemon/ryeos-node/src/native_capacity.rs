@@ -37,7 +37,9 @@ pub use account::NativeCapacityAccountBinding;
 pub(crate) use account::load_existing_capacity_binding;
 pub(crate) use account::prepare_initial_capacity_binding;
 pub use account::reanchor::{
-    CapacityReanchorEvidence, ReanchorReport, ReanchorRequest, read_capacity_reanchors,
+    CapacityPolicyAmendmentEvidence, CapacityPolicyAmendmentReport, CapacityPolicyAmendmentRequest,
+    CapacityReanchorEvidence, POLICY_AMENDMENT_EVIDENCE_LOG, ReanchorReport, ReanchorRequest,
+    amend_capacity_policy, read_capacity_policy_amendments, read_capacity_reanchors,
     reanchor_capacity,
 };
 pub use account::reissue::{

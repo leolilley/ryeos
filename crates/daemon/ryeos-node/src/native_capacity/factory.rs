@@ -1063,7 +1063,9 @@ impl LiveNativeFactory {
         let margin = std::time::Duration::from_millis(incarnation.rollover_drain_margin_ms);
         let wake = Arc::new(on_margin);
         let fired = Arc::new(AtomicBool::new(false));
-        {
+        // A policy without a work margin (schema 6) plans no work rollover;
+        // only the time margin is watched and spent work latches as before.
+        if let Some(work_margin) = incarnation.rollover_work_margin_steps {
             let (wake, fired) = (Arc::clone(&wake), Arc::clone(&fired));
             let authority = Arc::downgrade(&self.authority);
             let latch = Arc::clone(&latch);
@@ -1076,7 +1078,7 @@ impl LiveNativeFactory {
                                 .upgrade()
                                 .and_then(|authority| authority.budget.snapshot().ok())
                         },
-                        incarnation.rollover_work_margin_steps,
+                        work_margin,
                         WORK_MARGIN_POLL,
                         || latch.bits() != 0,
                         &fired,

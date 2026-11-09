@@ -687,6 +687,13 @@ fn run_node_policy_apply_command(argv: &[String], console: &crate::tty::Console)
     let installed = ryeos_node_runtime::node_policy::generation::policy_directory(&app_root)
         .join(format!("{}.yaml", args.section));
 
+    // Applying `native_capacity` also amends the capacity issuance to the
+    // new policy; the operation reports that amendment beside the install.
+    let capacity_amendment = applied
+        .result
+        .get("capacity_amendment")
+        .filter(|value| !value.is_null())
+        .cloned();
     if args.json {
         crate::tty::write_json(&serde_json::json!({
             "status": "installed",
@@ -694,12 +701,29 @@ fn run_node_policy_apply_command(argv: &[String], console: &crate::tty::Console)
             "path": installed,
             "signer_fingerprint": applied.result["signer_fingerprint"],
             "receipt": applied.receipt.digest()?,
+            "capacity_amendment": capacity_amendment,
         }))?;
     } else {
         console.text(&format!(
             "Installed signed node policy: {}\n",
             installed.display()
         ))?;
+        if let Some(amendment) = &capacity_amendment {
+            let already = amendment["already_applied"].as_bool().unwrap_or(false);
+            console.text(&format!(
+                "Capacity issuance {} policy {}{}\n",
+                if already {
+                    "already carries"
+                } else {
+                    "amended to"
+                },
+                amendment["policy_digest"].as_str().unwrap_or("?"),
+                amendment["document_digest"]
+                    .as_str()
+                    .map(|digest| format!(" (document {digest})"))
+                    .unwrap_or_default()
+            ))?;
+        }
     }
     Ok(())
 }

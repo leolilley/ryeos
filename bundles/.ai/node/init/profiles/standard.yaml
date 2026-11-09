@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-08T06:55:06Z:5a4ed6a686ab58b158607227f4fb2e6352eebbd60df6b2ceb70ac8e8a65c8837:vqQWj0DIwrWFEE0Rwt9QzXdrM9VsPxPedXKkvHemcPi847ienTXzWH3A2zPp2y+aUbeDIwpfXYZswEVucyJTDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-09T02:44:13Z:74ff6ae4405671aa91d992f421e48cd457306f8d5a15bb67cebc38329748d737:nnTshuVzEkOchXSzfgmcizPmlQPT1AcYr4braZOa+Wlo6dO56Yk0AdYU2Sg6BZdWGIKBeJFISyvGddnhHv20BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - core
@@ -16,7 +16,7 @@ policies:
   # Explicit local capacity issuance; admission/signing and operation proof remain open.
   # The account is root/node-bound and cannot be reminted by policy refresh.
   native_capacity:
-    schema: 6
+    schema: 7
     issuance_nonce: "33c88bbc57daa7c765d0fc460459d25a"
     allowance:
       # Sixteen finite 64-MiB incarnations plus 72-KiB bounded control/redo reserve.

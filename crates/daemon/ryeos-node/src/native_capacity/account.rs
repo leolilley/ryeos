@@ -142,7 +142,8 @@ impl NativeCapacityAccountBinding {
             maximum_occupancy_ms: u64,
             outside_cleanup_steps: u64,
             rollover_drain_margin_ms: u64,
-            rollover_work_margin_steps: u64,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            rollover_work_margin_steps: Option<u64>,
             units: Units,
         }
         #[derive(Serialize)]
@@ -2501,11 +2502,11 @@ mod issuance_digest_tests {
                 anchor_protocol: anchor::PROTOCOL.to_owned(),
                 reanchor: None,
                 policy: NodeNativeCapacityPolicy {
-                    schema: 6,
+                    schema: 7,
                     issuance_nonce: "a".repeat(32),
                     allowance: units,
                     incarnation: ryeos_node_runtime::node_policy::sections::native_capacity::NativeIncarnationEnvelope {
-                        units, maximum_occupancy_ms: 3, cleanup_occupancy_ms: 1, rollover_drain_margin_ms: 1, rollover_work_margin_steps: 1,
+                        units, maximum_occupancy_ms: 3, cleanup_occupancy_ms: 1, rollover_drain_margin_ms: 1, rollover_work_margin_steps: Some(1),
                         host_release_steps: 2, outside_cleanup_steps: 1,
                     },
                     recovery: ryeos_node_runtime::node_policy::sections::native_capacity::NativeRecoveryEnvelope {
@@ -2530,12 +2531,22 @@ mod issuance_digest_tests {
             );
             binding.policy.incarnation.outside_cleanup_steps -= 1;
             assert_eq!(binding.issuance_digest().unwrap(), expected);
-            binding.policy.incarnation.rollover_work_margin_steps += 1;
+            binding.policy.incarnation.rollover_work_margin_steps = Some(2);
             assert_ne!(
                 binding.issuance_digest().unwrap(),
                 expected,
                 "the work rollover margin must bind to the original issuance"
             );
+            // A schema 6 issuance names no margin: its digest is the digest
+            // of its canonical form without the key, as it was issued.
+            binding.policy.schema = 6;
+            binding.policy.incarnation.rollover_work_margin_steps = None;
+            binding.policy.validate().unwrap();
+            let canonical =
+                lillux::canonical_json(&serde_json::to_value(&binding).unwrap()).unwrap();
+            assert!(!canonical.contains("rollover_work_margin_steps"));
+            let issued: [u8; 32] = sha2::Sha256::digest(canonical.as_bytes()).into();
+            assert_eq!(binding.issuance_digest().unwrap(), issued);
         }
     }
 }

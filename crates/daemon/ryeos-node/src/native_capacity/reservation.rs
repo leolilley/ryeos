@@ -753,6 +753,11 @@ pub(super) fn work_margin_proven(
     incarnation: &ryeos_node_runtime::node_policy::sections::native_capacity::NativeIncarnationEnvelope,
     spent: Option<&lillux_sqlite::OriginalNativeBudgetSnapshot>,
 ) -> bool {
+    // A policy without a work margin plans no work rollover, so no counters
+    // can prove one.
+    let Some(margin) = incarnation.rollover_work_margin_steps else {
+        return false;
+    };
     spent.is_some_and(|counters| {
         counters.allocator_steps_limit == incarnation.units.allocator_steps
             && counters.cleanup_reserved == incarnation.units.cleanup_steps
@@ -760,7 +765,7 @@ pub(super) fn work_margin_proven(
                 counters.allocator_steps,
                 counters.allocator_steps_limit,
                 counters.cleanup_reserved,
-                incarnation.rollover_work_margin_steps,
+                margin,
             )
     })
 }
@@ -3740,7 +3745,7 @@ mod work_margin_proof_tests {
             maximum_occupancy_ms: 60_000,
             cleanup_occupancy_ms: 10_000,
             rollover_drain_margin_ms: 5_000,
-            rollover_work_margin_steps: 200,
+            rollover_work_margin_steps: Some(200),
             host_release_steps: 64,
             outside_cleanup_steps: 32,
         }
