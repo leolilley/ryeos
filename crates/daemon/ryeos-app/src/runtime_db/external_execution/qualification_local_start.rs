@@ -1077,6 +1077,33 @@ impl RuntimeDb {
             .with_sql(|conn| read_unreleased_custody(conn, current_generation))
     }
 
+    /// Every Q local start a previous daemon generation recorded, by
+    /// placement. Start recovery walks these for the disk state only that
+    /// generation's live owners could have released.
+    pub(crate) fn prior_generation_qualification_local_starts(
+        &self,
+        current_generation: &str,
+    ) -> Result<Vec<QualificationLocalStartRecord>> {
+        self.conn.with_sql(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT placement_thread_id FROM external_qualification_local_start
+                 WHERE json_extract(record_json,'$.daemon_generation_id')!=?1
+                 ORDER BY placement_thread_id",
+            )?;
+            let placements = statement
+                .query_map([current_generation], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let mut records = Vec::with_capacity(placements.len());
+            for placement in placements {
+                records.push(
+                    read_local_start(conn, &placement)?
+                        .context("Q local start disappeared during listing")?,
+                );
+            }
+            Ok(records)
+        })
+    }
+
     /// Read-only final pre-spawn gate. The app caller holds the Q occurrence
     /// contact gate from this check through held attachment; this projection
     /// itself grants neither a descriptor nor process contact.

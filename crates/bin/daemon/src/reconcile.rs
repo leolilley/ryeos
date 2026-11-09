@@ -2321,6 +2321,18 @@ pub async fn reconcile_dedicated_worker_startup(state: &AppState) -> Result<()> 
             "closed external connectors a previous daemon left open"
         );
     }
+    // A Q connector's configuration mount target lives in the shared
+    // credential home; a daemon that died holding the connector left it
+    // reserved there, and every later Q start on that credential is refused
+    // until it is released.
+    let released_mount_targets =
+        ryeos_app::external_connector::release_mount_targets_left_by_prior_generations(state)?;
+    if released_mount_targets != 0 {
+        tracing::warn!(
+            released_mount_targets,
+            "released connector mount targets a previous daemon left reserved"
+        );
+    }
     let released_qualification_credentials =
         ryeos_app::external_qualification_local::release_settled_qualification_credential_custody(
             state,

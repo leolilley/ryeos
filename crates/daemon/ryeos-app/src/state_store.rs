@@ -19370,6 +19370,15 @@ impl StateStore {
             .unreleased_qualification_credential_custody(runtime_db::daemon_generation_id())
     }
 
+    /// Q local starts a previous daemon generation recorded.
+    pub(crate) fn prior_generation_qualification_local_starts(
+        &self,
+    ) -> Result<Vec<runtime_db::external_execution::QualificationLocalStartRecord>> {
+        self.lock()?
+            .runtime_db
+            .prior_generation_qualification_local_starts(runtime_db::daemon_generation_id())
+    }
+
     pub(crate) fn qualification_worker_process(
         &self,
         placement: &str,

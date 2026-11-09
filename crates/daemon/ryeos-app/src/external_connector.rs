@@ -10,7 +10,7 @@
 //! bytes to the durable external-execution channel.
 
 use lillux::time::Duration;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -397,6 +397,113 @@ pub fn close_connectors_left_by_prior_generations(state: &AppState) -> Result<us
         closed = closed.saturating_add(1);
     }
     Ok(closed)
+}
+
+/// Release the configuration mount targets that connectors of ended daemon
+/// generations left reserved. A Q connector reserves its target inside the
+/// credential home, which every Q start on that credential shares; the live
+/// relay owner releases it on retirement, and a daemon that died holding the
+/// connector never does, so the next Q start on the credential is refused
+/// with the destination occupied. For every Q local start of a previous
+/// generation whose connector is no longer open, the target named by its
+/// binding is released when it still has a reservation's exact shape (an
+/// empty, owner-read-only regular file); anything else at that name is left
+/// alone and reported. Returns how many targets were released.
+pub fn release_mount_targets_left_by_prior_generations(state: &AppState) -> Result<usize> {
+    let mut released = 0usize;
+    for start in state
+        .state_store
+        .prior_generation_qualification_local_starts()?
+    {
+        let placement = start.placement_thread_id.clone();
+        let Some(custody) = start.credential_custody.as_ref() else {
+            continue;
+        };
+        if !state.state_store.external_connector_retired(&placement)? {
+            // Its peer is still alive; the connector still owns the target.
+            continue;
+        }
+        let Some(allocation) = state.state_store.external_allocation(&placement)? else {
+            continue;
+        };
+        let Some(binding) = state
+            .state_store
+            .retained_external_binding(&allocation.reservation.binding_hash)?
+        else {
+            continue;
+        };
+        let contract = binding.backend_contract();
+        let destination = match contract.workload.session_artifacts() {
+            Ok(artifacts) => artifacts.provider_configuration_destination.to_owned(),
+            Err(_) => continue,
+        };
+        let home_path = crate::private_artifact_home::home_path(
+            &state.config.runtime_state_dir(),
+            &custody.home_id,
+        )?;
+        let Some(home) = lillux::PinnedDirectory::open(&home_path)? else {
+            continue;
+        };
+        home.require_owner_private_directory()?;
+        match release_stale_mount_target(&home, OsStr::new(&destination))? {
+            MountTargetRelease::Released => {
+                tracing::warn!(
+                    placement = %placement,
+                    destination = %destination,
+                    "released a connector mount target a previous daemon left reserved"
+                );
+                released = released.saturating_add(1);
+            }
+            MountTargetRelease::Absent => {}
+            MountTargetRelease::Retained(why) => tracing::error!(
+                placement = %placement,
+                destination = %destination,
+                "a connector mount target of a previous daemon stays: {why}"
+            ),
+        }
+    }
+    Ok(released)
+}
+
+/// What became of one reserved mount-target name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MountTargetRelease {
+    /// The reservation placeholder was there and is removed.
+    Released,
+    /// Nothing is at that name.
+    Absent,
+    /// Something other than a reservation placeholder is at that name; it
+    /// is not touched, and the text says why.
+    Retained(&'static str),
+}
+
+/// Remove the reservation placeholder at `destination` in `home` if, and
+/// only if, it has exactly the shape a reservation creates: a regular file,
+/// empty, mode 0400. A configuration file, a link or a directory at that
+/// name is never removed.
+pub(crate) fn release_stale_mount_target(
+    home: &lillux::PinnedDirectory,
+    destination: &OsStr,
+) -> Result<MountTargetRelease> {
+    let Some(entry) = home.entry_no_follow(destination)? else {
+        return Ok(MountTargetRelease::Absent);
+    };
+    if entry.entry_type != lillux::PinnedEntryType::Regular {
+        return Ok(MountTargetRelease::Retained("it is not a regular file"));
+    }
+    let Some(file) = home.open_pinned_regular(destination, false)? else {
+        return Ok(MountTargetRelease::Absent);
+    };
+    if file.observation()?.size() != 0 {
+        return Ok(MountTargetRelease::Retained("it holds content"));
+    }
+    if entry.mode & 0o777 != 0o400 {
+        return Ok(MountTargetRelease::Retained(
+            "its mode is not a reservation's owner-read-only",
+        ));
+    }
+    home.remove_pinned_regular_if_same(&file)?;
+    Ok(MountTargetRelease::Released)
 }
 
 /// What start recovery does with one connector row it found open.
@@ -1481,6 +1588,52 @@ mod tests {
         .unwrap();
         let error = run_output_and_settle_input(&server, input, || Ok(())).unwrap_err();
         assert!(error.to_string().contains("input owner panicked"));
+    }
+
+    #[test]
+    fn a_stale_mount_target_is_released_only_in_its_reservation_shape() {
+        let root = tempfile::tempdir().unwrap();
+        let home = lillux::PinnedDirectory::open(root.path()).unwrap().unwrap();
+        home.tighten_owner_private_directory().unwrap();
+        let destination = OsStr::new("environments.toml");
+        assert_eq!(
+            release_stale_mount_target(&home, destination).unwrap(),
+            MountTargetRelease::Absent
+        );
+        // A reservation whose owner died without closing it.
+        let reservation = home.reserve_empty_mount_target(destination).unwrap();
+        std::mem::forget(reservation);
+        assert!(root.path().join("environments.toml").exists());
+        assert_eq!(
+            release_stale_mount_target(&home, destination).unwrap(),
+            MountTargetRelease::Released
+        );
+        assert!(!root.path().join("environments.toml").exists());
+        assert_eq!(
+            release_stale_mount_target(&home, destination).unwrap(),
+            MountTargetRelease::Absent
+        );
+        // A real configuration file at that name is never touched.
+        std::fs::write(root.path().join("environments.toml"), b"default = \"x\"\n").unwrap();
+        assert!(matches!(
+            release_stale_mount_target(&home, destination).unwrap(),
+            MountTargetRelease::Retained(_)
+        ));
+        assert!(root.path().join("environments.toml").exists());
+        // An empty file with a writable mode is not a reservation either.
+        std::fs::remove_file(root.path().join("environments.toml")).unwrap();
+        std::fs::write(root.path().join("environments.toml"), b"").unwrap();
+        assert!(matches!(
+            release_stale_mount_target(&home, destination).unwrap(),
+            MountTargetRelease::Retained(_)
+        ));
+        // A directory at that name is not touched.
+        std::fs::remove_file(root.path().join("environments.toml")).unwrap();
+        std::fs::create_dir(root.path().join("environments.toml")).unwrap();
+        assert!(matches!(
+            release_stale_mount_target(&home, destination).unwrap(),
+            MountTargetRelease::Retained(_)
+        ));
     }
 
     #[test]
