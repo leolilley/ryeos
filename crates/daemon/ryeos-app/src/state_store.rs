@@ -19364,6 +19364,17 @@ impl StateStore {
             .collect())
     }
 
+    /// Settle a Q directory borrow no Worker ever consumed; the caller has
+    /// proved the Worker's scope slot empty.
+    pub(crate) fn settle_unconsumed_directory_borrow(
+        &self,
+        placement: &str,
+    ) -> Result<runtime_db::external_execution::QualificationLocalStartRecord> {
+        self.lock()?
+            .runtime_db
+            .settle_unconsumed_directory_borrow(placement)
+    }
+
     pub(crate) fn prior_generation_qualification_credential_custody(&self) -> Result<Vec<String>> {
         self.lock()?
             .runtime_db

@@ -91,13 +91,43 @@ pub fn release_qualification_worker_credential_custody(
     // A terminal row is itself the death proof: settlement took it from a
     // checked reap and then retired the Worker's scope, so a later live check
     // would find no scope to ask.
-    if let Some(process) = state.state_store.qualification_worker_process(placement)?
+    let worker = state.state_store.qualification_worker_process(placement)?;
+    if let Some(process) = &worker
         && process.phase == QualificationWorkerProcessPhase::Attached
     {
         crate::process::assert_reaped_process_group_absent(&process.process_identity)?;
         state
             .state_store
             .settle_qualification_worker_process(placement)?;
+    }
+    // A borrow no Worker ever consumed: the start failed between lending the
+    // private project directory and attaching a Worker, in this generation
+    // or an earlier one. Nothing can hold the lent descriptor once the
+    // Worker's deterministic scope slot is proved empty, so the borrow is
+    // settled first; without a qualified cgroup scope that proof does not
+    // exist and the custody stays held.
+    if record
+        .directory_borrow_intent
+        .as_ref()
+        .is_some_and(|borrow| borrow.released_at_ms.is_none())
+        && record.worker_incarnation_digest.is_none()
+        && worker.is_none()
+    {
+        ensure!(
+            state
+                .isolation
+                .inspection()
+                .process_scope_readiness
+                .descendant_containment
+                .cgroup_scope,
+            "Q directory borrow was never consumed, and this node has no qualified cgroup scope \
+             to prove that no Worker holds it"
+        );
+        retire_qualification_worker_scope_slot(state, placement)
+            .context("prove the Q Worker scope slot empty before settling its unconsumed borrow")?;
+        state
+            .state_store
+            .settle_unconsumed_directory_borrow(placement)?;
     }
     state
         .state_store

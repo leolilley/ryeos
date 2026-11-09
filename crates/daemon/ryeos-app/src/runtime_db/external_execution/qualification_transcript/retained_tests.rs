@@ -404,6 +404,7 @@ impl<'a> Fixture<'a> {
                 workspace_id: workspace_id.clone(),
                 directory_identity: next.workspace_identity.unwrap(),
                 reserved_at_ms: 1,
+                released_at_ms: None,
             },
         );
         self.db
