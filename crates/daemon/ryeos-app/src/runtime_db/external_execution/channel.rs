@@ -198,8 +198,7 @@ pub(super) fn prepare_qualification_scope_settlement_tx(
         binding.issued_at_ms,
     )?;
     ensure!(
-        completion_application == "applied"
-            && completion.digest() == completion_digest
+        completion.digest() == completion_digest
             && i64::try_from(completion.frame().sequence)? == completion_sequence
             && completion_digest == observation.completion_frame_digest
             && matches!(&completion.frame().payload,
@@ -207,6 +206,14 @@ pub(super) fn prepare_qualification_scope_settlement_tx(
                     if completion_request_digest == &observation.completion_request_digest),
         "Q native settlement changed its applied controller completion"
     );
+    // The guest signs this settlement row inside the completion's application
+    // and acknowledges the completion only afterwards, so the row can arrive
+    // one exchange before the controller's own completion frame reads applied.
+    // Until that acknowledgement lands the settlement is pending evidence, not
+    // a contradiction: nothing is readable yet.
+    if completion_application != "applied" {
+        return Ok(None);
+    }
     let mut applied = signed(ChannelDirection::SupervisorToOwner, "runtime_applied")?;
     ensure!(
         applied.len() == 1,
