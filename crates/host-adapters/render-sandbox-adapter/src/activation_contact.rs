@@ -483,6 +483,13 @@ pub(super) fn proxy_request(
     if matches!(operation, ProxyOperation::UploadFile { .. }) {
         deadlines = deadlines.with_response_wait(crate::upload_response_wait(body.exact_len()));
     }
+    if matches!(operation, ProxyOperation::RunStream) {
+        // A run stream carries output only when the program writes. A verifier
+        // that is working, such as the consumer scenario's model turn, is
+        // silent for longer than any idle bound; the contact's absolute
+        // deadline is the one bound that applies while the stream is open.
+        deadlines.idle_timeout = deadline.remaining().max(IDLE_TIMEOUT);
+    }
     Ok(HttpRequest {
         method: token.method,
         url: token.route,
