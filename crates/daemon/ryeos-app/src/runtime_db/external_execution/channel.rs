@@ -771,21 +771,18 @@ impl RuntimeDb {
                     "runtime_applied_frame_digest": runtime.digest(),
                     "protocol_eof_frame_digest": protocol_eof.digest(),
                 }))?;
-            // The guest admits the completion only once its own runtime-applied
-            // and protocol-EOF frames are acknowledged as applied. The exchange
-            // that received the EOF acknowledged it as retained, because the
-            // connector relay applies protocol output after ingress and nothing
-            // re-acknowledges it. Author the applied acknowledgements here so
-            // they precede the completion in sequence; both are idempotent.
-            for applied in [&runtime, &protocol_eof] {
-                ensure_owner_acknowledgement_tx(
-                    &tx,
-                    placement,
-                    applied.frame().sequence,
-                    applied.digest(),
-                    signing_key,
-                )?;
-            }
+            // The guest admits the completion only once its runtime-applied
+            // frame and its protocol output through the EOF are acknowledged
+            // as applied, in order. Author those acknowledgements here so they
+            // precede the completion in sequence; each is idempotent.
+            ensure_owner_acknowledgement_tx(
+                &tx,
+                placement,
+                runtime.frame().sequence,
+                runtime.digest(),
+                signing_key,
+            )?;
+            ensure_applied_protocol_output_acknowledgements_tx(&tx, placement, signing_key)?;
             let mut statement = tx.prepare(
                 "SELECT frame_json FROM external_execution_frame
              WHERE binding_digest=?1 AND direction='owner_to_supervisor'
@@ -1969,6 +1966,7 @@ impl RuntimeDb {
             ) {
                 ensure_applied_export_acknowledgement_tx(&tx, placement, signing_key)?;
             }
+            ensure_applied_protocol_output_acknowledgements_tx(&tx, placement, signing_key)?;
             let outbound = journal::pending_transport_frames(
                 &tx,
                 &NodeJournalOwner,
@@ -2674,6 +2672,51 @@ fn retain_external_candidate_import_tx(
             expected.4
         ],
     )?;
+    Ok(())
+}
+
+/// Acknowledge, as applied and in sequence order, every protocol output frame
+/// (bytes and EOF) the relay has delivered. Ingress acknowledges such a frame
+/// with the state it has on arrival, which is retained because delivery to
+/// the connector peer happens later; the guest's transcript then holds the
+/// frame pending and admits a later applied frame only once every earlier one
+/// is applied. Each acknowledgement is recovered when it already exists.
+fn ensure_applied_protocol_output_acknowledgements_tx(
+    tx: &Transaction<'_>,
+    placement: &str,
+    signing_key: &lillux::crypto::SigningKey,
+) -> Result<()> {
+    let binding = load_binding(tx, placement)?;
+    if !matches!(
+        binding.execution_mode,
+        ryeos_state::external_execution::ExternalExecutionMode::StructuredSession {}
+            | ryeos_state::external_execution::ExternalExecutionMode::QualificationStructuredSession {}
+    ) {
+        return Ok(());
+    }
+    let rows = {
+        let mut statement = tx.prepare(
+            "SELECT sequence,frame_digest FROM external_execution_frame
+             WHERE binding_digest=?1 AND direction='supervisor_to_owner'
+               AND application='applied'
+               AND json_extract(frame_json,'$.frame.payload.kind') IN ('protocol_bytes','protocol_eof')
+             ORDER BY sequence",
+        )?;
+        statement
+            .query_map([binding.digest()?], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for (sequence, digest) in rows {
+        ensure_owner_acknowledgement_tx(
+            tx,
+            placement,
+            u64::try_from(sequence)?,
+            &digest,
+            signing_key,
+        )?;
+    }
     Ok(())
 }
 
