@@ -1714,11 +1714,20 @@ impl ExternalPlacementBackend for ExecutableExternalPlacementBackend {
             remaining_ms > 0,
             "restored verifier expired before adapter contact"
         );
+        // An owner measurement uploads one small verifier inside a contact; a
+        // consumer attempt delivers its whole archive and keeps the profile's
+        // delivery budget, as a Q guest package keeps its startup budget.
+        let budget_seconds = match &request.intent.purpose {
+            ryeos_external_execution_contract::restored_runtime_measurement::RemoteVerificationPurpose::OwnerMeasurement { .. } => {
+                qualification.contact_timeout_seconds()
+            }
+            ryeos_external_execution_contract::restored_runtime_measurement::RemoteVerificationPurpose::ConsumerRuntime { .. } => {
+                qualification.delivery_timeout_seconds()
+            }
+        };
         let deadline = deadline
             .min(lillux::time::MonotonicDeadline::after(
-                lillux::time::Duration::from_secs(u64::from(
-                    qualification.contact_timeout_seconds(),
-                )),
+                lillux::time::Duration::from_secs(u64::from(budget_seconds)),
             ))
             .min(lillux::time::MonotonicDeadline::after(
                 lillux::time::Duration::from_millis(u64::try_from(remaining_ms)?),

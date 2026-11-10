@@ -26,12 +26,13 @@ use crate::node_config::sections::runtime_snapshot_production::compose::installe
 pub const MAX_PROVIDER_SPEC_BYTES: usize = 64 * 1024;
 
 /// Protocol of the qualification document this composer emits.
-const QUALIFICATION_PROTOCOL: &str = "ryeos.runtime-snapshot-qualification.v3";
+const QUALIFICATION_PROTOCOL: &str = "ryeos.runtime-snapshot-qualification.v4";
 
 /// Budgets of one qualification attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QualificationLimits {
     pub contact_timeout_seconds: u32,
+    pub delivery_timeout_seconds: u32,
     pub maximum_lifetime_seconds: u32,
 }
 
@@ -39,6 +40,7 @@ impl Default for QualificationLimits {
     fn default() -> Self {
         Self {
             contact_timeout_seconds: 60,
+            delivery_timeout_seconds: 600,
             maximum_lifetime_seconds: 900,
         }
     }
@@ -106,7 +108,7 @@ pub fn compose_runtime_snapshot_qualification_binding(
     let settings = producer.settings().clone();
     let document = QualificationDocument {
         kind: "node".into(),
-        schema: 3,
+        schema: 4,
         protocol: QUALIFICATION_PROTOCOL.into(),
         production_binding_id: producer.id().to_owned(),
         production_binding_digest: producer.digest().to_owned(),
@@ -116,6 +118,7 @@ pub fn compose_runtime_snapshot_qualification_binding(
         verifier_artifact_hash: request.verifier_artifact_hash,
         consumer_verifiers,
         contact_timeout_seconds: request.limits.contact_timeout_seconds,
+        delivery_timeout_seconds: request.limits.delivery_timeout_seconds,
         maximum_lifetime_seconds: request.limits.maximum_lifetime_seconds,
     };
     document.validate()?;
@@ -268,6 +271,7 @@ mod tests {
                 .contains("consumer verifiers")
         );
         assert!(refused(&|r| r.limits.maximum_lifetime_seconds = 3601).contains("budget"));
+        assert!(refused(&|r| r.limits.delivery_timeout_seconds = 59).contains("budget"));
         assert!(refused(&|r| r.snapshot_binding_id = "../x".into()).contains("id is invalid"));
         assert!(refused(&|r| r.id = ".hidden".into()).contains("id is invalid"));
         assert!(

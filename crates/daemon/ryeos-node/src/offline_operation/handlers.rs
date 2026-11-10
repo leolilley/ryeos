@@ -276,6 +276,7 @@ pub struct QualificationComposeArguments {
     pub snapshot_binding: String,
     pub verifier: String,
     pub contact_timeout_seconds: Option<u32>,
+    pub delivery_timeout_seconds: Option<u32>,
     pub maximum_lifetime_seconds: Option<u32>,
 }
 
@@ -717,6 +718,9 @@ pub(super) fn snapshot_qualification_compose(ctx: &HandlerContext<'_>) -> Result
             contact_timeout_seconds: arguments
                 .contact_timeout_seconds
                 .unwrap_or(defaults.contact_timeout_seconds),
+            delivery_timeout_seconds: arguments
+                .delivery_timeout_seconds
+                .unwrap_or(defaults.delivery_timeout_seconds),
             maximum_lifetime_seconds: arguments
                 .maximum_lifetime_seconds
                 .unwrap_or(defaults.maximum_lifetime_seconds),
