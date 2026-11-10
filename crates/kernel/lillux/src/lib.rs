@@ -146,7 +146,7 @@ pub use secure_fs::{
     collect_regular_files_no_follow, current_user_home,
     digest_open_regular_file_stable_chunked_exact, digest_open_regular_file_stable_exact,
     ensure_open_regular_file_unchanged, inspect_optional_entry_no_follow,
-    matches_pinned_regular_file_identity, matches_regular_file_identity,
+    matches_pinned_regular_file_identity, matches_regular_file_identity, normalized_portable_mode,
     normalized_portable_regular_mode, observe_open_file_identity, observe_open_regular_file,
     open_mount_entry_kind, open_pinned_regular_file_no_follow, path_owner_ids,
     path_pin_open_regular_file, pin_canonical_mount_source, pinned_regular_file_identity,

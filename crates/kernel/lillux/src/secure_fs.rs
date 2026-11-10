@@ -439,6 +439,15 @@ fn digest_open_regular_file_chunked_exact(
     Ok((format!("{:x}", whole.finalize()), chunks))
 }
 
+/// The portable project-snapshot form of one declared regular-file mode: a
+/// mode with any execute bit is 0o755, every other mode is 0o644. A caller
+/// that compares an observed file against a mode it declared in a delivery
+/// normalizes the declaration with this before comparing it to
+/// [`normalized_portable_regular_mode`].
+pub fn normalized_portable_mode(mode: u32) -> u32 {
+    if mode & 0o111 == 0 { 0o644 } else { 0o755 }
+}
+
 /// Normalize one descriptor-observed regular file to RyeOS's portable
 /// project-snapshot mode contract. OS-specific permission inspection remains
 /// inside Lillux; callers consume only the stable 0o644/0o755 result.
@@ -454,11 +463,7 @@ pub fn normalized_portable_regular_mode(metadata: &std::fs::Metadata) -> Result<
         if !metadata.file_type().is_file() {
             anyhow::bail!("portable mode source is not a regular file");
         }
-        Ok(if metadata.permissions().mode() & 0o111 == 0 {
-            0o644
-        } else {
-            0o755
-        })
+        Ok(normalized_portable_mode(metadata.permissions().mode()))
     }
 }
 
@@ -9155,6 +9160,15 @@ fn restore_quarantined_regular(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn declared_modes_normalize_like_observed_ones() {
+        assert_eq!(super::normalized_portable_mode(0o500), 0o755);
+        assert_eq!(super::normalized_portable_mode(0o400), 0o644);
+        assert_eq!(super::normalized_portable_mode(0o644), 0o644);
+        assert_eq!(super::normalized_portable_mode(0o755), 0o755);
+        assert_eq!(super::normalized_portable_mode(0o010), 0o755);
+    }
+
     use super::*;
 
     #[test]

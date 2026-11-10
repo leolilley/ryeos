@@ -1485,8 +1485,11 @@ impl ConsumerInputRecord {
         let verifier = root
             .open_inherited_regular(std::ffi::OsStr::new(CONSUMER_VERIFIER_REMOTE_NAME), false)?
             .context("imported consumer verifier is missing")?;
+        // The observation reports the portable form (0o644 or 0o755), so the
+        // delivery's declared mode is compared in that form too.
         ensure!(
-            verifier.regular_file_observation()?.portable_mode()? == CONSUMER_VERIFIER_MODE,
+            verifier.regular_file_observation()?.portable_mode()?
+                == lillux::normalized_portable_mode(CONSUMER_VERIFIER_MODE),
             "imported consumer verifier mode differs from exact delivery"
         );
         self.verify_verifier_payload(&verifier)?;
@@ -1535,7 +1538,8 @@ impl ConsumerInputRecord {
                 .open_inherited_regular(std::ffi::OsStr::new(&record_name), false)?
                 .context("imported consumer product manifest is missing")?;
             ensure!(
-                manifest.regular_file_observation()?.portable_mode()? == 0o400,
+                manifest.regular_file_observation()?.portable_mode()?
+                    == lillux::normalized_portable_mode(0o400),
                 "imported consumer manifest differs from immutable delivery mode"
             );
             let remaining = budget.maximum_regular_bytes - regular_bytes;
