@@ -327,8 +327,14 @@ fn run() -> Result<()> {
             if let Some(error) = input_status.take_failure() {
                 return Err(error);
             }
-            let frame_deadline = lillux::time::MonotonicDeadline::after(LOCAL_IO_TIMEOUT);
-            match read_external_connector_server_frame(&mut stream.with_deadline(frame_deadline))? {
+            // A server frame arrives only when the guest writes, acknowledges
+            // input, reaches EOF or faults, so the controller's silence is the
+            // guest's silence: a guest that is working, or whose input close
+            // is still crossing the provider mailbox, can be quiet for longer
+            // than any local I/O bound. The controller owns the relay's
+            // lifetime and closes this stream at its deadline or on a fault;
+            // reading until then is the only bound this side may apply.
+            match read_external_connector_server_frame(&mut stream)? {
                 ExternalConnectorServerFrame::Ready { .. } => {
                     bail!("external connector received duplicate readiness");
                 }
