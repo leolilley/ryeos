@@ -390,13 +390,20 @@ impl ScriptedPeer {
                 }
                 if let Some(stream) = self
                     .listener
-                    .try_accept_until(self.deadline, &interrupted)?
+                    .try_accept_until(self.deadline, &interrupted)
+                    .with_context(|| {
+                        format!(
+                            "while waiting for scripted contact {} of {REQUEST_COUNT}",
+                            number + 1
+                        )
+                    })?
                 {
                     break stream;
                 }
                 lillux::time::sleep(lillux::time::Duration::from_millis(1));
             };
-            let request = read_request(&mut stream, self.address, &self.controller_canary)?;
+            let request = read_request(&mut stream, self.address, &self.controller_canary)
+                .with_context(|| format!("scripted contact {} of {REQUEST_COUNT}", number + 1))?;
             requests.push(request);
             let body = response_sse(
                 number,

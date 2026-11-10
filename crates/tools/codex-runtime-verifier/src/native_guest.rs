@@ -710,8 +710,28 @@ pub(crate) fn run_prepared_protocol(
         let mut input_eof = false;
         let mut pending_output = Vec::new();
         let mut output_offset = 0;
+        // A phase line on stderr every thirty seconds: the enclosing observer
+        // retains this process's stderr tail, so a run that is stopped at its
+        // deadline still says how far the relay got. Diagnostics only.
+        let started = std::time::Instant::now();
+        let mut last_phase_line = started;
         loop {
             ensure!(!active.has_elapsed(), "guest scenario expired");
+            if last_phase_line.elapsed() >= Duration::from_secs(30) {
+                last_phase_line = std::time::Instant::now();
+                eprintln!(
+                    "native guest relay: {}s, launch {}, sent {} B, received {} B, diagnostics {} B",
+                    started.elapsed().as_secs(),
+                    if applied_launch.is_some() {
+                        "applied"
+                    } else {
+                        "pending"
+                    },
+                    sent.len(),
+                    received.len(),
+                    diagnostics.len()
+                );
+            }
             if applied_launch.is_none()
                 && let Some(receipt) = held
                     .try_observe_applied_launch()
