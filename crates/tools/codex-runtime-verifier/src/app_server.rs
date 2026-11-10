@@ -19,6 +19,50 @@ use crate::routing_observation::{MAX_EVENT_BYTES, MAX_EVENTS, MAX_TOTAL_BYTES};
 /// a failed child gives of itself; the enclosing refusal is bounded further.
 const APP_SERVER_STDERR_TAIL_BYTES: usize = 240;
 
+/// The refusal for a terminal turn that is not the started turn completed:
+/// which identity differed, and the status and error the turn reported, each
+/// cut to a printable bound. Codex's own account of its turn, kept so a
+/// failed scenario names its failure; never provider bytes.
+pub(crate) fn terminal_turn_refusal(
+    notification: &serde_json::Value,
+    thread_id: &str,
+    turn_id: &str,
+) -> anyhow::Error {
+    fn bounded(value: &serde_json::Value) -> String {
+        let text = match value {
+            serde_json::Value::Null => "none".to_owned(),
+            serde_json::Value::String(text) => text.clone(),
+            other => other.to_string(),
+        };
+        text.chars()
+            .map(|c| {
+                if c == ' ' || c.is_ascii_graphic() {
+                    c
+                } else {
+                    '?'
+                }
+            })
+            .take(160)
+            .collect()
+    }
+    let params = &notification["params"];
+    anyhow::anyhow!(
+        "scripted terminal turn differs from started identity or status: thread {}, turn {}, status {}, error {}",
+        if params["threadId"] == thread_id {
+            "same"
+        } else {
+            "other"
+        },
+        if params["turn"]["id"] == turn_id {
+            "same"
+        } else {
+            "other"
+        },
+        bounded(&params["turn"]["status"]),
+        bounded(&params["turn"]["error"]),
+    )
+}
+
 pub struct AppServerObservation {
     child: SubordinateProcess,
     diagnostics: SubordinateDiagnosticDrain,
@@ -674,12 +718,16 @@ impl<T: AppServerTransport> AppServerProtocol<T> {
                 let notification = &self.notifications[checked];
                 checked += 1;
                 if notification["method"] == "turn/completed" {
-                    ensure!(
-                        notification["params"]["threadId"] == thread.thread_id
-                            && notification["params"]["turn"]["id"] == turn_id
-                            && notification["params"]["turn"]["status"] == "completed",
-                        "scripted terminal turn differs from started identity or status"
-                    );
+                    if !(notification["params"]["threadId"] == thread.thread_id
+                        && notification["params"]["turn"]["id"] == turn_id
+                        && notification["params"]["turn"]["status"] == "completed")
+                    {
+                        return Err(terminal_turn_refusal(
+                            notification,
+                            &thread.thread_id,
+                            turn_id,
+                        ));
+                    }
                     self.scripted_phase = ScriptedPhase::TurnCompleted;
                     return Ok(());
                 }

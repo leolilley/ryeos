@@ -385,12 +385,16 @@ impl<T: AppServerTransport> ScopedAppServerConversation<T> {
                 let notification = &self.notifications[checked];
                 checked += 1;
                 if notification["method"] == "turn/completed" {
-                    ensure!(
-                        notification["params"]["threadId"] == thread_id
-                            && notification["params"]["turn"]["id"] == turn_id
-                            && notification["params"]["turn"]["status"] == "completed",
-                        "scripted terminal turn differs from started identity or status"
-                    );
+                    if !(notification["params"]["threadId"] == thread_id
+                        && notification["params"]["turn"]["id"] == turn_id
+                        && notification["params"]["turn"]["status"] == "completed")
+                    {
+                        return Err(crate::app_server::terminal_turn_refusal(
+                            notification,
+                            thread_id,
+                            turn_id,
+                        ));
+                    }
                     self.phase = ScriptedPhase::TurnCompleted;
                     return Ok(());
                 }
