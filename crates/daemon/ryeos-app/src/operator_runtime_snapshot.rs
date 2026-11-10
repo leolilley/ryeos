@@ -906,7 +906,7 @@ fn create_qualification_occurrence_checked(
     }
 }
 
-const MAX_QUARANTINE_REASON_BYTES: usize = 512;
+const MAX_QUARANTINE_REASON_BYTES: usize = 2048;
 
 fn bounded_text(text: &str) -> String {
     let mut end = text.len().min(MAX_QUARANTINE_REASON_BYTES);
@@ -3242,7 +3242,10 @@ mod tests {
         );
         let error = anyhow::anyhow!("{}", "é".repeat(2000));
         let text = super::contact_error_text(&error);
-        assert!(text.len() <= 512 && text.starts_with("contact error: é"));
+        assert!(
+            text.len() <= super::MAX_QUARANTINE_REASON_BYTES
+                && text.starts_with("contact error: é")
+        );
     }
 
     use super::*;
@@ -3628,41 +3631,20 @@ mod tests {
             created_at_ms: now,
             updated_at_ms: now,
         };
-        validate_probe_snapshot_record(
-            &record,
-            &named,
-            proof,
-            &source,
-            "test-backend",
-            &owner,
-        )
-        .unwrap();
+        validate_probe_snapshot_record(&record, &named, proof, &source, "test-backend", &owner)
+            .unwrap();
         record.phase = RuntimeSnapshotPhase::Quarantined;
         assert!(
-            validate_probe_snapshot_record(
-                &record,
-                &named,
-                proof,
-                &source,
-                "test-backend",
-                &owner
-            )
-            .is_err()
+            validate_probe_snapshot_record(&record, &named, proof, &source, "test-backend", &owner)
+                .is_err()
         );
         record.phase = RuntimeSnapshotPhase::Bound;
         record.intent.source = RuntimeSnapshotSource::CapturedProduct {
             product_witness_hash: "f".repeat(64),
         };
         assert!(
-            validate_probe_snapshot_record(
-                &record,
-                &named,
-                proof,
-                &source,
-                "test-backend",
-                &owner
-            )
-            .is_err()
+            validate_probe_snapshot_record(&record, &named, proof, &source, "test-backend", &owner)
+                .is_err()
         );
         record.intent.source = RuntimeSnapshotSource::CapturedProduct {
             product_witness_hash: proof.evidence.product_witness_hash.clone(),
@@ -3699,15 +3681,8 @@ mod tests {
         );
         record.locator.as_mut().unwrap().snapshot_id = "snp-other".into();
         assert!(
-            validate_probe_snapshot_record(
-                &record,
-                &named,
-                proof,
-                &source,
-                "test-backend",
-                &owner
-            )
-            .is_err()
+            validate_probe_snapshot_record(&record, &named, proof, &source, "test-backend", &owner)
+                .is_err()
         );
     }
 

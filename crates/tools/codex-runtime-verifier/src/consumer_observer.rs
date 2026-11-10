@@ -117,10 +117,12 @@ impl ConsumerObservationFailure {
         if let Some(peer) = self.peer.take() {
             match peer.cancel_until(cleanup) {
                 Ok(Ok(_)) => {}
-                Ok(Err(_)) => {
-                    self.error = self
-                        .error
-                        .context("scripted peer refused during failure cleanup");
+                // The peer's own refusal is part of the account: a request it
+                // rejected is often why the turn failed.
+                Ok(Err(error)) => {
+                    self.error = self.error.context(format!(
+                        "scripted peer refused during failure cleanup: {error:#}"
+                    ));
                 }
                 Err(peer) => self.peer = Some(peer),
             }

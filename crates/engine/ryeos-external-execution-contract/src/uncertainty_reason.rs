@@ -9,7 +9,7 @@ use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 
 /// The longest accepted `detail`, in bytes.
-pub const MAX_UNCERTAINTY_DETAIL_BYTES: usize = 512;
+pub const MAX_UNCERTAINTY_DETAIL_BYTES: usize = 2048;
 
 /// Which step of the provider contact failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

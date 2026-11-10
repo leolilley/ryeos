@@ -663,9 +663,9 @@ pub(crate) fn parse_consumer_verifier_stream(
 }
 
 /// The longest stderr tail a refused stream reports. The reason that carries
-/// it is bounded to 512 printable bytes, which leaves room for the rule text
+/// it is bounded to 2048 printable bytes, which leaves room for the rule text
 /// and the exit code.
-const MAX_STREAM_STDERR_TAIL_BYTES: usize = 400;
+const MAX_STREAM_STDERR_TAIL_BYTES: usize = 1700;
 
 /// What a verifier stream can still tell its operator when it is refused: the
 /// parse rule that failed, the exit code when the stream carried one, and the

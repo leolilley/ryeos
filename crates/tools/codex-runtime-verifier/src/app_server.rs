@@ -17,7 +17,7 @@ use crate::routing_observation::{MAX_EVENT_BYTES, MAX_EVENTS, MAX_TOTAL_BYTES};
 #[must_use = "retain the app-server owner until stop proves exact-child and reader settlement"]
 /// How much of the app-server's stderr the observation keeps for the account
 /// a failed child gives of itself; the enclosing refusal is bounded further.
-const APP_SERVER_STDERR_TAIL_BYTES: usize = 240;
+const APP_SERVER_STDERR_TAIL_BYTES: usize = 700;
 
 /// The refusal for a terminal turn that is not the started turn completed:
 /// which identity differed, and the status and error the turn reported, each
