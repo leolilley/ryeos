@@ -771,6 +771,21 @@ impl RuntimeDb {
                     "runtime_applied_frame_digest": runtime.digest(),
                     "protocol_eof_frame_digest": protocol_eof.digest(),
                 }))?;
+            // The guest admits the completion only once its own runtime-applied
+            // and protocol-EOF frames are acknowledged as applied. The exchange
+            // that received the EOF acknowledged it as retained, because the
+            // connector relay applies protocol output after ingress and nothing
+            // re-acknowledges it. Author the applied acknowledgements here so
+            // they precede the completion in sequence; both are idempotent.
+            for applied in [&runtime, &protocol_eof] {
+                ensure_owner_acknowledgement_tx(
+                    &tx,
+                    placement,
+                    applied.frame().sequence,
+                    applied.digest(),
+                    signing_key,
+                )?;
+            }
             let mut statement = tx.prepare(
                 "SELECT frame_json FROM external_execution_frame
              WHERE binding_digest=?1 AND direction='owner_to_supervisor'
