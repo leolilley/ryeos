@@ -573,7 +573,7 @@ pub(crate) fn parse_restored_verifier_stream(
     locator: &RuntimeSnapshotLocator,
     readiness: &RuntimeSnapshotReadinessObservation,
 ) -> Result<RestoredVerifierStreamObservation> {
-    let bytes = parse_verifier_stdout(
+    let parsed = parse_verifier_stdout(
         body,
         MAX_RESTORED_RUN_STREAM_BYTES,
         16 * 1024,
@@ -581,16 +581,19 @@ pub(crate) fn parse_restored_verifier_stream(
         MAX_RESTORED_OWNER_RESULT_BYTES,
         None,
     )?;
+    let bytes = parsed.stdout.as_slice();
     let measurement: RestoredOwnerMeasurement =
         ryeos_external_execution_contract::from_json_slice_strict(
-            &bytes,
+            bytes,
             MAX_RESTORED_OWNER_RESULT_BYTES,
-        )?;
-    ensure!(
-        ryeos_external_execution_contract::canonical_json(&measurement)? == bytes,
-        "restored verifier output is noncanonical"
-    );
-    measurement.validate_content_for_bound_snapshot(challenge, intent, locator, readiness)?;
+        )
+        .map_err(|_| parsed.refusal("restored verifier output did not decode as a measurement"))?;
+    if ryeos_external_execution_contract::canonical_json(&measurement)? != bytes {
+        return Err(parsed.refusal("restored verifier output is noncanonical"));
+    }
+    measurement
+        .validate_content_for_bound_snapshot(challenge, intent, locator, readiness)
+        .map_err(|error| parsed.refusal(&format!("{error:#}")))?;
     Ok(RestoredVerifierStreamObservation {
         measurement,
         response_sha256: lillux::sha256_hex(body),
@@ -625,7 +628,7 @@ pub(crate) fn parse_consumer_verifier_stream(
     );
     challenge.validate()?;
     let maximum = usize::try_from(MAX_CONSUMER_VERIFIER_EVIDENCE_BYTES)?;
-    let bytes = parse_verifier_stdout(
+    let parsed = parse_verifier_stdout(
         body,
         MAX_CONSUMER_RUN_STREAM_BYTES,
         MAX_CONSUMER_RUN_STREAM_BYTES,
@@ -633,13 +636,15 @@ pub(crate) fn parse_consumer_verifier_stream(
         maximum,
         Some((cancellation, deadline)),
     )?;
+    let bytes = parsed.stdout.clone();
     let evidence: serde_json::Value =
-        ryeos_external_execution_contract::from_json_slice_strict(&bytes, maximum)?;
-    ensure!(
-        evidence.is_object()
-            && ryeos_external_execution_contract::canonical_json(&evidence)? == bytes,
-        "consumer verifier evidence is not an exact canonical object"
-    );
+        ryeos_external_execution_contract::from_json_slice_strict(&bytes, maximum)
+            .map_err(|_| parsed.refusal("consumer verifier evidence did not decode as JSON"))?;
+    if !evidence.is_object()
+        || ryeos_external_execution_contract::canonical_json(&evidence)? != bytes
+    {
+        return Err(parsed.refusal("consumer verifier evidence is not an exact canonical object"));
+    }
     ensure!(
         !deadline.has_elapsed() && !cancellation.is_cancelled(),
         "consumer evidence parsing expired or cancelled"
@@ -657,6 +662,72 @@ pub(crate) fn parse_consumer_verifier_stream(
     Ok(observation)
 }
 
+/// The longest stderr tail a refused stream reports. The reason that carries
+/// it is bounded to 512 printable bytes, which leaves room for the rule text
+/// and the exit code.
+const MAX_STREAM_STDERR_TAIL_BYTES: usize = 320;
+
+/// What a verifier stream can still tell its operator when it is refused: the
+/// parse rule that failed, the exit code when the stream carried one, and the
+/// tail of the guest program's stderr. The rule text is this adapter's own, the
+/// stderr is the uploaded verifier's; the reason bounds both and makes them
+/// printable. Provider bodies are never copied here.
+#[derive(Debug, Default)]
+struct StreamDiagnostics {
+    exit_code: Option<i32>,
+    stderr_tail: String,
+}
+
+impl StreamDiagnostics {
+    fn note_stderr(&mut self, data: &str) {
+        self.stderr_tail.push_str(data);
+        if self.stderr_tail.len() > MAX_STREAM_STDERR_TAIL_BYTES {
+            let mut cut = self.stderr_tail.len() - MAX_STREAM_STDERR_TAIL_BYTES;
+            while !self.stderr_tail.is_char_boundary(cut) {
+                cut += 1;
+            }
+            self.stderr_tail.drain(..cut);
+        }
+    }
+
+    fn refusal(&self, rule: &str) -> anyhow::Error {
+        let exit = self
+            .exit_code
+            .map_or_else(|| "none".to_owned(), |code| code.to_string());
+        let detail = if self.stderr_tail.is_empty() {
+            format!("{rule}; exit {exit}; stderr empty")
+        } else {
+            format!(
+                "{rule}; exit {exit}; stderr tail: {}",
+                self.stderr_tail.replace('\n', " | ")
+            )
+        };
+        crate::contact_failure::failure(
+            ryeos_external_execution_contract::UncertaintyClass::Parse,
+            &detail,
+        )
+    }
+}
+
+/// One complete verifier run stream: its stdout bytes (the measurement or the
+/// consumer evidence) and the stderr tail kept for the refusal a later content
+/// check may raise.
+pub(crate) struct ParsedVerifierStdout {
+    pub stdout: Vec<u8>,
+    stderr_tail: String,
+}
+
+impl ParsedVerifierStdout {
+    /// A content refusal after a clean exit, carrying the stderr tail.
+    pub(crate) fn refusal(&self, rule: &str) -> anyhow::Error {
+        StreamDiagnostics {
+            exit_code: Some(0),
+            stderr_tail: self.stderr_tail.clone(),
+        }
+        .refusal(rule)
+    }
+}
+
 pub(crate) fn parse_verifier_stdout(
     body: &[u8],
     maximum_wire: usize,
@@ -667,7 +738,7 @@ pub(crate) fn parse_verifier_stdout(
         &lillux::network::NetworkCancellation,
         lillux::time::MonotonicDeadline,
     )>,
-) -> Result<Vec<u8>> {
+) -> Result<ParsedVerifierStdout> {
     ensure!(
         !body.is_empty() && body.len() <= maximum_wire,
         "restored verifier stream exceeds its bound"
@@ -687,58 +758,83 @@ pub(crate) fn parse_verifier_stdout(
         )?,
         None => SseReader::new(Cursor::new(body), limits)?,
     };
+    let mut diagnostics = StreamDiagnostics::default();
     let mut stdout = String::new();
     let mut exited = false;
     while let Some(event) = events.next_event()? {
-        ensure!(
-            event.id.is_none() && event.retry_ms.is_none() && !exited,
-            "restored verifier stream has unexpected event authority"
-        );
+        if event.id.is_some() || event.retry_ms.is_some() || exited {
+            return Err(
+                diagnostics.refusal("restored verifier stream has unexpected event authority")
+            );
+        }
         match event.event.as_deref() {
             Some("output") => {
                 let output: VerifierOutputEvent =
                     ryeos_external_execution_contract::from_json_slice_strict(
                         event.data.as_bytes(),
                         maximum_event,
-                    )?;
-                ensure!(
-                    output.stream == "stdout" && !output.data.is_empty(),
-                    "restored verifier emitted non-measurement output"
-                );
-                ensure!(
-                    stdout
-                        .len()
-                        .checked_add(output.data.len())
-                        .is_some_and(|count| count <= maximum_output + 1),
-                    "restored verifier output exceeds its bound"
-                );
-                stdout.push_str(&output.data);
+                    )
+                    .map_err(|_| {
+                        diagnostics.refusal("restored verifier output event did not decode")
+                    })?;
+                match output.stream.as_str() {
+                    "stdout" => {
+                        if output.data.is_empty() {
+                            return Err(diagnostics
+                                .refusal("restored verifier emitted an empty stdout event"));
+                        }
+                        if !stdout
+                            .len()
+                            .checked_add(output.data.len())
+                            .is_some_and(|count| count <= maximum_output + 1)
+                        {
+                            return Err(
+                                diagnostics.refusal("restored verifier output exceeds its bound")
+                            );
+                        }
+                        stdout.push_str(&output.data);
+                    }
+                    // Diagnostics only: the guest program's own account of a
+                    // failure, reported with any refusal, never measured.
+                    "stderr" => diagnostics.note_stderr(&output.data),
+                    _ => {
+                        return Err(diagnostics
+                            .refusal("restored verifier emitted output on an unknown stream"));
+                    }
+                }
             }
             Some("exit") => {
                 let exit: VerifierExitEvent =
                     ryeos_external_execution_contract::from_json_slice_strict(
                         event.data.as_bytes(),
                         1024,
-                    )?;
-                ensure!(
-                    exit.exit_code == 0,
-                    "restored verifier did not exit successfully"
-                );
+                    )
+                    .map_err(|_| {
+                        diagnostics.refusal("restored verifier exit event did not decode")
+                    })?;
+                diagnostics.exit_code = Some(exit.exit_code);
+                if exit.exit_code != 0 {
+                    return Err(diagnostics.refusal("restored verifier did not exit successfully"));
+                }
                 exited = true;
             }
-            _ => anyhow::bail!("restored verifier stream has unsupported event"),
+            _ => return Err(diagnostics.refusal("restored verifier stream has unsupported event")),
         }
     }
-    ensure!(exited, "restored verifier stream has no complete exit");
-    let bytes = stdout
-        .strip_suffix('\n')
-        .context("restored verifier output lacks its single terminator")?
-        .as_bytes();
-    ensure!(
-        !bytes.is_empty() && bytes.len() <= maximum_output,
-        "verifier output is empty or exceeds its evidence bound"
-    );
-    Ok(bytes.to_vec())
+    if !exited {
+        return Err(diagnostics.refusal("restored verifier stream has no complete exit"));
+    }
+    let Some(bytes) = stdout.strip_suffix('\n') else {
+        return Err(diagnostics.refusal("restored verifier output lacks its single terminator"));
+    };
+    let bytes = bytes.as_bytes();
+    if bytes.is_empty() || bytes.len() > maximum_output {
+        return Err(diagnostics.refusal("verifier output is empty or exceeds its evidence bound"));
+    }
+    Ok(ParsedVerifierStdout {
+        stdout: bytes.to_vec(),
+        stderr_tail: diagnostics.stderr_tail,
+    })
 }
 
 pub(crate) fn interpret_authenticated_request(
@@ -1030,15 +1126,24 @@ mod tests {
         let nonzero = String::from_utf8(stream.clone())
             .unwrap()
             .replace("\"exit_code\":0", "\"exit_code\":1");
+        let refused = parse_restored_verifier_stream(
+            nonzero.as_bytes(),
+            &challenge,
+            &intent,
+            &locator,
+            &readiness,
+        )
+        .err()
+        .expect("refused");
+        let reason = crate::contact_failure::contact_reason(&refused);
+        assert_eq!(
+            reason.class,
+            ryeos_external_execution_contract::UncertaintyClass::Parse
+        );
         assert!(
-            parse_restored_verifier_stream(
-                nonzero.as_bytes(),
-                &challenge,
-                &intent,
-                &locator,
-                &readiness
-            )
-            .is_err()
+            reason.detail.contains("did not exit successfully") && reason.detail.contains("exit 1"),
+            "{}",
+            reason.detail
         );
         let extra = format!(
             "{}event: output\ndata: {{\"stream\":\"stdout\",\"data\":\"extra\"}}\n\n",
@@ -1060,6 +1165,79 @@ mod tests {
         assert!(
             parse_restored_verifier_stream(&stream, &wrong, &intent, &locator, &readiness).is_err()
         );
+    }
+
+    #[test]
+    fn verifier_stream_keeps_stderr_as_diagnostics_for_its_refusal() {
+        let (challenge, intent, locator, readiness, stream) = restored_stream_fixture();
+        let stderr =
+            serde_json::json!({"stream":"stderr","data":"Error: Refused(no owned write pipe)\n"});
+        let with_stderr = format!(
+            "event: output\ndata: {stderr}\n\n{}",
+            String::from_utf8(stream).unwrap()
+        );
+        // Diagnostics do not change a clean measurement.
+        parse_restored_verifier_stream(
+            with_stderr.as_bytes(),
+            &challenge,
+            &intent,
+            &locator,
+            &readiness,
+        )
+        .unwrap();
+        // A failed exit reports the tail, flattened to one printable line.
+        let failed = with_stderr.replace("\"exit_code\":0", "\"exit_code\":1");
+        let refused = parse_restored_verifier_stream(
+            failed.as_bytes(),
+            &challenge,
+            &intent,
+            &locator,
+            &readiness,
+        )
+        .err()
+        .expect("refused");
+        let reason = crate::contact_failure::contact_reason(&refused);
+        assert!(
+            reason.detail.contains("exit 1")
+                && reason
+                    .detail
+                    .contains("stderr tail: Error: Refused(no owned write pipe) |"),
+            "{}",
+            reason.detail
+        );
+        reason.validate().unwrap();
+        // Output on an unknown stream is still refused.
+        let unknown = with_stderr.replace("\"stream\":\"stderr\"", "\"stream\":\"fd3\"");
+        assert!(
+            parse_restored_verifier_stream(
+                unknown.as_bytes(),
+                &challenge,
+                &intent,
+                &locator,
+                &readiness
+            )
+            .is_err()
+        );
+        // A long tail keeps only its end and stays within the reason bound.
+        let long = serde_json::json!({"stream":"stderr","data":format!("{}END", "x".repeat(2000))});
+        let long_failed = format!(
+            "event: output\ndata: {long}\n\n{}",
+            String::from_utf8(restored_stream_fixture().4).unwrap()
+        )
+        .replace("\"exit_code\":0", "\"exit_code\":1");
+        let reason = crate::contact_failure::contact_reason(
+            &parse_restored_verifier_stream(
+                long_failed.as_bytes(),
+                &challenge,
+                &intent,
+                &locator,
+                &readiness,
+            )
+            .err()
+            .expect("refused"),
+        );
+        assert!(reason.detail.ends_with("END"), "{}", reason.detail);
+        reason.validate().unwrap();
     }
 
     #[test]

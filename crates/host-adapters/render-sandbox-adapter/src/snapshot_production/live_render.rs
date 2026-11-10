@@ -413,7 +413,7 @@ fn run_command(contact: &RenderContact<'_>, command: &str) -> Result<String> {
         RUN_OUTPUT_BYTES,
         None,
     )?;
-    Ok(String::from_utf8(stdout)?)
+    Ok(String::from_utf8(stdout.stdout)?)
 }
 
 fn wait_snapshot_available(
