@@ -3862,6 +3862,16 @@ impl PinnedDirectory {
     /// This performs the same no-follow component traversal and exact inode /
     /// mount comparison as the ordinary check, without cloning path buffers or
     /// constructing dynamic refusals. It does not grant ownership or funding.
+    /// Give up this binding's path proof because the current process
+    /// deliberately entered a private root in which the path no longer
+    /// resolves (a sandbox prepared for a guest, as opposed to a private
+    /// source filesystem that keeps the host view). The open descriptor
+    /// remains the sole authority for every later traversal and mutation;
+    /// path proofs become no-ops instead of refusing a path that cannot exist.
+    pub fn release_path_binding(&mut self) {
+        self.path_binding_required = false;
+    }
+
     pub fn ensure_path_binding_fixed(&self) -> std::result::Result<(), &'static str> {
         if !self.path_binding_required {
             return Ok(());
@@ -11841,6 +11851,21 @@ mod fixed_directory_binding_controls {
         assert_eq!(original.identity().unwrap(), identity);
         assert!(original.ensure_path_binding().is_err());
     }
+    #[test]
+    fn released_binding_keeps_descriptor_authority_without_path_proofs() {
+        let temp = tempfile::tempdir().unwrap();
+        let selected = temp.path().join("selected");
+        std::fs::create_dir(&selected).unwrap();
+        let mut original = super::PinnedDirectory::open(&selected).unwrap().unwrap();
+        let identity = original.identity().unwrap();
+        original.release_path_binding();
+        std::fs::rename(&selected, temp.path().join("retained")).unwrap();
+        std::fs::create_dir(&selected).unwrap();
+        original.ensure_path_binding().unwrap();
+        original.rebind_in_current_mount_namespace().unwrap();
+        assert_eq!(original.identity().unwrap(), identity);
+    }
+
     #[test]
     fn original_binding_rejects_symlink_replacement() {
         let temp = tempfile::tempdir().unwrap();
