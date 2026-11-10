@@ -85,10 +85,26 @@ impl ConsumerObservationFailure {
     pub fn settle(mut self) -> std::result::Result<anyhow::Error, Self> {
         let active = self.active_deadline;
         let cleanup = self.cleanup_deadline;
-        if let Some(mut app) = self.app.take()
-            && app.stop_until(active, cleanup).is_err()
-        {
-            self.app = Some(app);
+        if let Some(mut app) = self.app.take() {
+            match app.stop_until(active, cleanup) {
+                // The settled child's exit and stderr tail are the account it
+                // gives of the failure; the primary error stays the cause.
+                Ok(outcome) => {
+                    let exit = match &outcome {
+                        crate::app_server::AppServerStopOutcome::Exited(exit) => {
+                            format!("exited code {:?}", exit.code)
+                        }
+                        crate::app_server::AppServerStopOutcome::Forced(exit) => {
+                            format!("forced, code {:?}", exit.code)
+                        }
+                    };
+                    self.error = self.error.context(format!(
+                        "outer owner {exit}; stderr tail: {}",
+                        app.diagnostic_tail()
+                    ));
+                }
+                Err(_) => self.app = Some(app),
+            }
         }
         if let Some(launch) = self.launch.take() {
             match launch.settle(cleanup) {

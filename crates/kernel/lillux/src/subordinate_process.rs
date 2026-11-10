@@ -136,9 +136,22 @@ pub struct SubordinateDiagnosticDrain {
     stop: Arc<AtomicBool>,
     task: Option<crate::task::HostTask<SubordinateDiagnosticDrainEnd>>,
     end: Option<SubordinateDiagnosticDrainEnd>,
+    /// The retained tail for a reader started with `start_retaining_tail`;
+    /// a discarding reader keeps none.
+    tail: Option<Arc<std::sync::Mutex<Vec<u8>>>>,
 }
 
 impl SubordinateDiagnosticDrain {
+    /// The last bytes the child wrote to its diagnostic pipe, at most the
+    /// retention bound the reader was started with; empty for a discarding
+    /// reader. Read it after the reader settled, or accept a partial tail.
+    pub fn retained_tail(&self) -> Vec<u8> {
+        self.tail
+            .as_ref()
+            .map(|tail| tail.lock().map(|bytes| bytes.clone()).unwrap_or_default())
+            .unwrap_or_default()
+    }
+
     /// Observe completion under one absolute deadline without cancelling the
     /// reader. None retains ownership; EOF is not inferred from child exit.
     pub fn finish_until(
@@ -710,6 +723,15 @@ impl Read for SubordinateProcessError {
     }
 }
 
+/// Append `bytes` to `retained` and keep only its last `maximum` bytes.
+fn retain_tail(retained: &mut Vec<u8>, bytes: &[u8], maximum: usize) {
+    retained.extend_from_slice(bytes);
+    if retained.len() > maximum {
+        let cut = retained.len() - maximum;
+        retained.drain(..cut);
+    }
+}
+
 impl SubordinateProcessError {
     /// Start draining immediately with no retained diagnostic bytes. The sole
     /// reader checks cancellation at least between 50ms absolute-deadline
@@ -736,6 +758,49 @@ impl SubordinateProcessError {
             stop,
             task: Some(task),
             end: None,
+            tail: None,
+        })
+    }
+
+    /// Like `start_discarding`, but keep the last `maximum_bytes` the child
+    /// writes, for the account a failed child gives of itself. Retention never
+    /// applies backpressure: everything beyond the tail is dropped as it
+    /// arrives, and the tail is readable through `retained_tail` once the
+    /// reader has settled.
+    pub fn start_retaining_tail(
+        mut self,
+        maximum_bytes: usize,
+    ) -> std::io::Result<SubordinateDiagnosticDrain> {
+        let stop = Arc::new(AtomicBool::new(false));
+        let reader_stop = Arc::clone(&stop);
+        let tail = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let reader_tail = Arc::clone(&tail);
+        let task = crate::task::spawn_host_task("lillux-subordinate-diagnostics", move || {
+            loop {
+                if reader_stop.load(Ordering::Acquire) {
+                    return SubordinateDiagnosticDrainEnd::Cancelled;
+                }
+                let deadline = MonotonicDeadline::after(crate::time::Duration::from_millis(50));
+                match self.drain_until(4096, deadline) {
+                    Ok(capture) => {
+                        if !capture.bytes.is_empty()
+                            && let Ok(mut retained) = reader_tail.lock()
+                        {
+                            retain_tail(&mut retained, &capture.bytes, maximum_bytes);
+                        }
+                        if capture.eof {
+                            return SubordinateDiagnosticDrainEnd::Eof;
+                        }
+                    }
+                    Err(error) => return SubordinateDiagnosticDrainEnd::ReadFailed(error.kind()),
+                }
+            }
+        })?;
+        Ok(SubordinateDiagnosticDrain {
+            stop,
+            task: Some(task),
+            end: None,
+            tail: Some(tail),
         })
     }
 
@@ -793,5 +858,17 @@ impl SubordinateProcessError {
                 "deadline-bound subordinate diagnostic drain is unavailable",
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod retained_tail_tests {
+    #[test]
+    fn retained_tail_keeps_only_the_end() {
+        let mut retained = Vec::new();
+        super::retain_tail(&mut retained, b"abcdef", 4);
+        assert_eq!(retained, b"cdef");
+        super::retain_tail(&mut retained, b"gh", 4);
+        assert_eq!(retained, b"efgh");
     }
 }
