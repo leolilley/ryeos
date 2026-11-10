@@ -904,11 +904,13 @@ fn run_connector_owner(
         );
     }
     // Protocol and decoder errors can contain peer-controlled/private bytes.
-    // Publish only the closed category and the authoritative occurrence.
-    if error.is_some() {
+    // Publish only the closed category and the authoritative occurrence; a
+    // disconnect also names its I/O kind, a closed vocabulary of the kernel's.
+    if let Some(error) = &error {
         tracing::warn!(
             placement = %placement,
             reason,
+            disconnect_kind = ?disconnect_kind(error),
             "external connector relay terminated"
         );
     }
@@ -1301,19 +1303,25 @@ fn write_server_frame(
     )
 }
 
-fn is_disconnect(error: &anyhow::Error) -> bool {
+/// The I/O kind of the first disconnect-class cause, when there is one.
+fn disconnect_kind(error: &anyhow::Error) -> Option<std::io::ErrorKind> {
     error
         .chain()
         .filter_map(|cause| cause.downcast_ref::<std::io::Error>())
-        .any(|error| {
+        .map(std::io::Error::kind)
+        .find(|kind| {
             matches!(
-                error.kind(),
+                kind,
                 std::io::ErrorKind::BrokenPipe
                     | std::io::ErrorKind::ConnectionAborted
                     | std::io::ErrorKind::ConnectionReset
                     | std::io::ErrorKind::UnexpectedEof
             )
         })
+}
+
+fn is_disconnect(error: &anyhow::Error) -> bool {
+    disconnect_kind(error).is_some()
 }
 
 #[cfg(test)]
