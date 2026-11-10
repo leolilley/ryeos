@@ -297,6 +297,14 @@ pub fn prepare_startup(
     // attempt roots/files are transferred to the selected installed account.
     account.grant_readonly_host_directory(&parent)?;
     account.grant_private_directory(&work)?;
+    // The relinquished account reopens the owner runtime and the delivery
+    // below; both sit under the administrator-owned namespace root. Grant
+    // traversal of the root and the runtime exactly as the occurrence owner
+    // does before its own transition; neither grant gives mutation authority.
+    let namespace_root = PinnedDirectory::open(Path::new("/ryeos"))?
+        .context("consumer observer namespace root absent")?;
+    account.grant_readonly_host_directory(&namespace_root)?;
+    account.grant_readonly_host_directory(&runtime_root)?;
     runtime.recheck()?;
     ensure!(
         !active_deadline.has_elapsed(),
