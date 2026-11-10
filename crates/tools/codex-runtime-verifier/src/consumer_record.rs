@@ -1119,6 +1119,9 @@ impl ImportedConsumerInputs {
         // Keep prepared (including its private descriptor custody) alive until
         // the shared loop has settled the whole namespace and drained output.
         crate::native_guest::run_prepared_protocol(
+            // The native lane proves no path binding after entry; its
+            // control root is used through its retained descriptor only.
+            || Ok(()),
             || crate::native_guest::capture_requested(control),
             prepared.request().clone(),
             input,

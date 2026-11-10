@@ -597,6 +597,8 @@ fn run_in_directory(
     // applied-launch evidence before qualification claims are possible.
     let native = native_request(&request.recipe, request.effective_environment, mounts)?;
     let observed = run_prepared_protocol(
+        // The routed-guest harness proves no path binding after entry.
+        || Ok(()),
         || capture_requested(root),
         native,
         input,
@@ -669,6 +671,7 @@ pub(crate) fn capture_requested(root: &PinnedDirectory) -> Result<bool> {
 /// settlement remain Lillux-owned. Caller retains mount descriptors and writer
 /// authority through this call and independently checks the raw observation.
 pub(crate) fn run_prepared_protocol(
+    after_namespace_entry: impl FnOnce() -> Result<()>,
     mut completion_requested: impl FnMut() -> Result<bool>,
     native: lillux::LinuxSandboxRequest,
     mut input: lillux::inherited_pipes::InheritedPipeInput,
@@ -697,6 +700,10 @@ pub(crate) fn run_prepared_protocol(
     let mut applied_launch = None;
     let mut forwarded_output_bytes = 0usize;
     let observed = (|| -> Result<()> {
+        // This process now lives in the prepared namespaces, where every
+        // mount has a new identity: a caller that proves path bindings
+        // after this point re-anchors them here, before any protocol step.
+        after_namespace_entry().context("re-anchor path bindings in the native namespace")?;
         held.release_once().map_err(anyhow::Error::msg)?;
         let mut pending = Vec::new();
         let mut offset = 0;
