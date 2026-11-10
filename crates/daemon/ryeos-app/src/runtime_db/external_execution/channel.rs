@@ -782,7 +782,7 @@ impl RuntimeDb {
                 runtime.digest(),
                 signing_key,
             )?;
-            ensure_applied_protocol_output_acknowledgements_tx(&tx, placement, signing_key)?;
+            ensure_applied_supervisor_acknowledgements_tx(&tx, placement, signing_key)?;
             let mut statement = tx.prepare(
                 "SELECT frame_json FROM external_execution_frame
              WHERE binding_digest=?1 AND direction='owner_to_supervisor'
@@ -1966,7 +1966,7 @@ impl RuntimeDb {
             ) {
                 ensure_applied_export_acknowledgement_tx(&tx, placement, signing_key)?;
             }
-            ensure_applied_protocol_output_acknowledgements_tx(&tx, placement, signing_key)?;
+            ensure_applied_supervisor_acknowledgements_tx(&tx, placement, signing_key)?;
             let outbound = journal::pending_transport_frames(
                 &tx,
                 &NodeJournalOwner,
@@ -2675,13 +2675,16 @@ fn retain_external_candidate_import_tx(
     Ok(())
 }
 
-/// Acknowledge, as applied and in sequence order, every protocol output frame
-/// (bytes and EOF) the relay has delivered. Ingress acknowledges such a frame
-/// with the state it has on arrival, which is retained because delivery to
-/// the connector peer happens later; the guest's transcript then holds the
-/// frame pending and admits a later applied frame only once every earlier one
-/// is applied. Each acknowledgement is recovered when it already exists.
-fn ensure_applied_protocol_output_acknowledgements_tx(
+/// Acknowledge, as applied and in sequence order, every supervisor frame this
+/// node has applied. Ingress acknowledges a frame with the state it has on
+/// arrival, which for Ready (admitted with the Release that follows) and for
+/// protocol output (delivered to the connector peer later) is only retained,
+/// and nothing re-acknowledged them. The guest's transcript validator, which
+/// runs when it settles a qualification, keeps such frames pending and
+/// refuses any later applied frame behind a pending one, so every applied
+/// frame must carry an applied acknowledgement. Acknowledgements themselves
+/// are never acknowledged. Each one is recovered when it already exists.
+fn ensure_applied_supervisor_acknowledgements_tx(
     tx: &Transaction<'_>,
     placement: &str,
     signing_key: &lillux::crypto::SigningKey,
@@ -2699,7 +2702,7 @@ fn ensure_applied_protocol_output_acknowledgements_tx(
             "SELECT sequence,frame_digest FROM external_execution_frame
              WHERE binding_digest=?1 AND direction='supervisor_to_owner'
                AND application='applied'
-               AND json_extract(frame_json,'$.frame.payload.kind') IN ('protocol_bytes','protocol_eof')
+               AND json_extract(frame_json,'$.frame.payload.kind')!='acknowledge'
              ORDER BY sequence",
         )?;
         statement
@@ -7701,7 +7704,44 @@ pub(super) mod tests {
             )
             .unwrap();
         assert!(applied.acknowledgement.is_none());
-        assert!(applied.outbound.is_empty());
+        // Ready was admitted (applied) after its ingress acknowledgement
+        // reported it retained; the next exchange carries the applied one.
+        assert_eq!(applied.outbound.len(), 1);
+        let ready_applied = SignedExecutionFrame::decode_and_verify(
+            applied.outbound[0].wire(),
+            &binding,
+            binding.issued_at_ms,
+        )
+        .unwrap();
+        assert!(matches!(
+            ready_applied.frame().payload,
+            ExecutionChannelPayload::Acknowledge {
+                peer_frame_sequence: 1,
+                application: ExecutionFrameApplication::Applied,
+                ..
+            }
+        ));
+        // The supervisor's next frame carries its receive frontier past that
+        // acknowledgement, which retires it from transport; the node never
+        // acknowledges an acknowledgement back.
+        let (frontier_wire, frontier_digest) = wire(
+            &binding,
+            &supervisor,
+            ChannelDirection::SupervisorToOwner,
+            4,
+            Some(applied_ack_digest),
+            3,
+            ExecutionChannelPayload::Acknowledge {
+                peer_frame_sequence: 3,
+                peer_frame_digest: ready_applied.digest().to_owned(),
+                application: ExecutionFrameApplication::Retained,
+            },
+        );
+        let advanced = db
+            .exchange_external_supervisor_frame(placement, &frontier_wire, &owner, 16, 1024 * 1024)
+            .unwrap();
+        assert!(advanced.acknowledgement.is_none());
+        assert!(advanced.outbound.is_empty());
         let application: String = db
             .conn
             .with_sql(|connection| {
@@ -7744,11 +7784,11 @@ pub(super) mod tests {
             &binding,
             &supervisor,
             ChannelDirection::SupervisorToOwner,
-            4,
-            Some(applied_ack_digest),
-            3,
+            5,
+            Some(frontier_digest),
+            cancel.frame().sequence,
             ExecutionChannelPayload::Acknowledge {
-                peer_frame_sequence: 3,
+                peer_frame_sequence: cancel.frame().sequence,
                 peer_frame_digest: cancel.digest().to_owned(),
                 application: ExecutionFrameApplication::Retained,
             },
@@ -7769,11 +7809,13 @@ pub(super) mod tests {
             .exchange_external_supervisor_frame(placement, &ready_wire, &owner, 16, 1024 * 1024)
             .unwrap();
         assert!(!stale_retry.incoming_new);
-        // The readiness owner applied Ready before issuing Release. Retrying
-        // that exact input upgrades its earlier Retained receipt to Applied;
-        // it does not replay Release or cancellation after the peer drained it.
+        // The readiness owner applied Ready before issuing Release, and the
+        // exchange after that admission already authored the Applied receipt.
+        // Retrying that exact input returns that same receipt; it does not
+        // replay Release or cancellation after the peer drained it.
         let applied_ready_ack = stale_retry.acknowledgement.unwrap();
-        assert_eq!(applied_ready_ack.frame().sequence, 4);
+        assert_eq!(applied_ready_ack.frame().sequence, 3);
+        assert_eq!(applied_ready_ack.digest(), ready_applied.digest());
         assert!(matches!(
             &applied_ready_ack.frame().payload,
             ExecutionChannelPayload::Acknowledge {
@@ -7783,8 +7825,8 @@ pub(super) mod tests {
             } if peer_frame_digest == &ready_digest
         ));
         assert_ne!(applied_ready_ack.digest(), owner_ack_digest);
-        assert_eq!(stale_retry.outbound.len(), 1);
-        assert_eq!(stale_retry.outbound[0].digest(), applied_ready_ack.digest());
+        // The peer's frontier already retired that receipt from transport.
+        assert!(stale_retry.outbound.is_empty());
         assert!(stale_retry.urgent_revocation.is_none());
         let repeated = db
             .exchange_external_supervisor_frame(placement, &ready_wire, &owner, 16, 1024 * 1024)
@@ -7794,19 +7836,18 @@ pub(super) mod tests {
             repeated.acknowledgement.unwrap().digest(),
             applied_ready_ack.digest()
         );
-        assert_eq!(repeated.outbound.len(), 1);
-        assert_eq!(repeated.outbound[0].digest(), applied_ready_ack.digest());
+        assert!(repeated.outbound.is_empty());
         assert!(repeated.urgent_revocation.is_none());
 
         let (applied_ready_ack_wire, _) = wire(
             &binding,
             &supervisor,
             ChannelDirection::SupervisorToOwner,
-            5,
+            6,
             Some(cancel_ack_digest),
             4,
             ExecutionChannelPayload::Acknowledge {
-                peer_frame_sequence: 4,
+                peer_frame_sequence: 3,
                 peer_frame_digest: applied_ready_ack.digest().to_owned(),
                 application: ExecutionFrameApplication::Retained,
             },
@@ -8093,7 +8134,23 @@ pub(super) mod tests {
         let settled_transport = db
             .exchange_external_supervisor_frame(placement, &cancel_ack, &owner, 16, 1024 * 1024)
             .unwrap();
-        assert!(settled_transport.outbound.is_empty());
+        // The only outbound frame is Ready's applied acknowledgement, owed
+        // since its admission; the cancel itself is settled.
+        assert_eq!(settled_transport.outbound.len(), 1);
+        let ready_applied = SignedExecutionFrame::decode_and_verify(
+            settled_transport.outbound[0].wire(),
+            &binding,
+            binding.issued_at_ms,
+        )
+        .unwrap();
+        assert!(matches!(
+            ready_applied.frame().payload,
+            ExecutionChannelPayload::Acknowledge {
+                peer_frame_sequence: 1,
+                application: ExecutionFrameApplication::Applied,
+                ..
+            }
+        ));
         assert!(settled_transport.urgent_revocation.is_none());
         let release_application: String = db
             .conn
