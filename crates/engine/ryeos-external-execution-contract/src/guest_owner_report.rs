@@ -656,10 +656,14 @@ impl GuestOwnerReportFile {
         }
     }
 
-    /// The exact canonical bytes of the file.
+    /// The exact canonical bytes of the file, in the sorted-key canonical
+    /// form every relay reader demands of a mailbox file. The struct's field
+    /// order is not that form, so the file is never written from it directly.
     pub fn canonical_bytes(&self) -> Result<Vec<u8>> {
         self.exit.validate()?;
-        let bytes = crate::canonical_json(self)?;
+        let bytes = lillux::canonical_json(&serde_json::to_value(self)?)
+            .map_err(|error| anyhow::anyhow!("guest owner report file is not canonical: {error}"))?
+            .into_bytes();
         ensure!(
             bytes.len() <= MAX_GUEST_OWNER_REPORT_FILE_BYTES,
             "guest owner report file exceeds its bound"
@@ -1241,6 +1245,19 @@ mod tests {
         let id = ("sbx-a", "a".repeat(64), "b".repeat(64));
         let file = GuestOwnerReportFile::new(&id.0, &id.1, &id.2, exit(126, "launcher refused"));
         let bytes = file.canonical_bytes().unwrap();
+        // The relay readers accept only the sorted-key canonical form, which
+        // the struct's field order is not: the file must not be the plain
+        // serde rendering.
+        assert_eq!(
+            bytes,
+            lillux::canonical_json(&serde_json::to_value(&file).unwrap())
+                .unwrap()
+                .into_bytes()
+        );
+        assert!(bytes.starts_with(b"{\"allocation_request_digest\":"));
+        let field_order = serde_json::to_vec(&file).unwrap();
+        assert_ne!(field_order, bytes);
+        assert!(GuestOwnerReportFile::decode_for(&field_order, &id.0, &id.1, &id.2).is_err());
         assert_eq!(
             GuestOwnerReportFile::decode_for(&bytes, &id.0, &id.1, &id.2).unwrap(),
             exit(126, "launcher refused")
