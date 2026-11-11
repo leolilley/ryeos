@@ -159,7 +159,11 @@ pub enum DaemonCommand {
         #[arg(long)]
         profile: bool,
 
-        /// Print build provenance as JSON.
+        /// Print the compiled optional Cargo features, one per line.
+        #[arg(long)]
+        features: bool,
+
+        /// Print build provenance, including compiled features, as JSON.
         #[arg(long)]
         json: bool,
     },

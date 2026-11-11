@@ -350,6 +350,9 @@ assert_composition_pair ryeos-core-workflow core-workflow-pair core-workflow
 assert_composition_pair ryeos-core-knowledge core-knowledge-pair core-knowledge
 assert_composition_pair ryeos-f5r-controller controller-pair f5r-controller
 assert_composition_pair ryeos-standard standard-pair standard
+assert_composition_pair ryeos-central-host central-host-pair central-host
+assert_composition_pair ryeos-local-inference local-inference-pair local-inference
+assert_composition_pair ryeos-hosted-workflow hosted-workflow-pair hosted-workflow
 grep -Fxq 'ARG PUBLICATION_STAGE=published' <<<"$(dockerfile_instructions "$root/Dockerfile.release")" || {
     echo "Dockerfile.release must default the composition publication to the published stage" >&2
     exit 1

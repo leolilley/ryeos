@@ -3868,6 +3868,7 @@ async fn run(
     if let Some(config::DaemonCommand::BuildInfo {
         revision,
         profile,
+        features,
         json,
     }) = &cli.command
     {
@@ -3876,13 +3877,23 @@ async fn run(
             println!("{}", build.revision);
         } else if *profile {
             println!("{}", build.profile);
+        } else if *features {
+            for feature in bootstrap::compiled_features() {
+                println!("{feature}");
+            }
         } else if *json {
-            println!("{}", serde_json::to_string(&build)?);
+            let mut value = serde_json::to_value(&build)?;
+            value["compiled_features"] = serde_json::json!(bootstrap::compiled_features());
+            println!("{}", serde_json::to_string(&value)?);
         } else {
             println!("version: {}", build.version);
             println!("revision: {}", build.revision);
             println!("build_date: {}", build.build_date);
             println!("profile: {}", build.profile);
+            println!(
+                "compiled_features: {}",
+                bootstrap::compiled_features().join(", ")
+            );
         }
         return Ok(());
     }
