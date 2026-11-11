@@ -12,6 +12,7 @@ members = [
     "crates/daemon/ryeos-ui",
     "crates/clients/base",
     "crates/clients/presentation-contract",
+    "crates/clients/rune",
     "crates/clients/runtime",
     "crates/clients/terminal",
     "crates/clients/transport",

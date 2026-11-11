@@ -69,20 +69,6 @@ fn network(path: &str, what: &str, error: impl std::fmt::Display) -> RuntimeErro
     }
 }
 
-/// Pull the daemon's `{code, error}` envelope into a readable line, falling
-/// back to the raw body.
-fn daemon_error_message(body: &[u8]) -> String {
-    serde_json::from_slice::<serde_json::Value>(body)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("error")
-                .and_then(|error| error.as_str())
-                .map(str::to_string)
-        })
-        .unwrap_or_else(|| String::from_utf8_lossy(body).trim().to_string())
-}
-
 fn bounded_token(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 64
@@ -215,7 +201,7 @@ impl Link {
     async fn refusal(path: &str, response: reqwest::Response) -> RuntimeError {
         let status = response.status().as_u16();
         let message = match response.bytes().await {
-            Ok(body) => daemon_error_message(&body),
+            Ok(body) => super::daemon_error_message(&body),
             Err(_) => String::new(),
         };
         RuntimeError::Daemon {
@@ -803,7 +789,6 @@ mod tests {
         ));
         assert!(!seat_history_stream_response(StatusCode::OK, None, None));
     }
-
 
     #[test]
     fn credentials_are_bounded_transport_tokens() {

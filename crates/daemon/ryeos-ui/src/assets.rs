@@ -1,6 +1,6 @@
 //! Web UI static asset provider.
 //!
-//! Embeds files from `crates/clients/web/pkg/` at compile time via
+//! Embeds files from `crates/clients/rune/pkg/` at compile time via
 //! `include_bytes!`. Implements the `StaticAssetProvider` trait defined
 //! in `ryeos-api` so that generic static mode can resolve web assets
 //! without the API crate knowing about web-specific paths.
@@ -73,7 +73,7 @@ impl StaticAssetProvider for WebAssetProvider {
 
 /// Optional local development override for browser UI assets.
 ///
-/// Set `RYEOS_UI_ASSET_DIR=/path/to/crates/clients/web/pkg` before starting
+/// Set `RYEOS_UI_ASSET_DIR=/path/to/crates/clients/rune/pkg` before starting
 /// `ryeosd`, then `/ui` and `/ui/assets/*` are served from that directory
 /// instead of the compile-time embedded bytes. Only filenames admitted by the
 /// compiled manifest can be served. Selecting an override is generation-wide:
@@ -194,7 +194,7 @@ mod tests {
 
     #[test]
     fn packaged_asset_inventory_equals_the_closed_registry() {
-        let package = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../clients/web/pkg");
+        let package = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../clients/rune/pkg");
         let mut packaged = std::fs::read_dir(package)
             .expect("read authored web package")
             .map(|entry| entry.expect("read authored web package entry").path())

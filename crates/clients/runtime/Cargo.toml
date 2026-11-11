@@ -21,5 +21,15 @@ reqwest = { workspace = true, features = ["rustls-tls"] }
 ryeos-client-transport = { workspace = true }
 tokio = { workspace = true, features = ["rt", "time"] }
 
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = "0.3"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = [
+    "AbortController", "AbortSignal", "Crypto", "Headers", "Location", "ReadableStream",
+    "ReadableStreamDefaultReader", "Request", "RequestCredentials", "RequestInit",
+    "RequestRedirect", "Response", "Storage", "Window",
+] }
+
 [lints]
 workspace = true

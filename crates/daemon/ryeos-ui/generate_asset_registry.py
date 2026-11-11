@@ -11,7 +11,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 MANIFEST = ROOT / "web-assets.json"
-PACKAGE = ROOT / "../../clients/web/pkg"
+PACKAGE = ROOT / "../../clients/rune/pkg"
 GENERATED = ROOT / "src/generated_web_assets.rs"
 
 
@@ -106,7 +106,7 @@ def render(manifest: dict) -> str:
             lines.append("        imports: &[],")
         lines.extend(
             [
-                f'        bytes: include_bytes!("../../../clients/web/pkg/{asset["filename"]}"),',
+                f'        bytes: include_bytes!("../../../clients/rune/pkg/{asset["filename"]}"),',
                 "    },",
             ]
         )

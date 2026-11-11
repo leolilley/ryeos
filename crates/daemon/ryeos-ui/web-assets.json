@@ -7,47 +7,55 @@
       "filename": "index.html",
       "mime": "text/html; charset=utf-8",
       "cache": "no-cache",
-      "sha256": "ef90a265205b429fac3e265b5e6cc42407b7bd544ca9577427296d0f1e078124",
+      "sha256": "4b95eca117085a5c5ff9e1ef21f311ac8a2ac155fe0a887efe2fe8cdd08c4202",
       "imports": [
-        "/ui/assets/ryeos_ui.css",
-        "/ui/assets/ryeos_ui.js"
+        "/ui/assets/ryeos_boot.js"
       ]
     },
     {
-      "route": "/ui/assets/ryeos_ui.js",
-      "filename": "ryeos_ui.js",
+      "route": "/ui/assets/ryeos_boot.js",
+      "filename": "ryeos_boot.js",
       "mime": "application/javascript; charset=utf-8",
       "cache": "no-cache",
-      "sha256": "ff251960520ae80eee5f82727531de348887ebcbcb736528ed35c53877abae30",
+      "sha256": "df15eded4f1a3d9dedbb0c12af0902f3b2deb67fe745860aa1e723506f55c2cf",
       "imports": [
-        "/ui/assets/ryeos_web.js",
-        "/ui/assets/ryeos_web_bg.wasm"
+        "/ui/assets/ryeos_rune.js"
       ]
     },
     {
-      "route": "/ui/assets/ryeos_ui.css",
-      "filename": "ryeos_ui.css",
-      "mime": "text/css; charset=utf-8",
+      "route": "/ui/assets/ryeos_rune.js",
+      "filename": "ryeos_rune.js",
+      "mime": "application/javascript; charset=utf-8",
       "cache": "no-cache",
-      "sha256": "f76dd6f02cc4416c4f9ddad407ce5f10913118470702625f25d8fc86af295222",
+      "sha256": "9927171fa7b2ae201307fb42b63b8b2be8caa6bd7e564e810a7f02e3cf70b078",
+      "imports": [
+        "/ui/assets/rune_bridge.js",
+        "/ui/assets/rune_platform.js",
+        "/ui/assets/ryeos_rune_bg.wasm"
+      ]
+    },
+    {
+      "route": "/ui/assets/rune_bridge.js",
+      "filename": "rune_bridge.js",
+      "mime": "application/javascript; charset=utf-8",
+      "cache": "no-cache",
+      "sha256": "3de3a13536f230ade7b4d7b0a50fa6517a516bbbf7dab74fd24501a3a494960d",
       "imports": []
     },
     {
-      "route": "/ui/assets/ryeos_web.js",
-      "filename": "ryeos_web.js",
+      "route": "/ui/assets/rune_platform.js",
+      "filename": "rune_platform.js",
       "mime": "application/javascript; charset=utf-8",
       "cache": "no-cache",
-      "sha256": "77fc5da374bb4c999fd37966cb4b6fa9f5f55449b0fe1d8e47268ce80a184671",
-      "imports": [
-        "/ui/assets/ryeos_web_bg.wasm"
-      ]
+      "sha256": "694c9913bbbba7419de03c85f2542e33f150a7200f59669cca7c4623abc37a4c",
+      "imports": []
     },
     {
-      "route": "/ui/assets/ryeos_web_bg.wasm",
-      "filename": "ryeos_web_bg.wasm",
+      "route": "/ui/assets/ryeos_rune_bg.wasm",
+      "filename": "ryeos_rune_bg.wasm",
       "mime": "application/wasm",
       "cache": "no-cache",
-      "sha256": "5961e5d5dd562a26a5d733618fc6052b6cac352632e57637d2fbbca315adc502",
+      "sha256": "ade1b59b2bdd0ec566c4db730c802b436eeeaf4c2218d90b566b6a07e609bc45",
       "imports": []
     }
   ]

@@ -21,6 +21,22 @@ use crate::error::RuntimeError;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub mod native;
+#[cfg(target_arch = "wasm32")]
+pub mod web;
+
+/// Pull the daemon's `{code, error}` envelope into a readable line, falling
+/// back to the raw body.
+pub(crate) fn daemon_error_message(body: &[u8]) -> String {
+    serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("error")
+                .and_then(|error| error.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| String::from_utf8_lossy(body).trim().to_string())
+}
 
 /// The host: one value bundling every seam.
 pub trait Platform {
