@@ -14,6 +14,9 @@ ryeos-client-base = { workspace = true }
 ryeos-client-runtime = { workspace = true }
 serde_json = { workspace = true }
 
+[dev-dependencies]
+serde_yaml = { workspace = true }
+
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # Exact: the wasm-bindgen CLI that packages this crate must be the same version.
 wasm-bindgen = "=0.2.129"

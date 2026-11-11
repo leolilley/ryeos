@@ -218,6 +218,9 @@ enum Phase {
     Running(Box<boot::Running>),
     /// The page cannot continue; the message says why.
     Failed(String),
+    /// A native drawing check over an in-memory core: no node, effects dropped.
+    #[cfg(not(target_arch = "wasm32"))]
+    Fixture(Box<ryeos_client_base::ui::RyeOsCore>),
 }
 
 impl App {
@@ -229,17 +232,47 @@ impl App {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    fn fixture() -> App {
+        let build = FIXTURE
+            .get()
+            .ok_or_else(|| "no fixture was given".to_owned());
+        App {
+            boot: Boot::default(),
+            phase: match build.and_then(|build| build()) {
+                Ok(core) => Phase::Fixture(Box::new(core)),
+                Err(message) => Phase::Failed(message),
+            },
+            local: Local::default(),
+        }
+    }
+
+    /// The core being drawn, once there is one.
+    fn core(&self) -> Option<&ryeos_client_base::ui::RyeOsCore> {
+        match &self.phase {
+            Phase::Running(running) => Some(running.core()),
+            #[cfg(not(target_arch = "wasm32"))]
+            Phase::Fixture(core) => Some(core),
+            Phase::Starting | Phase::Failed(_) => None,
+        }
+    }
+
     /// Fold a core event and hand its effects to the runtime.
     pub(crate) fn dispatch(&mut self, event: RyeOsEvent) {
-        if let Phase::Running(running) = &mut self.phase {
-            running.dispatch(event);
+        match &mut self.phase {
+            Phase::Running(running) => running.dispatch(event),
+            #[cfg(not(target_arch = "wasm32"))]
+            Phase::Fixture(core) => {
+                core.dispatch(event);
+            }
+            Phase::Starting | Phase::Failed(_) => {}
         }
         self.sync_edits();
     }
 
     fn sync_edits(&mut self) {
-        if let Phase::Running(running) = &self.phase {
-            let vm = running.core().envelope(Vec::new()).view_model;
+        if let Some(core) = self.core() {
+            let vm = core.envelope(Vec::new()).view_model;
             self.local.edits.sync(&vm);
             self.local.sync_field_queries(&vm);
         }
@@ -372,13 +405,13 @@ impl App {
 }
 
 fn view(app: &App, _cx: &mut Cx<App>) -> El {
-    match &app.phase {
-        Phase::Starting => shell::boot_screen(None),
-        Phase::Failed(message) => shell::boot_screen(Some(message)),
-        Phase::Running(running) => {
-            let vm: RyeOsViewModel = running.core().envelope(Vec::new()).view_model;
+    match (&app.phase, app.core()) {
+        (Phase::Failed(message), _) => shell::boot_screen(Some(message)),
+        (_, Some(core)) => {
+            let vm: RyeOsViewModel = core.envelope(Vec::new()).view_model;
             shell::shell(&vm, &app.local)
         }
+        (_, None) => shell::boot_screen(None),
     }
 }
 
@@ -416,14 +449,29 @@ fn advance(app: &mut App, _seconds: f64, tx: &mut Tx) -> bool {
             }
         },
         Phase::Failed(_) => false,
+        #[cfg(not(target_arch = "wasm32"))]
+        Phase::Fixture(_) => false,
     }
 }
 
 fn on_key(app: &mut App, key: &KeyEvent, _tx: &mut Tx) -> bool {
-    let (Phase::Running(running), Some(event)) = (&mut app.phase, views::key_event(key)) else {
+    let Some(event) = views::key_event(key) else {
         return false;
     };
-    let taken = running.apply_key(event);
+    let taken = match &mut app.phase {
+        Phase::Running(running) => running.apply_key(event),
+        #[cfg(not(target_arch = "wasm32"))]
+        Phase::Fixture(core) => {
+            use ryeos_client_base::ui::{RyeOsKeyCommand, ryeos_key_command};
+            let command = ryeos_key_command(event, core.key_context());
+            if matches!(command, RyeOsKeyCommand::Ignore | RyeOsKeyCommand::Quit) {
+                return false;
+            }
+            core.apply_key_command(command);
+            true
+        }
+        Phase::Starting | Phase::Failed(_) => false,
+    };
     if taken {
         app.sync_edits();
     }
@@ -438,6 +486,31 @@ pub fn spec() -> AppSpec<App> {
         families: ("Inter", "IBM Plex Mono"),
         ..AppSpec::new("RyeOS", (1280.0, 800.0), App::new, view)
     }
+}
+
+/// Builds the core a fixture run draws.
+#[cfg(not(target_arch = "wasm32"))]
+pub type FixtureCore = fn() -> Result<ryeos_client_base::ui::RyeOsCore, String>;
+
+#[cfg(not(target_arch = "wasm32"))]
+static FIXTURE: std::sync::OnceLock<FixtureCore> = std::sync::OnceLock::new();
+
+/// The shell over an in-memory core, for drawing checks without a node:
+/// events fold into the core and effects that would reach a node are
+/// dropped. Rune's own arguments apply (`--snap out.png --size 1280x800`
+/// renders headlessly).
+///
+/// `fonts` adds font files: native Rune bundles Inter but not the data face.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn start_fixture(core: FixtureCore, fonts: &'static [&'static [u8]]) {
+    let _ = FIXTURE.set(core);
+    rune::run(AppSpec {
+        fonts,
+        poll: Some(poll),
+        on_key: Some(on_key),
+        families: ("Inter", "IBM Plex Mono"),
+        ..AppSpec::new("RyeOS fixture", (1280.0, 800.0), App::fixture, view)
+    });
 }
 
 /// The page's entry point.

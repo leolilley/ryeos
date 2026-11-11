@@ -4464,6 +4464,7 @@ dependencies = [
  "ryeos-client-base",
  "ryeos-client-runtime",
  "serde_json",
+ "serde_yaml",
  "wasm-bindgen",
  "wasm-bindgen-futures",
 ]
