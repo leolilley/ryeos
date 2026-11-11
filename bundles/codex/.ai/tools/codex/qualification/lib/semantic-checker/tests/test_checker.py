@@ -207,6 +207,31 @@ class CheckerSourceTests(unittest.TestCase):
             with self.subTest(mutation=mutation), self.assertRaises(checker.Refused):
                 self.check(values)
 
+    def test_routed_environment_disconnect_is_classified_only_after_completion(self):
+        def with_messages(edit):
+            values = fixture()
+            batch = values[2]["batches"][0]
+            messages = [synthetic_decode(e["payload"]["notification_json"], checker.MAX_EVENT_BYTES)
+                        for e in batch["events"]]
+            thread = messages[-1]["params"].get("threadId")
+            edit(messages, thread)
+            batch["events"] = [{"payload": {"notification_json": synthetic_json(m)}} for m in messages]
+            return values
+
+        def disconnected(thread, environment="ryeos-external-candidate"):
+            return {"method": "thread/environment/disconnected",
+                    "params": {"threadId": thread, "environmentId": environment}}
+
+        self.check(with_messages(lambda m, t: m.append(disconnected(t))))
+        refused = (
+            lambda m, t: m.insert(-1, disconnected(t)),
+            lambda m, t: m.append(disconnected(t, "local")),
+            lambda m, t: m.append(disconnected("foreign")),
+        )
+        for edit in refused:
+            with self.subTest(edit=edit), self.assertRaises(checker.Refused):
+                self.check(with_messages(edit))
+
     def test_projection_join_and_closed_envelope_refuse(self):
         for mutation in ("missing", "extra", "reorder", "digest", "observation", "presentation", "identity"):
             envelope = projected(fixture())

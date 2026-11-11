@@ -394,7 +394,11 @@ def _conversation(expected, provider, path, thread, turn, messages, presentation
     for message, argument_projection in messages:
         require("id" not in obj(message), "notification has response id")
         method, params = text(message, "method"), obj(message.get("params"))
-        require(not terminal or method == "thread/status/changed", "notification after terminal")
+        # After the turn completes only an idle status and the routed environment's
+        # disconnect may follow: the verifier's own finish request ends the guest,
+        # and Codex then reports that this thread's environment dropped.
+        require(not terminal or method in ("thread/status/changed", "thread/environment/disconnected"),
+                "notification after terminal")
         if method == "rawResponseItem/completed":
             same(params)
             item = obj(params.get("item"))
@@ -472,6 +476,10 @@ def _conversation(expected, provider, path, thread, turn, messages, presentation
             kind = text(obj(params.get("status")), "type")
             require(text(params, "threadId") == thread and kind in ("idle", "active")
                     and (not terminal or kind == "idle"), "thread status mismatch")
+        elif method == "thread/environment/disconnected":
+            require(terminal and text(params, "threadId") == thread
+                    and params.get("environmentId") in (None, "ryeos-external-candidate"),
+                    "routed environment disconnected before the turn completed")
         elif method == "item/agentMessage/delta":
             same(params)
             ancillary_id(text(params, "itemId"))
