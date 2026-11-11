@@ -1,7 +1,7 @@
-# ryeos:signed:2026-10-23T00:49:35Z:99e03ee0cbef4b4d064c7d1f18ef6c5523b2e2fdf3922bce17b9e32c42087cfd:FxhjN9etxgOIOjJLnnDBeXll7kuCM7esPoIM/hbCzAlIP+1LYZWl0DAkRAr1weG/b5pdf+ntn7De0bVCXYTeCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-11T23:13:09Z:8555407be9bb1a9bdf4f13cb24ce52f0bf362983e83b1f2bbe8449c40b3ac9f0:zdqvGrJvR4Rd3kjqOnU4mp1IHnkZrETIp8bd5j7Lq1e496oglkIn5eE3MZBXWNDarjFKJsyyHYWyaZAJ+zyjCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: codex
 version: "1.0.0"
-description: Retained credential-free node-rooted guest occurrence owner runtime
+description: Retained credential-free, controller-independent guest occurrence owner runtime
 build_products:
   schema: ryeos.build_products.v1
   output_roots:
@@ -9,7 +9,7 @@ build_products:
       path: products/external-guest-owner-runtime
       storage: content
       bounds:
-        maximum_entries: 4
+        maximum_entries: 3
         maximum_depth: 3
         maximum_file_bytes: 33554432
         maximum_total_bytes: 33558528
@@ -21,24 +21,19 @@ build_products:
       storage: content
       required: true
       bounds:
-        maximum_entries: 4
+        maximum_entries: 3
         maximum_depth: 3
         maximum_file_bytes: 33554432
         maximum_total_bytes: 33558528
 product_relationships:
   schema: ryeos.product_relationships.v1
   relationships:
-    # The controller root below is the published development controller key
-    # (RFC 8032 test vector 1): structurally valid, and replaced per hosted
-    # controller before signing a production bundle. The wire verifier refuses
-    # a subject rooted at this key, so a bundle that ships it cannot qualify.
     - name: owner_to_guest_wire_verifier
       producer:
-        canonical_ref: graph:codex/guest-owner-runtime-production-for-controller
+        canonical_ref: graph:codex/guest-owner-runtime-production
         recipe_binding: product_recipe
         product_name: runtime
-        parameters:
-          controller_public_key: ed25519:11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=
+        parameters: {}
       consumer:
         canonical_ref: tool:codex/qualification/guest-wire-verifier
         declaration_id: subject
@@ -46,7 +41,7 @@ product_relationships:
         shape: tree
         storage: content
         bounds:
-          maximum_entries: 4
+          maximum_entries: 3
           maximum_depth: 3
           maximum_file_bytes: 33554432
           maximum_total_bytes: 33558528

@@ -96,19 +96,14 @@ class GuestWireProbeSourceTests(unittest.TestCase):
         self.assertEqual([r["name"] for r in relationships], ["owner_to_guest_wire_verifier"])
         relationship = relationships[0]
         self.assertEqual(relationship["producer"]["canonical_ref"],
-                         "graph:codex/guest-owner-runtime-production-for-controller")
+                         "graph:codex/guest-owner-runtime-production")
         self.assertEqual(relationship["producer"]["recipe_binding"], "product_recipe")
         self.assertEqual(relationship["producer"]["product_name"], "runtime")
-        self.assertEqual(set(relationship["producer"]["parameters"]), {"controller_public_key"})
-        self.assertRegex(relationship["producer"]["parameters"]["controller_public_key"],
-                         r"^ed25519:[A-Za-z0-9+/]{43}=$")
-        # The shipped file carries the RFC 8032 placeholder and says it must be
-        # replaced per controller before signing; the verifier refuses it.
-        self.assertEqual(relationship["producer"]["parameters"]["controller_public_key"],
-                         "ed25519:11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=")
+        # The product names no controller: one manifest serves every
+        # controller, whose key travels in the signed occurrence assignment.
+        self.assertEqual(relationship["producer"]["parameters"], {})
         text = (CODEX / "config/codex/guest-owner-runtime-products.yaml").read_text()
-        self.assertIn("replaced per hosted", text)
-        self.assertIn("controller before signing", text)
+        self.assertNotIn("controller_public_key", text)
         self.assertEqual(relationship["consumer"], {
             "canonical_ref": "tool:codex/qualification/guest-wire-verifier",
             "declaration_id": "subject",

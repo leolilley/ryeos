@@ -1,36 +1,23 @@
-# ryeos:signed:2026-09-27T10:47:04Z:213840f714ab22428e20ca0948938a1aa9f7ad36567e95e7b3b781eb4005177c:lJq+pmiDySUegvTGLQ6PFBlqqdNHEaVS5EgaEEvk6z+cMa6pbGMApQLNM021fA+gJeaxHxOm0b6nG80HmAXMAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-11T23:13:09Z:7b96bfc36d7e7cd0bbb35014c1f88e2ed62652dfcdb506b88b7ea6f67f813ac5:kpjn/kttFUM2FC1od6Bq/EynJwxraPRIeio2IkagIaM3UCVnMoBLXxQ7rZmJjHHjPT7Cqsyg/cLV2zS1Ppr9BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: codex
 version: "1.0.0"
-description: Produce a node-rooted credential-free owner runtime from signed bundle bytes
+description: Produce a credential-free, controller-independent owner runtime from signed bundle bytes
 effects: live
 product_recipe: config:codex/guest-owner-runtime-products
 requires:
   capabilities:
     declared:
-      - ryeos.execute.service.identity/public_key
       - ryeos.execute.tool.codex/guest-runtime/produce-owner
       - ryeos.execute.config.codex/guest-owner-runtime-products
 config:
-  start: identity
-  max_steps: 3
+  start: produce
+  max_steps: 2
   on_error: fail
   config_schema:
     type: object
     properties: {}
     additionalProperties: false
   nodes:
-    identity:
-      node_type: action
-      effects: live
-      cache_result: false
-      action:
-        item_id: service:identity/public_key
-        ref_bindings: {}
-        params: {}
-        thread: inline
-      assign:
-        controller_public_key: "${result.signing_key}"
-      next: {type: unconditional, to: produce}
     produce:
       node_type: action
       effects: live
@@ -38,8 +25,7 @@ config:
       action:
         item_id: tool:codex/guest-runtime/produce-owner
         ref_bindings: {}
-        params:
-          controller_public_key: "${state.controller_public_key}"
+        params: {}
         thread: inline
       assign:
         production: "${result}"

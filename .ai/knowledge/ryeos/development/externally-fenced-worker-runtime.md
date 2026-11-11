@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-11T09:41:52Z:4c4b8faf655c62f757ab401e208fcc8db3041136dcbd598ff216f39946d7e8f0:esR2UBDiE9x6V/ZHhZZXNt8MU5bopkAoRLJY5Pjx4RgDjVHGgSrT33OWAjOFy2iDtlCt6gr/TKwOYT6UfC3LDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-12T03:25:35Z:ab71802bf8c67144a9ab465714bfee70ad762c9cdce3a56c5af620e876697a9f:tR+Bog29fwY1m4neeRg7RlhV+ok15BumGmOdfBqKXzqWrT0U0wM4wHx6SctJt7tQhB3g/JJp55+7SLa4hhfMDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/development
 name: externally-fenced-worker-runtime
@@ -175,21 +175,22 @@ derives expected content from the authenticated retained product witness and
 its exact CAS manifest. Provider snapshot identifiers and readiness responses
 identify provider observations; they do not supply expected content hashes.
 
-The current guest owner product uses a fixed four-entry ABI rooted at
+The current guest owner product uses a fixed three-entry ABI rooted at
 `/ryeos/guest-runtime`: `bin`,
-`bin/ryeos-external-guest-occurrence-owner`, `controller-root.hex`, and
-`guest-owner-profile.json`. Product production, upload and measurement share
-the layout observer
+`bin/ryeos-external-guest-occurrence-owner`, and `guest-owner-profile.json`.
+It carries no controller key: the placing controller names its public key in
+the occurrence assignment it signs, so one product serves any controller.
+Product production, upload and measurement share the layout observer
 `ryeos-external-execution::guest_import_authorization::ObservedGuestRuntime`.
-Owner bytes, controller root and bounded profile may vary within that ABI;
-their exact content changes the product identity. A different layout requires
+Owner bytes and bounded profile may vary within that ABI; their exact content
+changes the product identity. A different layout requires
 a coordinated product-format change rather than a caller-selected path.
 
 `ryeos-external-guest-restoration-verifier` is delivered separately from the
 snapshot as an independently admitted executable. It receives only a bounded
 controller challenge, measures the exact installed tree through pinned
-filesystem handles, and returns the challenge digest, manifest hash, owner
-executable hash and observed controller root. It does not receive expected
+filesystem handles, and returns the challenge digest, manifest hash and owner
+executable hash. It does not receive expected
 hashes that it can merely echo. The controller compares that result with its
 independent retained expectations.
 
