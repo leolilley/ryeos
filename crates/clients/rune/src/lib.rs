@@ -29,7 +29,16 @@ const TICK: Duration = Duration::from_millis(250);
 pub struct App {
     boot: Boot,
     phase: Phase,
-    edits: Edits,
+    local: Local,
+}
+
+/// State only this renderer keeps: the text fields, and which tile's
+/// actions menu is open. None of it is presentation state.
+#[derive(Default)]
+pub struct Local {
+    pub(crate) edits: Edits,
+    /// The `views::menu_key` of the open actions menu.
+    pub(crate) menu: Option<String>,
 }
 
 /// One Rune text field per mounted input, keyed by the input's exact address.
@@ -113,7 +122,7 @@ impl App {
         App {
             boot: Boot::default(),
             phase: Phase::Starting,
-            edits: Edits::default(),
+            local: Local::default(),
         }
     }
 
@@ -128,12 +137,13 @@ impl App {
     fn sync_edits(&mut self) {
         if let Phase::Running(running) = &self.phase {
             let vm = running.core().envelope(Vec::new()).view_model;
-            self.edits.sync(&vm);
+            self.local.edits.sync(&vm);
         }
     }
 
     pub(crate) fn edit_mut(&mut self, key: &str) -> &mut TextEdit {
-        self.edits
+        self.local
+            .edits
             .0
             .entry(key.to_owned())
             .or_insert_with(|| TextEdit::new(""))
@@ -141,7 +151,8 @@ impl App {
 
     /// A field's text and caret (a byte offset, as the core's cursor is).
     pub(crate) fn edit_state(&self, key: &str) -> Option<(String, usize)> {
-        self.edits
+        self.local
+            .edits
             .0
             .get(key)
             .map(|edit| (edit.text.clone(), edit.focus))
@@ -149,6 +160,18 @@ impl App {
 
     pub(crate) fn ui(&mut self, event: RyeOsUiEvent) {
         self.dispatch(RyeOsEvent::Ui { event });
+    }
+
+    /// Open or close one tile's actions menu.
+    pub(crate) fn toggle_menu(&mut self, key: String) {
+        self.local.menu = match self.local.menu.take() {
+            Some(open) if open == key => None,
+            _ => Some(key),
+        };
+    }
+
+    pub(crate) fn close_menu(&mut self) {
+        self.local.menu = None;
     }
 }
 
@@ -158,7 +181,7 @@ fn view(app: &App, _cx: &mut Cx<App>) -> El {
         Phase::Failed(message) => shell::boot_screen(Some(message)),
         Phase::Running(running) => {
             let vm: RyeOsViewModel = running.core().envelope(Vec::new()).view_model;
-            shell::shell(&vm, &app.edits)
+            shell::shell(&vm, &app.local)
         }
     }
 }

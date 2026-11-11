@@ -6,13 +6,14 @@ use rune::{El, col, el, row, text, text_input};
 use ryeos_client_base::ui::event::RyeOsInputAction;
 use ryeos_client_base::ui::view_model::{
     RyeOsDialogVm, RyeOsDockTileVm, RyeOsInputVm, RyeOsLayoutNodeVm, RyeOsNoticeVm,
-    RyeOsSplitAxisVm, RyeOsStatusBarVm, RyeOsTopBarVm, RyeOsViewModel, RyeOsViewSetVm,
+    RyeOsSplitAxisVm, RyeOsStatusBarVm, RyeOsTileIntentVm, RyeOsTopBarVm, RyeOsViewModel,
+    RyeOsViewSetVm,
 };
 use ryeos_client_base::ui::{RyeOsUiEvent, RyeOsUiIntent};
 
 use crate::theme::{self, NAV_WIDTH, Palette, STATUS_HEIGHT, STRIP_HEIGHT, SYSTEM_HEIGHT};
 use crate::views;
-use crate::{App, Edits};
+use crate::{App, Local};
 
 /// The page before the core exists: starting, or why it cannot.
 pub fn boot_screen(failure: Option<&str>) -> El {
@@ -67,7 +68,7 @@ pub fn boot_screen(failure: Option<&str>) -> El {
 }
 
 /// The whole presentation.
-pub fn shell(vm: &RyeOsViewModel, edits: &Edits) -> El {
+pub fn shell(vm: &RyeOsViewModel, local: &Local) -> El {
     let p = Palette::get();
     let chrome = &vm.presentation.chrome;
     let mut page = col()
@@ -76,13 +77,23 @@ pub fn shell(vm: &RyeOsViewModel, edits: &Edits) -> El {
         .fill(p.bg)
         .child(system_bar(vm))
         .child(view_set_strip(&chrome.top_bar))
-        .child(body(vm, edits))
+        .child(body(vm, local))
         .child(status_bar(&chrome.status_bar));
     if !vm.notices.is_empty() {
         page = page.child(notices(&vm.notices));
     }
     for dialog in &vm.dialogs {
-        page = page.child(dialog_layer(dialog, edits));
+        page = page.child(dialog_layer(dialog, local));
+    }
+    // An open actions menu draws last, anchored to its control.
+    if let Some(key) = &local.menu
+        && let Some(intents) = vm
+            .view_set
+            .as_ref()
+            .and_then(|set| set.root.as_ref())
+            .and_then(|root| menu_intents(root, key))
+    {
+        page = page.child(views::actions_menu(key, intents));
     }
     page
 }
@@ -177,7 +188,7 @@ fn view_set_strip(top_bar: &RyeOsTopBarVm) -> El {
     strip
 }
 
-fn body(vm: &RyeOsViewModel, edits: &Edits) -> El {
+fn body(vm: &RyeOsViewModel, local: &Local) -> El {
     let mut body = row()
         .w_full()
         .grow(1.0)
@@ -189,7 +200,7 @@ fn body(vm: &RyeOsViewModel, edits: &Edits) -> El {
     if !vm.navigation.items.is_empty() {
         body = body.child(navigation(vm));
     }
-    body.child(view_set(vm, edits))
+    body.child(view_set(vm, local))
 }
 
 fn navigation(vm: &RyeOsViewModel) -> El {
@@ -241,37 +252,60 @@ fn navigation(vm: &RyeOsViewModel) -> El {
         .child(items)
 }
 
-fn view_set(vm: &RyeOsViewModel, edits: &Edits) -> El {
+fn view_set(vm: &RyeOsViewModel, local: &Local) -> El {
     let docks = &vm.docks;
     let mut middle = row().w_full().grow(1.0).min_h(0.0).min_w(0.0).gap(12.0);
     if let Some(left) = &docks.left {
-        middle = middle.child(dock(left, true, edits));
+        middle = middle.child(dock(left, true, local));
     }
-    middle = middle.child(center(vm.view_set.as_ref(), edits));
+    middle = middle.child(center(vm.view_set.as_ref(), local));
     if let Some(right) = &docks.right {
-        middle = middle.child(dock(right, true, edits));
+        middle = middle.child(dock(right, true, local));
     }
     let mut set = col().grow(1.0).h_full().min_w(0.0).min_h(0.0).gap(12.0);
     if let Some(top) = &docks.top {
-        set = set.child(dock(top, false, edits));
+        set = set.child(dock(top, false, local));
     }
     set = set.child(middle);
     if let Some(bottom) = &docks.bottom {
-        set = set.child(dock(bottom, false, edits));
+        set = set.child(dock(bottom, false, local));
     }
     set
 }
 
-fn dock(tile: &RyeOsDockTileVm, side: bool, edits: &Edits) -> El {
+fn dock(tile: &RyeOsDockTileVm, side: bool, local: &Local) -> El {
+    let supplement = tile.supplement.as_ref();
+    let edge = tile.edge;
+    let focused = tile.focused;
     let frame = views::frame(
-        format!("dock:{:?}", tile.edge),
-        &tile.title,
-        tile.attachment_label.as_deref(),
-        tile.focused,
-        views::body(&tile.view, &tile.instance_key),
-        tile.input.as_ref(),
-        edits,
+        views::FrameSpec {
+            key: format!("dock:{:?}", tile.edge),
+            instance: &tile.instance_key,
+            label: supplement
+                .map(|s| s.frame_label.as_str())
+                .filter(|label| !label.is_empty())
+                .unwrap_or(&tile.title),
+            detail: supplement
+                .map(|s| s.frame_detail.as_str())
+                .filter(|detail| !detail.is_empty()),
+            attachment: tile.attachment_label.as_deref(),
+            focused,
+            transparent: false,
+            chrome_hidden: false,
+            tile: None,
+            dock_edge: Some(format!("{:?}", tile.edge).to_lowercase()),
+            heading: tile.heading.as_ref(),
+            supplement,
+            view: &tile.view,
+            input: tile.input.as_ref(),
+        },
+        local,
     );
+    let frame = if focused {
+        frame
+    } else {
+        frame.on_press(move |app: &mut App| app.ui(RyeOsUiEvent::FocusDock { edge }))
+    };
     let size = f32::from(tile.size);
     if side {
         col().w(size).h_full().min_h(0.0).child(frame)
@@ -280,7 +314,7 @@ fn dock(tile: &RyeOsDockTileVm, side: bool, edits: &Edits) -> El {
     }
 }
 
-fn center(view_set: Option<&RyeOsViewSetVm>, edits: &Edits) -> El {
+fn center(view_set: Option<&RyeOsViewSetVm>, local: &Local) -> El {
     let p = Palette::get();
     let Some(view_set) = view_set.filter(|set| !set.center_is_empty) else {
         return col()
@@ -300,7 +334,7 @@ fn center(view_set: Option<&RyeOsViewSetVm>, edits: &Edits) -> El {
             );
     };
     let content = match &view_set.root {
-        Some(root) => layout(root, edits),
+        Some(root) => layout(root, local),
         None => el(),
     };
     col()
@@ -311,7 +345,7 @@ fn center(view_set: Option<&RyeOsViewSetVm>, edits: &Edits) -> El {
         .child(content)
 }
 
-fn layout(node: &RyeOsLayoutNodeVm, edits: &Edits) -> El {
+fn layout(node: &RyeOsLayoutNodeVm, local: &Local) -> El {
     let p = Palette::get();
     match node {
         RyeOsLayoutNodeVm::Split {
@@ -325,12 +359,12 @@ fn layout(node: &RyeOsLayoutNodeVm, edits: &Edits) -> El {
                 .grow(ratio)
                 .min_w(0.0)
                 .min_h(0.0)
-                .child(layout(first, edits));
+                .child(layout(first, local));
             let second = col()
                 .grow(1.0 - ratio)
                 .min_w(0.0)
                 .min_h(0.0)
-                .child(layout(second, edits));
+                .child(layout(second, local));
             match axis {
                 RyeOsSplitAxisVm::Horizontal => row()
                     .w_full()
@@ -353,31 +387,81 @@ fn layout(node: &RyeOsLayoutNodeVm, edits: &Edits) -> El {
             }
         }
         RyeOsLayoutNodeVm::Tile {
+            group_label,
+            tabs,
             tile_id,
             instance_key,
             focused,
+            maximized,
             title,
             attachment_label,
+            heading,
+            supplement,
+            intents,
             view,
+            chrome_hidden,
+            background_transparent,
             input,
             ..
         } => {
-            let target = tile_id.clone();
-            views::frame(
-                format!("tile:{tile_id}"),
-                title,
-                attachment_label.as_deref(),
-                *focused,
-                views::body(view, instance_key),
-                input.as_ref(),
-                edits,
-            )
-            .on_press(move |app: &mut App| {
-                app.ui(RyeOsUiEvent::FocusChanged {
-                    target: Some(target.clone()),
-                });
-            })
+            let supplement = supplement.as_ref();
+            let label = supplement
+                .map(|s| s.frame_label.as_str())
+                .filter(|label| !label.is_empty())
+                .or(group_label.as_deref())
+                .unwrap_or(title);
+            let frame = views::frame(
+                views::FrameSpec {
+                    key: format!("tile:{tile_id}"),
+                    instance: instance_key,
+                    label,
+                    detail: supplement
+                        .map(|s| s.frame_detail.as_str())
+                        .filter(|detail| !detail.is_empty()),
+                    attachment: attachment_label.as_deref(),
+                    focused: *focused,
+                    transparent: *background_transparent,
+                    chrome_hidden: *chrome_hidden,
+                    tile: Some(views::TileChrome {
+                        tile_id,
+                        maximized: *maximized,
+                        intents,
+                        tabs,
+                        grouped: group_label.is_some(),
+                    }),
+                    dock_edge: None,
+                    heading: heading.as_ref(),
+                    supplement,
+                    view,
+                    input: input.as_ref(),
+                },
+                local,
+            );
+            if *focused {
+                frame
+            } else {
+                let target = tile_id.clone();
+                frame.on_press(move |app: &mut App| {
+                    app.ui(RyeOsUiEvent::FocusChanged {
+                        target: Some(target.clone()),
+                    });
+                })
+            }
         }
+    }
+}
+
+/// The intents of the mounted tile whose actions menu key is `key`.
+fn menu_intents<'a>(node: &'a RyeOsLayoutNodeVm, key: &str) -> Option<&'a [RyeOsTileIntentVm]> {
+    match node {
+        RyeOsLayoutNodeVm::Split { first, second, .. } => {
+            menu_intents(first, key).or_else(|| menu_intents(second, key))
+        }
+        RyeOsLayoutNodeVm::Tile {
+            instance_key,
+            intents,
+            ..
+        } => (views::menu_key(instance_key) == key).then_some(intents.as_slice()),
     }
 }
 
@@ -467,7 +551,7 @@ fn notices(notices: &[RyeOsNoticeVm]) -> El {
     stack
 }
 
-fn dialog_layer(dialog: &RyeOsDialogVm, edits: &Edits) -> El {
+fn dialog_layer(dialog: &RyeOsDialogVm, local: &Local) -> El {
     let p = Palette::get();
     let close = dialog.instance_key.clone();
     let close_button = close.clone();
@@ -479,7 +563,7 @@ fn dialog_layer(dialog: &RyeOsDialogVm, edits: &Edits) -> El {
         .gap(10.0)
         .child(views::body(&dialog.view, &dialog.instance_key));
     if let Some(input) = &dialog.input {
-        content = content.child(composer(input, edits));
+        content = content.child(composer(input, local));
     }
     let header = row()
         .w_full()
@@ -529,14 +613,14 @@ fn dialog_layer(dialog: &RyeOsDialogVm, edits: &Edits) -> El {
 
 /// The input composer: route strip, the text field bound to the core's
 /// buffer, and the submit control.
-pub fn composer(input: &RyeOsInputVm, edits: &Edits) -> El {
+pub fn composer(input: &RyeOsInputVm, local: &Local) -> El {
     let p = Palette::get();
     let key = crate::input_key(&input.address);
     let edit_key = key.clone();
     let change_address = input.address.clone();
     let submit_address = input.address.clone();
     let button_address = input.address.clone();
-    let field = text_input(&edits.edit(&key), theme::ui(13.0))
+    let field = text_input(&local.edits.edit(&key), theme::ui(13.0))
         .key(format!("composer:{key}"))
         .placeholder(input.placeholder.clone(), p.faint)
         .color(p.text)

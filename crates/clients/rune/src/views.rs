@@ -3,14 +3,19 @@
 //! Every view kind the core projects is matched here without a wildcard, so a
 //! new kind fails to compile until this renderer decides how to draw it.
 
-use rune::{El, Key, KeyEvent, ScrollSpec, col, el, row, text};
+use rune::{Align, El, Key, KeyEvent, ScrollSpec, Side, col, el, row, text};
 use ryeos_client_base::ids::RyeOsViewInstanceKey;
 use ryeos_client_base::ui::timeline::RyeOsTimelineEntryVm;
+
 use ryeos_client_base::ui::view_model::{
     RyeOsInputVm, RyeOsRowDetailVm, RyeOsRowVm, RyeOsSectionVm, RyeOsSourceStatusVm,
-    RyeOsTableCoverageVm, RyeOsTableHierarchyVm, RyeOsTableRowVm, RyeOsTextLineVm, RyeOsViewVm,
+    RyeOsTableCoverageVm, RyeOsTableHierarchyVm, RyeOsTableRowVm, RyeOsTextLineVm,
+    RyeOsTileIntentVm, RyeOsTone, RyeOsViewHeadingVm, RyeOsViewSupplementVm, RyeOsViewTabVm,
+    RyeOsViewVm,
 };
-use ryeos_client_base::ui::{RyeOsKey, RyeOsKeyEvent, RyeOsKeyModifiers, RyeOsUiEvent};
+use ryeos_client_base::ui::{
+    RyeOsKey, RyeOsKeyEvent, RyeOsKeyModifiers, RyeOsUiEvent, RyeOsUiIntent,
+};
 
 use crate::App;
 use crate::theme::{self, HEADER_HEIGHT, Palette};
@@ -56,55 +61,399 @@ pub fn header_label(label: &str, color: rune::Color) -> El {
         .truncate()
 }
 
-/// A bordered frame with a header row and a body, as tiles and docks draw.
-pub fn frame(
-    key: String,
-    title: &str,
-    detail: Option<&str>,
-    focused: bool,
-    body: El,
-    input: Option<&RyeOsInputVm>,
-    edits: &crate::Edits,
-) -> El {
+/// What a tile adds to a frame's header beyond a dock's.
+pub struct TileChrome<'a> {
+    pub tile_id: &'a str,
+    pub maximized: bool,
+    pub intents: &'a [RyeOsTileIntentVm],
+    pub tabs: &'a [RyeOsViewTabVm],
+    /// A grouped tile puts its tabs on their own row.
+    pub grouped: bool,
+}
+
+/// One mounted view in its frame: a layout tile or a dock.
+pub struct FrameSpec<'a> {
+    pub key: String,
+    pub instance: &'a RyeOsViewInstanceKey,
+    pub label: &'a str,
+    pub detail: Option<&'a str>,
+    pub attachment: Option<&'a str>,
+    pub focused: bool,
+    pub transparent: bool,
+    pub chrome_hidden: bool,
+    /// `None` for a dock, whose header names its edge instead of tools.
+    pub tile: Option<TileChrome<'a>>,
+    pub dock_edge: Option<String>,
+    pub heading: Option<&'a RyeOsViewHeadingVm>,
+    pub supplement: Option<&'a RyeOsViewSupplementVm>,
+    pub view: &'a RyeOsViewVm,
+    pub input: Option<&'a RyeOsInputVm>,
+}
+
+/// The key of a tile's actions menu, and of the control that opens it.
+pub fn menu_key(instance: &RyeOsViewInstanceKey) -> String {
+    format!("menu:{instance:?}")
+}
+
+/// A bordered frame: header, heading, the view body, supplement footer and
+/// the input composer, in the order the browser shell draws them.
+pub fn frame(spec: FrameSpec<'_>, local: &crate::Local) -> El {
+    let p = Palette::get();
+    let mut frame = col()
+        .key(spec.key.clone())
+        .w_full()
+        .h_full()
+        .min_w(0.0)
+        .min_h(0.0)
+        .fill(p.plane.alpha(if spec.transparent { 0.78 } else { 0.94 }))
+        .border(1.0, if spec.focused { p.accent } else { p.line });
+    if !spec.chrome_hidden {
+        frame = frame.child(frame_header(&spec, local));
+    }
+    if let Some(heading) = spec.heading {
+        frame = frame.child(content_heading(heading));
+    }
+    let filter = spec.input.filter(|input| input.live_filter);
+    if let Some(input) = filter {
+        frame = frame.child(crate::shell::composer(input, local));
+    }
+    frame = frame.child(
+        col()
+            .w_full()
+            .grow(1.0)
+            .min_h(0.0)
+            .child(body(spec.view, spec.instance)),
+    );
+    if let Some(supplement) = spec.supplement {
+        frame = supplement_footer(frame, supplement);
+    }
+    if let Some(input) = spec.input.filter(|input| !input.live_filter) {
+        frame = frame.child(crate::shell::composer(input, local));
+    }
+    frame
+}
+
+fn frame_header(spec: &FrameSpec<'_>, local: &crate::Local) -> El {
     let p = Palette::get();
     let signal = el()
-        .size(if focused { 13.0 } else { 5.0 }, 5.0)
+        .size(if spec.focused { 13.0 } else { 5.0 }, 5.0)
         .fill(p.accent_bright);
     let mut identity = row()
         .center_y()
         .gap(10.0)
         .min_w(0.0)
         .child(signal)
-        .child(header_label(title, p.text));
-    if let Some(detail) = detail {
-        identity = identity.child(
-            text(detail.to_owned())
-                .font(theme::data(9.0))
-                .color(p.muted)
-                .truncate(),
-        );
+        .child(header_label(spec.label, p.text));
+    if let Some(detail) = spec.detail.filter(|detail| !detail.is_empty()) {
+        identity = identity.child(frame_detail(detail));
     }
-    let header = row()
+    let mut title_row = row()
         .w_full()
-        .h(HEADER_HEIGHT)
+        .min_h(HEADER_HEIGHT)
         .px(12.0)
         .center_y()
-        .border_sides([0.0, 0.0, 1.0, 0.0], p.line)
-        .child(identity);
-    let mut frame = col()
-        .key(key)
+        .gap(10.0)
+        .child(identity.grow(1.0));
+    let Some(tile) = &spec.tile else {
+        // A dock names its attachment, its detail, or else its edge.
+        let aside = spec
+            .attachment
+            .or(spec.detail)
+            .map(str::to_owned)
+            .or_else(|| spec.dock_edge.clone())
+            .unwrap_or_default();
+        return title_row
+            .child(header_label(&aside, p.muted))
+            .border_sides([0.0, 0.0, 1.0, 0.0], p.line);
+    };
+    let tabs = (tile.tabs.len() > 1).then(|| view_tabs(tile.tabs, tile.grouped));
+    if !tile.grouped
+        && let Some(tabs) = tabs.as_ref().cloned()
+    {
+        title_row = title_row.child(tabs);
+    }
+    let mut tools = row().center_y().gap(8.0);
+    if let Some(attachment) = spec.attachment {
+        tools = tools.child(frame_detail(attachment).label("Selection attachment"));
+    }
+    let tile_id = tile.tile_id.to_owned();
+    let maximized = tile.maximized;
+    tools = tools.child(
+        text(if maximized { "↙" } else { "↗" })
+            .font(theme::ui(13.0))
+            .color(p.muted)
+            .padding(2.0)
+            .role("button")
+            .label(if maximized {
+                "Restore view"
+            } else {
+                "Maximize view"
+            })
+            .on_press(move |app: &mut App| {
+                app.ui(RyeOsUiEvent::Activate {
+                    intent: RyeOsUiIntent::ToggleTileMaximized {
+                        tile_id: tile_id.clone(),
+                    },
+                });
+            }),
+    );
+    if !tile.intents.is_empty() {
+        let key = menu_key(spec.instance);
+        let open = local.menu.as_deref() == Some(key.as_str());
+        let toggle = key.clone();
+        tools = tools.child(
+            text("⋮")
+                .key(format!("{key}:open"))
+                .font(theme::ui(15.0))
+                .color(if open { p.accent_bright } else { p.muted })
+                .padding(5.0)
+                .role("button")
+                .label(format!("Actions for {}", spec.label))
+                .expanded(open)
+                .on_press(move |app: &mut App| app.toggle_menu(toggle.clone())),
+        );
+    }
+    title_row = title_row.child(tools);
+    let mut header = col()
         .w_full()
-        .h_full()
-        .min_w(0.0)
-        .min_h(0.0)
-        .fill(p.plane)
-        .border(1.0, if focused { p.accent } else { p.line })
-        .child(header)
-        .child(col().w_full().grow(1.0).min_h(0.0).child(body));
-    if let Some(input) = input {
-        frame = frame.child(crate::shell::composer(input, edits));
+        .border_sides([0.0, 0.0, 1.0, 0.0], p.line)
+        .child(title_row);
+    if tile.grouped
+        && let Some(tabs) = tabs
+    {
+        header = header.child(
+            row()
+                .w_full()
+                .min_h(40.0)
+                .px(6.0)
+                .border_sides([1.0, 0.0, 0.0, 0.0], p.line)
+                .child(tabs),
+        );
+    }
+    header
+}
+
+fn frame_detail(detail: &str) -> El {
+    let p = Palette::get();
+    text(detail.to_owned())
+        .font(theme::data(9.0).tracking(0.4))
+        .color(p.muted)
+        .truncate()
+}
+
+fn view_tabs(tabs: &[RyeOsViewTabVm], grouped: bool) -> El {
+    let p = Palette::get();
+    let mut strip = row().h_full().role("tablist");
+    if !grouped {
+        strip = strip.ml(18.0);
+    }
+    if grouped {
+        strip = strip.scroll_x();
+    }
+    for tab in tabs {
+        let target = tab.tile_id.clone();
+        strip = strip.child(
+            row()
+                .h_full()
+                .min_h(HEADER_HEIGHT)
+                .px(13.0)
+                .center_y()
+                .border_sides(
+                    [0.0, 0.0, 1.0, 0.0],
+                    if tab.active {
+                        p.yellow
+                    } else {
+                        p.plane.alpha(0.0)
+                    },
+                )
+                .role("tab")
+                .focus_selected(tab.active)
+                .child(
+                    text(tab.title.clone())
+                        .font(theme::data(9.0))
+                        .color(if tab.active { p.text } else { p.muted }),
+                )
+                .on_press(move |app: &mut App| {
+                    app.ui(RyeOsUiEvent::FocusChanged {
+                        target: Some(target.clone()),
+                    });
+                }),
+        );
+    }
+    strip
+}
+
+/// The authored heading above a view's content.
+fn content_heading(heading: &RyeOsViewHeadingVm) -> El {
+    let p = Palette::get();
+    let mut block = col()
+        .w_full()
+        .pt(28.0)
+        .px(34.0)
+        .pb(22.0)
+        .border_sides([0.0, 0.0, 1.0, 0.0], p.line)
+        .child(
+            text(heading.eyebrow.to_uppercase())
+                .font(theme::data(9.0).tracking(1.3))
+                .color(p.muted),
+        )
+        .child(
+            text(heading.title.clone())
+                .font(theme::ui(38.0).tracking(-1.5))
+                .color(p.text)
+                .wrap()
+                .max_w(720.0)
+                .mt(14.0)
+                .mb(10.0),
+        );
+    if !heading.summary.is_empty() {
+        block = block.child(
+            text(heading.summary.clone())
+                .font(theme::ui(13.0))
+                .color(p.text)
+                .wrap()
+                .max_w(620.0),
+        );
+    }
+    if !heading.metadata.is_empty() {
+        block = block.child(
+            text(heading.metadata.join("  /  ").to_uppercase())
+                .font(theme::data(9.0).tracking(1.3))
+                .color(p.muted)
+                .wrap()
+                .mt(17.0),
+        );
+    }
+    block
+}
+
+/// The supplement's excerpt and footer under a view.
+fn supplement_footer(mut frame: El, supplement: &RyeOsViewSupplementVm) -> El {
+    let p = Palette::get();
+    let caption = |label: &str| {
+        text(label.to_uppercase())
+            .font(theme::data(9.0).tracking(0.7))
+            .color(p.muted)
+            .px(12.0)
+            .py(8.0)
+    };
+    if !supplement.excerpt.is_empty() {
+        let mut code = col().w_full();
+        for line in &supplement.excerpt {
+            let ink = line.tone.map_or(p.muted, |tone| p.tone(tone, p.muted));
+            let mut entry = row()
+                .w_full()
+                .min_h(20.0)
+                .px(12.0)
+                .py(2.0)
+                .child(
+                    text(line.field.clone())
+                        .font(theme::data(10.0))
+                        .color(p.faint)
+                        .w(42.0),
+                )
+                .child(
+                    text(line.value.clone())
+                        .font(theme::data(10.0))
+                        .color(ink)
+                        .wrap_anywhere()
+                        .grow(1.0)
+                        .min_w(0.0),
+                );
+            if line.tone == Some(RyeOsTone::Good) {
+                entry = entry.fill(p.green.alpha(0.09));
+            }
+            code = code.child(entry);
+        }
+        let mut section = col()
+            .w_full()
+            .max_h(240.0)
+            .border_sides([1.0, 0.0, 0.0, 0.0], p.line)
+            .label(if supplement.excerpt_title.is_empty() {
+                "Excerpt".to_owned()
+            } else {
+                supplement.excerpt_title.clone()
+            })
+            .scroll(ScrollSpec {
+                stick_bottom: false,
+            });
+        if !supplement.excerpt_title.is_empty() {
+            section = section.child(caption(&supplement.excerpt_title));
+        }
+        frame = frame.child(section.child(code));
+    }
+    if !supplement.footer.is_empty() || !supplement.footer_rows.is_empty() {
+        let mut footer = col()
+            .w_full()
+            .py(4.0)
+            .border_sides([1.0, 0.0, 0.0, 0.0], p.line);
+        if !supplement.footer.is_empty() {
+            footer = footer.child(caption(&supplement.footer));
+        }
+        for line in &supplement.footer_rows {
+            let ink = line.tone.map_or(p.muted, |tone| p.tone(tone, p.muted));
+            footer = footer.child(
+                row()
+                    .w_full()
+                    .px(14.0)
+                    .py(5.0)
+                    .gap(12.0)
+                    .child(
+                        text(line.field.clone())
+                            .font(theme::ui(10.0))
+                            .color(ink)
+                            .grow(1.0)
+                            .min_w(0.0)
+                            .truncate(),
+                    )
+                    .child(
+                        text(line.value.clone())
+                            .font(theme::ui(10.0))
+                            .color(p.muted),
+                    ),
+            );
+        }
+        frame = frame.child(footer);
     }
     frame
+}
+
+/// A tile's open actions menu, anchored under its control and drawn at the
+/// root so no frame clips it.
+pub fn actions_menu(key: &str, intents: &[RyeOsTileIntentVm]) -> El {
+    let p = Palette::get();
+    let mut list = col()
+        .key(key.to_owned())
+        .anchored_fit(format!("{key}:open"), Side::Bottom, Align::End, 2.0)
+        .min_w(180.0)
+        .max_w(360.0)
+        .padding(4.0)
+        .fill(p.plane_raised)
+        .border(1.0, p.line_strong)
+        .role("menu")
+        .modal(true, |app: &mut App| app.close_menu());
+    for action in intents {
+        let intent = action.intent.clone();
+        list = list.child(
+            text(action.label.clone())
+                .font(theme::ui(12.0))
+                .color(p.text)
+                .truncate()
+                .w_full()
+                .px(10.0)
+                .py(9.0)
+                .hover(p.plane_selected)
+                .role("menuitem")
+                .label(action.title.clone())
+                .on_press(move |app: &mut App| {
+                    app.close_menu();
+                    app.ui(RyeOsUiEvent::Activate {
+                        intent: intent.clone(),
+                    });
+                }),
+        );
+    }
+    list
 }
 
 /// The body of one mounted view instance.
