@@ -72,6 +72,129 @@ impl ConsumerQualificationContextRequest {
     }
 }
 
+/// A probe-lane qualification policy (one whose remote scenarios ship a probe
+/// input to a restored guest, with no consumer Worker) has no Worker, variant
+/// set or relationship to derive a use context from; its snapshot qualification
+/// binding still needs, per remote scenario, the verifier selection the launch
+/// will require. This form derives only those selections, from the same
+/// prepared verifier sources the launch uses.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProbeVerifierSelectionRequest {
+    pub policy_ref: String,
+    pub subject_manifest_hash: String,
+}
+
+impl ProbeVerifierSelectionRequest {
+    fn validate(&self) -> anyhow::Result<()> {
+        if !lillux::valid_hash(&self.subject_manifest_hash) {
+            bail!("subject_manifest_hash must be a 64-character lowercase hex digest");
+        }
+        if self.policy_ref.is_empty() {
+            bail!("policy_ref must not be empty");
+        }
+        Ok(())
+    }
+}
+
+/// `consumer_verifier_selections` has the same meaning and file use as in
+/// [`ConsumerQualificationContextResponse`].
+#[derive(Debug, Clone, Serialize)]
+pub struct ProbeVerifierSelectionResponse {
+    pub policy_ref: String,
+    pub requires_guarantees: Vec<lillux::process_control::CapabilityRequirement>,
+    pub subject_manifest_hash: String,
+    pub consumer_verifier_selections: BTreeMap<String, ConsumerRuntimeVerifierSelection>,
+}
+
+/// The two request forms of the derivation service, told apart by their
+/// closed field sets.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum QualificationContextDerivation {
+    Worker(ConsumerQualificationContextRequest),
+    Probe(ProbeVerifierSelectionRequest),
+}
+
+pub async fn derive_any(
+    state: Arc<AppState>,
+    context: HandlerContext,
+    request: QualificationContextDerivation,
+) -> anyhow::Result<serde_json::Value> {
+    match request {
+        QualificationContextDerivation::Worker(request) => Ok(serde_json::to_value(
+            derive(state, context, request).await?,
+        )?),
+        QualificationContextDerivation::Probe(request) => {
+            crate::operator_authority::require_admitted_operator(&state, &context)?;
+            request.validate()?;
+            let response = tokio::task::spawn_blocking(move || {
+                let reported = state.isolation.reported_guarantees();
+                derive_probe_for_guarantees(
+                    &state,
+                    &request,
+                    NodeGuarantees::new(&reported, state.isolation.capability_floor()),
+                )
+            })
+            .await
+            .context("probe verifier selection task stopped")??;
+            Ok(serde_json::to_value(response)?)
+        }
+    }
+}
+
+fn derive_probe_for_guarantees(
+    state: &AppState,
+    request: &ProbeVerifierSelectionRequest,
+    guarantees: NodeGuarantees<'_>,
+) -> anyhow::Result<ProbeVerifierSelectionResponse> {
+    require_unguarded_resolution("probe verifier selection derivation")?;
+    let policy_source = resolve_current_bundle_qualification_policy(state, &request.policy_ref)?;
+    ensure!(
+        policy_source.policy.consumer_execution_context.is_none(),
+        "qualification policy {} has a consumer execution context; derive it from its variant set and relationship",
+        request.policy_ref
+    );
+    require_policy_guarantees(
+        &policy_source.policy.requires_guarantees,
+        guarantees,
+        &request.policy_ref,
+    )?;
+    let mut consumer_verifier_selections = BTreeMap::new();
+    for (scenario_id, facts) in
+        remote_verifier_facts(state, &policy_source, &request.subject_manifest_hash)?
+    {
+        ensure!(
+            facts.lane == RemoteVerifierLane::Probe,
+            "remote scenario {scenario_id} of {} is not a probe scenario",
+            request.policy_ref
+        );
+        // The probe delivery ships the record, the verifier and the signed
+        // archive members; no retained product enters it.
+        let archive_budget = archive_budget_for(&[], &facts)
+            .with_context(|| format!("remote scenario {scenario_id} archive budget"))?;
+        consumer_verifier_selections.insert(
+            scenario_id,
+            ConsumerRuntimeVerifierSelection {
+                scenario_source_digest: facts.scenario_source_digest,
+                verifier_artifact_hash: facts.verifier_artifact_hash,
+                archive_budget,
+            },
+        );
+    }
+    ensure!(
+        !consumer_verifier_selections.is_empty(),
+        "qualification policy {} selects no remote verifier",
+        request.policy_ref
+    );
+    Ok(ProbeVerifierSelectionResponse {
+        policy_ref: request.policy_ref.clone(),
+        requires_guarantees: policy_source.policy.requires_guarantees.clone(),
+        subject_manifest_hash: request.subject_manifest_hash.clone(),
+        consumer_verifier_selections,
+    })
+}
+
 /// Size of the tar block every archive header, data run and trailer is
 /// rounded to.
 const TAR_BLOCK_BYTES: u64 = 512;
@@ -825,6 +948,48 @@ product_qualification_policy:
                 .contains("config:codex/environments/absent"),
             "refusal does not name the absent environment: {refusal:#}"
         );
+        // The probe form never derives a Worker-lane policy: its use context
+        // would be skipped.
+        let probe = ProbeVerifierSelectionRequest {
+            policy_ref: "config:test/consumer-qualification".into(),
+            subject_manifest_hash: "a".repeat(64),
+        };
+        let refusal = derive_probe_for_guarantees(&state, &probe, NodeGuarantees::new(&held, &[]))
+            .err()
+            .context("the probe form derived a consumer-context policy")?;
+        ensure!(
+            refusal
+                .to_string()
+                .contains("has a consumer execution context"),
+            "{refusal:#}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_two_request_forms_are_told_apart_by_their_closed_fields() -> Result<()> {
+        let worker: QualificationContextDerivation = serde_json::from_value(serde_json::json!({
+            "variants_ref": "config:v", "relationship_ref": "config:r",
+            "subject_manifest_hash": "a".repeat(64)}))?;
+        ensure!(matches!(worker, QualificationContextDerivation::Worker(_)));
+        let probe: QualificationContextDerivation = serde_json::from_value(serde_json::json!({
+            "policy_ref": "config:p", "subject_manifest_hash": "a".repeat(64)}))?;
+        ensure!(matches!(probe, QualificationContextDerivation::Probe(_)));
+        for mixed in [
+            serde_json::json!({"policy_ref": "config:p", "variants_ref": "config:v",
+                "relationship_ref": "config:r", "subject_manifest_hash": "a".repeat(64)}),
+            serde_json::json!({"policy_ref": "config:p"}),
+        ] {
+            ensure!(
+                serde_json::from_value::<QualificationContextDerivation>(mixed.clone()).is_err(),
+                "accepted {mixed}"
+            );
+        }
+        let malformed = ProbeVerifierSelectionRequest {
+            policy_ref: "config:p".into(),
+            subject_manifest_hash: "not-a-digest".into(),
+        };
+        ensure!(malformed.validate().is_err());
         Ok(())
     }
 

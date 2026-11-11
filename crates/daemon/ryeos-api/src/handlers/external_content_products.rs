@@ -411,16 +411,14 @@ pub async fn qualify(
 }
 
 pub async fn derive_consumer_qualification_context(
-    req: ryeos_app::operator_external_content::consumer_qualification_context::ConsumerQualificationContextRequest,
+    req: ryeos_app::operator_external_content::consumer_qualification_context::QualificationContextDerivation,
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value> {
-    Ok(serde_json::to_value(
-        ryeos_app::operator_external_content::consumer_qualification_context::derive(
-            state, ctx, req,
-        )
-        .await?,
-    )?)
+    ryeos_app::operator_external_content::consumer_qualification_context::derive_any(
+        state, ctx, req,
+    )
+    .await
 }
 
 pub async fn qualify_content(
