@@ -6,6 +6,9 @@
 # remapped, no wasm-opt runs, and wasm-bindgen's hashed snippet folders are flattened to
 # fixed names so the registry never sees a rotating hash.
 #
+# --out DIR writes the six files into DIR instead and leaves pkg/ and the registry alone
+# (the signed browser-assets-production tool checks and publishes through it).
+#
 # Environment: CARGO (default cargo), CARGO_TARGET_DIR (default <repo>/target),
 # WASM_BINDGEN (default wasm-bindgen; must match the locked wasm-bindgen crate).
 set -euo pipefail
@@ -15,6 +18,15 @@ cargo=${CARGO:-cargo}
 target_dir=${CARGO_TARGET_DIR:-$root/target}
 bindgen=${WASM_BINDGEN:-wasm-bindgen}
 pkg=$root/crates/clients/rune/pkg
+out=
+if [[ $# -gt 0 ]]; then
+    [[ $# -eq 2 && $1 == --out ]] || { echo "usage: build-rune-web.sh [--out DIR]" >&2; exit 2; }
+    out=$2
+    if [[ -e $out && -n $(ls -A "$out") ]]; then
+        echo "--out $out is not empty" >&2
+        exit 2
+    fi
+fi
 
 locked=$(python3 -I -c 'import sys, tomllib; print(next(p["version"] for p in tomllib.load(open(sys.argv[1], "rb"))["package"] if p["name"] == "wasm-bindgen"))' "$root/Cargo.lock")
 if [[ $("$bindgen" --version) != "wasm-bindgen $locked" ]]; then
@@ -55,11 +67,14 @@ if re.search(r"""\bfrom\s*['"]\./snippets/""", source):
 bindings.write_text(source)
 PY
 
-mkdir -p "$pkg"
-find "$pkg" -maxdepth 1 -type f -delete
+dest=${out:-$pkg}
+mkdir -p "$dest"
+[[ -n $out ]] || find "$pkg" -maxdepth 1 -type f -delete
 cp "$stage/out/ryeos_rune.js" "$stage/out/ryeos_rune_bg.wasm" \
-   "$stage/out/rune_bridge.js" "$stage/out/rune_platform.js" "$pkg/"
-cp "$root/crates/clients/rune/web/index.html" "$root/crates/clients/rune/web/ryeos_boot.js" "$pkg/"
+   "$stage/out/rune_bridge.js" "$stage/out/rune_platform.js" "$dest/"
+cp "$root/crates/clients/rune/web/index.html" "$root/crates/clients/rune/web/ryeos_boot.js" "$dest/"
 
-python3 -I "$root/crates/daemon/ryeos-ui/generate_asset_registry.py" --refresh-digests
-python3 -I -c 'import gzip, pathlib, sys; b = pathlib.Path(sys.argv[1]).read_bytes(); print(f"ryeos_rune_bg.wasm: {len(b):,} bytes, {len(gzip.compress(b, mtime=0)):,} gzip")' "$pkg/ryeos_rune_bg.wasm"
+if [[ -z $out ]]; then
+    python3 -I "$root/crates/daemon/ryeos-ui/generate_asset_registry.py" --refresh-digests
+fi
+python3 -I -c 'import gzip, pathlib, sys; b = pathlib.Path(sys.argv[1]).read_bytes(); print(f"ryeos_rune_bg.wasm: {len(b):,} bytes, {len(gzip.compress(b, mtime=0)):,} gzip")' "$dest/ryeos_rune_bg.wasm"
