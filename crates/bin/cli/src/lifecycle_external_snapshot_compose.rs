@@ -558,7 +558,13 @@ mod tests {
             format!("{error:#}").contains("remove --backend"),
             "{error:#}"
         );
-        let mut partial = vec!["--app-root", app_root, "--json", "--backend", "test-backend"];
+        let mut partial = vec![
+            "--app-root",
+            app_root,
+            "--json",
+            "--backend",
+            "test-backend",
+        ];
         partial.extend_from_slice(&PRODUCTION[..2]);
         partial.extend_from_slice(&PRODUCTION[4..]);
         let error = run_snapshot_compose(&argv(&partial), &console()).unwrap_err();

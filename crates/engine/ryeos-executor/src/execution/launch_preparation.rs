@@ -2400,7 +2400,9 @@ fn resolve_execution_dependencies(
         .map_err(|error| {
             preparation_error(
                 "execution_dependency_declaration_invalid",
-                format!("execution dependency `{name}` authored content shape is invalid: {error:#}"),
+                format!(
+                    "execution dependency `{name}` authored content shape is invalid: {error:#}"
+                ),
                 LaunchPrepareErrorClass::Configuration,
             )
         })?
@@ -2615,7 +2617,9 @@ fn resolve_content_dependencies(
             ryeos_engine::external_content::declaring_authority(resolution).map_err(|error| {
                 preparation_error(
                     "content_dependency_authority_invalid",
-                    format!("content dependency `{name}` has invalid declaring authority: {error:#}"),
+                    format!(
+                        "content dependency `{name}` has invalid declaring authority: {error:#}"
+                    ),
                     LaunchPrepareErrorClass::Configuration,
                 )
             })?;

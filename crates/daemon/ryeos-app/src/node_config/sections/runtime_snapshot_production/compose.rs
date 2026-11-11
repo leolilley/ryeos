@@ -25,10 +25,9 @@ use super::{
 };
 use crate::node_config::NodeConfigSection as _;
 use crate::node_config::sections::external_execution::compose::{
-    ProducerSourceFacts, item_context, load_node_identity,
-    operator_network_inputs, parse_tls_root_pem, publish_signed_document, read_installed_binding,
-    read_installed_document, resolve_installed_artifacts, sign_node_document, validate_document_id,
-    verify_node_signed,
+    ProducerSourceFacts, item_context, load_node_identity, operator_network_inputs,
+    parse_tls_root_pem, publish_signed_document, read_installed_binding, read_installed_document,
+    resolve_installed_artifacts, sign_node_document, validate_document_id, verify_node_signed,
 };
 
 /// Largest snapshot production spec the adapter accepts.

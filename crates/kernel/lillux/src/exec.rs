@@ -12137,7 +12137,10 @@ pub(crate) mod fork_creation_custody_tests {
         command
             .args([
                 "--exact",
-                &format!("{}::{name}", module.split_once("::").map_or(module, |(_, path)| path)),
+                &format!(
+                    "{}::{name}",
+                    module.split_once("::").map_or(module, |(_, path)| path)
+                ),
                 "--test-threads=1",
                 "--nocapture",
             ])

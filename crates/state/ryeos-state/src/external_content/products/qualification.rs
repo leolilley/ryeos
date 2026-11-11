@@ -873,9 +873,7 @@ impl ProductQualificationPolicy {
             context.validate()?;
         }
         if !self.requires_guarantees.is_empty() {
-            super::qualification_variants::validate_required_guarantees(
-                &self.requires_guarantees,
-            )?;
+            super::qualification_variants::validate_required_guarantees(&self.requires_guarantees)?;
         }
         if self.producer_scenarios.len() > MAX_PRODUCT_QUALIFICATION_PRODUCER_SCENARIOS {
             bail!("qualification producer scenario count exceeds bound");

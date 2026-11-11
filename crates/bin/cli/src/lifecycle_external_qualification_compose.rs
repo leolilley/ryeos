@@ -334,7 +334,13 @@ mod tests {
             format!("{error:#}").contains("remove --backend"),
             "{error:#}"
         );
-        let mut partial = vec!["--app-root", app_root, "--json", "--backend", "test-backend"];
+        let mut partial = vec![
+            "--app-root",
+            app_root,
+            "--json",
+            "--backend",
+            "test-backend",
+        ];
         partial.extend_from_slice(&REQUIRED[..2]);
         partial.extend_from_slice(&REQUIRED[4..]);
         let error = run_qualification_session_compose(&argv(&partial), &console()).unwrap_err();

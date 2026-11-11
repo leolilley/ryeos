@@ -566,7 +566,8 @@ mod tests {
     /// was closed even if another thread has since taken the number.
     fn descriptor_identity(fd: std::os::fd::RawFd) -> Option<(u64, u64)> {
         let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
-        (unsafe { libc::fstat(fd, &mut stat) } == 0).then_some((stat.st_dev as u64, stat.st_ino as u64))
+        (unsafe { libc::fstat(fd, &mut stat) } == 0)
+            .then_some((stat.st_dev as u64, stat.st_ino as u64))
     }
 
     fn assert_no_writer_leaked(mut reader: File) {
@@ -949,7 +950,9 @@ mod tests {
 
     #[test]
     fn pre_fork_failure_releases_registered_request_and_mapping_without_join_deadlock() {
-        if !isolated("pre_fork_failure_releases_registered_request_and_mapping_without_join_deadlock") {
+        if !isolated(
+            "pre_fork_failure_releases_registered_request_and_mapping_without_join_deadlock",
+        ) {
             return;
         }
         let (reader, received) = received_pipe_authority();
@@ -1131,7 +1134,9 @@ mod tests {
 
     #[test]
     fn receive_deadline_returns_during_quiescence_and_deferred_close_settles_queued_rights() {
-        if !isolated("receive_deadline_returns_during_quiescence_and_deferred_close_settles_queued_rights") {
+        if !isolated(
+            "receive_deadline_returns_during_quiescence_and_deferred_close_settles_queued_rights",
+        ) {
             return;
         }
         let (receiver, child) = inherited_descriptor_transfer_pair().unwrap();

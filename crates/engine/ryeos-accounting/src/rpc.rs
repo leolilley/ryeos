@@ -107,7 +107,9 @@ impl ProviderAttemptPrepareParams {
         if self.attempt_number == 0 || self.turn == 0 {
             return Err("turn and attempt_number are 1-based".to_string());
         }
-        self.request.validate().map_err(|error| format!("{error:#}"))?;
+        self.request
+            .validate()
+            .map_err(|error| format!("{error:#}"))?;
         self.transport
             .validate()
             .map_err(|error| format!("{error:#}"))?;

@@ -170,9 +170,9 @@ fn sealed_financial_authority(
     let external_effect_authority = prepared.external_effect_authority.ok_or_else(|| {
         anyhow!("thread {thread_id} was admitted without external-effect authority")
     })?;
-    external_effect_authority
-        .validate()
-        .map_err(|error| anyhow!("sealed external-effect authority failed validation: {error:#}"))?;
+    external_effect_authority.validate().map_err(|error| {
+        anyhow!("sealed external-effect authority failed validation: {error:#}")
+    })?;
     let mut required_secret_names: Vec<String> = prepared
         .required_secrets
         .into_iter()

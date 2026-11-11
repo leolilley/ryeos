@@ -428,8 +428,9 @@ fn check_pushed_head_capability(
     }
     if caps.pushed_head_requires_declaration && !declares_pushed_head {
         return Err(DispatchError::CapabilityRejected {
-            reason: "pushed_head requires the launched item to declare the pinned snapshot project lane"
-                .into(),
+            reason:
+                "pushed_head requires the launched item to declare the pinned snapshot project lane"
+                    .into(),
         });
     }
     Ok(())
@@ -6588,7 +6589,10 @@ async fn dispatch_by(
 mod tests {
     use super::*;
 
-    fn capabilities(allows: bool, requires_declaration: bool) -> ryeos_engine::protocol_vocabulary::ProtocolCapabilities {
+    fn capabilities(
+        allows: bool,
+        requires_declaration: bool,
+    ) -> ryeos_engine::protocol_vocabulary::ProtocolCapabilities {
         ryeos_engine::protocol_vocabulary::ProtocolCapabilities {
             allows_pushed_head: allows,
             allows_target_site: false,
@@ -6608,12 +6612,18 @@ mod tests {
         let declared = serde_json::json!({"project_lane": "pinned_snapshot"});
         let gated = capabilities(true, true);
         // Ungated protocol, or not a pushed head: never evaluated, even when malformed.
-        assert!(!pushed_head_declaration_if_gated(&capabilities(true, false), true, &execution, &stray).unwrap());
+        assert!(
+            !pushed_head_declaration_if_gated(&capabilities(true, false), true, &execution, &stray)
+                .unwrap()
+        );
         assert!(!pushed_head_declaration_if_gated(&gated, false, &execution, &stray).unwrap());
         // Gated pushed head: read, and a malformed value is refused.
         assert!(pushed_head_declaration_if_gated(&gated, true, &execution, &declared).unwrap());
         assert!(pushed_head_declaration_if_gated(&gated, true, &execution, &stray).is_err());
-        assert!(!pushed_head_declaration_if_gated(&gated, true, &execution, &serde_json::json!({})).unwrap());
+        assert!(
+            !pushed_head_declaration_if_gated(&gated, true, &execution, &serde_json::json!({}))
+                .unwrap()
+        );
     }
 
     #[test]
@@ -6629,7 +6639,10 @@ mod tests {
         let refused = check_pushed_head_capability(&capabilities(true, true), true, false)
             .unwrap_err()
             .to_string();
-        assert!(refused.contains("declare the pinned snapshot project lane"), "{refused}");
+        assert!(
+            refused.contains("declare the pinned snapshot project lane"),
+            "{refused}"
+        );
     }
 
     #[test]

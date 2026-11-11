@@ -21,8 +21,7 @@ use ryeos_app::execution_history_reset::{
 };
 use ryeos_app::node_config::sections::external_execution::compose::{
     ComposeLimits, ComposeRequest, ComposeTransportRequest, DEFAULT_CAPACITY_GROUP,
-    compose_external_execution_binding,
-    installed_binding_credential_generation,
+    compose_external_execution_binding, installed_binding_credential_generation,
 };
 use ryeos_app::node_config::sections::external_execution::compose_qualification::{
     QualificationBindingRequest, compose_qualification_session_binding,

@@ -969,7 +969,9 @@ fn resolve_bundle_binary_ref_for_target(
     let manifest_value =
         load_executor_cas_object_bounded(&cas, &manifest_hash, MAX_EXECUTOR_MANIFEST_OBJECT_BYTES)
             .map_err(|e| {
-                EngineError::Internal(format!("CAS read error for manifest {manifest_hash}: {e:#}"))
+                EngineError::Internal(format!(
+                    "CAS read error for manifest {manifest_hash}: {e:#}"
+                ))
             })?
             .ok_or_else(|| EngineError::BinManifestMissing {
                 bundle_root: bundle_root.display().to_string(),
@@ -1053,7 +1055,10 @@ fn resolve_bundle_binary_ref_for_target(
         None => std::fs::read(&bin_path).map_err(anyhow::Error::from),
     }
     .map_err(|e| {
-        EngineError::Internal(format!("failed to read binary {}: {e:#}", bin_path.display()))
+        EngineError::Internal(format!(
+            "failed to read binary {}: {e:#}",
+            bin_path.display()
+        ))
     })?;
     let mut hasher = Sha256::new();
     hasher.update(&bin_bytes);

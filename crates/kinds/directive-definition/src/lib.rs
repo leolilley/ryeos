@@ -1898,7 +1898,10 @@ pub fn prepare_directive_launch(
             target.model_name, target.provider_id
         ))
         .map_err(|error| {
-            DirectivePreparationError::configuration("provider_config_invalid", format!("{error:#}"))
+            DirectivePreparationError::configuration(
+                "provider_config_invalid",
+                format!("{error:#}"),
+            )
         })?;
     validate_reasoning_selection(
         target.reasoning.as_ref(),

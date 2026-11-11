@@ -6124,7 +6124,10 @@ owner = "RyeOS Development"
             body["tools"][0]["functionDeclarations"].is_array(),
             "Google body must wrap tools in functionDeclarations; got: {body}"
         );
-        assert!(snapshot.provider.pricing.is_none(), "route is unpriced, not free");
+        assert!(
+            snapshot.provider.pricing.is_none(),
+            "route is unpriced, not free"
+        );
     }
 
     #[test]

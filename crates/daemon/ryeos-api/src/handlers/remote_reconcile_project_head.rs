@@ -854,7 +854,9 @@ async fn publish_local_head(
     let _permit = state
         .write_barrier
         .acquire_with_timeout(ryeos_app::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
-        .map_err(|error| anyhow::anyhow!("cannot acquire reconciliation write permit: {error:#}"))?;
+        .map_err(|error| {
+            anyhow::anyhow!("cannot acquire reconciliation write permit: {error:#}")
+        })?;
     let signer = ryeos_app::state_store::NodeIdentitySigner::from_identity(&state.identity);
     let current = state
         .state_store

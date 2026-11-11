@@ -169,8 +169,7 @@ pub fn copy_project_snapshot_closure(
     snapshot_hash: &str,
 ) -> Result<ProjectSnapshotTransferMeasurement> {
     let target = lillux::CasStore::from_pinned_root(root.try_clone()?);
-    let mut entries =
-        Vec::with_capacity(closure.object_hashes.len() + closure.blob_hashes.len());
+    let mut entries = Vec::with_capacity(closure.object_hashes.len() + closure.blob_hashes.len());
     let mut total_bytes = 0_u64;
     for hash in &closure.object_hashes {
         let value = source

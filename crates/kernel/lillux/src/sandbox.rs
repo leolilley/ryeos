@@ -3261,10 +3261,15 @@ mod imp {
         for (overlay, clone) in overlays.iter().zip(clones.iter()) {
             let target = overlay.target();
             let pinned = crate::secure_fs::PinnedDirectory::open(target)
-                .map_err(|error| format!("pin root overlay target {}: {error:#}", target.display()))?
+                .map_err(|error| {
+                    format!("pin root overlay target {}: {error:#}", target.display())
+                })?
                 .ok_or_else(|| format!("root overlay target {} is absent", target.display()))?;
             let before = pinned.identity().map_err(|error| {
-                format!("identify root overlay target {}: {error:#}", target.display())
+                format!(
+                    "identify root overlay target {}: {error:#}",
+                    target.display()
+                )
             })?;
             let target_fd = pinned.try_clone_descriptor().map_err(|error| {
                 format!("retain root overlay target {}: {error:#}", target.display())
@@ -3544,7 +3549,10 @@ mod imp {
             if current
                 .identity()
                 .map_err(|error| format!("identify sealed source root: {error:#}"))?
-                != source.root.identity().map_err(|error| format!("{error:#}"))?
+                != source
+                    .root
+                    .identity()
+                    .map_err(|error| format!("{error:#}"))?
             {
                 return Err("sealed source root changed before held preparation".into());
             }

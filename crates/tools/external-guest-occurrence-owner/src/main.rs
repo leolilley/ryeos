@@ -29,9 +29,8 @@ use ryeos_external_execution_contract::guest_import_authorization::{
 };
 use ryeos_external_execution_contract::guest_owner_report::{
     GuestClockReport, GuestClockTrust, GuestOwnerReport, GuestOwnerStep as Step,
-    GuestRefusalDetail,
-    GuestSupervisorExit, GuestSupervisorStatus, MAX_GUEST_SUPERVISOR_STDERR_TAIL_BYTES,
-    RefusedAt as _,
+    GuestRefusalDetail, GuestSupervisorExit, GuestSupervisorStatus,
+    MAX_GUEST_SUPERVISOR_STDERR_TAIL_BYTES, RefusedAt as _,
 };
 
 const RUNTIME_ROOT: &str = "/ryeos/guest-runtime";

@@ -203,7 +203,9 @@ pub async fn qualify(
             .write_barrier
             .acquire_with_timeout(crate::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
             .map_err(|error| {
-                anyhow::anyhow!("cannot acquire content qualification publication permit: {error:#}")
+                anyhow::anyhow!(
+                    "cannot acquire content qualification publication permit: {error:#}"
+                )
             })?;
         let (published, idempotent) =
             ryeos_state::external_content::qualification_publication::publish(

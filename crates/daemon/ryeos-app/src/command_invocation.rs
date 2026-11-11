@@ -333,7 +333,9 @@ pub fn command_execution_policy(
         ExecutionPolicy::projectless(response)
     };
     if controls.retain_child_results {
-        policy = policy.retain_child_results().map_err(|e| format!("{e:#}"))?;
+        policy = policy
+            .retain_child_results()
+            .map_err(|e| format!("{e:#}"))?;
     }
     if controls.exclude_operator_vault {
         policy = policy.exclude_operator_vault();

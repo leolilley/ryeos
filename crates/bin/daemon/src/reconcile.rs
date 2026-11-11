@@ -2035,7 +2035,10 @@ async fn reconcile_active_threads_inner(
                     &thread.thread_id,
                     pgid,
                     &thread.status,
-                    Some(("resume_counter_io_error", json!({"error": format!("{err:#}")}))),
+                    Some((
+                        "resume_counter_io_error",
+                        json!({"error": format!("{err:#}")}),
+                    )),
                     &mut reconciled,
                 )?;
                 continue;
@@ -2130,7 +2133,10 @@ async fn reconcile_active_threads_inner(
                         &thread.thread_id,
                         pgid,
                         &thread.status,
-                        Some(("resume_counter_io_error", json!({"error": format!("{err:#}")}))),
+                        Some((
+                            "resume_counter_io_error",
+                            json!({"error": format!("{err:#}")}),
+                        )),
                         &mut reconciled,
                     )?;
                     continue;

@@ -540,7 +540,12 @@ fn the_local_inference_and_scoped_compositions_follow_the_host_class_matrix() {
 
 #[test]
 fn the_release_authority_composition_needs_an_enclosure_limit_no_host_here_proves() {
-    for host in [runit(), local_docker(), local_docker_oci_hook(), hosted_volume()] {
+    for host in [
+        runit(),
+        local_docker(),
+        local_docker_oci_hook(),
+        hosted_volume(),
+    ] {
         check(
             "release-authority",
             "local",
@@ -569,7 +574,11 @@ fn the_f5r_controller_node_follows_the_host_class_matrix() {
         ("local", runit(), Expect::Refuse(NO_LOCAL_ENCLOSURE)),
         ("hosted", runit(), Expect::Refuse(NO_HOSTED_ENCLOSURE)),
         ("hosted_enforced", hosted_userns(), Expect::Admit),
-        ("hosted_enforced", hosted_ephemeral(), Expect::Refuse(NO_DISK)),
+        (
+            "hosted_enforced",
+            hosted_ephemeral(),
+            Expect::Refuse(NO_DISK),
+        ),
         (
             "hosted_enforced",
             runit(),
@@ -591,7 +600,11 @@ fn the_development_direct_class_admits_an_operator_host_without_a_scope_associat
             local_docker_no_volume(),
             Expect::Refuse(NO_DISK),
         ),
-        ("local_direct", hosted_volume(), Expect::Refuse(NO_ACCOUNTING)),
+        (
+            "local_direct",
+            hosted_volume(),
+            Expect::Refuse(NO_ACCOUNTING),
+        ),
     ];
     for (class, host, expect) in &cases {
         check("development", class, host, expect);

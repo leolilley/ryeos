@@ -5760,7 +5760,9 @@ async fn run(
     }
     match daemon_result.as_ref() {
         Ok(()) => tracing::info!(reason = exit_reason, "daemon exiting"),
-        Err(error) => tracing::error!(reason = exit_reason, error = %format!("{error:#}"), "daemon exiting"),
+        Err(error) => {
+            tracing::error!(reason = exit_reason, error = %format!("{error:#}"), "daemon exiting")
+        }
     }
     if startup_cancelled {
         Ok(())

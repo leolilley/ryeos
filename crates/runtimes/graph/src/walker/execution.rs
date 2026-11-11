@@ -273,7 +273,9 @@ impl Walker {
                     Err(error) => {
                         return StepOutcome::DispatchHardError(DispatchHardErrorOutcome {
                             item_id: Some(dispatched_item_id),
-                            error: format!("follow action has invalid product selections: {error:#}"),
+                            error: format!(
+                                "follow action has invalid product selections: {error:#}"
+                            ),
                             next_on_error: resolve_next_on_error(node, cfg),
                             elapsed_ms: elapsed,
                             cost: None,

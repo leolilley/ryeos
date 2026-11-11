@@ -673,7 +673,8 @@ mod tests {
         };
         check_guest_observation(&observation(&input, &output), &scenario).unwrap();
         // A pre-write read that returns bytes means the candidate already existed.
-        output[4] = json!({"id":2,"result":{"dataBase64":STANDARD.encode(scenario.candidate_content)}});
+        output[4] =
+            json!({"id":2,"result":{"dataBase64":STANDARD.encode(scenario.candidate_content)}});
         assert!(check_guest_observation(&observation(&input, &output), &scenario).is_err());
         // A pre-write read of any other path stays unplanned.
         output[4] = json!({"id":2,"error":{"code":-32004,"message":"absent"}});
