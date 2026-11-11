@@ -110,7 +110,8 @@ async fn a_project_only_service_is_not_found() {
 
 /// The audit's exact gap-B tool: points straight at `@subprocess` with its
 /// own command, skipping every source-scoped runtime.
-const GAP_ECHO_TOOL: &str = "executor_id: \"@subprocess\"
+const GAP_ECHO_TOOL: &str = "category: gap
+executor_id: \"@subprocess\"
 execution_protocol: \"protocol:ryeos/core/opaque\"
 config:
   command: /bin/echo
