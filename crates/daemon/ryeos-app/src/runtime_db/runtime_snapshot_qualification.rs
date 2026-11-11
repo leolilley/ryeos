@@ -959,8 +959,9 @@ pub(crate) mod tests {
                 )
             };
         // The shared owner, callback author and retained journal reader must
-        // commit the exact typed protocol bytes, not a state CAS object or
-        // the tagged journal envelope.
+        // commit the exact typed protocol bytes, not the tagged journal
+        // envelope. RyeOS has one canonical encoding, so the protocol bytes
+        // and the observation's state-object digest agree.
         assert_eq!(
             observation.digest().unwrap(),
             hex::encode(Sha256::digest(
@@ -974,7 +975,11 @@ pub(crate) mod tests {
                 &serde_json::to_value(&observation).unwrap(),
             )
             .unwrap();
-        assert!(check_prerequisite(&observation, &object_coordinate).is_err());
+        assert_eq!(
+            object_coordinate.prerequisite_measurement_observation_digest,
+            coordinate.prerequisite_measurement_observation_digest
+        );
+        check_prerequisite(&observation, &object_coordinate).unwrap();
         let mut envelope_coordinate = coordinate.clone();
         envelope_coordinate.prerequisite_measurement_observation_digest =
             ryeos_state::objects::canonical_value_digest(

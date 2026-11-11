@@ -2596,8 +2596,10 @@ const RUNTIME_OPERATOR_APP_ID_MASK: u32 = 0xffff_ff00;
 const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // The current operator schema epoch. Any other epoch is refused by ordinary
 // open and reset by the explicit execution-history reset; no stored row of an
-// earlier epoch gains authority through defaults or migration.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 131;
+// earlier epoch gains authority through defaults or migration. Epoch 132: every
+// stored digest and canonical text is RyeOS canonical JSON (Lillux encoding);
+// rows written by the field-order encoder of epoch 131 do not re-verify.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 132;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
@@ -12041,7 +12043,7 @@ impl RuntimeDb {
         canonical_batch: &serde_json::Value,
     ) -> Result<bool> {
         self.conn.with_sql(|conn| {
-            let canonical_batch_json = serde_json::to_string(canonical_batch)?;
+            let canonical_batch_json = lillux::canonical_json(canonical_batch)?;
             let existing = conn
                 .query_row(
                     "SELECT through_sequence, previous_digest, batch_digest,
@@ -12111,7 +12113,7 @@ impl RuntimeDb {
             {
                 bail!("observation batch sequence range is invalid or unbounded");
             }
-            let canonical_batch_json = serde_json::to_string(canonical_batch)?;
+            let canonical_batch_json = lillux::canonical_json(canonical_batch)?;
             if canonical_batch_json.len() > ryeos_state::objects::MAX_STRUCTURED_OBSERVATION_BATCH_BYTES
             {
                 bail!("observation batch exceeds its exact serialized-byte ceiling");
