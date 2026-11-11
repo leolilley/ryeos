@@ -3,7 +3,6 @@
 import type { RyeOsFieldVm } from "./RyeOsFieldVm";
 import type { RyeOsRowDetailVm } from "./RyeOsRowDetailVm";
 import type { RyeOsRowVm } from "./RyeOsRowVm";
-import type { RyeOsSceneModel } from "./RyeOsSceneModel";
 import type { RyeOsSectionVm } from "./RyeOsSectionVm";
 import type { RyeOsSourceStatusVm } from "./RyeOsSourceStatusVm";
 import type { RyeOsTableCoverageVm } from "./RyeOsTableCoverageVm";
@@ -28,8 +27,6 @@ export type RyeOsViewVm =
    */
   | { type: "rows"; title: string; source_status?: RyeOsSourceStatusVm | null; columns: string[]; total_rows: bigint; provenance?: string | null; affordance_hints: string[]; rows: RyeOsRowVm[] }
   | { type: "timeline"; title: string; source_status?: RyeOsSourceStatusVm | null; provenance?: string | null; affordance_hints: string[]; entries: RyeOsTimelineEntryVm[]; entry_ids: string[]; entry_cursors: bigint[]; entry_arrived_at_ms: (bigint | null)[]; entry_indents: number[]; selected?: bigint | null; fold_section?: bigint | null; entry_expandable?: boolean[]; entry_expanded?: boolean[]; entry_details?: RyeOsRowDetailVm[][] }
-  | { type: "map"; scene: RyeOsSceneModel }
-  | { type: "atlas"; scene: RyeOsSceneModel }
   /**
    * A foldable multi-section list — the magit-style status surface: one
    * widget over many datasets, each section a titled, collapsible group of

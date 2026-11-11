@@ -293,7 +293,7 @@ fn draw_dock_tile(
         Style::new().fg(ACCENT).bg(BG).bold(),
     );
     // Dock content renders through the SAME widget dispatch as center
-    // tiles — rows with tones, timelines, scenes — not a crude subset.
+    // tiles — rows with tones, timelines — not a crude subset.
     let inner = Rect::new(
         rect.x + 1,
         rect.y + 1,
@@ -315,7 +315,6 @@ pub fn draw_tile(
     input: Option<&RyeOsInputVm>,
     border: Option<Border>,
     now_ms: u64,
-    preserve_background: bool,
 ) {
     let w = rect.w as usize;
     let h = rect.h as usize;
@@ -333,9 +332,7 @@ pub fn draw_tile(
     } else {
         Style::new().fg(MUTED).bg(BG)
     };
-    if !preserve_background {
-        fill_rect(surface, rect, Style::new().fg(FG).bg(BG));
-    }
+    fill_rect(surface, rect, Style::new().fg(FG).bg(BG));
     if w < 2 || h < 2 {
         super::draw_view(surface, rect, view, now_ms);
         return;
@@ -606,7 +603,6 @@ mod tests {
             Some(&input),
             Some(Border::Sharp),
             0,
-            false,
         );
         let row = |y: usize| (0..40).map(|x| surface.get(x, y).rune).collect::<String>();
         // Filter strip on the first interior row (inside the top border).

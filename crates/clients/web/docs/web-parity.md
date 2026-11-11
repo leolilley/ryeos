@@ -1,8 +1,8 @@
 # Web and terminal UI parity ledger
 
 The browser and terminal are transport and rendering adapters over the same
-`RyeOsCore`. Rust owns state, reduction, effects, layout, semantic view models,
-scene projection and key commands. A checked row means both adapters were
+`RyeOsCore`. Rust owns state, reduction, effects, layout, semantic view models
+and key commands. A checked row means both adapters were
 audited; it does not claim byte-identical presentation.
 
 `tests/parity_matrix.test.js` compares these checked inventories with the Rust
@@ -77,7 +77,6 @@ producers of the same intents, not a second command vocabulary.
 | [x] `InvokeAffordance` | shared | shared | content-declared affordance |
 | [x] `ActivateLocalProjection` | shared | shared | guarded Rust-projected local row activation |
 | [x] `OpenView` | shared | shared | compiled view activation |
-| [x] `OpenNewView` | shared | shared | compiled view activation |
 | [x] `OpenViewInNewTab` | shared | shared | Launcher row captures exact insertion tab/binding; existing retained InsertTab publishes only after ACK, with fresh required subjects. |
 | [x] `OpenCompositionInNewSurface` | shared | shared | Exact source tab/binding is recaptured portably; ordinary shared catalogue dialog invokes its signed composed-opening affordance. Admission remains ACK-gated. |
 | [x] `OpenSurfaceInNewPresentation` | shared | gap | Captures the exact selected Surface and each portable tab origin under ordinary signed admission. Only completed ACK reveals a prepared independent-document link; native document hosting remains unsupported. |
@@ -117,18 +116,13 @@ producers of the same intents, not a second command vocabulary.
 | [x] `ResizeSplit` | shared | shared | guarded ratio edit |
 | [x] `ToggleTopStatusBar` | shared | shared | surface presentation |
 | [x] `ToggleBottomStatusBar` | shared | shared | surface presentation |
-| [x] `ToggleBackdropBreak` | shared | shared | surface presentation |
 | [x] `ToggleDock` | shared | shared | surface presentation |
 | [x] `ResizeFocused` | shared | shared | keyboard layout edit |
-| [x] `SelectDimension` | shared | shared | semantic selection |
 | [x] `InspectItem` | shared | shared | derived inspector |
 | [x] `InspectThread` | shared | shared | derived inspector |
 | [x] `InspectSummary` | shared | shared | inert summary |
 | [x] `ReadFile` | shared | shared | bound file read |
-| [x] `CopyText` | shared | shared | platform effect |
-| [x] `OpenExternal` | shared | shared | platform effect |
 | [x] `SubmitThreadCommand` | shared | shared | bound command service |
-| [x] `AimThread` | shared | shared | route shared lens |
 | [x] `DrillThread` | shared | shared | push drill stack |
 | [x] `PrefillRetryTurn` | shared | shared | stage text for review |
 <!-- parity:RyeOsUiIntent:end -->
@@ -145,12 +139,6 @@ exact `InputAt` addresses; character-level events remain shared keymap paths.
 | [x] `InputAt` | native | gap | TUI uses the focused-input key path, not addressed native input |
 | [x] `Activate` | native | shared | generic intent |
 | [x] `SetFilter` | gap | gap | retained reducer event; current live filters use addressed input |
-| [x] `SetFilesRoot` | gap | gap | retained reducer event with no current producer |
-| [x] `SetFilesPath` | gap | gap | retained reducer event with no current producer |
-| [x] `SetAtlasLayerVisible` | native | gap | browser scene control only |
-| [x] `SetAtlasLens` | native | gap | browser scene control only |
-| [x] `SetAtlasProjection` | gap | gap | retained reducer event with no current producer |
-| [x] `SetAtlasFileSpacePath` | native | gap | browser scene/file control only |
 | [x] `SetFieldSelection` | native | shared | field state |
 | [x] `MoveFieldSelection` | native | shared | field state |
 | [x] `SetFieldGroupCollapsed` | native | shared | field state |
@@ -187,7 +175,6 @@ exact `InputAt` addresses; character-level events remain shared keymap paths.
 | [x] `ToggleViewItemExpansion` | native | gap | exact mounted instance and semantic item identity disclosure |
 | [x] `DismissNotice` | native | gap | exact idempotent browser notice dismissal |
 | [x] `ToggleViewSection` | native | gap | semantic section identity resolved atomically in current projection |
-| [x] `SetFold` | native | native | click/point fold |
 | [x] `SetViewFold` | native | gap | exact tile-or-dock instance fold |
 | [x] `ExpandSelectedRow` | shared | shared | shared keymap |
 | [x] `SetTreeRowCollapsed` | shared | shared | shared keymap |
@@ -224,8 +211,6 @@ exact `InputAt` addresses; character-level events remain shared keymap paths.
 | [x] `Document` | presentation | presentation | Same bounded text, path and provenance. |
 | [x] `Rows` | presentation | presentation | Same rows and affordances. |
 | [x] `Timeline` | presentation | presentation | Same entries, folds and details. |
-| [x] `Map` | presentation | presentation | Same scene model. |
-| [x] `Atlas` | presentation | presentation | Same scene model. |
 | [x] `Sections` | presentation | presentation | Same foldable sections. |
 | [x] `Table` | presentation | presentation | Same columns, rows and affordances. |
 | [x] `Placeholder` | presentation | presentation | Same title and message. |
@@ -235,13 +220,10 @@ exact `InputAt` addresses; character-level events remain shared keymap paths.
 ## Explicit platform exceptions
 
 1. Browser hash, clipboard, URL navigation, native selection, IME, pointer,
-   drag and WebGL have no byte-identical TUI equivalent. They translate
+   and drag have no byte-identical TUI equivalent. They translate
    mechanics into the shared variants above.
-2. Terminal fold keys use the cell-grid point before shared directional focus;
-   web folding is click/activation based. Both emit `SetFold`.
-3. Scenes use different drawing primitives but the exact same scene model.
-4. `TransportStateChanged` and `RouteChanged` are root-event TUI gaps. Exact
-   addressed input, direct scene/field controls and several retained reducer
+2. `TransportStateChanged` and `RouteChanged` are root-event TUI gaps. Exact
+   addressed input, direct field controls and several retained reducer
    setters have additional row-level gaps above. They stay visible until
    implemented or explicitly retired from the contract.
 

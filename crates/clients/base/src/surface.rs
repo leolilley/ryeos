@@ -55,8 +55,7 @@ pub struct SurfaceSpec {
     /// It does not regenerate an already edited or explicitly authored tree.
     #[serde(default)]
     pub tiling: TilingSpec,
-    /// Ordered initial center tiles, each a `view:<ref>` (graph/atlas
-    /// included — they are ordinary `view:` items).
+    /// Ordered initial center tiles, each a `view:<ref>`.
     #[serde(default)]
     pub tiles: Vec<ViewKindSpec>,
     /// Explicit named initial compositions. When populated, each view set
@@ -83,13 +82,6 @@ pub struct SurfaceSpec {
     /// inline — surfaces reference views, they do not define them).
     #[serde(default)]
     pub views: Option<serde_json::Value>,
-    /// Optional backdrop scene view ref (`view:ryeos/backdrop/<name>`, a
-    /// normal `view` with `widget: scene`). The renderer draws this scene
-    /// into the center rect when the center is empty — the background is
-    /// content, never a renderer enum. Absent = no backdrop, the
-    /// background fill stands.
-    #[serde(default)]
-    pub backdrop: Option<String>,
     /// Declared launcher groups (`[{ group, views }]`): each group titles
     /// a foldable header and lists launchable view refs. The view overlay
     /// derives its tree from these plus the completeness append (unlisted
@@ -101,8 +93,6 @@ pub struct SurfaceSpec {
     /// they do not own a page enum or infer navigation from view names.
     #[serde(default)]
     pub navigation: Vec<SurfaceNavigationSpec>,
-    #[serde(default)]
-    pub ambient: Option<AmbientSpec>,
     #[serde(default)]
     pub affordances: Vec<SurfaceCommandSpec>,
     #[serde(default)]
@@ -367,9 +357,9 @@ impl BorderStyleSpec {
 // ---------------------------------------------------------------------------
 
 /// A center tile as authored in a surface: a `view:` item ref. Every
-/// tile is views-as-content — graph/atlas are ordinary `view:` items
-/// (their `widget:` does the rest), so there are no named structural
-/// kinds. Serializes as the bare ref string the surface YAML carries.
+/// tile is views-as-content: an ordinary `view:` item (its `widget:` does
+/// the rest), so there are no named structural kinds. Serializes as the bare ref
+/// string the surface YAML carries.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(transparent)]
 pub struct ViewKindSpec(pub String);
@@ -397,72 +387,6 @@ impl ViewKindSpec {
     /// Create the appropriate initial local state for this view kind.
     pub fn initial_local_state(&self) -> ViewLocalState {
         self.to_view_spec().initial_local_state()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Ambient
-// ---------------------------------------------------------------------------
-
-/// Ambient animation configuration.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct AmbientSpec {
-    #[serde(default)]
-    pub show_background: Option<bool>,
-    #[serde(default)]
-    pub opacity: Option<f32>,
-    #[serde(default)]
-    pub mode: AmbientModeSpec,
-    #[serde(default)]
-    pub atlas: Option<AmbientAtlasSpec>,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AmbientModeSpec {
-    #[default]
-    Ambient,
-    NamespaceAtlas,
-    #[serde(rename = "atlas_2d")]
-    Atlas2d,
-    #[serde(rename = "atlas_paper_3d")]
-    AtlasPaper3d,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AmbientAtlasSpec {
-    #[serde(default)]
-    pub style: AmbientAtlasStyleSpec,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AmbientAtlasStyleSpec {
-    #[default]
-    #[serde(rename = "flat_2d")]
-    Flat2d,
-    #[serde(rename = "paper_3d")]
-    Paper3d,
-}
-
-impl AmbientSpec {
-    pub fn namespace_atlas_style(&self) -> Option<AmbientAtlasStyleSpec> {
-        match self.mode {
-            AmbientModeSpec::Ambient => None,
-            AmbientModeSpec::NamespaceAtlas => Some(
-                self.atlas
-                    .as_ref()
-                    .map(|atlas| atlas.style)
-                    .unwrap_or_default(),
-            ),
-            AmbientModeSpec::Atlas2d => Some(AmbientAtlasStyleSpec::Flat2d),
-            AmbientModeSpec::AtlasPaper3d => Some(AmbientAtlasStyleSpec::Paper3d),
-        }
-    }
-
-    pub fn uses_namespace_atlas(&self) -> bool {
-        self.show_background.unwrap_or(true) && self.namespace_atlas_style().is_some()
     }
 }
 
@@ -803,10 +727,8 @@ pub fn builtin_default() -> SurfaceSpec {
         input: None,
         sources: BTreeMap::new(),
         views: None,
-        backdrop: None,
         library: Vec::new(),
         navigation: Vec::new(),
-        ambient: None,
         affordances: Vec::new(),
         instruments: Vec::new(),
         capabilities: None,
@@ -1167,7 +1089,6 @@ mod tests {
         assert!(spec.tiles.is_empty());
         assert_eq!(spec.tiling, TilingSpec::default());
         assert!(spec.views.is_none());
-        assert!(spec.backdrop.is_none());
         assert!(spec.library.is_empty());
     }
 
@@ -1198,7 +1119,7 @@ mod tests {
     #[test]
     fn surface_with_home_view_field_is_rejected() {
         // CLEAN CUT: `home_view` (the deleted home-mode field) must fail
-        // to parse — the empty-center background is now `backdrop`.
+        // to parse.
         let bad: Result<SurfaceSpec, _> =
             serde_yaml::from_str("name: x\nhome_view: \"view:ryeos/home/brand\"\n");
         let err = bad.expect_err("`home_view` must be rejected");
@@ -1213,13 +1134,6 @@ mod tests {
         // CLEAN CUT: there is no `frame` field; `frame: home` must fail.
         let bad: Result<SurfaceSpec, _> = serde_yaml::from_str("name: x\nframe: home\n");
         assert!(bad.is_err(), "`frame: home` must be rejected");
-    }
-
-    #[test]
-    fn surface_declares_backdrop_scene_view() {
-        let spec: SurfaceSpec =
-            serde_yaml::from_str("name: x\nbackdrop: \"view:test/backdrop\"\n").unwrap();
-        assert_eq!(spec.backdrop.as_deref(), Some("view:test/backdrop"));
     }
 
     #[test]
@@ -1256,8 +1170,8 @@ tiling:
   insert: end
 tiles:
   - "view:ryeos/chain/timeline"
-  - "view:ryeos/atlas"
-  - "view:ryeos/graph/topology"
+  - "view:ryeos/programs/list"
+  - "view:ryeos/threads/list"
 style:
   border: thick
 "#;
@@ -1272,7 +1186,10 @@ style:
             spec.tiles[0],
             ViewKindSpec("view:ryeos/chain/timeline".into())
         );
-        assert_eq!(spec.tiles[1], ViewKindSpec("view:ryeos/atlas".into()));
+        assert_eq!(
+            spec.tiles[1],
+            ViewKindSpec("view:ryeos/programs/list".into())
+        );
         assert_eq!(spec.style.border, BorderStyleSpec::Thick);
     }
 
@@ -1344,7 +1261,7 @@ style:
     #[test]
     fn to_view_set_preserves_authored_focus_and_derives_geometric_order() {
         let spec: SurfaceSpec = serde_yaml::from_str(
-            "name: x\ntiles: [\"view:a/b\", \"view:ryeos/graph/topology\", \"view:ryeos/atlas\"]\n",
+            "name: x\ntiles: [\"view:a/b\", \"view:ryeos/threads/list\", \"view:ryeos/programs/list\"]\n",
         )
         .unwrap();
         let ws = spec.to_view_set(
@@ -1356,11 +1273,11 @@ style:
         assert_eq!(ws.tiles[&ws.focused_tile].view.view_ref, "view:a/b");
         assert!(matches!(
             ws.tiles.get(&ids[0]).map(|t| &t.view),
-            Some(ViewSpec { view_ref }) if view_ref == "view:ryeos/graph/topology"
+            Some(ViewSpec { view_ref }) if view_ref == "view:ryeos/threads/list"
         ));
         assert!(matches!(
             ws.tiles.get(&ids[1]).map(|t| &t.view),
-            Some(ViewSpec { view_ref }) if view_ref == "view:ryeos/atlas"
+            Some(ViewSpec { view_ref }) if view_ref == "view:ryeos/programs/list"
         ));
         assert!(matches!(
             ws.tiles.get(&ids[2]).map(|t| &t.view),
@@ -1458,7 +1375,7 @@ tiles = ["view:ryeos/threads/list"]
             ViewLocalState::GenericList { .. }
         ));
         assert!(matches!(
-            ViewKindSpec("view:ryeos/atlas".into()).initial_local_state(),
+            ViewKindSpec("view:ryeos/programs/list".into()).initial_local_state(),
             ViewLocalState::GenericList { .. }
         ));
     }
@@ -1495,8 +1412,8 @@ tiles = ["view:ryeos/threads/list"]
             ViewSpec::bound("view:test/x")
         );
         assert_eq!(
-            ViewKindSpec("view:ryeos/graph/topology".into()).to_view_spec(),
-            ViewSpec::bound("view:ryeos/graph/topology")
+            ViewKindSpec("view:ryeos/threads/list".into()).to_view_spec(),
+            ViewSpec::bound("view:ryeos/threads/list")
         );
     }
 
@@ -1549,19 +1466,15 @@ tiles = ["view:ryeos/threads/list"]
                 "legacy pane name `{legacy}` must be rejected"
             );
         }
-        // Bare named kinds are gone — graph/atlas are `view:` refs now.
-        for rejected in ["atlas", "graph"] {
+        // Bare named kinds are gone — tiles are `view:` refs.
+        for rejected in ["threads", "timeline"] {
             let parsed: Result<ViewKindSpec, _> = serde_yaml::from_str(&format!("\"{rejected}\""));
             assert!(
                 parsed.is_err(),
                 "bare named kind `{rejected}` must be rejected"
             );
         }
-        for kept in [
-            "view:ryeos/threads/list",
-            "view:ryeos/atlas",
-            "view:ryeos/graph/topology",
-        ] {
+        for kept in ["view:ryeos/threads/list", "view:ryeos/programs/list"] {
             let parsed: Result<ViewKindSpec, _> = serde_yaml::from_str(&format!("\"{kept}\""));
             assert!(parsed.is_ok(), "view ref `{kept}` must parse");
         }
@@ -1588,28 +1501,6 @@ tiles = ["view:ryeos/threads/list"]
                 .any(|tile| matches!(tile, ViewKindSpec(view_ref)
                     if view_ref == "view:ryeos/threads/history")),
             "workbench must bind the threads view by ref"
-        );
-    }
-
-    #[test]
-    fn bundled_atlas_surface_loads() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../..")
-            .join("bundles/ryeos-ui/.ai/surfaces/ryeos/ui/atlas.yaml");
-        assert!(path.exists(), "bundled atlas surface missing at {path:?}");
-        let content = std::fs::read_to_string(path).unwrap();
-        let spec: SurfaceSpec = serde_yaml::from_str(&content)
-            .unwrap_or_else(|e| panic!("failed to parse bundled atlas surface: {}", e));
-        assert_eq!(spec.name, "ryeos-ui-atlas");
-        assert_eq!(
-            spec.ambient.as_ref().map(|ambient| ambient.mode),
-            Some(AmbientModeSpec::NamespaceAtlas)
-        );
-        assert_eq!(
-            spec.ambient
-                .as_ref()
-                .and_then(|ambient| ambient.namespace_atlas_style()),
-            Some(AmbientAtlasStyleSpec::Flat2d)
         );
     }
 
@@ -1855,7 +1746,7 @@ id = "test"
             "provenance": provenance_json("surface:ryeos/ui/graph", []),
             "composed_value": {
                 "name": "graph",
-                "tiles": ["view:ryeos/graph/topology"],
+                "tiles": ["view:ryeos/threads/list"],
                 "affordances": []
             },
             "derived": {},

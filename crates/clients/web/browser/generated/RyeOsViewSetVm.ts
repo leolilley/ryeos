@@ -14,8 +14,8 @@ export interface RyeOsViewSetVm {
   root: RyeOsLayoutNodeVm | null;
   focused_tile: string;
   /**
-   * True when the center has no tiles. Drives backdrop-vs-tiles: when
-   * empty, the renderer draws `backdrop`; otherwise the layout tree.
+   * True when the center has no tiles: the renderer draws its empty state
+   * instead of the layout tree.
    */
   center_is_empty: boolean;
   tile_count: bigint;

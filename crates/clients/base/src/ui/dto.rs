@@ -4,7 +4,6 @@
 //! without making those endpoint names part of the RyeOs product model.
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 
 /// How the daemon delivered a `service:threads/input` submit. Typed so the
 /// client branches on a variant, not a string literal. Unknown/future values
@@ -392,130 +391,6 @@ pub struct RyeOsInvalidRemoteDto {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct RyeOsTopologyDto {
-    #[serde(default)]
-    pub version: String,
-    #[serde(default)]
-    pub kind: String,
-    #[serde(default)]
-    pub metadata: serde_json::Value,
-    #[serde(default)]
-    pub nodes: Vec<RyeOsTopologyNodeDto>,
-    #[serde(default)]
-    pub edges: Vec<RyeOsTopologyEdgeDto>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct RyeOsTopologyNodeDto {
-    #[serde(default)]
-    pub id: String,
-    #[serde(default)]
-    pub kind: String,
-    #[serde(default)]
-    pub label: String,
-    #[serde(default, rename = "ref")]
-    pub ref_: String,
-    #[serde(default)]
-    pub space: Option<String>,
-    #[serde(default)]
-    pub path: Option<String>,
-    #[serde(default)]
-    pub namespace: Option<String>,
-    #[serde(default, rename = "virtual")]
-    pub virtual_: bool,
-    #[serde(default)]
-    pub missing: bool,
-    #[serde(default)]
-    pub status: Option<RyeOsTopologyNodeStatusDto>,
-    #[serde(default)]
-    pub trust: Option<RyeOsTopologyTrustSummaryDto>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct RyeOsTopologyNodeStatusDto {
-    #[serde(default)]
-    pub resolved: bool,
-    #[serde(default)]
-    pub composed: Option<bool>,
-    #[serde(default)]
-    pub executable: bool,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct RyeOsTopologyTrustSummaryDto {
-    #[serde(default, rename = "class")]
-    pub class_: String,
-    #[serde(default)]
-    pub signer: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct RyeOsTopologyEdgeDto {
-    #[serde(default)]
-    pub id: String,
-    #[serde(default)]
-    pub from: String,
-    #[serde(default)]
-    pub to: String,
-    #[serde(default, rename = "type")]
-    pub type_: String,
-    #[serde(default)]
-    pub label: String,
-    #[serde(default)]
-    pub source: Option<RyeOsTopologyEdgeSourceDto>,
-    #[serde(default)]
-    pub confidence: String,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct RyeOsTopologyEdgeSourceDto {
-    #[serde(default)]
-    pub field: Option<String>,
-    #[serde(default)]
-    pub path: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct RyeOsItemsDto {
-    #[serde(default)]
-    pub schema_version: String,
-    #[serde(default)]
-    pub counts: RyeOsItemCountsDto,
-    #[serde(default)]
-    pub items: Vec<RyeOsItemDto>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct RyeOsItemCountsDto {
-    #[serde(default)]
-    pub by_kind: BTreeMap<String, usize>,
-    #[serde(default)]
-    pub by_space: BTreeMap<String, usize>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct RyeOsItemDto {
-    #[serde(default)]
-    pub canonical_ref: String,
-    #[serde(default)]
-    pub item_kind: String,
-    #[serde(default)]
-    pub bare_id: String,
-    #[serde(default)]
-    pub label: String,
-    #[serde(default)]
-    pub namespace: Option<String>,
-    #[serde(default)]
-    pub space: String,
-    #[serde(default)]
-    pub source_path: String,
-    #[serde(default)]
-    pub executable: bool,
-    #[serde(default)]
-    pub trust: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct RyeOsThreadsDto {
     #[serde(default)]
     pub threads: Vec<serde_json::Value>,
@@ -535,44 +410,6 @@ pub struct RyeOsFilesDto {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct RyeOsFileEntryDto {
-    #[serde(default)]
-    pub name: String,
-    #[serde(default)]
-    pub is_dir: bool,
-    #[serde(default)]
-    pub size: Option<u64>,
-    #[serde(default)]
-    pub modified: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct RyeOsFileSpaceDto {
-    #[serde(default)]
-    pub schema_version: String,
-    #[serde(default)]
-    pub root: String,
-    #[serde(default)]
-    pub path: String,
-    #[serde(default)]
-    pub max_depth: usize,
-    #[serde(default)]
-    pub max_entries: usize,
-    #[serde(default)]
-    pub truncated: bool,
-    #[serde(default)]
-    pub watchable: bool,
-    #[serde(default)]
-    pub supports_expand: bool,
-    #[serde(default)]
-    pub ignore_mode: String,
-    #[serde(default)]
-    pub entries: Vec<RyeOsFileSpaceEntryDto>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct RyeOsFileSpaceEntryDto {
-    #[serde(default)]
-    pub path: String,
     #[serde(default)]
     pub name: String,
     #[serde(default)]

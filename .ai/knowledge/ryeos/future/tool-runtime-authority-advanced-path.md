@@ -1,16 +1,23 @@
-<!-- ryeos:signed:2026-07-16T03:44:57Z:2d98b5482c02321fa3abc0fe1580cfce91fc863893b9a1590c10c1fed6b9923a:4KePbUgPy1TuDyOQpDGb1EZwq8EKUwzS6TbGXviMZfrosb8RUqukBziJSk9E2N144V59cAn/ZjkWXp7FBjRjBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-06T01:00:58Z:50818d91b1a924aefd9a19b5ad12172c048f50fc5ad0b24141b3934f139a24f0:LnlYhdDzETWIrrGf7dPcEaEisSAewvTQYNrw8tlC3WXsAcW2XRiNmCYEH2eHoYlBy+ealFQO1f5mUIJ6Ef9zBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # Future: Tool Runtime Authority Advanced Path
 
 ## Status
 
-Deferred. The current implementation intentionally provides only the narrow
-first slice: direct tool executions may receive exact self-bundle callback
-capabilities derived from signed generated bundle manifests.
+Deferred extensions to the existing narrow authority model. Direct tool
+executions may receive exact manifest-derived resource capabilities, including
+bundle-event, runtime-vault, item-authoring and project-snapshot operations.
+Project snapshots additionally require the admitted project authority described
+in [Tool runtime authority](tool-runtime-authority.md).
+
+The baseline thread-local callback methods use their own token and method
+access-class checks. They are not all resource-capability operations, and an
+empty resource-capability set does not disable that entire baseline surface.
 
 The signed `tool_callback` descriptor makes callback transport explicit;
-authority remains separately derived and deny-by-default. This advanced path is
+resource authority remains separately derived and deny-by-default. This advanced path is
 for the broader question: what should a first-class tool runtime authority model
-look like once tools need more than current self-bundle authority?
+look like once tools need more than the current resource grants and thread-local
+method surface?
 
 ## Why this is deferred
 
@@ -28,7 +35,7 @@ authority system.
 
 Reopen this design when direct tools need one or more of:
 
-- callback access to daemon APIs beyond current self-bundle authority;
+- callback access beyond the current manifest-backed and thread-local surfaces;
 - cross-bundle bundle-event or vault delegation;
 - caller-delegated capabilities narrower than the caller but broader than self-bundle authority;
 - user-visible approval grants for tool authority;
@@ -152,7 +159,8 @@ The same authority derivation should feed both paths.
 
 ## Migration path
 
-1. Keep the current self-bundle manifest-authority slice as the baseline.
+1. Keep the current manifest-derived resource grants and separately enforced
+   thread-local callback methods as the baseline.
 2. Add structured manifest declarations only when a new callback API needs them.
 3. Add install-policy checks before any cross-bundle or new callback authority.
 4. Add caller/session delegation as an intersecting constraint, not a replacement for signed declarations.

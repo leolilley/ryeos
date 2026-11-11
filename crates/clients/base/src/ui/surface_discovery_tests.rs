@@ -51,7 +51,6 @@ fn authored_shared_configs_offer_discovery_without_changing_their_surface_seeds(
             "terminal-presentation.yaml",
             "surface:ryeos/ui/lens-observe",
         ),
-        ("atlas-presentation.yaml", "surface:ryeos/ui/atlas-observe"),
     ] {
         let config: SharedPresentationConfig =
             serde_json::from_value(authored(&format!("config/ryeos/ui/{file}"))).unwrap();

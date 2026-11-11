@@ -48,7 +48,7 @@ async fn field_sources_authenticate_and_report_missing_projection_contract() {
 async fn exercise_field_sources(state: ryeos_app::state::AppState, project_available: bool) {
     let project_path = workspace_root();
     let launch_context = launch_context(
-        "surface:ryeos/ui/atlas",
+        "surface:ryeos/ui/base",
         Some(&project_path),
         ryeos_ui::compiled_binding::EffectiveUiPosture::ObservationOnly,
         None,

@@ -51,7 +51,6 @@ export type RyeOsUiIntent =
    */
   | { type: "activate_local_projection"; instance_key: RyeOsViewInstanceKey; record_id: string; projection_guard: string }
   | { type: "open_view"; view: ViewSpec }
-  | { type: "open_new_view"; view: ViewSpec }
   /**
    * Open one admitted View as a fresh tab at the captured insertion owner.
    * Subject-dependent Views stay unresolved; this never copies ambient work.
@@ -98,33 +97,23 @@ export type RyeOsUiIntent =
   | { type: "resize_split"; layout_guard: string; path: SplitBranch[]; ratio: number }
   | { type: "toggle_top_status_bar" }
   | { type: "toggle_bottom_status_bar" }
-  | { type: "toggle_backdrop_break" }
   | { type: "toggle_dock"; edge: RyeOsDockEdge }
   | { type: "resize_focused"; direction: FocusDirection }
-  | { type: "select_dimension" }
   | { type: "inspect_item"; canonical_ref: string }
   | { type: "inspect_thread"; thread_id: string }
   | { type: "inspect_summary"; title: string; detail: unknown }
   | { type: "read_file"; root: string; path: string }
-  | { type: "copy_text"; text: string }
-  | { type: "open_external"; url: string }
   /**
    * Steer the route's head thread via `service:commands/submit`
    * (`cancel` / `interrupt` / `continue` / `kill`). The reducer reads the
    * head thread at dispatch time. This is the same authority the CLI's
-   * `ryeos commands submit` uses — no new bypass; see the daemon authz
-   * note at `command_service.submit` / `.tmp/thread-authorization-review.md`.
+   * `ryeos commands submit` uses; the daemon authorizes it at
+   * `command_service.submit`, so no new bypass is introduced here.
    */
   | { type: "submit_thread_command"; command: ThreadControlCommand }
   /**
-   * Aim the input route at a thread — the feed re-projects to its braid.
-   * Activating a forked-subthread feed entry "enters" that subthread.
-   */
-  | { type: "aim_thread"; thread_id: string }
-  /**
    * Step INTO a child execution from a feed entry — the debugger step-in
-   * across the dispatch edge. Unlike `AimThread` (a bare route retarget),
-   * this pushes a return frame so Backspace walks back to the parent braid,
+   * across the dispatch edge. This pushes a return frame so Backspace walks back to the parent braid,
    * and sets BOTH route coordinates: a spawned child is a fresh root, so its
    * `chain_root_id` equals its own thread id. The lens stays the braid
    * timeline and re-projects onto the child via the route facet — no view

@@ -208,13 +208,8 @@ impl RyeOsCore {
                         self.runtime.activity_pulse = 0.0;
                     }
                 }
-                self.advance_backdrop_break(dt_ms);
                 self.expire_field_changes(now_ms);
                 let effects = self.advance_field_playback();
-                // The frame clock advances `generation` so generation-keyed
-                // motion (the backdrop twinkle, via the generic scene
-                // renderer) steps each tick. The loop already repaints on
-                // tick; bumping generation is what makes the step visible.
                 self.bump_generation();
                 effects
             }
@@ -334,102 +329,6 @@ impl RyeOsCore {
                 field,
                 value,
             } => self.set_tile_filter(tile_id, field, value),
-            RyeOsUiEvent::SetFilesRoot { .. } | RyeOsUiEvent::SetFilesPath { .. } => {
-                // File tiles are content-bound; path state lives in the
-                // view binding's params.
-                Vec::new()
-            }
-            RyeOsUiEvent::SetAtlasLayerVisible {
-                tile_id,
-                kind,
-                visible,
-            } => {
-                self.atlas_target_mut(&tile_id)
-                    .set_layer_visible(kind, visible);
-                self.bump_generation();
-                Vec::new()
-            }
-            RyeOsUiEvent::SetAtlasLens { tile_id, lens } => {
-                self.atlas_target_mut(&tile_id).set_lens(lens);
-                self.bump_generation();
-                Vec::new()
-            }
-            RyeOsUiEvent::SetAtlasProjection {
-                tile_id,
-                projection,
-                root,
-            } => {
-                {
-                    let atlas = self.atlas_target_mut(&tile_id);
-                    atlas.active_projection = projection;
-                    if projection.is_file_space() {
-                        if let Some(root) = root {
-                            atlas.file_space_root = root;
-                        }
-                        atlas.file_space_path.clear();
-                        atlas.set_lens(crate::atlas::AtlasLensVm::None);
-                    }
-                }
-                self.bump_generation();
-                match projection {
-                    crate::atlas::AtlasProjectionVm::AiSpace => self
-                        .fetch_atlas_source_role(tile_id.as_deref(), "items", serde_json::json!({}))
-                        .into_iter()
-                        .collect(),
-                    crate::atlas::AtlasProjectionVm::FileSpace => {
-                        if self.atlas_target_has_project_bound(tile_id.as_deref()) {
-                            let (root, path) = {
-                                let atlas = self.atlas_target(&tile_id);
-                                (atlas.file_space_root.clone(), atlas.file_space_path.clone())
-                            };
-                            self.fetch_atlas_source_role(
-                                tile_id.as_deref(),
-                                "file_space",
-                                serde_json::json!({
-                                    "root": root,
-                                    "path": path
-                                }),
-                            )
-                            .into_iter()
-                            .collect()
-                        } else {
-                            Vec::new()
-                        }
-                    }
-                }
-            }
-            RyeOsUiEvent::SetAtlasFileSpacePath {
-                tile_id,
-                root,
-                path,
-            } => {
-                {
-                    let atlas = self.atlas_target_mut(&tile_id);
-                    atlas.active_projection = crate::atlas::AtlasProjectionVm::FileSpace;
-                    atlas.file_space_root = root;
-                    atlas.file_space_path = path;
-                    atlas.set_lens(crate::atlas::AtlasLensVm::None);
-                }
-                self.bump_generation();
-                if self.atlas_target_has_project_bound(tile_id.as_deref()) {
-                    let (root, path) = {
-                        let atlas = self.atlas_target(&tile_id);
-                        (atlas.file_space_root.clone(), atlas.file_space_path.clone())
-                    };
-                    self.fetch_atlas_source_role(
-                        tile_id.as_deref(),
-                        "file_space",
-                        serde_json::json!({
-                            "root": root,
-                            "path": path
-                        }),
-                    )
-                    .into_iter()
-                    .collect()
-                } else {
-                    Vec::new()
-                }
-            }
             event @ (RyeOsUiEvent::SetFieldSelection { .. }
             | RyeOsUiEvent::MoveFieldSelection { .. }
             | RyeOsUiEvent::SetFieldGroupCollapsed { .. }
@@ -780,19 +679,6 @@ impl RyeOsCore {
                 }
                 Vec::new()
             }
-            RyeOsUiEvent::SetFold {
-                tile_id,
-                section,
-                collapsed,
-            } => {
-                let Some(tile_id) = parse_tile_id(&tile_id) else {
-                    return Vec::new();
-                };
-                if self.set_tile_fold(tile_id, section, collapsed) {
-                    self.bump_generation();
-                }
-                Vec::new()
-            }
             RyeOsUiEvent::SetViewFold {
                 instance_key,
                 section,
@@ -950,27 +836,6 @@ impl RyeOsCore {
                 dialog_id,
                 dialog_binding,
             ),
-            RyeOsUiIntent::OpenNewView { view } => {
-                if self.active_view_set().is_none() {
-                    return Vec::new();
-                }
-
-                // Single-lens surfaces have no "another tile": a new-view
-                // request collapses to replacing the one center lens.
-                if self
-                    .active_view_set()
-                    .expect("real tab checked")
-                    .tiling
-                    .mode
-                    == crate::surface::TilingModeSpec::SingleLens
-                {
-                    self.open_view(view)
-                } else {
-                    let effects = self.add_center_tile(view);
-                    self.bump_generation();
-                    effects
-                }
-            }
             RyeOsUiIntent::CloseFocused => {
                 if let Some(tile) = self.active_view_set().map(|set| set.focused_tile) {
                     self.close_tile_or_empty(tile);
@@ -1385,10 +1250,6 @@ impl RyeOsCore {
                 self.bump_generation();
                 Vec::new()
             }
-            RyeOsUiIntent::ToggleBackdropBreak => {
-                self.toggle_backdrop_break();
-                Vec::new()
-            }
             RyeOsUiIntent::ToggleDock { edge } => {
                 let Some(key) = self.shared_dock_instance_key(edge) else {
                     return Vec::new();
@@ -1433,13 +1294,6 @@ impl RyeOsCore {
                 }
                 Vec::new()
             }
-            RyeOsUiIntent::SelectDimension => self.apply_ui_affordance(
-                super::seat::KEY_SELECTION.to_string(),
-                Some(serde_json::json!({ "dimension": true })),
-                None,
-                None,
-                false,
-            ),
             // Inspection IS selection: a facet write on the seat braid.
             // Inspection IS selection: a facet write, peer to `input.route`.
             // The engine never opens or names the inspector — it's a view that
@@ -1456,13 +1310,6 @@ impl RyeOsCore {
                 super::seat::KEY_SELECTION.to_string(),
                 Some(serde_json::json!({ "thread_id": thread_id })),
                 None,
-                None,
-                false,
-            ),
-            RyeOsUiIntent::AimThread { thread_id } => self.apply_ui_affordance(
-                super::seat::KEY_INPUT_ROUTE.to_string(),
-                None,
-                Some(serde_json::json!({ "thread": thread_id })),
                 None,
                 false,
             ),
@@ -1574,12 +1421,6 @@ impl RyeOsCore {
                 binding_generation,
                 binding_digest,
             ),
-            RyeOsUiIntent::CopyText { text } => {
-                vec![self.emit(RyeOsEffectKind::CopyToClipboard { text })]
-            }
-            RyeOsUiIntent::OpenExternal { url } => {
-                vec![self.emit(RyeOsEffectKind::OpenUrl { url })]
-            }
             RyeOsUiIntent::SubmitThreadCommand { command } => {
                 let Some((origin, _)) = self.focused_input_instance() else {
                     return Vec::new();
@@ -1930,28 +1771,6 @@ impl RyeOsCore {
         effects
     }
 
-    fn toggle_backdrop_break(&mut self) {
-        self.ui.backdrop_break_target = if self.ui.backdrop_break_target >= 0.5 {
-            0.0
-        } else {
-            1.0
-        };
-        self.bump_generation();
-    }
-
-    fn advance_backdrop_break(&mut self, dt_ms: u64) {
-        let target = self.ui.backdrop_break_target.clamp(0.0, 1.0);
-        let current = self.ui.backdrop_break_amount.clamp(0.0, 1.0);
-        let delta = target - current;
-        if delta.abs() < 0.001 {
-            self.ui.backdrop_break_amount = target;
-            return;
-        }
-        let step = (dt_ms as f32 / 520.0).clamp(0.04, 0.22);
-        self.ui.backdrop_break_amount =
-            (current + delta.signum() * step.min(delta.abs())).clamp(0.0, 1.0);
-    }
-
     pub(crate) fn has_pending_cancel(&self, thread_id: &str) -> bool {
         let Some((origin, _)) = self.focused_input_instance() else {
             return false;
@@ -2117,7 +1936,7 @@ fn initial_list_local_state() -> crate::view_set::ViewLocalState {
 }
 
 /// A route is the view's own ref — every view is addressable by ref
-/// (`#view:…`), graph/atlas included. The engine names no specific view.
+/// (`#view:…`). The engine names no specific view.
 fn view_from_route(route: &str) -> Option<ViewSpec> {
     let route = route.trim_start_matches('#');
     route.starts_with("view:").then(|| ViewSpec::bound(route))
@@ -2933,15 +2752,7 @@ mod tests {
         settle_pending_prefix(&mut core, &producer);
         // The first tile fills the view_set.
         let master = core.active_view_set().unwrap().focused_tile;
-        core.dispatch(RyeOsEvent::Ui {
-            event: RyeOsUiEvent::Activate {
-                intent: RyeOsUiIntent::OpenNewView {
-                    view: ViewSpec {
-                        view_ref: "view:ryeos/threads/list".to_string(),
-                    },
-                },
-            },
-        });
+        core.add_center_tile(ViewSpec::bound("view:ryeos/threads/list"));
         settle_pending_prefix(&mut core, &producer);
         // An ordinary open splits beside it, preserving existing geometry.
         let stacked = core.active_view_set().unwrap().focused_tile;

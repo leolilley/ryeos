@@ -7,7 +7,6 @@ import type { RyeOsEffectFailureVm } from "./RyeOsEffectFailureVm";
 import type { RyeOsNavigationVm } from "./RyeOsNavigationVm";
 import type { RyeOsNoticeVm } from "./RyeOsNoticeVm";
 import type { RyeOsPresentationVm } from "./RyeOsPresentationVm";
-import type { RyeOsSceneModel } from "./RyeOsSceneModel";
 import type { RyeOsSessionVm } from "./RyeOsSessionVm";
 import type { RyeOsTransportVm } from "./RyeOsTransportVm";
 import type { RyeOsViewSetVm } from "./RyeOsViewSetVm";
@@ -25,7 +24,6 @@ export interface RyeOsViewModel {
   presentation: RyeOsPresentationVm;
   view_set: RyeOsViewSetVm | null;
   docks: RyeOsDockPlaneVm;
-  backdrop: RyeOsSceneModel | null;
   dialogs: RyeOsDialogVm[];
   notices: RyeOsNoticeVm[];
   transport: RyeOsTransportVm;

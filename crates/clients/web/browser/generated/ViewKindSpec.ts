@@ -2,8 +2,8 @@
 /* Rust-owned browser wire contract. */
 /**
  * A center tile as authored in a surface: a `view:` item ref. Every
- * tile is views-as-content — graph/atlas are ordinary `view:` items
- * (their `widget:` does the rest), so there are no named structural
- * kinds. Serializes as the bare ref string the surface YAML carries.
+ * tile is views-as-content: an ordinary `view:` item (its `widget:` does
+ * the rest), so there are no named structural kinds. Serializes as the bare ref
+ * string the surface YAML carries.
  */
 export type ViewKindSpec = string;

@@ -1,6 +1,5 @@
 <script lang="ts">
   import type { RyeOsViewSupplementVm } from "../generated";
-  import SceneView from "../views/SceneView.svelte";
 
   interface Props {
     model: RyeOsViewSupplementVm;
@@ -10,11 +9,7 @@
   let { model, phase }: Props = $props();
 </script>
 
-{#if phase === "content" && model.scene}
-  <section class="view-supplement-scene" aria-label="View topology">
-    <SceneView scene={model.scene} />
-  </section>
-{:else if phase === "footer"}
+{#if phase === "footer"}
   {#if model.excerpt.length}
     <section class="view-supplement-excerpt" aria-label={model.excerpt_title || "Excerpt"}>
       {#if model.excerpt_title}<header>{model.excerpt_title}</header>{/if}

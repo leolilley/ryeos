@@ -1,23 +1,14 @@
-//! `ui.graph.topology` — return the resolved `.ai/` topology for the web graph.
-//!
-//! This is intentionally a structured service result framed by the existing
-//! `json` response mode. YAML remains the artifact/export format for saved
-//! topology snapshots; the browser transport receives the same topology model
-//! as native JavaScript data.
-//!
-//! This handler builds a static `.ai` item/dependency topology for UI
-//! exploration. It is not the deferred portable execution projection over
-//! runtime events, node receipts, CAS objects, and refs.
+//! Static `.ai` item/dependency topology over signed items, shared by the
+//! item, project, run and definition field handlers. It is not the deferred
+//! portable execution projection over runtime events, node receipts, CAS
+//! objects, and refs.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
 
 use anyhow::Result;
 use serde::Serialize;
 use serde_json::Value;
 
-use ryeos_api::registry::ServiceDescriptor;
-use ryeos_app::handler_context::HandlerContext;
 use ryeos_app::state::AppState;
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::ItemSpace;
@@ -25,7 +16,6 @@ use ryeos_engine::contracts::{SignatureEnvelope, TrustClass};
 use ryeos_engine::item_resolution::parse_signature_header;
 use ryeos_engine::kind_registry::{DelegationVia, KindSchema};
 use ryeos_engine::trust::verify_item_signature;
-use ryeos_executor::executor::ServiceAvailability;
 
 #[derive(Debug, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -297,46 +287,6 @@ impl TopologyBuilder {
             },
         }
     }
-}
-
-pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
-    let caller = crate::seat_auth::require_seat_caller(&ctx, &state)?;
-
-    let project_access = caller.project_access()?;
-    let project_resolution_root = project_access
-        .as_ref()
-        .map(|access| access.path().to_string_lossy().into_owned())
-        .or_else(|| {
-            params
-                .get("project_path")
-                .and_then(|v| v.as_str())
-                .map(String::from)
-        });
-    let project_identity = caller
-        .project_query_identity()?
-        .map(|path| path.to_string_lossy().into_owned())
-        .or_else(|| {
-            params
-                .get("project_path")
-                .and_then(|v| v.as_str())
-                .map(String::from)
-        });
-    let root_surface = match &caller {
-        crate::seat_auth::SeatCaller::Attachment(attachment) => Some(attachment.root_ref.clone()),
-        crate::seat_auth::SeatCaller::Operator { .. } => params
-            .get("surface_ref")
-            .and_then(|v| v.as_str())
-            .map(String::from),
-    };
-
-    let graph = build_topology(
-        &state,
-        project_resolution_root,
-        project_access.as_ref(),
-        project_identity,
-        root_surface,
-    );
-    serde_json::to_value(graph).map_err(Into::into)
 }
 
 pub(crate) fn build_topology(
@@ -930,14 +880,6 @@ pub(crate) fn classify_trust(
     })
 }
 
-pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
-    service_ref: "service:ui/graph/topology",
-    endpoint: "ui.graph.topology",
-    availability: ServiceAvailability::DaemonOnly,
-    required_caps: &[],
-    handler: |params, ctx, state| Box::pin(async move { handle(params, ctx, state).await }),
-};
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -950,102 +892,6 @@ mod tests {
         assert_eq!(
             namespace_for_bare_id("ryeos/ryeos-ui/graph"),
             Some("ryeos/ryeos-ui".into())
-        );
-    }
-
-    #[test]
-    fn topology_response_wire_shape_is_golden() {
-        let mut builder = TopologyBuilder::new();
-        builder.add_node(TopologyNode {
-            id: "graph:test/build".to_string(),
-            kind: "graph".to_string(),
-            label: "build".to_string(),
-            ref_: "graph:test/build".to_string(),
-            space: Some("project".to_string()),
-            path: Some("/fixed/project/.ai/graphs/test/build.yaml".to_string()),
-            namespace: Some("test".to_string()),
-            virtual_: false,
-            missing: false,
-            status: Some(NodeStatus {
-                resolved: true,
-                composed: None,
-                executable: true,
-            }),
-            trust: Some(TrustSummary {
-                class: "trusted".to_string(),
-                signer: Some("f".repeat(64)),
-            }),
-        });
-        builder.add_ref_node("tool:test/run", "tool");
-        builder.add_edge(
-            "graph:test/build",
-            "tool:test/run",
-            "calls_tool",
-            "operation",
-            Some(EdgeSource {
-                field: Some("config.nodes.run.action".to_string()),
-                path: Some("/fixed/project/.ai/graphs/test/build.yaml".to_string()),
-            }),
-            "structural",
-        );
-        let graph = builder.finish(TopologyMetadata {
-            generated_at: "2026-08-04T00:00:00.000Z".to_string(),
-            project_root: Some("/fixed/project".to_string()),
-            root_surface: Some("surface:test/atlas".to_string()),
-            spaces: vec!["project".to_string(), "system".to_string()],
-        });
-        assert_eq!(
-            serde_json::to_value(graph).unwrap(),
-            serde_json::json!({
-                "version": "1.0.0",
-                "kind": "topology_graph",
-                "metadata": {
-                    "generated_at": "2026-08-04T00:00:00.000Z",
-                    "project_root": "/fixed/project",
-                    "root_surface": "surface:test/atlas",
-                    "spaces": ["project", "system"]
-                },
-                "nodes": [
-                    {
-                        "id": "graph:test/build",
-                        "kind": "graph",
-                        "label": "build",
-                        "ref": "graph:test/build",
-                        "space": "project",
-                        "path": "/fixed/project/.ai/graphs/test/build.yaml",
-                        "namespace": "test",
-                        "virtual": false,
-                        "missing": false,
-                        "status": {"resolved": true, "executable": true},
-                        "trust": {"class": "trusted", "signer": "f".repeat(64)}
-                    },
-                    {
-                        "id": "tool:test/run",
-                        "kind": "tool",
-                        "label": "run",
-                        "ref": "tool:test/run",
-                        "namespace": "test",
-                        "virtual": true,
-                        "missing": true
-                    }
-                ],
-                "edges": [{
-                    "id": "graph:test/build--calls_tool--tool:test/run",
-                    "from": "graph:test/build",
-                    "to": "tool:test/run",
-                    "type": "calls_tool",
-                    "label": "operation",
-                    "source": {
-                        "field": "config.nodes.run.action",
-                        "path": "/fixed/project/.ai/graphs/test/build.yaml"
-                    },
-                    "confidence": "structural"
-                }],
-                "views": {
-                    "defaults": {"group_by": "kind", "color_by": "kind", "label": "label"},
-                    "filters": {"kinds": ["graph", "tool"], "edge_types": ["calls_tool"]}
-                }
-            })
         );
     }
 

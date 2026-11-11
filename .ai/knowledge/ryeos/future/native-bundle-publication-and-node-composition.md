@@ -1,15 +1,22 @@
-<!-- ryeos:signed:2026-09-22T02:52:14Z:4afff42150c42e6febc259d466b5d9a760ade78b3175434d9dde588c54b9390e:wgAQPb471T44tDk4d5jGNdctTIH/QZP0/82MVsw518kaN/mDGDLQBmexJQCy1+sRSrxsSAfr1jY03SFxA9oNBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-06T01:00:58Z:bea591d8d6620fe56348225f6c2a89ada5002dd0b38c0af7c8ad27c6a0c61613:0lUxhd81rjMqnsHldlqZleElmTkKb4LLJ/Iucm1AArsVRP0InqIx0fZQSwZwdOHf6bLSF8v8ZZKGNM1FfzfbBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/future
 name: native-bundle-publication-and-node-composition
 title: Native Bundle Publication and Node Composition
 description: Scheduled direction for independently publishing exact RyeOS bundle generations and composing nodes without rebuilding the substrate image
 entry_type: design
-version: "0.5.0"
+version: "0.5.1"
 status: implementation_under_qualification
 ```
 
 # Native bundle publication and node composition
+
+This owns independent publication and exact consumer composition within the
+[platform direction](platform-direction-and-delivery.md). The dated source and
+qualification status below must be refreshed from current implementation evidence
+before use. Early authoring can select new revisions through existing supported
+paths; it does not require all release-system stages. Production publication and
+activation still require every applicable gate in this document.
 
 ## Status
 

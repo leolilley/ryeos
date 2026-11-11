@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-10-20T01:03:47Z:b1e194dca945bb15e90b127d7532b15a8fbee647478075ba85650933ec6322aa:1+aiIqZ7OPmLqE8HJjevHpsS0fxJlgECQC14W7pe9D//LQFYaoNOe2+i/zDFlgPZ2X/Io2ZA/nXFKai6LqZUBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-08T06:40:08Z:64e720284d458ba4321ad274c30aeb9e4655faf77bab21e76fbb47669b71b918:3Rf50/ovcVV3mW1d6EWg0U6mYrpKGr2He4Kab4ZGXqI2XNkMq86LNA5j+9NEl5wf9hlMm9z/2G7b+KYLPapUDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "ui-design-system"
@@ -24,7 +24,7 @@ implementation evidence. Reproduce the treatment through real shared UI
 contracts, not hardcoded specimen DOM.
 
 This revision supersedes the previous neutral-charcoal replacement palette,
-blanket removal of ambient layers, page/sidebar-first composition and advice
+page/sidebar-first composition and advice
 to limit this work to the existing master/stack layout. Those directions did
 not represent the user's intention. Do not use the rejected earlier screenshots
 as a design target.
@@ -36,7 +36,7 @@ and nothing here depends on one being available.
 
 RyeOS is a composable working environment, not a website dashboard with a fixed
 sidebar and a single page. Preserve the launcher, view sets, views, tiling,
-optional edge slots and authored background/scene character. Improve their
+optional edge slots. Improve their
 proportions and relationships rather than removing them.
 
 One-line direction: **A precise Gruvbox working environment with editorial
@@ -77,12 +77,6 @@ non-colour cues. A quiet divider need not have control contrast, but a control
 cannot rely on that divider alone. Measure actual foreground/background pairs:
 normal text 4.5:1, essential indicators 3:1. Do not assume small orange text
 or white-on-orange passes.
-
-Ambient/background content remains an authored surface decision. Retain the
-geometric identity where declared; tune contrast and opacity so content stays
-legible. Do not globally erase scenes, force every view transparent, or add
-background exceptions keyed to view refs. Main reading areas may be opaque
-while the surrounding view set retains its background.
 
 ## Typography and geometry
 
@@ -276,7 +270,7 @@ reasons; focus returns predictably. Content headers prefer authored human
 titles, with exact refs still inspectable. Errors, stale observations and
 unknown delivery must remain distinguishable from success or zero results.
 
-Keep tile contents diverse: prose, tables, files, diffs, timelines and scenes
+Keep tile contents diverse: prose, tables, files, diffs, timelines and fields
 need appropriate internal composition. The consistent layer is typography,
 palette, linework, chrome and interaction—not forcing every view into one card.
 
