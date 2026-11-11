@@ -7,6 +7,7 @@
 //! the runtime's inbox and wake Rune, whose `poll` folds them in order.
 
 mod boot;
+mod field;
 mod shell;
 mod theme;
 mod views;
@@ -48,6 +49,41 @@ pub struct Local {
     pub(crate) split_extent: HashMap<String, f32>,
     /// The ratio a divider drag shows before it commits through the core.
     pub(crate) split_preview: Option<(String, f32)>,
+    /// Each mounted field's search text, by `field::query_key`.
+    field_queries: HashMap<String, TextEdit>,
+    /// The `field-evidence:` keys of fields whose Evidence panel is open.
+    pub(crate) evidence_open: std::collections::BTreeSet<String>,
+}
+
+impl Local {
+    /// A field's search buffer, or the core's query before one exists.
+    pub(crate) fn field_query(&self, key: &str, query: &str) -> TextEdit {
+        self.field_queries
+            .get(key)
+            .cloned()
+            .unwrap_or_else(|| TextEdit::new(query))
+    }
+
+    /// Match every mounted field's search buffer to the core's query.
+    fn sync_field_queries(&mut self, vm: &RyeOsViewModel) {
+        let mut mounted = Vec::new();
+        collect_fields(vm, &mut mounted);
+        let keys: Vec<String> = mounted
+            .iter()
+            .map(|(key, _)| field::query_key(key))
+            .collect();
+        self.field_queries.retain(|key, _| keys.contains(key));
+        for (key, (_, query)) in keys.into_iter().zip(mounted) {
+            let edit = self
+                .field_queries
+                .entry(key)
+                .or_insert_with(|| TextEdit::new(""));
+            if edit.text != query {
+                edit.replace_text(query.to_owned());
+                edit.set_caret(query.len());
+            }
+        }
+    }
 }
 
 /// What an unfinished rename will rename.
@@ -130,6 +166,52 @@ fn collect_tile_inputs<'a>(node: &'a RyeOsLayoutNodeVm, out: &mut Vec<&'a RyeOsI
     }
 }
 
+fn collect_fields<'a>(
+    vm: &'a RyeOsViewModel,
+    out: &mut Vec<(&'a ryeos_client_base::ids::RyeOsViewInstanceKey, &'a str)>,
+) {
+    use ryeos_client_base::ui::view_model::RyeOsViewVm;
+    let mut push = |key, view: &'a RyeOsViewVm| {
+        if let RyeOsViewVm::Field { field } = view {
+            out.push((key, field.search.query.as_str()));
+        }
+    };
+    for dock in [
+        &vm.docks.top,
+        &vm.docks.bottom,
+        &vm.docks.left,
+        &vm.docks.right,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        push(&dock.instance_key, &dock.view);
+    }
+    for dialog in &vm.dialogs {
+        push(&dialog.instance_key, &dialog.view);
+    }
+    fn walk<'a>(
+        node: &'a RyeOsLayoutNodeVm,
+        push: &mut dyn FnMut(
+            &'a ryeos_client_base::ids::RyeOsViewInstanceKey,
+            &'a ryeos_client_base::ui::view_model::RyeOsViewVm,
+        ),
+    ) {
+        match node {
+            RyeOsLayoutNodeVm::Split { first, second, .. } => {
+                walk(first, push);
+                walk(second, push);
+            }
+            RyeOsLayoutNodeVm::Tile {
+                instance_key, view, ..
+            } => push(instance_key, view),
+        }
+    }
+    if let Some(root) = vm.view_set.as_ref().and_then(|set| set.root.as_ref()) {
+        walk(root, &mut push);
+    }
+}
+
 enum Phase {
     /// Establishing the session and claiming the seat.
     Starting,
@@ -159,6 +241,7 @@ impl App {
         if let Phase::Running(running) = &self.phase {
             let vm = running.core().envelope(Vec::new()).view_model;
             self.local.edits.sync(&vm);
+            self.local.sync_field_queries(&vm);
         }
     }
 
@@ -240,6 +323,27 @@ impl App {
             RenameTarget::Surface(_) => return,
         };
         self.ui(RyeOsUiEvent::Activate { intent });
+    }
+
+    pub(crate) fn field_query_mut(&mut self, key: &str) -> &mut TextEdit {
+        self.local
+            .field_queries
+            .entry(key.to_owned())
+            .or_insert_with(|| TextEdit::new(""))
+    }
+
+    pub(crate) fn field_query_text(&self, key: &str) -> String {
+        self.local
+            .field_queries
+            .get(key)
+            .map(|edit| edit.text.clone())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn toggle_evidence(&mut self, key: String) {
+        if !self.local.evidence_open.remove(&key) {
+            self.local.evidence_open.insert(key);
+        }
     }
 
     pub(crate) fn set_split_extent(&mut self, key: String, extent: f32) {

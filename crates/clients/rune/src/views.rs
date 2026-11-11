@@ -117,13 +117,11 @@ pub fn frame(spec: FrameSpec<'_>, local: &crate::Local) -> El {
     if let Some(input) = filter {
         frame = frame.child(crate::shell::composer(input, local));
     }
-    frame = frame.child(
-        col()
-            .w_full()
-            .grow(1.0)
-            .min_h(0.0)
-            .child(body(spec.view, spec.instance)),
-    );
+    frame = frame.child(col().w_full().grow(1.0).min_h(0.0).child(body(
+        spec.view,
+        spec.instance,
+        local,
+    )));
     if let Some(supplement) = spec.supplement {
         frame = supplement_footer(frame, supplement);
     }
@@ -457,7 +455,7 @@ pub fn actions_menu(key: &str, intents: &[RyeOsTileIntentVm]) -> El {
 }
 
 /// The body of one mounted view instance.
-pub fn body(view: &RyeOsViewVm, instance: &RyeOsViewInstanceKey) -> El {
+pub fn body(view: &RyeOsViewVm, instance: &RyeOsViewInstanceKey, local: &crate::Local) -> El {
     let p = Palette::get();
     match view {
         RyeOsViewVm::Placeholder { title, message } => empty_state(title, message),
@@ -532,7 +530,7 @@ pub fn body(view: &RyeOsViewVm, instance: &RyeOsViewInstanceKey) -> El {
                 details: entry_details,
             },
         ),
-        RyeOsViewVm::Field { .. } => not_ported("field graph"),
+        RyeOsViewVm::Field { field } => crate::field::view(field, instance, local),
     }
     .fill(p.plane)
 }
@@ -1220,7 +1218,34 @@ fn entry_line(primary: &str, meta: Option<&str>, ink: rune::Color, weight: f32) 
 }
 
 /// Field/value pairs under an expanded record.
-fn details(details: &[RyeOsRowDetailVm]) -> El {
+pub(crate) fn details(details: &[RyeOsRowDetailVm]) -> El {
+    let p = Palette::get();
+    let pairs: Vec<(&str, String, rune::Color)> = details
+        .iter()
+        .map(|detail| {
+            let field = if detail.field.is_empty() {
+                "detail"
+            } else {
+                detail.field.as_str()
+            };
+            let ink = detail.tone.map_or(p.muted, |tone| p.tone(tone, p.muted));
+            (field, detail.value.clone(), ink)
+        })
+        .collect();
+    pair_block(&pairs)
+}
+
+/// Untoned field/value pairs in the record-detail style.
+pub(crate) fn detail_pairs(pairs: &[(&str, String)]) -> El {
+    let p = Palette::get();
+    let pairs: Vec<(&str, String, rune::Color)> = pairs
+        .iter()
+        .map(|(field, value)| (*field, value.clone(), p.muted))
+        .collect();
+    pair_block(&pairs)
+}
+
+fn pair_block(pairs: &[(&str, String, rune::Color)]) -> El {
     let p = Palette::get();
     let mut block = col()
         .w_full()
@@ -1229,13 +1254,7 @@ fn details(details: &[RyeOsRowDetailVm]) -> El {
         .pl(34.0)
         .pr(12.0)
         .fill(p.plane_raised.alpha(0.45));
-    for detail in details {
-        let field = if detail.field.is_empty() {
-            "detail"
-        } else {
-            &detail.field
-        };
-        let value_ink = detail.tone.map_or(p.muted, |tone| p.tone(tone, p.muted));
+    for (field, value, ink) in pairs {
         block = block.child(
             row()
                 .w_full()
@@ -1243,16 +1262,16 @@ fn details(details: &[RyeOsRowDetailVm]) -> El {
                 .gap(12.0)
                 .py(2.0)
                 .child(
-                    text(field.to_owned())
+                    text((*field).to_owned())
                         .font(theme::data(9.0))
                         .color(p.faint)
                         .wrap_anywhere()
                         .w(110.0),
                 )
                 .child(
-                    text(detail.value.clone())
+                    text(value.clone())
                         .font(theme::data(9.0))
-                        .color(value_ink)
+                        .color(*ink)
                         .wrap_anywhere()
                         .grow(1.0)
                         .min_w(0.0),
@@ -1295,22 +1314,5 @@ fn empty_state(title: &str, message: &str) -> El {
                 .font(theme::ui(13.0))
                 .color(p.muted)
                 .max_w(360.0),
-        )
-}
-
-/// A view kind this renderer does not draw yet. Visible on purpose, so a
-/// missing piece is never mistaken for an empty source.
-fn not_ported(kind: &str) -> El {
-    let p = Palette::get();
-    col()
-        .w_full()
-        .grow(1.0)
-        .min_h(80.0)
-        .center()
-        .padding(16.0)
-        .child(
-            text(format!("{kind} view: not drawn by the Rune renderer yet"))
-                .font(theme::data(10.0))
-                .color(p.faint),
         )
 }

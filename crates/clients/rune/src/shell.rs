@@ -996,13 +996,11 @@ fn dialog_layer(dialog: &RyeOsDialogVm, local: &Local) -> El {
     if let Some(input) = filter {
         content = content.child(composer(input, local));
     }
-    content = content.child(
-        col()
-            .w_full()
-            .shrink()
-            .min_h(0.0)
-            .child(views::body(&dialog.view, &dialog.instance_key)),
-    );
+    content = content.child(col().w_full().shrink().min_h(0.0).child(views::body(
+        &dialog.view,
+        &dialog.instance_key,
+        local,
+    )));
     if let Some(input) = dialog.input.as_ref().filter(|input| !input.live_filter) {
         content = content.child(composer(input, local));
     }
