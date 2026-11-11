@@ -27,6 +27,11 @@ pub const SUPERVISOR_LAUNCH_INTENT_FD: u32 = 58;
 /// Distinct original pinned relay mailbox, never an admitted candidate mount.
 pub const SUPERVISOR_RELAY_MAILBOX_FD: u32 = 59;
 pub const SUPERVISOR_STAGE_MOUNT_DESTINATION: &str = "/ryeos/guest-stage";
+/// The occurrence's candidate-private directory, writable, in the held
+/// supervisor's view. The supervisor reopens its private parent here so every
+/// candidate root, fixture and scratch it hands the launcher has a locator
+/// that resolves inside its own root.
+pub const SUPERVISOR_PRIVATE_PARENT_MOUNT_DESTINATION: &str = "/ryeos/candidate-private";
 /// Only non-source controls may cross the held sealed-source launch. Source
 /// content is opened from the sole read-only stage mount after target exec.
 pub const SUPERVISOR_MOUNTED_CONTROL_DESCRIPTORS: [u32; 5] = [

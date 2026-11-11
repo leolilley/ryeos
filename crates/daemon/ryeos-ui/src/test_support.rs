@@ -669,6 +669,7 @@ fn build_app_state(
         external_candidate_imports: Arc::new(Default::default()),
         node_policy: Arc::new(
             ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![
+                ryeos_node_runtime::node_policy::default_launch_trust_record(),
                 Arc::new(
                     ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy(),
                 ),

@@ -29,6 +29,10 @@ pub trait ExternalCandidateLauncherClient {
     fn release(&mut self, frame: &AuthenticatedExecutionFrame) -> Result<()>;
     fn poll_applied_launch(&mut self) -> Result<Option<lillux::LinuxSandboxAppliedLaunchReceipt>>;
     fn apply_protocol_chunk(&mut self, frame: &AuthenticatedExecutionFrame) -> Result<usize>;
+    /// Close the candidate's protocol stdin after every earlier protocol frame
+    /// is applied. The candidate stays running; its stdout EOF is observed
+    /// separately through `poll_execution_output`.
+    fn close_protocol_input(&mut self, frame: &AuthenticatedExecutionFrame) -> Result<()>;
     fn cancel(&mut self, frame: &AuthenticatedExecutionFrame) -> Result<()>;
     fn complete_qualification(
         &mut self,
@@ -163,10 +167,10 @@ impl<L: ExternalCandidateLauncherClient> SerializedExternalCandidateSupervisor<L
     /// executable application for it. The shared journal reconciles the exact
     /// supervisor frame state named by the signed payload.
     pub fn record_owner_acknowledgement(&self, wire: &[u8]) -> Result<bool> {
-        let verified = ryeos_state::external_execution::SignedExecutionFrame::decode_and_verify(
+        let verified = ryeos_state::external_execution::SignedExecutionFrame::decode_and_verify_in_guest_window(
             wire,
             self.journal.binding(),
-            lillux::time::timestamp_millis(),
+            self.journal.window(),
         )?;
         ensure!(
             verified.frame().direction == ChannelDirection::OwnerToSupervisor
@@ -332,6 +336,38 @@ impl<L: ExternalCandidateLauncherClient> SerializedExternalCandidateSupervisor<L
         }
     }
 
+    /// Close the candidate's protocol input exactly once. A partially applied
+    /// protocol frame keeps its claim and refuses the close until it finishes,
+    /// so the close always lands after every applied byte.
+    pub fn dispatch_protocol_input_closed(
+        &mut self,
+        wire: &[u8],
+    ) -> Result<SupervisorApplicationOutcome> {
+        ensure!(
+            self.pending_protocol.is_none(),
+            "protocol input closure cannot overtake pending protocol input"
+        );
+        let digest = lillux::sha256_hex(wire);
+        match self.journal.record_and_claim(wire)? {
+            GuestApplicationClaim::New(token) => {
+                let (_, performed) = self
+                    .journal
+                    .apply_once(token, |frame| self.launcher.close_protocol_input(frame))?;
+                let ack = self.journal.finish(performed)?;
+                self.launcher.acknowledge_finish(ack.frame_digest())?;
+                Ok(SupervisorApplicationOutcome::Applied)
+            }
+            GuestApplicationClaim::AlreadyApplied => {
+                self.launcher.acknowledge_finish(&digest)?;
+                Ok(SupervisorApplicationOutcome::FinishReconciled)
+            }
+            GuestApplicationClaim::AlreadyClaimed => {
+                Ok(SupervisorApplicationOutcome::ClaimedUnknown)
+            }
+            GuestApplicationClaim::Revoked => Ok(SupervisorApplicationOutcome::Revoked),
+        }
+    }
+
     /// Apply at most one native pipe write. The same opaque claim token is
     /// retained between partial writes; a different wire cannot replace it.
     pub fn dispatch_protocol_chunk(&mut self, wire: &[u8]) -> Result<SupervisorApplicationOutcome> {
@@ -424,10 +460,10 @@ impl<L: ExternalCandidateLauncherClient> SerializedExternalCandidateSupervisor<L
             self.pending_protocol.is_none(),
             "quiescence cannot overtake pending protocol input"
         );
-        let quiesce = ryeos_state::external_execution::SignedExecutionFrame::decode_and_verify(
+        let quiesce = ryeos_state::external_execution::SignedExecutionFrame::decode_and_verify_in_guest_window(
             wire,
             self.journal.binding(),
-            lillux::time::timestamp_millis(),
+            self.journal.window(),
         )?;
         let capture = match self.journal.record_and_claim(wire)? {
             GuestApplicationClaim::New(token) => {
@@ -552,10 +588,10 @@ impl<L: ExternalCandidateLauncherClient> SerializedExternalCandidateSupervisor<L
                 && program.digest()? == self.journal.binding().candidate_program_digest,
             "qualification completion cannot overtake a live protocol application"
         );
-        let completion = ryeos_state::external_execution::SignedExecutionFrame::decode_and_verify(
+        let completion = ryeos_state::external_execution::SignedExecutionFrame::decode_and_verify_in_guest_window(
             wire,
             self.journal.binding(),
-            lillux::time::timestamp_millis(),
+            self.journal.window(),
         )?;
         let fresh = match self.journal.record_and_claim(wire)? {
             GuestApplicationClaim::New(token) => {
@@ -666,6 +702,10 @@ mod tests {
 
         fn apply_protocol_chunk(&mut self, _frame: &AuthenticatedExecutionFrame) -> Result<usize> {
             anyhow::bail!("test launcher does not admit protocol input")
+        }
+
+        fn close_protocol_input(&mut self, _frame: &AuthenticatedExecutionFrame) -> Result<()> {
+            anyhow::bail!("test launcher does not admit protocol input closure")
         }
 
         fn cancel(&mut self, _frame: &AuthenticatedExecutionFrame) -> Result<()> {
@@ -818,10 +858,10 @@ mod tests {
             &authority,
             &bootstrap_digest,
             binding.clone(),
+            ryeos_state::external_execution::guest_window::GuestChannelWindow::starting_now_for_single_clock_harness(&binding).unwrap(),
             state.host().factory(),
             state.host().destination(),
-            &ryeos_state::external_execution::native_journal::testing::census(state.host()),
-        )
+            &ryeos_state::external_execution::native_journal::testing::census(state.host()))
         .unwrap();
         let occurrence = LauncherOccurrenceEvidence::from_held_launcher(
             lillux::ExactProcessIdentity {
@@ -830,6 +870,7 @@ mod tests {
                 target_start_time_ticks: 300,
                 group_leader_pid: 200,
                 group_leader_start_time_ticks: 300,
+                group_basis: lillux::GroupBasis::ProcessGroup,
             },
             &"1".repeat(64),
             &"2".repeat(64),
@@ -1083,10 +1124,10 @@ mod tests {
             &authority,
             &"f".repeat(64),
             binding.clone(),
+            ryeos_state::external_execution::guest_window::GuestChannelWindow::starting_now_for_single_clock_harness(binding).unwrap(),
             state.host().factory(),
             state.host().destination(),
-            &ryeos_state::external_execution::native_journal::testing::census(state.host()),
-        )
+            &ryeos_state::external_execution::native_journal::testing::census(state.host()))
         .unwrap();
         let occurrence = LauncherOccurrenceEvidence::from_held_launcher(
             lillux::ExactProcessIdentity {
@@ -1095,6 +1136,7 @@ mod tests {
                 target_start_time_ticks: 300,
                 group_leader_pid: 200,
                 group_leader_start_time_ticks: 300,
+                group_basis: lillux::GroupBasis::ProcessGroup,
             },
             &"1".repeat(64),
             &"2".repeat(64),

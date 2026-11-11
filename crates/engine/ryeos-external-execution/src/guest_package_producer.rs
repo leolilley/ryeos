@@ -108,27 +108,38 @@ pub fn prepare_private_guest_package(
     expected: &GuestStagingExpected<'_>,
     deadline: lillux::time::MonotonicDeadline,
 ) -> Result<PreparedGuestPackage> {
-    parent.require_owner_private_directory()?;
-    let owner = parent.try_clone()?;
-    let (name, root) = parent.create_unique_child("guest-package", 0o700)?;
+    parent
+        .require_owner_private_directory()
+        .context("guest package parent")?;
+    let owner = parent
+        .try_clone()
+        .context("retain the guest package parent")?;
+    let (name, root) = parent
+        .create_unique_child("guest-package", 0o700)
+        .context("create the private guest package directory")?;
     let result = (|| {
         root.require_owner_private_directory()?;
-        let output = root.open_regular_create(OsStr::new("payload"), true, true, 0o600)?;
+        let output = root
+            .open_regular_create(OsStr::new("payload"), true, true, 0o600)
+            .context("create the guest package payload")?;
         let (output, manifest) = write_guest_package(
             output, inputs, bootstrap, supervisor, launcher, expected, deadline,
         )?;
         lillux::set_open_regular_file_mode(&output, 0o400)?;
-        output.sync_all()?;
+        output
+            .sync_all()
+            .context("sync the guest package payload")?;
         drop(output);
-        root.sync_tree_bounded(lillux::DirectoryTraversalBudget::new(1, 1))?;
+        root.sync_tree_bounded(lillux::DirectoryTraversalBudget::new(1, 1))
+            .context("sync the guest package directory")?;
         let payload = root
             .open_pinned_regular(OsStr::new("payload"), false)?
             .context("private guest package disappeared")?;
         let observation = payload.observation()?;
         let bytes = observation.size();
         ensure!(
-            bytes == manifest.framed_bytes()? && bytes <= expected.maximum_framed_bytes,
-            "private guest package length changed"
+            bytes <= manifest.framed_bytes_bound()? && bytes <= expected.maximum_framed_bytes,
+            "private guest package length exceeds its bound"
         );
         let sha256 = payload.digest_stable_exact(&observation)?;
         require_time(deadline)?;
@@ -234,7 +245,8 @@ pub(crate) fn write_guest_package<W: Write>(
 
     let base = inputs
         .base_snapshot()
-        .try_clone_pinned_directory(PathBuf::from("<guest-package-base>"))?;
+        .try_clone_pinned_directory(PathBuf::from("<guest-package-base>"))
+        .context("retain the guest base snapshot descriptor")?;
     inventory_tree(
         &base,
         "base",
@@ -244,12 +256,14 @@ pub(crate) fn write_guest_package<W: Write>(
         &mut total_regular_bytes,
         expected.maximum_regular_bytes,
         deadline,
-    )?;
+    )
+    .context("inventory the guest base snapshot")?;
     require_time(deadline)?;
     let measurement = ryeos_project_capture::inspect_project_snapshot_transfer(
         &base,
         &expected.inputs.base_snapshot.snapshot_hash,
-    )?;
+    )
+    .context("measure the guest base snapshot")?;
     require_time(deadline)?;
     let retained_base = &expected.inputs.base_snapshot;
     ensure!(
@@ -273,7 +287,8 @@ pub(crate) fn write_guest_package<W: Write>(
             &mut total_regular_bytes,
             expected.maximum_regular_bytes,
             deadline,
-        )?;
+        )
+        .with_context(|| format!("inventory the guest {name}"))?;
         roots.insert(name.into(), RootSource::File(authority));
     }
 
@@ -303,6 +318,7 @@ pub(crate) fn write_guest_package<W: Write>(
         let authority = inputs
             .input(index)
             .context("retained guest input descriptor disappeared")?;
+        let slot = || format!("guest {name} ({}, {:?})", input.authority_id, input.kind);
         match input.kind {
             GuestMountKind::RegularFile => {
                 inventory_root_file(
@@ -312,13 +328,16 @@ pub(crate) fn write_guest_package<W: Write>(
                     &mut total_regular_bytes,
                     expected.maximum_regular_bytes,
                     deadline,
-                )?;
+                )
+                .with_context(|| format!("inventory {}", slot()))?;
                 roots.insert(name, RootSource::File(authority));
             }
             GuestMountKind::Directory => {
-                let root = authority.try_clone_pinned_directory(PathBuf::from(format!(
-                    "<guest-package-input-{index}>"
-                )))?;
+                let root = authority
+                    .try_clone_pinned_directory(PathBuf::from(format!(
+                        "<guest-package-input-{index}>"
+                    )))
+                    .with_context(|| format!("retain {} descriptor", slot()))?;
                 inventory_tree(
                     &root,
                     &name,
@@ -331,7 +350,8 @@ pub(crate) fn write_guest_package<W: Write>(
                     &mut total_regular_bytes,
                     expected.maximum_regular_bytes,
                     deadline,
-                )?;
+                )
+                .with_context(|| format!("inventory {}", slot()))?;
                 roots.insert(name, RootSource::Directory(root));
             }
         }
@@ -349,7 +369,8 @@ pub(crate) fn write_guest_package<W: Write>(
             &mut total_regular_bytes,
             expected.maximum_regular_bytes,
             deadline,
-        )?;
+        )
+        .with_context(|| format!("inventory the guest {name}"))?;
         roots.insert(name, RootSource::File(authority));
     }
 
@@ -365,7 +386,7 @@ pub(crate) fn write_guest_package<W: Write>(
         entries,
     };
     ensure!(
-        manifest.framed_bytes()? <= expected.maximum_framed_bytes,
+        manifest.framed_bytes_bound()? <= expected.maximum_framed_bytes,
         "guest package exceeds admitted framed byte bound"
     );
     let mut stream = GuestStagingStreamWriter::new(output, manifest.clone(), expected)?;
@@ -394,28 +415,34 @@ pub(crate) fn write_guest_package<W: Write>(
                     relative.is_none(),
                     "guest package descends through a file root"
                 );
-                let mut reader = authority.stable_regular_reader_exact(
-                    *bytes,
-                    sha256,
-                    expected.maximum_regular_bytes,
-                )?;
-                stream.copy_next_file(&mut DeadlineReader {
-                    inner: &mut reader,
-                    deadline,
-                })?;
+                let label = path.clone();
+                let mut reader = authority
+                    .stable_regular_reader_exact(*bytes, sha256, expected.maximum_regular_bytes)
+                    .with_context(|| format!("read guest package file {label}"))?;
+                stream
+                    .copy_next_file(&mut DeadlineReader {
+                        inner: &mut reader,
+                        deadline,
+                    })
+                    .with_context(|| format!("copy guest package file {label}"))?;
                 reader.finish()?;
             }
             RootSource::Directory(root) => {
+                let label = path.clone();
                 let relative = relative.context("guest package directory has no file path")?;
                 let source = root
-                    .open_pinned_regular_descendant(Path::new(relative), false)?
+                    .open_pinned_regular_descendant(Path::new(relative), false)
+                    .with_context(|| format!("open guest package file {label}"))?
                     .context("guest package source file disappeared")?;
-                let mut reader =
-                    source.stable_reader_exact(*bytes, sha256, expected.maximum_regular_bytes)?;
-                stream.copy_next_file(&mut DeadlineReader {
-                    inner: &mut reader,
-                    deadline,
-                })?;
+                let mut reader = source
+                    .stable_reader_exact(*bytes, sha256, expected.maximum_regular_bytes)
+                    .with_context(|| format!("read guest package file {label}"))?;
+                stream
+                    .copy_next_file(&mut DeadlineReader {
+                        inner: &mut reader,
+                        deadline,
+                    })
+                    .with_context(|| format!("copy guest package file {label}"))?;
                 reader.finish()?;
             }
         }

@@ -58,6 +58,33 @@ pub(crate) struct GuestRuntimeUploadBinding {
 }
 
 impl GuestRuntimeUploadBinding {
+    /// Refuse the prepared package when the guest owner the snapshot was
+    /// produced from cannot stage it. Offline: reads the owner's profile from
+    /// the content store and contacts nothing.
+    pub(crate) fn require_owner_stages_package(
+        &self,
+        contract: &ExternalPlacementBackendContract,
+        framed_bytes: u64,
+        regular_bytes: u64,
+        entries: u64,
+    ) -> Result<()> {
+        let read = self.state.acquire_cas_read()?;
+        let profile =
+            ryeos_external_execution::guest_import_authorization::GuestOwnerRuntimeProfile::from_cas(
+                read.cas(),
+                &contract.guest_runtime_manifest_hash,
+            )?
+            .context("the guest owner runtime is not held by the content store")?;
+        profile
+            .require_stages_package(framed_bytes, regular_bytes, entries)
+            .with_context(|| {
+                format!(
+                    "the snapshot's guest owner cannot stage this package (framed {framed_bytes} \
+                     bytes, regular {regular_bytes} bytes, {entries} entries)"
+                )
+            })
+    }
+
     pub(crate) fn new(source: Arc<dyn GuestRuntimeUploadSource>, state: &AppState) -> Self {
         Self {
             source,

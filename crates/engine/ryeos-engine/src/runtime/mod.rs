@@ -311,7 +311,7 @@ fn render_runtime_argument(
             input.execution_project_file.validate().map_err(|error| {
                 EngineError::InvalidRuntimeConfig {
                     path: "config.args.execution_project_file".to_owned(),
-                    reason: error.to_string(),
+                    reason: format!("{error:#}"),
                 }
             })?;
             Ok(PlanArgument::AdmittedExecutionProjectFile {
@@ -952,7 +952,7 @@ pub(crate) fn compile_with_handlers_and_execution_root(
         crate::external_content::parse_realization_command_ref(&cmd_expanded).map_err(|error| {
             EngineError::InvalidRuntimeConfig {
                 path: "config.command".to_owned(),
-                reason: error.to_string(),
+                reason: format!("{error:#}"),
             }
         })?;
         (cmd_expanded, None)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ryeos:signed:2026-10-01T11:01:14Z:cf906532d6f4a32517d3bcddcfaeca18051debdfbdafa0153da9b3f4bfbeb8f3:H9LTEtDYXBesi+j1QYaZySsZ+ltMafG58O6SxXUopg2CZCil6T7J61H4Uyhx9ay7p7mTdDYYAU7PGs2g8jNUBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-11T02:56:41Z:25e2881909700c79fb283718863bfe81d65fbdfb7ce9b9fe6625b7ce6f4975dd:t5/gMcTNJyYWCD8H8pFyg9OLNdVhDjSv8wIE0a77R/dpc3ccRJkQioOItyzn1Lgptf5f2aFgM+T9OXXIFYzlCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Bundle-owned conformance checks for the OpenCode provider data."""
 
 from __future__ import annotations

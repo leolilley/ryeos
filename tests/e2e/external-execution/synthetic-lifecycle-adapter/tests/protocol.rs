@@ -1312,8 +1312,8 @@ fn signed_worker_admission_produces_real_external_candidate_capsule() {
 }
 
 #[test]
-fn signed_worker_admission_refuses_unsupported_connector_process_group() {
-    run_signed_worker_admission(SignedAdmissionCase::UnsupportedConnectorProcessGroup);
+fn signed_worker_admission_answers_contained_connector_descendants_from_reported_guarantees() {
+    run_signed_worker_admission(SignedAdmissionCase::ContainedConnectorDescendants);
 }
 
 #[test]
@@ -1329,7 +1329,7 @@ fn signed_runtime_selection_refuses_missing_claim_before_allocation() {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SignedAdmissionCase {
     Ready,
-    UnsupportedConnectorProcessGroup,
+    ContainedConnectorDescendants,
     MissingConnector,
     MissingRuntimeClaim,
 }
@@ -1415,7 +1415,7 @@ fn run_signed_worker_admission_on(
     state.started_at_iso = lillux::time::iso8601_now();
     let (external_bundle, external_trust, _) = install_signed_test_bundle(
         root.path(),
-        case == SignedAdmissionCase::UnsupportedConnectorProcessGroup,
+        case == SignedAdmissionCase::ContainedConnectorDescendants,
         true,
     );
     let external_artifacts = ryeos_app::external_artifacts::resolve_external_execution_artifacts(
@@ -1506,15 +1506,15 @@ fn run_signed_worker_admission_on(
         // and call back over its socket. The admission under test keeps the
         // engine isolation installed above.
         let admission_isolation = state.isolation.clone();
-        std::fs::create_dir_all(state.config.uds_path.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(state.config.runtime_uds_path().parent().unwrap()).unwrap();
         let _daemon_socket = {
             let _enter = runtime_host.enter();
-            tokio::net::UnixListener::bind(&state.config.uds_path)
+            tokio::net::UnixListener::bind(state.config.runtime_uds_path())
                 .unwrap_or_else(|error| panic!("bind daemon socket: {error}"))
         };
         state.isolation = ryeos_node_runtime::engine_init::load_test_daemon_execution_isolation(
             root.path(),
-            &state.config.uds_path,
+            &state.config.runtime_uds_path(),
             &daemon_isolation_roots(),
             &ryeos_engine::test_support::live_trust_store(),
             composed_isolation_policy(),
@@ -1630,12 +1630,34 @@ fn run_signed_worker_admission_on(
         qualification_use.clone(),
         &placement_qualification,
     );
-    if case == SignedAdmissionCase::UnsupportedConnectorProcessGroup {
-        let error = admission.unwrap_err();
-        assert!(
-            format!("{error:#}").contains("trusted controller process-group session"),
-            "unexpected refusal: {error:#}"
-        );
+    if case == SignedAdmissionCase::ContainedConnectorDescendants {
+        // The declared `contained` requirement is answered by what this
+        // enforced node reports, and a candidate launch binds no retained
+        // containment of its own (only the qualification Worker launch does):
+        // with a qualified mechanism it is refused for that missing binding,
+        // without one it is refused naming the missing guarantee.
+        let reported = state
+            .isolation
+            .inspection()
+            .process_scope_readiness
+            .descendant_containment
+            .enforced_guarantee();
+        match reported {
+            Some(_) => {
+                let error = admission.unwrap_err();
+                assert!(
+                    format!("{error:#}").contains("binds no retained containment"),
+                    "unexpected refusal: {error:#}"
+                );
+            }
+            None => {
+                let error = admission.unwrap_err();
+                assert!(
+                    format!("{error:#}").contains("no qualified descendant containment"),
+                    "unexpected refusal: {error:#}"
+                );
+            }
+        }
         return;
     }
     let capsule_hash = admission.unwrap();
@@ -3265,6 +3287,7 @@ fn composed_controller_attachment_on(
         connect_timeout_ms: 1_000,
         request_timeout_ms: 2_000,
         maximum_response_bytes: 64 * 1024,
+        max_clock_skew_ms: None,
         network_inputs: ExternalNetworkInputPolicy {
             resolver: ExternalNetworkInputSelection {
                 source: "/etc/resolv.conf".into(),
@@ -3866,8 +3889,8 @@ async fn run_production_tls_candidate(
         )
         .unwrap();
     std::fs::create_dir_all(state.config.runtime_root().trusted_keys_dir()).unwrap();
-    std::fs::create_dir_all(state.config.uds_path.parent().unwrap()).unwrap();
-    let uds_listener = tokio::net::UnixListener::bind(&state.config.uds_path).unwrap();
+    std::fs::create_dir_all(state.config.runtime_uds_path().parent().unwrap()).unwrap();
+    let uds_listener = tokio::net::UnixListener::bind(state.config.runtime_uds_path()).unwrap();
     let (candidate_authoring_bundle, authored_profile) = write_candidate_authoring_bundle(
         fixture_repository_source_root(),
         root.path(),
@@ -3935,7 +3958,7 @@ async fn run_production_tls_candidate(
     let trust = ryeos_engine::test_support::live_trust_store();
     state.isolation = ryeos_node_runtime::engine_init::load_test_daemon_execution_isolation(
         root.path(),
-        &state.config.uds_path,
+        &state.config.runtime_uds_path(),
         &daemon_isolation_roots(),
         &trust,
         isolation_policy,
@@ -4081,7 +4104,7 @@ async fn run_production_tls_candidate(
         );
         state.isolation = ryeos_node_runtime::engine_init::load_test_daemon_execution_isolation(
             root.path(),
-            &state.config.uds_path,
+            &state.config.runtime_uds_path(),
             &daemon_isolation_roots(),
             &trust,
             hosted_policy,
@@ -4334,6 +4357,7 @@ async fn run_production_tls_candidate(
         connect_timeout_ms: 1_000,
         request_timeout_ms: 2_000,
         maximum_response_bytes: 64 * 1024,
+        max_clock_skew_ms: None,
         network_inputs: ExternalNetworkInputPolicy {
             resolver: ExternalNetworkInputSelection {
                 source: "/etc/resolv.conf".into(),
@@ -6317,6 +6341,7 @@ fn exercise_activation_fault(fault: &str) {
             connect_timeout_ms: 1_000,
             request_timeout_ms: 5_000,
             maximum_response_bytes: 64 * 1024,
+            max_clock_skew_ms: None,
             network_inputs: ExternalNetworkInputPolicy {
                 resolver: ExternalNetworkInputSelection {
                     source: "/etc/resolv.conf".into(),

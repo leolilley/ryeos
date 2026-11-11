@@ -198,6 +198,7 @@ fn ordinary_direct_preflight_two_node_plan_reaches_endpoint_admission() {
     let prepared = super::super::PreparedItemPlan {
         resource_policy: super::super::PersistentSessionResourcePolicy::Ordinary,
         persistent_session_capsule_hash: None,
+        captured_callback_class: false,
         timeout_secs: 30,
         plan: fixture.plan,
         root_subject_source_identity: ryeos_state::objects::DirectRootSourceIdentity::Project,
@@ -779,6 +780,7 @@ fn external_closure_capture_is_portable_and_rechecks_final_authority() {
         let mut prepared = super::super::PreparedItemPlan {
             resource_policy: super::super::PersistentSessionResourcePolicy::Ordinary,
             persistent_session_capsule_hash: None,
+            captured_callback_class: false,
             timeout_secs: 30,
             plan: fixture.plan,
             root_subject_source_identity: DirectRootSourceIdentity::Project,

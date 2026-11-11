@@ -68,10 +68,9 @@ impl QualificationWorkerProcessRecord {
         }
         crate::process::validate_execution_process_identity_shape(&self.process_identity)?;
         self.provider_configuration.validate()?;
-        ensure!(
-            self.process_identity.process_scope.is_none(),
-            "qualification Worker requires its signed trusted process-group owner"
-        );
+        // The owner is the trusted process-group lane (no scope) or the
+        // enforced path's retained descendant containment (PID-namespace
+        // init or cgroup scope); the shape check above validates its record.
         // Resource-financial settlement is not part of this Q-only journal.
         // Keep that authority closed until a Q resource owner is implemented.
         ensure!(
@@ -354,11 +353,44 @@ pub(super) fn require_terminal_qualification_worker_process(
 /// Lillux has observed the authenticated peer in this process's retained
 /// group. Boot and group-leader birth identity prevent numeric PGID reuse
 /// from joining a different incarnation. This makes no containment claim.
+/// How a connector peer was proved to belong to its Worker.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum PeerBasis<'a> {
+    /// Member of the Worker's process group (the trusted lane).
+    Group,
+    /// Member of the Worker's retained containment, captured by the pinned
+    /// contained path against exactly this containment record.
+    Contained(&'a lillux::ProcessScopeRecovery),
+}
+
+fn require_basis_matches_holder(
+    basis: PeerBasis<'_>,
+    worker: &crate::process::ExecutionProcessIdentity,
+) -> Result<()> {
+    match (basis, worker.process_scope.as_ref()) {
+        (PeerBasis::Group, None) => Ok(()),
+        // The slow membership read happened before this transaction, against
+        // the record the proof carries. Only that record's identity with the
+        // Worker row's is compared here.
+        (PeerBasis::Contained(proven), Some(held)) => {
+            ensure!(
+                proven == held,
+                "qualification connector peer was proved against a different containment than its Worker's"
+            );
+            Ok(())
+        }
+        _ => bail!(
+            "qualification connector peer was proved by a basis that does not match its Worker's holder"
+        ),
+    }
+}
+
 pub(super) fn require_attached_qualification_worker_process(
     conn: &Connection,
     reservation: &ExternalAllocationReservation,
     channel_binding_digest: &str,
     peer: &lillux::ExactProcessIdentity,
+    basis: PeerBasis<'_>,
 ) -> Result<QualificationWorkerProcessRecord> {
     let record = read_process(conn, &reservation.placement_thread_id)?
         .context("qualification connector lost its attached local Worker")?;
@@ -368,6 +400,10 @@ pub(super) fn require_attached_qualification_worker_process(
             && record.channel_binding_digest == channel_binding_digest,
         "qualification connector lost its live exact Worker owner"
     );
+    // The admission path must match what holds the Worker. A contained
+    // Worker's peers are admitted only through the contained path, so every
+    // retained peer of a contained Worker was proved against its containment.
+    require_basis_matches_holder(basis, &record.process_identity)?;
     require_trusted_peer_group(&record.process_identity, peer)?;
     Ok(record)
 }
@@ -392,13 +428,31 @@ fn require_trusted_peer_group(
     crate::process::validate_execution_process_identity_shape(worker)?;
     peer.incarnation_digest().map_err(anyhow::Error::msg)?;
     ensure!(
-        worker.process_scope.is_none()
-            && worker.boot_id == peer.boot_id
-            && worker.group_leader_pid == i64::from(peer.group_leader_pid)
-            && u64::try_from(worker.group_leader_start_time_ticks).ok()
-                == Some(peer.group_leader_start_time_ticks),
-        "qualification connector peer changed its trusted Worker group incarnation"
+        worker.boot_id == peer.boot_id,
+        "qualification connector peer belongs to another boot than its Worker"
     );
+    // The trusted lane holds the connector only by the Worker's process
+    // group. A Worker held by a retained containment (PID-namespace init or
+    // cgroup scope) instead had the peer's membership proved against that
+    // containment at connect time; the connector may sit in its own group or
+    // session, so the group leader is not part of that identity.
+    if worker.process_scope.is_some() {
+        // No schema column holds a membership attestation, so the historical
+        // check can only use what the rows already imply: a member of the
+        // Worker's namespace or scope cannot predate the Worker target.
+        ensure!(
+            u64::try_from(worker.target_start_time_ticks).ok()
+                <= Some(peer.target_start_time_ticks),
+            "qualification connector peer predates its contained Worker"
+        );
+    } else {
+        ensure!(
+            worker.group_leader_pid == i64::from(peer.group_leader_pid)
+                && u64::try_from(worker.group_leader_start_time_ticks).ok()
+                    == Some(peer.group_leader_start_time_ticks),
+            "qualification connector peer changed its trusted Worker group incarnation"
+        );
+    }
     Ok(())
 }
 
@@ -642,6 +696,7 @@ mod tests {
             target_start_time_ticks: 100,
             group_leader_pid: 40,
             group_leader_start_time_ticks: 100,
+            group_basis: lillux::GroupBasis::ProcessGroup,
         };
         let worker = crate::process::execution_process_identity_from_lillux(leader, None).unwrap();
         let peer = lillux::ExactProcessIdentity {
@@ -650,6 +705,7 @@ mod tests {
             target_start_time_ticks: 110,
             group_leader_pid: 40,
             group_leader_start_time_ticks: 100,
+            group_basis: lillux::GroupBasis::ProcessGroup,
         };
         require_trusted_peer_group(&worker, &peer).unwrap();
         let mut reused_group = peer.clone();
@@ -661,5 +717,95 @@ mod tests {
         let mut other_group = peer;
         other_group.group_leader_pid = 39;
         assert!(require_trusted_peer_group(&worker, &other_group).is_err());
+    }
+
+    #[test]
+    fn contained_worker_peer_is_keyed_on_boot_not_on_the_worker_group() {
+        let (boot, _) = lillux::process_control::current_host_generation().unwrap();
+        let mut worker: crate::process::ExecutionProcessIdentity =
+            serde_json::from_value(serde_json::json!({
+                "schema_version": crate::process::PROCESS_IDENTITY_SCHEMA_VERSION,
+                "boot_id": boot, "target_pid": 40, "target_start_time_ticks": 100,
+                "group_leader_pid": 39, "group_leader_start_time_ticks": 90,
+                "process_scope": {
+                    "version": 5, "control_timeout": {"secs": 5, "nanos": 0},
+                    "configuration": {"version": 3, "backend": {"implementation": "pid_namespace_init"}},
+                    "backend": {"implementation": "pid_namespace_init", "boot_id": boot,
+                        "init_pid": 40, "init_start_time_ticks": 100,
+                        "namespace": {"device": 4, "inode": 9}}
+                },
+                "resource_selections": [], "resource_operations": [],
+                "resource_settlement_authority": null, "resource_allocation_limit": null,
+                "resource_occupancy_start": null, "resource_occupancy_limit": null,
+                "resource_cleanup_allowance_ms": null
+            }))
+            .unwrap();
+        // A connector that called setsid: its own group and session.
+        let detached = lillux::ExactProcessIdentity {
+            boot_id: boot.clone(),
+            target_pid: 77,
+            target_start_time_ticks: 500,
+            group_leader_pid: 77,
+            group_leader_start_time_ticks: 500,
+            group_basis: lillux::GroupBasis::ProcessGroup,
+        };
+        require_trusted_peer_group(&worker, &detached).unwrap();
+        // A process born before the Worker target cannot be a member.
+        let mut predates = detached.clone();
+        predates.target_start_time_ticks = 50;
+        assert!(require_trusted_peer_group(&worker, &predates).is_err());
+        // Another boot is still refused.
+        let mut other_boot = detached.clone();
+        other_boot.boot_id = "00000000-0000-0000-0000-000000000000".into();
+        assert!(require_trusted_peer_group(&worker, &other_boot).is_err());
+        // The same peer is refused for a Worker held only by its group.
+        worker.process_scope = None;
+        assert!(require_trusted_peer_group(&worker, &detached).is_err());
+    }
+
+    #[test]
+    fn peer_basis_must_match_what_holds_the_worker() {
+        let (boot, _) = lillux::process_control::current_host_generation().unwrap();
+        let trusted = crate::process::execution_process_identity_from_lillux(
+            lillux::ExactProcessIdentity {
+                boot_id: boot.clone(),
+                target_pid: 40,
+                target_start_time_ticks: 100,
+                group_leader_pid: 40,
+                group_leader_start_time_ticks: 100,
+                group_basis: lillux::GroupBasis::ProcessGroup,
+            },
+            None,
+        )
+        .unwrap();
+        let mut contained = trusted.clone();
+        contained.process_scope = Some(
+            serde_json::from_value(serde_json::json!({
+                "version": 5, "control_timeout": {"secs": 5, "nanos": 0},
+                "configuration": {"version": 3, "backend": {"implementation": "pid_namespace_init"}},
+                "backend": {"implementation": "pid_namespace_init", "boot_id": boot,
+                    "init_pid": 40, "init_start_time_ticks": 100,
+                    "namespace": {"device": 4, "inode": 9}}
+            }))
+            .unwrap(),
+        );
+        // Group-proved peers reach only trusted-lane Workers; contained
+        // peers only contained Workers. A group-proved peer can therefore
+        // never be retained against a contained Worker, so the historical
+        // containment branch is reachable only by contained admissions.
+        let held = contained.process_scope.clone().unwrap();
+        require_basis_matches_holder(PeerBasis::Group, &trusted).unwrap();
+        require_basis_matches_holder(PeerBasis::Contained(&held), &contained).unwrap();
+        assert!(require_basis_matches_holder(PeerBasis::Group, &contained).is_err());
+        assert!(require_basis_matches_holder(PeerBasis::Contained(&held), &trusted).is_err());
+        // A proof read against another containment is not this Worker's.
+        let mut other = held.clone();
+        other = serde_json::from_value({
+            let mut value = serde_json::to_value(&other).unwrap();
+            value["backend"]["init_pid"] = serde_json::json!(41);
+            value
+        })
+        .unwrap();
+        assert!(require_basis_matches_holder(PeerBasis::Contained(&other), &contained).is_err());
     }
 }

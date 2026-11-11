@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-12T23:46:58Z:680c555416e7eab1a1f8cbe5ab144d87858f204d1255562d4938b34bb27c98e8:FYqHlrrqjAG564NNkEWh9tlvKS5GA1LkwYUy+IEjJ4Gp5SAFS3KIi489T9uw1Yvmf2oOgE0RkAFd8f71NjNACQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-03T00:21:36Z:893bacb4cc957b9d86d1264e4bacfb3c0565ab412be210c097e4c015d3b51145:yDg/cm29iepUpJ0cNLMOfMjSvIX4X6YcIW7Bwg7woEREpjhliUVksljAmRgvfpXm5rOml9OWf9fmMd9Pksx/DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: codex
 version: "1.0.0"
 description: Exact signed input for controller-local guest owner materialization
@@ -12,6 +12,6 @@ guest_owner_materialization:
       implementation: unix
       uid: 65534
       gid: 65534
-    private_source_max_bytes: 33554432
-    private_source_max_inodes: 1024
+    private_source_max_bytes: 1073741824
+    private_source_max_inodes: 4096
     owner_timeout_seconds: 600

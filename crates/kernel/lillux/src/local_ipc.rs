@@ -37,6 +37,23 @@ pub fn local_endpoint_path_addressable(endpoint: &Path) -> bool {
     endpoint.as_os_str().as_bytes().len() <= max_local_endpoint_path_bytes()
 }
 
+/// Bind a Unix listener whose socket inode is created owner-only, so no
+/// window exists between creation and a later permission change. The creation
+/// mask is narrowed only around the `bind` call and restored immediately; the
+/// listener is returned non-blocking for the async runtime to adopt.
+#[cfg(unix)]
+pub fn bind_owner_private_unix_listener(
+    endpoint: &Path,
+) -> std::io::Result<std::os::unix::net::UnixListener> {
+    // A socket file is created with mode 0o777 & !mask; 0o177 leaves 0o600.
+    let previous = unsafe { libc::umask(0o177) };
+    let bound = std::os::unix::net::UnixListener::bind(endpoint);
+    unsafe { libc::umask(previous) };
+    let listener = bound?;
+    listener.set_nonblocking(true)?;
+    Ok(listener)
+}
+
 /// Kernel-authenticated process that connected one Unix stream. Its PID is
 /// expressed in the receiver's namespace, not in the peer's namespace. The
 /// retained pidfd pins the incarnation; a caller's numeric PID is never proof.
@@ -71,6 +88,41 @@ impl AuthenticatedUnixPeer {
         {
             let _ = expected_group_leader;
             bail!("authenticated exact process identity is unavailable on this OS")
+        }
+    }
+
+    /// Capture this peer's exact identity, with no process-group
+    /// requirement, and prove it is a member of `containment`. The peer's
+    /// retained pidfd is re-probed around the membership read (see
+    /// [`crate::ProcessScopeRecovery::contains_pinned_process`]).
+    pub fn contained_exact_process_identity(
+        &self,
+        containment: &crate::ProcessScopeRecovery,
+    ) -> Result<crate::ExactProcessIdentity> {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::AsFd as _;
+            let identity = crate::process_control::capture_contained_process_identity_from_pidfd(
+                u32::try_from(self.pid).context("authenticated peer PID is outside range")?,
+                self.pidfd.as_fd(),
+            )
+            .map_err(anyhow::Error::msg)?;
+            let member = containment
+                .contains_pinned_process(
+                    &identity,
+                    self.pidfd.as_fd(),
+                    containment.control_timeout(),
+                )
+                .map_err(anyhow::Error::msg)?;
+            if !member {
+                bail!("authenticated peer is not inside the retained containment");
+            }
+            Ok(identity)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = containment;
+            bail!("authenticated containment membership is unavailable on this OS")
         }
     }
 
@@ -1202,6 +1254,23 @@ mod local_connect_tests {
 mod peer_process_tests {
     use super::*;
     use std::os::fd::{AsFd as _, AsRawFd as _};
+
+    #[test]
+    fn owner_private_listener_is_born_0600_and_restores_the_mask() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let temporary = tempfile::tempdir().unwrap();
+        let endpoint = temporary.path().join("private.sock");
+        let before = unsafe { libc::umask(0o022) };
+        let listener = bind_owner_private_unix_listener(&endpoint).unwrap();
+        let after = unsafe { libc::umask(before) };
+        assert_eq!(after, 0o022, "the creation mask is restored");
+        let mode = std::fs::symlink_metadata(&endpoint)
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+        drop(listener);
+    }
 
     #[test]
     fn pinned_local_endpoint_works_below_deep_private_root() {

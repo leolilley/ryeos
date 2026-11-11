@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-01T01:13:28Z:e27206a68ddfaadd110d470abeade5adcedae4543cdd2436de815e909c189884:7xHJvvTPBZzvYAf9qoqJmgtUwtY2MMTzhAr4BOFyfW9i8w7px8OKLroJ8dV6avXAspYLqtVf7S5PWo3QHcCBDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-05T03:59:09Z:d519f83363ce0059233d87691d62f3bd1b6cc5b66e53375ef5abba617f467690:e4RaiLw7kG9ICt7JTj0+6zGARv84aaALbKmovqdn5pqsNLYyrnt4TICWjVYSbfDJICoyhShkOgNARuB1KceiCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: protocol
 name: qualification_consumer_callback
 category: ryeos/core
@@ -17,14 +17,23 @@ env_injections:
   - { name: RYEOSD_THREAD_ID, source: thread_id }
   - { name: RYEOSD_PROJECT_STATE_SCOPE, source: project_state_scope }
   - { name: RYEOSD_THREAD_AUTH_TOKEN, source: thread_auth_token }
+  - { name: RYEOSD_RUNTIME_STATE_ROOT, source: runtime_state_root }
+# A qualification verifier on the pinned-snapshot project lane runs against the exact snapshot the subject was
+# captured from, so its project source is a pushed head. The capability is open only to an item that declares that
+# lane (project_lane: pinned_snapshot); remote and detached dispatch stay closed.
 capabilities:
-  allows_pushed_head: false
+  allows_pushed_head: true
+  pushed_head_requires_declaration: true
   allows_target_site: false
   allows_detached: false
 lifecycle:
   mode: managed
 callback_channel: http
 qualification_callback: remote_consumer
+# Admits this protocol to captured execution. The digest is the identity of the closed four-method
+# consumer-verification surface the daemon issues for `remote_consumer`; admission refuses any mismatch.
+captured_compatible_callback:
+  surface_digest: 24a9c5e3fa4bede622a36401964cdc6a09b6852e3d45341e1102a2ec9598ee80
 execution_evidence:
   handler: handler:ryeos/core/scoped-qualification-execution-evidence
   config: { subordinate: remote_consumer }

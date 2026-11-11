@@ -118,10 +118,10 @@ mod tests {
         };
         authority.require_bundle_sources(["core"]).unwrap();
         let error = authority
-            .require_bundle_sources(["core", "render-sandbox"])
+            .require_bundle_sources(["core", "test-bundle"])
             .unwrap_err();
         assert!(
-            error.to_string().contains("active bundle `render-sandbox`"),
+            error.to_string().contains("active bundle `test-bundle`"),
             "{error:#}"
         );
     }

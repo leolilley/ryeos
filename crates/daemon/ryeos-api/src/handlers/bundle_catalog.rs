@@ -83,7 +83,7 @@ pub async fn upload(
     let _permit = state
         .write_barrier
         .acquire_with_timeout(ryeos_app::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
-        .map_err(|error| anyhow::anyhow!("cannot acquire catalog upload permit: {error}"))?;
+        .map_err(|error| anyhow::anyhow!("cannot acquire catalog upload permit: {error:#}"))?;
     let authority = state.state_store.pinned_state_authority()?;
     let guard = authority.acquire_shared_guard()?;
     let cas = authority.cas_store()?;

@@ -1974,6 +1974,10 @@ impl FollowWaiterSummary {
 // Keep this contract readable across future execution schema cuts; do not
 // replace it with the best-effort daemon PID/exit marker or a cgroup path scan.
 const SCOPE_LIFETIME_FENCE_FIRST_EPOCH: u32 = 30;
+
+pub(crate) mod qualification_cold_custody;
+pub use qualification_cold_custody::ColdQualificationCustodyReport;
+pub(crate) use qualification_cold_custody::QualificationCustodyDisposition;
 const SCOPE_LIFETIME_FENCE_SQL: &str = r#"CREATE TABLE execution_lifetime_fence (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     schema_version INTEGER NOT NULL CHECK (schema_version = 1),
@@ -2593,7 +2597,7 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // The current operator schema epoch. Any other epoch is refused by ordinary
 // open and reset by the explicit execution-history reset; no stored row of an
 // earlier epoch gains authority through defaults or migration.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 129;
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 131;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
@@ -7038,9 +7042,24 @@ fn decide_unreadable_lifetime_fence(
     }))
 }
 
-fn ensure_scope_lifetime_resettable(conn: &Connection, stored_epoch: u32) -> Result<()> {
-    ensure_scope_lifetime_resettable_with(conn, stored_epoch, UnreadableLifetimeFence::Refuse)
-        .map(drop)
+fn ensure_scope_lifetime_resettable(
+    conn: &Connection,
+    stored_epoch: u32,
+    custody: QualificationCustodyDisposition<'_>,
+) -> Result<()> {
+    ensure_scope_lifetime_resettable_with(
+        conn,
+        stored_epoch,
+        UnreadableLifetimeFence::Refuse,
+        custody,
+    )
+    .map(drop)
+}
+
+/// What the resettable check established: the Q local custody the reset
+/// settled or previewed.
+pub(crate) struct ResettableWitness {
+    pub(crate) cold_qualification_custody: Option<ColdQualificationCustodyReport>,
 }
 
 /// [`ensure_scope_lifetime_resettable`] with the reset's decision for an
@@ -7050,33 +7069,10 @@ fn ensure_scope_lifetime_resettable_with(
     conn: &Connection,
     stored_epoch: u32,
     fence: UnreadableLifetimeFence,
-) -> Result<Option<LifetimeFenceDiscard>> {
+    custody: QualificationCustodyDisposition<'_>,
+) -> Result<ResettableWitness> {
     // Independent of host lifetime: remote execution can survive its owner.
     external_execution::ensure_resettable(conn, stored_epoch)?;
-    // A Q workspace can exist before any process scope is allocated. The
-    // original local custody is not reconstructible after a schema reset.
-    if stored_epoch >= 107 {
-        let pending: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM external_qualification_local_start WHERE phase!='closed'",
-            [],
-            |row| row.get(0),
-        )?;
-        ensure!(
-            pending == 0,
-            "execution-history reset retains Q local workspace cleanup"
-        );
-    }
-    if stored_epoch >= 114 {
-        let pending: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM external_qualification_guest_scratch WHERE phase!='closed'",
-            [],
-            |row| row.get(0),
-        )?;
-        ensure!(
-            pending == 0,
-            "execution-history reset retains Q guest-input scratch custody"
-        );
-    }
     if stored_epoch >= 116 {
         let pending: i64 = conn.query_row(
             "SELECT COUNT(*) FROM external_execution_relay_transfer WHERE phase!='terminal_closed'",
@@ -7118,20 +7114,29 @@ fn ensure_scope_lifetime_resettable_with(
     // owned epochs could not allocate these resources; never decode their
     // execution rows. Every epoch from this cut onward requires the witness,
     // even when its execution tables are no longer understood by this binary.
-    if stored_epoch < SCOPE_LIFETIME_FENCE_FIRST_EPOCH {
-        return Ok(None);
-    }
-    if let Some(discard) = decide_unreadable_lifetime_fence(conn, fence)? {
-        return Ok(Some(discard));
-    }
-    if let Some(lifetime) = read_scope_lifetime_fence(conn)?
+    let lifetime_fence_discard = if stored_epoch < SCOPE_LIFETIME_FENCE_FIRST_EPOCH {
+        None
+    } else {
+        decide_unreadable_lifetime_fence(conn, fence)?
+    };
+    if stored_epoch >= SCOPE_LIFETIME_FENCE_FIRST_EPOCH
+        && lifetime_fence_discard.is_none()
+        && let Some(lifetime) = read_scope_lifetime_fence(conn)?
         && !lifetime.has_ended().map_err(anyhow::Error::msg)?
     {
         bail!(
             "execution-history reset retains unsettled process-scope lifetime authority; settle all workspaces with the owning runtime before upgrading, or end that host lifetime; restarting only the daemon is not cleanup proof"
         );
     }
-    Ok(None)
+    // A Q workspace or guest scratch can exist before any process scope is
+    // allocated, and only its creating generation could close its row. With
+    // every process scope proved ended, the explicit reset settles that local
+    // custody itself before retiring the rows; any other open refuses.
+    let cold_qualification_custody =
+        qualification_cold_custody::settle_open_qualification_custody(conn, stored_epoch, custody)?;
+    Ok(ResettableWitness {
+        cold_qualification_custody,
+    })
 }
 
 fn initialize_current_runtime_schema(
@@ -7340,9 +7345,10 @@ fn reset_owned_runtime_schema(
     conn: &Connection,
     path: &Path,
     reference: &sqlite_schema::SchemaSqlDefinition,
+    custody: QualificationCustodyDisposition<'_>,
 ) -> Result<()> {
     let operator_epoch = runtime_operator_schema_epoch(conn, path)?;
-    ensure_scope_lifetime_resettable(conn, operator_epoch)?;
+    ensure_scope_lifetime_resettable(conn, operator_epoch, custody)?;
     if operator_epoch >= RUNTIME_OPERATOR_SCHEMA_EPOCH {
         bail!(
             "runtime database operator schema epoch is {operator_epoch}, expected a proven predecessor of {RUNTIME_OPERATOR_SCHEMA_EPOCH}; refusing explicit reset of {}",
@@ -7476,6 +7482,9 @@ pub struct RuntimeDb {
     _directory_lock: Option<lillux::secure_fs::PinnedDirectoryLock>,
     _inspection_copy: Option<std::sync::Arc<SqliteInspectionCopyLease>>,
     _inspection_sql: Option<std::sync::Arc<dyn lillux_sqlite::SqliteInspectionSqlWork>>,
+    /// Q local custody the explicit reset open settled (or, for an inspection,
+    /// previewed) so the schema cut may retire those rows; `None` elsewhere.
+    cold_qualification_custody: Option<ColdQualificationCustodyReport>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -15894,7 +15903,11 @@ impl RuntimeDb {
             if !self.unsettled_scoped_child_attempt_ids()?.is_empty() {
                 bail!("execution-history reset requires settlement of every scoped child attempt");
             }
-            ensure_scope_lifetime_resettable(connection, RUNTIME_OPERATOR_SCHEMA_EPOCH)?;
+            ensure_scope_lifetime_resettable(
+                connection,
+                RUNTIME_OPERATOR_SCHEMA_EPOCH,
+                self.settled_qualification_custody(),
+            )?;
             fn count(conn: &Connection, table: &str) -> Result<usize> {
                 let rows: i64 =
                     conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
@@ -17113,6 +17126,22 @@ impl RuntimeDb {
         self.apply_explicit_history_reset_unchecked(path)
     }
 
+    /// Q local custody this explicit reset owner settled or previewed at its
+    /// open, for the report. `None` for every other open and when no Q row
+    /// was open.
+    pub(crate) fn cold_qualification_custody(&self) -> Option<&ColdQualificationCustodyReport> {
+        self.cold_qualification_custody.as_ref()
+    }
+
+    /// The disposition a later check on this owner uses: the receipt of the
+    /// settlement its open performed, or refusal when the open settled nothing.
+    fn settled_qualification_custody(&self) -> QualificationCustodyDisposition<'_> {
+        match &self.cold_qualification_custody {
+            Some(receipt) => QualificationCustodyDisposition::Settled(receipt),
+            None => QualificationCustodyDisposition::Refuse,
+        }
+    }
+
     fn apply_explicit_history_reset_unchecked(&mut self, path: &Path) -> Result<()> {
         if self.open_mode == RuntimeDbOpenMode::ExplicitHistoryResetInspection {
             bail!("runtime inspection authority cannot apply an explicit history reset");
@@ -17121,11 +17150,12 @@ impl RuntimeDb {
             return Ok(());
         }
         let reference = self.conn.schema_reference();
+        let custody = self.settled_qualification_custody();
         self.conn.with_sql(|connection| {
             connection
                 .execute_batch("PRAGMA journal_mode=WAL;")
                 .context("establish WAL for explicitly reset runtime store")?;
-            reset_owned_runtime_schema(connection, path, reference)?;
+            reset_owned_runtime_schema(connection, path, reference, custody)?;
             validate_current_runtime_store(connection, path, reference)
         })?;
         self.reset_required = false;
@@ -19075,7 +19105,13 @@ impl RuntimeDb {
             let tx = conn.unchecked_transaction()?;
             let scope_only =
                 consume_thread_process_scope_reservation(&tx, thread_id, process_identity)?;
-            if process_identity.process_scope.is_some()
+            // A PID-namespace init is bound by the held launch itself, so no
+            // pre-contact reservation exists to consume for it; a cgroup
+            // scope without resources must have one.
+            if process_identity
+                .process_scope
+                .as_ref()
+                .is_some_and(|scope| !scope.is_pid_namespace_init())
                 && process_identity.resource_selections.is_empty()
                 && !scope_only
             {
@@ -23348,7 +23384,12 @@ mod tests {
                 INSERT INTO unknown_execution_authority VALUES(X'FF00');",
             )
             .unwrap();
-            ensure_scope_lifetime_resettable(conn, SCOPE_LIFETIME_FENCE_FIRST_EPOCH).unwrap();
+            ensure_scope_lifetime_resettable(
+                conn,
+                SCOPE_LIFETIME_FENCE_FIRST_EPOCH,
+                QualificationCustodyDisposition::Refuse,
+            )
+            .unwrap();
             let current = lillux::ProcessHostLifetime::capture_current().unwrap();
             let raw = lillux::canonical_json(&serde_json::to_value(&current).unwrap()).unwrap();
             conn.execute(
@@ -23357,10 +23398,14 @@ mod tests {
             )
             .unwrap();
             assert!(
-                ensure_scope_lifetime_resettable(conn, SCOPE_LIFETIME_FENCE_FIRST_EPOCH)
-                    .unwrap_err()
-                    .to_string()
-                    .contains("restarting only the daemon")
+                ensure_scope_lifetime_resettable(
+                    conn,
+                    SCOPE_LIFETIME_FENCE_FIRST_EPOCH,
+                    QualificationCustodyDisposition::Refuse
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("restarting only the daemon")
             );
             assert_eq!(read_scope_lifetime_fence(conn).unwrap(), Some(current));
             let before: Vec<u8> = conn
@@ -23380,22 +23425,42 @@ mod tests {
                 [&ended],
             )
             .unwrap();
-            ensure_scope_lifetime_resettable(conn, SCOPE_LIFETIME_FENCE_FIRST_EPOCH).unwrap();
+            ensure_scope_lifetime_resettable(
+                conn,
+                SCOPE_LIFETIME_FENCE_FIRST_EPOCH,
+                QualificationCustodyDisposition::Refuse,
+            )
+            .unwrap();
 
             conn.execute("UPDATE execution_lifetime_fence SET host_lifetime='{}'", [])
                 .unwrap();
             assert!(
-                ensure_scope_lifetime_resettable(conn, SCOPE_LIFETIME_FENCE_FIRST_EPOCH).is_err()
+                ensure_scope_lifetime_resettable(
+                    conn,
+                    SCOPE_LIFETIME_FENCE_FIRST_EPOCH,
+                    QualificationCustodyDisposition::Refuse
+                )
+                .is_err()
             );
             conn.execute("DELETE FROM execution_lifetime_fence", [])
                 .unwrap();
             assert!(
-                ensure_scope_lifetime_resettable(conn, SCOPE_LIFETIME_FENCE_FIRST_EPOCH).is_err()
+                ensure_scope_lifetime_resettable(
+                    conn,
+                    SCOPE_LIFETIME_FENCE_FIRST_EPOCH,
+                    QualificationCustodyDisposition::Refuse
+                )
+                .is_err()
             );
             conn.execute("DROP TABLE execution_lifetime_fence", [])
                 .unwrap();
             assert!(
-                ensure_scope_lifetime_resettable(conn, SCOPE_LIFETIME_FENCE_FIRST_EPOCH).is_err()
+                ensure_scope_lifetime_resettable(
+                    conn,
+                    SCOPE_LIFETIME_FENCE_FIRST_EPOCH,
+                    QualificationCustodyDisposition::Refuse
+                )
+                .is_err()
             );
             Ok(())
         });

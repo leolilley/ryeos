@@ -537,6 +537,7 @@ pub fn load_test_daemon_execution_isolation(
     ryeos_engine::isolation::IsolationRuntime::resolve_compiled_policy_for_daemon(
         app_root,
         daemon_socket,
+        None,
         policy,
         crate::node_policy::generation::policy_directory(app_root).join("isolation.yaml"),
         format!("sha256:{}", "0".repeat(64)),
@@ -978,7 +979,7 @@ fn build_engine_for_roots_with_isolation(
         Some(store) => store.clone(),
         None => TrustStore::load(None, &node_config_root).map_err(|err| {
             tracing::error!(error = %err, "failed to load node trust store");
-            anyhow::anyhow!("failed to load node trust store: {err}")
+            anyhow::anyhow!("failed to load node trust store: {err:#}")
         })?,
     };
     tracing::info!(count = node_trust_store.len(), "loaded node trust store");

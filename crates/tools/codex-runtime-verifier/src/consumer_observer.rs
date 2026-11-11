@@ -85,15 +85,33 @@ impl ConsumerObservationFailure {
     pub fn settle(mut self) -> std::result::Result<anyhow::Error, Self> {
         let active = self.active_deadline;
         let cleanup = self.cleanup_deadline;
-        if let Some(mut app) = self.app.take()
-            && app.stop_until(active, cleanup).is_err()
-        {
-            self.app = Some(app);
+        if let Some(mut app) = self.app.take() {
+            match app.stop_until(active, cleanup) {
+                // The settled child's exit and stderr tail are the account it
+                // gives of the failure; the primary error stays the cause.
+                Ok(outcome) => {
+                    let exit = match &outcome {
+                        crate::app_server::AppServerStopOutcome::Exited(exit) => {
+                            format!("exited code {:?}", exit.code)
+                        }
+                        crate::app_server::AppServerStopOutcome::Forced(exit) => {
+                            format!("forced, code {:?}", exit.code)
+                        }
+                    };
+                    self.error = self.error.context(format!(
+                        "outer owner {exit}; stderr tail: {}",
+                        app.diagnostic_tail()
+                    ));
+                }
+                Err(_) => self.app = Some(app),
+            }
         }
         if let Some(launch) = self.launch.take() {
             match launch.settle(cleanup) {
                 Ok(error) => {
-                    self.error = self.error.context(format!("owner startup failed: {error}"))
+                    self.error = self
+                        .error
+                        .context(format!("owner startup failed: {error:#}"))
                 }
                 Err(launch) => self.launch = Some(launch),
             }
@@ -101,10 +119,12 @@ impl ConsumerObservationFailure {
         if let Some(peer) = self.peer.take() {
             match peer.cancel_until(cleanup) {
                 Ok(Ok(_)) => {}
-                Ok(Err(_)) => {
-                    self.error = self
-                        .error
-                        .context("scripted peer refused during failure cleanup");
+                // The peer's own refusal is part of the account: a request it
+                // rejected is often why the turn failed.
+                Ok(Err(error)) => {
+                    self.error = self.error.context(format!(
+                        "scripted peer refused during failure cleanup: {error:#}"
+                    ));
                 }
                 Err(peer) => self.peer = Some(peer),
             }
@@ -297,6 +317,14 @@ pub fn prepare_startup(
     // attempt roots/files are transferred to the selected installed account.
     account.grant_readonly_host_directory(&parent)?;
     account.grant_private_directory(&work)?;
+    // The relinquished account reopens the owner runtime and the delivery
+    // below; both sit under the administrator-owned namespace root. Grant
+    // traversal of the root and the runtime exactly as the occurrence owner
+    // does before its own transition; neither grant gives mutation authority.
+    let namespace_root = PinnedDirectory::open(Path::new("/ryeos"))?
+        .context("consumer observer namespace root absent")?;
+    account.grant_readonly_host_directory(&namespace_root)?;
+    account.grant_readonly_host_directory(&runtime_root)?;
     runtime.recheck()?;
     ensure!(
         !active_deadline.has_elapsed(),

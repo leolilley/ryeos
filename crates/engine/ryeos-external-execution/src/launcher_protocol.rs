@@ -294,6 +294,11 @@ impl LiveInheritedExternalCandidateSupervisor {
         self.supervisor.journal().binding()
     }
 
+    /// The channel window on the guest's own clock.
+    pub fn window(&self) -> &ryeos_state::external_execution::guest_window::GuestChannelWindow {
+        self.supervisor.journal().window()
+    }
+
     pub fn process_identity(&self) -> &lillux::ExactProcessIdentity {
         &self.process_identity
     }
@@ -321,10 +326,10 @@ impl LiveInheritedExternalCandidateSupervisor {
     /// Advance with another truthful acknowledgement of the same retained peer;
     /// this consumes the existing signed transcript budget and grants no input.
     pub fn author_idle_poll(&mut self, previous_poll: &[u8]) -> Result<Vec<u8>> {
-        let previous = SignedExecutionFrame::decode_and_verify(
+        let previous = SignedExecutionFrame::decode_and_verify_in_guest_window(
             previous_poll,
             self.binding(),
-            lillux::time::timestamp_millis(),
+            self.supervisor.journal().window(),
         )?;
         let ExecutionChannelPayload::Acknowledge {
             peer_frame_sequence,
@@ -368,6 +373,13 @@ impl LiveInheritedExternalCandidateSupervisor {
         self.supervisor.dispatch_protocol_chunk(wire)
     }
 
+    pub fn dispatch_protocol_input_closed(
+        &mut self,
+        wire: &[u8],
+    ) -> Result<SupervisorApplicationOutcome> {
+        self.supervisor.dispatch_protocol_input_closed(wire)
+    }
+
     pub fn dispatch_cancel(&mut self, wire: &[u8]) -> Result<SupervisorApplicationOutcome> {
         self.supervisor.dispatch_cancel(wire)
     }
@@ -390,10 +402,10 @@ impl LiveInheritedExternalCandidateSupervisor {
     /// A partial protocol write returns a signed `claimed` acknowledgement;
     /// the caller must continue this same frame locally until `applied`.
     pub fn dispatch_owner_frame(&mut self, wire: &[u8]) -> Result<ExternalOwnerFrameDispatch> {
-        let verified = SignedExecutionFrame::decode_and_verify(
+        let verified = SignedExecutionFrame::decode_and_verify_in_guest_window(
             wire,
             self.supervisor.journal().binding(),
-            lillux::time::timestamp_millis(),
+            self.supervisor.journal().window(),
         )?;
         ensure!(
             verified.frame().direction
@@ -418,6 +430,9 @@ impl LiveInheritedExternalCandidateSupervisor {
             }
             ExecutionChannelPayload::ProtocolBytes { .. } => {
                 ExternalOwnerFrameOutcome::Application(self.dispatch_protocol_chunk(wire)?)
+            }
+            ExecutionChannelPayload::ProtocolInputClosed => {
+                ExternalOwnerFrameOutcome::Application(self.dispatch_protocol_input_closed(wire)?)
             }
             ExecutionChannelPayload::Cancel => {
                 ExternalOwnerFrameOutcome::Application(self.dispatch_cancel(wire)?)
@@ -1053,6 +1068,14 @@ impl ExternalCandidateLauncherClient for InheritedExternalCandidateLauncherClien
             .context("launcher protocol action omitted written byte count")
     }
 
+    fn close_protocol_input(&mut self, frame: &AuthenticatedExecutionFrame) -> Result<()> {
+        ensure!(
+            self.apply(frame)?.is_none(),
+            "launcher input closure returned protocol progress"
+        );
+        Ok(())
+    }
+
     fn cancel(&mut self, frame: &AuthenticatedExecutionFrame) -> Result<()> {
         ensure!(
             self.apply(frame)?.is_none(),
@@ -1590,8 +1613,9 @@ pub fn serve_native_candidate_launcher(
     authority: ryeos_state::PinnedStateAuthority,
     bootstrap_digest: String,
     expected_binding: ExecutionChannelBinding,
-    deadline: lillux::time::MonotonicDeadline,
+    window: ryeos_state::external_execution::guest_window::GuestChannelWindow,
 ) -> Result<()> {
+    let deadline = window.expiry_monotonic();
     let result = (|| -> Result<()> {
         let stdout = BoundedCandidateExecutionOutput::new(protocol_output, maximum_output_bytes)?;
         let mut output = match expected_binding.execution_mode {
@@ -1670,10 +1694,10 @@ pub fn serve_native_candidate_launcher(
             )?;
             match message {
                 LauncherMessage::Apply { schema, frame_json } if schema == PROTOCOL_SCHEMA => {
-                    let decoded = SignedExecutionFrame::decode_and_verify(
+                    let decoded = SignedExecutionFrame::decode_and_verify_in_guest_window(
                         frame_json.as_bytes(),
                         &expected_binding,
-                        lillux::time::timestamp_millis(),
+                        &window,
                     )?;
                     let digest = decoded.digest().to_owned();
                     if matches!(
@@ -1748,6 +1772,9 @@ pub fn serve_native_candidate_launcher(
                         }
                         ExecutionChannelPayload::ProtocolBytes { .. } => {
                             candidate.apply_protocol_chunk(&decoded).map(Some)
+                        }
+                        ExecutionChannelPayload::ProtocolInputClosed => {
+                            candidate.close_protocol_input(&decoded).map(|_| None)
                         }
                         ExecutionChannelPayload::Cancel => {
                             output.cancelled();

@@ -38,13 +38,13 @@ pub enum ProjectSourceError {
 
 impl From<anyhow::Error> for ProjectSourceError {
     fn from(err: anyhow::Error) -> Self {
-        Self::Other(err.to_string())
+        Self::Other(format!("{err:#}"))
     }
 }
 
 impl From<ryeos_app::engine_cache::BuildWaitError> for ProjectSourceError {
     fn from(err: ryeos_app::engine_cache::BuildWaitError) -> Self {
-        Self::Other(err.to_string())
+        Self::Other(format!("{err:#}"))
     }
 }
 
@@ -760,7 +760,7 @@ fn resolve_pinned_snapshot_context_admitted(
         "pinned project resolution stage"
     );
     ryeos_state::project_materialization::load_project_snapshot_bounded(&cas, snapshot_hash)
-        .map_err(|e| ProjectSourceError::CheckoutFailed(e.to_string()))?
+        .map_err(|e| ProjectSourceError::CheckoutFailed(format!("{e:#}")))?
         .ok_or_else(|| {
             ProjectSourceError::CheckoutFailed(format!(
                 "snapshot {} not found in CAS",
@@ -780,7 +780,7 @@ fn resolve_pinned_snapshot_context_admitted(
         PinnedContextRealization::ReadOnly => (None, None),
         PinnedContextRealization::Cow => {
             ryeos_engine::execution_workspace::validate_workspace_id(checkout_id)
-                .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?;
+                .map_err(|error| ProjectSourceError::CheckoutFailed(format!("{error:#}")))?;
             let execution_root = runtime_cache.join("executions");
             let workspace_root = execution_root.join(checkout_id);
             state
@@ -794,11 +794,11 @@ fn resolve_pinned_snapshot_context_admitted(
                         )
                     })?,
                 )
-                .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?;
+                .map_err(|error| ProjectSourceError::CheckoutFailed(format!("{error:#}")))?;
             let reserved = state
                 .state_store
                 .execution_workspace(checkout_id)
-                .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?
+                .map_err(|error| ProjectSourceError::CheckoutFailed(format!("{error:#}")))?
                 .ok_or_else(|| {
                     ProjectSourceError::CheckoutFailed(
                         "workspace reservation disappeared".to_string(),
@@ -815,7 +815,7 @@ fn resolve_pinned_snapshot_context_admitted(
             // adoption proof; retained recovery has its own journal-backed path.
             let (project, guard) =
                 ryeos_app::temp_dir_guard::create_runtime_workspace(&runtime_cache, checkout_id)
-                    .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?;
+                    .map_err(|error| ProjectSourceError::CheckoutFailed(format!("{error:#}")))?;
             guard.preserve_for_explicit_cleanup();
             state
                 .state_store
@@ -825,7 +825,7 @@ fn resolve_pinned_snapshot_context_admitted(
                     WorkspaceState::Constructing,
                     None,
                 )
-                .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?;
+                .map_err(|error| ProjectSourceError::CheckoutFailed(format!("{error:#}")))?;
             (Some(project), Some(guard))
         }
     };
@@ -847,7 +847,7 @@ fn resolve_pinned_snapshot_context_admitted(
             project_materialization,
             &materialization_cache,
         )
-        .map_err(|e| ProjectSourceError::CheckoutFailed(e.to_string()))?;
+        .map_err(|e| ProjectSourceError::CheckoutFailed(format!("{e:#}")))?;
     tracing::debug!(
         checkout_id,
         recovery_stage = "snapshot-materialized",

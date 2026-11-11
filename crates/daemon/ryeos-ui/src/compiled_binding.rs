@@ -624,7 +624,7 @@ fn compile_surface_route(
         Err(error) => {
             attenuated.push(AttenuatedUiBinding {
                 coordinate: "surface_route".to_string(),
-                reason: format!("surface route bindings are invalid: {error}"),
+                reason: format!("surface route bindings are invalid: {error:#}"),
             });
             return None;
         }
@@ -649,7 +649,7 @@ fn compile_surface_route(
             if let Err(error) = validate_route_target_contract(&target, &bindings, &parameters) {
                 attenuated.push(AttenuatedUiBinding {
                     coordinate,
-                    reason: format!("surface route target contract is invalid: {error}"),
+                    reason: format!("surface route target contract is invalid: {error:#}"),
                 });
                 return None;
             }
@@ -669,7 +669,7 @@ fn compile_surface_route(
         Err(error) => {
             attenuated.push(AttenuatedUiBinding {
                 coordinate,
-                reason: format!("target resolution failed: {error}"),
+                reason: format!("target resolution failed: {error:#}"),
             });
             None
         }

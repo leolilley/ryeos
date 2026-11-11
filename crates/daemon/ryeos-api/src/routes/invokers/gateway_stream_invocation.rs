@@ -239,7 +239,7 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
             .map_err(|e| RouteDispatchError::BadRequest(format!("invalid request body: {e}")))?;
         req.execution_policy
             .validate()
-            .map_err(|error| RouteDispatchError::BadRequest(error.to_string()))?;
+            .map_err(|error| RouteDispatchError::BadRequest(format!("{error:#}")))?;
         req.launch_mode = match req.execution_policy.response {
             ryeos_app::execution_policy::ExecutionResponse::Wait => "wait".to_string(),
             ryeos_app::execution_policy::ExecutionResponse::Accepted => "accepted".to_string(),
@@ -263,7 +263,7 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
             return Ok(pre_spawn_dispatch_error(self.keep_alive_secs, error));
         }
         req.product_selections = ryeos_state::external_content::products::composition::canonicalize_product_selection_inputs(req.product_selections)
-            .map_err(|error| RouteDispatchError::BadRequest(error.to_string()))?;
+            .map_err(|error| RouteDispatchError::BadRequest(format!("{error:#}")))?;
         if req
             .target_site_id
             .as_deref()
@@ -349,7 +349,7 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
         let usage_subject_asserted_by = if let Some(subject) = &usage_subject {
             subject
                 .validate()
-                .map_err(|e| RouteDispatchError::BadRequest(e.to_string()))?;
+                .map_err(|e| RouteDispatchError::BadRequest(format!("{e:#}")))?;
             let principal = ctx
                 .principal
                 .as_ref()
@@ -424,7 +424,7 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
         // Policy capability checks precede canonicalization or any other
         // caller-selected project filesystem access.
         preauthorize_execution_policy(&req.execution_policy, &principal_scopes, &ctx.state)
-            .map_err(|error| RouteDispatchError::BadRequest(error.to_string()))?;
+            .map_err(|error| RouteDispatchError::BadRequest(format!("{error:#}")))?;
 
         let thread_id = ryeos_app::thread_lifecycle::new_thread_id();
         if let Some(timings) = ctx.launch_timings.as_ref() {
@@ -498,7 +498,7 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
             if let Some(timings) = ctx.launch_timings.as_ref() {
                 timings.emit("gateway_execution_contract_failed");
             }
-            RouteDispatchError::BadRequest(format!("resolve stream execution authority: {error}"))
+            RouteDispatchError::BadRequest(format!("resolve stream execution authority: {error:#}"))
         })?;
 
         ryeos_app::command_invocation::normalize_selected_parameters(
@@ -764,7 +764,7 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
                                             next_after = Some(lag_max);
                                         }
                                         Err(e) => {
-                                            lag_error = Some(format!("lag replay failed: {e}"));
+                                            lag_error = Some(format!("lag replay failed: {e:#}"));
                                             break;
                                         }
                                     }
@@ -854,7 +854,7 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
                                             next_after = Some(current_max);
                                         }
                                         Err(e) => {
-                                            yield Ok(error_envelope("post_launch_replay_failed", &format!("post-launch replay failed: {e}")));
+                                            yield Ok(error_envelope("post_launch_replay_failed", &format!("post-launch replay failed: {e:#}")));
                                             return;
                                         }
                                     }

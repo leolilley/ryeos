@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-20T14:59:00Z:d671f9bc57da4965723b77de5a876dae7b2f26715de5dba45eed0ed3e47afac3:+Y85EVFYtzPyrU5YvUuB6eg0hl8yhcCIjWTkla/P6cYR4rrzhjiUmbMTliqW9Z5UHzsMuBf7r0tr+Uv7ncMoCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-11T02:56:40Z:61451f9e5772bb8c5907dd5ec2b375d1f103216fa1d93ac71cc1d5e1a499e0f8:tfbiCKGLOZdaKpIzgLcL2T9103/Esy1DwSxdBeQ6BByvKyYhk4qCNiH5IjsE97X92fJ036ykpffr6nlzrOFxCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/service"
 inventory_policy:
   admission:
@@ -9,6 +9,12 @@ location:
 effective_trust:
   include_references: false
 resolution: []
+# Which spaces and trust classes may supply a launch root of this kind.
+# Only signed bundles supply this kind; a project or node file is ignored.
+launch_trust:
+  allowed_spaces: [bundle]
+  allowed_trust: [trusted_bundle]
+  operator_may_admit: []
 execution:
   terminator:
     kind: in_process

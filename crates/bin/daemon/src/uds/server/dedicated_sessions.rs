@@ -530,11 +530,11 @@ fn create_dedicated_runtime_workspace(
                         .map_err(|error| format!("capture workspace creator identity: {error}"))?,
                     None,
                 )
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| format!("{error:#}"))?;
                 state
                     .state_store
                     .attach_workspace_creator(workspace_id, thread_id, launch_owner, &identity)
-                    .map_err(|error| error.to_string())
+                    .map_err(|error| format!("{error:#}"))
             },
         )
         .map_err(|error| anyhow!(error.to_string()))?;

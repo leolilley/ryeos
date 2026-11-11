@@ -226,3 +226,70 @@ jobs:
             echo "first-boot init failed for: ${failed[*]}" >&2
             exit 1
           fi
+
+      - name: Daemon ready smoke
+        env:
+          BAKE_METADATA: ${{ steps.bake.outputs.metadata }}
+          PREFIX: ${{ steps.candidate.outputs.prefix }}
+        run: |
+          # Starts each built image exactly as a hosted deployment does (the
+          # image entrypoint initializes a throwaway anonymous /data volume and
+          # then execs the daemon) and fails unless /_ryeos/ready answers
+          # within the bound. A daemon that refuses its installed services, a
+          # bundle set its binary was not built for, or any other startup
+          # refusal exits the container or leaves the probe unanswered, and the
+          # container log is printed. The host class is the one the profile
+          # declares, hosted when present, as in the init smoke above.
+          failed=()
+          built="$(jq -r 'to_entries[] | select((.value | type) == "object" and (.value | has("containerimage.digest"))) | .key' <<<"$BAKE_METADATA" | sort)"
+          [[ -n "$built" ]] || { echo "bake pushed no images" >&2; exit 1; }
+          for target in $built; do
+            DIGEST="$(jq -r --arg target "$target" '.[$target]["containerimage.digest"] // empty' <<<"$BAKE_METADATA")"
+            [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+              echo "no pushed digest for $target" >&2
+              exit 1
+            }
+            IMAGE="${PREFIX}-${target}@${DIGEST}"
+            NAME="ready-smoke-${target}"
+            echo "::group::daemon ready: ${target}"
+            profile_classes="$(docker run --rm --entrypoint /bin/bash "$IMAGE" -c \
+              'awk "
+                 /^ *host_classes:\$/ { base = match(\$0, /[^ ]/); on = 1; next }
+                 on && match(\$0, /[^ ]/) <= base { exit }
+                 on && match(\$0, /[^ ]/) == base + 2 && /^ +[a-z][a-z0-9_-]*:\$/ { sub(/^ +/, \"\"); sub(/:\$/, \"\"); print }
+               " /opt/ryeos/.ai/node/init/profiles/$RYEOS_INIT_NODE_PROFILE.yaml' || true)"
+            host_class="$(grep -Fx hosted <<<"$profile_classes" || head -n1 <<<"$profile_classes")"
+            ok=0
+            if [[ -n "$host_class" ]] && docker run --detach --name "$NAME" \
+                 --volume /data \
+                 -e PORT=8000 \
+                 -e RYEOS_INIT_HOST_CLASS="$host_class" \
+                 -e RYEOS_SUBSTRATE_IMAGE="$IMAGE" \
+                 -e RYEOS_SUBSTRATE_PROTOCOL=1 \
+                 -e RYEOS_TRUST_BAKED_PUBLISHERS=1 \
+                 "$IMAGE" >/dev/null; then
+              for _ in $(seq 1 60); do
+                if docker exec "$NAME" python3 -c "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/_ryeos/ready',timeout=3).read()" 2>/dev/null; then
+                  ok=1
+                  break
+                fi
+                [[ "$(docker inspect -f '{{.State.Running}}' "$NAME")" == true ]] || break
+                sleep 2
+              done
+            fi
+            if (( ok == 0 )); then
+              docker logs "$NAME" 2>&1 | tail -n 80 || true
+            fi
+            docker rm --force --volumes "$NAME" >/dev/null 2>&1 || true
+            echo "::endgroup::"
+            if (( ok == 1 )); then
+              echo "daemon ready: ${target}"
+            else
+              echo "daemon did not reach ready within 120s for image target ${target} (${IMAGE})" >&2
+              failed+=("$target")
+            fi
+          done
+          if (( ${#failed[@]} > 0 )); then
+            echo "daemon ready smoke failed for: ${failed[*]}" >&2
+            exit 1
+          fi

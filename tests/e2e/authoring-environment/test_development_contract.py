@@ -81,7 +81,7 @@ class DevelopmentEnvironmentTests(unittest.TestCase):
             "kind": "tree", "mount_root": "execution_runtime", "mount": "authoring-tools",
         }})
         self.assertEqual(baseline["external_content"][0]["digest"],
-                         "1ca7a7fe9ecc1d19c38c986ba9df435ff7bbe6d4ba020f2643564b8bba0c84e6")
+                         "462135d8fd8f9df1101b9100ba3661baaba4a07c7070288262d7dd8b22a50050")
         self.assertNotIn("client", self.environment["workload_client"])
         self.assertIsNone(baseline["workload_client"])
 

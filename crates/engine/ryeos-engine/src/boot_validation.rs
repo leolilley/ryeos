@@ -855,6 +855,7 @@ pub fn validate_protocol_builder(
             args: &[],
             cwd: dummy_path,
             project_path: dummy_path,
+            runtime_state_root: dummy_path,
             project_state_scope: Some(
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             ),
@@ -2009,12 +2010,14 @@ composed_value_contract:
                 allows_pushed_head: false,
                 allows_target_site: false,
                 allows_detached: false,
+                pushed_head_requires_declaration: false,
             },
             lifecycle: crate::protocols::descriptor::ProtocolLifecycle {
                 mode: LifecycleMode::DetachedOk,
             },
             callback_channel: CallbackChannel::None,
             qualification_callback: None,
+            captured_compatible_callback: None,
             session: None,
             execution_evidence: None,
         }
@@ -2049,6 +2052,7 @@ composed_value_contract:
             args: &[],
             cwd: dummy,
             project_path: dummy,
+            runtime_state_root: dummy,
             project_state_scope: Some(
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             ),
@@ -2095,12 +2099,14 @@ composed_value_contract:
                 allows_pushed_head: false,
                 allows_target_site: false,
                 allows_detached: false,
+                pushed_head_requires_declaration: false,
             },
             lifecycle: crate::protocols::descriptor::ProtocolLifecycle {
                 mode: LifecycleMode::DetachedOk,
             },
             callback_channel: CallbackChannel::None,
             qualification_callback: None,
+            captured_compatible_callback: None,
             session: None,
             execution_evidence: None,
         };
@@ -2113,6 +2119,7 @@ composed_value_contract:
             args: &[],
             cwd: dummy,
             project_path: dummy,
+            runtime_state_root: dummy,
             project_state_scope: Some(
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             ),

@@ -10,11 +10,13 @@ use std::ffi::OsStr;
 use std::path::PathBuf;
 
 use anyhow::{Context as _, Result, ensure};
+use ryeos_external_execution_contract::guest_owner_report::{GuestOwnerStep, RefusedAt as _};
 use ryeos_external_execution_contract::guest_supervisor_descriptors::{
     GuestSupervisorDescriptorPlan, SUPERVISOR_BOOTSTRAP_FD, SUPERVISOR_CANDIDATE_RUNTIME_FD,
     SUPERVISOR_EXECUTABLE_FD, SUPERVISOR_LAUNCHER_FD, SUPERVISOR_MOUNTED_CONTROL_DESCRIPTORS,
     SUPERVISOR_MOUNTED_RELAY_CONTROL_DESCRIPTORS, SUPERVISOR_PRIVATE_PARENT_FD,
-    SUPERVISOR_RELAY_MAILBOX_FD, SUPERVISOR_STAGE_MOUNT_DESTINATION, SUPERVISOR_STATE_ROOT_FD,
+    SUPERVISOR_PRIVATE_PARENT_MOUNT_DESTINATION, SUPERVISOR_RELAY_MAILBOX_FD,
+    SUPERVISOR_STAGE_MOUNT_DESTINATION, SUPERVISOR_STATE_ROOT_FD,
     fixed_guest_supervisor_descriptor_plan,
 };
 use ryeos_external_execution_contract::staging_package::{
@@ -395,9 +397,48 @@ pub struct CommittedGuestSupervisorLaunchIntent {
 pub struct PreparedGuestMountedSandbox {
     _committed: CommittedGuestSupervisorLaunchIntent,
     _source_copy: lillux::InheritedDescriptorAuthority,
+    _private_mount: lillux::InheritedDescriptorAuthority,
     _controls: Vec<lillux::InheritedDescriptorAuthority>,
     _network_inputs: Vec<lillux::InheritedDescriptorAuthority>,
     request: lillux::LinuxSandboxRequest,
+    report_sink: Option<GuestOwnerReportSink>,
+}
+
+/// Where the owner records how its released supervisor ended: the
+/// occurrence's own relay mailbox, which the controller can already read.
+/// Identity fields bind the file to this occurrence and sealed bootstrap.
+pub struct GuestOwnerReportSink {
+    mailbox: lillux::PinnedDirectory,
+    occurrence_id: String,
+    allocation_request_digest: String,
+    bootstrap_digest: String,
+}
+
+impl GuestOwnerReportSink {
+    /// Publish the report once. The file takes the owner's account and the
+    /// mode of the supervisor's own mailbox files; an existing report is
+    /// never replaced.
+    pub fn publish(
+        &self,
+        exit: ryeos_external_execution_contract::guest_owner_report::GuestSupervisorExit,
+    ) -> Result<()> {
+        use ryeos_external_execution_contract::guest_owner_report::GuestOwnerReportFile;
+        use ryeos_external_execution_contract::relay_file::OWNER_REPORT_FILE_NAME;
+        let bytes = GuestOwnerReportFile::new(
+            &self.occurrence_id,
+            &self.allocation_request_digest,
+            &self.bootstrap_digest,
+            exit,
+        )
+        .canonical_bytes()?;
+        self.mailbox.atomic_write_if_same(
+            OsStr::new(OWNER_REPORT_FILE_NAME),
+            None,
+            &bytes,
+            0o600,
+            crate::GUEST_TEMP_PURPOSE,
+        )
+    }
 }
 
 /// A held native supervisor in its dedicated private-source owner. The target
@@ -409,9 +450,11 @@ pub struct HeldGuestMountedSandbox {
     held: lillux::sandbox::HeldPrivateSourceSandboxProcess,
     _committed: CommittedGuestSupervisorLaunchIntent,
     _source_copy: lillux::InheritedDescriptorAuthority,
+    _private_mount: lillux::InheritedDescriptorAuthority,
     _controls: Vec<lillux::InheritedDescriptorAuthority>,
     _network_inputs: Vec<lillux::InheritedDescriptorAuthority>,
     request: lillux::LinuxSandboxRequest,
+    report_sink: Option<GuestOwnerReportSink>,
 }
 
 /// Compose the admitted occurrence's sole import, installation and native
@@ -421,7 +464,11 @@ pub struct HeldGuestMountedSandbox {
 /// created never grants a replacement import or launch.
 ///
 /// `ready_boot_inputs` is present only for a leased guest: the verified
-/// activation inputs its Ready must name, in order.
+/// activation inputs its Ready must name, in order. `on_phase` is told as
+/// each long step begins, so the owner can report where it is.
+/// `supervisor_stderr`, when present, becomes the held supervisor's standard
+/// error so its owner can read what the supervisor reports about its own
+/// failure.
 ///
 /// The result is held, not running or Ready. Its caller must inspect Lillux's
 /// mount receipt, release exactly once, join the authenticated supervisor
@@ -435,46 +482,77 @@ pub fn prepare_authorized_held_guest_supervisor_once(
     source: lillux::sandbox::LinuxPrivateSourceFilesystem,
     import_deadline: lillux::time::MonotonicDeadline,
     ready_boot_inputs: Option<Vec<String>>,
+    supervisor_stderr: Option<std::fs::File>,
+    on_phase: &mut dyn FnMut(GuestOwnerStep),
 ) -> Result<HeldGuestMountedSandbox> {
-    ensure!(
-        source.limits() == installed_runtime.profile().private_source_limits(),
-        "private source limits differ from exact installed guest-owner profile"
-    );
-    installed_runtime.require_disjoint_directory_tree(occurrence)?;
-    installed_runtime.require_disjoint_directory_tree(source.root())?;
-    let verified =
-        installed_runtime.verify_import_documents(signed_import_bytes, signed_assignment_bytes)?;
-    verified.require_fresh_admission()?;
-    let stage_bytes = verified
-        .authorization()
-        .ticket
-        .framed_bytes
-        .checked_sub(20)
-        .context("guest package has no bounded staged-content floor")?;
-    ensure!(
-        stage_bytes <= source.limits().max_bytes,
-        "guest package cannot fit the installed private-source ceiling"
-    );
+    use GuestOwnerStep as Step;
+    (|| -> Result<_> {
+        ensure!(
+            source.limits() == installed_runtime.profile().private_source_limits(),
+            "private source limits differ from exact installed guest-owner profile"
+        );
+        Ok(())
+    })()
+    .refused_at(Step::PrivateSourceEntry)?;
+    installed_runtime
+        .require_disjoint_directory_tree(occurrence)
+        .refused_at(Step::OccurrenceRoot)?;
+    installed_runtime
+        .require_disjoint_directory_tree(source.root())
+        .refused_at(Step::PrivateSourceEntry)?;
+    let verified = installed_runtime
+        .verify_import_documents(signed_import_bytes, signed_assignment_bytes)
+        .refused_at(Step::ImportVerify)?;
+    verified
+        .require_fresh_admission()
+        .refused_at(Step::AdmissionExpired)?;
+    (|| -> Result<_> {
+        let stage_bytes = verified
+            .authorization()
+            .ticket
+            .framed_bytes
+            .checked_sub(crate::guest_import_authorization::GUEST_PACKAGE_FRAME_OVERHEAD_BYTES)
+            .context("guest package has no bounded staged-content floor")?;
+        ensure!(
+            stage_bytes <= source.limits().max_bytes,
+            "guest package cannot fit the installed private-source ceiling"
+        );
+        Ok(())
+    })()
+    .refused_at(Step::PrivateSourceCeiling)?;
     let authority = verified.authorization().clone();
     let context = authority.context();
     let inputs = &authority.guest_inputs;
-    let owner = GuestOccurrenceOwner::begin_authorized(occurrence, verified)?;
-    let staged = owner.stage_uploaded_once(upload, source, &context, inputs, import_deadline)?;
-    let installed = staged.install_base_once(&context, inputs)?;
-    let prepared = installed
-        .prepare_content_for_adoption(&context, inputs)?
-        .create_private_scratch_once(&context, inputs)?
-        .prepare_launch_artifacts_once(&context, inputs)?
-        .prepare_supervisor_request(
-            &context,
-            inputs,
-            installed_runtime.profile().owner_timeout_seconds(),
-        )?;
-    let prepared = prepared.with_ready_boot_inputs(&context, inputs, ready_boot_inputs)?;
-    let committed = prepared.commit_outer_launch_intent(&context, inputs)?;
+    let owner = GuestOccurrenceOwner::begin_authorized(occurrence, verified)
+        .refused_at(Step::OccurrenceRoot)?;
+    on_phase(Step::Stage);
+    let staged = owner
+        .stage_uploaded_once(upload, source, &context, inputs, import_deadline)
+        .refused_at(Step::Stage)?;
+    on_phase(Step::Install);
+    let installed = staged
+        .install_base_once(&context, inputs)
+        .refused_at(Step::Install)?;
+    on_phase(Step::LaunchPreparation);
+    let committed = (|| -> Result<_> {
+        let prepared = installed
+            .prepare_content_for_adoption(&context, inputs)?
+            .create_private_scratch_once(&context, inputs)?
+            .prepare_launch_artifacts_once(&context, inputs)?
+            .prepare_supervisor_request(
+                &context,
+                inputs,
+                installed_runtime.profile().owner_timeout_seconds(),
+            )?;
+        let prepared = prepared.with_ready_boot_inputs(&context, inputs, ready_boot_inputs)?;
+        prepared.commit_outer_launch_intent(&context, inputs)
+    })()
+    .refused_at(Step::LaunchPreparation)?;
+    on_phase(Step::HeldPrepare);
     committed
-        .prepare_mounted_sandbox_request(&context, inputs)?
-        .prepare_held_in_dedicated_owner()
+        .prepare_mounted_sandbox_request(&context, inputs)
+        .and_then(|request| request.prepare_held_in_dedicated_owner(supervisor_stderr))
+        .refused_at(Step::HeldPrepare)
 }
 
 /// The sole released native supervisor attempt. Applied launch is still only
@@ -485,10 +563,12 @@ pub struct ReleasedGuestMountedSandbox {
     held: lillux::sandbox::HeldPrivateSourceSandboxProcess,
     _committed: CommittedGuestSupervisorLaunchIntent,
     _source_copy: lillux::InheritedDescriptorAuthority,
+    _private_mount: lillux::InheritedDescriptorAuthority,
     _controls: Vec<lillux::InheritedDescriptorAuthority>,
     _network_inputs: Vec<lillux::InheritedDescriptorAuthority>,
     expected_launch: lillux::LinuxSandboxAppliedLaunchCommitments,
     expected_mounts: lillux::LinuxSandboxMountPreparationCommitments,
+    report_sink: Option<GuestOwnerReportSink>,
 }
 
 /// Terminal proof for the sole native supervisor target. A code-zero target
@@ -577,15 +657,23 @@ impl HeldGuestMountedSandbox {
             held: self.held,
             _committed: self._committed,
             _source_copy: self._source_copy,
+            _private_mount: self._private_mount,
             _controls: self._controls,
             _network_inputs: self._network_inputs,
             expected_launch,
             expected_mounts,
+            report_sink: self.report_sink,
         })
     }
 }
 
 impl ReleasedGuestMountedSandbox {
+    /// Where to record this supervisor's end for the controller, present
+    /// only when the occurrence has a relay mailbox.
+    pub fn report_sink(&self) -> Option<&GuestOwnerReportSink> {
+        self.report_sink.as_ref()
+    }
+
     /// Cancel the sole released supervisor attempt under the caller's fixed
     /// cleanup deadline. Lillux terminates the exact namespace-init lifetime
     /// and proves descendant death; a timeout retains this owner for further
@@ -695,6 +783,33 @@ fn check_applied_supervisor_receipt(
             && receipt.matches_post_release_mounts(expected_mounts)
             && receipt.owned_child_pid == child_pid,
         "released supervisor applied target or mounts differ from committed request"
+    );
+    Ok(())
+}
+
+/// The held supervisor's view admits read-only stage and network inputs and
+/// exactly one writable mount: the private parent at its fixed destination.
+fn require_held_supervisor_mounts(mounts: &[lillux::LinuxSandboxMount]) -> Result<()> {
+    let writable: Vec<_> = mounts
+        .iter()
+        .filter(|mount| mount.access == lillux::LinuxSandboxMountAccess::Writable)
+        .collect();
+    ensure!(
+        writable.len() == 1
+            && writable[0].destination
+                == std::path::Path::new(SUPERVISOR_PRIVATE_PARENT_MOUNT_DESTINATION),
+        "held supervisor admits only its private parent as a writable mount"
+    );
+    ensure!(
+        mounts
+            .iter()
+            .filter(|mount| {
+                mount.destination
+                    == std::path::Path::new(SUPERVISOR_PRIVATE_PARENT_MOUNT_DESTINATION)
+            })
+            .count()
+            == 1,
+        "held supervisor private parent is mounted more than once"
     );
     Ok(())
 }
@@ -927,12 +1042,28 @@ impl CommittedGuestSupervisorLaunchIntent {
             channels.iter().all(|(fd, _)| *fd != source_fd),
             "sealed source descriptor entered supervisor control channels"
         );
-        let mut mounts = vec![lillux::LinuxSandboxMount {
-            source_fd,
-            destination: PathBuf::from(SUPERVISOR_STAGE_MOUNT_DESTINATION),
-            access: lillux::LinuxSandboxMountAccess::ReadOnly,
-            layer: 0,
-        }];
+        let private_mount = artifacts
+            .private
+            .private_parent
+            .inherited_descriptor_authority()?
+            .duplicate_at_or_above(60)
+            .map_err(anyhow::Error::msg)?;
+        let mut mounts = vec![
+            lillux::LinuxSandboxMount {
+                source_fd,
+                destination: PathBuf::from(SUPERVISOR_STAGE_MOUNT_DESTINATION),
+                access: lillux::LinuxSandboxMountAccess::ReadOnly,
+                layer: 0,
+            },
+            lillux::LinuxSandboxMount {
+                source_fd: private_mount
+                    .inherited_descriptor()
+                    .map_err(anyhow::Error::msg)?,
+                destination: PathBuf::from(SUPERVISOR_PRIVATE_PARENT_MOUNT_DESTINATION),
+                access: lillux::LinuxSandboxMountAccess::Writable,
+                layer: 0,
+            },
+        ];
         for (source, destination) in network_inputs.iter().zip(network_destinations) {
             mounts.push(lillux::LinuxSandboxMount {
                 source_fd: source.inherited_descriptor().map_err(anyhow::Error::msg)?,
@@ -966,12 +1097,25 @@ impl CommittedGuestSupervisorLaunchIntent {
             aggregate_limits: None,
             target_limits: None,
         };
+        require_held_supervisor_mounts(&request.mounts)?;
+        let report_sink = relay_mailbox
+            .map(|mailbox| -> Result<_> {
+                Ok(GuestOwnerReportSink {
+                    mailbox: mailbox.try_clone()?,
+                    occurrence_id: parsed_bootstrap.occurrence_id.clone(),
+                    allocation_request_digest: parsed_bootstrap.allocation_request_digest.clone(),
+                    bootstrap_digest: parsed_bootstrap.digest()?,
+                })
+            })
+            .transpose()?;
         Ok(PreparedGuestMountedSandbox {
             _committed: self,
             _source_copy: source_copy,
+            _private_mount: private_mount,
             _controls: controls,
             _network_inputs: network_inputs,
             request,
+            report_sink,
         })
     }
 }
@@ -980,7 +1124,10 @@ impl PreparedGuestMountedSandbox {
     /// Enter the one-way native preparation cut in a dedicated, unprivileged
     /// owner process. Lillux exits that process on a source mismatch or failed
     /// namespace transition; this must never run on a shared daemon worker.
-    pub fn prepare_held_in_dedicated_owner(mut self) -> Result<HeldGuestMountedSandbox> {
+    pub fn prepare_held_in_dedicated_owner(
+        mut self,
+        supervisor_stderr: Option<std::fs::File>,
+    ) -> Result<HeldGuestMountedSandbox> {
         let installed = &mut self
             ._committed
             ._prepared
@@ -999,6 +1146,7 @@ impl PreparedGuestMountedSandbox {
             OsStr::new(&stage_name),
             std::path::Path::new(SUPERVISOR_STAGE_MOUNT_DESTINATION),
             self.request.clone(),
+            supervisor_stderr,
         );
         let receipt = held
             .held()
@@ -1014,9 +1162,11 @@ impl PreparedGuestMountedSandbox {
             held,
             _committed: self._committed,
             _source_copy: self._source_copy,
+            _private_mount: self._private_mount,
             _controls: self._controls,
             _network_inputs: self._network_inputs,
             request: self.request,
+            report_sink: self.report_sink,
         })
     }
 }
@@ -1482,10 +1632,13 @@ impl PreparedGuestPrivateInputs {
         state_root.require_disjoint_directory_tree(&self.private_parent)?;
         state_root.require_disjoint_directory_tree(imported.root())?;
         let relay_mailbox = if bootstrap.controller.relay().is_ok() {
+            // The mailbox lives inside this occurrence's own directory, which
+            // the signed parent and the occurrence name together address.
             let parent = &self.content._installed.owner.occurrence;
             ensure!(
                 parent.path()
-                    == std::path::Path::new(&bootstrap.controller.relay()?.private_mailbox_parent,),
+                    == std::path::Path::new(&bootstrap.controller.relay()?.private_mailbox_parent)
+                        .join(&bootstrap.occurrence_id),
                 "signed relay mailbox parent differs from original occurrence root"
             );
             // Q inputs admit only ProductManifest and PrivateScratch. Their
@@ -2817,6 +2970,44 @@ mod recovery_binding_tests {
     }
 
     #[test]
+    fn held_supervisor_admits_only_its_private_parent_writable() {
+        let mount = |destination: &str, access| lillux::LinuxSandboxMount {
+            source_fd: 60,
+            destination: PathBuf::from(destination),
+            access,
+            layer: 0,
+        };
+        use lillux::LinuxSandboxMountAccess::{ReadOnly, Writable};
+        let stage = mount(SUPERVISOR_STAGE_MOUNT_DESTINATION, ReadOnly);
+        let private = mount(SUPERVISOR_PRIVATE_PARENT_MOUNT_DESTINATION, Writable);
+        require_held_supervisor_mounts(&[stage.clone(), private.clone()]).unwrap();
+        assert!(require_held_supervisor_mounts(std::slice::from_ref(&stage)).is_err());
+        assert!(
+            require_held_supervisor_mounts(&[
+                stage.clone(),
+                private.clone(),
+                mount("/ryeos/elsewhere", Writable),
+            ])
+            .is_err()
+        );
+        assert!(
+            require_held_supervisor_mounts(&[
+                stage.clone(),
+                mount(SUPERVISOR_PRIVATE_PARENT_MOUNT_DESTINATION, ReadOnly),
+            ])
+            .is_err()
+        );
+        assert!(
+            require_held_supervisor_mounts(&[
+                stage,
+                private.clone(),
+                mount(SUPERVISOR_PRIVATE_PARENT_MOUNT_DESTINATION, ReadOnly),
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
     fn supervisor_network_mounts_refuse_overlap_and_invalid_sources() {
         let temporary = tempfile::tempdir().unwrap();
         let resolver = temporary.path().join("resolver");
@@ -2946,5 +3137,56 @@ mod recovery_binding_tests {
             .create_child(OsStr::new("retained"), 0o700)
             .unwrap();
         assert!(ensure_child_binding(&occurrence, "retained", &child).is_err());
+    }
+}
+
+#[cfg(test)]
+mod owner_report_sink_tests {
+    use super::*;
+    use ryeos_external_execution_contract::guest_owner_report::{
+        GuestOwnerReportFile, GuestSupervisorExit, GuestSupervisorStatus,
+    };
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    #[test]
+    fn report_is_one_canonical_private_file_bound_to_its_occurrence() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let sink = GuestOwnerReportSink {
+            mailbox: lillux::PinnedDirectory::open(directory.path())
+                .unwrap()
+                .unwrap(),
+            occurrence_id: "sbx-a".into(),
+            allocation_request_digest: "a".repeat(64),
+            bootstrap_digest: "b".repeat(64),
+        };
+        let exit = GuestSupervisorExit::from_raw_tail(GuestSupervisorStatus::Code(126), b"cause\n");
+        sink.publish(exit.clone()).unwrap();
+        let path = directory.path().join("owner-report.json");
+        let metadata = std::fs::metadata(&path).unwrap();
+        assert_eq!(metadata.permissions().mode() & 0o7777, 0o600);
+        assert_eq!(
+            metadata.uid(),
+            std::fs::metadata(directory.path()).unwrap().uid()
+        );
+        assert_eq!(
+            GuestOwnerReportFile::decode_for(
+                &std::fs::read(&path).unwrap(),
+                "sbx-a",
+                &"a".repeat(64),
+                &"b".repeat(64)
+            )
+            .unwrap(),
+            exit
+        );
+        // A second report never replaces the first, and no temp file lingers.
+        assert!(
+            sink.publish(GuestSupervisorExit::from_raw_tail(
+                GuestSupervisorStatus::Code(1),
+                b"later"
+            ))
+            .is_err()
+        );
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
     }
 }

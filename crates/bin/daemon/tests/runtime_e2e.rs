@@ -453,6 +453,9 @@ effective_trust:
   include_references: false
 location:
   directory: {kind}_items
+launch_trust:
+  allowed_spaces: [bundle, project]
+  allowed_trust: [trusted_bundle, trusted_project]
 execution:
   delegate:
     via: runtime_registry

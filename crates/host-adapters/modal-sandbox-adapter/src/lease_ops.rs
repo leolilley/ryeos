@@ -8,7 +8,7 @@
 //! was never sent, or the facade refused it before creating anything on a
 //! first and only contact.
 
-use std::time::Duration;
+use lillux::time::Duration;
 
 use ryeos_external_execution_contract::{
     AllocationReservation, BoundOccurrence, LifecycleAdapterResponse, LifecycleOperationCommon,
@@ -127,10 +127,12 @@ fn digest_of<T: Serialize>(evidence: &T) -> Option<String> {
 fn allocation_pending(
     common: &LifecycleOperationCommon,
     reservation: &AllocationReservation,
+    reason: &'static str,
 ) -> LifecycleAdapterResponse {
     LifecycleAdapterResponse::AllocationPending {
         operation_id: common.operation_id.clone(),
         request_digest: reservation.request_digest.clone(),
+        reason: reason.to_owned(),
     }
 }
 
@@ -139,6 +141,7 @@ fn no_occurrence(
     reservation: &AllocationReservation,
     name: &str,
     basis: &'static str,
+    reason: &'static str,
     refusal: Option<&'static str>,
 ) -> LifecycleAdapterResponse {
     let evidence = NoOccurrenceEvidence {
@@ -156,8 +159,9 @@ fn no_occurrence(
             operation_id: common.operation_id.clone(),
             request_digest: reservation.request_digest.clone(),
             provider_observation_digest: digest,
+            reason: refusal.unwrap_or(reason).to_owned(),
         },
-        None => allocation_pending(common, reservation),
+        None => allocation_pending(common, reservation, "evidence_unencodable"),
     }
 }
 
@@ -178,11 +182,12 @@ pub fn allocate<T: FacadeTransport>(
             reservation,
             &name,
             "lifetime below the facade minimum",
+            "lifetime_below_minimum",
             None,
         );
     }
     if timeout > PROVIDER_MAXIMUM_LEASE_SECONDS {
-        return allocation_pending(common, reservation);
+        return allocation_pending(common, reservation, "lifetime_above_maximum");
     }
     let network = network_object(policy);
     let mut contacted = false;
@@ -197,10 +202,11 @@ pub fn allocate<T: FacadeTransport>(
                     reservation,
                     &name,
                     "transport_no_request_sent",
+                    "not_sent",
                     None,
                 );
             }
-            Err(_) => return allocation_pending(common, reservation),
+            Err(_) => return allocation_pending(common, reservation, "create_no_response"),
         };
         if reply.observation::<CreateObservation>().is_some() {
             return bind_created(client, context, common, reservation, policy, &name, &reply);
@@ -210,20 +216,27 @@ pub fn allocate<T: FacadeTransport>(
                 contacted = true;
                 recovered = true;
                 if !settle_untagged(client, context, &name) {
-                    return allocation_pending(common, reservation);
+                    return allocation_pending(common, reservation, "untagged_recovery_failed");
                 }
             }
             (Some(code), _) if code.starts_with("name_taken_") => {
-                return allocation_pending(common, reservation);
+                return allocation_pending(common, reservation, "name_taken_unresolved");
             }
             (Some(code), _) if !contacted => {
-                return no_occurrence(common, reservation, &name, "facade_refusal", Some(code));
+                return no_occurrence(
+                    common,
+                    reservation,
+                    &name,
+                    "facade_refusal",
+                    "facade_refusal",
+                    Some(code),
+                );
             }
             (None, Some(PROVIDER_NOT_FOUND)) if !retried_missing => {
                 contacted = true;
                 retried_missing = true;
             }
-            _ => return allocation_pending(common, reservation),
+            _ => return allocation_pending(common, reservation, "create_unrecognized"),
         }
     }
 }
@@ -247,7 +260,7 @@ fn settle_untagged<T: FacadeTransport>(
             return true;
         }
         if attempt == 0 {
-            std::thread::sleep(context.untagged_settle);
+            lillux::time::sleep(context.untagged_settle);
         }
     }
     let _ = client.terminate_by_name(name);
@@ -264,7 +277,7 @@ fn bind_created<T: FacadeTransport>(
     reply: &Reply,
 ) -> LifecycleAdapterResponse {
     let Some(observation) = reply.observation::<CreateObservation>() else {
-        return allocation_pending(common, reservation);
+        return allocation_pending(common, reservation, "create_observation_missing");
     };
     let consistent = observation.created != observation.name_taken
         && observation.name == name
@@ -279,7 +292,7 @@ fn bind_created<T: FacadeTransport>(
             )
         && sorted_compact_sha256(&observation.policy) == observation.policy_sha256;
     if !consistent {
-        return allocation_pending(common, reservation);
+        return allocation_pending(common, reservation, "create_observation_inconsistent");
     }
     let evidence = AllocationEvidence {
         schema: 1,
@@ -302,7 +315,7 @@ fn bind_created<T: FacadeTransport>(
             occurrence_id: observation.sandbox_id.clone(),
             provider_observation_digest: digest,
         },
-        None => allocation_pending(common, reservation),
+        None => allocation_pending(common, reservation, "evidence_unencodable"),
     }
 }
 
@@ -357,7 +370,7 @@ pub fn reconcile_allocation<T: FacadeTransport>(
             observation.tags.get(POLICY_TAG),
         ) else {
             if observation.found && observation.tagged == Some(false) && attempt == 0 {
-                std::thread::sleep(context.untagged_settle);
+                lillux::time::sleep(context.untagged_settle);
                 continue;
             }
             break;
@@ -392,10 +405,10 @@ pub fn reconcile_allocation<T: FacadeTransport>(
                 occurrence_id: sandbox_id.to_owned(),
                 provider_observation_digest: digest,
             },
-            None => allocation_pending(common, reservation),
+            None => allocation_pending(common, reservation, "evidence_unencodable"),
         };
     }
-    allocation_pending(common, reservation)
+    allocation_pending(common, reservation, "no_exact_observation")
 }
 
 fn termination_pending(

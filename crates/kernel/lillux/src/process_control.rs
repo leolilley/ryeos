@@ -23,24 +23,29 @@ pub const CONTROLLER_MEMLOCK_CEILING_BYTES: u64 = 256 * 1024 * 1024;
 pub const CONTROLLER_NOFILE_SOFT_CEILING: u64 = 65_536;
 mod host_capability;
 mod oci_lifecycle;
-// This is the diagnostic witness that a namespace can outlive a process
-// group. It is not a second production lifecycle backend: membership scans
-// cannot provide the kernel freeze barrier required by workspace capture.
-#[cfg(all(test, target_os = "linux"))]
+// Descendant containment by retained PID-namespace init: termination,
+// recovery and settlement without a cgroup, and explicitly no quiescence.
+#[cfg(target_os = "linux")]
 mod pid_namespace;
+#[cfg(target_os = "linux")]
+pub use pid_namespace::{
+    PidNamespaceIdentity, PinnedPidNamespace, cached_pid_namespace_containment_probe,
+    pid_namespace_proof_source, probe_pid_namespace_containment,
+};
 mod scope;
 pub use host_capability::{
     ACCOUNTING, CapabilityEvidence, CapabilityRequirement, CapabilityRequirementSpec, CgroupFacts,
     CgroupLimit, DirectoryStepFacts, HOST_FACTS_VERSION, HOST_PROVIDER, HostCapabilities,
     HostFacts, HostLifetimeBound, ISOLATION_NAMESPACES, MAX_CAPABILITY_ENTRIES,
     MAX_CAPABILITY_NAME_BYTES, MAX_CAPABILITY_TEXT_BYTES, MemlockFacts, PERSISTENCE_DURABLE_STATE,
-    PrivateDirectoryFacts, ProbeOutcome, ProofSource, RECOVERY_ENCLOSURE,
-    RECOVERY_ENCLOSURE_TRUSTED_INIT, RESIDENCY_CAPABILITIES, RESIDENCY_LOCKED,
-    RESIDENCY_SWAP_ABSENT, RESIDENCY_SWAP_LIMIT, ResidencyProof, RootStorageFacts, SCOPE_LIMITS,
-    STORAGE_DURABLE_ROOT, TERMINATION_ENCLOSURE, TERMINATION_ENCLOSURE_TRUSTED_INIT,
+    PID_NAMESPACE_PROVIDER, PrivateDirectoryFacts, ProbeOutcome, ProofSource,
+    QUIESCENCE_PID_NAMESPACE, RECOVERY_ENCLOSURE, RECOVERY_ENCLOSURE_TRUSTED_INIT,
+    RECOVERY_PID_NAMESPACE, RESIDENCY_CAPABILITIES, RESIDENCY_LOCKED, RESIDENCY_SWAP_ABSENT,
+    RESIDENCY_SWAP_LIMIT, ResidencyProof, RootStorageFacts, SCOPE_LIMITS, STORAGE_DURABLE_ROOT,
+    TERMINATION_ENCLOSURE, TERMINATION_ENCLOSURE_TRUSTED_INIT, TERMINATION_PID_NAMESPACE,
     admit_enclosure_inits, current_host_generation, decide_durable_root, decide_durable_state,
-    decide_private_directory, floor_entry_refusal, is_scope_capability, is_weaker_grade,
-    met_by_strongest, satisfies,
+    decide_private_directory, floor_entry_refusal, host_kernel_is_gvisor, is_scope_capability,
+    is_weaker_grade, kernel_version_is_gvisor, met_by_strongest, satisfies,
 };
 pub use oci_lifecycle::{
     OciHookState, OciLifecycleGeneration, OciLifecycleIntent, OciPreparationPhase,
@@ -56,6 +61,26 @@ pub use scope::{
 #[cfg(target_os = "linux")]
 use std::os::fd::AsRawFd;
 
+/// What the `group_leader_*` coordinates of an identity mean.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GroupBasis {
+    /// A real, pinned process-group leader. The default; absent from stored
+    /// identities, so every existing row and wire form is unchanged.
+    #[default]
+    ProcessGroup,
+    /// Membership in a retained containment is the authority and no group was
+    /// pinned: the coordinates repeat the process's own birth and name no
+    /// group. Nothing may signal, freeze or reopen a group from them.
+    Contained,
+}
+
+impl GroupBasis {
+    pub fn is_process_group(&self) -> bool {
+        matches!(self, Self::ProcessGroup)
+    }
+}
+
 /// Durable coordinates required to recover one exact process incarnation.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -65,6 +90,9 @@ pub struct ExactProcessIdentity {
     pub target_start_time_ticks: u64,
     pub group_leader_pid: u32,
     pub group_leader_start_time_ticks: u64,
+    /// See [`GroupBasis`].
+    #[serde(default, skip_serializing_if = "GroupBasis::is_process_group")]
+    pub group_basis: GroupBasis,
 }
 
 /// Descriptor-owned access to one exact live process's filesystem and mount
@@ -100,6 +128,7 @@ impl ExactProcessRoot {
         use std::os::fd::AsFd as _;
 
         identity.validate()?;
+        identity.require_process_group_basis()?;
         let pidfd = linux::open_pidfd(identity.target_pid)?;
         let observed = linux::capture_from_pidfd(
             identity.target_pid,
@@ -590,6 +619,19 @@ pub(crate) fn capture_exact_process_identity_from_pidfd(
     linux::capture_from_pidfd(target_pid, expected_group_leader, target_pidfd)
 }
 
+/// Identity of a process whose authority is membership in a retained
+/// containment, not its process group. It requires no live group leader (an
+/// orphaned-group member or a connector that called `setsid` has none to
+/// pin), so the group coordinates are the process's own birth and are not
+/// evidence of a group.
+#[cfg(target_os = "linux")]
+pub(crate) fn capture_contained_process_identity_from_pidfd(
+    target_pid: u32,
+    target_pidfd: std::os::fd::BorrowedFd<'_>,
+) -> Result<ExactProcessIdentity, String> {
+    linux::capture_contained_from_pidfd(target_pid, target_pidfd)
+}
+
 /// One completed process barrier, retaining whichever exact lifecycle
 /// authority admission selected. Applications need no backend or OS branch.
 pub struct QuiescedProcesses {
@@ -663,6 +705,18 @@ struct PinnedMember {
 }
 
 impl ExactProcessIdentity {
+    /// Group signalling, freezing and group-rooted access need a real pinned
+    /// leader. An identity captured by containment membership has none.
+    pub(crate) fn require_process_group_basis(&self) -> Result<(), String> {
+        if self.group_basis != GroupBasis::ProcessGroup {
+            return Err(
+                "identity was captured by containment membership and names no process group"
+                    .to_owned(),
+            );
+        }
+        Ok(())
+    }
+
     pub(crate) fn validate(&self) -> Result<(), String> {
         if self.boot_id.trim().is_empty()
             || self.target_pid <= 1
@@ -761,6 +815,10 @@ impl ExactProcessIdentity {
             target_start_time_ticks,
             group_leader_pid,
             group_leader_start_time_ticks,
+            // Reviewed: the persisted version-1 digest is unchanged for every
+            // existing identity, and a contained identity's coordinates are
+            // its own birth, so the basis does not enter the digest.
+            group_basis: _,
         } = self;
         let wire = Wire {
             boot_identity: boot_id,
@@ -1049,6 +1107,7 @@ mod linux {
         timeout: Duration,
     ) -> Result<QuiescedProcessGroup, String> {
         identity.validate()?;
+        identity.require_process_group_basis()?;
         let current_pid = std::process::id();
         let current_group = unsafe { libc::getpgrp() };
         if identity.target_pid == current_pid
@@ -1308,6 +1367,33 @@ mod linux {
             target_start_time_ticks: target.start_time_ticks,
             group_leader_pid,
             group_leader_start_time_ticks: group.start_time_ticks,
+            group_basis: crate::GroupBasis::ProcessGroup,
+        })
+    }
+
+    pub(super) fn capture_contained_from_pidfd(
+        target_pid: u32,
+        target_pidfd: BorrowedFd<'_>,
+    ) -> Result<ExactProcessIdentity, String> {
+        if target_pid <= 1 {
+            return Err("exact target PID is unsafe".to_owned());
+        }
+        pidfd_signal(target_pidfd.as_raw_fd(), 0, 0)
+            .map_err(|error| format!("probe exact target pidfd: {error}"))?;
+        let target = read_process_stat(target_pid)
+            .map_err(|error| format!("read exact target process stat: {error}"))?;
+        if matches!(target.state, 'Z' | 'X') {
+            return Err("exact target exited during identity capture".to_owned());
+        }
+        pidfd_signal(target_pidfd.as_raw_fd(), 0, 0)
+            .map_err(|error| format!("reprobe exact target pidfd: {error}"))?;
+        Ok(ExactProcessIdentity {
+            boot_id: read_boot_id()?,
+            target_pid,
+            target_start_time_ticks: target.start_time_ticks,
+            group_leader_pid: target_pid,
+            group_leader_start_time_ticks: target.start_time_ticks,
+            group_basis: super::GroupBasis::Contained,
         })
     }
 
@@ -1365,6 +1451,20 @@ mod linux {
         Ok(unsafe { OwnedFd::from_raw_fd(raw) })
     }
 
+    /// The PID a pidfd names in this process's PID namespace, read from its
+    /// fdinfo. `-1` means the task has exited. This is the descriptor's own
+    /// testimony, unlike a numeric PID read from /proc.
+    pub(super) fn pidfd_pid(pidfd: i32) -> Result<i64, String> {
+        let info = std::fs::read_to_string(format!("/proc/self/fdinfo/{pidfd}"))
+            .map_err(|error| format!("read pidfd fdinfo: {error}"))?;
+        info.lines()
+            .find_map(|line| line.strip_prefix("Pid:"))
+            .ok_or_else(|| "pidfd fdinfo has no Pid".to_owned())?
+            .trim()
+            .parse::<i64>()
+            .map_err(|error| format!("parse pidfd fdinfo Pid: {error}"))
+    }
+
     pub(super) fn pidfd_signal(pidfd: i32, signal: i32, flags: u32) -> std::io::Result<()> {
         let result = unsafe {
             libc::syscall(
@@ -1413,6 +1513,69 @@ mod linux {
     }
 }
 
+#[cfg(all(test, target_os = "linux"))]
+mod contained_identity_tests {
+    use std::io::Read as _;
+    use std::os::fd::AsFd as _;
+    use std::os::unix::process::CommandExt as _;
+    use std::process::{Command, Stdio};
+
+    #[test]
+    fn contained_identity_needs_no_live_group_leader() {
+        // The group leader exits at once, leaving `sleep` an orphaned-group
+        // member: nothing remains to pin as its group.
+        let mut leader = Command::new("sh")
+            .args(["-c", "sleep 30 >/dev/null 2>&1 & echo $!"])
+            .process_group(0)
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut text = String::new();
+        leader
+            .stdout
+            .take()
+            .unwrap()
+            .read_to_string(&mut text)
+            .unwrap();
+        leader.wait().unwrap();
+        let pid: u32 = text.trim().parse().unwrap();
+        let pidfd = super::linux::open_pidfd(pid).unwrap();
+        let group_required =
+            super::capture_exact_process_identity_from_pidfd(pid, None, pidfd.as_fd());
+        let contained = super::capture_contained_process_identity_from_pidfd(pid, pidfd.as_fd());
+        unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+        assert!(
+            group_required.is_err(),
+            "the group requirement cannot be met"
+        );
+        let identity = contained.expect("membership, not the group, is the authority");
+        assert_eq!(identity.target_pid, pid);
+        assert_eq!(identity.group_leader_pid, pid);
+        identity.incarnation_digest().unwrap();
+        // The marker is type-level: it is stored only when contained (so
+        // every existing identity serializes unchanged) and no group
+        // operation accepts it.
+        assert_eq!(identity.group_basis, super::GroupBasis::Contained);
+        assert_eq!(
+            serde_json::to_value(&identity).unwrap()["group_basis"],
+            "contained"
+        );
+        let mut ordinary = identity.clone();
+        ordinary.group_basis = super::GroupBasis::ProcessGroup;
+        assert!(
+            serde_json::to_value(&ordinary)
+                .unwrap()
+                .get("group_basis")
+                .is_none()
+        );
+        let error = super::quiesce_exact_process_group(&identity, std::time::Duration::ZERO)
+            .expect_err("a contained identity names no group to freeze");
+        assert!(error.contains("names no process group"), "{error}");
+        let error = super::ExactProcessRoot::open(&identity).err().unwrap();
+        assert!(error.contains("names no process group"), "{error}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -1426,6 +1589,7 @@ mod tests {
                     target_start_time_ticks: ticks,
                     group_leader_pid: pid,
                     group_leader_start_time_ticks: ticks,
+                    group_basis: crate::GroupBasis::ProcessGroup,
                 };
                 let canonical = crate::canonical_json(&serde_json::json!({
                     "version": 1, "boot_identity": boot,
@@ -1447,6 +1611,7 @@ mod tests {
             target_start_time_ticks: 1,
             group_leader_pid: 2,
             group_leader_start_time_ticks: 1,
+            group_basis: crate::GroupBasis::ProcessGroup,
         };
         assert!(invalid.incarnation_digest_bytes().is_err());
     }
@@ -1460,6 +1625,7 @@ mod tests {
             target_start_time_ticks: 0,
             group_leader_pid: 0,
             group_leader_start_time_ticks: 0,
+            group_basis: crate::GroupBasis::ProcessGroup,
         };
         assert!(quiesce_exact_process_group(&identity, Duration::ZERO).is_err());
     }

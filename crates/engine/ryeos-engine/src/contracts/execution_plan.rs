@@ -208,6 +208,9 @@ pub struct EngineContext {
     pub isolation_checkpoint_authority: Option<Arc<lillux::PinnedDirectory>>,
     /// Typed callback-socket fact paired with this plan's daemon callback env.
     pub isolation_daemon_socket_path: Option<PathBuf>,
+    /// The daemon admitted the socket above as a captured-compatible
+    /// callback; only that fact lets a captured launch carry it.
+    pub isolation_captured_callback_socket: bool,
     pub isolation_bundle_roots: Vec<PathBuf>,
     pub isolation_node_trusted_keys_dir: Option<PathBuf>,
     pub isolation_verified_code: Vec<crate::isolation::IsolationVerifiedCode>,

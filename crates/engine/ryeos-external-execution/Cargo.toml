@@ -19,12 +19,19 @@ tar = { workspace = true }
 
 [dev-dependencies]
 libc = { workspace = true }
+lillux = { workspace = true, features = ["test-support"] }
 ryeos-state = { workspace = true, features = ["test-support"] }
+serde_yaml = { workspace = true }
 tempfile = { workspace = true }
 
 [[test]]
 name = "guest_occurrence_owner_native"
 path = "tests/guest_occurrence_owner_native.rs"
+harness = false
+
+[[test]]
+name = "guest_start_rehearsal_native"
+path = "tests/guest_start_rehearsal_native.rs"
 harness = false
 
 [lints]

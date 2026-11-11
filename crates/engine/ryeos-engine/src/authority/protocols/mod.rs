@@ -17,9 +17,10 @@ pub use builder::{
     BuildError, BuildRequest, CallbackBindings, build_method_call_stdin, build_subprocess_spec,
 };
 pub use descriptor::{
-    PersistentSessionChannel, PersistentSessionCleanupAuthority, PersistentSessionFraming,
-    PersistentSessionProtocol, ProtocolDescriptor, QualificationCallbackAuthority,
-    validate_method_runtime_protocol, validate_persistent_session_protocol,
+    CapturedCompatibleCallback, PersistentSessionChannel, PersistentSessionCleanupAuthority,
+    PersistentSessionFraming, PersistentSessionProtocol, ProtocolDescriptor,
+    QualificationCallbackAuthority, validate_method_runtime_protocol,
+    validate_persistent_session_protocol,
 };
 pub use registry::{
     ProtocolError, ProtocolRegistry, VerifiedProtocol, validate_admitted_protocol_descriptor,

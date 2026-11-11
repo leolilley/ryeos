@@ -1,0 +1,88 @@
+# ryeos:signed:2026-10-31T02:06:51Z:e69bfffd77344b72f6df61f0bfb9ba05709fdf8e97242339354580391e776a53:OKgbHVU335X9B+ZJQbp/vDMthKRvIQZtYrGno5m507e9ZBVQWJEha/eEmXvG78XgyZkBU93O3JKoklva3pbBCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "ryeos-runtime/model-providers"
+# Google Generative Language API, native streaming endpoint, for hosted Gemma 4.
+# The request body carries no thinkingConfig: Google rejects thinking settings
+# for gemma-* models, so this provider never sends one.
+# No `pricing` block: the route is metered by Google, and this config does not
+# pin a tariff, so turn cost is recorded as `unpriced` rather than as free.
+family: google_generate_content
+transport:
+  kind: remote_http
+  base_url: "https://generativelanguage.googleapis.com/v1beta/models/{model}:streamGenerateContent?alt=sse"
+auth:
+  env_var: GEMINI_API_KEY
+  header_name: x-goog-api-key
+  prefix: ""
+headers:
+  Content-Type: application/json
+body_template:
+  contents: "{messages}"
+body_extra:
+  generationConfig:
+    maxOutputTokens: 4096
+schemas:
+  accounting: {require_usage: true}
+  messages:
+    role_map: {user: user, assistant: model}
+    content_key: parts
+    text_placement: parts_array
+    assistant_tool_calls_placement: inline_blocks
+    text_block_template:
+      text: "{text}"
+    system_message:
+      mode: body_inject
+      template:
+        systemInstruction:
+          parts:
+            - text: "{system}"
+    tool_result:
+      role: user
+      wrap_mode: content_blocks
+      block_template:
+        functionResponse:
+          name: "{tool_name}"
+          response:
+            content: "{content}"
+    tool_call_block_template:
+      functionCall:
+        name: "{name}"
+        args: "{input}"
+  tools:
+    template:
+      name: "{name}"
+      description: "{description}"
+      parameters: "{schema}"
+    list_wrap: functionDeclarations
+  streaming:
+    mode: complete_chunks
+    metadata:
+      finish_reason_path: "candidates.0.finishReason"
+      response_id_path: responseId
+      error:
+        path: error
+        message_path: message
+        code_path: code
+    paths:
+      content_path: "candidates.0.content.parts"
+      text_field: text
+      thought_field: thought
+      tool_call_field: functionCall
+      tool_call_name_path: "functionCall.name"
+      tool_call_args_path: "functionCall.args"
+      usage_path: usageMetadata
+      input_tokens_field: promptTokenCount
+      output_tokens_field: candidatesTokenCount
+      finish_reason_path: "candidates.0.finishReason"
+  output_limit: {path: generationConfig.maxOutputTokens, semantics: provider_native_output_tokens}
+extra:
+  stream_url: ""
+  setup:
+    display_name: Google Gemini API
+    priority: 30
+    credential: {label: API key, secret_name: GEMINI_API_KEY, input: secret}
+    help_url: https://aistudio.google.com/apikey
+    validation: {ref: "service:model-providers/validate", url: "https://generativelanguage.googleapis.com/v1beta/models", timeout_seconds: 15}
+    models:
+      - {name: gemma-4-31b-it, display_name: Gemma 4 31B IT, context_window: 256000, recommended: true}
+  available_models:
+    gemma: [gemma-4-31b-it]

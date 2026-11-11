@@ -69,7 +69,7 @@ fn project_inner(
         );
     }
     let result = ProductQualificationResult::from_value(&request.terminal.result)
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| format!("{error:#}"))?;
     use ryeos_handler_protocol::ExecutionEvidenceCandidateSubordinateAttemptWire;
     let candidate = if request.config == serde_json::json!({"subordinate":"remote_consumer"}) {
         if result.probe_evidence.get("scoped_attempt").is_some() {

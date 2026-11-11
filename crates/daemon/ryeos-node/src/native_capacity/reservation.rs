@@ -678,6 +678,10 @@ pub struct ReservationParts {
     // retry after a refused settlement keeps that first claim and never
     // takes a fresher one, so the settlement it retries cannot re-decide.
     rollover_claim: OnceLock<Option<RolloverClaim>>,
+    // The retired budget facade's final counters, fixed by the first release
+    // call alongside the claim. They are the account owner's own evidence of
+    // spent work; a work-margin claim is accepted only against them.
+    spent_work: OnceLock<Option<lillux_sqlite::OriginalNativeBudgetSnapshot>>,
 }
 
 /// One original reservation under custody: its end releases a settled
@@ -714,6 +718,56 @@ impl std::ops::DerefMut for LiveNativeCapacityReservation {
 pub struct RolloverClaim {
     /// Service-refusal latch bits at the moment of the claim; any FACT bit forbids it.
     pub latch_bits: u8,
+    /// Which planned margin the stop owner observed first.
+    pub margin: PlannedMargin,
+}
+
+/// A planned point before the incarnation's resources run out, at which the
+/// daemon begins an orderly stop so the next incarnation can follow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlannedMargin {
+    /// The signed rollover drain margin before the service-window edge.
+    Time,
+    /// The signed rollover work margin before the prepaid service work ends.
+    Work,
+}
+
+impl PlannedMargin {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Time => "time",
+            Self::Work => "work",
+        }
+    }
+}
+
+/// Whether service work spent has reached the planned work rollover point:
+/// `limit - reserve - margin`, where `reserve` is held back for cleanup.
+pub fn work_margin_reached(spent: u64, limit: u64, reserve: u64, margin: u64) -> bool {
+    spent >= limit.saturating_sub(reserve).saturating_sub(margin)
+}
+
+/// Whether final budget counters prove the work margin of this very policy:
+/// the counters must describe the envelope the policy prepaid.
+pub(super) fn work_margin_proven(
+    incarnation: &ryeos_node_runtime::node_policy::sections::native_capacity::NativeIncarnationEnvelope,
+    spent: Option<&lillux_sqlite::OriginalNativeBudgetSnapshot>,
+) -> bool {
+    // A policy without a work margin plans no work rollover, so no counters
+    // can prove one.
+    let Some(margin) = incarnation.rollover_work_margin_steps else {
+        return false;
+    };
+    spent.is_some_and(|counters| {
+        counters.allocator_steps_limit == incarnation.units.allocator_steps
+            && counters.cleanup_reserved == incarnation.units.cleanup_steps
+            && work_margin_reached(
+                counters.allocator_steps,
+                counters.allocator_steps_limit,
+                counters.cleanup_reserved,
+                margin,
+            )
+    })
 }
 
 enum ReleasedReservation {
@@ -2621,6 +2675,7 @@ impl SettledLiveNative {
         drop(original.late.take());
         // The settled claim is a plain copied observation; nothing to settle.
         original.rollover_claim.take();
+        original.spent_work.take();
         let released = original
             .released
             .take()
@@ -2964,7 +3019,8 @@ impl ReservationParts {
                 // Only a served region release carries the rollover claim; a
                 // before-region release above is never a served window.
                 let claim = self.rollover_claim.get().copied().flatten();
-                account.settle_released(inputs, released, claim, &|steps| {
+                let spent = self.spent_work.get().and_then(Option::as_ref);
+                account.settle_released(inputs, released, claim, spent, &|steps| {
                     inputs.require_original(true)?;
                     late.prepay(0, steps)
                 })?;
@@ -3051,6 +3107,7 @@ impl LiveNativeCapacityReservation {
             late: None,
             physical_registry: Mutex::new(None),
             rollover_claim: OnceLock::new(),
+            spent_work: OnceLock::new(),
         });
         let result = (|| -> Result<()> {
             let original: &mut ReservationParts = &mut owner;
@@ -3265,6 +3322,12 @@ impl LiveNativeCapacityReservation {
             // Fix the claim before any check can refuse: the first call's
             // observation is the one every retry settles under.
             original.rollover_claim.get_or_init(|| claim);
+            original.spent_work.get_or_init(|| {
+                original
+                    .budget
+                    .get()
+                    .and_then(|budget| budget.retained_retirement_snapshot().ok())
+            });
             original.inputs()?.require_original(true)?;
             // Match the outside receipt before consulting any region state.
             // The original mapping may already be gone and account writes may
@@ -3440,6 +3503,7 @@ mod custody_drop_tests {
             late: None,
             physical_registry: Mutex::new(None),
             rollover_claim: OnceLock::new(),
+            spent_work: OnceLock::new(),
         })
     }
 
@@ -3659,5 +3723,74 @@ mod tests {
             checked += 1;
         }
         assert!(checked > 0, "no shipped profile declares native capacity");
+    }
+}
+
+#[cfg(test)]
+mod work_margin_proof_tests {
+    use super::*;
+    use ryeos_node_runtime::node_policy::sections::native_capacity::{
+        NativeCapacityUnits, NativeIncarnationEnvelope,
+    };
+
+    fn incarnation() -> NativeIncarnationEnvelope {
+        NativeIncarnationEnvelope {
+            units: NativeCapacityUnits {
+                storage_bytes: 67_108_864,
+                host_control_storage_bytes: 1_048_576,
+                allocator_steps: 1_000,
+                connection_tickets: 4,
+                cleanup_steps: 100,
+            },
+            maximum_occupancy_ms: 60_000,
+            cleanup_occupancy_ms: 10_000,
+            rollover_drain_margin_ms: 5_000,
+            rollover_work_margin_steps: Some(200),
+            host_release_steps: 64,
+            outside_cleanup_steps: 32,
+        }
+    }
+
+    fn counters(
+        spent: u64,
+        limit: u64,
+        reserved: u64,
+    ) -> lillux_sqlite::OriginalNativeBudgetSnapshot {
+        lillux_sqlite::OriginalNativeBudgetSnapshot {
+            storage_bytes: 0,
+            allocator_steps: spent,
+            allocator_steps_limit: limit,
+            cleanup_reserved: reserved,
+            cleanup_steps: 0,
+            connections_issued: 0,
+        }
+    }
+
+    #[test]
+    fn a_work_margin_claim_is_proven_only_by_enough_spent_steps() {
+        let policy = incarnation();
+        // Service work is 900; the margin of 200 puts the point at 700.
+        assert!(work_margin_proven(
+            &policy,
+            Some(&counters(700, 1_000, 100))
+        ));
+        assert!(work_margin_proven(
+            &policy,
+            Some(&counters(900, 1_000, 100))
+        ));
+        assert!(!work_margin_proven(
+            &policy,
+            Some(&counters(699, 1_000, 100))
+        ));
+        assert!(!work_margin_proven(&policy, None));
+        // Counters of some other envelope prove nothing about this policy.
+        assert!(!work_margin_proven(
+            &policy,
+            Some(&counters(950, 2_000, 100))
+        ));
+        assert!(!work_margin_proven(
+            &policy,
+            Some(&counters(950, 1_000, 50))
+        ));
     }
 }

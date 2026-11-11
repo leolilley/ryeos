@@ -721,8 +721,9 @@ fn acquire_pinned_ref_lock(
     directory: &lillux::PinnedDirectory,
     create: bool,
     label: &str,
-) -> anyhow::Result<File> {
+) -> anyhow::Result<lillux::locks::ForkClosedLockFile> {
     let name = std::ffi::OsStr::new("lock");
+    let fork_sensitive_descriptors = lillux::try_retain_fork_sensitive_descriptors()?;
     let file = if create {
         let file = directory.open_regular_create(name, true, false, 0o666)?;
         directory.sync()?;
@@ -736,13 +737,15 @@ fn acquire_pinned_ref_lock(
         })?
     };
     #[cfg(unix)]
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
-        return Err(std::io::Error::last_os_error())
-            .with_context(|| format!("acquire {label} lock {}", directory.path().display()));
+    {
+        let file = lillux::locks::ForkClosedLockFile::register(file, &fork_sensitive_descriptors);
+        drop(fork_sensitive_descriptors);
+        file.lock_exclusive()
+            .with_context(|| format!("acquire {label} lock {}", directory.path().display()))?;
+        Ok(file)
     }
     #[cfg(not(unix))]
-    anyhow::bail!("{label} locking is unavailable on this platform");
-    Ok(file)
+    anyhow::bail!("{label} locking is unavailable on this platform")
 }
 
 fn ensure_pinned_ref_lock(
@@ -1248,7 +1251,7 @@ pub(crate) fn list_verified_project_head_refs_in_directory(
 /// Mutation helpers require this exact guard and prove its inode belongs to the
 /// supplied refs root before comparing or publishing.
 pub struct ProjectHeadLock {
-    _lock_file: File,
+    _lock_file: lillux::locks::ForkClosedLockFile,
     principal_key: String,
     project_hash: String,
 }
@@ -1330,27 +1333,28 @@ impl ProjectHeadLock {
             .join("lock");
 
         #[cfg(unix)]
-        let lock_file = open_regular_ref_path_no_follow(&lock_path, true, create, create)?
-            .ok_or_else(|| {
+        let lock_file = {
+            let fork_sensitive_descriptors = lillux::try_retain_fork_sensitive_descriptors()?;
+            let file = open_regular_ref_path_no_follow(&lock_path, true, create, create)?
+                .ok_or_else(|| {
+                    anyhow!(
+                        "project HEAD lock anchor is missing: {}",
+                        lock_path.display()
+                    )
+                })?;
+            let file =
+                lillux::locks::ForkClosedLockFile::register(file, &fork_sensitive_descriptors);
+            drop(fork_sensitive_descriptors);
+            file.lock_exclusive().map_err(|error| {
                 anyhow!(
-                    "project HEAD lock anchor is missing: {}",
+                    "project HEAD flock failed at {}: {error}",
                     lock_path.display()
                 )
             })?;
+            file
+        };
         #[cfg(not(unix))]
-        let lock_file: File = anyhow::bail!("project HEAD locking is unavailable on this platform");
-
-        #[cfg(unix)]
-        {
-            let ret = unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX) };
-            if ret != 0 {
-                anyhow::bail!(
-                    "project HEAD flock failed at {}: {}",
-                    lock_path.display(),
-                    std::io::Error::last_os_error()
-                );
-            }
-        }
+        let lock_file = anyhow::bail!("project HEAD locking is unavailable on this platform");
 
         Ok(Self {
             _lock_file: lock_file,
@@ -1406,17 +1410,8 @@ impl ProjectHeadLock {
     }
 }
 
-impl Drop for ProjectHeadLock {
-    fn drop(&mut self) {
-        #[cfg(unix)]
-        unsafe {
-            let _ = libc::flock(self._lock_file.as_raw_fd(), libc::LOCK_UN);
-        }
-    }
-}
-
 pub(crate) struct DeployedProjectHeadLock {
-    _lock_file: File,
+    _lock_file: lillux::locks::ForkClosedLockFile,
     project_hash: String,
 }
 
@@ -1464,15 +1459,6 @@ impl DeployedProjectHeadLock {
                 .ok_or_else(|| anyhow!("deployed-project HEAD lock directory disappeared"))?;
         ensure_pinned_ref_lock(&self._lock_file, &directory, "deployed-project HEAD")?;
         Ok(directory)
-    }
-}
-
-impl Drop for DeployedProjectHeadLock {
-    fn drop(&mut self) {
-        #[cfg(unix)]
-        unsafe {
-            let _ = libc::flock(self._lock_file.as_raw_fd(), libc::LOCK_UN);
-        }
     }
 }
 
@@ -1642,7 +1628,7 @@ fn generic_head_file_path(
 }
 
 pub(crate) struct GenericHeadLock {
-    _lock_file: File,
+    _lock_file: lillux::locks::ForkClosedLockFile,
     namespace: String,
     name: String,
 }
@@ -1657,21 +1643,23 @@ impl GenericHeadLock {
             .join(name)
             .join("lock");
         #[cfg(unix)]
-        let lock_file = open_regular_ref_path_no_follow(&lock_path, true, true, true)?
-            .expect("create=true opens generic HEAD lock");
+        let lock_file = {
+            let fork_sensitive_descriptors = lillux::try_retain_fork_sensitive_descriptors()?;
+            let file = open_regular_ref_path_no_follow(&lock_path, true, true, true)?
+                .expect("create=true opens generic HEAD lock");
+            let file =
+                lillux::locks::ForkClosedLockFile::register(file, &fork_sensitive_descriptors);
+            drop(fork_sensitive_descriptors);
+            file.lock_exclusive().map_err(|error| {
+                anyhow!(
+                    "generic HEAD flock failed at {}: {error}",
+                    lock_path.display()
+                )
+            })?;
+            file
+        };
         #[cfg(not(unix))]
-        let lock_file: File = anyhow::bail!("generic HEAD locking is unavailable on this platform");
-        #[cfg(unix)]
-        {
-            let ret = unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX) };
-            if ret != 0 {
-                anyhow::bail!(
-                    "generic HEAD flock failed at {}: {}",
-                    lock_path.display(),
-                    std::io::Error::last_os_error()
-                );
-            }
-        }
+        let lock_file = anyhow::bail!("generic HEAD locking is unavailable on this platform");
         Ok(Self {
             _lock_file: lock_file,
             namespace: namespace.to_string(),
@@ -1754,15 +1742,6 @@ impl GenericHeadLock {
         .ok_or_else(|| anyhow!("generic HEAD lock directory disappeared"))?;
         ensure_pinned_ref_lock(&self._lock_file, &directory, "generic HEAD")?;
         Ok(directory)
-    }
-}
-
-impl Drop for GenericHeadLock {
-    fn drop(&mut self) {
-        #[cfg(unix)]
-        unsafe {
-            let _ = libc::flock(self._lock_file.as_raw_fd(), libc::LOCK_UN);
-        }
     }
 }
 

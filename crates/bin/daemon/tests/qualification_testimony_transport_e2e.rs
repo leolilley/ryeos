@@ -452,6 +452,7 @@ fn qualification_policy() -> ProductQualificationPolicy {
         minimum_verifier_process_settlement: VerifierProcessSettlementAuthority::ScopeEmpty,
         verifier_parameters: json!({"scope": "bounded_fixture"}),
         consumer_execution_context: None,
+        requires_guarantees: Vec::new(),
         producer_scenarios: BTreeMap::new(),
     }
 }

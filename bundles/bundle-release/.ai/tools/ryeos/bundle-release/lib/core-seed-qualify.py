@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ryeos:signed:2026-09-23T08:19:54Z:9d89e8217c6807f90652fcf46b96789da0c3de16ce090c4132f732237cd645f4:wemuRTm8+8kq6lNk7DiBYQNTdic+m018BNgqC6bHC4X05ROp8wvyUXJLgWgZFUy0FKhMV0/ApsnmnHdF8FSFBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-11T02:56:41Z:a1a707ba9441490b30d70796ef82b87ed9a90e06a7782deaf9a78305bd7f118c:QCsXMOjforejqIadTQj/q8sAgxdB9YXofjfZnlh8Svbi9KPmLj/G1IpALaefw3C1BiBviThpXoyCGr4F+2i3DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Qualify one exact admitted signed substrate Core seed."""
 import json
 import os

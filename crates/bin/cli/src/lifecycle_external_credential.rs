@@ -253,7 +253,7 @@ mod tests {
             binding_id: "b".into(),
             owner: "a".repeat(64),
             generation: "c".repeat(64),
-            backend: "render-sandbox-early-access".into(),
+            backend: "test-backend".into(),
             account: "acct".into(),
             outcome: ProvisionOutcome::Inserted,
         };

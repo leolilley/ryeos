@@ -20,8 +20,6 @@ use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
-#[cfg(unix)]
-use std::os::fd::AsRawFd as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::bail;
@@ -132,7 +130,7 @@ pub struct PinnedLargeObjectSourceIdentity {
 pub struct LeasedLargeObject {
     path: PathBuf,
     file: fs::File,
-    _lease: fs::File,
+    _lease: lillux::locks::ForkClosedLockFile,
 }
 
 impl LeasedLargeObject {
@@ -144,7 +142,9 @@ impl LeasedLargeObject {
         &self.file
     }
 
-    pub fn into_parts(self) -> (PathBuf, fs::File, fs::File) {
+    /// The shared lease is the registered lock itself: it stays held exactly
+    /// as long as the returned value lives.
+    pub fn into_parts(self) -> (PathBuf, fs::File, lillux::locks::ForkClosedLockFile) {
         (self.path, self.file, self._lease)
     }
 }
@@ -438,12 +438,14 @@ impl LargeObjectStore {
         // byte-for-byte prefix comparison below remains the content proof.
         let staging_key = staging_key_for_source(expected_source)?;
         let staging_name = OsString::from(format!("ingest-{staging_key}"));
-        let lock = self.locks.open_regular_create(
-            OsStr::new(&format!("ingest-{staging_key}")),
-            true,
-            false,
-            0o600,
-        )?;
+        let lock = open_registered_lock(|| {
+            self.locks.open_regular_create(
+                OsStr::new(&format!("ingest-{staging_key}")),
+                true,
+                false,
+                0o600,
+            )
+        })?;
         flock_exclusive_blocking(&lock)?;
 
         let mut staged = self
@@ -582,9 +584,10 @@ impl LargeObjectStore {
         require_store_hash(file_sha256)?;
         self.validate_expectation(expect)?;
         let name = format!("upload-{file_sha256}");
-        let lock = self
-            .locks
-            .open_regular_create(OsStr::new(&name), true, false, 0o600)?;
+        let lock = open_registered_lock(|| {
+            self.locks
+                .open_regular_create(OsStr::new(&name), true, false, 0o600)
+        })?;
         flock_exclusive_blocking(&lock)?;
 
         if let Some(resident) = self.object_size(file_sha256)?
@@ -890,7 +893,8 @@ impl LargeObjectStore {
         let Some(first) = self.objects.open_regular(name, false)? else {
             return Ok(None);
         };
-        let lease = self.leases.open_regular_create(name, true, false, 0o600)?;
+        let lease =
+            open_registered_lock(|| self.leases.open_regular_create(name, true, false, 0o600))?;
         flock_shared_blocking(&lease)?;
         let _ = lease.set_modified(std::time::SystemTime::now());
         // The lease was acquired after opening; re-open and require the same
@@ -1002,16 +1006,19 @@ impl LargeObjectStore {
             if report.total_bytes_after <= budget_bytes {
                 break;
             }
-            let lease = match self.leases.open_regular(OsStr::new(&name), false)? {
+            let lease = match open_registered_lock_if_present(|| {
+                self.leases.open_regular(OsStr::new(&name), false)
+            })? {
                 Some(lease) => lease,
                 None if dry_run => {
                     report.total_bytes_after = report.total_bytes_after.saturating_sub(bytes);
                     report.evicted.push((name, bytes));
                     continue;
                 }
-                None => self
-                    .leases
-                    .open_regular_create(OsStr::new(&name), true, false, 0o600)?,
+                None => open_registered_lock(|| {
+                    self.leases
+                        .open_regular_create(OsStr::new(&name), true, false, 0o600)
+                })?,
             };
             if !flock_exclusive_nonblocking(&lease)? {
                 report.retained_leased += 1;
@@ -1041,7 +1048,10 @@ impl LargeObjectStore {
     /// state.
     pub fn object_is_leased(&self, file_sha256: &str) -> anyhow::Result<bool> {
         require_store_hash(file_sha256)?;
-        let Some(lease) = self.leases.open_regular(OsStr::new(file_sha256), false)? else {
+        let Some(lease) = open_registered_lock_if_present(|| {
+            self.leases.open_regular(OsStr::new(file_sha256), false)
+        })?
+        else {
             return Ok(false);
         };
         Ok(!flock_exclusive_nonblocking(&lease)?)
@@ -1065,7 +1075,9 @@ impl LargeObjectStore {
             if entry.entry_type != lillux::PinnedEntryType::Regular {
                 anyhow::bail!("large-object staging namespace contains a non-regular entry");
             }
-            let lock = match self.locks.open_regular(&entry.name, false)? {
+            let lock = match open_registered_lock_if_present(|| {
+                self.locks.open_regular(&entry.name, false)
+            })? {
                 Some(lock) => lock,
                 None if dry_run => {
                     if let Some(staged) = self.staging.open_regular(&entry.name, false)? {
@@ -1074,9 +1086,10 @@ impl LargeObjectStore {
                     }
                     continue;
                 }
-                None => self
-                    .locks
-                    .open_regular_create(&entry.name, true, false, 0o600)?,
+                None => open_registered_lock(|| {
+                    self.locks
+                        .open_regular_create(&entry.name, true, false, 0o600)
+                })?,
             };
             if !flock_exclusive_nonblocking(&lock)? {
                 continue;
@@ -1125,9 +1138,10 @@ impl LargeObjectStore {
     ) -> anyhow::Result<Vec<LargeObjectIntegrityFinding>> {
         require_store_hash(file_sha256)?;
         let mut findings = Vec::new();
-        let lease = self
-            .leases
-            .open_regular_create(OsStr::new(file_sha256), true, false, 0o600)?;
+        let lease = open_registered_lock(|| {
+            self.leases
+                .open_regular_create(OsStr::new(file_sha256), true, false, 0o600)
+        })?;
         flock_shared_blocking(&lease)?;
         let Some(mut object) = self.objects.open_regular(OsStr::new(file_sha256), false)? else {
             return Ok(vec![LargeObjectIntegrityFinding::UnreadableObject {
@@ -1146,7 +1160,7 @@ impl LargeObjectStore {
             Err(error) => {
                 findings.push(LargeObjectIntegrityFinding::MalformedSidecar {
                     file_sha256: file_sha256.to_string(),
-                    error: error.to_string(),
+                    error: format!("{error:#}"),
                 });
                 None
             }
@@ -1326,33 +1340,50 @@ fn require_store_hash(value: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Open a lock file under a fork-sensitive lease and register it so every
+/// direct-attachment fork child closes it; the lease ends before any lock wait.
 #[cfg(unix)]
-fn flock_exclusive_blocking(file: &fs::File) -> anyhow::Result<()> {
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
+fn open_registered_lock(
+    open: impl FnOnce() -> anyhow::Result<fs::File>,
+) -> anyhow::Result<lillux::locks::ForkClosedLockFile> {
+    let lease = lillux::try_retain_fork_sensitive_descriptors()?;
+    let file = open()?;
+    let file = lillux::locks::ForkClosedLockFile::register(file, &lease);
+    drop(lease);
+    Ok(file)
+}
+
+/// Like `open_registered_lock`, for an open that yields nothing when the file
+/// is absent.
+#[cfg(unix)]
+fn open_registered_lock_if_present(
+    open: impl FnOnce() -> anyhow::Result<Option<fs::File>>,
+) -> anyhow::Result<Option<lillux::locks::ForkClosedLockFile>> {
+    let lease = lillux::try_retain_fork_sensitive_descriptors()?;
+    let Some(file) = open()? else {
+        return Ok(None);
+    };
+    let file = lillux::locks::ForkClosedLockFile::register(file, &lease);
+    drop(lease);
+    Ok(Some(file))
+}
+
+#[cfg(unix)]
+fn flock_exclusive_blocking(file: &lillux::locks::ForkClosedLockFile) -> anyhow::Result<()> {
+    file.lock_exclusive()?;
     Ok(())
 }
 
 #[cfg(unix)]
-fn flock_shared_blocking(file: &fs::File) -> anyhow::Result<()> {
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH) } != 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
+fn flock_shared_blocking(file: &lillux::locks::ForkClosedLockFile) -> anyhow::Result<()> {
+    file.lock_shared()?;
     Ok(())
 }
 
 /// True when the exclusive lock was won without blocking.
 #[cfg(unix)]
-fn flock_exclusive_nonblocking(file: &fs::File) -> anyhow::Result<bool> {
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-        let error = std::io::Error::last_os_error();
-        if error.kind() == std::io::ErrorKind::WouldBlock {
-            return Ok(false);
-        }
-        return Err(error.into());
-    }
-    Ok(true)
+fn flock_exclusive_nonblocking(file: &lillux::locks::ForkClosedLockFile) -> anyhow::Result<bool> {
+    Ok(file.try_lock_exclusive()?)
 }
 
 #[cfg(not(unix))]

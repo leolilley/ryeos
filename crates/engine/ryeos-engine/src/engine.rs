@@ -267,7 +267,7 @@ impl AdmittedRequestAuthoritySnapshot {
             || !self
                 .materialization
                 .owns_path(project_root)
-                .map_err(|error| EngineError::Internal(error.to_string()))?
+                .map_err(|error| EngineError::Internal(format!("{error:#}")))?
         {
             return Err(EngineError::Internal(
                 "admitted request authority was paired with a different materialization"
@@ -295,7 +295,7 @@ fn authority_snapshot_from_request(
 fn require_live_project_context(ctx: &PlanContext, project_root: &Path) -> Result<(), EngineError> {
     ctx.subject_resolution_authority
         .validate_for_project_context(&ctx.project_context)
-        .map_err(|error| EngineError::Internal(error.to_string()))?;
+        .map_err(|error| EngineError::Internal(format!("{error:#}")))?;
     if !matches!(
         ctx.subject_resolution_authority,
         SubjectResolutionAuthority::LiveFs
@@ -1186,7 +1186,7 @@ impl CheckedEngineGeneration<'_> {
                 )
                 .map_err(|error| {
                     EngineError::Internal(format!(
-                        "materialization source signature envelope is not canonical: {error}"
+                        "materialization source signature envelope is not canonical: {error:#}"
                     ))
                 })?;
             if strict_raw != raw.raw_content
@@ -1391,7 +1391,7 @@ fn logical_bundle_compile_subject(
 ) -> Result<(PlanContext, VerifiedItem), EngineError> {
     ctx.subject_resolution_authority
         .validate_for_project_context(&ctx.project_context)
-        .map_err(|error| EngineError::Internal(error.to_string()))?;
+        .map_err(|error| EngineError::Internal(format!("{error:#}")))?;
 
     let caller_ref = &item.resolved.canonical_ref;
     if caller_ref.suffix.is_some()
@@ -1767,7 +1767,7 @@ impl Engine {
         self.checked_bundle_generation(|| {
             subject_resolution_authority
                 .validate_for_materialized_root(project_root)
-                .map_err(|error| EngineError::Internal(error.to_string()))?;
+                .map_err(|error| EngineError::Internal(format!("{error:#}")))?;
             match subject_resolution_authority.operational_generation() {
                 Some(generation) => {
                     let root = project_root.ok_or_else(|| {
@@ -1784,7 +1784,7 @@ impl Engine {
                     if materialization.snapshot_hash() != generation
                         || !materialization
                             .owns_path(root)
-                            .map_err(|error| EngineError::Internal(error.to_string()))?
+                            .map_err(|error| EngineError::Internal(format!("{error:#}")))?
                     {
                         return Err(EngineError::Internal(
                             "content-addressed trust policy materialization contradicts its authority"
@@ -1861,7 +1861,7 @@ impl Engine {
             authority
                 .subject_resolution_authority
                 .validate_for_materialized_root(Some(project_root))
-                .map_err(|error| EngineError::Internal(error.to_string()))?;
+                .map_err(|error| EngineError::Internal(format!("{error:#}")))?;
             if authority.request_engine_generation_identity
                 != self.request_engine_generation_identity()
             {
@@ -1928,7 +1928,7 @@ impl Engine {
         if materialization.snapshot_hash() != operational_generation
             || !materialization
                 .owns_path(project_root)
-                .map_err(|error| EngineError::Internal(error.to_string()))?
+                .map_err(|error| EngineError::Internal(format!("{error:#}")))?
         {
             return Err(EngineError::Internal(
                 "pinned request authority proof contradicts its snapshot or project root"
@@ -2121,7 +2121,7 @@ impl Engine {
     ) -> Result<EffectiveRequestAuthoritySnapshot, EngineError> {
         subject_resolution_authority
             .validate_for_materialized_root(project_root)
-            .map_err(|error| EngineError::Internal(error.to_string()))?;
+            .map_err(|error| EngineError::Internal(format!("{error:#}")))?;
         let snapshot =
             self.effective_request_snapshot_current(project_root, subject_resolution_authority)?;
         Ok(authority_snapshot_from_request(&snapshot))
@@ -2134,7 +2134,7 @@ impl Engine {
     ) -> Result<EffectiveRequestSnapshot, EngineError> {
         subject_resolution_authority
             .validate_for_materialized_root(project_root)
-            .map_err(|error| EngineError::Internal(error.to_string()))?;
+            .map_err(|error| EngineError::Internal(format!("{error:#}")))?;
         let trust_store = self.effective_trust_store(project_root)?.into_owned();
         let parser_dispatcher =
             self.effective_parser_dispatcher_with_trust(project_root, &trust_store)?;
@@ -2163,7 +2163,7 @@ impl Engine {
     ) -> Result<EffectiveRequestSnapshot, EngineError> {
         subject_resolution_authority
             .validate_for_materialized_root(Some(materialization.path()))
-            .map_err(|error| EngineError::Internal(error.to_string()))?;
+            .map_err(|error| EngineError::Internal(format!("{error:#}")))?;
 
         let trust_base = self
             .request_trust_base
@@ -2197,7 +2197,7 @@ impl Engine {
     ) -> Result<EffectiveRequestSnapshot, EngineError> {
         subject_resolution_authority
             .validate_for_materialized_root(Some(project_root))
-            .map_err(|error| EngineError::Internal(error.to_string()))?;
+            .map_err(|error| EngineError::Internal(format!("{error:#}")))?;
         let trust_base = self
             .request_trust_base
             .as_ref()
@@ -2300,7 +2300,7 @@ impl Engine {
         authority
             .admits(target)
             .map_err(|error| EngineError::IsolationPolicyRefused {
-                reason: error.to_string(),
+                reason: format!("{error:#}"),
             })?;
         if let Some(target) = target
             && target.requests_resources()
@@ -2313,7 +2313,7 @@ impl Engine {
                     })?
                     .admit(target)
                     .map_err(|error| EngineError::IsolationPolicyRefused {
-                        reason: error.to_string(),
+                        reason: format!("{error:#}"),
                     })?;
         }
         Ok(())
@@ -2322,7 +2322,7 @@ impl Engine {
     fn admit_plan_resources(&self, plan: ExecutionPlan) -> Result<ExecutionPlan, EngineError> {
         plan.validate_endpoint_for_planning().map_err(|error| {
             EngineError::IsolationPolicyRefused {
-                reason: error.to_string(),
+                reason: format!("{error:#}"),
             }
         })?;
         self.admit_execution_target(
@@ -2348,7 +2348,7 @@ impl Engine {
     ) -> Result<ResolvedItem, EngineError> {
         ctx.subject_resolution_authority
             .validate_for_project_context(&ctx.project_context)
-            .map_err(|error| EngineError::Internal(error.to_string()))?;
+            .map_err(|error| EngineError::Internal(format!("{error:#}")))?;
         // Materialize project context
         let project_root = match &ctx.project_context {
             crate::contracts::ProjectContext::LocalPath { path } => Some(path.clone()),
@@ -2845,7 +2845,7 @@ impl Engine {
     ) -> Result<VerifiedArtifactAttestation, EngineError> {
         ctx.subject_resolution_authority
             .validate_for_project_context(&ctx.project_context)
-            .map_err(|error| EngineError::Internal(error.to_string()))?;
+            .map_err(|error| EngineError::Internal(format!("{error:#}")))?;
         if item.subject_resolution_authority != ctx.subject_resolution_authority {
             return Err(EngineError::Internal(
                 "resolved item carries different subject authority from its planning context"
@@ -2969,7 +2969,7 @@ impl Engine {
     ) -> Result<VerifiedItem, EngineError> {
         expected_subject_resolution_authority
             .validate_for_project_context(&ctx.project_context)
-            .map_err(|error| EngineError::Internal(error.to_string()))?;
+            .map_err(|error| EngineError::Internal(format!("{error:#}")))?;
         if &request_authority.subject_resolution_authority != expected_subject_resolution_authority
         {
             return Err(EngineError::Internal(
@@ -3280,7 +3280,7 @@ impl Engine {
     ) -> Result<VerifiedItem, EngineError> {
         ctx.subject_resolution_authority
             .validate_for_project_context(&ctx.project_context)
-            .map_err(|error| EngineError::Internal(error.to_string()))?;
+            .map_err(|error| EngineError::Internal(format!("{error:#}")))?;
         if item.subject_resolution_authority != ctx.subject_resolution_authority {
             return Err(EngineError::Internal(
                 "resolved item authority differs from verification context".to_string(),

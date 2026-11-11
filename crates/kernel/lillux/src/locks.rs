@@ -20,6 +20,16 @@ pub fn acquire_existing_shared_file_until(
     file: fs::File,
     deadline: crate::time::MonotonicDeadline,
 ) -> std::io::Result<fs::File> {
+    lock_shared_file_until(&file, deadline)?;
+    Ok(file)
+}
+
+/// Shared `flock` on `file` bounded by the caller's deadline. A lock won after
+/// the deadline is released again before the refusal returns.
+fn lock_shared_file_until(
+    file: &fs::File,
+    deadline: crate::time::MonotonicDeadline,
+) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::fd::AsRawFd;
@@ -45,11 +55,13 @@ pub fn acquire_existing_shared_file_until(
             }
             if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) } == 0 {
                 // A successful native call after expiry supplies no authority.
-                // Dropping this uniquely owned file releases its acquired lock.
                 if deadline.has_elapsed() {
+                    unsafe {
+                        libc::flock(file.as_raw_fd(), libc::LOCK_UN);
+                    }
                     return Err(expired());
                 }
-                return Ok(file);
+                return Ok(());
             }
             let error = std::io::Error::last_os_error();
             match error.kind() {
@@ -72,6 +84,96 @@ pub fn acquire_existing_shared_file_until(
             std::io::ErrorKind::Unsupported,
             "interprocess file locking is unavailable on this platform",
         ))
+    }
+}
+
+/// A long-lived advisory `flock` held through a descriptor that every
+/// direct-attachment fork child closes before its pre-exec hold.
+///
+/// Register the file while the caller still retains the fork-sensitive lease
+/// it took before opening it. The lease may then be released: the lock is
+/// acquired and held without keeping the fork window closed, because no child
+/// can carry this descriptor into its hold. Dropping releases the lock with
+/// `LOCK_UN` before the registered descriptor closes.
+#[cfg(unix)]
+pub struct ForkClosedLockFile {
+    file: crate::exec::ForkChildCloseFile,
+}
+
+#[cfg(unix)]
+impl ForkClosedLockFile {
+    pub fn register(file: fs::File, _lease: &crate::exec::ForkSensitiveDescriptorLease) -> Self {
+        Self {
+            file: crate::exec::register_fork_child_close_file(file),
+        }
+    }
+
+    /// Block until the shared lock is held.
+    pub fn lock_shared(&self) -> std::io::Result<()> {
+        self.lock_blocking(libc::LOCK_SH)
+    }
+
+    /// Block until the exclusive lock is held.
+    pub fn lock_exclusive(&self) -> std::io::Result<()> {
+        self.lock_blocking(libc::LOCK_EX)
+    }
+
+    /// True when the exclusive lock was won without blocking.
+    pub fn try_lock_exclusive(&self) -> std::io::Result<bool> {
+        use std::os::fd::AsRawFd;
+        loop {
+            if unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                return Ok(true);
+            }
+            let error = std::io::Error::last_os_error();
+            match error.kind() {
+                std::io::ErrorKind::Interrupted => continue,
+                std::io::ErrorKind::WouldBlock => return Ok(false),
+                _ => return Err(error),
+            }
+        }
+    }
+
+    /// The shared lock, bounded by the caller's existing deadline.
+    pub fn lock_shared_until(
+        &self,
+        deadline: crate::time::MonotonicDeadline,
+    ) -> std::io::Result<()> {
+        lock_shared_file_until(&self.file, deadline)
+    }
+
+    fn lock_blocking(&self, operation: i32) -> std::io::Result<()> {
+        use std::os::fd::AsRawFd;
+        loop {
+            if unsafe { libc::flock(self.file.as_raw_fd(), operation) } == 0 {
+                return Ok(());
+            }
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::Interrupted {
+                return Err(error);
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+impl std::ops::Deref for ForkClosedLockFile {
+    type Target = fs::File;
+
+    fn deref(&self) -> &fs::File {
+        &self.file
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ForkClosedLockFile {
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd;
+        // Release before the registered close, which a protected fork window
+        // may defer: the lock must end with its holder, not with the close.
+        unsafe {
+            libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
+        }
     }
 }
 

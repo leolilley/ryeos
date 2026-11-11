@@ -357,7 +357,7 @@ pub fn compile_hooks(
         let action_field = format!("hook[{index}] (id={id}).action");
         let action = CompiledActionTemplate::compile(&source_action, &action_field, limits)
             .map_err(|error: CompiledTemplateError| {
-                HookCompilationError::hook(index, &id, &event, error.to_string())
+                HookCompilationError::hook(index, &id, &event, format!("{error:#}"))
             })?;
         validate_reference_roots(action.references(), schema, &action_field)
             .map_err(|message| HookCompilationError::hook(index, &id, &event, message))?;

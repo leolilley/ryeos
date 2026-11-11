@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-20T20:37:21Z:24b6c639cfb0093eeb33e910a3f94faa554e50460b9ea79db1c61fddaad8d3db:F+OdshKGTfS0HjhYskJlaGsEM9fcR0/2tNZ4b7SqEHVWzYs+kScuI2yuLcM9aNSDfXQGMHjEpCxNwFVHC1lwDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-11T02:56:41Z:f486ba3af9b5236bc7eba80265ecb5dbf2e9a005c5ad9fa7926604ba905b2330:JhQAMc0VZ9GuJFK1LelrPrpn2un9GEYMSvjLmsGAtQjus1HVVi5N3S2EjojY8bCrPzctj3U6gVCO+ddYiQK9Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/tool"
 version: "1.3.0"
 location:
@@ -7,6 +7,12 @@ location:
 effective_trust:
   include_references: false
 resolution: []
+# Which spaces and trust classes may supply a launch root of this kind.
+# Work signed by an unpinned key runs only where node policy admits it.
+launch_trust:
+  allowed_spaces: [bundle, project]
+  allowed_trust: [trusted_bundle, trusted_project]
+  operator_may_admit: [untrusted_project]
 execution:
   source_closure:
     derived: effective_source_closure
@@ -38,6 +44,11 @@ execution:
   filesystem_authority_ceiling:
     path: [filesystem_authority]
     default: node_policy
+  # Optional declaration that the tool runs against a pinned project snapshot
+  # (a pushed-head project source). Protocols that gate that capability on a
+  # declaration admit only tools that author `project_lane: pinned_snapshot`.
+  pushed_head_declaration:
+    path: [project_lane]
   # Direct opaque producers and evaluators use the same signed target
   # contract as resident workers. Ordinary tools omit it and request no
   # constrained execution resource.
@@ -226,6 +237,9 @@ runtime:
     # Consumed only through the kind-owned workspace-access projection above.
     # Dispatch must not grow tool/provider-specific interpretations of it.
     - workspace_access
+    # Consumed by the kind-owned pushed-head declaration projection above; it
+    # is not a runtime-handler block.
+    - project_lane
     # Consumed by the kind-owned network-authority projection above; it is not
     # a runtime-handler block.
     - network_authority

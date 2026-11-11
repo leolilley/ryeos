@@ -146,6 +146,11 @@ pub fn check_guest_protocol(
     let mut processes = BTreeMap::new();
     let mut patch = None;
     let mut requests = BTreeMap::new();
+    // Codex's add-file patch first reads the candidate path to prove it is
+    // absent. Such a pre-write read is planned only for the exact candidate
+    // and only when the guest answers it with an error: no bytes before the
+    // authored write.
+    let mut absence_reads = BTreeSet::new();
     for message in &input {
         let method = message["method"]
             .as_str()
@@ -182,10 +187,15 @@ pub fn check_guest_protocol(
                     "unplanned metadata path"
                 );
             }
-            "fs/readFile" => ensure!(
-                patch.is_some() && message["params"]["path"] == scenario.candidate_uri,
-                "unplanned or premature guest file read"
-            ),
+            "fs/readFile" => {
+                ensure!(
+                    message["params"]["path"] == scenario.candidate_uri,
+                    "unplanned guest file read"
+                );
+                if patch.is_none() {
+                    absence_reads.insert(request_id.to_string());
+                }
+            }
             "process/start" => {
                 let params = &message["params"];
                 let argv = params["argv"].as_array().context("guest argv absent")?;
@@ -274,6 +284,10 @@ pub fn check_guest_protocol(
                 "initialize" | "environment/info" => {
                     ensure!(message.get("result").is_some(), "guest setup failed")
                 }
+                "fs/readFile" if absence_reads.contains(&id.to_string()) => ensure!(
+                    message.get("error").is_some(),
+                    "candidate existed before the authored write"
+                ),
                 "fs/readFile" => ensure!(
                     message["result"]["dataBase64"]
                         .as_str()
@@ -592,5 +606,80 @@ mod tests {
         assert!(check_guest_observation(&observation(&input, &output), &scenario).is_err());
         output[9] = json!({"id":4,"error":{"code":-1,"message":"missing"}});
         assert!(check_guest_observation(&observation(&input, &output), &scenario).is_err());
+    }
+
+    #[test]
+    fn add_file_absence_read_before_the_write_must_find_nothing() {
+        let request_hash = "a".repeat(64);
+        let scenario = GuestScenario {
+            request_sha256: &request_hash,
+            shell: "/tools/zsh",
+            guest_cwd_uri: "file:///workspace",
+            guest_command: "probe".into(),
+            secret_read_command: "secret",
+            expected_command_output: "expected",
+            controller_canary_value: "private-canary-value",
+            secret_read_denial: "denied",
+            candidate_uri: "file:///workspace/result".into(),
+            candidate_relative_path: "result",
+            candidate_content: b"candidate",
+        };
+        let encode = |frames: &[Value]| {
+            STANDARD.encode(
+                frames
+                    .iter()
+                    .map(|frame| format!("{}\n", serde_json::to_string(frame).unwrap()))
+                    .collect::<String>(),
+            )
+        };
+        // Codex 0.147's add-file patch: read the candidate, expect absence,
+        // then write the authored bytes.
+        let input = [
+            json!({"id":1,"method":"process/start","params":{"processId":"p","argv":[scenario.shell,"-c","probe"],"cwd":scenario.guest_cwd_uri}}),
+            json!({"id":2,"method":"fs/readFile","params":{"path":scenario.candidate_uri}}),
+            json!({"id":3,"method":"fs/writeFile","params":{"path":scenario.candidate_uri,"dataBase64":STANDARD.encode(scenario.candidate_content)}}),
+            json!({"id":4,"method":"process/start","params":{"processId":"s","argv":[scenario.shell,"-c","secret"],"cwd":scenario.guest_cwd_uri}}),
+        ];
+        let mut output = vec![
+            json!({"id":1,"result":{"processId":"p"}}),
+            json!({"method":"process/output","params":{"processId":"p","seq":1,"chunk":STANDARD.encode("expected")}}),
+            json!({"method":"process/exited","params":{"processId":"p","seq":2,"exitCode":0}}),
+            json!({"method":"process/closed","params":{"processId":"p","seq":3}}),
+            json!({"id":2,"error":{"code":-32004,"message":"No such file or directory (os error 2)"}}),
+            json!({"id":3,"result":{}}),
+            json!({"id":4,"result":{"processId":"s"}}),
+            json!({"method":"process/output","params":{"processId":"s","seq":1,"chunk":STANDARD.encode("denied")}}),
+            json!({"method":"process/exited","params":{"processId":"s","seq":2,"exitCode":73}}),
+            json!({"method":"process/closed","params":{"processId":"s","seq":3}}),
+        ];
+        let file = ryeos_state::objects::ProjectFile {
+            blob_hash: lillux::sha256_hex(scenario.candidate_content),
+            size: scenario.candidate_content.len() as u64,
+            normalized_mode: 0o644,
+        };
+        let captured = ryeos_state::objects::canonical_value_digest(&file.to_value()).unwrap();
+        let observation = |input: &[Value], output: &[Value]| {
+            let encoded_output = encode(output);
+            json!({
+                "schema":"test.routed_guest_observation.v1",
+                "request_sha256":request_hash,
+                "namespace_exit":"Signal(9)",
+                "applied_receipt":applied_receipt(),
+                "guest_input_base64":encode(input),
+                "guest_output_base64":encoded_output,
+                "forwarded_output_bytes":STANDARD.decode(&encoded_output).unwrap().len(),
+                "captured_files":{"result":captured},
+            })
+        };
+        check_guest_observation(&observation(&input, &output), &scenario).unwrap();
+        // A pre-write read that returns bytes means the candidate already existed.
+        output[4] =
+            json!({"id":2,"result":{"dataBase64":STANDARD.encode(scenario.candidate_content)}});
+        assert!(check_guest_observation(&observation(&input, &output), &scenario).is_err());
+        // A pre-write read of any other path stays unplanned.
+        output[4] = json!({"id":2,"error":{"code":-32004,"message":"absent"}});
+        let mut elsewhere = input.clone();
+        elsewhere[1]["params"]["path"] = json!("file:///workspace/other");
+        assert!(check_guest_observation(&observation(&elsewhere, &output), &scenario).is_err());
     }
 }

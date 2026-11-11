@@ -1468,7 +1468,10 @@ impl SchedulerDb {
             };
             match result {
                 Ok(observed) => Ok((Some(phase), observed)),
-                Err(error) => Err((phase, SchedulerDbRetirementError::Host(error.to_string()))),
+                Err(error) => Err((
+                    phase,
+                    SchedulerDbRetirementError::Host(format!("{error:#}")),
+                )),
             }
         })
     }

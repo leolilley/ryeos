@@ -6,9 +6,20 @@
 //! descriptor-relative, no-follow operations before starting the existing
 //! fixed-FD supervisor. Neither a provider upload acknowledgement nor this
 //! manifest alone authorizes Ready.
+//!
+//! The wire carries each distinct regular-file content once: the first entry
+//! in manifest order for a `(sha256, bytes)` pair carries the payload, and a
+//! later entry with the same pair is materialized by the stager from that
+//! earlier staged file. The manifest still lists every file with its own
+//! path and mode; only the transferred bytes are shared.
+//!
+//! Each carried payload is one deflate stream cut into length-prefixed frames
+//! ending with an empty frame, so a sequential reader consumes exactly one
+//! entry at a time. The framed length of a package is therefore observed, not
+//! derived; the manifest supplies only its upper bound.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{Read, Write};
+use std::io::{BufReader, Read, Write};
 
 use anyhow::{Result, bail, ensure};
 use serde::{Deserialize, Serialize};
@@ -19,7 +30,7 @@ use crate::{
     digest, from_json_slice_strict,
 };
 
-pub const GUEST_STAGING_PACKAGE_SCHEMA: u32 = 1;
+pub const GUEST_STAGING_PACKAGE_SCHEMA: u32 = 2;
 pub const GUEST_IMPORT_TICKET_SCHEMA: u32 = 1;
 /// Structural ceiling for any admitted framed guest package.
 pub const MAX_GUEST_STAGING_FRAMED_BYTES: u64 = 4 * 1024 * 1024 * 1024;
@@ -27,8 +38,12 @@ pub const MAX_GUEST_STAGING_FRAMED_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 // inputs share this package and must be accounted for by backend admission.
 pub const MAX_GUEST_STAGING_ENTRIES: usize = 500_000;
 pub const MAX_GUEST_STAGING_MANIFEST_BYTES: usize = 128 * 1024 * 1024;
-pub const GUEST_STAGING_STREAM_MAGIC: &[u8; 16] = b"RYEOS-GUESTPKG-1";
+pub const GUEST_STAGING_STREAM_MAGIC: &[u8; 16] = b"RYEOS-GUESTPKG-2";
 const STREAM_CHUNK_BYTES: usize = 64 * 1024;
+/// Compressed bytes are framed in bounded pieces; a frame larger than this
+/// cannot come from the writer.
+const MAX_PAYLOAD_FRAME_BYTES: usize = 1024 * 1024;
+const PAYLOAD_COMPRESSION_LEVEL: u32 = 6;
 
 /// Retained semantic coordinates supplied independently of the stream. The
 /// caller must source these from the committed activation and signed artifacts,
@@ -79,17 +94,15 @@ pub struct GuestImportContext<'a> {
 }
 
 impl GuestImportTicket {
-    /// Logical regular-file bytes needed while the exact uploaded package and
-    /// its private staged generation coexist. Staging retains a canonical
-    /// manifest sidecar: the upload contains 20 framing bytes plus manifest
-    /// and payload, while the stage contains manifest plus payload. Filesystem
-    /// allocation overhead and a later installed runtime require additional
-    /// host capacity and are not covered by this lower bound.
+    /// Logical bytes needed while the exact uploaded package and its private
+    /// staged generation coexist: the framed upload plus every materialized
+    /// regular file. The stage also retains a canonical manifest sidecar,
+    /// filesystem allocation overhead and a later installed runtime require
+    /// additional host capacity; none of those are covered by this lower bound.
     pub fn minimum_upload_and_stage_bytes(&self) -> Result<u64> {
         self.validate()?;
         self.framed_bytes
-            .checked_mul(2)
-            .and_then(|bytes| bytes.checked_sub(20))
+            .checked_add(self.regular_bytes)
             .ok_or_else(|| anyhow::anyhow!("guest temporary storage bound overflow"))
     }
 
@@ -122,7 +135,7 @@ impl GuestImportTicket {
         ensure!(
             self.regular_bytes > 0
                 && self.regular_bytes <= self.maximum_regular_bytes
-                && self.framed_bytes >= self.regular_bytes.saturating_add(20)
+                && self.framed_bytes > 20
                 && self.framed_bytes <= self.maximum_framed_bytes
                 && self.maximum_framed_bytes <= MAX_GUEST_STAGING_FRAMED_BYTES,
             "guest import ticket package exceeds its bounds"
@@ -161,7 +174,7 @@ impl GuestImportTicket {
                 && manifest.supervisor_sha256 == self.supervisor_sha256
                 && manifest.launcher_sha256 == self.launcher_sha256
                 && manifest.total_regular_bytes == self.regular_bytes
-                && manifest.framed_bytes()? == self.framed_bytes
+                && self.framed_bytes <= manifest.framed_bytes_bound()?
                 && manifest.identity_digest()? == self.manifest_sha256,
             "verified guest package differs from retained import ticket"
         );
@@ -239,6 +252,38 @@ impl GuestStagingEntry {
     }
 }
 
+/// Payload ownership for one manifest, in manifest order: the entries whose
+/// bytes the stream carries, and for every other regular file the index of
+/// the earlier entry with identical content.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuestStagingPayloadPlan {
+    carried: Vec<(usize, u64)>,
+    origins: BTreeMap<usize, usize>,
+}
+
+impl GuestStagingPayloadPlan {
+    /// Manifest indices whose bytes cross the wire, in stream order.
+    pub fn carried(&self) -> impl Iterator<Item = usize> + '_ {
+        self.carried.iter().map(|(index, _)| *index)
+    }
+
+    pub fn carried_count(&self) -> usize {
+        self.carried.len()
+    }
+
+    fn carried_bound(&self) -> u64 {
+        self.carried.iter().fold(0_u64, |total, (_, bytes)| {
+            total.saturating_add(encoded_payload_bound(*bytes))
+        })
+    }
+
+    /// The earlier entry a regular file takes its bytes from, or `None` when
+    /// the entry carries its own payload or is not a regular file.
+    pub fn origin(&self, index: usize) -> Option<usize> {
+        self.origins.get(&index).copied()
+    }
+}
+
 #[derive(Clone, Copy)]
 enum RootKind<'a> {
     Directory {
@@ -265,10 +310,12 @@ impl GuestStagingPackageManifest {
         from_json_slice_strict(bytes, MAX_GUEST_STAGING_MANIFEST_BYTES)
     }
 
-    /// Exact uncompressed wire length, including magic and manifest framing.
-    /// Backend admission must compare this with its signed upload limit before
-    /// staging or provider contact.
-    pub fn framed_bytes(&self) -> Result<u64> {
+    /// Upper bound of the wire length, including magic and manifest framing.
+    /// Backend admission compares this with its signed upload limit before
+    /// staging or provider contact; the produced package observes the exact
+    /// length, which the import ticket carries. Identical content is carried
+    /// once and compressed, so the bound usually exceeds the real length.
+    pub fn framed_bytes_bound(&self) -> Result<u64> {
         let manifest_bytes = canonical_json(self)?.len();
         ensure!(
             manifest_bytes <= MAX_GUEST_STAGING_MANIFEST_BYTES,
@@ -276,8 +323,32 @@ impl GuestStagingPackageManifest {
         );
         20_u64
             .checked_add(u64::try_from(manifest_bytes)?)
-            .and_then(|bytes| bytes.checked_add(self.total_regular_bytes))
+            .and_then(|bytes| bytes.checked_add(self.payload_plan().carried_bound()))
             .ok_or_else(|| anyhow::anyhow!("guest staging framed byte count overflow"))
+    }
+
+    /// Which regular-file entries carry their bytes on the wire and where the
+    /// others take theirs from. Computed once per manifest; both stream
+    /// directions and the stager follow the same plan.
+    pub fn payload_plan(&self) -> GuestStagingPayloadPlan {
+        let mut first = BTreeMap::<(&str, u64), usize>::new();
+        let mut carried = Vec::new();
+        let mut origins = BTreeMap::new();
+        for (index, entry) in self.entries.iter().enumerate() {
+            let GuestStagingEntry::RegularFile { bytes, sha256, .. } = entry else {
+                continue;
+            };
+            match first.get(&(sha256.as_str(), *bytes)) {
+                Some(origin) => {
+                    origins.insert(index, *origin);
+                }
+                None => {
+                    first.insert((sha256.as_str(), *bytes), index);
+                    carried.push((index, *bytes));
+                }
+            }
+        }
+        GuestStagingPayloadPlan { carried, origins }
     }
 
     /// Validate the complete package inventory against the retained activation
@@ -549,7 +620,7 @@ fn write_staging_header<W: Write>(
         expected.maximum_regular_bytes,
     )?;
     ensure!(
-        manifest.framed_bytes()? <= expected.maximum_framed_bytes,
+        manifest.framed_bytes_bound()? <= expected.maximum_framed_bytes,
         "guest staging framed transfer budget exceeded"
     );
     let encoded = canonical_json(manifest)?;
@@ -596,10 +667,144 @@ fn read_staging_header<R: Read>(
         expected.maximum_regular_bytes,
     )?;
     ensure!(
-        manifest.framed_bytes()? <= expected.maximum_framed_bytes,
+        manifest.framed_bytes_bound()? <= expected.maximum_framed_bytes,
         "guest staging framed transfer budget exceeded"
     );
     Ok(manifest)
+}
+
+/// Largest deflate output plus frame overhead for one payload of `bytes`:
+/// a stored-block worst case with headroom, then one frame header per
+/// 64 KiB of output and the empty terminating frame.
+fn encoded_payload_bound(bytes: u64) -> u64 {
+    let deflate = bytes
+        .saturating_add(bytes / 8)
+        .saturating_add(bytes / 64)
+        .saturating_add(160);
+    deflate.saturating_add((deflate / (STREAM_CHUNK_BYTES as u64) + 2).saturating_mul(4))
+}
+
+/// Cuts a byte stream into `[u32 length][bytes]` frames and ends it with an
+/// empty frame, so the matching reader stops exactly where this entry ends.
+struct FrameWriter<'a, W: Write> {
+    writer: &'a mut W,
+    buffer: Vec<u8>,
+}
+
+impl<'a, W: Write> FrameWriter<'a, W> {
+    fn new(writer: &'a mut W) -> Self {
+        Self {
+            writer,
+            buffer: Vec::with_capacity(STREAM_CHUNK_BYTES),
+        }
+    }
+
+    fn emit(&mut self) -> std::io::Result<()> {
+        if self.buffer.is_empty() {
+            return Ok(());
+        }
+        let length = u32::try_from(self.buffer.len())
+            .map_err(|_| std::io::Error::other("payload frame exceeds its bound"))?;
+        self.writer.write_all(&length.to_be_bytes())?;
+        self.writer.write_all(&self.buffer)?;
+        self.buffer.clear();
+        Ok(())
+    }
+
+    fn finish(mut self) -> std::io::Result<()> {
+        self.emit()?;
+        self.writer.write_all(&0_u32.to_be_bytes())
+    }
+}
+
+impl<W: Write> Write for FrameWriter<'_, W> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let room = STREAM_CHUNK_BYTES - self.buffer.len();
+        let taken = bytes.len().min(room);
+        self.buffer.extend_from_slice(&bytes[..taken]);
+        if self.buffer.len() == STREAM_CHUNK_BYTES {
+            self.emit()?;
+        }
+        Ok(taken)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.emit()?;
+        self.writer.flush()
+    }
+}
+
+/// Reads the frames one `FrameWriter` produced and reports end of stream at
+/// the empty frame, never consuming the next entry's bytes.
+struct FrameReader<'a, R: Read> {
+    reader: &'a mut R,
+    remaining: usize,
+    terminated: bool,
+}
+
+impl<'a, R: Read> FrameReader<'a, R> {
+    fn new(reader: &'a mut R) -> Self {
+        Self {
+            reader,
+            remaining: 0,
+            terminated: false,
+        }
+    }
+
+    fn next_frame(&mut self) -> std::io::Result<()> {
+        let mut length = [0_u8; 4];
+        self.reader.read_exact(&mut length)?;
+        let length = u32::from_be_bytes(length) as usize;
+        if length > MAX_PAYLOAD_FRAME_BYTES {
+            return Err(std::io::Error::other("payload frame exceeds its bound"));
+        }
+        if length == 0 {
+            self.terminated = true;
+        }
+        self.remaining = length;
+        Ok(())
+    }
+
+    /// The decoder may stop before the terminating frame; consume it now and
+    /// refuse any frame data it left unread.
+    fn finish(mut self) -> Result<()> {
+        if !self.terminated {
+            ensure!(
+                self.remaining == 0,
+                "guest staging payload has frame bytes after its deflate stream"
+            );
+            self.next_frame()?;
+            ensure!(
+                self.terminated,
+                "guest staging payload has frames after its deflate stream"
+            );
+        }
+        Ok(())
+    }
+}
+
+impl<R: Read> Read for FrameReader<'_, R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        if self.terminated || buffer.is_empty() {
+            return Ok(0);
+        }
+        if self.remaining == 0 {
+            self.next_frame()?;
+            if self.terminated {
+                return Ok(0);
+            }
+        }
+        let wanted = buffer.len().min(self.remaining);
+        let read = self.reader.read(&mut buffer[..wanted])?;
+        if read == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "guest staging payload frame ended early",
+            ));
+        }
+        self.remaining -= read;
+        Ok(read)
+    }
 }
 
 /// Copy one declared file through a bounded buffer while checking its exact
@@ -630,6 +835,47 @@ fn copy_staging_file<R: Read, W: Write>(
     Ok(())
 }
 
+/// Compress one declared file onto the wire as a framed deflate stream while
+/// checking the exact size and digest of the bytes read.
+fn encode_staging_file<R: Read, W: Write>(
+    reader: &mut R,
+    writer: &mut W,
+    entry: &GuestStagingEntry,
+) -> Result<()> {
+    let mut encoder = flate2::write::DeflateEncoder::new(
+        FrameWriter::new(writer),
+        flate2::Compression::new(PAYLOAD_COMPRESSION_LEVEL),
+    );
+    copy_staging_file(reader, &mut encoder, entry)?;
+    encoder.finish()?.finish()?;
+    Ok(())
+}
+
+/// Materialize one declared file from its framed deflate stream, checking the
+/// decompressed size and digest and that the stream ends exactly with it.
+fn decode_staging_file<R: Read, W: Write>(
+    reader: &mut R,
+    writer: &mut W,
+    entry: &GuestStagingEntry,
+) -> Result<()> {
+    let mut decoder = flate2::bufread::DeflateDecoder::new(BufReader::with_capacity(
+        STREAM_CHUNK_BYTES,
+        FrameReader::new(reader),
+    ));
+    copy_staging_file(&mut decoder, writer, entry)?;
+    let mut sentinel = [0_u8; 1];
+    ensure!(
+        decoder.read(&mut sentinel)? == 0,
+        "guest staging payload grew beyond its declared size"
+    );
+    let frames = decoder.into_inner();
+    ensure!(
+        frames.buffer().is_empty(),
+        "guest staging payload has bytes after its deflate stream"
+    );
+    frames.into_inner().finish()
+}
+
 /// Refuse undeclared trailing bytes after all manifest payloads were copied.
 /// A caller-owned deadline must bound a slow or stalled stream.
 fn require_staging_eof<R: Read>(reader: &mut R) -> Result<()> {
@@ -641,25 +887,14 @@ fn require_staging_eof<R: Read>(reader: &mut R) -> Result<()> {
     Ok(())
 }
 
-fn next_regular_entry(
-    manifest: &GuestStagingPackageManifest,
-    start: usize,
-) -> Option<(usize, &GuestStagingEntry)> {
-    manifest
-        .entries
-        .iter()
-        .enumerate()
-        .skip(start)
-        .find(|(_, entry)| matches!(entry, GuestStagingEntry::RegularFile { .. }))
-}
-
 /// Sequential producer over a private package file. A failed copy permanently
 /// aborts the writer; the caller must discard the contaminated package.
 #[must_use = "finish every declared file before using the private package"]
 pub struct GuestStagingStreamWriter<W: Write> {
     writer: W,
     manifest: GuestStagingPackageManifest,
-    next_index: usize,
+    plan: GuestStagingPayloadPlan,
+    next: usize,
     failed: bool,
 }
 
@@ -670,27 +905,37 @@ impl<W: Write> GuestStagingStreamWriter<W> {
         expected: &GuestStagingExpected<'_>,
     ) -> Result<Self> {
         write_staging_header(&mut writer, &manifest, expected)?;
+        let plan = manifest.payload_plan();
         Ok(Self {
             writer,
             manifest,
-            next_index: 0,
+            plan,
+            next: 0,
             failed: false,
         })
     }
 
+    /// The next entry whose bytes the stream carries.
     pub fn next_file(&self) -> Option<&GuestStagingEntry> {
-        next_regular_entry(&self.manifest, self.next_index).map(|(_, entry)| entry)
+        self.plan
+            .carried()
+            .nth(self.next)
+            .map(|index| &self.manifest.entries[index])
     }
 
     pub fn copy_next_file<R: Read>(&mut self, reader: &mut R) -> Result<()> {
         ensure!(!self.failed, "guest staging writer was aborted");
-        let (index, entry) = next_regular_entry(&self.manifest, self.next_index)
+        let index = self
+            .plan
+            .carried()
+            .nth(self.next)
             .ok_or_else(|| anyhow::anyhow!("guest staging has no remaining file"))?;
-        let result = copy_staging_file(reader, &mut self.writer, entry)
+        let entry = &self.manifest.entries[index];
+        let result = encode_staging_file(reader, &mut self.writer, entry)
             .and_then(|()| require_staging_eof(reader));
         match result {
             Ok(()) => {
-                self.next_index = index + 1;
+                self.next += 1;
                 Ok(())
             }
             Err(error) => {
@@ -702,7 +947,7 @@ impl<W: Write> GuestStagingStreamWriter<W> {
 
     pub fn finish(self) -> Result<W> {
         ensure!(
-            !self.failed && next_regular_entry(&self.manifest, self.next_index).is_none(),
+            !self.failed && self.next == self.plan.carried_count(),
             "guest staging writer did not complete its inventory"
         );
         Ok(self.writer)
@@ -716,17 +961,20 @@ impl<W: Write> GuestStagingStreamWriter<W> {
 pub struct GuestStagingStreamReader<R: Read> {
     reader: R,
     manifest: GuestStagingPackageManifest,
-    next_index: usize,
+    plan: GuestStagingPayloadPlan,
+    next: usize,
     failed: bool,
 }
 
 impl<R: Read> GuestStagingStreamReader<R> {
     pub fn new(mut reader: R, expected: &GuestStagingExpected<'_>) -> Result<Self> {
         let manifest = read_staging_header(&mut reader, expected)?;
+        let plan = manifest.payload_plan();
         Ok(Self {
             reader,
             manifest,
-            next_index: 0,
+            plan,
+            next: 0,
             failed: false,
         })
     }
@@ -735,18 +983,26 @@ impl<R: Read> GuestStagingStreamReader<R> {
         &self.manifest
     }
 
+    /// The next entry whose bytes the stream carries.
     pub fn next_file(&self) -> Option<&GuestStagingEntry> {
-        next_regular_entry(&self.manifest, self.next_index).map(|(_, entry)| entry)
+        self.plan
+            .carried()
+            .nth(self.next)
+            .map(|index| &self.manifest.entries[index])
     }
 
     pub fn copy_next_file<W: Write>(&mut self, writer: &mut W) -> Result<()> {
         ensure!(!self.failed, "guest staging reader was aborted");
-        let (index, entry) = next_regular_entry(&self.manifest, self.next_index)
+        let index = self
+            .plan
+            .carried()
+            .nth(self.next)
             .ok_or_else(|| anyhow::anyhow!("guest staging has no remaining file"))?;
-        let result = copy_staging_file(&mut self.reader, writer, entry);
+        let entry = &self.manifest.entries[index];
+        let result = decode_staging_file(&mut self.reader, writer, entry);
         match result {
             Ok(()) => {
-                self.next_index = index + 1;
+                self.next += 1;
                 Ok(())
             }
             Err(error) => {
@@ -758,7 +1014,7 @@ impl<R: Read> GuestStagingStreamReader<R> {
 
     pub fn finish(mut self) -> Result<R> {
         ensure!(
-            !self.failed && next_regular_entry(&self.manifest, self.next_index).is_none(),
+            !self.failed && self.next == self.plan.carried_count(),
             "guest staging reader did not complete its inventory"
         );
         require_staging_eof(&mut self.reader)?;
@@ -890,7 +1146,7 @@ mod tests {
             guest_input_identity: manifest.guest_input_identity.clone(),
             payload_sha256: hash('2'),
             manifest_sha256: hex::encode(Sha256::digest(canonical_json(&manifest).unwrap())),
-            framed_bytes: manifest.framed_bytes().unwrap(),
+            framed_bytes: manifest.framed_bytes_bound().unwrap(),
             regular_bytes: manifest.total_regular_bytes,
             bootstrap_sha256: manifest.bootstrap_sha256.clone(),
             supervisor_sha256: manifest.supervisor_sha256.clone(),
@@ -907,9 +1163,7 @@ mod tests {
         ticket.validate().unwrap();
         assert_eq!(
             ticket.minimum_upload_and_stage_bytes().unwrap(),
-            ticket.framed_bytes
-                + manifest.total_regular_bytes
-                + canonical_json(&manifest).unwrap().len() as u64,
+            ticket.framed_bytes + manifest.total_regular_bytes,
         );
         ticket.staging_expected(&context, &inputs).unwrap();
         ticket
@@ -1198,7 +1452,7 @@ mod tests {
             supervisor_sha256: &manifest.supervisor_sha256,
             launcher_sha256: &manifest.launcher_sha256,
             maximum_regular_bytes: 20,
-            maximum_framed_bytes: manifest.framed_bytes().unwrap(),
+            maximum_framed_bytes: manifest.framed_bytes_bound().unwrap(),
         };
 
         let writer =
@@ -1212,15 +1466,12 @@ mod tests {
         }
         assert!(writer.next_file().is_none());
         let stream = writer.finish().unwrap();
-        assert_eq!(
-            u64::try_from(stream.len()).unwrap(),
-            manifest.framed_bytes().unwrap()
-        );
+        assert!(u64::try_from(stream.len()).unwrap() <= manifest.framed_bytes_bound().unwrap());
         let mut writer =
             GuestStagingStreamWriter::new(Vec::new(), manifest.clone(), &expected).unwrap();
         assert!(writer.copy_next_file(&mut b"bbx".as_slice()).is_err());
         assert!(writer.finish().is_err());
-        let header_end = stream.len() - 20;
+        let header_end = 20 + canonical_json(&manifest).unwrap().len();
         let mut reader = GuestStagingStreamReader::new(stream.as_slice(), &expected).unwrap();
         assert_eq!(reader.manifest(), &manifest);
         for payload in payloads {
@@ -1278,6 +1529,173 @@ mod tests {
         assert!(reader.copy_next_file(&mut RefuseWrite).is_err());
         assert!(reader.copy_next_file(&mut Vec::new()).is_err());
         assert!(reader.finish().is_err());
+    }
+
+    /// Two entries with identical content share one wire payload: the first
+    /// in manifest order carries it, the later one names its origin, and the
+    /// framed length counts the bytes once while every file keeps its own
+    /// path and mode.
+    #[test]
+    fn identical_payloads_cross_the_wire_once() {
+        let (mut inputs, mut manifest) = fixture();
+        // input-00 sorts before launcher and carries the same bytes.
+        let payloads: [&[u8]; 5] = [b"bb", b"boot", b"start", b"start", b"runrun"];
+        for (entry, payload) in manifest
+            .entries
+            .iter_mut()
+            .filter(|entry| !entry.is_directory())
+            .zip(payloads)
+        {
+            let GuestStagingEntry::RegularFile { sha256, bytes, .. } = entry else {
+                unreachable!()
+            };
+            *sha256 = hex::encode(Sha256::digest(payload));
+            *bytes = payload.len() as u64;
+        }
+        manifest.total_regular_bytes = payloads.iter().map(|payload| payload.len() as u64).sum();
+        let GuestMountContentAuthority::RawFile { sha256 } =
+            &mut inputs.inputs[0].content_authority
+        else {
+            unreachable!()
+        };
+        *sha256 = hex::encode(Sha256::digest(payloads[2]));
+        inputs.inputs[0].bytes = payloads[2].len() as u64;
+        manifest.guest_input_identity = inputs.identity_digest().unwrap();
+        manifest.bootstrap_sha256 = hex::encode(Sha256::digest(payloads[1]));
+        manifest.launcher_sha256 = hex::encode(Sha256::digest(payloads[3]));
+        manifest.supervisor_sha256 = hex::encode(Sha256::digest(payloads[4]));
+        let expected = GuestStagingExpected {
+            inputs: &inputs,
+            activation_request_digest: &manifest.activation_request_digest,
+            bootstrap_sha256: &manifest.bootstrap_sha256,
+            supervisor_sha256: &manifest.supervisor_sha256,
+            launcher_sha256: &manifest.launcher_sha256,
+            maximum_regular_bytes: 64,
+            maximum_framed_bytes: manifest.framed_bytes_bound().unwrap(),
+        };
+
+        let plan = manifest.payload_plan();
+        let paths: Vec<&str> = plan
+            .carried()
+            .map(|index| manifest.entries[index].path())
+            .collect();
+        assert_eq!(
+            paths,
+            ["base/object", "bootstrap", "input-00", "supervisor"]
+        );
+        let launcher = manifest
+            .entries
+            .iter()
+            .position(|entry| entry.path() == "launcher")
+            .unwrap();
+        let input = manifest
+            .entries
+            .iter()
+            .position(|entry| entry.path() == "input-00")
+            .unwrap();
+        assert_eq!(plan.origin(launcher), Some(input));
+        assert_eq!(plan.origin(input), None);
+
+        let mut writer =
+            GuestStagingStreamWriter::new(Vec::new(), manifest.clone(), &expected).unwrap();
+        for payload in [payloads[0], payloads[1], payloads[2], payloads[4]] {
+            writer.copy_next_file(&mut &payload[..]).unwrap();
+        }
+        assert!(writer.next_file().is_none());
+        let stream = writer.finish().unwrap();
+        assert!(u64::try_from(stream.len()).unwrap() <= manifest.framed_bytes_bound().unwrap());
+        let mut reader = GuestStagingStreamReader::new(stream.as_slice(), &expected).unwrap();
+        let mut observed = Vec::new();
+        for _ in 0..4 {
+            let mut bytes = Vec::new();
+            reader.copy_next_file(&mut bytes).unwrap();
+            observed.push(bytes);
+        }
+        assert_eq!(
+            observed,
+            [
+                b"bb".to_vec(),
+                b"boot".to_vec(),
+                b"start".to_vec(),
+                b"runrun".to_vec()
+            ]
+        );
+        assert!(reader.next_file().is_none());
+        reader.finish().unwrap();
+    }
+
+    /// A compressible payload crosses the wire far smaller than it is, within
+    /// the manifest's bound, and comes back byte-exact; a byte flipped inside
+    /// the compressed frames is refused.
+    #[test]
+    fn payloads_are_compressed_within_the_declared_bound() {
+        let (mut inputs, mut manifest) = fixture();
+        let big: Vec<u8> = (0..(4 * STREAM_CHUNK_BYTES))
+            .map(|index| b"ryeos guest package "[index % 20])
+            .collect();
+        let payloads: [&[u8]; 5] = [b"bb", b"boot", &big, b"start", b"runrun"];
+        for (entry, payload) in manifest
+            .entries
+            .iter_mut()
+            .filter(|entry| !entry.is_directory())
+            .zip(payloads)
+        {
+            let GuestStagingEntry::RegularFile { sha256, bytes, .. } = entry else {
+                unreachable!()
+            };
+            *sha256 = hex::encode(Sha256::digest(payload));
+            *bytes = payload.len() as u64;
+        }
+        manifest.total_regular_bytes = payloads.iter().map(|payload| payload.len() as u64).sum();
+        let GuestMountContentAuthority::RawFile { sha256 } =
+            &mut inputs.inputs[0].content_authority
+        else {
+            unreachable!()
+        };
+        *sha256 = hex::encode(Sha256::digest(payloads[2]));
+        inputs.inputs[0].bytes = payloads[2].len() as u64;
+        manifest.guest_input_identity = inputs.identity_digest().unwrap();
+        manifest.bootstrap_sha256 = hex::encode(Sha256::digest(payloads[1]));
+        manifest.launcher_sha256 = hex::encode(Sha256::digest(payloads[3]));
+        manifest.supervisor_sha256 = hex::encode(Sha256::digest(payloads[4]));
+        let expected = GuestStagingExpected {
+            inputs: &inputs,
+            activation_request_digest: &manifest.activation_request_digest,
+            bootstrap_sha256: &manifest.bootstrap_sha256,
+            supervisor_sha256: &manifest.supervisor_sha256,
+            launcher_sha256: &manifest.launcher_sha256,
+            maximum_regular_bytes: manifest.total_regular_bytes,
+            maximum_framed_bytes: manifest.framed_bytes_bound().unwrap(),
+        };
+        let mut writer =
+            GuestStagingStreamWriter::new(Vec::new(), manifest.clone(), &expected).unwrap();
+        for payload in payloads {
+            writer.copy_next_file(&mut &payload[..]).unwrap();
+        }
+        let stream = writer.finish().unwrap();
+        let header = 20 + canonical_json(&manifest).unwrap().len();
+        assert!(
+            stream.len() - header < big.len() / 4,
+            "stream {} big {}",
+            stream.len(),
+            big.len()
+        );
+        assert!(u64::try_from(stream.len()).unwrap() <= manifest.framed_bytes_bound().unwrap());
+        let mut reader = GuestStagingStreamReader::new(stream.as_slice(), &expected).unwrap();
+        for payload in payloads {
+            let mut observed = Vec::new();
+            reader.copy_next_file(&mut observed).unwrap();
+            assert_eq!(observed, payload);
+        }
+        reader.finish().unwrap();
+
+        let mut tampered = stream.clone();
+        let inside = header + 64;
+        tampered[inside] ^= 0x55;
+        let mut reader = GuestStagingStreamReader::new(tampered.as_slice(), &expected).unwrap();
+        reader.copy_next_file(&mut Vec::new()).unwrap();
+        reader.copy_next_file(&mut Vec::new()).unwrap();
+        assert!(reader.copy_next_file(&mut Vec::new()).is_err());
     }
 
     #[test]

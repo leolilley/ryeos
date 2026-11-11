@@ -37,6 +37,68 @@ pub struct NodeExecutionAdmissionPolicy {
     /// policy identity of a node that places none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_lease_budget: Option<ExternalLeaseBudget>,
+    /// A synchronized wall clock this node must hold before it issues the
+    /// absolute-time windows of an external execution. Omission is report
+    /// only: the node issues windows whatever its clock says, and the clock
+    /// trust is still reported where the node reports its health. Omission
+    /// keeps the policy identity of a node that requires nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_wall_clock_requirement: Option<ExternalWallClockRequirement>,
+}
+
+/// The largest clock error bound a node may accept, one minute in
+/// microseconds. A looser bound than the guests' own skew tolerance defeats
+/// the requirement.
+pub const MAX_EXTERNAL_WALL_CLOCK_ERROR_US: u64 = 60_000_000;
+
+/// A synchronized-clock requirement for issuing external execution windows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalWallClockRequirement {
+    /// The most the kernel may admit its wall-clock error to be, in
+    /// microseconds, while it also claims to be synchronized.
+    pub max_error_us: u64,
+}
+
+impl ExternalWallClockRequirement {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if !(1..=MAX_EXTERNAL_WALL_CLOCK_ERROR_US).contains(&self.max_error_us) {
+            bail!(
+                "node external wall-clock requirement max_error_us must be between 1 and \
+                 {MAX_EXTERNAL_WALL_CLOCK_ERROR_US}"
+            );
+        }
+        Ok(())
+    }
+
+    /// Refuse, naming the cause, unless `trust` satisfies the requirement.
+    pub fn require(&self, trust: &lillux::time::WallClockTrust) -> anyhow::Result<()> {
+        match trust {
+            lillux::time::WallClockTrust::Synced {
+                maximum_error_us, ..
+            } if *maximum_error_us <= self.max_error_us => Ok(()),
+            lillux::time::WallClockTrust::Synced {
+                maximum_error_us, ..
+            } => bail!(
+                "this node's wall clock is too uncertain to issue external execution windows: \
+                 the kernel admits an error of up to {maximum_error_us} us, node execution \
+                 policy allows {} us",
+                self.max_error_us
+            ),
+            lillux::time::WallClockTrust::Unsynchronized => bail!(
+                "this node's wall clock is unsynchronized, and node execution policy requires \
+                 a synchronized wall clock (error at most {} us) to issue external execution \
+                 windows",
+                self.max_error_us
+            ),
+            lillux::time::WallClockTrust::Unknown => bail!(
+                "this node cannot determine whether its wall clock is synchronized, and node \
+                 execution policy requires a synchronized wall clock (error at most {} us) to \
+                 issue external execution windows",
+                self.max_error_us
+            ),
+        }
+    }
 }
 
 /// The most concurrent leases a node may declare. Providers bound a
@@ -199,6 +261,9 @@ impl NodeExecutionAdmissionPolicy {
         }
         if let Some(budget) = &self.external_lease_budget {
             budget.validate()?;
+        }
+        if let Some(requirement) = &self.external_wall_clock_requirement {
+            requirement.validate()?;
         }
         Ok(())
     }
@@ -429,6 +494,7 @@ mod tests {
             resource_authority: None,
             producer_resource_ceiling: None,
             external_lease_budget: None,
+            external_wall_clock_requirement: None,
         }
     }
 
@@ -439,6 +505,59 @@ mod tests {
             daily_lease_seconds: 8 * 60 * 60,
             turn_end_margin_seconds: 10 * 60,
         }
+    }
+
+    #[test]
+    fn wall_clock_requirement_is_optional_data_and_names_its_cause() {
+        let policy = valid_policy();
+        let value = serde_json::to_value(&policy).unwrap();
+        assert!(value.get("external_wall_clock_requirement").is_none());
+        let mut required = valid_policy();
+        required.external_wall_clock_requirement = Some(ExternalWallClockRequirement {
+            max_error_us: 50_000,
+        });
+        required.validate().unwrap();
+        let parsed: NodeExecutionAdmissionPolicy =
+            serde_json::from_value(serde_json::to_value(&required).unwrap()).unwrap();
+        assert_eq!(parsed, required);
+        for bad in [0, MAX_EXTERNAL_WALL_CLOCK_ERROR_US + 1] {
+            required.external_wall_clock_requirement =
+                Some(ExternalWallClockRequirement { max_error_us: bad });
+            assert!(required.validate().is_err());
+        }
+
+        let requirement = ExternalWallClockRequirement {
+            max_error_us: 50_000,
+        };
+        requirement
+            .require(&lillux::time::WallClockTrust::Synced {
+                maximum_error_us: 50_000,
+                estimated_error_us: 10,
+            })
+            .unwrap();
+        let too_uncertain = requirement
+            .require(&lillux::time::WallClockTrust::Synced {
+                maximum_error_us: 50_001,
+                estimated_error_us: 10,
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(
+            too_uncertain.contains("up to 50001 us") && too_uncertain.contains("allows 50000 us")
+        );
+        let unsynchronized = requirement
+            .require(&lillux::time::WallClockTrust::Unsynchronized)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            unsynchronized.contains("is unsynchronized"),
+            "{unsynchronized}"
+        );
+        let unknown = requirement
+            .require(&lillux::time::WallClockTrust::Unknown)
+            .unwrap_err()
+            .to_string();
+        assert!(unknown.contains("cannot determine"), "{unknown}");
     }
 
     #[test]

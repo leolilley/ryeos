@@ -54,7 +54,6 @@ pub fn retain_terminal_qualification_worker_transcript(
                     placement,
                     expected_process,
                 )?;
-                crate::process::assert_reaped_process_group_absent(expected_process)?;
                 let retained = state
                     .state_store
                     .retain_qualification_worker_transcript(placement)?;

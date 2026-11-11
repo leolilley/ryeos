@@ -501,6 +501,12 @@ pub struct PrepareRuntimeLaunchRequest<'a> {
     pub resolution_cache: Option<PreparedResolutionCacheContext<'a>>,
     pub ref_binding_resolution_timings:
         Option<&'a ryeos_app::launch_stage_timings::LaunchStageTimings>,
+    /// Current node policy, whose launch_trust section widens the runtime's
+    /// primary trust list within what the primary's kind lets an operator
+    /// admit. Diagnostics without a node pass `None` and judge against the
+    /// runtime's own list.
+    pub node_policy:
+        Option<&'a std::sync::Arc<ryeos_node_runtime::node_policy::NodePolicySnapshot>>,
 }
 
 #[derive(Clone, Copy)]
@@ -588,6 +594,7 @@ struct OwnedPrepareRuntimeLaunchRequest {
     subject_resolution_authority: ryeos_engine::contracts::SubjectResolutionAuthority,
     resolution_cache: Option<OwnedPreparedResolutionCacheContext>,
     ref_binding_resolution_timings: Option<ryeos_app::launch_stage_timings::LaunchStageTimings>,
+    node_policy: Option<std::sync::Arc<ryeos_node_runtime::node_policy::NodePolicySnapshot>>,
 }
 
 impl OwnedPrepareRuntimeLaunchRequest {
@@ -612,6 +619,7 @@ impl OwnedPrepareRuntimeLaunchRequest {
                 }
             }),
             ref_binding_resolution_timings: request.ref_binding_resolution_timings.cloned(),
+            node_policy: request.node_policy.cloned(),
         }
     }
 
@@ -638,6 +646,7 @@ impl OwnedPrepareRuntimeLaunchRequest {
             subject_resolution_authority: &self.subject_resolution_authority,
             resolution_cache: cache_context,
             ref_binding_resolution_timings: self.ref_binding_resolution_timings.as_ref(),
+            node_policy: self.node_policy.as_ref(),
         })
     }
 }
@@ -1448,7 +1457,12 @@ pub(crate) fn project_effective_ref_bindings(
         if declaration.required && !effective.contains_key(name) {
             return Err(preparation_error_with_binding(
                 "ref_binding_required",
-                format!("required ref binding `{name}` is missing"),
+                format!(
+                    "required ref binding `{name}` is missing; pass \
+                     `--ref-binding {name}=<item ref>` on the CLI (or `ref_bindings` \
+                     `{{\"{name}\": \"<item ref>\"}}` in the request); a directive's \
+                     `model` binding is the directive's own ref"
+                ),
                 LaunchPrepareErrorClass::Caller,
                 Some(name.clone()),
             ));
@@ -1468,11 +1482,33 @@ fn prepare_runtime_launch_inputs(
     .map_err(|error| {
         preparation_error(
             "product_selection_input_invalid",
-            error.to_string(),
+            format!("{error:#}"),
             LaunchPrepareErrorClass::Caller,
         )
     })?;
     let contract = &request.runtime.yaml.launch_contract;
+    let primary_allowed_trust = match request.node_policy {
+        Some(node_policy) => {
+            let primary_kind = ryeos_engine::canonical_ref::CanonicalRef::parse(
+                &request.primary.root.resolved_ref,
+            )
+            .map_err(|error| {
+                DispatchError::InvalidRef(
+                    request.primary.root.resolved_ref.clone(),
+                    error.to_string(),
+                )
+            })?
+            .kind;
+            super::launch_trust_gate::effective_launch_trust(
+                &request.engine.kinds,
+                node_policy,
+                &primary_kind,
+                Some(&contract.primary_allowed_trust),
+            )?
+            .admitted
+        }
+        None => contract.primary_allowed_trust.clone(),
+    };
     validate_prepared_item(
         PreparedItemRole::Primary,
         &request.primary.root.resolved_ref,
@@ -1480,7 +1516,7 @@ fn prepare_runtime_launch_inputs(
         request.primary.effective_trust_class,
         &contract.primary_allowed_kinds,
         &contract.primary_allowed_spaces,
-        &contract.primary_allowed_trust,
+        &primary_allowed_trust,
     )?;
     let effective_ref_bindings = project_effective_ref_bindings(
         &contract.ref_bindings,
@@ -1953,7 +1989,7 @@ fn finish_runtime_launch_preparation_parts(
         request.validate().map_err(|error| {
             preparation_error(
                 "workload_client_request_invalid",
-                error.to_string(),
+                format!("{error:#}"),
                 LaunchPrepareErrorClass::Internal,
             )
         })?;
@@ -1965,7 +2001,7 @@ fn finish_runtime_launch_preparation_parts(
     .map_err(|error| {
         preparation_error(
             "workload_execution_product_selection_invalid",
-            error.to_string(),
+            format!("{error:#}"),
             LaunchPrepareErrorClass::Caller,
         )
     })?;
@@ -2087,7 +2123,7 @@ fn resolve_environment_contributions(
         contribution.validate().map_err(|error| {
             preparation_error(
                 "environment_contribution_invalid",
-                format!("environment contribution `{name}` is invalid: {error}"),
+                format!("environment contribution `{name}` is invalid: {error:#}"),
                 LaunchPrepareErrorClass::Internal,
             )
         })?;
@@ -2348,7 +2384,7 @@ fn resolve_execution_dependencies(
                 preparation_error(
                     "execution_dependency_authority_invalid",
                     format!(
-                        "execution dependency `{name}` has invalid declaring authority: {error}"
+                        "execution dependency `{name}` has invalid declaring authority: {error:#}"
                     ),
                     LaunchPrepareErrorClass::Configuration,
                 )
@@ -2364,7 +2400,9 @@ fn resolve_execution_dependencies(
         .map_err(|error| {
             preparation_error(
                 "execution_dependency_declaration_invalid",
-                format!("execution dependency `{name}` authored content shape is invalid: {error}"),
+                format!(
+                    "execution dependency `{name}` authored content shape is invalid: {error:#}"
+                ),
                 LaunchPrepareErrorClass::Configuration,
             )
         })?
@@ -2390,7 +2428,7 @@ fn resolve_execution_dependencies(
         dependency.validate().map_err(|error| {
             preparation_error(
                 "execution_dependency_capture_invalid",
-                format!("execution dependency `{name}` capture is invalid: {error}"),
+                format!("execution dependency `{name}` capture is invalid: {error:#}"),
                 LaunchPrepareErrorClass::Internal,
             )
         })?;
@@ -2570,7 +2608,7 @@ fn resolve_content_dependencies(
             intersect_content_policy(external_policy, source_contract).map_err(|error| {
                 preparation_error(
                     "content_dependency_kind_contract_denied",
-                    error.to_string(),
+                    format!("{error:#}"),
                     LaunchPrepareErrorClass::Configuration,
                 )
             })?;
@@ -2579,7 +2617,9 @@ fn resolve_content_dependencies(
             ryeos_engine::external_content::declaring_authority(resolution).map_err(|error| {
                 preparation_error(
                     "content_dependency_authority_invalid",
-                    format!("content dependency `{name}` has invalid declaring authority: {error}"),
+                    format!(
+                        "content dependency `{name}` has invalid declaring authority: {error:#}"
+                    ),
                     LaunchPrepareErrorClass::Configuration,
                 )
             })?;
@@ -2591,7 +2631,7 @@ fn resolve_content_dependencies(
         .map_err(|error| {
             preparation_error(
                 "content_dependency_declaration_invalid",
-                format!("content dependency `{name}` authored shape is invalid: {error}"),
+                format!("content dependency `{name}` authored shape is invalid: {error:#}"),
                 LaunchPrepareErrorClass::Configuration,
             )
         })?
@@ -2658,7 +2698,7 @@ fn resolve_content_dependencies(
             .map_err(|error| {
                 preparation_error(
                     "content_dependency_target_contract_missing",
-                    error.to_string(),
+                    format!("{error:#}"),
                     LaunchPrepareErrorClass::Configuration,
                 )
             })?;
@@ -2675,7 +2715,7 @@ fn resolve_content_dependencies(
         dependency.validate().map_err(|error| {
             preparation_error(
                 "content_dependency_capture_invalid",
-                format!("content dependency `{name}` capture is invalid: {error}"),
+                format!("content dependency `{name}` capture is invalid: {error:#}"),
                 LaunchPrepareErrorClass::Internal,
             )
         })?;

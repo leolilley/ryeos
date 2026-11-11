@@ -1,7 +1,7 @@
 //! Produce one exact, credential-free guest owner runtime tree.
 //!
 //! The caller supplies an admitted executable descriptor and controller
-//! *public* root. This module does not publish a Render snapshot or qualify
+//! *public* root. This module does not publish a provider snapshot or qualify
 //! the provider's restored bytes, process lifetime, or filesystem custody.
 
 use std::ffi::OsStr;

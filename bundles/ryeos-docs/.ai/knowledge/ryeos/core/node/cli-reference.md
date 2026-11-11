@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-10-15T08:44:06Z:402cfb4cf0d6b7b4edabc718202f94b298d7bc06b7a9955d5ad693ecc23b2554:mdxzFCrasZqCGG0k4FjQ9Jq4+BJlvk+D6dwD0zRcAVt3gXytlmXGys5YJlVswan5pxE29SayNpfe20cCi2mtBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-04T06:06:06Z:b5adb0555d39a6fb07f1b91558e4357ef7bd71a8aeb9cd16b6848cfc19846eb8:jzFL1vPoscBSx/LrunngSlO+CTmoJf0eLx7+e3GY66DXN5Y7g0TaDLm75SzpmEx+z11hCjwOZWk0FORLjcfMAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -224,13 +224,13 @@ customization.
 ### `ryeos node external-execution compose`
 
 ```bash
-ryeos node external-execution compose --id <binding-id> --backend <backend|render> \
+ryeos node external-execution compose --id <binding-id> --backend <backend> \
   --transport https --origin <https://host[:port]> --roots <roots.pem> \
   --account <label> --settings <file> --program <program.json> \
   --guest-runtime-manifest-hash <hash> \
   [--capacity-group <group>] [--runtime-qualification <file|none>] \
   [--limits <limits.json>] [--app-root <dir>] [--json]
-ryeos node external-execution compose --id <binding-id> --backend <backend|render> \
+ryeos node external-execution compose --id <binding-id> --backend <backend> \
   --transport file-relay --owner-workspace-id <id> --private-mailbox-parent <dir> \
   --account <label> --settings <file> --program <program.json> \
   --guest-runtime-manifest-hash <hash> [...same optional flags]
@@ -242,7 +242,7 @@ holds the node state lock, so it refuses while the daemon runs. Artifact
 identities (backend, supervisor, launcher, configuration adapter, connector)
 and the settings schema digest come from the installed, verified bundles; an
 unknown provider or backend, or an ambiguous installed generation, is refused.
-`render` selects `render-sandbox-early-access`. The https origin must be a
+The https origin must be a
 canonical bare origin (lowercase ASCII host, no default port, no path, query,
 fragment or userinfo, non-zero port) and `--roots` must hold only X.509
 CERTIFICATE blocks. Every run names a fresh credential generation; provision

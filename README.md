@@ -244,7 +244,7 @@ The image includes `ryeosd`, `ryeos`, core tools, and signed bundle trees. The
 entrypoint runs `ryeos init --non-interactive --node-profile standard
 --host-class "$RYEOS_INIT_HOST_CLASS"` for first policy publication. The image
 never sets `RYEOS_INIT_HOST_CLASS`: the deployment sets it to `hosted` in a
-hosting provider's container (Railway, a Render service, plain Docker) or to
+hosting provider's container (a hosted service, plain Docker) or to
 `local` on a host the operator runs, and the node keeps that class for life.
 On later boots it omits the init profile and asks
 RyeOS to validate and preserve the existing complete signed generation before starting

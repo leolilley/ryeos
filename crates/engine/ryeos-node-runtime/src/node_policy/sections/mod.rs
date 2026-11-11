@@ -6,6 +6,7 @@ pub mod external_content;
 pub mod hosted;
 pub mod ingest_ignore;
 pub mod isolation;
+pub mod launch_trust;
 pub mod maintenance;
 pub mod native_capacity;
 pub mod object_closure;

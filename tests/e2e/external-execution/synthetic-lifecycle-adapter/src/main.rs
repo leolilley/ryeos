@@ -692,6 +692,7 @@ fn reconcile_allocation(
                 "allocation_absent",
                 &serde_json::json!({"request_digest": request_digest}),
             )?,
+            reason: "allocation_absent".into(),
         });
     };
     let record: AllocationRecord = read_document(&occurrence, ALLOCATION_FILE)?;
@@ -725,6 +726,8 @@ fn activate(
         return Ok(LifecycleAdapterResponse::SupervisorPending {
             operation_id: request.common().operation_id.clone(),
             activation_request_digest: activation.activation_request_digest.clone(),
+            guest_owner: None,
+            contact_failure: None,
         });
     };
     phase_lock.ensure_protects(&occurrence_root)?;
@@ -1046,6 +1049,8 @@ fn reconcile_activation(
         return Ok(LifecycleAdapterResponse::SupervisorPending {
             operation_id: request.common().operation_id.clone(),
             activation_request_digest: activation.activation_request_digest.clone(),
+            guest_owner: None,
+            contact_failure: None,
         });
     };
     phase_lock.ensure_protects(&occurrence_root)?;
@@ -1054,6 +1059,8 @@ fn reconcile_activation(
         return Ok(LifecycleAdapterResponse::SupervisorPending {
             operation_id: request.common().operation_id.clone(),
             activation_request_digest: activation.activation_request_digest.clone(),
+            guest_owner: None,
+            contact_failure: None,
         });
     };
     let mut retained: ActivationRecord = decode_document(&file)?;
@@ -1100,6 +1107,8 @@ fn reconcile_activation(
     Ok(LifecycleAdapterResponse::SupervisorPending {
         operation_id: request.common().operation_id.clone(),
         activation_request_digest: activation.activation_request_digest.clone(),
+        guest_owner: None,
+        contact_failure: None,
     })
 }
 

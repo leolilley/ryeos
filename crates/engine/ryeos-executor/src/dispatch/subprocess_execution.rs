@@ -266,7 +266,7 @@ pub(crate) async fn dispatch_subprocess(
                 kind: current_ref.kind.clone(),
                 detail: "dispatch_subprocess called on a schema with no terminator".into(),
             })?;
-    let protocol_ref = match terminator {
+    let (protocol_ref, composed_value) = match terminator {
         TerminatorDecl::Subprocess { protocol } => {
             let verified = hop_verified.ok_or_else(|| DispatchError::SchemaMisconfigured {
                 kind: current_ref.kind.clone(),
@@ -295,12 +295,13 @@ pub(crate) async fn dispatch_subprocess(
                             .into(),
                 });
             }
-            protocol
+            let protocol_ref = protocol
                 .resolve(&effective.composed_value)
                 .map_err(|detail| DispatchError::SchemaMisconfigured {
                     kind: current_ref.kind.clone(),
                     detail,
-                })?
+                })?;
+            (protocol_ref, effective.composed_value)
         }
         TerminatorDecl::InProcess { .. } => {
             return Err(DispatchError::SchemaMisconfigured {
@@ -318,7 +319,26 @@ pub(crate) async fn dispatch_subprocess(
         .require(&protocol_ref)
         .map_err(|_| DispatchError::ProtocolNotRegistered(protocol_ref.clone()))?;
 
-    check_dispatch_capabilities(&protocol.descriptor.capabilities, request)?;
+    // The declaration is read only where it matters: a gated protocol and a
+    // pushed-head project source. Every other launch never evaluates it.
+    let declares_pushed_head = crate::dispatch::pushed_head_declaration_if_gated(
+        &protocol.descriptor.capabilities,
+        matches!(
+            request.provenance.project_source(),
+            ProjectSourceKind::PushedHead
+        ),
+        exec,
+        &composed_value,
+    )
+    .map_err(|error| DispatchError::SchemaMisconfigured {
+        kind: current_ref.kind.clone(),
+        detail: error.to_string(),
+    })?;
+    check_dispatch_capabilities(
+        &protocol.descriptor.capabilities,
+        request,
+        declares_pushed_head,
+    )?;
 
     use ryeos_engine::protocol_vocabulary::StdoutMode;
     if protocol.descriptor.stdout.mode == StdoutMode::Streaming && request.launch_mode == "detached"
@@ -865,6 +885,42 @@ async fn dispatch_tool_subprocess(
         kind: current_ref.kind.clone(),
         detail: format!("failed to resolve executor-chain terminal for '{item_ref}': {e}"),
     })?;
+    // The launch root and every executor hop must be admitted for their kind
+    // before anything is finalized, any secret is read or any process starts.
+    // This holds for a method-dispatch wrapper too: its own chain is judged
+    // here and its target on the target's launch.
+    let (root_space, root_class) = match verified {
+        Some(verified) => (
+            verified.resolved.source_space,
+            verified.launch_trust_class(),
+        ),
+        None => {
+            let root = &resolved
+                .root_admission
+                .as_ref()
+                .ok_or_else(|| {
+                    DispatchError::Internal(anyhow::anyhow!(
+                        "direct launch of '{item_ref}' has neither a verified root nor a root admission"
+                    ))
+                })?
+                .resolution_output()
+                .root;
+            (root.source_space, root.trust_class)
+        }
+    };
+    crate::execution::launch_trust_gate::enforce_direct_root(
+        &ctx.engine.kinds,
+        &state.node_policy,
+        &item_ref,
+        &current_ref.kind,
+        root_space,
+        root_class,
+    )?;
+    crate::execution::launch_trust_gate::enforce_executor_chain(
+        &ctx.engine.kinds,
+        &state.node_policy,
+        &terminal.chain_authorities,
+    )?;
     if terminal.kind == ryeos_engine::plan_builder::TerminalExecutorKind::MethodDispatch {
         if protocol.descriptor.stdout.mode
             == ryeos_engine::protocol_vocabulary::StdoutMode::Streaming
@@ -940,7 +996,13 @@ async fn dispatch_tool_subprocess(
         // before it spawns: the manifest-backed runtime caps and the node
         // guarantees the tool declares. A tool this node cannot host is
         // refused here rather than reported ready for admission.
-        admit_tool_launch(state, &resolved.resolved_item, &resolved.item_ref, ctx)?;
+        admit_tool_launch(
+            state,
+            &resolved.resolved_item,
+            root_class,
+            &resolved.item_ref,
+            ctx,
+        )?;
         let admission_ready = source
             .as_ref()
             .is_none_or(|preview| preview.ready_for_admission);
@@ -960,8 +1022,13 @@ async fn dispatch_tool_subprocess(
     // Admitted before the direct program is finalized or any process is
     // spawned: a tool declaring a node guarantee this node does not prove
     // leaves nothing behind.
-    let effective_caps =
-        admit_tool_launch(state, &resolved.resolved_item, &resolved.item_ref, ctx)?;
+    let effective_caps = admit_tool_launch(
+        state,
+        &resolved.resolved_item,
+        root_class,
+        &resolved.item_ref,
+        ctx,
+    )?;
 
     let parent_thread_id = request
         .parent_execution_context
@@ -1161,10 +1228,10 @@ fn map_runner_error(item_ref: String, error: anyhow::Error) -> DispatchError {
                 }
             }
             error @ ryeos_app::vault::VaultReadError::AuthorityViolation(_) => {
-                DispatchError::Internal(anyhow::anyhow!("vault read refused: {error}"))
+                DispatchError::Internal(anyhow::anyhow!("vault read refused: {error:#}"))
             }
             ryeos_app::vault::VaultReadError::Internal(error) => {
-                DispatchError::Internal(anyhow::anyhow!("vault read failed: {error}"))
+                DispatchError::Internal(anyhow::anyhow!("vault read failed: {error:#}"))
             }
         };
     }

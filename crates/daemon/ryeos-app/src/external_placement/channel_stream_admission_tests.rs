@@ -209,3 +209,42 @@ fn a_different_or_missing_occurrence_admits_no_stream() {
         "no attached channel",
     );
 }
+
+#[test]
+fn a_repeated_attachment_is_answered_only_for_the_same_supervisor_key() {
+    let existing = binding(lillux::time::timestamp_millis());
+    let same_key = existing.supervisor_public_key.clone();
+    require_attachment_replay_matches(
+        &existing,
+        &same_key,
+        &existing.candidate_program_digest,
+        &existing.execution_mode,
+    )
+    .unwrap();
+    // A guest whose state root was lost has a new key and is refused.
+    let other_key = ryeos_state::external_execution::encode_channel_public_key(
+        &lillux::crypto::generate_signing_key().verifying_key(),
+    )
+    .unwrap();
+    let refusal = require_attachment_replay_matches(
+        &existing,
+        &other_key,
+        &existing.candidate_program_digest,
+        &existing.execution_mode,
+    )
+    .unwrap_err();
+    assert!(
+        format!("{refusal:#}").contains("changed its exact supervisor or program"),
+        "{refusal:#}"
+    );
+    // So is the same key naming a different program.
+    assert!(
+        require_attachment_replay_matches(
+            &existing,
+            &same_key,
+            &"1".repeat(64),
+            &existing.execution_mode
+        )
+        .is_err()
+    );
+}

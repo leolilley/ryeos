@@ -19,13 +19,12 @@ fn render_source_declaration_commits_exact_profile_and_bounded_capability_ceilin
         declaration.provider_spec.sha256,
         lillux::sha256_hex(profile)
     );
-    let settings = include_bytes!(
-        "../../../host-adapters/render-sandbox-adapter/fixtures/settings.schema.json"
-    );
+    let settings = include_bytes!("../fixtures/settings.schema.json");
     assert_eq!(
         declaration.settings_schema_digest,
         lillux::sha256_hex(settings)
     );
+    assert_eq!(declaration.relay_scope_setting.as_deref(), Some("owner_id"));
     let capabilities = serde_json::to_value(&declaration.capabilities).unwrap();
     let capabilities: BTreeSet<&str> = capabilities
         .as_array()
@@ -39,6 +38,7 @@ fn render_source_declaration_commits_exact_profile_and_bounded_capability_ceilin
             "supervisor_activation",
             "authoritative_no_occurrence",
             "exact_terminal_observation",
+            "controller_file_relay",
         ])
     );
 }

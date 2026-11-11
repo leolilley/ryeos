@@ -84,9 +84,9 @@ fn map_launch_planning_check_error(error: anyhow::Error) -> LaunchSpawnError {
         .chain()
         .any(|cause| cause.is::<ryeos_app::state_store::LaunchPlanningInactive>())
     {
-        LaunchSpawnError::PlanningCancelled(error.to_string())
+        LaunchSpawnError::PlanningCancelled(format!("{error:#}"))
     } else {
-        LaunchSpawnError::PlanningStateCheckFailed(error.to_string())
+        LaunchSpawnError::PlanningStateCheckFailed(format!("{error:#}"))
     }
 }
 
@@ -869,7 +869,7 @@ fn spawn_dispatch_launch_inner(
                             Err(error) => {
                                 tracing::error!(
                                     thread_id = %pre_minted_thread_id,
-                                    error = %error,
+                                    error = %format!("{error:#}"),
                                     "refusing to persist a failed root without exact executor-route authority"
                                 );
                                 return Err(LaunchSpawnError::Dispatch(e));
@@ -896,7 +896,7 @@ fn spawn_dispatch_launch_inner(
                                 // request to finalize somebody else's row.
                                 tracing::error!(
                                     thread_id = %pre_minted_thread_id,
-                                    error = %error,
+                                    error = %format!("{error:#}"),
                                     "failed to persist admitted launch failure row"
                                 );
                                 false

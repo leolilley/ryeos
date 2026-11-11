@@ -57,7 +57,7 @@
     "-c",
     "approvals_reviewer=\"user\"",
     "-c",
-    "default_permissions=\"danger-full-access\"",
+    "default_permissions=\":danger-full-access\"",
     "-c",
     "web_search=\"disabled\"",
     "-c",
@@ -640,7 +640,7 @@
       "response_predicates": [
         {
           "pointer": "/response/result/activePermissionProfile/id",
-          "equals": "danger-full-access"
+          "equals": ":danger-full-access"
         },
         {
           "pointer": "/response/result/approvalsReviewer",
@@ -737,7 +737,7 @@
       "response_predicates": [
         {
           "pointer": "/response/result/activePermissionProfile/id",
-          "equals": "danger-full-access"
+          "equals": ":danger-full-access"
         },
         {
           "pointer": "/response/result/approvalsReviewer",
@@ -1585,6 +1585,74 @@
       },
       "observations": [],
       "ceremony_clear": false
+    },
+    {
+      "method": "thread/environment/connected",
+      "schema": "schema/EnvironmentConnectionNotification.json",
+      "event_type": "workload.environment_connected",
+      "durable": true,
+      "payload": {
+        "op": "object",
+        "fields": {
+          "observed": {
+            "op": "literal",
+            "value": true
+          }
+        }
+      },
+      "observations": [],
+      "ceremony_clear": false
+    },
+    {
+      "method": "thread/environment/disconnected",
+      "schema": "schema/EnvironmentConnectionNotification.json",
+      "event_type": "workload.environment_disconnected",
+      "durable": true,
+      "payload": {
+        "op": "object",
+        "fields": {
+          "observed": {
+            "op": "literal",
+            "value": true
+          }
+        }
+      },
+      "observations": [],
+      "ceremony_clear": false
+    },
+    {
+      "method": "thread/compacted",
+      "schema": "schema/ContextCompactedNotification.json",
+      "event_type": "workload.context_compacted",
+      "durable": true,
+      "payload": {
+        "op": "object",
+        "fields": {
+          "observed": {
+            "op": "literal",
+            "value": true
+          }
+        }
+      },
+      "observations": [],
+      "ceremony_clear": false
+    },
+    {
+      "method": "guardianWarning",
+      "schema": "schema/GuardianWarningNotification.json",
+      "event_type": "workload.guardian_warning",
+      "durable": true,
+      "payload": {
+        "op": "object",
+        "fields": {
+          "observed": {
+            "op": "literal",
+            "value": true
+          }
+        }
+      },
+      "observations": [],
+      "ceremony_clear": false
     }
   ],
   "ignored_notifications": {
@@ -1599,7 +1667,10 @@
     "serverRequest/resolved": "schema/ServerRequestResolvedNotification.json",
     "model/rerouted": "schema/ModelReroutedNotification.json",
     "model/verification": "schema/ModelVerificationNotification.json",
-    "remoteControl/status/changed": "schema/RemoteControlStatusChangedNotification.json"
+    "remoteControl/status/changed": "schema/RemoteControlStatusChangedNotification.json",
+    "turn/moderationMetadata": "schema/TurnModerationMetadataNotification.json",
+    "model/safetyBuffering/updated": "schema/ModelSafetyBufferingUpdatedNotification.json",
+    "item/commandExecution/terminalInteraction": "schema/TerminalInteractionNotification.json"
   },
   "server_requests": [
     {

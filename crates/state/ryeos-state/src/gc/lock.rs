@@ -8,7 +8,6 @@
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::os::fd::AsRawFd;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -19,9 +18,28 @@ use serde_json::json;
 /// Acquires an exclusive flock on `runtime_state_dir/gc.lock`. The lock is
 /// released when this guard is dropped (or the process exits).
 pub struct GcLock {
-    _lock_file: File,
+    _lock_file: lillux::locks::ForkClosedLockFile,
     directory: lillux::PinnedDirectory,
     state_file: Option<File>,
+}
+
+fn acquire_nonblocking(
+    lock_file: &lillux::locks::ForkClosedLockFile,
+    lock_path: &Path,
+) -> Result<()> {
+    match lock_file.try_lock_exclusive() {
+        Ok(true) => Ok(()),
+        Ok(false) => anyhow::bail!(
+            "failed to acquire GC lock at {}: {} (another GC run may be in progress)",
+            lock_path.display(),
+            std::io::Error::from(std::io::ErrorKind::WouldBlock)
+        ),
+        Err(err) => anyhow::bail!(
+            "failed to acquire GC lock at {}: {} (another GC run may be in progress)",
+            lock_path.display(),
+            err
+        ),
+    }
 }
 
 impl GcLock {
@@ -45,19 +63,16 @@ impl GcLock {
         let lock_path = runtime_state_dir.join("gc.lock");
         let directory = lillux::PinnedDirectory::open_or_create(runtime_state_dir)
             .context("open runtime state directory for GC lock")?;
+        let fork_sensitive_descriptors = lillux::try_retain_fork_sensitive_descriptors()?;
         let lock_file = directory
             .open_regular_create(std::ffi::OsStr::new("gc.lock"), true, false, 0o600)
             .with_context(|| format!("failed to open GC lock file: {}", lock_path.display()))?;
+        let lock_file =
+            lillux::locks::ForkClosedLockFile::register(lock_file, &fork_sensitive_descriptors);
+        drop(fork_sensitive_descriptors);
 
         // Non-blocking exclusive lock
-        if unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            let err = std::io::Error::last_os_error();
-            anyhow::bail!(
-                "failed to acquire GC lock at {}: {} (another GC run may be in progress)",
-                lock_path.display(),
-                err
-            );
-        }
+        acquire_nonblocking(&lock_file, &lock_path)?;
 
         // Write state sidecar
         let pid = std::process::id();
@@ -101,17 +116,14 @@ impl GcLock {
         let lock_path = runtime_state_dir.join("gc.lock");
         let directory = lillux::PinnedDirectory::open(runtime_state_dir)?
             .ok_or_else(|| anyhow::anyhow!("runtime state directory is absent"))?;
+        let fork_sensitive_descriptors = lillux::try_retain_fork_sensitive_descriptors()?;
         let lock_file = directory
             .open_regular(std::ffi::OsStr::new("gc.lock"), true)?
             .ok_or_else(|| anyhow::anyhow!("GC lock anchor is absent: {}", lock_path.display()))?;
-        if unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            let err = std::io::Error::last_os_error();
-            anyhow::bail!(
-                "failed to acquire GC lock at {}: {} (another GC run may be in progress)",
-                lock_path.display(),
-                err
-            );
-        }
+        let lock_file =
+            lillux::locks::ForkClosedLockFile::register(lock_file, &fork_sensitive_descriptors);
+        drop(fork_sensitive_descriptors);
+        acquire_nonblocking(&lock_file, &lock_path)?;
         Ok(Self {
             _lock_file: lock_file,
             directory,
@@ -152,11 +164,6 @@ impl Drop for GcLock {
             let _ = self
                 .directory
                 .remove_if_same(std::ffi::OsStr::new("gc.state.json"), &state_file);
-        }
-
-        // Release flock (implicit on close, but explicit is cleaner)
-        unsafe {
-            libc::flock(self._lock_file.as_raw_fd(), libc::LOCK_UN);
         }
 
         tracing::info!("GC lock released");

@@ -1,7 +1,8 @@
-//! Opt-in, single-threaded production source-owner component probe.
-//! `RYEOS_GUEST_OCCURRENCE_NATIVE=1 cargo test ... --test guest_occurrence_owner_native`
-//! requires a host that admits Lillux user/mount namespaces. This is not a
-//! supervisor, Render, or Codex qualification result.
+//! Single-threaded production source-owner component probe.
+//! It runs wherever the host admits Lillux user/mount namespaces and skips
+//! elsewhere; `RYEOS_GUEST_OCCURRENCE_NATIVE=1` makes it required (an
+//! unsupported host fails) and `=0` skips it. This is not a supervisor,
+//! provider, or Codex qualification result.
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
@@ -104,6 +105,7 @@ fn supervisor_bootstrap(
             connect_timeout_ms: 5_000,
             request_timeout_ms: 10_000,
             maximum_response_bytes: 1024 * 1024,
+            max_clock_skew_ms: None,
         }.into(),
         tls_root_certificates_der_base64: roots,
         placement_thread_id: "T-native-test".into(),
@@ -324,7 +326,7 @@ fn run(
         executable_search: Vec::new(),
         environment: BTreeMap::new(),
     };
-    // The native fixture owns its exact network-input bytes. Render Sandboxes
+    // The native fixture owns its exact network-input bytes. Provider sandboxes
     // need not expose /etc/hosts, and this probe tests native installation,
     // not a host's ambient network configuration.
     let resolver_source = fixture_path.join("network-resolver");
@@ -372,7 +374,7 @@ fn run(
         supervisor_sha256: &manifest.supervisor_sha256,
         launcher_sha256: &manifest.launcher_sha256,
         maximum_regular_bytes: manifest.total_regular_bytes,
-        maximum_framed_bytes: manifest.framed_bytes()? + 128,
+        maximum_framed_bytes: manifest.framed_bytes_bound()? + 128,
     };
     let mut writer = GuestStagingStreamWriter::new(Vec::new(), manifest.clone(), &expected)?;
     while let Some(entry) = writer.next_file() {
@@ -389,7 +391,7 @@ fn run(
     std::fs::create_dir(&upload_dir)?;
     std::fs::create_dir(&occurrence_dir)?;
     let upload_parent = lillux::PinnedDirectory::open(&upload_dir)?.context("upload vanished")?;
-    let occurrence =
+    let mut occurrence =
         lillux::PinnedDirectory::open(&occurrence_dir)?.context("occurrence vanished")?;
     upload_parent.tighten_owner_private_directory()?;
     occurrence.tighten_owner_private_directory()?;
@@ -460,11 +462,12 @@ fn run(
     )?;
     let guest_runtime = lillux::PinnedDirectory::open(&guest_runtime_path)?
         .context("installed native fixture runtime vanished")?;
-    let observed_runtime = ObservedGuestRuntime::observe(&guest_runtime)?;
+    let mut observed_runtime = ObservedGuestRuntime::observe(&guest_runtime)?;
+    let runtime_manifest_hash = observed_runtime.manifest_hash().to_owned();
     let assignment = occurrence_assignment(
         &measurement.snapshot_hash,
         parsed_bootstrap.attachment_deadline_ms,
-        observed_runtime.manifest_hash(),
+        &runtime_manifest_hash,
     );
     let authorization = GuestImportAuthorization {
         schema: GUEST_IMPORT_AUTHORIZATION_SCHEMA,
@@ -479,6 +482,7 @@ fn run(
         guest_runtime_manifest_hash: assignment.guest_runtime_manifest_hash.into(),
         attachment_deadline_ms: assignment.attachment_deadline_ms,
         admission_deadline_ms: assignment.attachment_deadline_ms - 1_000,
+        max_clock_skew_ms: None,
         nonce_sha256: "8".repeat(64),
         ticket: ticket.clone(),
         guest_inputs: inputs.clone(),
@@ -507,6 +511,8 @@ fn run(
         },
     )
     .map_err(anyhow::Error::msg)?;
+    occurrence.rebind_in_current_mount_namespace()?;
+    observed_runtime.rebind_in_current_mount_namespace()?;
     let source_root = source.root().try_clone()?;
     let mut held = if release {
         let verified = verify_native_import(
@@ -560,7 +566,7 @@ fn run(
         let committed = prepared.commit_outer_launch_intent(&context, &inputs)?;
         committed
             .prepare_mounted_sandbox_request(&context, &inputs)?
-            .prepare_held_in_dedicated_owner()?
+            .prepare_held_in_dedicated_owner(None)?
     } else {
         prepare_authorized_held_guest_supervisor_once(
             &occurrence,
@@ -571,12 +577,14 @@ fn run(
             source,
             lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(30)),
             None,
+            None,
+            &mut |_| {},
         )?
     };
     let receipt = held.mount_preparation_receipt()?;
     ensure!(
-        receipt.mount_count == 3,
-        "held native target lacks the stage and two sealed network inputs"
+        receipt.mount_count == 4,
+        "held native target lacks the stage, two sealed network inputs and the candidate-private mount"
     );
     if release {
         let mut released = held.release_once()?;
@@ -682,9 +690,22 @@ fn main() {
         println!("guest_occurrence_owner_native: test");
         return;
     }
-    if std::env::var("RYEOS_GUEST_OCCURRENCE_NATIVE").as_deref() != Ok("1") {
-        eprintln!("native guest occurrence probe skipped (set RYEOS_GUEST_OCCURRENCE_NATIVE=1)");
+    let requested = std::env::var("RYEOS_GUEST_OCCURRENCE_NATIVE").ok();
+    if requested.as_deref() == Some("0") {
+        eprintln!("native guest occurrence probe skipped (RYEOS_GUEST_OCCURRENCE_NATIVE=0)");
         return;
+    }
+    if std::env::var("RYEOS_GUEST_OCCURRENCE_NATIVE_CHILD").as_deref() != Ok("1") {
+        let host = lillux::process_control::HostFacts::observe(0, &std::env::temp_dir());
+        if !host.unshare_user_pid_mount.allowed() {
+            let reason = format!("{:?}", host.unshare_user_pid_mount);
+            assert!(
+                requested.as_deref() != Some("1"),
+                "native guest occurrence probe required, but this host refuses namespaces: {reason}"
+            );
+            eprintln!("native guest occurrence probe skipped: host namespaces {reason}");
+            return;
+        }
     }
     if std::env::var("RYEOS_GUEST_OCCURRENCE_NATIVE_CHILD").as_deref() == Ok("1") {
         let root = std::env::var_os("RYEOS_GUEST_OCCURRENCE_FIXTURE_ROOT")
@@ -724,7 +745,6 @@ fn main() {
             args: Vec::new(),
             cwd: None,
             envs: vec![
-                ("RYEOS_GUEST_OCCURRENCE_NATIVE".into(), "1".into()),
                 ("RYEOS_GUEST_OCCURRENCE_NATIVE_CHILD".into(), "1".into()),
                 (
                     "RYEOS_GUEST_OCCURRENCE_NATIVE_RELEASE".into(),

@@ -914,7 +914,12 @@ impl RuntimeDb {
                     epoch <= RUNTIME_OPERATOR_SCHEMA_EPOCH,
                     "inspection belongs to a newer operator epoch"
                 );
-                ensure_scope_lifetime_resettable_with(connection, epoch, fence)?;
+                let witness = ensure_scope_lifetime_resettable_with(
+                    connection,
+                    epoch,
+                    fence,
+                    QualificationCustodyDisposition::Preview(&retained_directory),
+                )?;
                 let reset_required = epoch < RUNTIME_OPERATOR_SCHEMA_EPOCH;
                 if !reset_required {
                     validate_current_runtime_store_with(
@@ -935,9 +940,9 @@ impl RuntimeDb {
                         connection.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
                     ensure!(mode == "wal", "Runtime inspection journal mode is not WAL");
                 }
-                Ok(reset_required)
+                Ok((reset_required, witness.cold_qualification_custody))
             });
-            let reset_required = match validation {
+            let (reset_required, cold_qualification_custody) = match validation {
                 Ok(value) => value,
                 Err(error) => {
                     return Err(failure(
@@ -969,6 +974,7 @@ impl RuntimeDb {
                 _directory_lock: Some(namespace),
                 _inspection_copy: Some(copy.clone()),
                 _inspection_sql: Some(sql),
+                cold_qualification_custody,
             })
         })();
         opened.map_err(|error| SqliteInspectionCopyCustodyError::retain(error, copy))

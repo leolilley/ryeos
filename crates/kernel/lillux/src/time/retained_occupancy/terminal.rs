@@ -233,6 +233,13 @@ mod controls {
 
     #[test]
     fn shared_clock_descriptor_keeps_whole_original_clock_retryable() {
+        if !crate::exec::fork_creation_custody_tests::run_isolated_in(
+            module_path!(),
+            "shared_clock_descriptor_keeps_whole_original_clock_retryable",
+        ) {
+            return;
+        }
+        let _serial = crate::exec::registered_pair::serialize_clock_close_tests();
         let clock = RetainedOccupancyClock::capture().unwrap();
         let limit = OccupancyLimit::new(clock.start().clone(), 30_000_000_000).unwrap();
         let (deadline, _) = clock
@@ -247,6 +254,7 @@ mod controls {
         assert!(clock.window_fixed(&limit, Duration::ZERO).is_ok());
         let binding = clock.binding;
         drop(alias);
+        crate::exec::registered_pair::wait_for_open_fork_window(deadline);
         let receipt = clock
             .into_terminal(&limit, Duration::ZERO, deadline)
             .unwrap();
@@ -257,6 +265,13 @@ mod controls {
 
     #[test]
     fn expired_or_foreign_limit_never_consumes_clock_descriptors() {
+        if !crate::exec::fork_creation_custody_tests::run_isolated_in(
+            module_path!(),
+            "expired_or_foreign_limit_never_consumes_clock_descriptors",
+        ) {
+            return;
+        }
+        let _serial = crate::exec::registered_pair::serialize_clock_close_tests();
         let clock = RetainedOccupancyClock::capture().unwrap();
         let limit = OccupancyLimit::new(clock.start().clone(), 30_000_000_000).unwrap();
         let (deadline, _) = clock
@@ -278,6 +293,7 @@ mod controls {
             .unwrap_err();
         assert!(!failure.effects_entered());
         let clock = failure.into_original().unwrap();
+        crate::exec::registered_pair::wait_for_open_fork_window(deadline);
         clock
             .into_terminal(&limit, Duration::ZERO, deadline)
             .unwrap();
@@ -285,6 +301,7 @@ mod controls {
 
     #[test]
     fn dropped_close_failure_retains_the_whole_clock() {
+        let _serial = crate::exec::registered_pair::serialize_clock_close_tests();
         const KIND: &str = "lillux::time::retained-clock-close-failure";
         let clock = RetainedOccupancyClock::capture().unwrap();
         let limit = OccupancyLimit::new(clock.start().clone(), 30_000_000_000).unwrap();
@@ -302,6 +319,7 @@ mod controls {
 
     #[test]
     fn suspend_expiry_fails_timing_even_while_original_monotonic_deadline_is_live() {
+        let _serial = crate::exec::registered_pair::serialize_clock_close_tests();
         let clock = RetainedOccupancyClock::capture().unwrap();
         let limit = OccupancyLimit::new(clock.start().clone(), 30_000_000_000).unwrap();
         let (deadline, _) = clock

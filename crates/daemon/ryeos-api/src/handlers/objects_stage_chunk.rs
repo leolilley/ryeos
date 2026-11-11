@@ -137,7 +137,7 @@ fn stage_chunk_blocking(
     let _permit = state
         .write_barrier
         .acquire_with_timeout(ryeos_app::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
-        .map_err(|error| anyhow::anyhow!("cannot acquire stage chunk write permit: {error}"))?;
+        .map_err(|error| anyhow::anyhow!("cannot acquire stage chunk write permit: {error:#}"))?;
     let recovery = authority.require_recovery()?;
     // Ownership is the authenticated operator: a stage minted for another
     // principal is refused by the reopen itself.

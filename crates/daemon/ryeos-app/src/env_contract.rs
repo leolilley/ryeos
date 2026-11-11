@@ -471,6 +471,10 @@ fn validate_protocol_injection_name(
                 EnvInjectionSource::ProjectStateScope,
                 "RYEOSD_PROJECT_STATE_SCOPE"
             )
+            | (
+                EnvInjectionSource::RuntimeStateRoot,
+                "RYEOSD_RUNTIME_STATE_ROOT"
+            )
             | (EnvInjectionSource::ProjectPath, "RYE_PROJECT_PATH")
             | (EnvInjectionSource::ProjectPath, "RYEOS_PROJECT_PATH")
             | (
@@ -873,6 +877,26 @@ mod tests {
             )])
             .unwrap_err();
         assert!(format!("{err:#}").contains("RYEOSD_PROJECT_STATE_SCOPE"));
+
+        EnvContractBuilder::new()
+            .with_typed_bindings(vec![EnvBinding::new(
+                "RYEOSD_RUNTIME_STATE_ROOT",
+                "/state/launch",
+                EnvSourceDetail::ProtocolInjection {
+                    source: EnvInjectionSource::RuntimeStateRoot,
+                },
+            )])
+            .unwrap();
+        let err = EnvContractBuilder::new()
+            .with_typed_bindings(vec![EnvBinding::new(
+                "RYEOSD_RUNTIME_STATE_ROOT",
+                "/project",
+                EnvSourceDetail::ProtocolInjection {
+                    source: EnvInjectionSource::ProjectPath,
+                },
+            )])
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("RYEOSD_RUNTIME_STATE_ROOT"));
     }
 
     #[test]

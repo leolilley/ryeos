@@ -34,8 +34,9 @@
 //! contact; the private half reaches only the exact lease through the
 //! one-shot activation upload. Ready is the channel's first supervisor frame
 //! and carries the guest boot id, the activation inputs the guest verified
-//! and its ready time, which may lead the controller's clock by at most the
-//! bounded skew the lease request declares. Every later guest frame continues
+//! and its ready time, which is the guest's testimony and is never compared with
+//! the controller's clock: the controller judges Ready on its own clock
+//! against the activation deadline. Every later guest frame continues
 //! the frame chain (sequence and predecessor digest) from Ready, and the
 //! capability report names the same boot. A changed boot, a second Ready or a
 //! frame off the chain ends the lease. Each admission returns the chain state
@@ -93,12 +94,6 @@ use crate::facts::{
 
 pub const LEASE_SCHEMA: u32 = 3;
 pub(crate) const MAX_LEASE_REQUEST_BYTES: usize = 64 * 1024;
-/// How far a guest Ready time may lead the controller's clock when the lease
-/// request declares no skew of its own.
-const DEFAULT_READY_CLOCK_SKEW_MS: u32 = 5_000;
-/// The most skew a lease request may declare. Beyond it a Ready time is a
-/// claim about the future, not clock drift.
-const MAX_READY_CLOCK_SKEW_MS: u32 = 30_000;
 const MAX_GUEST_FRAME_BYTES: usize = 64 * 1024;
 const MAX_REQUIREMENTS: usize = 64;
 const MAX_NAME_BYTES: usize = 128;
@@ -129,11 +124,6 @@ pub struct LeaseAdmissionRequest {
     pub guest_network_allow: BTreeSet<String>,
     pub maximum_lifetime_seconds: u32,
     pub activation_deadline_seconds: u32,
-    /// How far, in milliseconds, the guest's Ready time may lead the
-    /// controller's clock, at most 30 s. A remote lease's guest clock
-    /// drifts independently of its controller's; absent means 5 s.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ready_clock_skew_ms: Option<u32>,
 }
 
 impl LeaseAdmissionRequest {
@@ -165,19 +155,7 @@ impl LeaseAdmissionRequest {
             self.maximum_lifetime_seconds > 0 && self.activation_deadline_seconds > 0,
             "lease admission lifetime or activation deadline is zero"
         );
-        ensure!(
-            self.ready_clock_skew_ms
-                .is_none_or(|skew| skew <= MAX_READY_CLOCK_SKEW_MS),
-            "lease admission declares a Ready clock skew above {MAX_READY_CLOCK_SKEW_MS} ms"
-        );
         Ok(())
-    }
-
-    fn ready_clock_skew_ms(&self) -> i64 {
-        i64::from(
-            self.ready_clock_skew_ms
-                .unwrap_or(DEFAULT_READY_CLOCK_SKEW_MS),
-        )
     }
 }
 
@@ -717,14 +695,14 @@ impl LeaseReadyResponse {
 }
 
 /// Authenticate the guest's Ready against the retained expectation and start
-/// the lease's chain from it. The guest's Ready time may lead `now_ms` by at
-/// most `clock_skew_ms`; the controller's own clock alone decides whether
-/// Ready arrived before the activation deadline.
+/// the lease's chain from it. The Ready's own time is the guest's testimony
+/// from a clock the controller cannot vouch for, so it is not judged; the
+/// controller's own clock alone decides whether Ready arrived before the
+/// activation deadline.
 pub(crate) fn verify_ready(
     expectation: &LeaseReadyExpectation,
     bytes: &[u8],
     now_ms: i64,
-    clock_skew_ms: i64,
 ) -> Result<GuestChain> {
     ensure!(
         !bytes.is_empty() && bytes.len() <= MAX_GUEST_FRAME_BYTES,
@@ -751,7 +729,7 @@ pub(crate) fn verify_ready(
     let SupervisorReadyBoot {
         boot_id,
         verified_input_digests,
-        ready_at_ms,
+        ready_at_ms: _,
     } = boot;
     ensure!(
         verified_input_digests
@@ -764,16 +742,6 @@ pub(crate) fn verify_ready(
         now_ms <= expectation.ready_deadline_ms,
         "guest Ready for lease {} arrived after the activation deadline",
         expectation.lease_id
-    );
-    let latest_ready_at = now_ms
-        .checked_add(clock_skew_ms)
-        .context("guest Ready clock bound overflows")?;
-    ensure!(
-        *ready_at_ms <= latest_ready_at,
-        "guest Ready for lease {} claims a ready time {} ms later than the controller's clock, \
-         beyond the declared {clock_skew_ms} ms skew",
-        expectation.lease_id,
-        ready_at_ms.saturating_sub(now_ms)
     );
     Ok(GuestChain {
         boot_id: boot_id.clone(),
@@ -1051,12 +1019,7 @@ fn receive_ready_and_report(
                 .with_context(|| {
                     format!("no guest Ready for lease {lease_id} before the deadline")
                 })?;
-            let mut chain = verify_ready(
-                expectation,
-                &ready_bytes,
-                now_ms(),
-                request.admission.ready_clock_skew_ms(),
-            )?;
+            let mut chain = verify_ready(expectation, &ready_bytes, now_ms())?;
             let report_bytes = transport
                 .receive(MAX_GUEST_FRAME_BYTES, deadline)?
                 .with_context(|| {
@@ -1181,7 +1144,6 @@ mod tests {
 
     const BOOT_ID: &str = "997aad14-f3e6-4990-9d40-d1068e5a38d5";
     const OTHER_BOOT_ID: &str = "00000000-0000-4000-8000-000000000000";
-    const SKEW: i64 = DEFAULT_READY_CLOCK_SKEW_MS as i64;
 
     /// Provider facts for a test provider: a 24 h lease lifetime, exact
     /// HTTPS allow-lists of at most 4 hosts, lease ids under one prefix, and a
@@ -1281,7 +1243,6 @@ mod tests {
             guest_network_allow: BTreeSet::new(),
             maximum_lifetime_seconds: 4 * 60 * 60,
             activation_deadline_seconds: 5 * 60,
-            ready_clock_skew_ms: None,
         }
     }
 
@@ -1315,17 +1276,6 @@ mod tests {
         request = admission(Vec::new(), Vec::new());
         request.activation_deadline_seconds = 0;
         assert!(request.validate().is_err());
-        request = admission(Vec::new(), Vec::new());
-        request.ready_clock_skew_ms = Some(MAX_READY_CLOCK_SKEW_MS);
-        request.validate().unwrap();
-        request.ready_clock_skew_ms = Some(MAX_READY_CLOCK_SKEW_MS + 1);
-        let error = request.validate().err().unwrap();
-        assert!(format!("{error:#}").contains("Ready clock skew above"));
-        // An undeclared skew is absent from the canonical request rather
-        // than serialized as null, so an omitted field stays canonical.
-        request = admission(Vec::new(), Vec::new());
-        let text = String::from_utf8(canonical_json(&request).unwrap()).unwrap();
-        assert!(!text.contains("ready_clock_skew_ms"), "{text}");
         let peer = CapabilityRequirement::Spec(CapabilityRequirementSpec {
             name: Some("isolation:namespaces".into()),
             any_of: Vec::new(),
@@ -1489,7 +1439,7 @@ mod tests {
         let lease = lease();
         lease.expectation.validate(&relayed_facts()).unwrap();
         let bytes = signed_ready(&lease, ready_boot(&lease));
-        let state = verify_ready(&lease.expectation, &bytes, 1_500, SKEW).unwrap();
+        let state = verify_ready(&lease.expectation, &bytes, 1_500).unwrap();
         assert_eq!(state.boot_id, BOOT_ID);
         assert_eq!(state.ready_frame_digest, lillux::sha256_hex(&bytes));
         assert_eq!(state.next_sequence, 2);
@@ -1504,38 +1454,29 @@ mod tests {
             None,
             ExecutionChannelPayload::Release,
         );
-        assert!(verify_ready(&lease.expectation, &forged, 1_500, SKEW).is_err());
+        assert!(verify_ready(&lease.expectation, &forged, 1_500).is_err());
         // After the activation deadline.
-        assert!(verify_ready(&lease.expectation, &bytes, 2_001, SKEW).is_err());
+        assert!(verify_ready(&lease.expectation, &bytes, 2_001).is_err());
 
-        // A guest clock slightly ahead of the controller's is drift within
-        // the declared skew, even past the activation deadline, while the
-        // controller's own clock is still before it.
-        let mut issued_late = ready_boot(&lease);
-        issued_late.ready_at_ms = 1_600;
-        let issued_late = signed_ready(&lease, issued_late);
-        verify_ready(&lease.expectation, &issued_late, 1_500, SKEW).unwrap();
-        let error = verify_ready(&lease.expectation, &issued_late, 1_500, 0)
-            .err()
-            .unwrap();
-        assert!(format!("{error:#}").contains("100 ms later than the controller's clock"));
-        let mut skewed_past_deadline = ready_boot(&lease);
-        skewed_past_deadline.ready_at_ms = 2_500;
-        let skewed_past_deadline = signed_ready(&lease, skewed_past_deadline);
-        verify_ready(&lease.expectation, &skewed_past_deadline, 1_900, SKEW).unwrap();
-        // Beyond the skew the ready time is refused.
-        let mut beyond_skew = ready_boot(&lease);
-        beyond_skew.ready_at_ms = 1_500 + SKEW + 1;
-        let beyond_skew = signed_ready(&lease, beyond_skew);
-        let error = verify_ready(&lease.expectation, &beyond_skew, 1_500, SKEW)
-            .err()
-            .unwrap();
-        assert!(format!("{error:#}").contains("beyond the declared 5000 ms skew"));
+        // The Ready's own time is the guest's testimony from a clock the
+        // controller cannot vouch for, so a clock far behind or far ahead
+        // changes nothing; only the controller's clock against the activation
+        // deadline decides.
+        for ready_at_ms in [1, 1_500, 1_600, 2_500, 3_600_000, i64::MAX] {
+            let mut skewed = ready_boot(&lease);
+            skewed.ready_at_ms = ready_at_ms;
+            let skewed = signed_ready(&lease, skewed);
+            verify_ready(&lease.expectation, &skewed, 1_900).unwrap();
+            let error = verify_ready(&lease.expectation, &skewed, 2_001)
+                .err()
+                .unwrap();
+            assert!(format!("{error:#}").contains("arrived after the activation deadline"));
+        }
 
         let mut other_inputs = ready_boot(&lease);
         other_inputs.verified_input_digests[2] = "5".repeat(64);
         let other_inputs = signed_ready(&lease, other_inputs);
-        let error = verify_ready(&lease.expectation, &other_inputs, 1_500, SKEW)
+        let error = verify_ready(&lease.expectation, &other_inputs, 1_500)
             .err()
             .unwrap();
         assert!(format!("{error:#}").contains("different activation inputs"));
@@ -1545,7 +1486,7 @@ mod tests {
             let mut reordered = ready_boot(&lease);
             reordered.verified_input_digests.swap(left, right);
             let reordered = signed_ready(&lease, reordered);
-            let error = verify_ready(&lease.expectation, &reordered, 1_500, SKEW)
+            let error = verify_ready(&lease.expectation, &reordered, 1_500)
                 .err()
                 .unwrap();
             assert!(format!("{error:#}").contains("different activation inputs"));
@@ -1554,11 +1495,11 @@ mod tests {
         let mut short = ready_boot(&lease);
         short.verified_input_digests.pop();
         let short = signed_ready(&lease, short);
-        assert!(verify_ready(&lease.expectation, &short, 1_500, SKEW).is_err());
+        assert!(verify_ready(&lease.expectation, &short, 1_500).is_err());
         let mut long = ready_boot(&lease);
         long.verified_input_digests.push("6".repeat(64));
         let long = signed_ready(&lease, long);
-        assert!(verify_ready(&lease.expectation, &long, 1_500, SKEW).is_err());
+        assert!(verify_ready(&lease.expectation, &long, 1_500).is_err());
 
         let no_boot = signed_frame(
             &lease,
@@ -1568,7 +1509,7 @@ mod tests {
             None,
             ready_payload(&lease, None),
         );
-        let error = verify_ready(&lease.expectation, &no_boot, 1_500, SKEW)
+        let error = verify_ready(&lease.expectation, &no_boot, 1_500)
             .err()
             .unwrap();
         assert!(format!("{error:#}").contains("not a Ready naming the guest boot"));
@@ -1577,18 +1518,18 @@ mod tests {
         let mut other_lease = lease.expectation.clone();
         other_lease.lease_id = "lease-2".into();
         other_lease.channel.occurrence_id = "lease-2".into();
-        assert!(verify_ready(&other_lease, &bytes, 1_500, SKEW).is_err());
+        assert!(verify_ready(&other_lease, &bytes, 1_500).is_err());
 
         let mut noncanonical = bytes.clone();
         noncanonical.push(b' ');
-        assert!(verify_ready(&lease.expectation, &noncanonical, 1_500, SKEW).is_err());
+        assert!(verify_ready(&lease.expectation, &noncanonical, 1_500).is_err());
     }
 
     #[test]
     fn guest_frames_continue_the_chain_from_ready() {
         let lease = lease();
         let ready = signed_ready(&lease, ready_boot(&lease));
-        let mut state = verify_ready(&lease.expectation, &ready, 1_500, SKEW).unwrap();
+        let mut state = verify_ready(&lease.expectation, &ready, 1_500).unwrap();
         let ready_digest = state.ready_frame_digest.clone();
 
         let first = signed_report(&lease, 2, &ready_digest, report(BOOT_ID, &[], &[]));
@@ -1859,7 +1800,7 @@ mod tests {
 
     /// Canonical bytes of one first Ready request, as the controller must
     /// compose them: fields in declared order, the admitted request embedded
-    /// whole, an undeclared Ready clock skew omitted and `resume` null.
+    /// whole, and `resume` null.
     const LEASE_READY_REQUEST_FIXTURE: &[u8] =
         include_bytes!("../fixtures/lease-ready-request.json");
 
@@ -1883,7 +1824,6 @@ mod tests {
             guest_network_allow: BTreeSet::from(["controller.example.com".to_owned()]),
             maximum_lifetime_seconds: 4 * 60 * 60,
             activation_deadline_seconds: 5 * 60,
-            ready_clock_skew_ms: None,
         };
         let admission_request_sha256 = lillux::sha256_hex(&canonical_json(&admission).unwrap());
         LeaseReadyRequest {
@@ -1922,7 +1862,6 @@ mod tests {
 
         let text = std::str::from_utf8(LEASE_READY_REQUEST_FIXTURE).unwrap();
         assert!(text.ends_with(",\"resume\":null}"), "{text}");
-        assert!(!text.contains("ready_clock_skew_ms"), "{text}");
         let field_at = |field: &str| text.find(&format!("\"{field}\":")).unwrap();
         let order = [
             "schema",

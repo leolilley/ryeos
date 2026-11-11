@@ -34,7 +34,7 @@ pub fn mint_runtime_capability_caps(
         "runtime capability requirements need a bundle-qualified item ref".to_string()
     })?;
     ryeos_state::objects::validate_bundle_identifier("bundle_id", &effective_bundle_id)
-        .map_err(|err| err.to_string())?;
+        .map_err(|err| format!("{err:#}"))?;
 
     // Deep, segment-grammar validation of each requested resource. The static
     // shape (known keys, valid ops, non-empty arrays) was already enforced by
@@ -43,11 +43,11 @@ pub fn mint_runtime_capability_caps(
     let requested_authority = &reqs.manifest.runtime_authority;
     for req in &requested_authority.bundle_events {
         ryeos_state::objects::validate_bundle_identifier("event_kind", &req.event_kind)
-            .map_err(|err| err.to_string())?;
+            .map_err(|err| format!("{err:#}"))?;
     }
     for req in &requested_authority.runtime_vault {
         crate::vault::validate_runtime_vault_segment("namespace", &req.namespace)
-            .map_err(|err| err.to_string())?;
+            .map_err(|err| format!("{err:#}"))?;
     }
     for req in &requested_authority.item_authoring {
         ryeos_bundle::runtime_authority::validate_item_author_pattern(&req.kind, &req.namespace)?;
@@ -79,7 +79,7 @@ pub fn mint_runtime_capability_caps(
                 &effective_bundle_id,
                 &engine.node_trust_store,
             )
-            .map_err(|err| err.to_string())?
+            .map_err(|err| format!("{err:#}"))?
             .manifest
         }
         ryeos_engine::contracts::ItemSpace::Project => {
@@ -106,7 +106,7 @@ pub fn mint_runtime_capability_caps(
                 &effective_bundle_id,
                 project_trust.as_ref(),
             )
-            .map_err(|err| err.to_string())?
+            .map_err(|err| format!("{err:#}"))?
             .manifest
         }
         ryeos_engine::contracts::ItemSpace::Node => {

@@ -134,62 +134,7 @@ pub fn prepare_project_snapshot_transfer(
     transfer_parent.require_owner_private_directory()?;
     let (name, root) = transfer_parent.create_unique_child("snapshot", 0o700)?;
     root.require_owner_private_directory()?;
-    let result = (|| -> Result<ProjectSnapshotTransferMeasurement> {
-        let target = lillux::CasStore::from_pinned_root(root.try_clone()?);
-        let mut entries =
-            Vec::with_capacity(closure.object_hashes.len() + closure.blob_hashes.len());
-        let mut total_bytes = 0_u64;
-        for hash in &closure.object_hashes {
-            let value = source
-                .get_object(hash)?
-                .ok_or_else(|| anyhow::anyhow!("base snapshot object {hash} disappeared"))?;
-            let bytes = lillux::canonical_json(&value)?.len() as u64;
-            total_bytes = total_bytes
-                .checked_add(bytes)
-                .ok_or_else(|| anyhow::anyhow!("base snapshot transfer byte overflow"))?;
-            anyhow::ensure!(
-                target.store_object(&value)? == *hash,
-                "base snapshot object address changed during transfer"
-            );
-            entries.push(serde_json::json!({"kind":"object","hash":hash,"bytes":bytes}));
-        }
-        for hash in &closure.blob_hashes {
-            let (file, bytes) = source
-                .open_blob(hash)?
-                .ok_or_else(|| anyhow::anyhow!("base snapshot blob {hash} disappeared"))?;
-            total_bytes = total_bytes
-                .checked_add(bytes)
-                .ok_or_else(|| anyhow::anyhow!("base snapshot transfer byte overflow"))?;
-            let copied = target.put_blob_from_open_regular_bounded(
-                file,
-                Path::new("<external-base-snapshot-blob>"),
-                bytes,
-            )?;
-            anyhow::ensure!(
-                copied.hash == *hash && copied.size == bytes,
-                "base snapshot blob address changed during transfer"
-            );
-            entries.push(serde_json::json!({"kind":"blob","hash":hash,"bytes":bytes}));
-        }
-        let pruned = target.prune_abandoned_blob_captures(false)?;
-        anyhow::ensure!(
-            pruned.files == 0 && pruned.bytes == 0,
-            "fresh base snapshot transfer contained interrupted blob capture state"
-        );
-        let expected = ProjectSnapshotTransferMeasurement {
-            snapshot_hash: snapshot_hash.to_owned(),
-            closure_digest: transfer_closure_digest(snapshot_hash, &entries)?,
-            object_count: u64::try_from(closure.object_hashes.len())?,
-            blob_count: u64::try_from(closure.blob_hashes.len())?,
-            total_bytes,
-        };
-        let observed = inspect_project_snapshot_transfer(&root, snapshot_hash)?;
-        anyhow::ensure!(
-            observed == expected,
-            "prepared base snapshot transfer changed during verification"
-        );
-        Ok(observed)
-    })();
+    let result = copy_project_snapshot_closure(&source, &closure, &root, snapshot_hash);
     let measurement = match result {
         Ok(value) => value,
         Err(error) => {
@@ -212,6 +157,70 @@ pub fn prepare_project_snapshot_transfer(
         blob_count: measurement.blob_count,
         total_bytes: measurement.total_bytes,
     })
+}
+
+/// Copy one already-collected, complete snapshot closure from `source` into
+/// the empty private CAS root `root`, reverifying every address, and return
+/// the transfer's measurement as `inspect_project_snapshot_transfer` sees it.
+pub fn copy_project_snapshot_closure(
+    source: &lillux::CasStore,
+    closure: &ryeos_state::object_closure::ObjectClosureReport,
+    root: &lillux::PinnedDirectory,
+    snapshot_hash: &str,
+) -> Result<ProjectSnapshotTransferMeasurement> {
+    let target = lillux::CasStore::from_pinned_root(root.try_clone()?);
+    let mut entries = Vec::with_capacity(closure.object_hashes.len() + closure.blob_hashes.len());
+    let mut total_bytes = 0_u64;
+    for hash in &closure.object_hashes {
+        let value = source
+            .get_object(hash)?
+            .ok_or_else(|| anyhow::anyhow!("base snapshot object {hash} disappeared"))?;
+        let bytes = lillux::canonical_json(&value)?.len() as u64;
+        total_bytes = total_bytes
+            .checked_add(bytes)
+            .ok_or_else(|| anyhow::anyhow!("base snapshot transfer byte overflow"))?;
+        anyhow::ensure!(
+            target.store_object(&value)? == *hash,
+            "base snapshot object address changed during transfer"
+        );
+        entries.push(serde_json::json!({"kind":"object","hash":hash,"bytes":bytes}));
+    }
+    for hash in &closure.blob_hashes {
+        let (file, bytes) = source
+            .open_blob(hash)?
+            .ok_or_else(|| anyhow::anyhow!("base snapshot blob {hash} disappeared"))?;
+        total_bytes = total_bytes
+            .checked_add(bytes)
+            .ok_or_else(|| anyhow::anyhow!("base snapshot transfer byte overflow"))?;
+        let copied = target.put_blob_from_open_regular_bounded(
+            file,
+            Path::new("<external-base-snapshot-blob>"),
+            bytes,
+        )?;
+        anyhow::ensure!(
+            copied.hash == *hash && copied.size == bytes,
+            "base snapshot blob address changed during transfer"
+        );
+        entries.push(serde_json::json!({"kind":"blob","hash":hash,"bytes":bytes}));
+    }
+    let pruned = target.prune_abandoned_blob_captures(false)?;
+    anyhow::ensure!(
+        pruned.files == 0 && pruned.bytes == 0,
+        "fresh base snapshot transfer contained interrupted blob capture state"
+    );
+    let expected = ProjectSnapshotTransferMeasurement {
+        snapshot_hash: snapshot_hash.to_owned(),
+        closure_digest: transfer_closure_digest(snapshot_hash, &entries)?,
+        object_count: u64::try_from(closure.object_hashes.len())?,
+        blob_count: u64::try_from(closure.blob_hashes.len())?,
+        total_bytes,
+    };
+    let observed = inspect_project_snapshot_transfer(root, snapshot_hash)?;
+    anyhow::ensure!(
+        observed == expected,
+        "prepared base snapshot transfer changed during verification"
+    );
+    Ok(observed)
 }
 
 /// Inspect a descriptor-pinned partial CAS and prove that it contains exactly

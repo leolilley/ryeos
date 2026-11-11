@@ -42,7 +42,7 @@ fn remove_if_present(path: &Path) -> Result<(), String> {
     match std::fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(format!("remove {}: {error}", path.display())),
+        Err(error) => Err(format!("remove {}: {error:#}", path.display())),
     }
 }
 
@@ -99,7 +99,7 @@ fn run() -> Result<(), String> {
     let aborted_pid = pending.pid();
     let aborted = pending
         .abort_and_reap()
-        .map_err(|error| format!("abort target: {error}"))?;
+        .map_err(|error| format!("abort target: {error:#}"))?;
     if aborted.pid != aborted_pid || abort_marker.exists() || is_alive(aborted_pid) {
         return Err("aborted target executed or was not reaped".to_string());
     }
@@ -111,7 +111,7 @@ fn run() -> Result<(), String> {
 #[cfg(target_os = "linux")]
 fn main() {
     if let Err(error) = run() {
-        eprintln!("lillux attachment smoke failed: {error}");
+        eprintln!("lillux attachment smoke failed: {error:#}");
         std::process::exit(1);
     }
 }

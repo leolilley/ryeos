@@ -228,6 +228,12 @@ pub struct ExternalControllerTransportContract {
     pub connect_timeout_ms: u32,
     pub request_timeout_ms: u32,
     pub maximum_response_bytes: u64,
+    /// How far a guest's wall clock may stand past a controller-written
+    /// deadline when the guest checks it for freshness. Absent leaves the
+    /// bytes of a contract composed before the field existed unchanged; the
+    /// guest then applies the contract crate's fallback tolerance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_clock_skew_ms: Option<u32>,
 }
 
 impl ExternalControllerTransportContract {
@@ -265,6 +271,9 @@ impl ExternalControllerTransportContract {
             (4_096..=2 * 1024 * 1024).contains(&self.maximum_response_bytes),
             "external controller response bound is invalid"
         );
+        ryeos_external_execution_contract::clock_skew::validate_declared_max_clock_skew_ms(
+            self.max_clock_skew_ms,
+        )?;
         Ok(())
     }
 
@@ -308,6 +317,10 @@ pub struct ExternalControllerFileRelayContract {
     pub maximum_frames: u32,
     pub poll_interval_ms: u32,
     pub poll_deadline_ms: u32,
+    /// As for the request/response transport: the freshness tolerance a guest
+    /// applies to controller-written deadlines, absent when undeclared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_clock_skew_ms: Option<u32>,
 }
 
 impl ExternalControllerFileRelayContract {
@@ -345,6 +358,9 @@ impl ExternalControllerFileRelayContract {
                 && self.poll_interval_ms <= self.poll_deadline_ms,
             "external relay transfer or polling bound is invalid"
         );
+        ryeos_external_execution_contract::clock_skew::validate_declared_max_clock_skew_ms(
+            self.max_clock_skew_ms,
+        )?;
         Ok(())
     }
 }
@@ -370,6 +386,14 @@ impl ExternalControllerTransportSelection {
         match self {
             Self::HttpJson(http) => http.validate(),
             Self::ControllerFileRelay(relay) => relay.validate(),
+        }
+    }
+
+    /// The freshness tolerance this contract declares, if it declares one.
+    pub fn declared_max_clock_skew_ms(&self) -> Option<u32> {
+        match self {
+            Self::HttpJson(http) => http.max_clock_skew_ms,
+            Self::ControllerFileRelay(relay) => relay.max_clock_skew_ms,
         }
     }
 
@@ -658,6 +682,7 @@ impl ExternalSupervisorBootstrap {
         Ok(())
     }
 
+    /// Freshness judged on the clock of the node that wrote the deadline.
     pub fn validate_at(&self, now_ms: i64) -> Result<()> {
         self.validate()?;
         ensure!(
@@ -667,8 +692,32 @@ impl ExternalSupervisorBootstrap {
         Ok(())
     }
 
-    /// Lexical occurrence coordinate only. A later installed relay owner must
-    /// pin and prove this private directory before any provider transfer.
+    /// Freshness judged by a guest whose wall clock may disagree with the
+    /// controller's by up to the contract's declared tolerance. The refusal
+    /// names the observed difference, the tolerance and the guest's own
+    /// account of its clock.
+    pub fn validate_fresh_on_guest(
+        &self,
+        guest_now_ms: i64,
+        guest_clock_trust: &dyn std::fmt::Display,
+    ) -> Result<()> {
+        self.validate()?;
+        ryeos_external_execution_contract::clock_skew::require_fresh_before(
+            "attachment deadline",
+            self.attachment_deadline_ms,
+            guest_now_ms,
+            ryeos_external_execution_contract::clock_skew::effective_max_clock_skew_ms(
+                self.controller.declared_max_clock_skew_ms(),
+            ),
+            guest_clock_trust,
+        )
+    }
+
+    /// Lexical occurrence coordinate only: the signed mailbox parent holds one
+    /// directory per occurrence, named by the occurrence, and the mailbox is a
+    /// child of that occurrence directory. The guest owner proves the
+    /// occurrence directory is its own before any provider transfer; the
+    /// controller addresses the same path on the provider.
     pub fn relay_mailbox_root(&self) -> Result<String> {
         self.validate()?;
         let relay = self.controller.relay()?;
@@ -679,7 +728,10 @@ impl ExternalSupervisorBootstrap {
             "occurrence_id": self.occurrence_id,
             "execution_binding_hash": self.execution_binding_hash,
         }))?;
-        Ok(format!("{}/{}", relay.private_mailbox_parent, child))
+        Ok(format!(
+            "{}/{}/{}",
+            relay.private_mailbox_parent, self.occurrence_id, child
+        ))
     }
 
     pub fn canonical_bytes(&self) -> Result<Vec<u8>> {
@@ -1254,6 +1306,7 @@ mod tests {
             connect_timeout_ms: 5_000,
             request_timeout_ms: 10_000,
             maximum_response_bytes: 1024 * 1024,
+            max_clock_skew_ms: None,
         }
     }
 
@@ -1440,12 +1493,13 @@ mod tests {
             ExternalControllerFileRelayContract {
                 schema: 3,
                 route_contract: EXTERNAL_CHANNEL_RELAY_CONTRACT.into(),
-                owner_workspace_id: "render-owner".into(),
+                owner_workspace_id: "test-owner".into(),
                 private_mailbox_parent: "/run/ryeos/private-relay".into(),
                 maximum_file_bytes: 1024 * 1024,
                 maximum_frames: 1024,
                 poll_interval_ms: 1000,
                 poll_deadline_ms: 30_000,
+                max_clock_skew_ms: None,
             },
         );
         value.tls_root_certificates_der_base64.clear();
@@ -1461,12 +1515,13 @@ mod tests {
             ExternalControllerFileRelayContract {
                 schema: 3,
                 route_contract: EXTERNAL_CHANNEL_RELAY_CONTRACT.into(),
-                owner_workspace_id: "render-owner".into(),
+                owner_workspace_id: "test-owner".into(),
                 private_mailbox_parent: "/run/ryeos/private-relay".into(),
                 maximum_file_bytes: 1024 * 1024,
                 maximum_frames: 1024,
                 poll_interval_ms: 1000,
                 poll_deadline_ms: 30_000,
+                max_clock_skew_ms: None,
             },
         );
         value.tls_root_certificates_der_base64.clear();
@@ -1655,12 +1710,13 @@ mod tests {
         let relay = ExternalControllerFileRelayContract {
             schema: 3,
             route_contract: EXTERNAL_CHANNEL_RELAY_CONTRACT.into(),
-            owner_workspace_id: "render-owner".into(),
+            owner_workspace_id: "test-owner".into(),
             private_mailbox_parent: "/run/ryeos/private-relay".into(),
             maximum_file_bytes: 1024 * 1024,
             maximum_frames: 1024,
             poll_interval_ms: 1000,
             poll_deadline_ms: 30_000,
+            max_clock_skew_ms: None,
         };
         relay.validate().unwrap();
         let wire = serde_json::to_value(ExternalControllerTransportSelection::ControllerFileRelay(
@@ -2021,6 +2077,75 @@ mod tests {
         session.validate().unwrap();
         session.candidate_export_max_bytes = 0;
         assert!(session.validate().is_err());
+    }
+
+    #[test]
+    fn guest_freshness_tolerates_declared_skew_in_both_directions_and_names_the_cause() {
+        const DEADLINE: i64 = 2_000_000;
+        for mut bootstrap in [bootstrap(), relay_bootstrap()] {
+            assert_eq!(bootstrap.attachment_deadline_ms, DEADLINE);
+            let trust = "unsynchronized";
+            // Guest clock behind the controller's by far more than the
+            // tolerance: still fresh, since only a late guest can be stale.
+            bootstrap
+                .validate_fresh_on_guest(DEADLINE - 1_500_000, &trust)
+                .unwrap();
+            // Guest clock ahead, inside the 60 s fallback applied when the
+            // contract declares none.
+            assert_eq!(bootstrap.controller.declared_max_clock_skew_ms(), None);
+            bootstrap
+                .validate_fresh_on_guest(DEADLINE + 59_999, &trust)
+                .unwrap();
+            let refusal = bootstrap
+                .validate_fresh_on_guest(DEADLINE + 94_000, &trust)
+                .unwrap_err();
+            assert_eq!(
+                refusal.to_string(),
+                "guest clock is 94 s past the controller's attachment deadline; \
+                 declared skew tolerance 60 s; guest clock trust: unsynchronized"
+            );
+            // The contract's own declaration replaces the fallback.
+            match &mut bootstrap.controller {
+                ExternalControllerTransportSelection::HttpJson(http) => {
+                    http.max_clock_skew_ms = Some(120_000)
+                }
+                ExternalControllerTransportSelection::ControllerFileRelay(relay) => {
+                    relay.max_clock_skew_ms = Some(120_000)
+                }
+            }
+            bootstrap
+                .validate_fresh_on_guest(DEADLINE + 94_000, &trust)
+                .unwrap();
+            let refusal = bootstrap
+                .validate_fresh_on_guest(DEADLINE + 3_600_000, &"synchronized (maximum error 9 us)")
+                .unwrap_err();
+            assert!(
+                refusal
+                    .to_string()
+                    .ends_with("declared skew tolerance 120 s; guest clock trust: synchronized (maximum error 9 us)"),
+                "{refusal}"
+            );
+            // The controller's own freshness check keeps wall-clock meaning.
+            assert!(bootstrap.validate_at(DEADLINE + 1).is_err());
+        }
+    }
+
+    #[test]
+    fn declared_clock_skew_is_bounded_and_absent_by_default_in_canonical_bytes() {
+        let mut http = controller(&["root".to_owned()]);
+        assert!(
+            !serde_json::to_string(&http)
+                .unwrap()
+                .contains("max_clock_skew_ms")
+        );
+        http.max_clock_skew_ms = Some(60_000);
+        assert!(
+            serde_json::to_string(&http)
+                .unwrap()
+                .contains("\"max_clock_skew_ms\":60000")
+        );
+        http.max_clock_skew_ms = Some(600_001);
+        assert!(http.validate().is_err());
     }
 
     #[test]

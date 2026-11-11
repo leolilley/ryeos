@@ -248,6 +248,7 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
             args: &["--project-path".to_string(), project_path_string],
             cwd: project_path,
             project_path,
+            runtime_state_root: state_root.unwrap_or(project_path),
             project_state_scope,
             thread_id,
             callback: Some(&callback_bindings),
@@ -302,6 +303,7 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
                 bound.sealed_set_env(),
                 ryeos_app::env_contract::EnvSourceDetail::PerSpawnDaemon,
             ));
+            protocol_bindings.extend(bound.delivery_env_bindings()?);
         }
         if let Some(bound) = &source_closure {
             protocol_bindings.push(ryeos_app::env_contract::EnvBinding::new(
@@ -379,6 +381,7 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
         checkpoint_dir,
         checkpoint_authority,
         daemon_socket_path: isolation_daemon_socket_path,
+        captured_callback_socket: false,
         bundle_roots: &envelope.roots.bundle_roots,
         node_trusted_keys_dir: Some(&envelope.roots.node_trusted_keys_dir),
         verified_code: &[],

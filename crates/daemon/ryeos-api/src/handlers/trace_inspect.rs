@@ -85,7 +85,7 @@ fn state_anchor_payload(event: &PersistedEventRecord) -> Option<Result<Value, St
     let anchor = match ryeos_state::objects::StateAnchorMilestone::from_value(event.payload.clone())
     {
         Ok(anchor) => anchor,
-        Err(error) => return Some(Err(error.to_string())),
+        Err(error) => return Some(Err(format!("{error:#}"))),
     };
     serde_json::to_value(anchor.payload)
         .map_err(|error| error.to_string())
@@ -111,7 +111,7 @@ pub async fn handle(
             let root = state
                 .state_store
                 .get_thread(chain_root_id)
-                .map_err(|e| HandlerError::Internal(e.to_string()))?;
+                .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
             match root {
                 Some(detail) => ctx.require_owner(detail.requested_by.as_deref())?,
                 None => return Err(HandlerError::NotFound),
@@ -122,7 +122,7 @@ pub async fn handle(
             let thread = state
                 .state_store
                 .get_thread(thread_id)
-                .map_err(|e| HandlerError::Internal(e.to_string()))?;
+                .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
             match thread {
                 Some(detail) => {
                     ctx.require_owner(detail.requested_by.as_deref())?;
@@ -142,7 +142,7 @@ pub async fn handle(
             after_chain_seq: req.after_chain_seq,
             limit: req.limit,
         })
-        .map_err(|e| HandlerError::Internal(e.to_string()))?;
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
 
     let mut events = Vec::with_capacity(result.events.len());
     let mut state_anchors = Vec::new();

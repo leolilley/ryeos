@@ -74,13 +74,14 @@ pub fn run_startup(encoded_challenge: &str) -> Result<()> {
     let imported = record.open_imported_products(&imported_root, &challenge)?;
     runtime.recheck()?;
     runtime.profile().account.require_current_process()?;
+    let (mut home, mut control, mut owner) = (home, control, owner);
     run_outer_protocol(
         &imported,
         &record,
         &challenge,
-        &home,
-        &control,
-        &owner,
+        &mut home,
+        &mut control,
+        &mut owner,
         input,
         &mut output,
         interrupt,
@@ -400,9 +401,9 @@ pub fn run_outer_protocol(
     imported: &ImportedConsumerInputs,
     record: &ConsumerInputRecord,
     challenge: &ConsumerRuntimeChallenge,
-    fresh_home: &PinnedDirectory,
-    native_control: &PinnedDirectory,
-    protected_owner: &PinnedDirectory,
+    fresh_home: &mut PinnedDirectory,
+    native_control: &mut PinnedDirectory,
+    protected_owner: &mut PinnedDirectory,
     input: InheritedPipeInput,
     output: &mut InheritedPipeOutput,
     interrupt: PipeInterrupt,
@@ -441,9 +442,25 @@ pub fn run_outer_protocol(
             crate::VERIFIER_TEMP_PURPOSE,
         )?
         .context("outer owner execution was already attempted")?;
+    let native = request.request().clone();
+    // The protocol runner moves this process into the guest's namespaces and
+    // private root, where the host paths of these three directories do not
+    // resolve at all (unlike the occurrence owner's private source filesystem,
+    // which keeps the host view and is re-anchored instead). Their open
+    // descriptors stay the sole authority from here on; the completion check
+    // and the evidence below read the owner through its descriptor.
+    let bound = std::cell::RefCell::new((fresh_home, native_control, protected_owner));
     let observed = crate::native_guest::run_prepared_protocol(
-        || completion_requested(protected_owner, record, challenge),
-        request.request().clone(),
+        || {
+            let mut bound = bound.borrow_mut();
+            let (home, control, owner) = &mut *bound;
+            home.release_path_binding();
+            control.release_path_binding();
+            owner.release_path_binding();
+            Ok(())
+        },
+        || completion_requested(bound.borrow().2, record, challenge),
+        native,
         input,
         output,
         interrupt,
@@ -453,6 +470,8 @@ pub fn run_outer_protocol(
     // Keep request and its source/mount/protected-owner custody alive until the
     // namespace is settled and all raw buffers are drained by the shared loop.
     // The target had no mount or inherited descriptor for this owner directory.
+    // Home and control were released for the caller; only the owner is read here.
+    let (_, _, protected_owner) = bound.into_inner();
     protected_owner.ensure_path_binding()?;
     ensure!(
         !cleanup.has_elapsed(),

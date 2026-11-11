@@ -152,6 +152,7 @@ fn with_budget_and_counting_vault(
             resource_authority: None,
             producer_resource_ceiling: None,
             external_lease_budget: budget,
+            external_wall_clock_requirement: None,
         };
     state.node_policy = Arc::new(
         ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![Arc::new(

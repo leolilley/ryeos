@@ -88,6 +88,7 @@ mod tests {
                 guest_runtime_manifest_hash: digest('7'),
                 attachment_deadline_ms: 20_000,
                 admission_deadline_ms: 10_000,
+                max_clock_skew_ms: None,
                 nonce_sha256: digest('8'),
                 ticket: GuestImportTicket {
                     schema: GUEST_IMPORT_TICKET_SCHEMA,

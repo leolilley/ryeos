@@ -422,7 +422,8 @@ pub fn prepare_after_reservation(
         .policy_ref
         .as_deref()
         .context("selected product relationship has no qualification policy")?;
-    let policy_source = super::resolve_current_bundle_qualification_policy(state, policy_ref)?;
+    let policy_source =
+        super::resolve_current_bundle_qualification_policy_for_local_run(state, policy_ref)?;
     require_current_consumer_invocation(
         state,
         &context.fingerprint,
@@ -585,6 +586,7 @@ mod tests {
                 minimum_verifier_process_settlement: VerifierProcessSettlementAuthority::ScopeEmpty,
                 verifier_parameters: json!({}),
                 consumer_execution_context: None,
+                requires_guarantees: Vec::new(),
                 producer_scenarios: scenarios
                     .into_iter()
                     .map(|(name, scenario)| (name.to_owned(), scenario))

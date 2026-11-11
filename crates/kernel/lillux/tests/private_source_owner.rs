@@ -306,6 +306,7 @@ fn held_source_target(
         OsStr::new(name),
         std::path::Path::new("/source"),
         request,
+        None,
     );
     let outcome = (|| -> Result<(), String> {
         if unsafe { libc::prctl(libc::PR_GET_DUMPABLE, 0, 0, 0, 0) } != 0 {

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-08T03:28:23Z:72cad2a6f188b6554854fc738be978539e7be4ee3dfad99917af9e9bf047b483:DfgLbICcz04iqEy8pEMhwv4qXXv2kipObrr64N2aJvOM61AokM9ivONn3m1tDPRN6fULyNeKK/4YShTCueQXDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-11T02:56:41Z:e1bfb221a1670e7c3778668b5086ec79c8b8fd563a30b25bb5b638949a5ad5f5:15HovDktCGGRh580NfK59HqGWdSwOKcjvwVl5f//Hjr+79Jax1P/iZCICekoDcFZ34cudyvPer6eTkRMJMe4Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/directive"
 inventory_policy:
   admission:
@@ -10,6 +10,12 @@ resolution:
   - step: resolve_extends_chain
 effective_trust:
   include_references: false
+# Which spaces and trust classes may supply a launch root of this kind.
+# Work signed by an unpinned key runs only where node policy admits it.
+launch_trust:
+  allowed_spaces: [bundle, project]
+  allowed_trust: [trusted_bundle, trusted_project]
+  operator_may_admit: [untrusted_project]
 execution:
   # Explicit delegation to the runtime registry. The dispatcher will
   # call `RuntimeRegistry::lookup_for("directive")` to find the

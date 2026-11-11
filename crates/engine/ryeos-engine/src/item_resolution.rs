@@ -390,16 +390,23 @@ fn resolve_item_full_inner(
     let mut searched_spaces = Vec::new();
 
     for root in &roots.ordered {
-        let space_label = root.space.as_str().to_owned();
-        if !searched_spaces.contains(&space_label) {
-            searched_spaces.push(space_label);
+        // A kind that names the spaces allowed to supply it never takes a
+        // candidate from another space. A file there is reported, so a
+        // planted item is visible, but it can neither win nor shadow.
+        let space_admitted = kind_schema
+            .launch_trust
+            .as_ref()
+            .is_none_or(|launch_trust| launch_trust.admits_space(root.space));
+        if space_admitted {
+            let space_label = root.space.as_str().to_owned();
+            if !searched_spaces.contains(&space_label) {
+                searched_spaces.push(space_label);
+            }
         }
 
         let kind_dir = root.ai_root.join(&kind_schema.directory);
-        for ext_spec in &kind_schema.extensions {
-            let path = kind_dir.join(format!("{}{}", ref_.bare_id, ext_spec.ext));
-            tracing::trace!(candidate = %path.display(), label = %root.label, "checking candidate path");
-            let is_file = match (root.space, project_authority) {
+        let candidate_exists = |path: &Path| -> Result<bool, EngineError> {
+            match (root.space, project_authority) {
                 (ItemSpace::Project, Some((project_root, content))) => {
                     if root.ai_root != project_root.join(crate::AI_DIR) {
                         return Err(EngineError::Internal(format!(
@@ -415,23 +422,72 @@ fn resolve_item_full_inner(
                             project_root.display()
                         ))
                     })?;
-                    !content.validates_absence(relative)?
+                    Ok(!content.validates_absence(relative)?)
                 }
-                _ => match lillux::inspect_optional_entry_no_follow(&path) {
-                    Ok(Some(lillux::secure_fs::PinnedEntryType::Regular)) => true,
-                    Ok(None) => false,
-                    Ok(Some(_)) => false,
-                    Err(error) => {
-                        return Err(EngineError::ItemResolutionUnavailable {
-                            canonical_ref: ref_.to_string(),
-                            path,
-                            source: std::io::Error::other(error.to_string()),
-                        });
-                    }
+                _ => match lillux::inspect_optional_entry_no_follow(path) {
+                    Ok(Some(lillux::secure_fs::PinnedEntryType::Regular)) => Ok(true),
+                    Ok(None) | Ok(Some(_)) => Ok(false),
+                    Err(error) => Err(EngineError::ItemResolutionUnavailable {
+                        canonical_ref: ref_.to_string(),
+                        path: path.to_path_buf(),
+                        source: std::io::Error::other(format!("{error:#}")),
+                    }),
                 },
-            };
+            }
+        };
+        for (ext_index, ext_spec) in kind_schema.extensions.iter().enumerate() {
+            let path = kind_dir.join(format!("{}{}", ref_.bare_id, ext_spec.ext));
+            tracing::trace!(candidate = %path.display(), label = %root.label, "checking candidate path");
+            let is_file = candidate_exists(&path)?;
+            if is_file && !space_admitted {
+                tracing::warn!(
+                    item_ref = %ref_,
+                    ignored = %path.display(),
+                    space = root.space.as_str(),
+                    "ignoring a candidate from a space this kind does not admit"
+                );
+                shadowed.push(ShadowedCandidate {
+                    label: root.label.clone(),
+                    space: root.space,
+                    path,
+                });
+                break;
+            }
+            if !space_admitted {
+                // Nothing in this space can change the winner, so its
+                // absences are not dependencies of the resolution.
+                continue;
+            }
             if is_file {
                 if winner.is_none() {
+                    // One name, one item: a second format of the same name in
+                    // the winning folder is refused rather than silently
+                    // ranked, and each later format's absence is a dependency
+                    // so a collision appearing later is never served from a
+                    // stale resolution.
+                    let relative = |extension: &str| {
+                        PathBuf::from(format!(
+                            "{}/{}/{}{}",
+                            crate::AI_DIR,
+                            kind_schema.directory,
+                            ref_.bare_id,
+                            extension
+                        ))
+                    };
+                    for later in &kind_schema.extensions[ext_index + 1..] {
+                        let sibling = kind_dir.join(format!("{}{}", ref_.bare_id, later.ext));
+                        if candidate_exists(&sibling)? {
+                            return Err(EngineError::AmbiguousResolution {
+                                canonical_ref: ref_.to_string(),
+                                space: format!("{} ({})", root.space.as_str(), root.label),
+                                candidates: vec![relative(&ext_spec.ext), relative(&later.ext)],
+                            });
+                        }
+                        probed_absent.push(ProbedAbsence {
+                            space: root.space,
+                            path: sibling,
+                        });
+                    }
                     winner = Some((
                         path,
                         root.space,
@@ -447,12 +503,11 @@ fn resolve_item_full_inner(
                         path,
                     });
                 }
-                break; // Only match one extension per root (first ext wins)
+                break; // A root supplies at most one candidate.
             } else if winner.is_none() {
                 // Absent at a precedence >= the (not-yet-found) winner: a
                 // negative dependency. If this exact path (or an earlier
-                // sibling) appears, it becomes the new winner. Absences after
-                // the winner is found cannot change the winner, so skip them.
+                // sibling) appears, it becomes the new winner.
                 probed_absent.push(ProbedAbsence {
                     space: root.space,
                     path,
@@ -632,6 +687,14 @@ fn enumerate_kind_refs_inner(
     let mut seen = HashSet::new();
     let mut refs = Vec::new();
     for root in &roots.ordered {
+        // Enumeration lists only what resolution could select.
+        if kind_schema
+            .launch_trust
+            .as_ref()
+            .is_some_and(|launch_trust| !launch_trust.admits_space(root.space))
+        {
+            continue;
+        }
         let kind_dir = root.ai_root.join(&kind_schema.directory);
         let mut relative_files = Vec::new();
         match (root.space, project_authority) {
@@ -875,6 +938,7 @@ mod tests {
                 effect_class_ceiling: None,
                 workspace_access: None,
                 network_authority_ceiling: None,
+                pushed_head_declaration: None,
                 filesystem_authority_ceiling: None,
                 target: None,
                 endpoint: None,
@@ -916,6 +980,7 @@ mod tests {
             inventory_kinds: Vec::new(),
             inventory_schema_keys: Vec::new(),
             inventory_policy: Default::default(),
+            launch_trust: None,
         }
     }
 
@@ -993,6 +1058,144 @@ mod tests {
         ));
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn two_formats_of_one_name_in_one_folder_are_refused() {
+        let root = tempdir();
+        let schema = make_kind_schema(
+            "tools",
+            vec![(".py", "python/tool-header"), (".yaml", "yaml")],
+        );
+        write_item(&root, "tools", "demo/x", ".py", "# python");
+        write_item(&root, "tools", "demo/x", ".yaml", "executor_id: run");
+        let roots = ResolutionRoots::from_flat(None, vec![root.clone()]);
+        let item = CanonicalRef::parse("tool:demo/x").unwrap();
+        match resolve_item_full(&roots, &schema, &item) {
+            Err(EngineError::AmbiguousResolution { candidates, .. }) => {
+                assert_eq!(
+                    candidates,
+                    [
+                        PathBuf::from(".ai/tools/demo/x.py"),
+                        PathBuf::from(".ai/tools/demo/x.yaml")
+                    ]
+                );
+            }
+            other => panic!("expected an ambiguous-format refusal, got {other:?}"),
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_single_format_records_its_later_siblings_as_absences() {
+        let root = tempdir();
+        let schema = make_kind_schema(
+            "tools",
+            vec![(".py", "python/tool-header"), (".yaml", "yaml")],
+        );
+        write_item(&root, "tools", "demo/x", ".py", "# python");
+        let roots = ResolutionRoots::from_flat(None, vec![root.clone()]);
+        let item = CanonicalRef::parse("tool:demo/x").unwrap();
+        let result = resolve_item_full(&roots, &schema, &item).unwrap();
+        assert!(
+            result
+                .probed_absent
+                .iter()
+                .any(|absence| absence.path.ends_with("tools/demo/x.yaml"))
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn the_same_name_across_roots_is_a_shadow_not_a_collision() {
+        let project = tempdir();
+        let bundle = tempdir();
+        let schema = make_kind_schema(
+            "tools",
+            vec![(".py", "python/tool-header"), (".yaml", "yaml")],
+        );
+        write_item(&project, "tools", "demo/x", ".yaml", "executor_id: run");
+        write_item(&bundle, "tools", "demo/x", ".py", "# python");
+        let roots = ResolutionRoots::from_flat(Some(project.clone()), vec![bundle.clone()]);
+        let item = CanonicalRef::parse("tool:demo/x").unwrap();
+        let result = resolve_item_full(&roots, &schema, &item).unwrap();
+        assert_eq!(result.winner_space, ItemSpace::Project);
+        assert_eq!(result.shadowed.len(), 1);
+        fs::remove_dir_all(project).unwrap();
+        fs::remove_dir_all(bundle).unwrap();
+    }
+
+    fn bundle_only_schema() -> KindSchema {
+        let mut schema = make_kind_schema("services", vec![(".yaml", "yaml")]);
+        schema.launch_trust = Some(crate::kind_registry::launch_trust::LaunchTrustPolicy {
+            allowed_spaces: vec![ItemSpace::Bundle],
+            allowed_trust: vec![crate::resolution::TrustClass::TrustedBundle],
+            operator_may_admit: Vec::new(),
+        });
+        schema
+    }
+
+    #[test]
+    fn a_project_file_never_wins_for_a_bundle_only_kind_and_is_reported() {
+        let project = tempdir();
+        let bundle = tempdir();
+        write_item(
+            &project,
+            "services",
+            "health/status",
+            ".yaml",
+            "endpoint: remote.list",
+        );
+        write_item(
+            &bundle,
+            "services",
+            "health/status",
+            ".yaml",
+            "endpoint: health.status",
+        );
+        let roots = ResolutionRoots::from_flat(Some(project.clone()), vec![bundle.clone()]);
+        let schema = bundle_only_schema();
+        let item = CanonicalRef::parse("service:health/status").unwrap();
+
+        let result = resolve_item_full(&roots, &schema, &item).unwrap();
+        assert_eq!(result.winner_space, ItemSpace::Bundle);
+        assert!(result.winner_path.starts_with(&bundle));
+        assert_eq!(result.shadowed.len(), 1);
+        assert_eq!(result.shadowed[0].space, ItemSpace::Project);
+        assert!(
+            result
+                .probed_absent
+                .iter()
+                .all(|absence| absence.space != ItemSpace::Project)
+        );
+        assert_eq!(enumerate_kind_refs(&roots, &schema, "service").len(), 1);
+
+        fs::remove_dir_all(project).unwrap();
+        fs::remove_dir_all(bundle).unwrap();
+    }
+
+    #[test]
+    fn a_project_only_item_of_a_bundle_only_kind_is_not_found() {
+        let project = tempdir();
+        let bundle = tempdir();
+        write_item(
+            &project,
+            "services",
+            "planted/x",
+            ".yaml",
+            "endpoint: remote.configure",
+        );
+        let roots = ResolutionRoots::from_flat(Some(project.clone()), vec![bundle.clone()]);
+        let schema = bundle_only_schema();
+        let item = CanonicalRef::parse("service:planted/x").unwrap();
+        assert!(matches!(
+            resolve_item_full(&roots, &schema, &item),
+            Err(EngineError::ItemNotFound { .. })
+        ));
+        assert!(enumerate_kind_refs(&roots, &schema, "service").is_empty());
+
+        fs::remove_dir_all(project).unwrap();
+        fs::remove_dir_all(bundle).unwrap();
     }
 
     fn registered_pair() -> (PathBuf, PathBuf, Vec<RegisteredBundleRoot>) {
@@ -1222,23 +1425,24 @@ mod tests {
     }
 
     #[test]
-    fn resolve_extension_priority() {
+    fn resolve_finds_an_item_in_any_declared_format() {
         let project_root = tempdir();
-        // .py is listed first, so it should win even though .yaml also exists
+        // Only the second declared format exists: every format is probed,
+        // and the single match resolves. Two formats of one name in one
+        // folder are refused (see two_formats_of_one_name_in_one_folder_are_refused).
         let schema = make_kind_schema(
             "tools",
             vec![(".py", "python/tool-header"), (".yaml", "yaml/yaml")],
         );
 
-        write_item(&project_root, "tools", "my_tool", ".py", "# python");
         write_item(&project_root, "tools", "my_tool", ".yaml", "name: yaml");
 
         let roots = ResolutionRoots::from_flat(Some(project_root), vec![]);
         let ref_ = CanonicalRef::parse("tool:my_tool").unwrap();
 
         let (path, _, ext) = resolve_item(&roots, &schema, &ref_).unwrap();
-        assert_eq!(ext, ".py");
-        assert!(path.to_string_lossy().ends_with(".py"));
+        assert_eq!(ext, ".yaml");
+        assert!(path.to_string_lossy().ends_with(".yaml"));
     }
 
     #[test]

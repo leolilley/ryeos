@@ -13,7 +13,6 @@
 use std::path::PathBuf;
 
 use anyhow::{Context as _, Result, ensure};
-use lillux::time::Duration;
 use ryeos_external_execution_contract::{
     ExternalExecutionMode, ExternalGuestInputProjection, ExternalTargetExit, GuestMountAccess,
     GuestMountKind,
@@ -48,6 +47,7 @@ pub(crate) fn prepare_candidate(
     authority: &PinnedStateAuthority,
     private_parent: &lillux::PinnedDirectory,
     mount_authorities: &[lillux::InheritedDescriptorAuthority],
+    window: &ryeos_state::external_execution::guest_window::GuestChannelWindow,
 ) -> Result<(NativeExternalCandidate, NativeCandidateOutput)> {
     use ryeos_state::external_execution::admission::ExternalCandidateProcFilesystem;
 
@@ -123,6 +123,7 @@ pub(crate) fn prepare_candidate(
         spec.stdin.as_ref(),
         spec.qualification_fixture(),
         mount_authorities,
+        window,
     )
 }
 
@@ -346,6 +347,10 @@ pub struct NativeExternalCandidate {
     terminal: bool,
     input: Option<std::fs::File>,
     protocol: CandidateProtocolInput,
+    /// The owner ended its protocol input: the candidate's stdin is closed and
+    /// later protocol frames are refused. This is not terminal; the candidate
+    /// keeps running until its own exit or a later owner command.
+    protocol_input_closed: bool,
     direct_input: Option<DirectCommandInput>,
     /// Lillux's once-reaped observation remains local to the native owner. A
     /// cleanup proof alone is never promoted into an actual target exit.
@@ -734,6 +739,7 @@ impl NativeExternalCandidate {
             &ryeos_external_execution_contract::qualification_fixture::QFixtureContract,
         >,
         mount_authorities: &[lillux::InheritedDescriptorAuthority],
+        window: &ryeos_state::external_execution::guest_window::GuestChannelWindow,
     ) -> Result<(Self, NativeCandidateOutput)> {
         binding.validate()?;
         guest_inputs.validate()?;
@@ -818,17 +824,11 @@ impl NativeExternalCandidate {
                 "external candidate mount changed its admitted guest authority"
             );
         }
-        let now = lillux::time::timestamp_millis();
         ensure!(
-            now >= binding.issued_at_ms && now < binding.execution_deadline_ms,
+            !window.execution_elapsed(),
             "external candidate preparation is outside its execution window"
         );
-        let deadline = lillux::time::MonotonicDeadline::after(Duration::from_millis(
-            u64::try_from(binding.execution_deadline_ms - now)?,
-        ));
-        let channel_deadline = lillux::time::MonotonicDeadline::after(Duration::from_millis(
-            u64::try_from(binding.expires_at_ms - now)?,
-        ));
+        let (deadline, channel_deadline) = window.monotonic_pair();
         // Hold the CAS guard only during immutable input validation/copy. It
         // must be gone before native launch forks the isolated target.
         let root = {
@@ -971,6 +971,7 @@ impl NativeExternalCandidate {
                 terminal: false,
                 input: Some(pipes.stdin),
                 protocol: CandidateProtocolInput::default(),
+                protocol_input_closed: false,
                 direct_input,
                 native_termination: None,
                 target_exit: None,
@@ -1048,6 +1049,10 @@ impl NativeExternalCandidate {
             "external direct command has no structured-session input authority"
         );
         ensure!(
+            !self.protocol_input_closed,
+            "candidate protocol input was closed by the owner"
+        );
+        ensure!(
             self.released
                 && !self.terminal
                 && self.application_fence.is_clear()
@@ -1059,6 +1064,46 @@ impl NativeExternalCandidate {
             frame.digest(),
             frame.protocol_bytes()?,
         )
+    }
+
+    /// Close the candidate's protocol stdin for good. Admitted only while the
+    /// candidate runs with no partially applied protocol frame, so the close
+    /// lands after every applied byte. The candidate is not terminal: it may
+    /// keep running, and its stdout EOF remains a separate observation. The
+    /// fence makes this one-shot like every other applied owner frame.
+    pub fn close_protocol_input(&mut self, frame: &AuthenticatedExecutionFrame) -> Result<()> {
+        self.require_owner(frame)?;
+        ensure!(
+            matches!(
+                frame.frame().payload,
+                ExecutionChannelPayload::ProtocolInputClosed
+            ),
+            "not a protocol input closure"
+        );
+        ensure!(
+            matches!(
+                self.binding.execution_mode,
+                ExternalExecutionMode::StructuredSession {}
+                    | ExternalExecutionMode::QualificationStructuredSession {}
+            ),
+            "external direct command has no structured-session input authority"
+        );
+        ensure!(
+            !self.protocol_input_closed,
+            "candidate protocol input is already closed"
+        );
+        ensure!(
+            self.released
+                && !self.terminal
+                && self.protocol.pending.is_none()
+                && self.application_fence.is_clear()
+                && !self.execution_expired(),
+            "candidate is not executable, has partial protocol input or awaits durable finish"
+        );
+        self.protocol_input_closed = true;
+        // Dropping the sole parent-side writer is the candidate's stdin EOF.
+        self.input = None;
+        self.application_fence.begin(frame.digest())
     }
 
     /// At most one nonblocking write. Partial progress remains the same claimed
@@ -1595,8 +1640,7 @@ impl NativeExternalCandidate {
             "external candidate command changed channel authority"
         );
         ensure!(
-            !self.channel_deadline.has_elapsed()
-                && lillux::time::timestamp_millis() < self.binding.expires_at_ms,
+            !self.channel_deadline.has_elapsed(),
             "external candidate command channel expired"
         );
         Ok(())
@@ -1698,7 +1742,7 @@ mod tests {
     }
 
     fn preparation_deadline() -> lillux::time::MonotonicDeadline {
-        lillux::time::MonotonicDeadline::after(Duration::from_secs(10))
+        lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(10))
     }
 
     #[test]
@@ -1743,7 +1787,7 @@ mod tests {
             prepare_workspace_input_targets(
                 &root,
                 &[("too-late".into(), GuestMountKind::Directory)],
-                lillux::time::MonotonicDeadline::after(Duration::ZERO),
+                lillux::time::MonotonicDeadline::after(lillux::time::Duration::ZERO),
             )
             .is_err()
         );

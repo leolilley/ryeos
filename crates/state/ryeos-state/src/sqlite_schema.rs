@@ -1234,13 +1234,55 @@ fn schema_sql_entries(conn: &Connection) -> Result<Vec<SchemaSqlEntry>> {
                 // The reference database is built by this exact SQLite
                 // library from the declared DDL, so raw stored SQL is stable.
                 // Comparing it byte-for-byte also preserves whitespace and
-                // case inside quoted CHECK literals.
-                sql,
+                // case inside quoted CHECK literals. SQLite stores comments
+                // verbatim too, and they define nothing, so rewording one
+                // must not make an existing store refuse.
+                sql: sql.as_deref().map(sql_without_comments),
             })
         })?
         .collect::<std::result::Result<Vec<_>, _>>()
         .context("read complete SQLite schema SQL")?;
     Ok(entries)
+}
+
+/// Remove `--` and `/* */` comments from stored DDL, leaving every other byte
+/// as stored. Text inside string literals and quoted identifiers is not a
+/// comment. A line that held only a comment is removed with it.
+fn sql_without_comments(sql: &str) -> String {
+    let mut out = String::with_capacity(sql.len());
+    let mut rest = sql;
+    while let Some(first) = rest.chars().next() {
+        let closer = match first {
+            '\'' | '"' | '`' => Some(first),
+            '[' => Some(']'),
+            _ => None,
+        };
+        if let Some(closer) = closer {
+            // A doubled quote re-enters here as an adjacent quoted run.
+            let end = rest[1..].find(closer).map_or(rest.len(), |at| at + 2);
+            out.push_str(&rest[..end]);
+            rest = &rest[end..];
+            continue;
+        }
+        let after_comment = if rest.starts_with("--") {
+            Some(rest.find('\n').map_or("", |at| &rest[at..]))
+        } else {
+            rest.strip_prefix("/*")
+                .map(|body| body.find("*/").map_or("", |at| &body[at + 2..]))
+        };
+        let Some(after_comment) = after_comment else {
+            out.push(first);
+            rest = &rest[first.len_utf8()..];
+            continue;
+        };
+        out.truncate(out.trim_end_matches([' ', '\t']).len());
+        let at_line_start = out.is_empty() || out.ends_with('\n');
+        rest = match after_comment.strip_prefix('\n') {
+            Some(next_line) if at_line_start => next_line,
+            _ => after_comment,
+        };
+    }
+    out
 }
 
 /// Initialize a fresh database with the given schema spec.
@@ -1426,6 +1468,29 @@ mod custody_drop_tests {
             anyhow::anyhow!("schema reference refused"),
             None,
         )
+    }
+
+    #[test]
+    fn stored_sql_comparison_ignores_comments_and_nothing_else() {
+        let stored = "CREATE TABLE t (\n    a TEXT, -- one wording\n    -- a whole line\n    /* block\n       comment */\n    b TEXT CHECK (b IN ('x--y', '/*z*/', 'it''s -- kept'))\n)";
+        let reworded = "CREATE TABLE t (\n    a TEXT, -- another wording\n    b TEXT CHECK (b IN ('x--y', '/*z*/', 'it''s -- kept'))\n)";
+        let bare = "CREATE TABLE t (\n    a TEXT,\n    b TEXT CHECK (b IN ('x--y', '/*z*/', 'it''s -- kept'))\n)";
+        assert_eq!(super::sql_without_comments(stored), bare);
+        assert_eq!(super::sql_without_comments(reworded), bare);
+        assert_eq!(super::sql_without_comments(bare), bare);
+        assert_eq!(
+            super::sql_without_comments("\"a--b\" [c--d] `e/*f*/` -- end"),
+            "\"a--b\" [c--d] `e/*f*/`"
+        );
+        // A changed predicate, and whitespace or case inside a literal, still differ.
+        assert_ne!(
+            super::sql_without_comments("CHECK (b IN ('x'))"),
+            super::sql_without_comments("CHECK (b IN ('y'))")
+        );
+        assert_ne!(
+            super::sql_without_comments("CHECK (b IN ('x  y'))"),
+            super::sql_without_comments("CHECK (b IN ('x y'))")
+        );
     }
 
     #[test]

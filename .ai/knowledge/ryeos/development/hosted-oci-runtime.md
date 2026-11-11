@@ -20,13 +20,13 @@ configuration to one exact app root, node signing identity, and non-root
 controller account. An external OCI administrator owns container creation,
 the lifecycle boundary, delegation, stop/removal, and volume-reuse decisions.
 
-Railway externally fenced workers are a separate capability because Railway
+Externally fenced workers on a managed container host are a separate capability because that host
 does not currently supply this nested writable process-scope authority. Local
 inference resource selection and GPU occupancy are also separate: device
 visibility is not process containment.
 
 The runtime products stay distinct. `ryeos-hosted-workflow` is the broadly
-usable controller/workflow node and makes no hard-containment claim. Railway's
+usable controller/workflow node and makes no hard-containment claim. The managed host's
 restricted worker node belongs exclusively to the external-container-workers
 lane and uses an externally fenced service lifecycle. `ryeos-contained-workflow`
 is this capability's fail-closed packaging: it contains the fixed account,

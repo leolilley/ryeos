@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ryeos:signed:2026-10-26T23:17:07Z:0d25531979d02157f556a5b3fd14f88e84ceb888b3e48a27254298cd69cf5ae3:7JXN3xqSqZRy3bo/qFQAZHuOIF8l2Qd4sFHPa2fi515heHBDsZbFrYFEYhlcz4WDHGwfLwSawg1vo6ZnWjdYDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-11T02:56:41Z:d3f7506ddf92a335ec77c64b6bae9758c66426284dd334980608b9cdfaff3994:qNK0uOKGenKdt2+FB+PzMos+erlLVxDL+HIfu8Pv0QSThZ5EoOpInUBSA/AoU9sbea50GNWpGddQoUTKXfALBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 
 # Canonical offline producer for the exact Stage0 compiler platform. This file
 # owns transformation and archive production for both the pre-RyeOS publisher

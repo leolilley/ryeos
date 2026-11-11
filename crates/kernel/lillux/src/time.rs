@@ -1,3 +1,5 @@
+mod guest_clock;
+pub use guest_clock::{LocalClockAnchor, LocalDeadline, WallClockTrust, wall_clock_trust};
 mod retained_occupancy;
 pub use retained_occupancy::{
     OccupancyServiceEdge, RetainedClockCloseFailure, RetainedOccupancyClock, RetiredOccupancyClock,
@@ -37,7 +39,7 @@ impl OriginalLocalDeadlineHandoff {
         // BOOTTIME precedes both remaining observations: export can only narrow.
         let before = occupancy_now()?;
         let service_tick = local_deadline_wire::expiry(before.tick_ns, service.remaining())?;
-        let cleanup_tick = if service.deadline == cleanup.deadline {
+        let cleanup_tick = if service.same_endpoint(&cleanup) {
             service_tick
         } else {
             local_deadline_wire::expiry(before.tick_ns, cleanup.remaining())?
@@ -155,20 +157,14 @@ impl AdoptedOriginalLocalDeadlines {
         clock: crate::InheritedDescriptorAuthority,
     ) -> Result<Self, String> {
         let wire = local_deadline_wire::read(&bound, &clock)?;
-        // Instant precedes BOOTTIME: parsing/adoption delay cannot renew time.
-        let anchor = Instant::now();
+        // The wire carries exact suspend-inclusive coordinates, so adoption
+        // delay cannot renew time and a paused host cannot extend it.
         let now = occupancy_now()?;
         wire.validate(&now)?;
-        let service = MonotonicDeadline {
-            deadline: anchor
-                .checked_add(Duration::from_nanos(wire.service_tick - now.tick_ns))
-                .ok_or("adopted service deadline overflow")?,
-        };
-        let cleanup = MonotonicDeadline {
-            deadline: anchor
-                .checked_add(Duration::from_nanos(wire.cleanup_tick - now.tick_ns))
-                .ok_or("adopted cleanup deadline overflow")?,
-        };
+        let service = MonotonicDeadline::at_boot_tick(wire.service_tick)
+            .ok_or("adopted service deadline has no suspend-inclusive clock")?;
+        let cleanup = MonotonicDeadline::at_boot_tick(wire.cleanup_tick)
+            .ok_or("adopted cleanup deadline has no suspend-inclusive clock")?;
         original_window::require_same_clock_namespace(clock.file())?;
         wire.validate(&occupancy_now()?)?;
         if service.has_elapsed() {
@@ -273,6 +269,7 @@ mod local_deadline_handoff_tests {
 
     #[test]
     fn equal_endpoints_share_one_tick_and_delayed_adoption_does_not_extend() {
+        let _serial = crate::exec::registered_pair::serialize_clock_close_tests();
         let handoff = pair();
         let original = handoff.original_service();
         let wire = local_deadline_wire::read(&handoff.bound, &handoff.clock).unwrap();
@@ -282,16 +279,17 @@ mod local_deadline_handoff_tests {
         // Consume both registered owners; this same-process fixture must not
         // impersonate raw inheritance or register an already-owned FD again.
         let adopted = AdoptedOriginalLocalDeadlines::from_owned_roles(bound, clock).unwrap();
-        assert!(adopted.service.deadline <= original.deadline);
-        assert_eq!(adopted.service.deadline, adopted.cleanup.deadline);
-        assert_eq!(
-            adopted.service_deadline().deadline,
-            adopted.service_deadline().deadline
-        );
+        let original_left = original.remaining();
+        assert!(adopted.service.remaining() <= original_left);
+        assert!(adopted.service.same_endpoint(&adopted.cleanup));
+        assert!(adopted.service_deadline().same_endpoint(&adopted.service));
+        // Adopted deadlines count the suspend-inclusive clock.
+        assert!(matches!(adopted.service.basis, DeadlineBasis::Boot(_)));
     }
 
     #[test]
     fn duplicates_preserve_objects_and_original_endpoints() {
+        let _serial = crate::exec::registered_pair::serialize_clock_close_tests();
         let original = pair();
         let copy = original.duplicate_retained_pair().unwrap();
         for (a, b) in [
@@ -306,12 +304,13 @@ mod local_deadline_handoff_tests {
             let b = b.file().metadata().unwrap();
             assert_eq!((a.dev(), a.ino()), (b.dev(), b.ino()));
         }
-        assert_eq!(original.service.deadline, copy.service.deadline);
-        assert_eq!(original.cleanup.deadline, copy.cleanup.deadline);
+        assert!(original.service.same_endpoint(&copy.service));
+        assert!(original.cleanup.same_endpoint(&copy.cleanup));
     }
 
     #[test]
     fn construction_refuses_inverted_and_expired_originals() {
+        let _serial = crate::exec::registered_pair::serialize_clock_close_tests();
         let earlier = MonotonicDeadline::after(Duration::from_secs(30));
         let later = MonotonicDeadline::after(Duration::from_secs(60));
         assert!(OriginalLocalDeadlineHandoff::from_original(later, earlier).is_err());
@@ -326,6 +325,7 @@ mod local_deadline_handoff_tests {
 
     #[test]
     fn decoding_refuses_unknown_fields_domain_version_order_and_expiry() {
+        let _serial = crate::exec::registered_pair::serialize_clock_close_tests();
         let handoff = pair();
         let mut wire = local_deadline_wire::read(&handoff.bound, &handoff.clock).unwrap();
         let now = occupancy_now().unwrap();
@@ -350,6 +350,7 @@ mod local_deadline_handoff_tests {
 
     #[test]
     fn descriptor_reader_refuses_wrong_clock_identity_and_oversized_packet() {
+        let _serial = crate::exec::registered_pair::serialize_clock_close_tests();
         let handoff = pair();
         let mut wire = local_deadline_wire::read(&handoff.bound, &handoff.clock).unwrap();
         wire.clock_ino ^= 1;
@@ -376,6 +377,7 @@ mod local_deadline_handoff_tests {
 
     #[test]
     fn role_validation_precedes_ownership_and_arithmetic_refuses_overflow() {
+        let _serial = crate::exec::registered_pair::serialize_clock_close_tests();
         for (bound, clock) in [(0, 9), (9, 1), (2, 9), (9, 9)] {
             assert!(
                 unsafe { AdoptedOriginalLocalDeadlines::take_inherited(bound, clock) }.is_err()
@@ -569,24 +571,58 @@ fn occupancy_contract_digest(contract: &OccupancyClockContract) -> Result<String
 
 #[cfg(target_os = "linux")]
 fn occupancy_now_platform() -> Result<OccupancyCoordinate, String> {
-    let contract = OccupancyClockContract::current()?;
-    let tick_ns = occupancy_tick_ns()?;
-    let incarnation = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
-        .map_err(|error| format!("read occupancy clock incarnation: {error}"))?;
-    let incarnation = incarnation.trim();
-    if incarnation.is_empty() {
-        return Err("occupancy clock incarnation is empty".to_string());
+    // The contract is fixed for the life of the process, and its digest is a
+    // canonical-JSON hash, so it is computed once.
+    static CONTRACT_DIGEST: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let contract_digest = match CONTRACT_DIGEST.get() {
+        Some(digest) => digest.clone(),
+        None => CONTRACT_DIGEST
+            .get_or_init(|| {
+                OccupancyClockContract::current()
+                    .map(|contract| contract.contract_digest)
+                    .unwrap_or_default()
+            })
+            .clone(),
+    };
+    if contract_digest.is_empty() {
+        return Err("occupancy clock contract is unavailable".to_string());
     }
+    let tick_ns = occupancy_tick_ns()?;
+    // The boot id cannot change while this process runs, so it is read once:
+    // deadline checks sample the clock often and must not open a descriptor
+    // each time.
+    static INCARNATION_DIGEST: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let incarnation_digest = match INCARNATION_DIGEST.get() {
+        Some(digest) => digest.clone(),
+        None => {
+            let incarnation = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+                .map_err(|error| format!("read occupancy clock incarnation: {error}"))?;
+            let incarnation = incarnation.trim();
+            if incarnation.is_empty() {
+                return Err("occupancy clock incarnation is empty".to_string());
+            }
+            INCARNATION_DIGEST
+                .get_or_init(|| crate::sha256_hex(incarnation.as_bytes()))
+                .clone()
+        }
+    };
     Ok(OccupancyCoordinate {
-        contract_digest: contract.contract_digest,
-        incarnation_digest: crate::sha256_hex(incarnation.as_bytes()),
+        contract_digest,
+        incarnation_digest,
         tick_ns,
     })
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(any(test, feature = "test-support"))))]
 fn occupancy_tick_ns() -> Result<u64, String> {
     occupancy_tick_ns_fixed().map_err(str::to_owned)
+}
+
+#[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
+fn occupancy_tick_ns() -> Result<u64, String> {
+    occupancy_tick_ns_fixed()
+        .map(|tick| tick + simulated_suspension::get())
+        .map_err(str::to_owned)
 }
 
 #[cfg(target_os = "linux")]
@@ -624,46 +660,177 @@ pub struct MonotonicTimer {
     started_at: Instant,
 }
 
-/// Opaque process-local monotonic expiry authority.
+/// The host clock a [`MonotonicDeadline`] counts on.
+#[derive(Debug, Clone, Copy)]
+enum DeadlineBasis {
+    /// The process monotonic clock, which stands still while the host is
+    /// suspended.
+    Process(Instant),
+    /// The host's suspend-inclusive clock as a nanosecond coordinate, valid
+    /// for the boot this process is running on.
+    Boot(u64),
+}
+
+/// Opaque process-local expiry authority.
 ///
 /// Callers can ask whether the deadline has elapsed, but never receive the
 /// host `Instant` or compare it as durable identity. This keeps callback and
 /// lease expiry mechanics inside the Lillux time boundary.
+///
+/// A deadline made by [`Self::after`] counts the process monotonic clock and
+/// so does not advance while the host is suspended; that suits purely local
+/// timeouts. A deadline that mirrors a window issued by a remote authority
+/// comes from `LocalDeadline::to_monotonic` and counts the suspend-inclusive
+/// clock, so a paused host cannot extend it. Either kind narrows with the
+/// other through [`Self::min`].
 #[derive(Debug, Clone, Copy)]
 pub struct MonotonicDeadline {
-    deadline: Instant,
+    basis: DeadlineBasis,
 }
 
 impl MonotonicDeadline {
     pub fn after(duration: Duration) -> Self {
         Self {
-            deadline: Instant::now() + duration,
+            basis: DeadlineBasis::Process(Instant::now() + duration),
         }
+    }
+
+    pub(crate) fn at_instant(deadline: Instant) -> Self {
+        Self {
+            basis: DeadlineBasis::Process(deadline),
+        }
+    }
+
+    #[cfg(test)]
+    fn instant(&self) -> Instant {
+        match self.basis {
+            DeadlineBasis::Process(deadline) => deadline,
+            DeadlineBasis::Boot(_) => panic!("deadline counts the suspend-inclusive clock"),
+        }
+    }
+
+    /// A deadline at a suspend-inclusive clock coordinate of this boot.
+    /// `None` where the host offers no such clock.
+    pub(crate) fn at_boot_tick(tick_ns: u64) -> Option<Self> {
+        boot_tick_ns().map(|_| Self {
+            basis: DeadlineBasis::Boot(tick_ns),
+        })
     }
 
     pub fn has_elapsed(&self) -> bool {
-        Instant::now() >= self.deadline
-    }
-
-    /// Narrow two process-local expiry authorities without restarting either
-    /// clock or exposing the underlying host instant.
-    pub fn min(self, other: Self) -> Self {
-        Self {
-            deadline: self.deadline.min(other.deadline),
+        match self.basis {
+            DeadlineBasis::Process(deadline) => Instant::now() >= deadline,
+            DeadlineBasis::Boot(deadline) => boot_tick_ns().is_none_or(|now| now >= deadline),
         }
     }
 
-    /// Compare process-local expiries without sampling, exporting or renewing time.
-    pub(crate) fn is_before(&self, other: &Self) -> bool {
-        self.deadline < other.deadline
+    /// Narrow two expiry authorities without restarting either clock or
+    /// exposing the underlying host instant. Authorities on different clocks
+    /// are compared on the suspend-inclusive clock, and the result counts it:
+    /// a process-clock deadline that wins is carried over as the boot
+    /// coordinate it stands at now, so a host pause cannot stretch the
+    /// narrowed deadline past the suspend-inclusive one it was narrowed by.
+    pub fn min(self, other: Self) -> Self {
+        match (self.basis, other.basis) {
+            (DeadlineBasis::Process(_), DeadlineBasis::Boot(_))
+            | (DeadlineBasis::Boot(_), DeadlineBasis::Process(_)) => {
+                match (self.boot_coordinate(), other.boot_coordinate()) {
+                    (Some(a), Some(b)) => Self {
+                        basis: DeadlineBasis::Boot(a.min(b)),
+                    },
+                    _ if other.is_before(&self) => other,
+                    _ => self,
+                }
+            }
+            _ => {
+                if other.is_before(&self) {
+                    other
+                } else {
+                    self
+                }
+            }
+        }
     }
 
-    /// Remaining duration in this process-local monotonic clock domain.
-    /// Returning zero is the only expiry representation exposed to callers;
-    /// the host `Instant` never escapes Lillux.
-    pub fn remaining(&self) -> Duration {
-        self.deadline.saturating_duration_since(Instant::now())
+    /// This deadline as a suspend-inclusive coordinate, where the host has
+    /// such a clock. A process deadline is placed by its time left now.
+    fn boot_coordinate(&self) -> Option<u64> {
+        match self.basis {
+            DeadlineBasis::Boot(tick) => Some(tick),
+            DeadlineBasis::Process(_) => {
+                // The tick first, then the time left: the coordinate can then
+                // only be earlier than the true one, as in `from_original`.
+                let tick = boot_tick_ns()?;
+                let left = u64::try_from(self.remaining().as_nanos()).ok()?;
+                tick.checked_add(left)
+            }
+        }
     }
+
+    /// Whether both name the very same endpoint on the same clock.
+    pub(crate) fn same_endpoint(&self, other: &Self) -> bool {
+        match (self.basis, other.basis) {
+            (DeadlineBasis::Process(a), DeadlineBasis::Process(b)) => a == b,
+            (DeadlineBasis::Boot(a), DeadlineBasis::Boot(b)) => a == b,
+            _ => false,
+        }
+    }
+
+    /// Compare expiries without exporting or renewing time. Two on one clock
+    /// compare exactly; two on different clocks on the suspend-inclusive one.
+    pub(crate) fn is_before(&self, other: &Self) -> bool {
+        match (self.basis, other.basis) {
+            (DeadlineBasis::Process(a), DeadlineBasis::Process(b)) => a < b,
+            (DeadlineBasis::Boot(a), DeadlineBasis::Boot(b)) => a < b,
+            _ => match (self.boot_coordinate(), other.boot_coordinate()) {
+                (Some(a), Some(b)) => a < b,
+                _ => self.remaining() < other.remaining(),
+            },
+        }
+    }
+
+    /// Remaining duration on this deadline's own clock. Returning zero is the
+    /// only expiry representation exposed to callers; the host `Instant`
+    /// never escapes Lillux.
+    pub fn remaining(&self) -> Duration {
+        match self.basis {
+            DeadlineBasis::Process(deadline) => deadline.saturating_duration_since(Instant::now()),
+            DeadlineBasis::Boot(deadline) => match boot_tick_ns() {
+                Some(now) => Duration::from_nanos(deadline.saturating_sub(now)),
+                None => Duration::ZERO,
+            },
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn boot_tick_ns() -> Option<u64> {
+    occupancy_tick_ns().ok()
+}
+
+/// A host suspension, for tests: it advances the suspend-inclusive clock as
+/// this thread reads it while the process clock stands still. Per thread, so
+/// concurrent tests keep their own time.
+#[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
+pub mod simulated_suspension {
+    use std::cell::Cell;
+
+    thread_local! {
+        static EXTRA_NS: Cell<u64> = const { Cell::new(0) };
+    }
+
+    pub(super) fn get() -> u64 {
+        EXTRA_NS.with(Cell::get)
+    }
+
+    pub fn suspend_for(duration: std::time::Duration) {
+        EXTRA_NS.with(|extra| extra.set(extra.get() + duration.as_nanos() as u64));
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn boot_tick_ns() -> Option<u64> {
+    None
 }
 
 #[cfg(test)]
@@ -673,10 +840,12 @@ mod monotonic_deadline_ordering_tests {
     #[test]
     fn deadline_order_uses_exact_endpoints_and_accepts_equal_copies() {
         let anchor = Instant::now();
-        let early = MonotonicDeadline { deadline: anchor };
+        let early = MonotonicDeadline {
+            basis: DeadlineBasis::Process(anchor),
+        };
         let equal = early;
         let late = MonotonicDeadline {
-            deadline: anchor + Duration::from_secs(1),
+            basis: DeadlineBasis::Process(anchor + Duration::from_secs(1)),
         };
         assert!(!early.is_before(&equal));
         assert!(!equal.is_before(&early));
@@ -689,13 +858,67 @@ mod monotonic_deadline_ordering_tests {
         let anchor = Instant::now();
         let earlier = anchor.checked_sub(Duration::from_secs(2));
         let early = MonotonicDeadline {
-            deadline: earlier.unwrap_or(anchor),
+            basis: DeadlineBasis::Process(earlier.unwrap_or(anchor)),
         };
-        let late = MonotonicDeadline { deadline: anchor };
+        let late = MonotonicDeadline {
+            basis: DeadlineBasis::Process(anchor),
+        };
         assert!(early.has_elapsed());
         assert!(late.has_elapsed());
         assert_eq!(early.is_before(&late), earlier.is_some());
         assert!(!late.is_before(&early));
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod mixed_basis_tests {
+    use super::*;
+
+    fn boot_deadline(after: Duration) -> MonotonicDeadline {
+        let now = occupancy_tick_ns().unwrap();
+        MonotonicDeadline::at_boot_tick(now + after.as_nanos() as u64).unwrap()
+    }
+
+    #[test]
+    fn a_mixed_min_never_outlives_the_suspend_inclusive_deadline() {
+        let long_process = MonotonicDeadline::after(Duration::from_secs(3600));
+        let short_boot = boot_deadline(Duration::from_secs(10));
+        let narrowed = [long_process.min(short_boot), short_boot.min(long_process)];
+        assert!(narrowed.iter().all(|deadline| !deadline.has_elapsed()));
+        // The host suspends: the boot clock moves on, the process clock does
+        // not. The narrowed deadlines follow the boot clock.
+        simulated_suspension::suspend_for(Duration::from_secs(11));
+        assert!(narrowed.iter().all(MonotonicDeadline::has_elapsed));
+        assert!(short_boot.has_elapsed());
+        assert!(!long_process.has_elapsed());
+    }
+
+    #[test]
+    fn a_process_deadline_that_wins_a_mixed_min_still_counts_suspension() {
+        let short_process = MonotonicDeadline::after(Duration::from_secs(5));
+        let long_boot = boot_deadline(Duration::from_secs(3600));
+        let narrowed = short_process.min(long_boot);
+        assert!(matches!(narrowed.basis, DeadlineBasis::Boot(_)));
+        assert!(narrowed.remaining() <= Duration::from_secs(5));
+        let other_way = long_boot.min(short_process);
+        assert!(matches!(other_way.basis, DeadlineBasis::Boot(_)));
+        assert!(!narrowed.has_elapsed());
+        simulated_suspension::suspend_for(Duration::from_secs(6));
+        assert!(narrowed.has_elapsed() && other_way.has_elapsed());
+        // The process deadline alone would not have noticed.
+        assert!(!short_process.has_elapsed());
+    }
+
+    #[test]
+    fn same_basis_min_is_unchanged() {
+        let early = MonotonicDeadline::after(Duration::from_secs(1));
+        let late = MonotonicDeadline::after(Duration::from_secs(9));
+        assert!(early.min(late).same_endpoint(&early));
+        assert!(late.min(early).same_endpoint(&early));
+        let early = boot_deadline(Duration::from_secs(1));
+        let late = boot_deadline(Duration::from_secs(9));
+        assert!(early.min(late).same_endpoint(&early));
+        assert!(late.min(early).same_endpoint(&early));
     }
 }
 
@@ -762,20 +985,42 @@ fn write_iso8601_from_unix_secs(secs: u64, output: &mut dyn std::fmt::Write) -> 
     )
 }
 
+/// Milliseconds a test process shifts its own wall-clock reading by, to
+/// rehearse a clock that disagrees with another machine's. The reading is
+/// compiled into every build and is zero until test code installs a value:
+/// only the installer is gated behind `test-support`, and Lillux never
+/// consults the environment to decide it.
+static WALL_CLOCK_TEST_OFFSET_MS: std::sync::atomic::AtomicI64 =
+    std::sync::atomic::AtomicI64::new(0);
+
+/// Shift every [`timestamp_millis`] and [`unix_secs_now`] reading of this
+/// process by `offset_ms` (negative: the clock runs behind). Process-global:
+/// a test that installs one must not run beside tests that read the clock.
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_wall_clock_test_offset_ms(offset_ms: i64) {
+    WALL_CLOCK_TEST_OFFSET_MS.store(offset_ms, std::sync::atomic::Ordering::SeqCst);
+}
+
+fn wall_clock_test_offset_ms() -> i64 {
+    WALL_CLOCK_TEST_OFFSET_MS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Current wall-clock time as milliseconds since Unix epoch.
 pub fn timestamp_millis() -> i64 {
-    SystemTime::now()
+    (SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_millis() as i64
+        .as_millis() as i64)
+        .saturating_add(wall_clock_test_offset_ms())
 }
 
 /// Current wall-clock time as whole seconds since the Unix epoch.
 pub fn unix_secs_now() -> u64 {
-    SystemTime::now()
+    let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs()
+        .as_secs();
+    secs.saturating_add_signed(wall_clock_test_offset_ms() / 1_000)
 }
 
 /// The strict inverse of [`iso8601_from_unix_secs`]: accepts exactly the
@@ -1010,10 +1255,10 @@ mod tests {
     fn deadline_intersection_preserves_the_original_earliest_instant() {
         let earlier = MonotonicDeadline::after(Duration::ZERO);
         let later = MonotonicDeadline::after(Duration::from_secs(60));
-        assert_eq!(earlier.min(later).deadline, earlier.deadline);
-        assert_eq!(later.min(earlier).deadline, earlier.deadline);
+        assert!(earlier.min(later).same_endpoint(&earlier));
+        assert!(later.min(earlier).same_endpoint(&earlier));
         assert!(later.min(earlier).has_elapsed());
-        assert_eq!(earlier.min(earlier).deadline, earlier.deadline);
+        assert!(earlier.min(earlier).same_endpoint(&earlier));
     }
 }
 
@@ -1310,11 +1555,11 @@ impl AdoptedOriginalNamespaceOccupancy {
         wire.validate(&now)?;
         wire.require_clock_namespace(clock_namespace.file())?;
         let remaining = Duration::from_nanos(wire.contact_expiry_tick_ns - now.tick_ns);
-        let deadline = MonotonicDeadline {
-            deadline: anchor
+        let deadline = MonotonicDeadline::at_instant(
+            anchor
                 .checked_add(remaining)
                 .ok_or("original contact deadline overflow")?,
-        };
+        );
         original_window::require_window(
             &wire.limit,
             Duration::from_nanos(wire.cleanup_ns),
@@ -1539,6 +1784,7 @@ mod original_window_tests {
 
     #[test]
     fn terminal_peer_scan_observes_original_roles_before_close_without_extending_window() {
+        let _serial = crate::exec::registered_pair::serialize_clock_close_tests();
         let (limit, cleanup, deadline) = window();
         let (sealed, namespace) =
             OriginalNamespaceOccupancyHandoff::from_original(&limit, cleanup, deadline)
@@ -1560,17 +1806,18 @@ mod original_window_tests {
             Some((&writer, &companions)),
         )
         .unwrap();
-        assert!(adopted.deadline.deadline <= deadline.deadline);
+        assert!(adopted.deadline.instant() <= deadline.instant());
         assert!(writer.file_identity().is_ok());
         let (actual_limit, actual_cleanup, actual_deadline) =
             adopted.into_original_parts().unwrap();
         assert_eq!(actual_limit, limit);
         assert_eq!(actual_cleanup, cleanup);
-        assert!(actual_deadline.deadline <= deadline.deadline);
+        assert!(actual_deadline.instant() <= deadline.instant());
     }
 
     #[test]
     fn original_terminal_hook_rejects_live_writer_alias_and_missing_stdio() {
+        let _serial = crate::exec::registered_pair::serialize_clock_close_tests();
         let (_held, writer) = terminal_pipe();
         let alias = writer.duplicate_at_or_above(64).unwrap();
         let (limit, cleanup, deadline) = window();
@@ -1617,6 +1864,7 @@ mod original_window_tests {
 
     #[test]
     fn sealed_original_window_roundtrip_cannot_extend_original_deadline() {
+        let _serial = crate::exec::registered_pair::serialize_clock_close_tests();
         let (limit, cleanup, deadline) = window();
         let handoff =
             OriginalNamespaceOccupancyHandoff::from_original(&limit, cleanup, deadline).unwrap();
@@ -1628,12 +1876,12 @@ mod original_window_tests {
             )
         }
         .unwrap();
-        assert!(adopted.deadline.deadline <= deadline.deadline);
+        assert!(adopted.deadline.instant() <= deadline.instant());
         let (actual_limit, actual_cleanup, actual_deadline) =
             adopted.into_original_parts().unwrap();
         assert_eq!(actual_limit, limit);
         assert_eq!(actual_cleanup, cleanup);
-        assert!(actual_deadline.deadline <= deadline.deadline);
+        assert!(actual_deadline.instant() <= deadline.instant());
     }
 
     fn adopt_original_bound(
@@ -1664,7 +1912,7 @@ mod original_window_tests {
                 adopted.original_service_parts().unwrap();
             assert_eq!(observed_limit, limit);
             assert_eq!(observed_cleanup, cleanup);
-            assert_eq!(observed_deadline.deadline, adopted.deadline.deadline);
+            assert_eq!(observed_deadline.instant(), adopted.deadline.instant());
             assert_eq!(
                 adopted.clock_namespace.inherited_descriptor().unwrap(),
                 clock_fd
@@ -1730,14 +1978,15 @@ mod original_window_tests {
 
     #[test]
     fn retained_pair_duplicate_preserves_objects_deadline_and_original_owners() {
+        let _serial = crate::exec::registered_pair::serialize_clock_close_tests();
         use std::os::unix::fs::MetadataExt as _;
         let (limit, cleanup, deadline) = window();
         let original =
             OriginalNamespaceOccupancyHandoff::from_original(&limit, cleanup, deadline).unwrap();
         let copy = original.duplicate_retained_pair().unwrap();
         assert_eq!(
-            copy.original_deadline.deadline,
-            original.original_deadline.deadline
+            copy.original_deadline.instant(),
+            original.original_deadline.instant()
         );
         let mut coordinates = Vec::new();
         for authority in [
@@ -1774,6 +2023,7 @@ mod original_window_tests {
 
     #[test]
     fn retained_pair_duplicate_refuses_expiry_without_consuming_originals() {
+        let _serial = crate::exec::registered_pair::serialize_clock_close_tests();
         let (limit, cleanup, deadline) = window();
         let mut original =
             OriginalNamespaceOccupancyHandoff::from_original(&limit, cleanup, deadline).unwrap();
@@ -1781,9 +2031,7 @@ mod original_window_tests {
             original.window.inherited_descriptor().unwrap(),
             original.clock_namespace.inherited_descriptor().unwrap(),
         ];
-        original.original_deadline = MonotonicDeadline {
-            deadline: Instant::now(),
-        };
+        original.original_deadline = MonotonicDeadline::at_instant(Instant::now());
         assert!(original.duplicate_retained_pair().is_err());
         assert_eq!(original.window.inherited_descriptor().unwrap(), fds[0]);
         assert_eq!(
@@ -1797,6 +2045,7 @@ mod original_window_tests {
 
     #[test]
     fn retained_pair_duplicate_refuses_aliased_roles_without_consuming_originals() {
+        let _serial = crate::exec::registered_pair::serialize_clock_close_tests();
         let (limit, cleanup, deadline) = window();
         let mut original =
             OriginalNamespaceOccupancyHandoff::from_original(&limit, cleanup, deadline).unwrap();
@@ -1809,6 +2058,7 @@ mod original_window_tests {
 
     #[test]
     fn original_window_rejects_unsealed_foreign_clock_and_descriptor_alias() {
+        let _serial = crate::exec::registered_pair::serialize_clock_close_tests();
         let (limit, cleanup, deadline) = window();
         let (sealed, namespace) =
             OriginalNamespaceOccupancyHandoff::from_original(&limit, cleanup, deadline)
@@ -1854,6 +2104,7 @@ mod original_window_tests {
 
     #[test]
     fn original_window_strict_wire_refuses_expired_foreign_and_partial() {
+        let _serial = crate::exec::registered_pair::serialize_clock_close_tests();
         let (limit, cleanup, deadline) = window();
         let (sealed, _namespace) =
             OriginalNamespaceOccupancyHandoff::from_original(&limit, cleanup, deadline)

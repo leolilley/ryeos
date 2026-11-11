@@ -29,7 +29,7 @@ pub async fn handle(
     let root = state
         .state_store
         .get_thread(&req.thread_id)
-        .map_err(|e| HandlerError::Internal(e.to_string()))?;
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
 
     match root {
         Some(detail) => {
@@ -41,7 +41,7 @@ pub async fn handle(
     match state
         .threads
         .get_chain(&req.thread_id)
-        .map_err(|e| HandlerError::Internal(e.to_string()))?
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?
     {
         Some(chain) => {
             serde_json::to_value(chain).map_err(|e| HandlerError::Internal(e.to_string()))

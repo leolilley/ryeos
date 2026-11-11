@@ -1389,6 +1389,7 @@ mod tests {
             external_candidate_imports: std::sync::Arc::new(Default::default()),
             node_policy: std::sync::Arc::new(
                 ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![
+                    ryeos_node_runtime::node_policy::default_launch_trust_record(),
                     std::sync::Arc::new(
                         ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy(
                         ),

@@ -32,8 +32,9 @@ use super::{
 };
 use crate::node_config::NodeConfigSection as _;
 
-/// Backend id the `render` shorthand selects.
-pub const RENDER_BACKEND_ID: &str = "render-sandbox-early-access";
+/// Installed-backend id the tests register.
+#[cfg(test)]
+pub(super) const TEST_BACKEND_ID: &str = "test-lease-backend";
 /// Capacity group an operator binding joins unless told otherwise.
 pub const DEFAULT_CAPACITY_GROUP: &str = "candidate-workers";
 
@@ -42,15 +43,6 @@ pub(super) const RELAY_NETWORK_POLICY: &str = "controller_file_relay_guest_deny_
 pub(super) const STORAGE_POLICY: &str = "ephemeral_private_candidate_v1";
 pub(super) const CLEANUP_PROOF: &str = "provider_terminal_occurrence_v1";
 const MAX_ROOTS_PEM_BYTES: usize = 256 * 1024;
-
-/// Resolve the operator's backend spelling to the installed adapter id.
-pub fn canonical_backend_id(backend: &str) -> &str {
-    if backend == "render" {
-        RENDER_BACKEND_ID
-    } else {
-        backend
-    }
-}
 
 /// Bounds a binding grants one placement. Every omitted field keeps the
 /// operator default; the document validation still owns the hard limits.
@@ -62,6 +54,10 @@ pub struct ComposeLimits {
     pub contact_timeout_seconds: u32,
     pub observation_timeout_seconds: u32,
     pub cleanup_timeout_seconds: u32,
+    /// Prepaid native work (SQL VM steps) a placement may spend on the node
+    /// across its life; a fresh placement needs at least this much left in
+    /// the daemon incarnation. Measure a workload before lowering it.
+    pub native_work_steps: u64,
     pub max_workspace_bytes: u64,
     pub max_export_bytes: u64,
     pub max_transfer_bytes: u64,
@@ -77,6 +73,7 @@ impl Default for ComposeLimits {
             contact_timeout_seconds: 30,
             observation_timeout_seconds: 120,
             cleanup_timeout_seconds: 300,
+            native_work_steps: super::DEFAULT_NATIVE_WORK_STEPS,
             max_workspace_bytes: 1024 * 1024 * 1024,
             max_export_bytes: 512 * 1024 * 1024,
             max_transfer_bytes: 1024 * 1024 * 1024,
@@ -84,6 +81,52 @@ impl Default for ComposeLimits {
             max_guest_package_framed_bytes: 2 * 1024 * 1024 * 1024,
         }
     }
+}
+
+/// Refuse a binding whose largest admitted package the snapshot's guest owner
+/// cannot stage. The owner's profile is read from the node's content store by
+/// the guest runtime manifest hash; a node that does not hold that manifest
+/// cannot be checked here, and the activation check covers it. The binding
+/// bounds no entry count, so only the byte ceilings are checked at this point.
+pub(crate) fn require_guest_owner_stages_largest_package(
+    app_root: &Path,
+    guest_runtime_manifest_hash: &str,
+    limits: &ComposeLimits,
+    owner_runtime_required: bool,
+) -> Result<()> {
+    let cas = lillux::CasStore::new(
+        ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf())
+            .state()
+            .join("objects"),
+    );
+    let Some(profile) =
+        ryeos_external_execution::guest_import_authorization::GuestOwnerRuntimeProfile::from_cas(
+            &cas,
+            guest_runtime_manifest_hash,
+        )?
+    else {
+        ensure!(
+            !owner_runtime_required,
+            "the binding's guest owner runtime {guest_runtime_manifest_hash} is not in this \
+             node's content store, so its staging capacity cannot be checked"
+        );
+        return Ok(());
+    };
+    profile
+        .require_stages_package(
+            limits.max_guest_package_framed_bytes,
+            limits.max_guest_package_regular_bytes,
+            0,
+        )
+        .with_context(|| {
+            format!(
+                "the snapshot's guest owner cannot stage the largest package this binding admits \
+                 (framed {} bytes, regular {} bytes; owner private source {} bytes)",
+                limits.max_guest_package_framed_bytes,
+                limits.max_guest_package_regular_bytes,
+                profile.private_source_max_bytes
+            )
+        })
 }
 
 /// Artifact identities taken from the installed, verified bundles.
@@ -100,6 +143,7 @@ pub(crate) struct BundleArtifactFacts {
     pub(crate) configuration_adapter_artifact_bytes: u64,
     pub(crate) connector_artifact_hash: String,
     pub(crate) connector_artifact_bytes: u64,
+    pub(crate) relay_scope_setting: Option<String>,
 }
 
 /// Everything one binding document is made from.
@@ -177,6 +221,11 @@ pub(super) fn compose_binding_document(inputs: ComposeInputs<'_>) -> Result<Bind
         artifacts,
         limits,
     } = inputs;
+    super::require_relay_scope(
+        &controller_transport,
+        artifacts.relay_scope_setting.as_deref(),
+        &settings,
+    )?;
     program.validate()?;
     require_content_qualification_pairing(program, runtime_content_qualification.as_ref())?;
     controller_transport.validate()?;
@@ -243,6 +292,7 @@ pub(super) fn compose_binding_document(inputs: ComposeInputs<'_>) -> Result<Bind
         contact_timeout_seconds: limits.contact_timeout_seconds,
         observation_timeout_seconds: limits.observation_timeout_seconds,
         cleanup_timeout_seconds: limits.cleanup_timeout_seconds,
+        native_work_steps: Some(limits.native_work_steps),
         max_workspace_bytes: limits.max_workspace_bytes,
         max_export_bytes: limits.max_export_bytes,
         max_transfer_bytes: limits.max_transfer_bytes,
@@ -388,10 +438,7 @@ pub(super) struct SelectedTransport {
     pub(super) tls_roots: Vec<String>,
 }
 
-pub(super) fn select_transport(
-    request: &ComposeTransportRequest,
-    settings: &Value,
-) -> Result<SelectedTransport> {
+pub(super) fn select_transport(request: &ComposeTransportRequest) -> Result<SelectedTransport> {
     let network_inputs = operator_network_inputs();
     match request {
         ComposeTransportRequest::Https { origin, roots_pem } => {
@@ -406,6 +453,7 @@ pub(super) fn select_transport(
                 connect_timeout_ms: 5_000,
                 request_timeout_ms: 10_000,
                 maximum_response_bytes: 1024 * 1024,
+                max_clock_skew_ms: None,
             };
             Ok(SelectedTransport {
                 selection: contract.into(),
@@ -418,9 +466,10 @@ pub(super) fn select_transport(
             private_mailbox_parent,
         } => {
             ensure!(
-                settings.get("owner_id").and_then(Value::as_str)
-                    == Some(owner_workspace_id.as_str()),
-                "file-relay settings owner_id must equal the owner workspace id"
+                private_mailbox_parent == ryeos_external_execution_contract::GUEST_OCCURRENCES_ROOT,
+                "a file-relay mailbox parent must be the guest owner's occurrence root `{}`, \
+                 where each relay mailbox lives; got `{private_mailbox_parent}`",
+                ryeos_external_execution_contract::GUEST_OCCURRENCES_ROOT
             );
             Ok(SelectedTransport {
                 selection: ExternalControllerTransportSelection::ControllerFileRelay(
@@ -433,6 +482,7 @@ pub(super) fn select_transport(
                         maximum_frames: 1024,
                         poll_interval_ms: 1000,
                         poll_deadline_ms: 30_000,
+                        max_clock_skew_ms: None,
                     },
                 ),
                 network_inputs,
@@ -471,6 +521,7 @@ pub(crate) fn bundle_artifact_facts(
         configuration_adapter_artifact_bytes,
         connector_artifact_hash,
         connector_artifact_bytes,
+        relay_scope_setting: generation.relay_scope_setting,
     })
 }
 
@@ -577,8 +628,8 @@ pub(crate) fn compose_with_resolver(
         .ensure_protects_app_root(request.app_root)?;
     validate_document_id(&request.id, "external-execution binding")?;
     let identity = load_node_identity(request.app_root)?;
-    let backend = canonical_backend_id(&request.backend).to_owned();
-    let transport = select_transport(&request.transport, &request.settings)?;
+    let backend = request.backend.clone();
+    let transport = select_transport(&request.transport)?;
     let runtime_qualification = request
         .runtime_qualification
         .map(|value| {
@@ -593,6 +644,12 @@ pub(crate) fn compose_with_resolver(
                 .context("invalid runtime content qualification")
         })
         .transpose()?;
+    require_guest_owner_stages_largest_package(
+        request.app_root,
+        &request.guest_runtime_manifest_hash,
+        &request.limits,
+        false,
+    )?;
     let resolved = resolve(request.app_root)?;
     let artifacts = bundle_artifact_facts(
         &resolved,
@@ -1019,6 +1076,7 @@ pub(crate) mod tests {
             configuration_adapter_artifact_bytes: 4096,
             connector_artifact_hash: "f".repeat(64),
             connector_artifact_bytes: 4096,
+            relay_scope_setting: Some("owner_id".into()),
         }
     }
 
@@ -1031,8 +1089,9 @@ pub(crate) mod tests {
 
     fn relay() -> ComposeTransportRequest {
         ComposeTransportRequest::FileRelay {
-            owner_workspace_id: "render-owner".into(),
-            private_mailbox_parent: "/run/ryeos/private-relay".into(),
+            owner_workspace_id: "test-owner".into(),
+            private_mailbox_parent: ryeos_external_execution_contract::GUEST_OCCURRENCES_ROOT
+                .into(),
         }
     }
 
@@ -1041,13 +1100,13 @@ pub(crate) mod tests {
         transport: &ComposeTransportRequest,
         settings: Value,
     ) -> Result<BindingDocument> {
-        let selected = select_transport(transport, &settings)?;
+        let selected = select_transport(transport)?;
         compose_binding_document(ComposeInputs {
             program,
             controller_transport: selected.selection,
             provider_network_inputs: selected.network_inputs,
             tls_roots_der_base64: selected.tls_roots,
-            backend: RENDER_BACKEND_ID.into(),
+            backend: TEST_BACKEND_ID.into(),
             account: "operator-account".into(),
             capacity_group: DEFAULT_CAPACITY_GROUP.into(),
             credential_generation: fresh_credential_generation()?,
@@ -1068,7 +1127,7 @@ pub(crate) mod tests {
     }
 
     fn relay_settings() -> Value {
-        serde_json::json!({"owner_id": "render-owner"})
+        serde_json::json!({"owner_id": "test-owner"})
     }
 
     fn content_program() -> AdmittedExternalCandidateProgram {
@@ -1107,13 +1166,13 @@ pub(crate) mod tests {
         program: &AdmittedExternalCandidateProgram,
         content: Option<ExternalRuntimeContentQualificationBinding>,
     ) -> Result<BindingDocument> {
-        let selected = select_transport(&relay(), &relay_settings())?;
+        let selected = select_transport(&relay())?;
         compose_binding_document(ComposeInputs {
             program,
             controller_transport: selected.selection,
             provider_network_inputs: selected.network_inputs,
             tls_roots_der_base64: selected.tls_roots,
-            backend: RENDER_BACKEND_ID.into(),
+            backend: TEST_BACKEND_ID.into(),
             account: "operator-account".into(),
             capacity_group: DEFAULT_CAPACITY_GROUP.into(),
             credential_generation: "a".repeat(64),
@@ -1186,7 +1245,7 @@ pub(crate) mod tests {
             "{error:#}"
         );
         let node = stopped_node();
-        let mut request = compose_request(&node, "render");
+        let mut request = compose_request(&node, TEST_BACKEND_ID);
         request.runtime_content_qualification = Some(content_qualification_value());
         let resolved =
             installed_artifacts(&node, Some(PROVIDER_ID), vec![lifecycle(&"d".repeat(64))]);
@@ -1237,7 +1296,7 @@ pub(crate) mod tests {
     #[test]
     fn a_remote_content_testimony_selection_is_signed_through_composition() {
         let node = stopped_node();
-        let mut request = compose_request(&node, "render");
+        let mut request = compose_request(&node, TEST_BACKEND_ID);
         request.program = content_program();
         let mut selected = content_qualification_value();
         selected["remote_testimony"] = serde_json::json!({
@@ -1268,7 +1327,7 @@ pub(crate) mod tests {
             "owner_principal": format!("fp:{}", "7".repeat(64)),
             "qualification": {
                 "policy_ref": "config:fixtures/guest-qualification",
-                "required_claims": ["render_snapshot_v1"],
+                "required_claims": ["snapshot_v1"],
             },
             "remote_testimony": remote,
         })
@@ -1300,7 +1359,7 @@ pub(crate) mod tests {
     #[test]
     fn a_remote_testimony_selection_is_signed_through_composition() {
         let node = stopped_node();
-        let mut request = compose_request(&node, "render");
+        let mut request = compose_request(&node, TEST_BACKEND_ID);
         request.runtime_qualification = Some(guest_qualification_value(serde_json::json!({
             "acceptance_hash": "8".repeat(64),
             "acceptance_policy_ref": "config:fixtures/guest-acceptance",
@@ -1325,7 +1384,7 @@ pub(crate) mod tests {
     #[test]
     fn an_activated_content_program_is_refused_without_a_content_qualification() {
         let node = stopped_node();
-        let mut request = compose_request(&node, "render");
+        let mut request = compose_request(&node, TEST_BACKEND_ID);
         request.program = content_program();
         let resolved =
             installed_artifacts(&node, Some(PROVIDER_ID), vec![lifecycle(&"d".repeat(64))]);
@@ -1474,7 +1533,7 @@ pub(crate) mod tests {
             app_root: root.path(),
             state_lock: &lock,
             id: "operator".into(),
-            backend: "render".into(),
+            backend: TEST_BACKEND_ID.into(),
             program: program(),
             transport: https(),
             account: "operator-account".into(),
@@ -1551,28 +1610,60 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn relay_owner_must_equal_settings_owner_and_carries_no_roots() {
+    fn relay_scope_must_equal_the_setting_the_adapter_declares() {
         let program = program();
-        let error = refusal(compose(
-            &program,
-            &relay(),
+        // `relay()` names workspace `test-owner`; the declared key is `owner_id`.
+        compose(&program, &relay(), relay_settings()).unwrap();
+        for settings in [
             serde_json::json!({"owner_id": "other"}),
-        ));
+            serde_json::json!({}),
+            serde_json::json!({"workspace": "test-owner"}),
+        ] {
+            let error = refusal(compose(&program, &relay(), settings));
+            assert!(
+                error.to_string().contains("relay scope setting differs"),
+                "{error}"
+            );
+        }
+        // An adapter that declares no scope key cannot be composed over a relay.
+        let selected = select_transport(&relay()).unwrap();
+        let error = refusal(compose_binding_document(ComposeInputs {
+            program: &program,
+            controller_transport: selected.selection,
+            provider_network_inputs: selected.network_inputs,
+            tls_roots_der_base64: Vec::new(),
+            backend: TEST_BACKEND_ID.into(),
+            account: "a".into(),
+            capacity_group: DEFAULT_CAPACITY_GROUP.into(),
+            credential_generation: "a".repeat(64),
+            settings: relay_settings(),
+            guest_runtime_manifest_hash: "4".repeat(64),
+            runtime_qualification: None,
+            runtime_content_qualification: None,
+            artifacts: BundleArtifactFacts {
+                relay_scope_setting: None,
+                ..facts()
+            },
+            limits: ComposeLimits::default(),
+        }));
         assert!(
-            error
-                .to_string()
-                .contains("owner_id must equal the owner workspace id"),
+            error.to_string().contains("no relay scope setting"),
             "{error}"
         );
-        assert!(compose(&program, &relay(), serde_json::json!({})).is_err());
+    }
+
+    #[test]
+    fn relay_carries_no_roots() {
+        let program = program();
+        compose(&program, &relay(), relay_settings()).unwrap();
         // The constructor itself refuses roots beside a relay transport.
-        let selected = select_transport(&relay(), &relay_settings()).unwrap();
+        let selected = select_transport(&relay()).unwrap();
         let error = refusal(compose_binding_document(ComposeInputs {
             program: &program,
             controller_transport: selected.selection,
             provider_network_inputs: selected.network_inputs,
             tls_roots_der_base64: vec![STANDARD.encode(der_of(CERT_A_BODY))],
-            backend: RENDER_BACKEND_ID.into(),
+            backend: TEST_BACKEND_ID.into(),
             account: "a".into(),
             capacity_group: DEFAULT_CAPACITY_GROUP.into(),
             credential_generation: "a".repeat(64),
@@ -1587,13 +1678,6 @@ pub(crate) mod tests {
             error.to_string().contains("carries no TLS roots"),
             "{error}"
         );
-    }
-
-    #[test]
-    fn render_alias_resolves_and_other_backends_pass_through() {
-        assert_eq!(canonical_backend_id("render"), RENDER_BACKEND_ID);
-        assert_eq!(canonical_backend_id(RENDER_BACKEND_ID), RENDER_BACKEND_ID);
-        assert_eq!(canonical_backend_id("other"), "other");
     }
 
     #[test]
@@ -1646,7 +1730,7 @@ pub(crate) mod tests {
 
     #[test]
     fn binding_id_is_a_bounded_identifier() {
-        assert!(validate_document_id("render-1.a_b", "binding").is_ok());
+        assert!(validate_document_id("doc-1.a_b", "binding").is_ok());
         for bad in ["", ".hidden", "a/b", "a b", &"a".repeat(129)] {
             assert!(validate_document_id(bad, "binding").is_err(), "{bad}");
         }
@@ -1661,6 +1745,10 @@ pub(crate) mod tests {
             limits.timeout_seconds,
             ComposeLimits::default().timeout_seconds
         );
+        assert_eq!(limits.native_work_steps, 2_000_000);
+        let limits: ComposeLimits =
+            serde_json::from_value(serde_json::json!({"native_work_steps": 12_000_000})).unwrap();
+        assert_eq!(limits.native_work_steps, 12_000_000);
         assert!(
             serde_json::from_value::<ComposeLimits>(serde_json::json!({"max_actve": 3})).is_err()
         );
@@ -1720,8 +1808,8 @@ pub(crate) mod tests {
             protocol: ryeos_external_execution_contract::PROVIDER_DECLARATION_PROTOCOL.to_owned(),
             targets: vec!["x86_64-unknown-linux-gnu".to_owned()],
             connector: "provider-connector".to_owned(),
-            connector_process_group:
-                ryeos_external_execution_contract::ExternalProviderConnectorProcessGroup::Inherited,
+            connector_descendants:
+                ryeos_external_execution_contract::ExternalProviderConnectorDescendants::InProcessGroup,
             configuration_adapter: "provider-configuration".to_owned(),
             configuration_destination: "environments.toml".to_owned(),
             qualification_request_binding_protocol: None,
@@ -1732,7 +1820,7 @@ pub(crate) mod tests {
         artifact: &str,
     ) -> std::sync::Arc<dyn crate::external_placement::ExternalPlacementBackend> {
         installed::CoordinateOnlyBackend::shared(
-            RENDER_BACKEND_ID,
+            TEST_BACKEND_ID,
             artifact,
             SETTINGS_SCHEMA,
             &"1".repeat(64),
@@ -1803,10 +1891,11 @@ pub(crate) mod tests {
         let resolved =
             installed_artifacts(&node, Some(PROVIDER_ID), vec![lifecycle(&"d".repeat(64))]);
         let report =
-            compose_with_resolver(compose_request(&node, "render"), |_| Ok(resolved)).unwrap();
+            compose_with_resolver(compose_request(&node, TEST_BACKEND_ID), |_| Ok(resolved))
+                .unwrap();
 
         assert_eq!(report.id, BINDING_ID);
-        assert_eq!(report.backend, RENDER_BACKEND_ID);
+        assert_eq!(report.backend, TEST_BACKEND_ID);
         assert_eq!(report.path, binding_path(&node));
         let published =
             lillux::secure_fs::open_pinned_regular_file_no_follow(&report.path).unwrap();
@@ -1860,7 +1949,7 @@ pub(crate) mod tests {
             vec![lifecycle(&"d".repeat(64))],
         );
         let error = refusal(compose_with_resolver(
-            compose_request(&node, "render"),
+            compose_request(&node, TEST_BACKEND_ID),
             |_| Ok(resolved),
         ));
         assert!(
@@ -1875,13 +1964,12 @@ pub(crate) mod tests {
         let node = stopped_node();
         let resolved = installed_artifacts(&node, Some(PROVIDER_ID), Vec::new());
         let error = refusal(compose_with_resolver(
-            compose_request(&node, "render"),
+            compose_request(&node, TEST_BACKEND_ID),
             |_| Ok(resolved),
         ));
         assert!(
-            format!("{error:#}").contains(
-                "external lifecycle backend `render-sandbox-early-access` is not installed"
-            ),
+            format!("{error:#}")
+                .contains("external lifecycle backend `test-lease-backend` is not installed"),
             "{error:#}"
         );
         assert!(!binding_path(&node).exists());
@@ -1897,7 +1985,7 @@ pub(crate) mod tests {
                     refusal(bundle_artifact_facts(
                         resolved,
                         PROVIDER_ID,
-                        RENDER_BACKEND_ID
+                        TEST_BACKEND_ID
                     ))
                 )
             };
@@ -1974,7 +2062,8 @@ pub(crate) mod tests {
         let resolved =
             installed_artifacts(&node, Some(PROVIDER_ID), vec![lifecycle(&"d".repeat(64))]);
         let report =
-            compose_with_resolver(compose_request(&node, "render"), |_| Ok(resolved)).unwrap();
+            compose_with_resolver(compose_request(&node, TEST_BACKEND_ID), |_| Ok(resolved))
+                .unwrap();
 
         let provisioned = super::super::provision::provision_installed_placement_credential(
             node.root.path(),

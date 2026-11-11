@@ -65,6 +65,68 @@ enum LaunchOutcome {
     },
 }
 
+/// The retained containment chosen for one enforced Worker launch.
+struct WorkerContainment {
+    scope: lillux::ProcessScope,
+    allocation: Option<lillux::ProcessScopeAllocation>,
+    /// Present only for a cgroup scope, which needs explicit retirement.
+    cgroup_recovery: Option<lillux::ProcessScopeRecovery>,
+}
+
+/// Select and prepare the node's qualified mechanism. A cgroup scope is
+/// planned and allocated through the runtime's admitted provider; the
+/// PID-namespace init is bound by the held launch itself. The Worker row
+/// persists the bound recovery at attachment either way.
+fn allocate_worker_containment(
+    state: &ryeos_app::state::AppState,
+    placement: &str,
+) -> Result<WorkerContainment> {
+    use ryeos_engine::isolation::DescendantContainmentGuarantee;
+    let guarantee = state
+        .isolation
+        .inspection()
+        .process_scope_readiness
+        .descendant_containment
+        .enforced_guarantee()
+        .context("enforced Q Worker has no qualified descendant containment")?;
+    match guarantee {
+        DescendantContainmentGuarantee::PidNamespaceInit => Ok(WorkerContainment {
+            scope: lillux::ProcessScope::pid_namespace_init(),
+            allocation: None,
+            cgroup_recovery: None,
+        }),
+        DescendantContainmentGuarantee::CgroupScope => {
+            let name =
+                ryeos_app::external_qualification_local::qualification_worker_scope_name(placement);
+            let allocation = state.isolation.plan_process_scope(&name)?;
+            let scope = state.isolation.allocate_process_scope(&allocation)?;
+            let recovery = scope.recovery().clone();
+            Ok(WorkerContainment {
+                scope,
+                allocation: Some(allocation),
+                cgroup_recovery: Some(recovery),
+            })
+        }
+        DescendantContainmentGuarantee::TrustedProcessGroup => {
+            anyhow::bail!("the trusted process-group lane is not a Q enforced containment")
+        }
+    }
+}
+
+/// Prove a cgroup scope empty and remove it after a failed held spawn.
+fn settle_unlaunched_scope(
+    state: &ryeos_app::state::AppState,
+    recovery: &lillux::ProcessScopeRecovery,
+) -> Result<()> {
+    let timeout = state.isolation.process_scope_control_timeout()?;
+    recovery
+        .terminate_and_wait(timeout)
+        .map_err(anyhow::Error::msg)?;
+    recovery
+        .retire_after_settlement()
+        .map_err(anyhow::Error::msg)
+}
+
 fn fence_start_failure(
     owner: &QualificationLocalOwner<'_>,
     error: anyhow::Error,
@@ -156,6 +218,11 @@ impl ExternalQualificationLocalWorker {
                 .cap_execution_deadline(lillux::time::MonotonicDeadline::after(
                     lillux::time::Duration::from_millis(u64::try_from(remaining_ms)?),
                 ));
+        // The pool notices an ended Worker on its own one-second tick, so the
+        // attachment check that follows it needs no finer cadence than that.
+        const ATTACHMENT_CHECK_INTERVAL: lillux::time::Duration =
+            lillux::time::Duration::from_secs(1);
+        let mut attachment_checked = lillux::time::MonotonicTimer::start();
         loop {
             ensure!(
                 !deadline.has_elapsed(),
@@ -181,11 +248,80 @@ impl ExternalQualificationLocalWorker {
             ) {
                 return Ok(outcome);
             }
+            // The turn is still pending, so a Worker that has ended can never
+            // finish it: fail now rather than at the unrelated deadline.
+            if attachment_checked.elapsed() >= ATTACHMENT_CHECK_INTERVAL {
+                ryeos_app::external_qualification_local::ensure_qualification_worker_attached(
+                    state,
+                    self.ready.placement(),
+                )?;
+                attachment_checked = lillux::time::MonotonicTimer::start();
+            }
             lillux::time::sleep(
                 deadline
                     .remaining()
                     .min(lillux::time::Duration::from_millis(20)),
             );
+        }
+    }
+
+    /// After the turn, end the Worker's session protocol from the owner side
+    /// and wait for the connector to retire normally. The owner's input
+    /// closure makes the guest close the candidate's stdin; a candidate that
+    /// ends on EOF exits, the guest signs its stdout EOF and the relay
+    /// delivers it to the live connector peer, which is the only way the
+    /// connector closes `completed`. Retiring the Worker first kills that peer
+    /// and records a disconnect, which native completion must refuse.
+    pub(crate) fn close_protocol_input_and_await_connector_completion(
+        &self,
+        state: &ryeos_app::state::AppState,
+    ) -> Result<()> {
+        use ryeos_app::state_store::ExternalConnectorSettlement;
+        ryeos_app::external_placement::request_external_protocol_input_close(
+            state,
+            self.ready.placement(),
+        )?;
+        let now = lillux::time::timestamp_millis();
+        let remaining_ms = self
+            .ready
+            .binding()
+            .execution_deadline_ms
+            .checked_sub(now)
+            .filter(|remaining| *remaining > 0)
+            .context("Q connector retirement wait passed its retained channel deadline")?;
+        let deadline =
+            self.ready
+                .root()
+                .cap_execution_deadline(lillux::time::MonotonicDeadline::after(
+                    lillux::time::Duration::from_millis(u64::try_from(remaining_ms)?),
+                ));
+        loop {
+            ensure!(
+                !deadline.has_elapsed(),
+                "Q connector did not retire before the channel deadline after the owner closed its input"
+            );
+            self.ready.ensure_relay_running()?;
+            match state
+                .state_store
+                .external_connector_settlement(self.ready.placement())?
+            {
+                ExternalConnectorSettlement::Closed { reason } => {
+                    ensure!(
+                        reason.as_deref() == Some("completed"),
+                        "Q connector closed `{}` before the guest protocol EOF",
+                        reason.as_deref().unwrap_or("unknown")
+                    );
+                    return Ok(());
+                }
+                ExternalConnectorSettlement::Absent => {
+                    anyhow::bail!("Q connector vanished after the Worker turn")
+                }
+                ExternalConnectorSettlement::Open => lillux::time::sleep(
+                    deadline
+                        .remaining()
+                        .min(lillux::time::Duration::from_millis(50)),
+                ),
+            }
         }
     }
 
@@ -197,7 +333,6 @@ impl ExternalQualificationLocalWorker {
         state: &ryeos_app::state::AppState,
     ) -> Result<()> {
         if self.retired {
-            ryeos_app::process::assert_reaped_process_group_absent(&self.process_identity)?;
             return ryeos_app::external_qualification_local::ensure_qualification_worker_terminal(
                 state,
                 self.ready.placement(),
@@ -219,7 +354,6 @@ impl ExternalQualificationLocalWorker {
             // exact pool entry. `Absent` carries no death proof by itself;
             // the attached process identity and terminal journal must still
             // independently verify its whole-group reap below.
-            ryeos_app::process::assert_reaped_process_group_absent(&self.process_identity)?;
             ryeos_app::external_qualification_local::ensure_qualification_worker_terminal(
                 state,
                 self.ready.placement(),
@@ -301,6 +435,7 @@ impl ExternalQualificationLocalWorker {
         let turn = (|| -> Result<()> {
             self.execute_one_signed_request(state, coordinate, selected)?;
             self.wait_for_signed_turn_completion(state, selected)?;
+            self.close_protocol_input_and_await_connector_completion(state)?;
             Ok(())
         })();
         // A failed send no longer needs guest traffic. Stop all relay
@@ -311,7 +446,11 @@ impl ExternalQualificationLocalWorker {
             Err(error) => match self.ready.stop_relay() {
                 Ok(()) => Err(error),
                 Err(relay_error) => {
-                    Err(error.context(format!("Q relay shutdown also failed: {relay_error:#}")))
+                    Err(super::external_qualification_start::with_secondary_failure(
+                        error,
+                        "Q relay shutdown also failed",
+                        &relay_error,
+                    ))
                 }
             },
             Ok(()) => Ok(()),
@@ -321,9 +460,13 @@ impl ExternalQualificationLocalWorker {
             (Ok(()), Ok(())) => Ok(()),
             (Err(turn_error), Ok(())) => Err(turn_error),
             (Ok(()), Err(retirement_error)) => Err(retirement_error),
-            (Err(turn_error), Err(retirement_error)) => Err(turn_error.context(format!(
-                "Q Worker retirement also remained unproved: {retirement_error:#}"
-            ))),
+            (Err(turn_error), Err(retirement_error)) => {
+                Err(super::external_qualification_start::with_secondary_failure(
+                    turn_error,
+                    "Q Worker retirement also remained unproved",
+                    &retirement_error,
+                ))
+            }
         }
     }
 }
@@ -348,53 +491,75 @@ pub(crate) fn run_external_qualification_to_normal_terminal(
     let binding_digest = worker.ready().binding().digest()?;
     worker.run_signed_turn_and_retire(state, coordinate, &selected)?;
 
-    // The signed frame is durably queued for the existing channel transport;
-    // its return is not evidence that the guest processed the command.
-    ryeos_app::external_placement::request_external_qualification_native_completion(
-        state, &placement,
-    )?;
-    let native = loop {
-        if let Some(native) =
-            ryeos_app::external_placement::apply_external_qualification_native_settlement(
-                state, &placement,
-            )?
-        {
-            break native;
-        }
-        worker.ready().ensure_relay_running()?;
-        // Completion must be authored before its execution deadline. The
-        // signed native death observation may arrive later, during the
-        // binding's post-execution observation window.
-        lillux::time::sleep(
-            remaining_qualification_native_observation_window(worker.ready().binding())?
-                .min(lillux::time::Duration::from_millis(50)),
+    let settled = (|| -> Result<()> {
+        // The signed frame is durably queued for the existing channel transport;
+        // its return is not evidence that the guest processed the command.
+        ryeos_app::external_placement::request_external_qualification_native_completion(
+            state, &placement,
+        )?;
+        let native = loop {
+            if let Some(native) =
+                ryeos_app::external_placement::apply_external_qualification_native_settlement(
+                    state, &placement,
+                )?
+            {
+                break native;
+            }
+            worker.ready().ensure_relay_running()?;
+            // Completion must be authored before its execution deadline. The
+            // signed native death observation may arrive later, during the
+            // binding's post-execution observation window.
+            lillux::time::sleep(
+                remaining_qualification_native_observation_window(worker.ready().binding())?
+                    .min(lillux::time::Duration::from_millis(50)),
+            );
+        };
+        ensure!(
+            native.placement_thread_id == placement && native.binding_digest == binding_digest,
+            "Q native settlement changed its exact channel"
         );
-    };
-    ensure!(
-        native.placement_thread_id == placement && native.binding_digest == binding_digest,
-        "Q native settlement changed its exact channel"
-    );
 
-    // Publish once only after the original native frame is Applied and its
-    // optional capture has verified controller custody. This reuses historical
-    // evidence ownership; it cannot repeat the turn or mint contact permission.
-    worker.retain_terminal_transcript(state, coordinate)?;
+        // Publish once only after the original native frame is Applied and its
+        // optional capture has verified controller custody. This reuses historical
+        // evidence ownership; it cannot repeat the turn or mint contact permission.
+        worker.retain_terminal_transcript(state, coordinate)?;
+        Ok(())
+    })();
 
     // Join the last bounded file contact before physical local cleanup or
     // provider termination can acquire the same placement contact gate.
-    worker.ready.stop_relay()?;
+    let relay = worker.ready.stop_relay();
 
     // Private root removal is local cleanup, independent of the expired
-    // guest protocol deadline. It retains original descriptors and has its
-    // own exact directory removal authority.
+    // guest protocol deadline and of the native outcome: the Worker is
+    // terminal, its connector closed and its credential released, so the
+    // roots are proven-safe to retire now. Leaving them open on a native
+    // refusal would keep every periodic cleanup pass refusing the scratch
+    // until the next daemon start. The removal retains original descriptors
+    // and has its own exact directory removal authority.
     let local = ryeos_app::external_qualification_local::cleanup_qualification_local_worker(
         state, &placement,
-    )?;
-    ensure!(
-        local.phase
-            == ryeos_app::runtime_db::external_execution::QualificationLocalStartPhase::Closed,
-        "Q original local private roots remain unclosed"
-    );
+    )
+    .and_then(|local| {
+        ensure!(
+            local.phase
+                == ryeos_app::runtime_db::external_execution::QualificationLocalStartPhase::Closed,
+            "Q original local private roots remain unclosed"
+        );
+        Ok(())
+    });
+    match (settled.and(relay), local) {
+        (Ok(()), Ok(())) => {}
+        (Err(error), Ok(())) => return Err(error),
+        (Ok(()), Err(local)) => return Err(local),
+        (Err(error), Err(local)) => {
+            return Err(super::external_qualification_start::with_secondary_failure(
+                error,
+                "Q local private roots also remain retained",
+                &local,
+            ));
+        }
+    }
 
     // The first provider call commits its intent before contact. A Pending
     // response remains recoverable under that exact intent after this owner
@@ -557,13 +722,26 @@ pub(crate) fn start_external_qualification_local_worker_for_signed_request(
                 {
                     let workspace_directory =
                         owner.borrow_workspace_directory(&workspace_ready, &workspace)?;
+                    // Enforced isolation runs the Worker over the captured
+                    // scratch root (the Q workspace's own named child of the
+                    // execution root) with no backend view, retained by its
+                    // PID-namespace init. Disabled isolation keeps the
+                    // trusted lane over the private project directory.
+                    let enforced = state.isolation.is_enforced();
+                    let spawn_workspace = if enforced {
+                        std::path::PathBuf::from(&workspace_ready.workspace_root)
+                    } else {
+                        workspace_path.clone()
+                    };
                     let (prepared_environment, writable_runtime_view_mounts) =
                         super::persistent_session::prepare_retained_session_process_environment(
                             &content.process_environment,
+                            // Beneath the workspace the Worker is told about,
+                            // where its bridge looks on either lane.
                             &workspace_path,
-                            Some(&workspace_directory),
+                            (!enforced).then_some(&workspace_directory),
                             session.protocol.workspace_authority,
-                            false,
+                            enforced,
                         )?;
 
                     let boot_identity = lillux::sha256_hex(workspace_ready.launch_owner.as_bytes());
@@ -667,9 +845,40 @@ pub(crate) fn start_external_qualification_local_worker_for_signed_request(
                     // Retain the original private directory through the held
                     // process lifetime; use the existing trusted launch path.
                     lifelines.push(Box::new(workspace_directory));
+                    // Enforced isolation retains the Worker's descendants by
+                    // whichever mechanism the node qualified: its cgroup
+                    // scope or the Worker's own PID-namespace init. The same
+                    // guarantee the connector gate admitted against.
+                    let containment = match enforced
+                        .then(|| allocate_worker_containment(state, &placement))
+                        .transpose()
+                    {
+                        Ok(containment) => containment,
+                        // Failure after connector preparation settles through
+                        // the same path as a failed spawn: fence the start
+                        // and hand the connector settlement to the caller.
+                        Err(error) => {
+                            return Ok(LaunchOutcome::Failed {
+                                error: fence_start_failure(
+                                    owner,
+                                    error,
+                                    "Q Worker descendant containment could not be allocated",
+                                ),
+                                connector_settlement,
+                                attached_process: None,
+                            });
+                        }
+                    };
+                    let scope_cleanup = containment
+                        .as_ref()
+                        .and_then(|containment| containment.cgroup_recovery.clone());
+                    let (allocation, scope) = match containment {
+                        Some(containment) => (containment.allocation, Some(containment.scope)),
+                        None => (None, None),
+                    };
                     let spawned = plan.spawn_persistent_session_held(
                         state,
-                        &workspace_path,
+                        &spawn_workspace,
                         None,
                         mounts,
                         writable_runtime_view_mounts,
@@ -684,13 +893,34 @@ pub(crate) fn start_external_qualification_local_worker_for_signed_request(
                         &workspace_ready.launch_owner,
                         "qualification_local_worker",
                         &placement,
-                        None,
-                        None,
+                        allocation.as_ref(),
+                        scope,
                         None,
                     );
                     let held = match spawned {
                         Ok(held) => held,
                         Err(error) => {
+                            let error = match scope_cleanup.as_ref() {
+                                Some(recovery) => match settle_unlaunched_scope(state, recovery) {
+                                    Ok(()) => error,
+                                    Err(cleanup) => {
+                                        // The slot is left in place on purpose: its
+                                        // deterministic name lets the Q local cleanup
+                                        // sweep (`retire_qualification_worker_scope_slot`)
+                                        // find and retire it, and the Q start is
+                                        // fenced cleanup-unproved below.
+                                        tracing::warn!(
+                                            placement = %placement,
+                                            error = %format!("{cleanup:#}"),
+                                            "Q cgroup scope retained for the restart sweep after a failed held spawn"
+                                        );
+                                        error.context(format!(
+                                            "Q cgroup scope cleanup remains unproved and is retained for the sweep: {cleanup:#}"
+                                        ))
+                                    }
+                                },
+                                None => error,
+                            };
                             return Ok(LaunchOutcome::Failed {
                                 error: fence_start_failure(
                                     owner,
@@ -707,11 +937,19 @@ pub(crate) fn start_external_qualification_local_worker_for_signed_request(
                         .attach_worker_process(&held.process_identity, &configuration_observation)
                     {
                         let reaped = held.abort_and_reap();
+                        // No Worker row names this scope, so nothing else
+                        // will retire it: prove it empty and remove it.
+                        let scope_retired = match (&reaped, scope_cleanup.as_ref()) {
+                            (Ok(_), Some(recovery)) => {
+                                Some(settle_unlaunched_scope(state, recovery))
+                            }
+                            _ => None,
+                        };
                         return Ok(LaunchOutcome::Failed {
                             error: fence_start_failure(
                                 owner,
                                 error.context(format!(
-                                    "Q held Worker attachment failed; reap: {reaped:?}"
+                                    "Q held Worker attachment failed; reap: {reaped:?}; scope: {scope_retired:?}"
                                 )),
                                 "Q held Worker attachment failed",
                             ),

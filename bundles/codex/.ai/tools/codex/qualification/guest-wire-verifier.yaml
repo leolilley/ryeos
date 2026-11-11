@@ -1,11 +1,27 @@
-# ryeos:signed:2026-10-23T00:49:35Z:5d69f0bf4fe9f8023ea1b7a0e49c127633c916c784fa27c3ce4e6e819abb7989:k/H1S747RBA8v4Nx58kmx/577qMRyjMJucGP3Eztv74h6uAgZH6VTPB4NWVBdvfDP3WTpkMmwgfYlYYkiiFADQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-04T06:36:05Z:87e6e293ba7047f6f2755a469d28f5b443f38a81c84dc89d285004e639f68a2f:AU3tI0khELoStPrC3ZEj1mEEB6/FXcNuyLSXlIRf7v3GNb/OQWRzatUdMd5MReykwxhGLoO6lD8m4hx8GUiKBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: codex/qualification
 version: "1.0.0"
-description: Prove in a restored guest, under an ephemeral key, that the subject guest owner speaks the pinned guest-inputs and launcher wire schemas; the claim binds the subject's owner executable digest and manifest hash, never the ephemeral probe manifest. The measured owner, supervisor and launcher executables performed the exchange under an ephemeral controller key and test configuration; operation under the real controller key, connection and credentials is proved by a live session, not by this claim.
+description: >-
+  Prove in a restored guest, under an ephemeral key, that the subject guest owner speaks the pinned
+  guest-inputs and launcher wire schemas; the claim binds the subject's owner executable digest and
+  manifest hash, never the ephemeral probe manifest. The measured owner, supervisor and launcher
+  executables performed the exchange under an ephemeral controller key and test configuration;
+  operation under the real controller key, connection and credentials is proved by a live session, not
+  by this claim. Runs as an ordinary node_policy tool: it produces no filesystem product to
+  capture, it reads only its pinned read-only project root plus its admitted content and product
+  slots, and its authority channel is the daemon callback. Its policy has no isolation variants, so it
+  does not depend on enforced isolation, although its protocol declares the captured-compatible
+  callback class.
 executor_id: "@subprocess"
 execution_protocol: protocol:ryeos/core/qualification_consumer_callback
 effects: live
-filesystem_authority: captured_execution
+# node_policy, not captured_execution: captured execution bounds the filesystem products of a tool under enforced
+# isolation. This verifier has a single policy that runs on any node, so it stays node_policy. It produces no filesystem product, reads only
+# its pinned read-only project root and admitted mounts, and does all of its work through the callback protocol.
+filesystem_authority: node_policy
+# The verifier runs against the exact pinned snapshot its subject was captured from, a pushed-head project source;
+# the qualification callback protocol admits that only to a tool that declares it here.
+project_lane: pinned_snapshot
 required_caps: []
 external_product_slots:
   # The verifier inspects the unqualified guest owner through its own

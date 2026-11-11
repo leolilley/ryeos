@@ -132,6 +132,7 @@ impl ExternalConnectorRecord {
                         | "startup_abandoned"
                         | "controller_shutdown"
                         | "protocol_fault"
+                        | "peer_absent"
                 ),
                 "external connector close reason is unsupported"
             );
@@ -496,6 +497,30 @@ impl RuntimeDb {
         self.conn.with_sql(|conn| read_connector(conn, placement))
     }
 
+    /// Every connector row still `prepared` or `connected`, by placement. A
+    /// relay owner is a thread of the daemon that prepared its row, so a row
+    /// that is still open when a daemon starts was left by an ended
+    /// generation whose owner never wrote the closure.
+    pub(crate) fn open_external_connectors(&self) -> Result<Vec<ExternalConnectorRecord>> {
+        self.conn.with_sql(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT placement_thread_id FROM external_execution_connector
+                  WHERE state IN ('prepared','connected') ORDER BY placement_thread_id",
+            )?;
+            let placements = statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let mut open = Vec::with_capacity(placements.len());
+            for placement in placements {
+                open.push(
+                    read_connector(conn, &placement)?
+                        .context("open external connector disappeared during listing")?,
+                );
+            }
+            Ok(open)
+        })
+    }
+
     pub(crate) fn prepare_external_connector(
         &self,
         placement: &str,
@@ -553,12 +578,53 @@ impl RuntimeDb {
 
     /// Returns `true` only to the transaction that acquired the one allowed
     /// connection. `false` is durable uncertainty and grants no reconnect.
+    /// Admit a connector peer proved only by its process group. A Worker held
+    /// by a retained containment refuses this path: its peers must arrive
+    /// through [`Self::connect_external_connector_contained`].
     pub(crate) fn connect_external_connector(
         &self,
         placement: &str,
         capability_generation: &str,
         capability_hash: &str,
         peer: &lillux::ExactProcessIdentity,
+    ) -> Result<bool> {
+        self.connect_external_connector_with(
+            placement,
+            capability_generation,
+            capability_hash,
+            peer,
+            qualification_process::PeerBasis::Group,
+        )
+    }
+
+    /// Admit a peer whose membership in the Worker's retained containment was
+    /// captured through the pinned contained path. Only a contained Worker
+    /// accepts it, so a retained row whose Worker is held by a containment
+    /// was always admitted this way, and a group-proved peer never reaches
+    /// the containment branch of the historical check.
+    pub(crate) fn connect_external_connector_contained(
+        &self,
+        placement: &str,
+        capability_generation: &str,
+        capability_hash: &str,
+        peer: &crate::external_connector::ContainedQualificationPeer,
+    ) -> Result<bool> {
+        self.connect_external_connector_with(
+            placement,
+            capability_generation,
+            capability_hash,
+            peer.identity(),
+            qualification_process::PeerBasis::Contained(peer.proven_against()),
+        )
+    }
+
+    fn connect_external_connector_with(
+        &self,
+        placement: &str,
+        capability_generation: &str,
+        capability_hash: &str,
+        peer: &lillux::ExactProcessIdentity,
+        basis: qualification_process::PeerBasis<'_>,
     ) -> Result<bool> {
         self.conn.with_sql(|conn| {
             let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
@@ -595,7 +661,13 @@ impl RuntimeDb {
                             &allocation.reservation,
                             &channel.digest()?,
                             peer,
+                            basis,
                         )?;
+                    } else {
+                        ensure!(
+                            matches!(basis, qualification_process::PeerBasis::Group),
+                            "a contained-peer admission belongs to a qualification Worker"
+                        );
                     }
                     let retained =
                         read_retained_binding(&tx, &allocation.reservation.binding_hash)?
@@ -716,6 +788,7 @@ mod tests {
             target_start_time_ticks: ticks,
             group_leader_pid: pid,
             group_leader_start_time_ticks: ticks,
+            group_basis: lillux::GroupBasis::ProcessGroup,
         }
     }
 
@@ -1162,5 +1235,39 @@ mod tests {
         );
         db.close_external_connector(&placement, "startup_abandoned")
             .unwrap();
+    }
+
+    #[test]
+    fn open_connectors_lists_prepared_and_connected_rows_until_they_close() {
+        let root = tempfile::tempdir().unwrap();
+        let db =
+            crate::runtime_db::test_native::TestRuntime::open(&root.path().join("runtime.sqlite3"));
+        assert!(db.open_external_connectors().unwrap().is_empty());
+        let capability_hash = "a".repeat(64);
+        let (placement, _) = released(&db, "open-connector");
+        let generation = db
+            .external_connector_capability_generation(&placement)
+            .unwrap();
+        db.prepare_external_connector(&placement, &generation, &capability_hash)
+            .unwrap();
+        let open = db.open_external_connectors().unwrap();
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].placement_thread_id, placement);
+        assert_eq!(open[0].phase, ExternalConnectorPhase::Prepared);
+        assert_eq!(open[0].peer_process_identity, None);
+
+        contact_provider(&db, &placement);
+        assert!(
+            db.connect_external_connector(&placement, &generation, &capability_hash, &peer(77, 7))
+                .unwrap()
+        );
+        let open = db.open_external_connectors().unwrap();
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].phase, ExternalConnectorPhase::Connected);
+        assert_eq!(open[0].peer_process_identity, Some(peer(77, 7)));
+
+        db.close_external_connector(&placement, "peer_absent")
+            .unwrap();
+        assert!(db.open_external_connectors().unwrap().is_empty());
     }
 }

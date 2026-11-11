@@ -37,6 +37,10 @@ struct QualificationDocument {
     verifier_artifact_hash: String,
     consumer_verifiers: BTreeMap<String, ConsumerRuntimeVerifierSelection>,
     contact_timeout_seconds: u32,
+    /// Budget of the one contact that delivers a consumer verifier archive
+    /// into the restored occurrence. An archive transfer outlasts any plain
+    /// provider round trip, exactly as a Q guest package outlasts its contact.
+    delivery_timeout_seconds: u32,
     maximum_lifetime_seconds: u32,
 }
 
@@ -44,8 +48,8 @@ impl QualificationDocument {
     fn validate(&self) -> Result<()> {
         ensure!(
             self.kind == "node"
-                && self.schema == 3
-                && self.protocol == "ryeos.runtime-snapshot-qualification.v3",
+                && self.schema == 4
+                && self.protocol == "ryeos.runtime-snapshot-qualification.v4",
             "unsupported runtime snapshot qualification binding"
         );
         ensure!(
@@ -91,8 +95,10 @@ impl QualificationDocument {
         );
         ensure!(
             (1..=300).contains(&self.contact_timeout_seconds)
-                && (1..=3600).contains(&self.maximum_lifetime_seconds),
-            "qualification contact or lifetime budget is invalid"
+                && (1..=3600).contains(&self.maximum_lifetime_seconds)
+                && (self.contact_timeout_seconds..=self.maximum_lifetime_seconds)
+                    .contains(&self.delivery_timeout_seconds),
+            "qualification contact, delivery or lifetime budget is invalid"
         );
         Ok(())
     }
@@ -161,6 +167,9 @@ impl InstalledRuntimeSnapshotQualificationBinding {
     }
     pub(crate) fn contact_timeout_seconds(&self) -> u32 {
         self.document.contact_timeout_seconds
+    }
+    pub(crate) fn delivery_timeout_seconds(&self) -> u32 {
+        self.document.delivery_timeout_seconds
     }
     pub(crate) fn maximum_lifetime_seconds(&self) -> u32 {
         self.document.maximum_lifetime_seconds
@@ -235,9 +244,9 @@ mod tests {
         let settings = serde_json::json!({"schema":1,"owner_id":"owner-1"});
         QualificationDocument {
             kind: "node".into(),
-            schema: 3,
-            protocol: "ryeos.runtime-snapshot-qualification.v3".into(),
-            production_binding_id: "render-source".into(),
+            schema: 4,
+            protocol: "ryeos.runtime-snapshot-qualification.v4".into(),
+            production_binding_id: "test-source".into(),
             production_binding_digest: "1".repeat(64),
             provider_spec_digest: "2".repeat(64),
             settings_digest: lillux::sha256_hex(
@@ -247,6 +256,7 @@ mod tests {
             verifier_artifact_hash: "3".repeat(64),
             consumer_verifiers: BTreeMap::new(),
             contact_timeout_seconds: 60,
+            delivery_timeout_seconds: 600,
             maximum_lifetime_seconds: 900,
         }
     }
@@ -263,13 +273,23 @@ mod tests {
         changed = document();
         changed.maximum_lifetime_seconds = 3601;
         assert!(changed.validate().is_err());
+        // The delivery budget sits between one contact and the whole lifetime.
+        changed = document();
+        changed.delivery_timeout_seconds = 59;
+        assert!(changed.validate().is_err());
+        changed = document();
+        changed.delivery_timeout_seconds = 901;
+        assert!(changed.validate().is_err());
+        changed = document();
+        changed.delivery_timeout_seconds = 900;
+        changed.validate().unwrap();
     }
 
     #[test]
     fn consumer_selection_is_explicit_bounded_and_distinct_from_owner_artifact() {
         let mut predecessor = document();
-        predecessor.schema = 2;
-        predecessor.protocol = "ryeos.runtime-snapshot-qualification.v2".into();
+        predecessor.schema = 3;
+        predecessor.protocol = "ryeos.runtime-snapshot-qualification.v3".into();
         assert!(predecessor.validate().is_err());
         let mut selected = document();
         selected.consumer_verifiers.insert(

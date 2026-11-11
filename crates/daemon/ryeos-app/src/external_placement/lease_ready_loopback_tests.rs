@@ -188,6 +188,10 @@ struct CountingLauncher {
 }
 
 impl ExternalCandidateLauncherClient for CountingLauncher {
+    fn close_protocol_input(&mut self, _frame: &AuthenticatedExecutionFrame) -> Result<()> {
+        anyhow::bail!("counting launcher does not admit protocol input closure")
+    }
+
     fn release(&mut self, _frame: &AuthenticatedExecutionFrame) -> Result<()> {
         self.releases.fetch_add(1, AtomicOrdering::SeqCst);
         Ok(())
@@ -305,10 +309,10 @@ impl Guest {
             authority,
             &"f".repeat(64),
             binding.clone(),
+            ryeos_state::external_execution::guest_window::GuestChannelWindow::starting_now_for_single_clock_harness(binding).unwrap(),
             host.factory(),
             host.destination(),
-            &ryeos_state::external_execution::native_journal::testing::census(host),
-        )
+            &ryeos_state::external_execution::native_journal::testing::census(host))
         .unwrap();
         let occurrence = LauncherOccurrenceEvidence::from_held_launcher(
             lillux::ExactProcessIdentity {
@@ -317,6 +321,7 @@ impl Guest {
                 target_start_time_ticks: 300,
                 group_leader_pid: 200,
                 group_leader_start_time_ticks: 300,
+                group_basis: lillux::GroupBasis::ProcessGroup,
             },
             &"1".repeat(64),
             &"2".repeat(64),
@@ -432,6 +437,7 @@ fn compose_app(
             resource_authority: None,
             producer_resource_ceiling: None,
             external_lease_budget: Some(budget()),
+            external_wall_clock_requirement: None,
         };
     state.node_policy = Arc::new(
         ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![Arc::new(

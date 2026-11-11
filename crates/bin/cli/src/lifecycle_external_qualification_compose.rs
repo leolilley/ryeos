@@ -8,7 +8,7 @@
 //! published, and the installed document id is printed. The requirement
 //! digest, Worker profile hash, artifact identities and configuration
 //! destination are read on the node; the operator names the provider facts,
-//! the policy, the runtime product and the Render settings.
+//! the policy, the runtime product and the provider settings.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -46,7 +46,7 @@ struct QualificationSessionComposeArgs {
     #[arg(long)]
     binding: Option<String>,
 
-    /// Lifecycle backend id; `render` selects render-sandbox-early-access.
+    /// Installed lifecycle adapter backend id.
     #[arg(long)]
     backend: Option<String>,
 
@@ -54,7 +54,7 @@ struct QualificationSessionComposeArgs {
     #[arg(long)]
     account: Option<String>,
 
-    /// Render owner id; it is also the file-relay owner workspace.
+    /// Provider owner id; it is also the file-relay owner workspace.
     #[arg(long)]
     owner_id: Option<String>,
 
@@ -334,7 +334,13 @@ mod tests {
             format!("{error:#}").contains("remove --backend"),
             "{error:#}"
         );
-        let mut partial = vec!["--app-root", app_root, "--json", "--backend", "render"];
+        let mut partial = vec![
+            "--app-root",
+            app_root,
+            "--json",
+            "--backend",
+            "test-backend",
+        ];
         partial.extend_from_slice(&REQUIRED[..2]);
         partial.extend_from_slice(&REQUIRED[4..]);
         let error = run_qualification_session_compose(&argv(&partial), &console()).unwrap_err();
@@ -368,7 +374,7 @@ mod tests {
         let report = QualificationBindingReport {
             id: "qualification".into(),
             path: PathBuf::from("/srv/node/.ai/node/external_execution/qualification.yaml"),
-            backend: "render-sandbox-early-access".into(),
+            backend: "test-backend".into(),
             account: "acct".into(),
             capacity_group: "qualification-workers".into(),
             provider_declaration_id: "codex-hosted".into(),

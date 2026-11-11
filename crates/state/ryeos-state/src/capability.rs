@@ -9,8 +9,9 @@ use regex::Regex;
 
 /// Match one granted capability pattern against one required capability.
 ///
-/// `*` matches any run of characters (including `/`) and `?` matches exactly
-/// one character. Every other character is literal and the match is anchored.
+/// `*` matches any run of characters (including `/`). Every other character,
+/// `?` included, is literal and the match is anchored. Grant writers refuse
+/// `?` in a scope, so no grant may rely on a single-character wildcard.
 pub fn grant_matches(granted: &str, required: &str) -> bool {
     if granted == required {
         return true;
@@ -19,7 +20,6 @@ pub fn grant_matches(granted: &str, required: &str) -> bool {
     for character in granted.chars() {
         match character {
             '*' => regex.push_str(".*"),
-            '?' => regex.push('.'),
             other => regex.push_str(&regex::escape(&other.to_string())),
         }
     }
@@ -38,12 +38,11 @@ pub fn pattern_covers(parent: &str, child: &str) -> bool {
     if parent == child {
         return true;
     }
-    if !child.contains('*') && !child.contains('?') {
+    if !child.contains('*') {
         return grant_matches(parent, child);
     }
     if let Some(prefix) = parent.strip_suffix('*')
         && !prefix.contains('*')
-        && !prefix.contains('?')
     {
         return child.starts_with(prefix);
     }
@@ -75,5 +74,11 @@ mod tests {
         ));
         assert!(pattern_covers("ryeos.*", "ryeos.execute.tool.*"));
         assert!(!pattern_covers("ryeos.get.vault.?", "ryeos.get.vault.*"));
+    }
+
+    #[test]
+    fn question_mark_is_literal() {
+        assert!(!grant_matches("ryeos.get.vault.?", "ryeos.get.vault.a"));
+        assert!(grant_matches("ryeos.get.vault.?", "ryeos.get.vault.?"));
     }
 }

@@ -2699,7 +2699,7 @@ pub fn reserve_restart_pending_approval_outcomes(state: &AppState) -> Result<usi
                 tracing::warn!(
                     placement_thread_id = %session.placement_thread_id,
                     worker_boot_epoch = worker.boot_epoch,
-                    error = %error,
+                    error = %format!("{error:#}"),
                     "restart could not prove one exact pending hosted approval; preserving outcome-unknown classification"
                 );
                 continue;
@@ -3237,7 +3237,7 @@ pub async fn execute_command(
                 cleanup_state,
             ) {
                 bail!(
-                    "worker contact failed: {error}; local worker cleanup is {cleanup_state}, but durable fencing failed: {cleanup_error}"
+                    "worker contact failed: {error:#}; local worker cleanup is {cleanup_state}, but durable fencing failed: {cleanup_error}"
                 );
             }
             append_command_fact_once(

@@ -77,13 +77,13 @@ pub(super) fn capture(
                 ));
             }
             let pinned = lillux::open_pinned_regular_file_no_follow(&source)
-                .map_err(|error| refused(format!("pin network runtime input: {error}")))?;
+                .map_err(|error| refused(format!("pin network runtime input: {error:#}")))?;
             let observation = pinned
                 .observation()
-                .map_err(|error| refused(format!("observe network runtime input: {error}")))?;
+                .map_err(|error| refused(format!("observe network runtime input: {error:#}")))?;
             let capture = pinned
                 .capture_sealed_bounded(&observation, file.max_bytes)
-                .map_err(|error| refused(format!("capture network runtime input: {error}")))?;
+                .map_err(|error| refused(format!("capture network runtime input: {error:#}")))?;
             Ok(CapturedNetworkFile {
                 destination: file.destination.clone(),
                 digest: capture.digest().to_owned(),

@@ -21,6 +21,7 @@ pub mod admission;
 pub mod connector;
 pub mod export;
 pub mod guest_journal;
+pub mod guest_window;
 pub mod journal;
 pub mod native_journal;
 pub mod qualification_controller_canary;
@@ -210,12 +211,15 @@ pub struct SupervisorReadyBoot {
     /// Digests of the activation inputs the supervisor verified on this boot
     /// before reporting ready, in the order the owner delivered them.
     pub verified_input_digests: Vec<String>,
-    /// Wall-clock time the supervisor became ready.
+    /// The guest's own wall-clock reading when the supervisor became ready.
+    /// It is the guest's testimony on a clock the controller cannot vouch
+    /// for, so it is informational: no window is checked against it, and the
+    /// controller's authoritative Ready time is its own clock at receipt.
     pub ready_at_ms: i64,
 }
 
 impl SupervisorReadyBoot {
-    fn validate(&self, binding: &ExecutionChannelBinding) -> Result<()> {
+    fn validate(&self) -> Result<()> {
         boot_id(&self.boot_id)?;
         ensure!(
             !self.verified_input_digests.is_empty()
@@ -226,8 +230,8 @@ impl SupervisorReadyBoot {
             hash(digest)?;
         }
         ensure!(
-            self.ready_at_ms >= binding.issued_at_ms && self.ready_at_ms < binding.expires_at_ms,
-            "supervisor Ready time is outside the channel lifetime"
+            self.ready_at_ms > 0,
+            "supervisor Ready time is not a positive wall-clock reading"
         );
         Ok(())
     }
@@ -282,6 +286,13 @@ pub enum ExecutionChannelPayload {
     ProtocolBytes {
         bytes_base64: String,
     },
+    /// The owner has no more session protocol input: the guest closes the
+    /// candidate's stdin once every earlier protocol frame is applied, so a
+    /// candidate that ends on EOF can exit and its stdout EOF can be
+    /// observed. Structured-session modes only, at most once per channel.
+    /// It is not cancellation, quiescence or completion: the candidate keeps
+    /// running until its own exit or a later owner command.
+    ProtocolInputClosed,
     /// Candidate protocol stdout reached EOF. This is an endpoint transport
     /// observation, not candidate success, writer exclusion, or cleanup.
     ProtocolEof,
@@ -492,7 +503,7 @@ impl ExecutionChannelPayload {
         use ExecutionChannelPayload::*;
         let owner_only = matches!(
             self,
-            Release | Quiesce { .. } | QualificationComplete { .. } | Cancel
+            Release | Quiesce { .. } | QualificationComplete { .. } | Cancel | ProtocolInputClosed
         );
         let supervisor_only = matches!(
             self,
@@ -516,12 +527,14 @@ impl ExecutionChannelPayload {
             "owner cannot author supervisor observations"
         );
         ensure!(
-            !matches!(self, ProtocolBytes { .. } | ProtocolEof)
-                || matches!(
-                    binding.execution_mode,
-                    ExternalExecutionMode::StructuredSession {}
-                        | ExternalExecutionMode::QualificationStructuredSession {}
-                ),
+            !matches!(
+                self,
+                ProtocolBytes { .. } | ProtocolEof | ProtocolInputClosed
+            ) || matches!(
+                binding.execution_mode,
+                ExternalExecutionMode::StructuredSession {}
+                    | ExternalExecutionMode::QualificationStructuredSession {}
+            ),
             "direct command channel cannot carry session protocol"
         );
         ensure!(
@@ -553,7 +566,7 @@ impl ExecutionChannelPayload {
                     "supervisor readiness changed admitted inputs"
                 );
                 if let Some(boot) = boot {
-                    boot.validate(binding)?;
+                    boot.validate()?;
                 }
             }
             CapabilityReport {
@@ -668,7 +681,7 @@ impl ExecutionChannelPayload {
                 );
                 hash(peer_frame_digest)?;
             }
-            Release | ProtocolEof | Cancel | Stopped { .. } => {}
+            Release | ProtocolInputClosed | ProtocolEof | Cancel | Stopped { .. } => {}
         }
         Ok(())
     }
@@ -744,10 +757,45 @@ impl SignedExecutionFrame {
         Ok(Self { frame, signature })
     }
 
+    /// Verify a frame against the controller's wall clock. Only the node that
+    /// issued the binding may use this form: it compares the binding's
+    /// absolute times with `now_ms`, which is meaningful only on the clock
+    /// that wrote them. A guest uses [`Self::decode_and_verify_in_guest_window`].
     pub fn decode_and_verify(
         bytes: &[u8],
         binding: &ExecutionChannelBinding,
         now_ms: i64,
+    ) -> Result<AuthenticatedExecutionFrame> {
+        Self::decode_and_verify_within(bytes, binding, || {
+            ensure!(
+                now_ms >= binding.issued_at_ms && now_ms < binding.expires_at_ms,
+                "external channel is outside its admitted lifetime"
+            );
+            Ok(())
+        })
+    }
+
+    /// Verify a frame on a guest. The channel lifetime is the guest's local
+    /// window, not the binding's absolute times, so a skewed guest wall clock
+    /// neither admits an expired channel nor refuses a live one.
+    pub fn decode_and_verify_in_guest_window(
+        bytes: &[u8],
+        binding: &ExecutionChannelBinding,
+        window: &guest_window::GuestChannelWindow,
+    ) -> Result<AuthenticatedExecutionFrame> {
+        Self::decode_and_verify_within(bytes, binding, || {
+            ensure!(
+                !window.expiry_elapsed(),
+                "external channel is outside its admitted lifetime"
+            );
+            Ok(())
+        })
+    }
+
+    fn decode_and_verify_within(
+        bytes: &[u8],
+        binding: &ExecutionChannelBinding,
+        require_lifetime: impl FnOnce() -> Result<()>,
     ) -> Result<AuthenticatedExecutionFrame> {
         ensure!(
             bytes.len() <= MAX_FRAME_BYTES,
@@ -756,10 +804,14 @@ impl SignedExecutionFrame {
         let signed: Self =
             serde_json::from_slice(bytes).context("decode external execution frame")?;
         validate_frame(&signed.frame, binding)?;
-        ensure!(
-            now_ms >= binding.issued_at_ms && now_ms < binding.expires_at_ms,
-            "external channel is outside its admitted lifetime"
-        );
+        // A channel's lifetime bounds the authority its frames carry. The
+        // owner's cancellation carries none: it only withdraws input, so it
+        // stays admissible after the lifetime ends. Otherwise a channel that
+        // expired before its owner could revoke it could never be fenced or
+        // settled.
+        if !is_owner_revocation(&signed.frame) {
+            require_lifetime()?;
+        }
         let canonical = lillux::canonical_json(&serde_json::to_value(&signed)?)?;
         ensure!(
             canonical.as_bytes() == bytes,
@@ -779,6 +831,11 @@ impl SignedExecutionFrame {
             canonical,
         })
     }
+}
+
+fn is_owner_revocation(frame: &ExecutionFrame) -> bool {
+    frame.direction == ChannelDirection::OwnerToSupervisor
+        && matches!(frame.payload, ExecutionChannelPayload::Cancel)
 }
 
 fn validate_frame(frame: &ExecutionFrame, binding: &ExecutionChannelBinding) -> Result<()> {
@@ -1448,6 +1505,10 @@ mod tests {
                 ChannelDirection::SupervisorToOwner,
                 ExecutionChannelPayload::ProtocolEof,
             ),
+            (
+                ChannelDirection::OwnerToSupervisor,
+                ExecutionChannelPayload::ProtocolInputClosed,
+            ),
         ] {
             let mut value = frame(&binding);
             value.direction = direction;
@@ -1465,6 +1526,12 @@ mod tests {
                 ExecutionChannelPayload::Quiesce {
                     completion_request_digest: "a".repeat(64),
                 },
+            ),
+            // The input closure is an owner command; a supervisor cannot
+            // author it.
+            (
+                ChannelDirection::SupervisorToOwner,
+                ExecutionChannelPayload::ProtocolInputClosed,
             ),
             (
                 ChannelDirection::SupervisorToOwner,
@@ -1529,6 +1596,10 @@ mod tests {
                 ExecutionChannelPayload::ProtocolBytes {
                     bytes_base64: STANDARD.encode(b"input"),
                 },
+            ),
+            (
+                ChannelDirection::OwnerToSupervisor,
+                ExecutionChannelPayload::ProtocolInputClosed,
             ),
             (
                 ChannelDirection::SupervisorToOwner,
@@ -1731,17 +1802,14 @@ mod tests {
             vec!["1".repeat(64); MAX_READY_VERIFIED_INPUTS + 1];
         let mut bad_digest = ready_boot();
         bad_digest.verified_input_digests = vec!["X".repeat(64)];
-        let mut before_issue = ready_boot();
-        before_issue.ready_at_ms = 0;
-        let mut after_expiry = ready_boot();
-        after_expiry.ready_at_ms = binding.expires_at_ms;
+        let mut no_reading = ready_boot();
+        no_reading.ready_at_ms = 0;
         for boot in [
             malformed,
             empty_inputs,
             too_many_inputs,
             bad_digest,
-            before_issue,
-            after_expiry,
+            no_reading,
         ] {
             assert!(
                 SignedExecutionFrame::sign(
@@ -1751,6 +1819,23 @@ mod tests {
                 )
                 .is_err()
             );
+        }
+    }
+
+    #[test]
+    fn ready_time_is_the_guests_testimony_not_a_window_check() {
+        let (binding, _, supervisor) = binding();
+        // A guest clock far before issue or far after expiry is still a valid
+        // Ready: the controller decides timing on its own clock.
+        for ready_at_ms in [1, binding.expires_at_ms, binding.expires_at_ms + 3_600_000] {
+            let mut boot = ready_boot();
+            boot.ready_at_ms = ready_at_ms;
+            SignedExecutionFrame::sign(
+                supervisor_frame(&binding, 1, ready_with(&binding, Some(boot))),
+                &binding,
+                &supervisor,
+            )
+            .unwrap();
         }
     }
 
@@ -1877,5 +1962,167 @@ mod tests {
         let mut bad = binding;
         bad.max_bytes = u64::MAX;
         assert!(bad.validate().is_err());
+    }
+
+    /// A binding as the controller issued it at `issued_at_ms` on its own
+    /// clock, with the usual execution and cleanup window lengths.
+    fn binding_issued_at(issued_at_ms: i64) -> (ExecutionChannelBinding, SigningKey, SigningKey) {
+        let (mut binding, owner, supervisor) = binding();
+        binding.issued_at_ms = issued_at_ms;
+        binding.execution_deadline_ms = issued_at_ms + 100_000;
+        binding.expires_at_ms = issued_at_ms + 200_000;
+        (binding, owner, supervisor)
+    }
+
+    fn owner_release_wire(binding: &ExecutionChannelBinding, owner: &SigningKey) -> String {
+        let signed = SignedExecutionFrame::sign(frame(binding), binding, owner).unwrap();
+        lillux::canonical_json(&serde_json::to_value(signed).unwrap()).unwrap()
+    }
+
+    /// Guest wall clocks this far from the controller's, in both directions,
+    /// and far beyond any plausible tolerance.
+    const SKEWS_MS: [i64; 5] = [-3_600_000, -60_000, 0, 60_000, 3_600_000];
+
+    #[test]
+    fn guest_window_lengths_do_not_depend_on_controller_absolute_times() {
+        let guest_wall_ms = lillux::time::timestamp_millis();
+        for skew in SKEWS_MS {
+            // The controller's clock differs from the guest's by `skew`.
+            let (binding, _, _) = binding_issued_at(guest_wall_ms + skew);
+            let anchor = lillux::time::LocalClockAnchor::capture().unwrap();
+            let window = guest_window::GuestChannelWindow::derive(&anchor, &binding).unwrap();
+            let execution = window.execution_remaining();
+            let expiry = window.expiry_remaining();
+            assert!(
+                execution <= lillux::time::Duration::from_secs(100)
+                    && execution > lillux::time::Duration::from_secs(99),
+                "skew {skew}: execution {execution:?}"
+            );
+            assert!(
+                expiry <= lillux::time::Duration::from_secs(200)
+                    && expiry > lillux::time::Duration::from_secs(199),
+                "skew {skew}: expiry {expiry:?}"
+            );
+            assert!(!window.execution_elapsed() && !window.expiry_elapsed());
+        }
+    }
+
+    #[test]
+    fn window_derived_monotonic_deadlines_keep_the_window_lengths_and_order() {
+        let (binding, _, _) = binding_issued_at(lillux::time::timestamp_millis());
+        let anchor = lillux::time::LocalClockAnchor::capture().unwrap();
+        let window = guest_window::GuestChannelWindow::derive(&anchor, &binding).unwrap();
+        let (execution, expiry) = window.monotonic_pair();
+        assert!(!execution.has_elapsed() && !expiry.has_elapsed());
+        assert!(execution.remaining() > lillux::time::Duration::from_secs(99));
+        assert!(execution.remaining() <= lillux::time::Duration::from_secs(100));
+        assert!(expiry.remaining() > lillux::time::Duration::from_secs(199));
+        // A purely local timeout narrows a window deadline, and the other way
+        // round, whichever clock each counts.
+        let poll = lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(2));
+        assert!(execution.min(poll).remaining() <= lillux::time::Duration::from_secs(2));
+        assert!(poll.min(execution).remaining() <= lillux::time::Duration::from_secs(2));
+        assert!(expiry.min(execution).remaining() <= lillux::time::Duration::from_secs(100));
+        // The pair survives a handoff to a child as a window of its own.
+        let handed = guest_window::GuestChannelWindow::from_handed_down(execution, expiry).unwrap();
+        assert!(!handed.expiry_elapsed());
+    }
+
+    #[test]
+    fn guest_frame_verification_follows_the_local_window_not_the_wall_clock() {
+        let guest_wall_ms = lillux::time::timestamp_millis();
+        for skew in SKEWS_MS {
+            let (binding, owner, _) = binding_issued_at(guest_wall_ms + skew);
+            let wire = owner_release_wire(&binding, &owner);
+            let window =
+                guest_window::GuestChannelWindow::starting_now_for_single_clock_harness(&binding)
+                    .unwrap();
+            SignedExecutionFrame::decode_and_verify_in_guest_window(
+                wire.as_bytes(),
+                &binding,
+                &window,
+            )
+            .unwrap();
+            // The controller form, fed the guest's wall clock, is what a
+            // skewed pair of machines used to trip over.
+            let by_wall_clock =
+                SignedExecutionFrame::decode_and_verify(wire.as_bytes(), &binding, guest_wall_ms);
+            assert_eq!(
+                by_wall_clock.is_ok(),
+                skew <= 0 && skew > -200_000,
+                "skew {skew}"
+            );
+        }
+    }
+
+    #[test]
+    fn guest_frame_verification_refuses_once_the_local_window_elapsed() {
+        let (binding, owner, _) = binding_issued_at(lillux::time::timestamp_millis());
+        let wire = owner_release_wire(&binding, &owner);
+        let window = guest_window::GuestChannelWindow::from_handed_down(
+            lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_millis(20)),
+            lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_millis(40)),
+        )
+        .unwrap();
+        SignedExecutionFrame::decode_and_verify_in_guest_window(wire.as_bytes(), &binding, &window)
+            .unwrap();
+        lillux::time::sleep(lillux::time::Duration::from_millis(60));
+        assert!(window.execution_elapsed() && window.expiry_elapsed());
+        let refusal = SignedExecutionFrame::decode_and_verify_in_guest_window(
+            wire.as_bytes(),
+            &binding,
+            &window,
+        )
+        .err()
+        .unwrap();
+        assert!(
+            format!("{refusal:#}").contains("admitted lifetime"),
+            "{refusal:#}"
+        );
+    }
+
+    #[test]
+    fn guest_window_is_refused_for_an_old_anchor_another_boot_and_an_inverted_handoff() {
+        let (binding, _, _) = binding_issued_at(lillux::time::timestamp_millis());
+        let now = lillux::time::LocalClockAnchor::capture().unwrap();
+
+        // Short windows keep the aged anchors independent of host uptime.
+        let (mut short, _, _) = binding_issued_at(lillux::time::timestamp_millis());
+        short.execution_deadline_ms = short.issued_at_ms + 20;
+        short.expires_at_ms = short.issued_at_ms + 10_000;
+        for (age_ms, label) in [(30_u64, "execution"), (11_000, "expiry")] {
+            let mut aged = now.coordinate().clone();
+            aged.tick_ns = aged.tick_ns.saturating_sub(age_ms * 1_000_000);
+            assert!(aged.tick_ns > 0, "host booted less than {age_ms} ms ago");
+            let refusal = guest_window::GuestChannelWindow::derive(
+                &lillux::time::LocalClockAnchor::from_retained(aged).unwrap(),
+                &short,
+            )
+            .unwrap_err();
+            assert!(
+                format!("{refusal:#}").contains("already elapsed"),
+                "{label}: {refusal:#}"
+            );
+        }
+
+        let mut other_boot = now.coordinate().clone();
+        other_boot.incarnation_digest = lillux::sha256_hex(b"another boot");
+        let refusal = guest_window::GuestChannelWindow::derive(
+            &lillux::time::LocalClockAnchor::from_retained(other_boot).unwrap(),
+            &binding,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{refusal:#}").contains("earlier boot"),
+            "{refusal:#}"
+        );
+
+        assert!(
+            guest_window::GuestChannelWindow::from_handed_down(
+                lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(9)),
+                lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(1)),
+            )
+            .is_err()
+        );
     }
 }

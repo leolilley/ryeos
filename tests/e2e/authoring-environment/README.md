@@ -6,7 +6,7 @@
 Server with a credential-free scripted Responses endpoint and an actual pinned
 exec-server. Two separate bwrap filesystem views give the same `/workspace`
 path different contents. This is an external diagnostic, not an installed RyeOS
-worker, Render deployment, authenticated channel or Lillux qualification.
+worker, hosted deployment, authenticated channel or Lillux qualification.
 
 ```sh
 python3 -B tests/e2e/authoring-environment/probe_pinned_codex_external_execution.py \
@@ -150,7 +150,7 @@ completion-fenced capture, frozen-candidate survival across daemon restart and
 owner discard passed. Child formatting did not execute: after correcting the
 signed shell environment, the nested command sandbox refused the restricted
 broker connection with EPERM. Do not interpret completed turn/candidate facts
-as successful project verification, promote these candidates, or claim Railway
+as successful project verification, promote these candidates, or claim a hosted-service
 or full-repository development acceptance.
 
 The original next step was to resolve the nested CLI connection without general

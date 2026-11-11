@@ -67,9 +67,10 @@ pub async fn handle(
 
     // 2. Compute fingerprint from the public key bytes.
     let fingerprint = lillux::sha256_hex(&key_bytes);
-    let configured_operator =
-        ryeos_node_runtime::identity::NodeIdentity::load(&state.config.operator_signing_key_path)
-            .map_err(|error| HandlerError::Internal(format!("load configured operator: {error}")))?;
+    let configured_operator = ryeos_node_runtime::identity::NodeIdentity::load(
+        &state.config.operator_signing_key_path,
+    )
+    .map_err(|error| HandlerError::Internal(format!("load configured operator: {error:#}")))?;
     if fingerprint == configured_operator.fingerprint() {
         return Err(HandlerError::Forbidden(
             "configured-operator authorization and class changes are offline-only".to_string(),
@@ -140,13 +141,8 @@ pub async fn handle(
     // create-only: an API caller may not replace or reclassify an existing
     // local-client, remote-node, remote-operator, or bootstrap grant.
     let now = lillux::time::iso8601_now();
-    let auth_dir = state
-        .config
-        .app_root
-        .join(ryeos_engine::AI_DIR)
-        .join("node")
-        .join("auth")
-        .join("authorized_keys");
+    // Grants live where the authenticator reads them.
+    let auth_dir = state.config.authorized_keys_dir.clone();
 
     let _path = ryeos_node_runtime::identity::create_authorized_key_toml(
         &auth_dir,
@@ -168,7 +164,7 @@ pub async fn handle(
                     .to_string(),
             )
         } else {
-            HandlerError::Internal(e.to_string())
+            HandlerError::Internal(format!("{e:#}"))
         }
     })?;
 
@@ -283,5 +279,53 @@ mod tests {
         assert!(validate_scope_pattern("ryeos.execute.*").is_ok());
         assert!(validate_scope_pattern("ryeos.execute.service.*").is_ok());
         assert!("ryeos.execute.service.*".contains('*'));
+    }
+
+    #[test]
+    fn question_mark_scopes_are_refused_at_grant_time() {
+        assert!(validate_scope_pattern("ryeos.execute.service.vault/se?").is_err());
+        assert!(validate_scope_pattern("ryeos.execute.service.?").is_err());
+    }
+
+    #[tokio::test]
+    async fn grant_lands_in_the_configured_authorized_keys_dir() {
+        use base64::Engine as _;
+        let (tmp, _owner, mut state) = crate::test_support::build_test_state();
+        let configured = tmp.path().join("custom-auth-dir");
+        let mut config = (*state.config).clone();
+        config.authorized_keys_dir = configured.clone();
+        state.config = Arc::new(config);
+        let state = Arc::new(state);
+
+        let grantee = lillux::crypto::SigningKey::generate(&mut rand::rngs::OsRng);
+        let public = grantee.verifying_key();
+        let scope = "ryeos.execute.service.vault/list".to_string();
+        let ctx = HandlerContext::new("caller".to_string(), vec![scope.clone()], true);
+        let response = handle(
+            Request {
+                public_key: format!(
+                    "ed25519:{}",
+                    base64::engine::general_purpose::STANDARD.encode(public.as_bytes())
+                ),
+                label: "grantee".to_string(),
+                scopes: vec![scope],
+            },
+            ctx,
+            state.clone(),
+        )
+        .await
+        .unwrap();
+        let fingerprint = response["fingerprint"].as_str().unwrap();
+
+        let loaded = ryeos_node_runtime::identity::load_verified_authorized_key(
+            fingerprint,
+            &configured,
+            &state.identity,
+        )
+        .unwrap();
+        assert!(
+            loaded.is_some(),
+            "grant must be loadable from the configured dir"
+        );
     }
 }

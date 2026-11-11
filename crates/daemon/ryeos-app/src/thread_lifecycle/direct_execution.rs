@@ -476,6 +476,9 @@ pub struct PreparedItemPlan {
     realization_command: Option<PreparedRealizationCommand>,
     resource_policy: PersistentSessionResourcePolicy,
     persistent_session_capsule_hash: Option<String>,
+    /// Set by closure admission when a captured plan's callback authority was
+    /// admitted through the captured-compatible protocol class.
+    captured_callback_class: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1453,18 +1456,19 @@ impl PreparedItemPlan {
             if !isolation.is_enforced() {
                 bail!("captured execution requires enforced isolation before admission");
             }
-            if protocol.descriptor.callback_channel
+            let callback_authority = protocol.descriptor.callback_channel
                 != ryeos_engine::protocol_vocabulary::CallbackChannel::None
                 || protocol.descriptor.env_injections.iter().any(|injection| {
                     matches!(
-                    injection.source,
-                    ryeos_engine::protocol_vocabulary::EnvInjectionSource::CallbackSocketPath
-                        | ryeos_engine::protocol_vocabulary::EnvInjectionSource::CallbackToken
-                        | ryeos_engine::protocol_vocabulary::EnvInjectionSource::ThreadAuthToken
-                )
-                })
-            {
-                bail!("captured execution cannot receive daemon callback or thread-auth authority");
+                        injection.source,
+                        ryeos_engine::protocol_vocabulary::EnvInjectionSource::CallbackSocketPath
+                            | ryeos_engine::protocol_vocabulary::EnvInjectionSource::CallbackToken
+                            | ryeos_engine::protocol_vocabulary::EnvInjectionSource::ThreadAuthToken
+                    )
+                });
+            if callback_authority {
+                admit_captured_compatible_callback(&protocol.descriptor)?;
+                self.captured_callback_class = true;
             }
         }
         if !external
@@ -1802,6 +1806,7 @@ impl PreparedItemPlan {
             realization_command,
             resource_policy: PersistentSessionResourcePolicy::Ordinary,
             persistent_session_capsule_hash: None,
+            captured_callback_class: false,
         })
     }
 
@@ -1869,12 +1874,16 @@ impl PreparedItemPlan {
                 ryeos_engine::isolation::IsolationProjectAuthority::RuntimeWorkspace
             }
         };
-        if state_root.is_some()
-            && !matches!(
-                workspace_authority,
-                PersistentSessionWorkspaceAuthority::RuntimeWorkspace
-            )
-        {
+        if !persistent_session_state_root_admitted(
+            state_root.is_some(),
+            workspace_authority,
+            // Only the qualification local Worker: a dedicated, resource-free
+            // exclusive session whose state root is its private credential
+            // home and whose descendants its own retained containment holds.
+            process_scope.is_some()
+                && self.resource_policy
+                    == PersistentSessionResourcePolicy::QualificationNoResources,
+        ) {
             bail!("persistent-session state root requires runtime-workspace authority");
         }
         let filesystem_authority_ceiling = self.plan.filesystem_authority_ceiling;
@@ -1934,6 +1943,17 @@ impl PreparedItemPlan {
                         scope.recovery(),
                     )?
                 }
+                (Some(scope), None) if scope.is_pid_namespace_init() => {
+                    // Containment by the retained PID-namespace init has no
+                    // cgroup to carry scope-wide limits or occupancy, so it
+                    // cannot own execution resources.
+                    if !selected_resources.selections().is_empty() {
+                        bail!(
+                            "PID-namespace containment cannot own execution resources; a cgroup scope is required"
+                        );
+                    }
+                    None
+                }
                 (None, None) => {
                     prepared_scope = crate::execution_resources::prepare_process_resource_scope(
                         state,
@@ -1961,6 +1981,7 @@ impl PreparedItemPlan {
             isolation_checkpoint_dir: None,
             isolation_checkpoint_authority: None,
             isolation_daemon_socket_path: None,
+            isolation_captured_callback_socket: false,
             // A persistent session executes its captured command and exact
             // external realizations. Mutable bundle roots and node trust state
             // are neither inputs nor ambient read authority for that worker.
@@ -2185,6 +2206,116 @@ impl PreparedItemPlan {
             spawned,
         })
     }
+}
+
+/// A state root is session-private authority: one daemon-owned child beneath
+/// the node state directory, pinned by descriptor and mounted alone (the
+/// isolation compiler refuses the node state directory itself, anything
+/// outside it and any sibling, drops every broader overlapping writable policy
+/// mount, and under captured execution refuses all ambient authority beside
+/// it). It belongs to a runtime workspace, or to the qualification local
+/// Worker: a dedicated, resource-free session whose descendants its own
+/// retained containment holds, over captured scratch. A cgroup-scoped
+/// ordinary scratch session is NOT admitted here: its scope exists for
+/// resource limits, and nothing else binds a private state root to it.
+fn persistent_session_state_root_admitted(
+    has_state_root: bool,
+    workspace_authority: ryeos_engine::protocols::descriptor::PersistentSessionWorkspaceAuthority,
+    qualification_worker_containment: bool,
+) -> bool {
+    use ryeos_engine::protocols::descriptor::PersistentSessionWorkspaceAuthority::{
+        EphemeralScratch, RuntimeWorkspace,
+    };
+    !has_state_root
+        || matches!(workspace_authority, RuntimeWorkspace)
+        || (matches!(workspace_authority, EphemeralScratch) && qualification_worker_containment)
+}
+
+#[cfg(test)]
+mod state_root_authority_tests {
+    use super::persistent_session_state_root_admitted as admitted;
+    use ryeos_engine::protocols::descriptor::PersistentSessionWorkspaceAuthority::{
+        EphemeralScratch, RuntimeWorkspace,
+    };
+
+    #[test]
+    fn state_root_follows_a_runtime_workspace_or_the_qualification_worker() {
+        // (has root, authority, contained) -> admitted
+        for (root, authority, contained, expected) in [
+            (false, EphemeralScratch, false, true),
+            (true, RuntimeWorkspace, false, true),
+            (true, RuntimeWorkspace, true, true),
+            (true, EphemeralScratch, true, true),
+            (true, EphemeralScratch, false, false),
+        ] {
+            assert_eq!(
+                admitted(root, authority, contained),
+                expected,
+                "root={root} {authority:?} contained={contained}"
+            );
+        }
+    }
+}
+
+/// The signed session protocol a qualification-only local Worker may use,
+/// per launch lane. Disabled isolation runs the trusted process-group lane
+/// over a runtime workspace; enforced isolation runs descendant containment
+/// over captured scratch. Each lane's launch repeats its own check.
+pub fn qualification_worker_protocol_lane_admits(
+    session: &ryeos_engine::protocols::descriptor::PersistentSessionProtocol,
+    enforced: bool,
+) -> bool {
+    use ryeos_engine::protocols::PersistentSessionCleanupAuthority::{
+        DescendantContainment, TrustedProcessGroup,
+    };
+    use ryeos_engine::protocols::descriptor::{
+        PersistentSessionProcessMode,
+        PersistentSessionWorkspaceAuthority::{EphemeralScratch, RuntimeWorkspace},
+    };
+    let (cleanup, workspace) = if enforced {
+        (DescendantContainment, EphemeralScratch)
+    } else {
+        (TrustedProcessGroup, RuntimeWorkspace)
+    };
+    session.process_mode == PersistentSessionProcessMode::ExclusiveSession
+        && session.cleanup_authority == cleanup
+        && session.workspace_authority == workspace
+        && session.channel == ryeos_engine::protocols::PersistentSessionChannel::InheritedUnixSocket
+}
+
+/// A captured-execution tool may hold callback and thread-auth credentials
+/// only on a protocol that declares the captured-compatible class and whose
+/// declared surface digest equals the closed surface the daemon issues for
+/// the protocol's qualification authority. Ordinary tool callbacks, and a
+/// declaration naming any other surface, stay refused.
+pub(crate) fn admit_captured_compatible_callback(
+    descriptor: &ryeos_engine::protocols::ProtocolDescriptor,
+) -> Result<()> {
+    let refused =
+        || anyhow!("captured execution cannot receive daemon callback or thread-auth authority");
+    let class = descriptor
+        .captured_compatible_callback
+        .as_ref()
+        .ok_or_else(refused)?;
+    // Only the remote-consumer authority is a captured-compatible surface.
+    let authority = descriptor
+        .qualification_callback
+        .filter(|authority| {
+            *authority == ryeos_engine::protocols::QualificationCallbackAuthority::RemoteConsumer
+        })
+        .ok_or_else(refused)?;
+    let issued =
+        crate::callback_token::CallbackRuntimeMethodSurface::for_qualification_authority(authority)
+            .exact_surface_digest()?;
+    if class.surface_digest != issued
+        || descriptor.callback_channel != ryeos_engine::protocol_vocabulary::CallbackChannel::Http
+        || descriptor.capabilities.allows_target_site
+        || descriptor.capabilities.allows_detached
+        || descriptor.session.is_some()
+    {
+        return Err(refused());
+    }
+    Ok(())
 }
 
 fn validate_admitted_direct_executor_binding(
@@ -2834,17 +2965,10 @@ pub fn with_prepared_external_qualification_local_worker_plan<T>(
             &signed_protocol.descriptor,
         )
         .map_err(anyhow::Error::msg)?;
-        use ryeos_engine::protocols::descriptor::{
-            PersistentSessionProcessMode, PersistentSessionWorkspaceAuthority,
-        };
-        if session.process_mode != PersistentSessionProcessMode::ExclusiveSession
-            || session.cleanup_authority
-                != ryeos_engine::protocols::PersistentSessionCleanupAuthority::TrustedProcessGroup
-            || session.workspace_authority != PersistentSessionWorkspaceAuthority::RuntimeWorkspace
-            || session.channel
-                != ryeos_engine::protocols::PersistentSessionChannel::InheritedUnixSocket
-        {
-            bail!("qualification-only local Worker requires a dedicated trusted session protocol");
+        if !qualification_worker_protocol_lane_admits(session, state.isolation.is_enforced()) {
+            bail!(
+                "qualification-only local Worker requires a dedicated session protocol for its lane: trusted process group over a runtime workspace when isolation is disabled, descendant containment over captured scratch when enforced"
+            );
         }
         if session.readiness_identity_env.is_none()
             || (!content.process_environment.is_empty()
@@ -2927,6 +3051,7 @@ pub fn with_prepared_external_qualification_local_worker_plan<T>(
                 realization_command: None,
                 resource_policy: PersistentSessionResourcePolicy::QualificationNoResources,
                 persistent_session_capsule_hash: None,
+                captured_callback_class: false,
             },
             declaration,
             signed_protocol,
@@ -3031,6 +3156,7 @@ fn prepare_item_plan_with_logical_context(
             realization_command: None,
             resource_policy: PersistentSessionResourcePolicy::Ordinary,
             persistent_session_capsule_hash: None,
+            captured_callback_class: false,
         })
     })
 }
@@ -3142,6 +3268,7 @@ fn assemble_captured_item_plan(
         realization_command: None,
         resource_policy: PersistentSessionResourcePolicy::Ordinary,
         persistent_session_capsule_hash: None,
+        captured_callback_class: false,
     })
 }
 
@@ -3241,10 +3368,45 @@ pub struct SpawnItemParams<'a> {
     /// Exact node-selected launch authority. Selection has already crossed
     /// replay/admission; this owner binds it to the held process before release.
     pub selected_resources: crate::execution_resources::SelectedExecutionResources,
-    /// The accepted root's signed product claim requires a naturally empty
-    /// whole-descendant scope. Device selection is not a substitute for this
-    /// requirement, and an unscoped launch must refuse before process contact.
-    pub require_process_scope: bool,
+    /// What whole-descendant containment the accepted root's signed product
+    /// claim demands. Device selection is not a substitute for it, and an
+    /// uncontained launch must refuse before process contact.
+    pub process_containment: ProcessContainmentRequirement,
+}
+
+/// The containment a launch must run under, read from the sealed root's
+/// signed minimum verifier settlement; never a later policy lookup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessContainmentRequirement {
+    /// Nothing beyond the strict process group.
+    None,
+    /// A cgroup scope specifically (`scope_empty`).
+    CgroupScope,
+    /// Whole-descendant emptiness by whichever mechanism the node qualified
+    /// (`containment_empty`): a cgroup scope or the PID-namespace init.
+    AnyQualifiedContainment,
+}
+
+impl ProcessContainmentRequirement {
+    /// The qualified mechanism answering this requirement on this node, or the
+    /// refusal that names the missing guarantee.
+    fn select(
+        self,
+        containment: &ryeos_engine::isolation::DescendantContainmentReadiness,
+    ) -> Result<Option<ryeos_engine::isolation::DescendantContainmentGuarantee>> {
+        use ryeos_engine::isolation::DescendantContainmentGuarantee as Guarantee;
+        match self {
+            Self::None => Ok(None),
+            Self::CgroupScope => Ok(Some(Guarantee::CgroupScope)),
+            Self::AnyQualifiedContainment => match containment.enforced_guarantee() {
+                Some(guarantee) => Ok(Some(guarantee)),
+                None => bail!(
+                    "signed verifier policy demands `containment_empty` but this node reports no qualified descendant containment (cgroup scope: unavailable; PID-namespace init: {}); the trusted process-group lane is a weaker guarantee and is never a substitute",
+                    containment.pid_namespace.detail
+                ),
+            },
+        }
+    }
 }
 
 #[tracing::instrument(
@@ -3275,7 +3437,7 @@ pub fn spawn_item(
         thread_id,
         launch_owner,
         accounting_scope,
-        require_process_scope,
+        process_containment,
     ) = (|| -> Result<_> {
         let SpawnItemParams {
             state,
@@ -3307,7 +3469,7 @@ pub fn spawn_item(
             original_snapshot_hash: _,
             state_root,
             selected_resources,
-            require_process_scope,
+            process_containment,
         } = params;
         let app_root = roots
             .app_root
@@ -3490,6 +3652,7 @@ pub fn spawn_item(
             isolation_checkpoint_authority: allocated_checkpoint_authority,
             isolation_daemon_socket_path: isolation_daemon_socket_path
                 .map(std::path::Path::to_path_buf),
+            isolation_captured_callback_socket: prepared_plan.captured_callback_class,
             isolation_bundle_roots,
             isolation_node_trusted_keys_dir: Some(isolation_node_trusted_keys_dir),
             isolation_verified_code,
@@ -3549,11 +3712,29 @@ pub fn spawn_item(
             thread_id,
             launch_owner,
             accounting_scope,
-            require_process_scope,
+            process_containment,
         ))
     })()
     .map_err(SpawnItemFailure::before_contact)?;
-    let mut thread_scope = if require_process_scope && selected_resources.selections().is_empty() {
+    // Resource-bearing launches already run in the cgroup scope their
+    // resources need, which satisfies either requirement. Otherwise choose the
+    // mechanism now, before any process contact.
+    let selected_mechanism = if selected_resources.selections().is_empty() {
+        process_containment
+            .select(
+                &state
+                    .isolation
+                    .inspection()
+                    .process_scope_readiness
+                    .descendant_containment,
+            )
+            .map_err(SpawnItemFailure::before_contact)?
+    } else {
+        None
+    };
+    let mut thread_scope = if selected_mechanism
+        == Some(ryeos_engine::isolation::DescendantContainmentGuarantee::CgroupScope)
+    {
         Some(
             crate::execution_resources::prepare_thread_scope_only(state, thread_id, launch_owner)
                 .map_err(SpawnItemFailure::before_contact)?,
@@ -3561,6 +3742,11 @@ pub fn spawn_item(
     } else {
         None
     };
+    // The PID-namespace init is bound by the held launch itself: no cgroup
+    // allocation and no pre-contact reservation exist to journal.
+    let mut namespace_scope = (selected_mechanism
+        == Some(ryeos_engine::isolation::DescendantContainmentGuarantee::PidNamespaceInit))
+    .then(lillux::ProcessScope::pid_namespace_init);
     let mut resource_scope = crate::execution_resources::prepare_process_resource_scope(
         state,
         &selected_resources,
@@ -3568,8 +3754,24 @@ pub fn spawn_item(
         thread_id,
     )
     .map_err(SpawnItemFailure::before_contact)?;
-    let spawned_result = match (resource_scope.as_mut(), thread_scope.as_mut()) {
-        (Some(prepared), None) => engine.spawn_plan_in_scope_with_resources(
+    let spawned_result = match (
+        resource_scope.as_mut(),
+        thread_scope.as_mut(),
+        namespace_scope.take(),
+    ) {
+        (None, None, Some(scope)) => engine.spawn_plan_in_scope_with_resources(
+            &engine_ctx,
+            &plan,
+            scope,
+            selected_resources.selections(),
+            selected_resources.devices().map(Arc::as_ref),
+        ),
+        (_, _, Some(_)) => {
+            return Err(SpawnItemFailure::before_contact(anyhow!(
+                "item launch prepared conflicting process scopes"
+            )));
+        }
+        (Some(prepared), None, None) => engine.spawn_plan_in_scope_with_resources(
             &engine_ctx,
             &plan,
             prepared
@@ -3578,7 +3780,7 @@ pub fn spawn_item(
             selected_resources.selections(),
             selected_resources.devices().map(Arc::as_ref),
         ),
-        (None, Some(prepared)) => engine.spawn_plan_in_scope_with_resources(
+        (None, Some(prepared), None) => engine.spawn_plan_in_scope_with_resources(
             &engine_ctx,
             &plan,
             prepared
@@ -3587,13 +3789,13 @@ pub fn spawn_item(
             selected_resources.selections(),
             selected_resources.devices().map(Arc::as_ref),
         ),
-        (None, None) => engine.spawn_plan_with_resources(
+        (None, None, None) => engine.spawn_plan_with_resources(
             &engine_ctx,
             &plan,
             selected_resources.selections(),
             selected_resources.devices().map(Arc::as_ref),
         ),
-        (Some(_), Some(_)) => {
+        (Some(_), Some(_), None) => {
             return Err(SpawnItemFailure::before_contact(anyhow!(
                 "item launch prepared conflicting process scopes"
             )));
@@ -3723,8 +3925,176 @@ pub fn spawn_item(
 }
 
 #[cfg(test)]
+mod process_containment_requirement_tests {
+    use super::ProcessContainmentRequirement as Requirement;
+    use ryeos_engine::isolation::{
+        DescendantContainmentGuarantee as Guarantee, DescendantContainmentReadiness,
+        PidNamespaceContainmentQualification as Namespace,
+    };
+
+    fn readiness(cgroup_scope: bool, namespace: bool) -> DescendantContainmentReadiness {
+        DescendantContainmentReadiness {
+            cgroup_scope,
+            pid_namespace: if namespace {
+                Namespace::qualified_by(lillux::process_control::ProofSource::Measured, "probed")
+            } else {
+                Namespace::not_probed("user namespaces refused")
+            },
+            trusted_process_group: true,
+        }
+    }
+
+    #[test]
+    fn each_demand_is_answered_by_the_mechanism_the_node_qualified() {
+        // `scope_empty` is a cgroup demand whatever else the node has.
+        for (cgroup, namespace) in [(true, true), (false, true), (false, false)] {
+            assert_eq!(
+                Requirement::CgroupScope
+                    .select(&readiness(cgroup, namespace))
+                    .unwrap(),
+                Some(Guarantee::CgroupScope)
+            );
+            assert_eq!(
+                Requirement::None
+                    .select(&readiness(cgroup, namespace))
+                    .unwrap(),
+                None
+            );
+        }
+        // `containment_empty` takes either mechanism, scope preferred.
+        let any = Requirement::AnyQualifiedContainment;
+        assert_eq!(
+            any.select(&readiness(true, true)).unwrap(),
+            Some(Guarantee::CgroupScope)
+        );
+        assert_eq!(
+            any.select(&readiness(true, false)).unwrap(),
+            Some(Guarantee::CgroupScope)
+        );
+        assert_eq!(
+            any.select(&readiness(false, true)).unwrap(),
+            Some(Guarantee::PidNamespaceInit)
+        );
+        // With neither it refuses, naming the missing guarantee and why the
+        // always-available trusted lane is not a substitute.
+        let error = any
+            .select(&readiness(false, false))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("containment_empty"), "{error}");
+        assert!(
+            error.contains("no qualified descendant containment"),
+            "{error}"
+        );
+        assert!(error.contains("user namespaces refused"), "{error}");
+        assert!(error.contains("never a substitute"), "{error}");
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    fn captured_callback_protocol(
+        digest: &str,
+        class: bool,
+        qualification: &str,
+    ) -> ryeos_engine::protocols::ProtocolDescriptor {
+        let class_yaml = if class {
+            format!("captured_compatible_callback:\n  surface_digest: {digest}\n")
+        } else {
+            String::new()
+        };
+        let qualification_yaml = if qualification.is_empty() {
+            String::new()
+        } else {
+            format!("qualification_callback: {qualification}\n")
+        };
+        serde_yaml::from_str(&format!(
+            "kind: protocol\nname: t\ncategory: ryeos/core\nabi_version: v1\nstdin:\n  shape: opaque\nstdout:\n  shape: opaque_bytes\n  mode: terminal\nenv_injections:\n  - {{ name: RYEOSD_SOCKET_PATH, source: callback_socket_path }}\n  - {{ name: RYEOSD_CALLBACK_TOKEN, source: callback_token }}\n  - {{ name: RYEOSD_THREAD_AUTH_TOKEN, source: thread_auth_token }}\ncapabilities:\n  allows_pushed_head: true\n  allows_target_site: false\n  allows_detached: false\nlifecycle:\n  mode: managed\ncallback_channel: http\n{qualification_yaml}{class_yaml}"
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn captured_execution_admits_callback_only_on_the_declared_closed_surface() {
+        use crate::callback_token::CallbackRuntimeMethodSurface as Surface;
+        let remote = Surface::qualification_remote_consumer()
+            .exact_surface_digest()
+            .unwrap();
+        let scoped = Surface::qualification_scoped_producer()
+            .exact_surface_digest()
+            .unwrap();
+        assert_ne!(remote, scoped);
+        // The declared class on the surface the daemon issues is admitted.
+        admit_captured_compatible_callback(&captured_callback_protocol(
+            &remote,
+            true,
+            "remote_consumer",
+        ))
+        .unwrap();
+        // An ordinary tool callback protocol is refused.
+        assert!(
+            admit_captured_compatible_callback(&captured_callback_protocol(&remote, false, ""))
+                .is_err()
+        );
+        // A class declared without qualification authority is refused.
+        assert!(
+            admit_captured_compatible_callback(&captured_callback_protocol(&remote, true, ""))
+                .is_err()
+        );
+        // A declared surface that is not the issued one is refused, as is a stale
+        // or arbitrary digest and the other authority's surface.
+        assert!(
+            admit_captured_compatible_callback(&captured_callback_protocol(
+                &scoped,
+                true,
+                "remote_consumer"
+            ))
+            .is_err()
+        );
+        assert!(
+            admit_captured_compatible_callback(&captured_callback_protocol(
+                &"0".repeat(64),
+                true,
+                "remote_consumer"
+            ))
+            .is_err()
+        );
+        // The scoped-producer authority is never admitted, even with its own digest.
+        assert!(
+            admit_captured_compatible_callback(&captured_callback_protocol(
+                &scoped,
+                true,
+                "scoped_producer"
+            ))
+            .is_err()
+        );
+        // Remote or detached capability reopens refusal.
+        let mut detached = captured_callback_protocol(&remote, true, "remote_consumer");
+        detached.capabilities.allows_detached = true;
+        assert!(admit_captured_compatible_callback(&detached).is_err());
+    }
+
+    #[test]
+    fn shipped_qualification_protocols_declare_the_captured_class_only_where_fitting() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../bundles/core/.ai/protocols/ryeos/core");
+        let load = |name: &str| -> ryeos_engine::protocols::ProtocolDescriptor {
+            serde_yaml::from_str(&std::fs::read_to_string(dir.join(name)).unwrap()).unwrap()
+        };
+        // The remote-consumer protocol names exactly the surface the daemon issues.
+        let consumer = load("qualification_consumer_callback.yaml");
+        assert!(consumer.captured_compatible_callback.is_some());
+        admit_captured_compatible_callback(&consumer).unwrap();
+        // The scoped-producer surface drives a daemon-owned process and stays outside the class.
+        let scoped = load("qualification_scoped_callback.yaml");
+        assert!(scoped.captured_compatible_callback.is_none());
+        assert!(admit_captured_compatible_callback(&scoped).is_err());
+        // Ordinary tool callbacks stay refused.
+        let tool_callback = load("tool_callback.yaml");
+        assert!(admit_captured_compatible_callback(&tool_callback).is_err());
+    }
 
     #[test]
     fn item_spawn_failure_retains_only_boundary_proved_settlement() {
@@ -4148,6 +4518,7 @@ mod tests {
             realization_command: None,
             resource_policy: PersistentSessionResourcePolicy::Ordinary,
             persistent_session_capsule_hash: None,
+            captured_callback_class: false,
         }
     }
 
@@ -5326,5 +5697,38 @@ execution:
             error.to_string().contains("absolute and normalized"),
             "unexpected error: {error:#}"
         );
+    }
+}
+
+#[cfg(test)]
+mod captured_verifier_admission_tests {
+    use super::admit_captured_compatible_callback as admit;
+    use ryeos_engine::protocols::ProtocolDescriptor;
+
+    fn protocol(name: &str) -> ProtocolDescriptor {
+        let path = ryeos_engine::test_support::workspace_root()
+            .join("bundles/core/.ai/protocols/ryeos/core")
+            .join(name);
+        serde_yaml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn the_shipped_contained_verifier_protocol_is_admitted_to_captured_execution() {
+        let tool: serde_json::Value = serde_yaml::from_str(
+            &std::fs::read_to_string(ryeos_engine::test_support::workspace_root().join(
+                "bundles/codex/.ai/tools/codex/qualification/consumer-runtime-verifier.yaml",
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(tool["filesystem_authority"], "captured_execution");
+        assert_eq!(
+            tool["execution_protocol"],
+            "protocol:ryeos/core/qualification_consumer_callback"
+        );
+        admit(&protocol("qualification_consumer_callback.yaml")).unwrap();
+        // A callback protocol that declares no captured-compatible class stays refused.
+        assert!(admit(&protocol("qualification_scoped_callback.yaml")).is_err());
+        assert!(admit(&protocol("tool_callback.yaml")).is_err());
     }
 }

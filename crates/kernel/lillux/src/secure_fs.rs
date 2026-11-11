@@ -439,6 +439,15 @@ fn digest_open_regular_file_chunked_exact(
     Ok((format!("{:x}", whole.finalize()), chunks))
 }
 
+/// The portable project-snapshot form of one declared regular-file mode: a
+/// mode with any execute bit is 0o755, every other mode is 0o644. A caller
+/// that compares an observed file against a mode it declared in a delivery
+/// normalizes the declaration with this before comparing it to
+/// [`normalized_portable_regular_mode`].
+pub fn normalized_portable_mode(mode: u32) -> u32 {
+    if mode & 0o111 == 0 { 0o644 } else { 0o755 }
+}
+
 /// Normalize one descriptor-observed regular file to RyeOS's portable
 /// project-snapshot mode contract. OS-specific permission inspection remains
 /// inside Lillux; callers consume only the stable 0o644/0o755 result.
@@ -454,11 +463,7 @@ pub fn normalized_portable_regular_mode(metadata: &std::fs::Metadata) -> Result<
         if !metadata.file_type().is_file() {
             anyhow::bail!("portable mode source is not a regular file");
         }
-        Ok(if metadata.permissions().mode() & 0o111 == 0 {
-            0o644
-        } else {
-            0o755
-        })
+        Ok(normalized_portable_mode(metadata.permissions().mode()))
     }
 }
 
@@ -1143,6 +1148,7 @@ fn digest_open_regular_file_exact(file: &File, expected_bytes: u64) -> Result<St
         }
         digest.update(&buffer[..read]);
         remaining -= read as u64;
+        crate::progress::beat();
     }
     let mut sentinel = [0_u8; 1];
     if read_regular_file_at(file, &mut sentinel, expected_bytes)? != 0 {
@@ -2325,6 +2331,17 @@ fn remove_flat_directory_generation(
 }
 
 impl PinnedRegularFile {
+    /// Hand this exact inode's descriptor to a fork-closed lock, registered
+    /// while the caller still holds the lease it took before opening. A lock
+    /// held on it then never needs the fork window closed.
+    #[cfg(unix)]
+    pub fn into_fork_closed_lock(
+        self,
+        lease: &crate::exec::ForkSensitiveDescriptorLease,
+    ) -> crate::locks::ForkClosedLockFile {
+        crate::locks::ForkClosedLockFile::register(self.file, lease)
+    }
+
     /// Open one exact bounded byte stream whose digest must match an
     /// independently admitted upload identity. The stream must be consumed
     /// and finished before its bytes can be treated as staged input.
@@ -3815,10 +3832,46 @@ impl PinnedDirectory {
         Ok(())
     }
 
+    /// Re-anchor this path binding after the current process deliberately
+    /// entered a new mount namespace. Every mount there has a new identity, so
+    /// the original descriptor can no longer prove the path. Reopen the same
+    /// path inside the current namespace, require the identical directory
+    /// inode, and keep that descriptor: later checks then compare mounts
+    /// within this namespace. A binding that is not re-anchored keeps
+    /// refusing, and a path that now reaches another inode refuses here.
+    pub fn rebind_in_current_mount_namespace(&mut self) -> Result<()> {
+        if !self.path_binding_required {
+            return Ok(());
+        }
+        let current = Self::open(&self.path)?.ok_or_else(|| {
+            anyhow::anyhow!(
+                "pinned directory path disappeared at mount namespace entry: {}",
+                self.path.display()
+            )
+        })?;
+        ensure!(
+            self.is_same_directory(&current)?,
+            "pinned directory path reaches another inode after mount namespace entry: {}",
+            self.path.display()
+        );
+        self.directory = current.directory;
+        Ok(())
+    }
+
     /// Fixed-size path-binding check for an original admission checkpoint.
     /// This performs the same no-follow component traversal and exact inode /
     /// mount comparison as the ordinary check, without cloning path buffers or
     /// constructing dynamic refusals. It does not grant ownership or funding.
+    /// Give up this binding's path proof because the current process
+    /// deliberately entered a private root in which the path no longer
+    /// resolves (a sandbox prepared for a guest, as opposed to a private
+    /// source filesystem that keeps the host view). The open descriptor
+    /// remains the sole authority for every later traversal and mutation;
+    /// path proofs become no-ops instead of refusing a path that cannot exist.
+    pub fn release_path_binding(&mut self) {
+        self.path_binding_required = false;
+    }
+
     pub fn ensure_path_binding_fixed(&self) -> std::result::Result<(), &'static str> {
         if !self.path_binding_required {
             return Ok(());
@@ -8927,6 +8980,7 @@ fn copy_open_regular_into_new(
     }
     let mut target = unsafe { File::from_raw_fd(descriptor) };
     let result = (|| -> Result<()> {
+        crate::progress::beat();
         source.seek(std::io::SeekFrom::Start(0))?;
         let mut bounded = (&mut source).take(observation.size().saturating_add(1));
         let copied = std::io::copy(&mut bounded, &mut target)?;
@@ -9116,6 +9170,15 @@ fn restore_quarantined_regular(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn declared_modes_normalize_like_observed_ones() {
+        assert_eq!(super::normalized_portable_mode(0o500), 0o755);
+        assert_eq!(super::normalized_portable_mode(0o400), 0o644);
+        assert_eq!(super::normalized_portable_mode(0o644), 0o644);
+        assert_eq!(super::normalized_portable_mode(0o755), 0o755);
+        assert_eq!(super::normalized_portable_mode(0o010), 0o755);
+    }
+
     use super::*;
 
     #[test]
@@ -11772,6 +11835,37 @@ mod fixed_directory_binding_controls {
         assert!(original.ensure_path_binding().is_err());
         assert!(original.ensure_path_binding_fixed().is_err());
     }
+    #[test]
+    fn namespace_rebind_keeps_the_same_inode_and_refuses_another() {
+        let temp = tempfile::tempdir().unwrap();
+        let selected = temp.path().join("selected");
+        std::fs::create_dir(&selected).unwrap();
+        let mut original = super::PinnedDirectory::open(&selected).unwrap().unwrap();
+        let identity = original.identity().unwrap();
+        original.rebind_in_current_mount_namespace().unwrap();
+        assert_eq!(original.identity().unwrap(), identity);
+        original.ensure_path_binding().unwrap();
+        std::fs::rename(&selected, temp.path().join("retained")).unwrap();
+        std::fs::create_dir(&selected).unwrap();
+        assert!(original.rebind_in_current_mount_namespace().is_err());
+        assert_eq!(original.identity().unwrap(), identity);
+        assert!(original.ensure_path_binding().is_err());
+    }
+    #[test]
+    fn released_binding_keeps_descriptor_authority_without_path_proofs() {
+        let temp = tempfile::tempdir().unwrap();
+        let selected = temp.path().join("selected");
+        std::fs::create_dir(&selected).unwrap();
+        let mut original = super::PinnedDirectory::open(&selected).unwrap().unwrap();
+        let identity = original.identity().unwrap();
+        original.release_path_binding();
+        std::fs::rename(&selected, temp.path().join("retained")).unwrap();
+        std::fs::create_dir(&selected).unwrap();
+        original.ensure_path_binding().unwrap();
+        original.rebind_in_current_mount_namespace().unwrap();
+        assert_eq!(original.identity().unwrap(), identity);
+    }
+
     #[test]
     fn original_binding_rejects_symlink_replacement() {
         let temp = tempfile::tempdir().unwrap();

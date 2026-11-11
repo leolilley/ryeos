@@ -20,6 +20,7 @@ use ryeos_handler_protocol::{
 const ALLOWED_SECRET_NAMES: &[&str] = &[
     "ANTHROPIC_API_KEY",
     "DEEPSEEK_API_KEY",
+    "GEMINI_API_KEY",
     "OPENAI_API_KEY",
     "OPENROUTER_API_KEY",
     "ZAI_API_KEY",
@@ -104,7 +105,7 @@ fn prepare_inner(
             .map_err(|error| {
                 wire_error(
                     "directive_effective_header_invalid",
-                    error.to_string(),
+                    format!("{error:#}"),
                     LaunchPrepareErrorClass::Configuration,
                     None,
                 )
@@ -154,7 +155,7 @@ fn prepare_inner(
     .map_err(|error| {
         wire_error(
             "external_effect_authority_invalid",
-            error.to_string(),
+            format!("{error:#}"),
             LaunchPrepareErrorClass::Configuration,
             Some(MODEL_BINDING),
         )

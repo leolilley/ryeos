@@ -627,10 +627,13 @@ qualification is absent. A read-only Render inventory on 2026-09-27 returned
 no snapshots (`[]`), so none of the installed claims above has been made.
 
 The capabilities the signed bundle spec yields are exactly
-`authoritative_no_occurrence`, `exact_terminal_observation` and
-`supervisor_activation`. The last is derived only when both one-shot
-activation and the journal-claimed file relay are selected; it admits startup
-and does not attest `Ready`, which the channel owner still verifies. The first
+`authoritative_no_occurrence`, `controller_file_relay`,
+`exact_terminal_observation` and `supervisor_activation`.
+`controller_file_relay` is derived when the journal-claimed file relay is
+selected, and a binding may select the controller file relay transport only
+over an adapter that declares it. `supervisor_activation` is derived only
+when both one-shot activation and the file relay are selected; it admits
+startup and does not attest `Ready`, which the channel owner still verifies. The first
 capability is limited to W1's
 `NoRequestSent` result; provider response errors do not currently establish it.
 The adapter does not declare `idempotent_termination` because it follows the
@@ -661,9 +664,9 @@ frames to it on an inherited descriptor.
   descriptors, since its request arrives on the request descriptor. It reads
   the signed provider spec and a canonical request (schema 3) carrying the
   workload's lease entries, its guest entries, its guest egress allow-list,
-  its lifetime and activation deadline, and optionally `ready_clock_skew_ms`,
-  how far the guest's Ready time may lead the controller's clock (default
-  5 s, at most 30 s). The
+  its lifetime and activation deadline. The guest's Ready time is its own
+  testimony and is not compared with the controller's clock; the controller
+  judges Ready against the activation deadline on its own clock. The
   evidence is `provider_attested` by `render_sandbox_v1` and derived from
   implemented operation kinds only (`lease.create_bound`,
   `lease.lifetime_bound`, `lease.network_policy`, `lease.terminate_observed`,

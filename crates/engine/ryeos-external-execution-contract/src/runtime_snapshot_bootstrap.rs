@@ -147,10 +147,10 @@ pub struct RuntimeSnapshotBootstrapOccurrence {
     pub operation_id: String,
     pub occurrence_id: String,
     pub provider_response_sha256: String,
-    /// Bounded provider create-response evidence. The Render adapter must
+    /// Bounded provider create-response evidence. The lifecycle adapter must
     /// independently check the fields the response actually exposes (ID,
     /// plan, region, lifetime, network policy, creation time), with account
-    /// scoped by its authenticated request. Render does not return group
+    /// scoped by its authenticated request. The provider may not return group
     /// membership here; snapshot creation must prove the intended group.
     /// This object alone proves neither readiness nor snapshot suitability.
     pub provider_creation_observation: serde_json::Value,
@@ -455,7 +455,7 @@ mod tests {
             schema: BOOTSTRAP_INTENT_SCHEMA,
             operation_id: String::new(),
             owner_principal: format!("fp:{}", "1".repeat(64)),
-            provider_id: "render-sandbox-early-access".into(),
+            provider_id: "test-backend".into(),
             provider_group_id: "sbg-exact".into(),
             production_binding_digest: "2".repeat(64),
             bootstrap_profile_digest: "a".repeat(64),

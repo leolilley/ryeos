@@ -226,12 +226,12 @@ mod tests {
 
     #[test]
     fn request_is_the_adapters_exact_canonical_shape() {
-        let bytes = canonical_request("render-sandbox", SPEC, &inputs()).unwrap();
+        let bytes = canonical_request("test-adapter", SPEC, &inputs()).unwrap();
         // The adapter re-serializes the request in its own field order, with
         // each requirement entry in Lillux's field order, and must get these
         // exact bytes back.
         let expected = format!(
-            "{{\"schema\":3,\"adapter_id\":\"render-sandbox\",\
+            "{{\"schema\":3,\"adapter_id\":\"test-adapter\",\
              \"provider_spec_sha256\":\"{SPEC}\",\"workload\":\"codex.authoring.remote\",\
              \"requires_before_spend\":[{{\"name\":\"lease.network_policy\",\
              \"accept\":[\"provider_attested\"]}},\"time\"],\
@@ -242,7 +242,7 @@ mod tests {
         );
         assert_eq!(String::from_utf8(bytes.clone()).unwrap(), expected);
         assert_eq!(
-            canonical_request("render-sandbox", SPEC, &inputs()).unwrap(),
+            canonical_request("test-adapter", SPEC, &inputs()).unwrap(),
             bytes,
             "the same inputs always yield the same retained bytes"
         );
@@ -287,19 +287,19 @@ mod tests {
 
     #[test]
     fn an_admitted_verdict_must_name_the_exact_request_and_spec() {
-        let request = canonical_request("render-sandbox", SPEC, &inputs()).unwrap();
+        let request = canonical_request("test-adapter", SPEC, &inputs()).unwrap();
         let admitted = verdict(
             &request,
             "admitted",
             serde_json::json!({"met_by": {}, "budget_weight": 1}),
         );
         assert_eq!(
-            require_admitted(&admitted, &request, SPEC, "render-sandbox").unwrap(),
+            require_admitted(&admitted, &request, SPEC, "test-adapter").unwrap(),
             1
         );
 
         let other = canonical_request(
-            "render-sandbox",
+            "test-adapter",
             SPEC,
             &LeaseAdmissionInputs {
                 activation_deadline_seconds: 301,
@@ -307,18 +307,18 @@ mod tests {
             },
         )
         .unwrap();
-        let error = require_admitted(&admitted, &other, SPEC, "render-sandbox").unwrap_err();
+        let error = require_admitted(&admitted, &other, SPEC, "test-adapter").unwrap_err();
         assert!(error.to_string().contains("different request"), "{error:#}");
         let other_spec = "0".repeat(64);
-        assert!(require_admitted(&admitted, &request, &other_spec, "render-sandbox").is_err());
-        assert!(require_admitted(b"not json", &request, SPEC, "render-sandbox").is_err());
+        assert!(require_admitted(&admitted, &request, &other_spec, "test-adapter").is_err());
+        assert!(require_admitted(b"not json", &request, SPEC, "test-adapter").is_err());
         let unknown = verdict(&request, "maybe", serde_json::json!({}));
-        assert!(require_admitted(&unknown, &request, SPEC, "render-sandbox").is_err());
+        assert!(require_admitted(&unknown, &request, SPEC, "test-adapter").is_err());
     }
 
     #[test]
     fn an_admitted_verdict_names_its_specs_budget_weight_within_bound() {
-        let request = canonical_request("render-sandbox", SPEC, &inputs()).unwrap();
+        let request = canonical_request("test-adapter", SPEC, &inputs()).unwrap();
         let max = ryeos_external_execution_contract::MAX_LEASE_BUDGET_WEIGHT;
         for weight in [1, 50, max] {
             let admitted = verdict(
@@ -327,17 +327,17 @@ mod tests {
                 serde_json::json!({"met_by": {}, "budget_weight": weight}),
             );
             assert_eq!(
-                require_admitted(&admitted, &request, SPEC, "render-sandbox").unwrap(),
+                require_admitted(&admitted, &request, SPEC, "test-adapter").unwrap(),
                 weight
             );
         }
         let missing = verdict(&request, "admitted", serde_json::json!({"met_by": {}}));
-        let text = require_admitted(&missing, &request, SPEC, "render-sandbox")
+        let text = require_admitted(&missing, &request, SPEC, "test-adapter")
             .unwrap_err()
             .to_string();
         assert!(
             text.contains(&format!(
-                "lease refused: lifecycle adapter `render-sandbox` admitted the lease without \
+                "lease refused: lifecycle adapter `test-adapter` admitted the lease without \
                  the budget_weight of provider spec {SPEC}"
             )),
             "{text}"
@@ -352,7 +352,7 @@ mod tests {
                 "admitted",
                 serde_json::json!({"met_by": {}, "budget_weight": refused}),
             );
-            let text = require_admitted(&admitted, &request, SPEC, "render-sandbox")
+            let text = require_admitted(&admitted, &request, SPEC, "test-adapter")
                 .unwrap_err()
                 .to_string();
             assert!(
@@ -371,28 +371,28 @@ mod tests {
                 "admitted",
                 serde_json::json!({"met_by": {}, "budget_weight": malformed}),
             );
-            assert!(require_admitted(&admitted, &request, SPEC, "render-sandbox").is_err());
+            assert!(require_admitted(&admitted, &request, SPEC, "test-adapter").is_err());
         }
     }
 
     #[test]
     fn a_stage_one_refusal_is_plain_and_names_its_adapter() {
-        let request = canonical_request("render-sandbox", SPEC, &inputs()).unwrap();
+        let request = canonical_request("test-adapter", SPEC, &inputs()).unwrap();
         let refused = verdict(
             &request,
             "refused",
             serde_json::json!({
                 "unmet": {"guest.ready_authenticated": "unattested"},
                 "reason": "`codex.authoring.remote` requires `guest.ready_authenticated`:\n\
-                           provider spec render_sandbox_v1 declares guest_channel \
+                           provider spec test_profile_v1 declares guest_channel \
                            unsupported_pending"
             }),
         );
-        let text = require_admitted(&refused, &request, SPEC, "render-sandbox")
+        let text = require_admitted(&refused, &request, SPEC, "test-adapter")
             .unwrap_err()
             .to_string();
         assert!(text.starts_with("lease admission refused before any provider contact"));
-        assert!(text.contains("`render-sandbox`"), "{text}");
+        assert!(text.contains("`test-adapter`"), "{text}");
         assert!(text.contains("guest_channel unsupported_pending"), "{text}");
         assert!(!text.contains('\n'), "{text}");
         assert!(plain_reason(&"x".repeat(MAX_REFUSAL_REASON_BYTES * 2)).len() < 4100);

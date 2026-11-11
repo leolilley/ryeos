@@ -56,12 +56,23 @@ const MAX_PROBE_VALUE_BYTES: usize = 8 * 1024;
 #[serde(rename_all = "snake_case")]
 pub enum VerifierProcessSettlementAuthority {
     ScopeEmpty,
+    /// The retained containment of the verifier's descendants (its private
+    /// PID-namespace init) is gone, so every descendant, including one that
+    /// left the process group, is gone. Settlement is as complete as
+    /// `ScopeEmpty`; it names a different mechanism and, unlike a scope, was
+    /// never able to freeze the tree. A policy naming `scope_empty` therefore
+    /// does not accept it, while one naming this accepts either.
+    ContainmentEmpty,
     TrustedProcessGroupAbsent,
 }
 
 impl VerifierProcessSettlementAuthority {
-    fn satisfies(self, minimum: Self) -> bool {
-        self == minimum || (self == Self::ScopeEmpty && minimum == Self::TrustedProcessGroupAbsent)
+    /// Whether a settlement of this authority meets a policy or checker `minimum`.
+    pub fn satisfies(self, minimum: Self) -> bool {
+        self == minimum
+            || (minimum == Self::TrustedProcessGroupAbsent
+                && matches!(self, Self::ScopeEmpty | Self::ContainmentEmpty))
+            || (minimum == Self::ContainmentEmpty && self == Self::ScopeEmpty)
     }
 }
 
@@ -83,6 +94,11 @@ pub struct ProductQualificationPolicy {
     /// Bundle generation and join them to the selected relationship.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub consumer_execution_context: Option<ProductQualificationConsumerExecutionContext>,
+    /// Guarantees a node must hold, under the capability names it reports,
+    /// to prove or launch this policy. A node lacking one refuses; empty asks
+    /// nothing of the node.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requires_guarantees: Vec<lillux::process_control::CapabilityRequirement>,
     /// Finite signed alternatives for one selected producer attempt per
     /// admitted verifier root. A ref is only source identity, not permission
     /// to launch: the daemon must resolve and admit a typed Bundle recipe.
@@ -855,6 +871,9 @@ impl ProductQualificationPolicy {
         )?;
         if let Some(context) = &self.consumer_execution_context {
             context.validate()?;
+        }
+        if !self.requires_guarantees.is_empty() {
+            super::qualification_variants::validate_required_guarantees(&self.requires_guarantees)?;
         }
         if self.producer_scenarios.len() > MAX_PRODUCT_QUALIFICATION_PRODUCER_SCENARIOS {
             bail!("qualification producer scenario count exceeds bound");
