@@ -2663,6 +2663,7 @@ pub fn resolve_current_bundle_producer_recipe_for_purpose(
     scenario_id: &str,
 ) -> anyhow::Result<CurrentBundleProducerRecipe> {
     state.engine.with_checked_bundle_generation(|generation| {
+        require_consumer_content_generation(purpose.consumer_content(), generation)?;
         resolve_current_bundle_producer_recipe_for_purpose_in_generation(
             state,
             generation,
@@ -2697,11 +2698,6 @@ fn resolve_current_bundle_producer_recipe_for_purpose_in_generation(
     let current = resolve_bundle_producer_recipe_in_generation(generation, recipe_ref)?;
     require_direct_consumer_target(&current_policy, &current, purpose.subject_manifest_hash())?;
     if let Some(content) = purpose.consumer_content() {
-        if generation.request_engine_generation_identity()
-            != content.definitions.bundle_generation_identity
-        {
-            bail!("qualification consumer Bundle generation changed before direct probe");
-        }
         let ProducerExecutableSource::AdmittedRealizationMember {
             relative_path,
             executable_sha256,
@@ -2818,6 +2814,7 @@ impl PreparedExternalQualificationRoot {
         &self,
         generation: &ryeos_engine::engine::CheckedEngineGeneration<'_>,
     ) -> anyhow::Result<ResolutionOutput> {
+        require_admitted_bundle_generation(&self.purpose, generation)?;
         let (worker, contract) = derive_qualification_worker_resolution(
             &self.purpose,
             &self.program,
@@ -2831,6 +2828,36 @@ impl PreparedExternalQualificationRoot {
         }
         Ok(worker)
     }
+}
+
+/// A qualification-only launch runs in the Bundle generation its root was
+/// admitted under. The generation identity is process-local, so this is a
+/// launch-time freshness check only; re-verifying a retained proof later
+/// compares the signed definitions instead.
+fn require_admitted_bundle_generation(
+    purpose: &ryeos_state::external_content::qualification_purpose::QualificationLaunchPurpose,
+    generation: &ryeos_engine::engine::CheckedEngineGeneration<'_>,
+) -> anyhow::Result<()> {
+    let content = purpose
+        .consumer_content
+        .as_ref()
+        .context("qualification-only root has no accepted Worker content")?;
+    require_consumer_content_generation(Some(content), generation)
+}
+
+/// The launch-time half of [`require_admitted_bundle_generation`] for a
+/// purpose view; a purpose without consumer content admitted no generation.
+fn require_consumer_content_generation(
+    content: Option<&ProductQualificationConsumerContentIdentity>,
+    generation: &ryeos_engine::engine::CheckedEngineGeneration<'_>,
+) -> anyhow::Result<()> {
+    if let Some(content) = content
+        && generation.request_engine_generation_identity()
+            != content.definitions.bundle_generation_identity
+    {
+        bail!("qualification consumer changed its admitted Bundle generation");
+    }
+    Ok(())
 }
 
 fn derive_qualification_worker_resolution(
@@ -2858,14 +2885,12 @@ fn derive_qualification_worker_resolution(
         .as_ref()
         .context("qualification-only root has no signed consumer context")?;
     content.definitions.validate_for(context)?;
-    if generation.request_engine_generation_identity()
-        != content.definitions.bundle_generation_identity
-        || resolve_current_bundle_qualification_policy_in_generation(
-            generation,
-            &purpose.policy_source.canonical_ref,
-        )? != purpose.policy_source
+    if resolve_current_bundle_qualification_policy_in_generation(
+        generation,
+        &purpose.policy_source.canonical_ref,
+    )? != purpose.policy_source
     {
-        bail!("qualification-only Worker changed its accepted Bundle generation or policy");
+        bail!("qualification-only Worker changed its accepted policy");
     }
     let worker =
         resolve_consumer_definition_in_generation(generation, &context.worker_ref, "worker")?;
@@ -3031,6 +3056,7 @@ pub fn prepare_external_qualification_root_for_invocation(
     drop(guard);
     let (_, worker_launch_contract) =
         state.engine.with_checked_bundle_generation(|generation| {
+            require_admitted_bundle_generation(purpose, generation)?;
             derive_qualification_worker_resolution(
                 purpose, &program, &profile, &owner, coordinate, generation,
             )
@@ -3837,6 +3863,7 @@ pub fn prepare_remote_consumer_verifier_for_purpose(
     protected_selection: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerifierSelection,
 ) -> anyhow::Result<PreparedRemoteConsumerVerifier> {
     state.engine.with_checked_bundle_generation(|generation| {
+        require_consumer_content_generation(purpose.consumer_content(), generation)?;
         // A probe scenario pins no producer, so there is no recipe to recheck.
         if purpose
             .policy_source()

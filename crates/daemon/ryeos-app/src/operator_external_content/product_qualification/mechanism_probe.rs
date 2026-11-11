@@ -132,6 +132,7 @@ impl CapturedMechanismProbeSource {
             capsule.content_hash()? == self.root_capsule_hash,
             "mechanism preparation changed its original root capsule"
         );
+        super::require_consumer_content_generation(purpose.consumer_content(), generation)?;
         let current = super::resolve_current_bundle_producer_recipe_for_purpose_in_generation(
             state, generation, purpose, scenario,
         )?;
@@ -218,6 +219,7 @@ pub fn capture_root_mechanism_probe_source(
         .context("mechanism probe source has no original admitted root capsule")?;
     let root_capsule_hash = capsule.content_hash()?;
     state.engine.with_checked_bundle_generation(|generation| {
+        super::require_consumer_content_generation(purpose.consumer_content(), generation)?;
         let current = super::resolve_current_bundle_producer_recipe_for_purpose_in_generation(
             state,
             generation,
