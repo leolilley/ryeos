@@ -177,6 +177,7 @@ jobs:
         with:
           toolchain: 1.95.0
           components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
 
       - name: Install cargo-deny
         uses: taiki-e/install-action@1725d1806acf0cd664ecc8dd0fcff6d896453dcf # cargo-deny
@@ -198,6 +199,10 @@ jobs:
 
       - name: Check Clippy policy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      # The browser renderer's page entry and the runtime's web platform compile only for wasm32.
+      - name: Check browser renderer Clippy policy
+        run: cargo clippy --locked -p ryeos-client-rune --target wasm32-unknown-unknown -- -D warnings
 
       - name: Check dependency advisories, licenses, and sources
         run: cargo deny check
@@ -810,7 +815,7 @@ jobs:
           set +e
           CARGO_TARGET_DIR="$RUNNER_TEMP/ryeos-rust-2024-wasm-target" \
           RUSTFLAGS="-W rust-2024-compatibility" \
-            cargo check --locked -p ryeos-client-web \
+            cargo check --locked -p ryeos-client-web -p ryeos-client-rune \
               --target wasm32-unknown-unknown --lib --message-format=json \
               >"$RUNNER_TEMP/ryeos-rust-2024-diagnostics/wasm.jsonl" \
               2>"$RUNNER_TEMP/ryeos-rust-2024-diagnostics/wasm.stderr"
