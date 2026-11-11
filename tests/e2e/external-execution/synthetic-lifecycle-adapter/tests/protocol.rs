@@ -1632,8 +1632,10 @@ fn run_signed_worker_admission_on(
     );
     if case == SignedAdmissionCase::ContainedConnectorDescendants {
         // The declared `contained` requirement is answered by what this
-        // enforced node reports: admitted when it qualified a containment
-        // mechanism, refused naming the missing guarantee when it did not.
+        // enforced node reports, and a candidate launch binds no retained
+        // containment of its own (only the qualification Worker launch does):
+        // with a qualified mechanism it is refused for that missing binding,
+        // without one it is refused naming the missing guarantee.
         let reported = state
             .isolation
             .inspection()
@@ -1642,7 +1644,11 @@ fn run_signed_worker_admission_on(
             .enforced_guarantee();
         match reported {
             Some(_) => {
-                admission.unwrap();
+                let error = admission.unwrap_err();
+                assert!(
+                    format!("{error:#}").contains("binds no retained containment"),
+                    "unexpected refusal: {error:#}"
+                );
             }
             None => {
                 let error = admission.unwrap_err();
