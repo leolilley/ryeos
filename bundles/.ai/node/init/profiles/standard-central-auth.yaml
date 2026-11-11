@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-11T02:56:40Z:47df6ce95246b5e7f0f10b0606e9cea372d7e522f60ca82dd6c6f190ddf58909:JRsUl0ZjRD/0MocyKlKTnhtSMF6grgMEKwlL5qdF8a2zNaU5UGbvd0hqr7Kc2oJROlUmZ1/dxuItOuG33KU3Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-11T04:16:48Z:961d77eef5ad266f2dc30fef156760872f42e5c96a3a2a66c549064026818b7e:gvWDzxClyRGnd6RNDIuRGNBw5kS1VytAicPQQJsH6kNqmZ1J7lU9xINA9ObQdVWb0ny3Odyn+J1b2RZIjvnUBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Optional application authentication above the standard set.
 schema: 1
 exact_bundles:
@@ -318,6 +318,7 @@ policies:
       - ".git/"
       - ".hg/"
       - ".svn/"
+      - ".tmp/"
       - ".venv/"
       - "/.ai/config/remotes/"
       - "/.ai/state/"
