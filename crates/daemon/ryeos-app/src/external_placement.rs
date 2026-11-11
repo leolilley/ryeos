@@ -15172,6 +15172,7 @@ mod tests {
             owner_report_exit_for("T", &good, occurrence, &allocation, &bootstrap),
             Some(exit)
         );
+        let wrong_identity = "c".repeat(64);
         // Wrong identity, malformed and non-canonical files are all ignored.
         for (bytes, occ, alloc, boot) in [
             (
@@ -15183,14 +15184,14 @@ mod tests {
             (
                 good.clone(),
                 occurrence,
-                "c".repeat(64).leak() as &str,
+                wrong_identity.as_str(),
                 bootstrap.as_str(),
             ),
             (
                 good.clone(),
                 occurrence,
                 allocation.as_str(),
-                "c".repeat(64).leak() as &str,
+                wrong_identity.as_str(),
             ),
             (
                 b"{\"exit\":".to_vec(),

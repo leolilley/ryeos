@@ -10583,8 +10583,10 @@ mod tests {
             thread_id: "T-runtime-socket",
             verbatim_env_names: &[],
         };
-        let runtime_static: &'static Path = Box::leak(runtime_path.clone().into_boxed_path());
-        let control_static: &'static Path = Box::leak(control_path.clone().into_boxed_path());
+        static RUNTIME: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+        static CONTROL: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+        let runtime_static: &'static Path = RUNTIME.get_or_init(|| runtime_path.clone());
+        let control_static: &'static Path = CONTROL.get_or_init(|| control_path.clone());
         let plan_of = |applied: AppliedIsolationLaunch| {
             let (bytes, _) = applied
                 .request
@@ -10680,7 +10682,8 @@ mod tests {
         ]);
         backend.declaration.capabilities = backend.effective_capabilities.clone();
         let backend = Arc::new(backend);
-        let runtime_static: &'static Path = Box::leak(runtime_path.clone().into_boxed_path());
+        static RUNTIME_ONLY: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+        let runtime_static: &'static Path = RUNTIME_ONLY.get_or_init(|| runtime_path.clone());
 
         for broad in [
             socket_dir.path().to_string_lossy().into_owned(),
