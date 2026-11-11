@@ -495,16 +495,21 @@ where
             fs::remove_dir_all(&staging)
                 .with_context(|| format!("remove stale staging dir {}", staging.display()))?;
         }
-        copy_dir_recursive(&source, &staging).with_context(|| {
-            format!(
-                "copy bundle from {} to staging {}",
-                source.display(),
-                staging.display()
-            )
-        })?;
-        lillux::sync_tree_durable(&staging)
-            .with_context(|| format!("flush staged bundle {}", staging.display()))?;
-        verify_staged(&staging)?;
+        discard_unadmitted_staging(
+            &staging,
+            (|| {
+                copy_dir_recursive(&source, &staging).with_context(|| {
+                    format!(
+                        "copy bundle from {} to staging {}",
+                        source.display(),
+                        staging.display()
+                    )
+                })?;
+                lillux::sync_tree_durable(&staging)
+                    .with_context(|| format!("flush staged bundle {}", staging.display()))?;
+                verify_staged(&staging)
+            })(),
+        )?;
         transaction.begin_present(
             ryeos_app::bundle_transaction::BundleOperation::Install,
             &staging,
@@ -603,19 +608,24 @@ where
             fs::remove_dir_all(&staging)
                 .with_context(|| format!("remove stale staging dir {}", staging.display()))?;
         }
-        copy_dir_recursive(&source, &staging).with_context(|| {
-            format!(
-                "copy replacement bundle from {} to staging {}",
-                source.display(),
-                staging.display(),
-            )
-        })?;
-        if preserve_runtime_artifacts {
-            preserve_runtime_artifact_dirs(&canonical_target, &staging)?;
-        }
-        lillux::sync_tree_durable(&staging)
-            .with_context(|| format!("flush staged bundle {}", staging.display()))?;
-        verify_staged(&staging)?;
+        discard_unadmitted_staging(
+            &staging,
+            (|| {
+                copy_dir_recursive(&source, &staging).with_context(|| {
+                    format!(
+                        "copy replacement bundle from {} to staging {}",
+                        source.display(),
+                        staging.display(),
+                    )
+                })?;
+                if preserve_runtime_artifacts {
+                    preserve_runtime_artifact_dirs(&canonical_target, &staging)?;
+                }
+                lillux::sync_tree_durable(&staging)
+                    .with_context(|| format!("flush staged bundle {}", staging.display()))?;
+                verify_staged(&staging)
+            })(),
+        )?;
         transaction.begin_present(
             ryeos_app::bundle_transaction::BundleOperation::Replace,
             &staging,
@@ -648,6 +658,23 @@ where
         }
         Ok(())
     })()
+}
+
+/// A staging tree belongs to no bundle transaction until `begin_present`, so
+/// when copying, flushing or admitting it fails the tree is removed here: left
+/// in the bundle root it is an entry init refuses and nothing would recover.
+fn discard_unadmitted_staging(staging: &Path, staged: Result<()>) -> Result<()> {
+    let Err(error) = staged else {
+        return Ok(());
+    };
+    match fs::remove_dir_all(staging) {
+        Ok(()) => Err(error),
+        Err(cleanup) if cleanup.kind() == std::io::ErrorKind::NotFound => Err(error),
+        Err(cleanup) => Err(error.context(format!(
+            "the unadmitted staging tree {} could not be removed: {cleanup}",
+            staging.display()
+        ))),
+    }
 }
 
 fn preserve_runtime_artifact_dirs(existing: &Path, staging: &Path) -> Result<()> {
@@ -884,6 +911,41 @@ mod tests {
         assert!(error.to_string().contains("completed staging rejected"));
         assert_eq!(fs::read(target.join("old.txt")).unwrap(), b"old");
         assert!(!target.join(".ai/node/commands/new.yaml").exists());
+        assert!(!bundles.join(".demo.staging").exists());
+    }
+
+    #[test]
+    fn refused_install_leaves_no_staging_tree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let bundles = tmp.path().join(".ai/bundles");
+        let target = bundles.join("demo");
+        fs::create_dir_all(src.join(".ai/config")).unwrap();
+        fs::create_dir_all(&bundles).unwrap();
+        fs::write(src.join(".ai/config/policy.yaml"), b"policy").unwrap();
+        let registry_lock =
+            ryeos_node_runtime::registry::BundleRegistryMutationLock::acquire(tmp.path()).unwrap();
+        let transaction = ryeos_app::bundle_transaction::BundleMutationTransaction::acquire(
+            &registry_lock,
+            "demo",
+        )
+        .unwrap();
+
+        let error = install_dir_atomic(
+            &src,
+            &target,
+            &transaction,
+            serde_json::json!({ "kind": "node", "path": target }),
+            |staging| {
+                assert!(staging.join(".ai/config/policy.yaml").is_file());
+                anyhow::bail!("completed staging rejected")
+            },
+        )
+        .expect_err("a refused staging tree must not activate");
+
+        assert!(format!("{error:#}").contains("completed staging rejected"));
+        assert!(!target.exists());
+        assert!(!bundles.join(".demo.staging").exists());
     }
 
     #[test]
