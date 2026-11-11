@@ -310,7 +310,7 @@ impl FiniteProductContract {
             "unsupported finite product setup.sandbox"
         );
         ensure!(
-            self.setup.permission_profile == "danger-full-access",
+            self.setup.permission_profile == ":danger-full-access",
             "unsupported finite product setup.permission_profile"
         );
         ensure!(
@@ -524,7 +524,7 @@ mod tests {
             "approval_policy": "never",
             "approvals_reviewer": "user",
             "sandbox": "dangerFullAccess",
-            "permission_profile": "danger-full-access",
+            "permission_profile": ":danger-full-access",
             "model_selection": "compare-only-explicit-signed-selection"
           },
           "families": {

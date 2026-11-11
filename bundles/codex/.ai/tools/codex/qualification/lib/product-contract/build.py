@@ -100,7 +100,7 @@ FIXED = {
         "approvals_reviewer": "user",
         "model_provider": "openai",
         "model_selection": "compare-only-explicit-signed-selection",
-        "permission_profile": "danger-full-access",
+        "permission_profile": ":danger-full-access",
         "sandbox": "dangerFullAccess",
     },
     "worker_ref": "worker:codex/external-hosted-authoring",
