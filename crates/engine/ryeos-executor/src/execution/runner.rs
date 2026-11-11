@@ -3325,12 +3325,12 @@ fn build_protocol_launch_env(
         });
 
     let isolation_daemon_socket_path =
-        callback_ipc_requested.then(|| state.config.uds_path.clone());
+        callback_ipc_requested.then(|| state.config.runtime_uds_path());
     let callback_socket_path = if callback_socket_requested {
         Some(
             state
                 .config
-                .uds_path
+                .runtime_uds_path()
                 .to_str()
                 .ok_or_else(|| anyhow::anyhow!("callback socket path is not valid UTF-8"))?
                 .to_owned(),

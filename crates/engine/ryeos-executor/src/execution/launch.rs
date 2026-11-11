@@ -7123,7 +7123,7 @@ async fn run_claimed_thread_row_inner(
             hard_limits: hard_limits.clone(),
         },
         EnvelopeCallback {
-            socket_path: state.config.uds_path.clone(),
+            socket_path: state.config.runtime_uds_path(),
             token: cap.token.clone(),
         },
         effective_program,

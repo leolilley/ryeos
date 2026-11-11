@@ -4138,7 +4138,8 @@ async fn run(
     );
 
     let early_startup = async {
-        process::remove_stale_socket(&config.uds_path)?;
+        let runtime_uds_path = config.runtime_uds_path();
+        process::remove_stale_sockets(&[&config.uds_path, &runtime_uds_path])?;
         ensure_runtime_paths(&config)?;
         let daemon_json_path = config.app_root.join("daemon.json");
         let _ = std::fs::remove_file(&daemon_json_path);
@@ -4152,12 +4153,32 @@ async fn run(
         let actual_bind = tcp_listener
             .local_addr()
             .with_context(|| format!("failed to read local_addr after binding {}", config.bind))?;
-        let uds_listener = UnixListener::bind(&config.uds_path)
-            .with_context(|| format!("failed to bind {}", config.uds_path.display()))?;
-        Ok::<_, anyhow::Error>((tcp_listener, uds_listener, daemon_json_path, actual_bind))
+        // Both sockets are created owner-only. Cleanup guards the first socket
+        // before the second is bound, so a failed second bind leaves no stale
+        // control socket behind.
+        let uds_listener = bind_owner_private_listener(&config.uds_path)?;
+        let discovery_cleanup =
+            startup::DiscoveryCleanup::new(config.uds_path.clone(), daemon_json_path.clone())?;
+        let runtime_uds_listener = bind_owner_private_listener(&runtime_uds_path)?;
+        let discovery_cleanup = discovery_cleanup.with_runtime_socket(runtime_uds_path)?;
+        Ok::<_, anyhow::Error>((
+            tcp_listener,
+            uds_listener,
+            runtime_uds_listener,
+            discovery_cleanup,
+            daemon_json_path,
+            actual_bind,
+        ))
     }
     .await;
-    let (tcp_listener, uds_listener, daemon_json_path, actual_bind) = match early_startup {
+    let (
+        tcp_listener,
+        uds_listener,
+        runtime_uds_listener,
+        _discovery_cleanup,
+        daemon_json_path,
+        actual_bind,
+    ) = match early_startup {
         Ok(value) => value,
         Err(error) => {
             let detail = format!("{error:#}");
@@ -4166,20 +4187,6 @@ async fn run(
         }
     };
     config.bind = actual_bind;
-    let _discovery_cleanup =
-        startup::DiscoveryCleanup::new(config.uds_path.clone(), daemon_json_path.clone())?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&config.uds_path, std::fs::Permissions::from_mode(0o600))
-            .with_context(|| {
-                format!(
-                    "failed to set socket permissions on {}",
-                    config.uds_path.display()
-                )
-            })?;
-    }
 
     // daemon.json is an early discovery hint.  Live lifecycle truth always
     // comes from the UDS, and started_at is process start (never ready time).
@@ -4214,8 +4221,9 @@ async fn run(
     let startup = startup::StartupCoordinator::bootstrap(lifecycle_identity, process_started)?;
     let recovery_execution_release = ryeos_app::recovery_execution_gate::arm();
     let http_state = startup.http_state();
-    let mut uds_task = tokio::spawn(uds::server::serve_dynamic(
+    let mut uds_task = tokio::spawn(uds::server::serve_dynamic_pair(
         uds_listener,
+        runtime_uds_listener,
         startup.uds_state(),
     ));
     let shutdown = shutdown_signal();
@@ -8089,6 +8097,13 @@ async fn shutdown_signal() {
     ryeosd::request_shutdown();
 }
 
+/// Bind an owner-only Unix listener and hand it to the async runtime.
+fn bind_owner_private_listener(path: &std::path::Path) -> Result<UnixListener> {
+    let listener = lillux::local_ipc::bind_owner_private_unix_listener(path)
+        .with_context(|| format!("failed to bind {}", path.display()))?;
+    UnixListener::from_std(listener).with_context(|| format!("failed to adopt {}", path.display()))
+}
+
 fn ensure_runtime_paths(config: &Config) -> Result<()> {
     if let Some(parent) = config.db_path.parent() {
         std::fs::create_dir_all(parent)
@@ -8104,6 +8119,17 @@ fn ensure_runtime_paths(config: &Config) -> Result<()> {
             .with_context(|| format!("configured uds parent is absent: {}", parent.display()))?
             .ensure_path_binding()
             .with_context(|| format!("configured uds parent changed: {}", parent.display()))?;
+    }
+    // The callback-only socket is derived beside the control socket and is
+    // longer by its suffix, so a control path that fits can still leave it
+    // unaddressable. Refuse before binding, naming the budget.
+    let runtime_uds_path = config.runtime_uds_path();
+    if !lillux::local_ipc::local_endpoint_path_addressable(&runtime_uds_path) {
+        anyhow::bail!(
+            "callback socket path {} exceeds the {}-byte local socket limit; configure a shorter uds_path",
+            runtime_uds_path.display(),
+            lillux::local_ipc::max_local_endpoint_path_bytes()
+        );
     }
     Ok(())
 }

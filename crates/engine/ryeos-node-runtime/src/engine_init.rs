@@ -537,6 +537,7 @@ pub fn load_test_daemon_execution_isolation(
     ryeos_engine::isolation::IsolationRuntime::resolve_compiled_policy_for_daemon(
         app_root,
         daemon_socket,
+        None,
         policy,
         crate::node_policy::generation::policy_directory(app_root).join("isolation.yaml"),
         format!("sha256:{}", "0".repeat(64)),

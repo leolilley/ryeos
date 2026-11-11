@@ -131,9 +131,57 @@ pub async fn serve(
     serve_dynamic(listener, dynamic).await
 }
 
+/// Which of the daemon's two Unix sockets accepted a connection. Both run the
+/// same framing, peer and bearer authorization; they differ only in the
+/// methods admitted before routing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SocketSurface {
+    /// The control socket: lifecycle and health reads for the CLI and local
+    /// operators, plus every `runtime.*` callback.
+    Operator,
+    /// The callback-only socket handed to sandboxed tools and runtimes. It
+    /// admits `runtime.*` alone, so a holder learns nothing the unauthenticated
+    /// lifecycle and health reads would disclose about the node.
+    RuntimeOnly,
+}
+
+impl SocketSurface {
+    /// The gate applied to every request before routing.
+    pub(crate) fn admits(self, method: &str) -> bool {
+        match self {
+            Self::Operator => true,
+            Self::RuntimeOnly => method.starts_with("runtime."),
+        }
+    }
+}
+
+/// Serve the control socket and the callback-only socket from one task, so
+/// losing either listener is a daemon listener loss.
+pub async fn serve_dynamic_pair(
+    operator: UnixListener,
+    runtime_only: UnixListener,
+    state: DynamicServerState,
+) -> Result<()> {
+    tokio::try_join!(
+        serve_surface(operator, state.clone(), SocketSurface::Operator),
+        serve_surface(runtime_only, state, SocketSurface::RuntimeOnly),
+    )?;
+    Ok(())
+}
+
 pub async fn serve_dynamic(listener: UnixListener, state: DynamicServerState) -> Result<()> {
+    serve_surface(listener, state, SocketSurface::Operator).await
+}
+
+async fn serve_surface(
+    listener: UnixListener,
+    state: DynamicServerState,
+    surface: SocketSurface,
+) -> Result<()> {
     #[cfg(feature = "crash-qualification-test-support")]
-    runtime_phase_cut::initialize_from_env()?;
+    if surface == SocketSurface::Operator {
+        runtime_phase_cut::initialize_from_env()?;
+    }
 
     let mut connections = tokio::task::JoinSet::new();
     let connection_slots = Arc::new(Semaphore::new(MAX_UDS_CONNECTIONS));
@@ -173,7 +221,8 @@ pub async fn serve_dynamic(listener: UnixListener, state: DynamicServerState) ->
                 let frame_bytes = Arc::clone(&frame_bytes);
                 connections.spawn(async move {
                     let _connection_permit = connection_permit;
-                    let result = transport::handle_connection(stream, state, frame_bytes).await;
+                    let result =
+                        transport::handle_connection(stream, state, frame_bytes, surface).await;
                     drop(_connection_permit);
                     result
                 });
@@ -2840,17 +2889,33 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let state = DynamicServerState::bootstrap(bootstrap_lifecycle(&tmp)).unwrap();
 
-        let status =
-            routing::dispatch_dynamic(rpc("lifecycle.status", json!({})), &state, None).await;
+        let status = routing::dispatch_dynamic(
+            rpc("lifecycle.status", json!({})),
+            &state,
+            None,
+            SocketSurface::Operator,
+        )
+        .await;
         assert_eq!(rpc_ok(&status)["status"], "starting");
         assert_eq!(rpc_ok(&status)["ready"], false);
         assert_eq!(rpc_ok(&status)["startup"]["sequence"], 0);
 
-        let health = routing::dispatch_dynamic(rpc("system.health", json!({})), &state, None).await;
+        let health = routing::dispatch_dynamic(
+            rpc("system.health", json!({})),
+            &state,
+            None,
+            SocketSurface::Operator,
+        )
+        .await;
         assert_eq!(rpc_err(&health).code, "node_starting");
 
-        let runtime =
-            routing::dispatch_dynamic(rpc("runtime.get_thread", json!({})), &state, None).await;
+        let runtime = routing::dispatch_dynamic(
+            rpc("runtime.get_thread", json!({})),
+            &state,
+            None,
+            SocketSurface::Operator,
+        )
+        .await;
         let error = rpc_err(&runtime);
         assert_eq!(error.code, "node_starting");
         assert!(error.retryable);
@@ -2866,10 +2931,21 @@ mod tests {
         let (mut barrier, _) = ryeos_executor::SelectedInvocationCompositionBarrier::bootstrap();
         barrier.arm_from_app_generation(&app).unwrap();
         state.publish_application(barrier.publication(app).unwrap());
-        let health = routing::dispatch_dynamic(rpc("system.health", json!({})), &state, None).await;
+        let health = routing::dispatch_dynamic(
+            rpc("system.health", json!({})),
+            &state,
+            None,
+            SocketSurface::Operator,
+        )
+        .await;
         assert_eq!(rpc_err(&health).code, "node_starting");
-        let callback =
-            routing::dispatch_dynamic(rpc("runtime.get_thread", json!({})), &state, None).await;
+        let callback = routing::dispatch_dynamic(
+            rpc("runtime.get_thread", json!({})),
+            &state,
+            None,
+            SocketSurface::Operator,
+        )
+        .await;
         let callback_error = rpc_err(&callback);
         assert_eq!(callback_error.code, "request_failed");
         assert!(callback_error.message.contains("missing callback_token"));
@@ -3037,6 +3113,154 @@ mod tests {
                 "omitting `{key}` must violate runtime.finalize_thread's exact wire"
             );
         }
+    }
+
+    #[test]
+    fn runtime_only_socket_refuses_everything_but_runtime_methods() {
+        on_daemon_worker_stack(runtime_only_socket_refuses_everything_but_runtime_methods_body);
+    }
+
+    async fn runtime_only_socket_refuses_everything_but_runtime_methods_body() {
+        let (_tmp, _state_owner, state) = setup_app_state();
+        for method in [
+            "lifecycle.status",
+            "system.health",
+            "execute",
+            "threads.create",
+            "nonexistent.method",
+            // A near miss of the prefix is not a runtime method.
+            "runtimes.get_thread",
+            "xruntime.get_thread",
+        ] {
+            let resp = routing::dispatch_on(
+                rpc(method, json!({})),
+                &state,
+                None,
+                SocketSurface::RuntimeOnly,
+            )
+            .await;
+            let error = rpc_err(&resp);
+            assert_eq!(error.code, "unknown_method", "{method}");
+            assert!(resp.result.is_none(), "{method} must disclose nothing");
+        }
+        // The control socket is unchanged.
+        for method in ["lifecycle.status", "system.health"] {
+            let resp = routing::dispatch_on(
+                rpc(method, json!({})),
+                &state,
+                None,
+                SocketSurface::Operator,
+            )
+            .await;
+            assert!(resp.error.is_none(), "{method}: {:?}", resp.error);
+        }
+    }
+
+    #[test]
+    fn runtime_only_socket_serves_runtime_methods_under_a_bearer() {
+        on_daemon_worker_stack(runtime_only_socket_serves_runtime_methods_under_a_bearer_body);
+    }
+
+    async fn runtime_only_socket_serves_runtime_methods_under_a_bearer_body() {
+        let (_tmp, _state_owner, state) = setup_app_state();
+        let params = make_create_params("T-RO", "T-RO");
+        state.threads.create_thread_for_test(&params).unwrap();
+        let cbt = generate_test_callback(
+            &state,
+            "T-RO",
+            std::path::PathBuf::from("/test"),
+            std::time::Duration::from_secs(300),
+            Vec::new(),
+            test_provenance(&state, "/test"),
+            "0".repeat(64),
+        );
+
+        // Without the bearer the method is routed and fails authentication.
+        let unauthenticated = routing::dispatch_on(
+            rpc("runtime.get_thread", json!({ "thread_id": "T-RO" })),
+            &state,
+            None,
+            SocketSurface::RuntimeOnly,
+        )
+        .await;
+        assert!(
+            rpc_err(&unauthenticated)
+                .message
+                .contains("missing callback_token")
+        );
+
+        let authenticated = routing::dispatch_on(
+            rpc(
+                "runtime.get_thread",
+                json!({ "callback_token": cbt.token, "thread_id": "T-RO" }),
+            ),
+            &state,
+            None,
+            SocketSurface::RuntimeOnly,
+        )
+        .await;
+        assert!(
+            authenticated.error.is_none(),
+            "bearer-authenticated runtime call failed: {:?}",
+            authenticated.error
+        );
+    }
+
+    #[test]
+    fn the_two_sockets_route_by_surface_over_real_listeners() {
+        on_daemon_worker_stack(the_two_sockets_route_by_surface_over_real_listeners_body);
+    }
+
+    async fn call_over_socket(path: &std::path::Path, method: &str) -> serde_json::Value {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut stream = tokio::net::UnixStream::connect(path).await.unwrap();
+        let body = rmp_serde::to_vec_named(&json!({
+            "request_id": 7, "method": method, "params": {},
+        }))
+        .unwrap();
+        stream
+            .write_all(&(body.len() as u32).to_be_bytes())
+            .await
+            .unwrap();
+        stream.write_all(&body).await.unwrap();
+        let mut len = [0u8; 4];
+        stream.read_exact(&mut len).await.unwrap();
+        let mut frame = vec![0u8; u32::from_be_bytes(len) as usize];
+        stream.read_exact(&mut frame).await.unwrap();
+        rmp_serde::from_slice(&frame).unwrap()
+    }
+
+    async fn the_two_sockets_route_by_surface_over_real_listeners_body() {
+        let tmp = TempDir::new().unwrap();
+        let control = tmp.path().join("c.sock");
+        let runtime = tmp.path().join("c-runtime.sock");
+        let state = DynamicServerState::bootstrap(bootstrap_lifecycle(&tmp)).unwrap();
+        let server = tokio::spawn(serve_dynamic_pair(
+            UnixListener::bind(&control).unwrap(),
+            UnixListener::bind(&runtime).unwrap(),
+            state,
+        ));
+
+        // The control socket still answers the CLI's status probe.
+        let status = call_over_socket(&control, "lifecycle.status").await;
+        assert_eq!(status["result"]["status"], "starting");
+        assert_eq!(status["result"]["ready"], false);
+
+        // The callback-only socket discloses nothing and does not even
+        // distinguish lifecycle.status from a method that never existed.
+        let refused = call_over_socket(&runtime, "lifecycle.status").await;
+        let unknown = call_over_socket(&runtime, "nonexistent.method").await;
+        assert!(refused.get("result").is_none());
+        assert_eq!(refused["error"]["code"], "unknown_method");
+        assert_eq!(unknown["error"]["code"], "unknown_method");
+        let health = call_over_socket(&runtime, "system.health").await;
+        assert_eq!(health["error"]["code"], "unknown_method");
+
+        // runtime.* is routed (and here, before readiness, classified).
+        let routed = call_over_socket(&runtime, "runtime.get_thread").await;
+        assert_eq!(routed["error"]["code"], "node_starting");
+
+        server.abort();
     }
 
     #[test]

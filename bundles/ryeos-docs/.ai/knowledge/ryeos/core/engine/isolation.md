@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-05T03:59:09Z:8f3722c9106cd5e61d51ba7c900978fb334c7cf288fa771e06eebc27383d3ac8:fAlwc/UFDZubuSNHkeoXQidr44tktomqXlfg4Lu8lQkzLONl7vj97zinFQMMDs75l14YWpcKx93H9LK+6orjAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-11T03:26:26Z:9cbafc8f3673b56ac8c168134b29a4b61475df20ccfd8ad847699bfac4576652:zcn/trMqGSX8hm8T/n/9UoW8Ybyxc8Duu9R5SdI5vOcZSedSPBBFhsLc8O/NiSUm0FaxmVhP3ncayLGEbXRuDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/engine
@@ -152,7 +152,7 @@ protocol and lifecycle bindings, not a list granted to every subprocess:
 
 | Variable | Purpose |
 |---|---|
-| `RYEOSD_SOCKET_PATH` | Daemon UDS path for callbacks |
+| `RYEOSD_SOCKET_PATH` | Daemon callback-only UDS path |
 | `RYEOSD_CALLBACK_TOKEN` | Auth token for daemon callbacks |
 | `RYEOSD_THREAD_AUTH_TOKEN` | Per-thread auth token |
 | `RYEOSD_THREAD_ID` | Thread identifier |

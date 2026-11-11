@@ -6,22 +6,40 @@ use ryeos_app::state::AppState;
 
 #[cfg(test)]
 pub(crate) async fn dispatch(request: RpcRequest, state: &AppState) -> RpcResponse {
+    dispatch_on(request, state, None, super::SocketSurface::Operator).await
+}
+
+#[cfg(test)]
+pub(crate) async fn dispatch_on(
+    request: RpcRequest,
+    state: &AppState,
+    peer: Option<&super::AuthenticatedUnixPeer>,
+    surface: super::SocketSurface,
+) -> RpcResponse {
     let lifecycle = super::ready_lifecycle_response(state);
-    dispatch_with_state(request, Some(state), None, &lifecycle, None).await
+    dispatch_with_state(request, Some(state), None, &lifecycle, peer, surface).await
 }
 
 pub(super) async fn dispatch_dynamic(
     request: RpcRequest,
     state: &super::DynamicServerState,
     peer: Option<&super::AuthenticatedUnixPeer>,
+    surface: super::SocketSurface,
 ) -> RpcResponse {
     let lifecycle = state.lifecycle();
     let application = state.application();
     let app = application
         .as_ref()
         .map(|publication| publication.app().as_ref());
-    let response =
-        dispatch_with_state(request, app, application.as_deref(), &lifecycle, peer).await;
+    let response = dispatch_with_state(
+        request,
+        app,
+        application.as_deref(),
+        &lifecycle,
+        peer,
+        surface,
+    )
+    .await;
     drop(application);
     response
 }
@@ -32,7 +50,14 @@ async fn dispatch_with_state(
     publication: Option<&ryeos_executor::SelectedApplicationPublication>,
     lifecycle: &ryeos_node::LifecycleResponse,
     peer: Option<&super::AuthenticatedUnixPeer>,
+    surface: super::SocketSurface,
 ) -> RpcResponse {
+    // The surface gate precedes routing for both sockets. A refused method is
+    // answered exactly like an unknown one, so the callback-only socket does
+    // not confirm which unauthenticated methods the control socket serves.
+    if !surface.admits(&request.method) {
+        return unknown_method(request.request_id, &request.method);
+    }
     match request.method.as_str() {
         // Local lifecycle control has no public HTTP surface.
         "lifecycle.status" => lifecycle_status(request.request_id, lifecycle),

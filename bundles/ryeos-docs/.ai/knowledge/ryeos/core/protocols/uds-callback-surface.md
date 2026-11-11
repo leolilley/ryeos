@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-06T23:37:02Z:1c548fe820d91f56e8f315bb04fd14d9aa7e8bde73b4669ede02f8137fe3f7ea:YXvlBXtlSB9QixqJISEKe2QqlL5Px4jl0j5+7Pas9M5kOMOwOjEVez3mw6XsGt1DnF1Q1HY5jnAHEivk3hJvAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-04T09:32:59Z:f0a84ce252fbd9b2ba7b98b87fbcf54f9c5e60b9cfb355fe57fa58c1cba235c0:3TAA9nDKhKxdPmrbHzAv2f2XBVUVQGCj5sViSELa5eX1KHAJi3Uox8HlL+A81ZvR/w4B6fyZG5//S1HgPLL5Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/protocols
 tags: [callbacks, auth, uds, runtime, tokens, capabilities, audit, boundary]
@@ -80,9 +80,15 @@ authorizes the *content* of the request:
 
 ## Ungated / local-status surface
 
-Only `system.health` and read-only `lifecycle.status` are ungated bare methods.
-They carry no thread authority. There is no UDS shutdown method: sandboxed
-runtimes may receive this socket, so local lifecycle control uses a
+The daemon binds two Unix sockets side by side: the control socket
+(`ryeosd.sock`) and a callback-only socket (`ryeosd-runtime.sock`, the control
+name plus `-runtime`). Only the control socket serves `system.health` and
+read-only `lifecycle.status`, the ungated bare methods; they carry no thread
+authority and are for the CLI and local operators. The callback-only socket
+is the one handed to sandboxed tools and runtimes: it admits `runtime.*`
+alone (bearer-authenticated) and answers every other method, ungated ones
+included, as `unknown_method`. There is no UDS shutdown method: local
+lifecycle control uses a
 kernel-authenticated socket peer pidfd and OS signals. Every other
 bare-namespace method returns `unknown_method`.
 

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-06T01:55:13Z:f01d6ecdbf06712bc90efa638f3d5396b0e1c18f9e058614646ce8a189568b09:/cDnTapNlull0om1WfhCHORqMYvLko7yP9JZJCVmwOzVcnKOCOdhyL9fTrlpZe6mQn7tadAIDf/8g9iFb0IvCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-04T09:32:59Z:f9d047459832d18292fa94952ee463f824c456d14c1d28247fc63eca2260fc6e:IUz7NzJKWpxuo/56Ylpfbw06z9naMw9MapyHSQYr3zjsl7s8vkOPe966oNYVgJdOtI6Z4WOc2QaOdxVtkqWMDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [fundamentals, tools, execution, subprocess]
@@ -139,7 +139,7 @@ declare the basic tool variables:
 
 | Variable                    | Description                        |
 |-----------------------------|------------------------------------|
-| `RYEOSD_SOCKET_PATH`        | Daemon Unix socket path            |
+| `RYEOSD_SOCKET_PATH`        | Daemon callback-only socket path   |
 | `RYEOSD_CALLBACK_TOKEN`     | Auth token for callback channel    |
 | `RYEOSD_THREAD_ID`          | Thread ID (redundant with RYE_)    |
 | `RYEOSD_PROJECT_STATE_SCOPE` | Opaque logical-project state namespace; stable across pinned COW successors and not an authority token |

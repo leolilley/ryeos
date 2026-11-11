@@ -668,7 +668,7 @@ pub async fn run(
             method: target_method.clone(),
             thread_id: child_thread_id.clone(),
             callback: ryeos_runtime::envelope::EnvelopeCallback {
-                socket_path: state.config.uds_path.clone(),
+                socket_path: state.config.runtime_uds_path(),
                 token: cap.token.clone(),
             },
             project_root: project_path.to_path_buf(),
@@ -745,7 +745,7 @@ pub async fn run(
                 Some(
                     state
                         .config
-                        .uds_path
+                        .runtime_uds_path()
                         .to_str()
                         .ok_or_else(|| {
                             LaunchAugmentationError::RuntimeRegistry(
@@ -818,6 +818,7 @@ pub async fn run(
             inherited_fd_mappings: Vec::new(),
             supervised_status: None,
         };
+        let runtime_socket = state.config.runtime_uds_path();
         let applied = state
             .isolation
             .apply_awaiting_attachment_with_provenance(
@@ -840,7 +841,7 @@ pub async fn run(
                     checkpoint_authority: None,
                     captured_callback_socket: false,
                     daemon_socket_path: callback_ipc_requested
-                        .then_some(state.config.uds_path.as_path()),
+                        .then_some(runtime_socket.as_path()),
                     bundle_roots: &bundle_roots,
                     node_trusted_keys_dir: Some(&state.config.runtime_root().trusted_keys_dir()),
                     verified_code: &[],

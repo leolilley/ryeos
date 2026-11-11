@@ -2397,7 +2397,7 @@ pub(crate) async fn dispatch_method(
         }
 
         let callback = ryeos_runtime::envelope::EnvelopeCallback {
-            socket_path: state.config.uds_path.clone(),
+            socket_path: state.config.runtime_uds_path(),
             token: cap.token.clone(),
         };
         let runtime_config = method_runtime_config_snapshot_off_thread(

@@ -500,6 +500,10 @@ struct PinnedDaemonSocket {
     parent: Arc<lillux::PinnedDirectory>,
     name: std::ffi::OsString,
     entry: lillux::InheritedDescriptorAuthority,
+    /// Daemon endpoints a sandboxed launch must never be given: the control
+    /// socket, as its configured spelling and its canonical location. No
+    /// readable mount may equal or contain any of them.
+    withheld: Vec<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -1771,6 +1775,7 @@ impl IsolationRuntime {
             parent: Arc::new(parent),
             name: socket_name.to_os_string(),
             entry,
+            withheld: Vec::new(),
         };
         Self::load_inner(app_root, Some(socket), backend)
     }
@@ -1829,6 +1834,7 @@ impl IsolationRuntime {
     pub fn resolve_compiled_policy_for_daemon(
         app_root: &Path,
         daemon_socket: &Path,
+        withheld_control_socket: Option<&Path>,
         policy: IsolationPolicy,
         source: PathBuf,
         digest: String,
@@ -1875,6 +1881,10 @@ impl IsolationRuntime {
             parent: Arc::new(parent),
             name: socket_name.to_os_string(),
             entry,
+            withheld: withheld_control_socket
+                .map(withheld_endpoint_spellings)
+                .transpose()?
+                .unwrap_or_default(),
         };
         Self::resolve_compiled_policy_inner(
             app_root,
@@ -6984,7 +6994,49 @@ fn resolve_writable_mount(
     }))
 }
 
+/// The spellings under which the control socket could be mounted: as
+/// configured and as its canonical location.
+fn withheld_endpoint_spellings(endpoint: &Path) -> Result<Vec<PathBuf>, EngineError> {
+    validate_namespace_destination("withheld control socket", endpoint)?;
+    let mut spellings = vec![endpoint.to_path_buf()];
+    if let (Some(parent), Some(name)) = (endpoint.parent(), endpoint.file_name()) {
+        let canonical = canonicalize_launch_path("withheld control socket parent", parent)?;
+        spellings.push(canonical.join(name));
+    }
+    spellings.dedup();
+    Ok(spellings)
+}
+
+/// Resolve one readable policy entry, refusing any mount that equals or
+/// contains a withheld daemon endpoint. A broad operator readable entry (a
+/// state directory, a runtime directory) therefore cannot hand a sandbox the
+/// control socket that the callback-only socket exists to keep from it.
 fn resolve_readable_mounts(
+    configured: &str,
+    resolution: &ReadableMountResolution<'_>,
+) -> Result<Vec<ReadableMount>, EngineError> {
+    let mounts = resolve_readable_mounts_unchecked(configured, resolution)?;
+    if let Some(socket) = resolution.daemon_socket {
+        for mount in &mounts {
+            for withheld in &socket.withheld {
+                if mount.destination.starts_with(withheld)
+                    || withheld.starts_with(&mount.destination)
+                    || mount.source.starts_with(withheld)
+                    || withheld.starts_with(&mount.source)
+                {
+                    return Err(refused(format!(
+                        "isolation readable entry `{configured}` resolves to {}, which equals or contains the withheld daemon control socket {}",
+                        mount.destination.display(),
+                        withheld.display()
+                    )));
+                }
+            }
+        }
+    }
+    Ok(mounts)
+}
+
+fn resolve_readable_mounts_unchecked(
     configured: &str,
     resolution: &ReadableMountResolution<'_>,
 ) -> Result<Vec<ReadableMount>, EngineError> {
@@ -10435,6 +10487,284 @@ mod tests {
                 .to_string()
                 .contains("captured execution context carries ambient filesystem authority")
         );
+    }
+
+    /// The daemon pins its callback-only socket, never the control socket that
+    /// sits beside it. Both a captured tool on the class and a node-policy
+    /// callback tool receive exactly that one socket entry: not its parent
+    /// directory, and not the control socket.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn callback_tools_mount_only_the_pinned_runtime_socket_entry() {
+        let app_root = tempfile::tempdir().unwrap();
+        let mut policy = IsolationPolicy::disabled_for_authoring();
+        policy.mode = IsolationMode::Enforce;
+        policy.backend = Some(resolved_backend().selection.clone());
+        policy.filesystem.readable =
+            vec!["{verified_code}".to_string(), "{daemon_socket}".to_string()];
+        policy.filesystem.writable = vec!["{project}".to_string()];
+        write_policy(app_root.path(), &policy);
+
+        let mut backend = resolved_backend();
+        backend.effective_capabilities = BTreeSet::from([
+            IsolationCapability::FilesystemPrivateRoot,
+            IsolationCapability::FilesystemFdReadOnly,
+            IsolationCapability::FilesystemFdWritable,
+            IsolationCapability::FilesystemOrderedOverlays,
+            IsolationCapability::FilesystemFixedParentViews,
+            IsolationCapability::FilesystemPrivateTmp,
+            IsolationCapability::DevicesMinimal,
+            IsolationCapability::EnvironmentExact,
+            IsolationCapability::NetworkIsolated,
+            IsolationCapability::NetworkHost,
+            IsolationCapability::ProcessHostPidNamespace,
+            IsolationCapability::ProcessIsolatedPidNamespace,
+            IsolationCapability::ProcessTargetPidReporting,
+            IsolationCapability::LifecycleSharedProcessGroup,
+        ]);
+        backend.declaration.capabilities = backend.effective_capabilities.clone();
+        let socket_dir = tempfile::tempdir().unwrap();
+        let control_path = socket_dir.path().join("ryeosd.sock");
+        let runtime_path = socket_dir.path().join("ryeosd-runtime.sock");
+        let _control = std::os::unix::net::UnixListener::bind(&control_path).unwrap();
+        let _runtime = std::os::unix::net::UnixListener::bind(&runtime_path).unwrap();
+        let runtime = IsolationRuntime::load_for_daemon(
+            app_root.path(),
+            &runtime_path,
+            Some(Arc::new(backend)),
+        )
+        .unwrap();
+        let command = runtime
+            .capture_verified_command(Path::new("/bin/true"), None, None)
+            .unwrap();
+        let project = runtime
+            .runtime_workspaces
+            .as_ref()
+            .unwrap()
+            .open_or_create_child(std::ffi::OsStr::new("runtime-socket"), 0o700)
+            .unwrap();
+        let request = || lillux::SubprocessRequest {
+            cmd: "/bin/true".to_string(),
+            argv0: None,
+            args: Vec::new(),
+            cwd: Some(project.path().to_string_lossy().into_owned()),
+            envs: Vec::new(),
+            stdin_data: None,
+            timeout: 1.0,
+            limits: None,
+            inherited_fds: Vec::new(),
+            inherited_fd_mappings: Vec::new(),
+            supervised_status: None,
+        };
+        let context = |socket: &'static Path,
+                       ceiling: IsolationFilesystemAuthorityCeiling,
+                       captured: bool| IsolationLaunchContext {
+            immutable_project: None,
+            workspace_view: None,
+            project_path: project.path(),
+            project_authority: IsolationProjectAuthority::EphemeralScratch,
+            filesystem_authority_ceiling: ceiling,
+            network_authority_ceiling: IsolationNetworkAuthorityCeiling::Isolated,
+            live_access: None,
+            state_root: None,
+            checkpoint_dir: None,
+            checkpoint_authority: None,
+            daemon_socket_path: Some(socket),
+            captured_callback_socket: captured,
+            bundle_roots: &[],
+            node_trusted_keys_dir: None,
+            verified_code: &[],
+            verified_command: Some(&command),
+            external_read_only_mounts: &[],
+            writable_runtime_view_mounts: &[],
+            producer_prepared_mounts: &[],
+            target_channels: &[],
+            item_ref: "worker:tests/runtime-socket",
+            thread_id: "T-runtime-socket",
+            verbatim_env_names: &[],
+        };
+        let runtime_static: &'static Path = Box::leak(runtime_path.clone().into_boxed_path());
+        let control_static: &'static Path = Box::leak(control_path.clone().into_boxed_path());
+        let plan_of = |applied: AppliedIsolationLaunch| {
+            let (bytes, _) = applied
+                .request
+                .inherited_fds
+                .last()
+                .unwrap()
+                .read_regular_file_stable_bounded(
+                    ryeos_isolation_protocol::MAX_REQUEST_BYTES as u64,
+                )
+                .unwrap();
+            serde_json::from_slice::<AdapterLaunchRequest>(&bytes).unwrap()
+        };
+        let runtime_text = runtime_path.to_string_lossy().into_owned();
+        let control_text = control_path.to_string_lossy().into_owned();
+        let parent_text = socket_dir.path().to_string_lossy().into_owned();
+
+        for (label, ceiling, captured) in [
+            (
+                "captured tool on the class",
+                IsolationFilesystemAuthorityCeiling::CapturedExecution,
+                true,
+            ),
+            (
+                "node-policy callback tool",
+                IsolationFilesystemAuthorityCeiling::NodePolicy,
+                false,
+            ),
+        ] {
+            let plan = plan_of(
+                runtime
+                    .apply_with_provenance(request(), context(runtime_static, ceiling, captured))
+                    .unwrap(),
+            );
+            let destinations = plan
+                .plan
+                .mounts
+                .iter()
+                .map(|mount| mount.destination.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                destinations
+                    .iter()
+                    .filter(|destination| **destination == runtime_text)
+                    .count(),
+                1,
+                "{label}: the runtime socket entry is mounted once"
+            );
+            assert!(
+                !destinations.contains(&control_text.as_str()),
+                "{label}: the control socket is not mounted"
+            );
+            assert!(
+                !destinations.contains(&parent_text.as_str()),
+                "{label}: the socket directory is not mounted"
+            );
+
+            // The control socket is not an admissible callback endpoint.
+            let error = runtime
+                .apply_with_provenance(request(), context(control_static, ceiling, captured))
+                .err()
+                .unwrap_or_else(|| panic!("{label}: the control socket must be refused"));
+            assert!(error.to_string().contains("expected"), "{label}: {error}");
+        }
+    }
+
+    /// A broad readable entry must not hand a sandbox the control socket: any
+    /// entry that equals or contains it is refused by name at launch.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn readable_entries_cannot_expose_the_control_socket() {
+        let app_root = tempfile::tempdir().unwrap();
+        let socket_dir = tempfile::tempdir().unwrap();
+        let control_path = socket_dir.path().join("ryeosd.sock");
+        let runtime_path = socket_dir.path().join("ryeosd-runtime.sock");
+        let _control = std::os::unix::net::UnixListener::bind(&control_path).unwrap();
+        let _runtime = std::os::unix::net::UnixListener::bind(&runtime_path).unwrap();
+        let mut backend = resolved_backend();
+        backend.effective_capabilities = BTreeSet::from([
+            IsolationCapability::FilesystemPrivateRoot,
+            IsolationCapability::FilesystemFdReadOnly,
+            IsolationCapability::FilesystemFdWritable,
+            IsolationCapability::FilesystemOrderedOverlays,
+            IsolationCapability::FilesystemFixedParentViews,
+            IsolationCapability::FilesystemPrivateTmp,
+            IsolationCapability::DevicesMinimal,
+            IsolationCapability::EnvironmentExact,
+            IsolationCapability::NetworkIsolated,
+            IsolationCapability::NetworkHost,
+            IsolationCapability::ProcessHostPidNamespace,
+            IsolationCapability::ProcessIsolatedPidNamespace,
+            IsolationCapability::ProcessTargetPidReporting,
+            IsolationCapability::LifecycleSharedProcessGroup,
+        ]);
+        backend.declaration.capabilities = backend.effective_capabilities.clone();
+        let backend = Arc::new(backend);
+        let runtime_static: &'static Path = Box::leak(runtime_path.clone().into_boxed_path());
+
+        for broad in [
+            socket_dir.path().to_string_lossy().into_owned(),
+            control_path.to_string_lossy().into_owned(),
+        ] {
+            let mut policy = IsolationPolicy::disabled_for_authoring();
+            policy.mode = IsolationMode::Enforce;
+            policy.backend = Some(resolved_backend().selection.clone());
+            policy.filesystem.readable = vec![
+                "{verified_code}".to_string(),
+                "{daemon_socket}".to_string(),
+                broad.clone(),
+            ];
+            policy.filesystem.writable = vec!["{project}".to_string()];
+            let runtime = IsolationRuntime::resolve_compiled_policy_for_daemon(
+                app_root.path(),
+                &runtime_path,
+                Some(&control_path),
+                policy,
+                app_root.path().join("isolation.yaml"),
+                format!("sha256:{}", "0".repeat(64)),
+                Some(backend.clone()),
+                None,
+                None,
+            )
+            .unwrap();
+            let command = runtime
+                .capture_verified_command(Path::new("/bin/true"), None, None)
+                .unwrap();
+            let project = runtime
+                .runtime_workspaces
+                .as_ref()
+                .unwrap()
+                .open_or_create_child(std::ffi::OsStr::new("withheld"), 0o700)
+                .unwrap();
+            let error = runtime
+                .apply_with_provenance(
+                    lillux::SubprocessRequest {
+                        cmd: "/bin/true".to_string(),
+                        argv0: None,
+                        args: Vec::new(),
+                        cwd: Some(project.path().to_string_lossy().into_owned()),
+                        envs: Vec::new(),
+                        stdin_data: None,
+                        timeout: 1.0,
+                        limits: None,
+                        inherited_fds: Vec::new(),
+                        inherited_fd_mappings: Vec::new(),
+                        supervised_status: None,
+                    },
+                    IsolationLaunchContext {
+                        immutable_project: None,
+                        workspace_view: None,
+                        project_path: project.path(),
+                        project_authority: IsolationProjectAuthority::EphemeralScratch,
+                        filesystem_authority_ceiling:
+                            IsolationFilesystemAuthorityCeiling::NodePolicy,
+                        network_authority_ceiling: IsolationNetworkAuthorityCeiling::Isolated,
+                        live_access: None,
+                        state_root: None,
+                        checkpoint_dir: None,
+                        checkpoint_authority: None,
+                        daemon_socket_path: Some(runtime_static),
+                        captured_callback_socket: false,
+                        bundle_roots: &[],
+                        node_trusted_keys_dir: None,
+                        verified_code: &[],
+                        verified_command: Some(&command),
+                        external_read_only_mounts: &[],
+                        writable_runtime_view_mounts: &[],
+                        producer_prepared_mounts: &[],
+                        target_channels: &[],
+                        item_ref: "worker:tests/withheld",
+                        thread_id: "T-withheld",
+                        verbatim_env_names: &[],
+                    },
+                )
+                .err()
+                .unwrap_or_else(|| panic!("readable `{broad}` must be refused"));
+            assert!(
+                error.to_string().contains("withheld daemon control socket"),
+                "{broad}: {error}"
+            );
+        }
     }
 
     /// The captured verifier on the enforced lane: a read-only project, the
