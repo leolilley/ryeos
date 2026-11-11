@@ -54,7 +54,7 @@ pub async fn stop_supervised_with_invalid_config(
         "node configuration is invalid and no protected host association exists; refusing to guess a direct daemon endpoint",
     )?;
     service.check_supervisor()?;
-    service.request_down()?;
+    service.wait_down(deadline.saturating_duration_since(Instant::now()))?;
     Ok(StopReport {
         status: LifecycleStatus::Stopped {
             app_root: app_root.to_path_buf(),
@@ -145,9 +145,10 @@ pub async fn stop_with_progress(
             // The configured native controller owns this exact service
             // process and its restart disposition. Its successful Down
             // transition is sufficient to cancel pre-control startup without
-            // trusting a marker PID. Worker-tree settlement remains a
-            // separate retained scope-recovery obligation.
-            service.request_down()?;
+            // trusting a marker PID; stop returns once the supervisor reports
+            // that process gone. Worker-tree settlement remains a separate
+            // retained scope-recovery obligation.
+            service.wait_down(opts.timeout)?;
             return Ok(StopReport {
                 status: LifecycleStatus::Stopped {
                     app_root: env.config().app_root.clone(),
@@ -268,6 +269,10 @@ async fn force_through_supervisor(
     mut observer: Option<&mut dyn LifecycleProgressObserver>,
 ) -> Result<StopReport> {
     service.force_down()?;
+    // Lifecycle status stops reporting a live daemon once its socket and
+    // metadata are gone, which can precede process exit; the supervisor's
+    // own down report is the process evidence.
+    service.wait_down(opts.timeout)?;
     let deadline = Instant::now() + opts.timeout;
     loop {
         let status = crate::status::status(env).await?;
