@@ -909,6 +909,44 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_walk_skips_an_ignored_symlink_outside_ignored_directories() {
+        // A file pattern, not a directory prune: the walk must decide the
+        // entry is ignored before it tries to open it as a regular file.
+        let project = tempfile::tempdir().unwrap();
+        fs::write(project.path().join("regular.txt"), b"regular").unwrap();
+        symlink("/usr/bin/python", project.path().join("cache.pyc")).unwrap();
+
+        let root = lillux::PinnedDirectory::open(project.path())
+            .unwrap()
+            .unwrap();
+        let policy = ryeos_state::project_sync::capture_snapshot_policy_from_pinned(
+            &root,
+            &crate::ignore::IgnoreMatcher::from_config(&crate::ignore::IgnoreConfig {
+                patterns: vec!["*.pyc".to_owned()],
+            })
+            .unwrap(),
+            ProjectSyncScope::FullProject,
+        )
+        .unwrap();
+        let mut visited = Vec::new();
+        let complete = visit_project_files(&root, &policy, None, |relative, file| {
+            visited.push(relative.to_owned());
+            let observation = lillux::observe_open_regular_file(&file)?;
+            let (blob_hash, metadata) =
+                lillux::digest_open_regular_file_stable_exact(&file, observation.size())?;
+            Ok(ProjectFile {
+                blob_hash,
+                size: metadata.len(),
+                normalized_mode: lillux::normalized_portable_regular_mode(&metadata)?,
+            })
+        })
+        .unwrap();
+
+        assert!(complete);
+        assert_eq!(visited, vec!["regular.txt".to_owned()]);
+    }
+
+    #[test]
     fn status_deadline_stops_shared_traversal_without_claiming_completeness() {
         let project = tempfile::tempdir().unwrap();
         fs::write(project.path().join("file"), b"data").unwrap();
