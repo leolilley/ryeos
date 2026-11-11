@@ -512,7 +512,10 @@ pub async fn handle_particular_surface_resume(
             receipt: crate::browser_session::ParticularSurfaceReceipt {
                 saved_id: saved.id.clone(),
                 library_revision: config.particular_view_set_library_revision,
-                record_digest: format!("{:x}", Sha256::digest(lillux::canonical_json_bytes_bounded(&saved, usize::MAX)?)),
+                record_digest: format!(
+                    "{:x}",
+                    Sha256::digest(lillux::canonical_json_bytes_bounded(&saved, usize::MAX)?)
+                ),
                 surface_ref: context.surface_ref,
                 registered_project_id: candidate.registered_project_id.clone(),
                 resolved: ryeos_client_base::surface::view_sets::ResolvedParticularViewSet {
@@ -1125,7 +1128,10 @@ pub async fn handle_particular_view_set_resume(
     let receipt = crate::browser_session::ParticularSurfaceReceipt {
         saved_id: resume.id.clone(),
         library_revision: req.expected_revision,
-        record_digest: format!("{:x}", Sha256::digest(lillux::canonical_json_bytes_bounded(&resume, usize::MAX)?)),
+        record_digest: format!(
+            "{:x}",
+            Sha256::digest(lillux::canonical_json_bytes_bounded(&resume, usize::MAX)?)
+        ),
         surface_ref: req.surface_ref.clone(),
         registered_project_id: project.as_ref().map(|project| project.local_id.clone()),
         resolved,

@@ -229,7 +229,9 @@ mod tests {
         let bytes = canonical_request("test-adapter", SPEC, &inputs()).unwrap();
         // The adapter re-serializes the request as RyeOS canonical JSON (keys
         // sorted at every level) and must get these exact bytes back.
-        let expected = format!("{{\"activation_deadline_seconds\":300,\"adapter_id\":\"test-adapter\",\"guest_network_allow\":[\"controller.example.com\"],\"maximum_lifetime_seconds\":14400,\"provider_spec_sha256\":\"{SPEC}\",\"requires_before_spend\":[{{\"accept\":[\"provider_attested\"],\"name\":\"lease.network_policy\"}},\"time\"],\"requires_from_guest\":[{{\"accept\":[\"provider_attested\"],\"name\":\"guest.exec_route_closed\"}}],\"schema\":3,\"workload\":\"codex.authoring.remote\"}}");
+        let expected = format!(
+            "{{\"activation_deadline_seconds\":300,\"adapter_id\":\"test-adapter\",\"guest_network_allow\":[\"controller.example.com\"],\"maximum_lifetime_seconds\":14400,\"provider_spec_sha256\":\"{SPEC}\",\"requires_before_spend\":[{{\"accept\":[\"provider_attested\"],\"name\":\"lease.network_policy\"}},\"time\"],\"requires_from_guest\":[{{\"accept\":[\"provider_attested\"],\"name\":\"guest.exec_route_closed\"}}],\"schema\":3,\"workload\":\"codex.authoring.remote\"}}"
+        );
         assert_eq!(String::from_utf8(bytes.clone()).unwrap(), expected);
         assert_eq!(
             canonical_request("test-adapter", SPEC, &inputs()).unwrap(),
