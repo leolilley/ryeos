@@ -39,6 +39,27 @@ pub struct Local {
     pub(crate) edits: Edits,
     /// The `views::menu_key` of the open actions menu.
     pub(crate) menu: Option<String>,
+    /// An unfinished name being typed; committing it goes through the core.
+    pub(crate) rename: Option<Rename>,
+    /// Whether the system bar's Surface picker is open.
+    pub(crate) surfaces_open: bool,
+    scratch: TextEdit,
+    /// Each split's main-axis length, by `shell::split_key`, as last laid out.
+    pub(crate) split_extent: HashMap<String, f32>,
+    /// The ratio a divider drag shows before it commits through the core.
+    pub(crate) split_preview: Option<(String, f32)>,
+}
+
+/// What an unfinished rename will rename.
+pub(crate) enum RenameTarget {
+    ViewSet(ryeos_client_base::ids::ViewSetId),
+    /// The Surface's projected rename intent; its title is replaced.
+    Surface(ryeos_client_base::ui::RyeOsUiIntent),
+}
+
+pub(crate) struct Rename {
+    pub(crate) target: RenameTarget,
+    pub(crate) edit: TextEdit,
 }
 
 /// One Rune text field per mounted input, keyed by the input's exact address.
@@ -172,6 +193,74 @@ impl App {
 
     pub(crate) fn close_menu(&mut self) {
         self.local.menu = None;
+    }
+
+    pub(crate) fn begin_rename(&mut self, target: RenameTarget, title: &str) {
+        let mut edit = TextEdit::new(title);
+        edit.set_caret(title.len());
+        self.local.rename = Some(Rename { target, edit });
+    }
+
+    /// The rename field's buffer. A stray edit after the rename ended lands in
+    /// a scratch buffer that is never committed.
+    pub(crate) fn rename_edit(&mut self) -> &mut TextEdit {
+        match &mut self.local.rename {
+            Some(rename) => &mut rename.edit,
+            None => &mut self.local.scratch,
+        }
+    }
+
+    pub(crate) fn cancel_rename(&mut self) {
+        self.local.rename = None;
+    }
+
+    /// Commit a non-empty trimmed name through the core.
+    pub(crate) fn finish_rename(&mut self) {
+        let Some(rename) = self.local.rename.take() else {
+            return;
+        };
+        let title = rename.edit.text.trim().to_owned();
+        if title.is_empty() {
+            return;
+        }
+        use ryeos_client_base::ui::RyeOsUiIntent;
+        let intent = match rename.target {
+            RenameTarget::ViewSet(view_set_id) => {
+                RyeOsUiIntent::RenameViewSet { view_set_id, title }
+            }
+            RenameTarget::Surface(RyeOsUiIntent::RenameSurface {
+                surface_instance_id,
+                binding,
+                ..
+            }) => RyeOsUiIntent::RenameSurface {
+                surface_instance_id,
+                binding,
+                title,
+            },
+            RenameTarget::Surface(_) => return,
+        };
+        self.ui(RyeOsUiEvent::Activate { intent });
+    }
+
+    pub(crate) fn set_split_extent(&mut self, key: String, extent: f32) {
+        if self.local.split_extent.get(&key) != Some(&extent) {
+            self.local.split_extent.insert(key, extent);
+        }
+    }
+
+    pub(crate) fn split_extent(&self, key: &str) -> Option<f32> {
+        self.local.split_extent.get(key).copied()
+    }
+
+    pub(crate) fn set_split_preview(&mut self, preview: Option<(String, f32)>) {
+        self.local.split_preview = preview;
+    }
+
+    pub(crate) fn set_surfaces_open(&mut self, open: bool) {
+        self.local.surfaces_open = open;
+        if !open {
+            self.local.rename = None;
+        }
     }
 }
 
