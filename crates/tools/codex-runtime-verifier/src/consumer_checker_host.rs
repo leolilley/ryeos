@@ -563,6 +563,21 @@ fn run_transaction(
     Ok(CheckerHostSuccess { checked: verified })
 }
 
+/// The checker's own bounded refusal, `{"refused": "<fixed message>"}`, when
+/// its response has exactly that shape; anything else reports no reason.
+fn checker_refusal_reason(response: &[u8]) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(response).ok()?;
+    let object = value.as_object()?;
+    if object.len() != 1 {
+        return None;
+    }
+    let reason = object.get("refused")?.as_str()?;
+    (!reason.is_empty()
+        && reason.len() <= 256
+        && reason.bytes().all(|byte| (b' '..=b'~').contains(&byte)))
+    .then(|| reason.to_owned())
+}
+
 // This primitive joins actual Lillux IO/child observations, never semantic
 // meaning or runtime conformance. It cannot construct a verified result.
 fn read_and_settle_checker(
@@ -593,10 +608,14 @@ fn read_and_settle_checker(
         .wait_exact_child_until(deadline)
         .map_err(anyhow::Error::msg)?
         .context("checker exact-child reap incomplete")?;
-    ensure!(
-        exit.success && exit.code == Some(0),
-        "checker refused or exited unsuccessfully"
-    );
+    if !(exit.success && exit.code == Some(0)) {
+        anyhow::bail!(
+            "checker refused or exited unsuccessfully{}",
+            checker_refusal_reason(&response)
+                .map(|reason| format!(": {reason}"))
+                .unwrap_or_default()
+        );
+    }
     ensure!(
         state
             .drain
@@ -912,7 +931,18 @@ envelope['stream'] = decode(b''.join(raw_chunks))
 namespace = {'__name__': 'ryeos_selected_semantic_checker'}
 exec(compile(script_bytes, '<ryeos-selected-checker>', 'exec'), namespace)
 require_module_origins()
-response = namespace['check_conversation'](envelope)
+try:
+    response = namespace['check_conversation'](envelope)
+except Exception as error:
+    # The checker's own refusals carry fixed messages from its source, never
+    # transcript data: report one as a bounded reason, then exit nonzero.
+    # Any other failure stays opaque.
+    message = error.args[0] if type(error).__name__ == 'Refused' and len(error.args) == 1 else None
+    if type(message) is str and 0 < len(message) <= 256 and all(' ' <= ch <= '~' for ch in message):
+        sys.stdout.buffer.write(json.dumps({'refused': message}, separators=(',', ':')).encode('ascii') + b'\n')
+        sys.stdout.buffer.flush()
+        sys.exit(3)
+    raise
 require_module_origins()
 encoded = json.dumps(response, sort_keys=True, separators=(',', ':'), ensure_ascii=True, allow_nan=False).encode('utf-8') + b'\n'
 require(len(encoded) <= 65536)
@@ -923,6 +953,25 @@ sys.stdout.buffer.flush()
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_bounded_printable_refusal_is_reported() {
+        assert_eq!(
+            checker_refusal_reason(br#"{"refused":"notification after terminal"}"#).as_deref(),
+            Some("notification after terminal")
+        );
+        for opaque in [
+            &br#"{"refused":"x","extra":1}"#[..],
+            br#"{"refused":""}"#,
+            br#"{"refused":"tab\there"}"#,
+            br#"{"conversation":{}}"#,
+            b"not json",
+        ] {
+            assert!(checker_refusal_reason(opaque).is_none());
+        }
+        let long = format!(r#"{{"refused":"{}"}}"#, "a".repeat(257));
+        assert!(checker_refusal_reason(long.as_bytes()).is_none());
+    }
     use lillux::subordinate_process::SubordinateProcessRequest;
     use lillux::time::Duration;
     use std::sync::mpsc;
