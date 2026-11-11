@@ -571,8 +571,8 @@ impl StateStore {
     }
 
     /// Author only the original bound occurrence's guest assignment with the
-    /// node identity. The qualified guest must already pin this public root;
-    /// signing here does not make a provider snapshot qualified or start it.
+    /// node identity, naming the node's public key inside the signed document.
+    /// Signing here does not make a provider snapshot qualified or start it.
     pub(crate) fn author_external_guest_assignment(
         &self,
         reservation: &runtime_db::external_execution::ExternalAllocationReservation,
@@ -626,6 +626,7 @@ impl StateStore {
             supervisor_runtime_hash: intent.supervisor_runtime_hash.clone(),
             guest_runtime_manifest_hash: contract.guest_runtime_manifest_hash.clone(),
             owner_public_key_hex: hex::encode(owner_bytes),
+            controller_public_key_hex: hex::encode(g.signer.verifying_key().to_bytes()),
             attachment_deadline_ms: intent.attachment_deadline_ms,
         };
         let signature = g.signer.sign(&assignment.signing_bytes()?);

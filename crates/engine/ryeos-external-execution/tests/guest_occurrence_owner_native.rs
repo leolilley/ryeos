@@ -174,6 +174,7 @@ fn signed_native_assignment(
     assignment: &GuestOccurrenceAssignment<'_>,
     owner: &lillux::crypto::SigningKey,
 ) -> Result<Vec<u8>> {
+    let root = lillux::crypto::SigningKey::from_bytes(&[43; 32]);
     let document = GuestOccurrenceAssignmentDocument {
         schema: GUEST_OCCURRENCE_ASSIGNMENT_SCHEMA,
         placement_thread_id: assignment.placement_thread_id.into(),
@@ -186,9 +187,9 @@ fn signed_native_assignment(
         supervisor_runtime_hash: assignment.supervisor_runtime_hash.into(),
         guest_runtime_manifest_hash: assignment.guest_runtime_manifest_hash.into(),
         owner_public_key_hex: hex::encode(owner.verifying_key().to_bytes()),
+        controller_public_key_hex: hex::encode(root.verifying_key().to_bytes()),
         attachment_deadline_ms: assignment.attachment_deadline_ms,
     };
-    let root = lillux::crypto::SigningKey::from_bytes(&[43; 32]);
     let signed = sign_guest_occurrence_assignment(document, &root)?;
     ryeos_external_execution_contract::canonical_json(&signed)
 }
@@ -199,10 +200,8 @@ fn verify_native_import(
     installed_runtime_manifest_hash: &str,
 ) -> Result<ryeos_external_execution::guest_import_authorization::VerifiedGuestImportAuthorization>
 {
-    let root = lillux::crypto::SigningKey::from_bytes(&[43; 32]);
     verify_guest_import_documents(
         &ryeos_external_execution_contract::canonical_json(signed)?,
-        &root.verifying_key(),
         installed_runtime_manifest_hash,
         signed_assignment,
     )

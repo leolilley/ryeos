@@ -11781,9 +11781,9 @@ mod tests {
             ryeos_node_runtime::identity::NodeIdentity::load(&root.join("node-key.pem")).unwrap();
         let verified = ryeos_external_execution::guest_import_authorization::verify_signed_guest_occurrence_assignment(
             signed.clone(),
-            identity.verifying_key(),
         )
         .unwrap();
+        assert_eq!(verified.controller_key(), identity.verifying_key());
         assert_eq!(
             verified.assignment().occurrence_id,
             occurrence.occurrence_id
@@ -14404,6 +14404,7 @@ mod tests {
                     owner_public_key_hex: hex::encode(
                         authority.owner_signing_key().verifying_key().to_bytes(),
                     ),
+                    controller_public_key_hex: hex::encode(root.verifying_key().to_bytes()),
                     attachment_deadline_ms: assignment.attachment_deadline_ms,
                 },
                 &root,
@@ -14414,7 +14415,6 @@ mod tests {
             ryeos_external_execution_contract::canonical_json(&signed_assignment).unwrap();
         ryeos_external_execution::guest_import_authorization::verify_guest_import_documents(
             &import_bytes,
-            &root.verifying_key(),
             assignment.guest_runtime_manifest_hash,
             &assignment_bytes,
         )
@@ -14429,7 +14429,6 @@ mod tests {
         let verified_delivery =
             ryeos_external_execution::guest_import_authorization::verify_guest_import_documents(
                 &delivered,
-                &root.verifying_key(),
                 assignment.guest_runtime_manifest_hash,
                 &assignment_bytes,
             )
@@ -14472,7 +14471,6 @@ mod tests {
         assert!(
             ryeos_external_execution::guest_import_authorization::verify_guest_import_documents(
                 &import_bytes,
-                &root.verifying_key(),
                 &"7".repeat(64),
                 &assignment_bytes,
             )

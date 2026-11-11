@@ -462,6 +462,7 @@ pub fn prepare(inputs: &FixtureInputs<'_>) -> Result<Prepared> {
         supervisor_runtime_hash: supervisor_runtime_hash.clone(),
         guest_runtime_manifest_hash: inputs.probe_manifest_hash.into(),
         owner_public_key_hex: hex::encode(inputs.controller_key.verifying_key().to_bytes()),
+        controller_public_key_hex: hex::encode(inputs.root_key.verifying_key().to_bytes()),
         attachment_deadline_ms,
     };
     let signed_assignment = ryeos_external_execution_contract::canonical_json(

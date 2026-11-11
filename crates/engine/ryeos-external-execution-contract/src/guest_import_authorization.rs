@@ -1,9 +1,11 @@
 //! Controller-authorized, provider-neutral guest import intent.
 //!
-//! The uploaded package is not an authority source. A guest importer verifies
-//! the root-signed occurrence assignment against its installed trust root,
-//! then the import authorization against the delegated owner key before
-//! creating its one-shot owner.
+//! The uploaded package is not an authority source. The placing controller
+//! names its own public key inside the occurrence assignment it signs and
+//! delivers through the launch it controls. A guest importer verifies the
+//! assignment under that key, then the import authorization against the
+//! delegated owner key before creating its one-shot owner. The guest runtime
+//! product itself carries no trust root, so one product serves any controller.
 
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
@@ -11,9 +13,10 @@ use sha2::{Digest as _, Sha256};
 
 use crate::staging_package::{GuestImportContext, GuestImportTicket};
 use crate::{ExternalGuestInputProjection, canonical_json};
+use lillux::crypto::{Signature, Verifier as _, VerifyingKey};
 
 pub const GUEST_IMPORT_AUTHORIZATION_SCHEMA: u32 = 1;
-pub const GUEST_OCCURRENCE_ASSIGNMENT_SCHEMA: u32 = 1;
+pub const GUEST_OCCURRENCE_ASSIGNMENT_SCHEMA: u32 = 2;
 pub const MAX_GUEST_OCCURRENCE_ASSIGNMENT_BYTES: usize = 4 * 1024;
 pub const MAX_SIGNED_GUEST_OCCURRENCE_ASSIGNMENT_BYTES: usize =
     MAX_GUEST_OCCURRENCE_ASSIGNMENT_BYTES + 256;
@@ -38,9 +41,11 @@ pub struct GuestOccurrenceAssignment<'a> {
 }
 
 /// Wire form for an occurrence assignment delivered separately from the
-/// uploaded package. Parsing it does not establish origin: the qualified
-/// guest runtime must pin a controller root and verify the enclosing
-/// signature before this assignment delegates the temporary owner key.
+/// uploaded package. Parsing it does not establish origin: the enclosing
+/// signature must verify under `controller_public_key_hex` before this
+/// assignment delegates the temporary owner key. The key rides the same
+/// launch channel the controller already owns, so naming it here grants no
+/// authority beyond what setting the launch command already holds.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GuestOccurrenceAssignmentDocument {
@@ -57,6 +62,8 @@ pub struct GuestOccurrenceAssignmentDocument {
     /// Per-occurrence channel owner delegated by an independently trusted
     /// controller root. Never take this key from the uploaded package.
     pub owner_public_key_hex: String,
+    /// Ed25519 public key of the controller that signs this assignment.
+    pub controller_public_key_hex: String,
     pub attachment_deadline_ms: i64,
 }
 
@@ -103,17 +110,30 @@ impl GuestOccurrenceAssignmentDocument {
             &self.supervisor_runtime_hash,
             &self.guest_runtime_manifest_hash,
             &self.owner_public_key_hex,
+            &self.controller_public_key_hex,
         ] {
             ensure!(
                 canonical_digest(digest),
                 "guest occurrence assignment has invalid digest"
             );
         }
+        self.controller_key()?;
         ensure!(
             canonical_json(self)?.len() <= MAX_GUEST_OCCURRENCE_ASSIGNMENT_BYTES,
             "guest occurrence assignment exceeds byte bound"
         );
         Ok(())
+    }
+
+    /// The controller key this assignment names, refused when it is not a
+    /// usable Ed25519 point.
+    pub fn controller_key(&self) -> Result<VerifyingKey> {
+        let bytes: [u8; 32] = hex::decode(&self.controller_public_key_hex)?
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("guest assignment controller key changed length"))?;
+        let key = VerifyingKey::from_bytes(&bytes)?;
+        ensure!(!key.is_weak(), "guest assignment controller key is weak");
+        Ok(key)
     }
 
     pub fn signing_bytes(&self) -> Result<Vec<u8>> {
@@ -140,6 +160,26 @@ impl SignedGuestOccurrenceAssignment {
         );
         Ok(())
     }
+
+    /// Verify the enclosing signature under the controller key the assignment
+    /// itself names and return that key. A caller that knows which controller
+    /// should have signed compares the returned key with its own.
+    pub fn verify_controller_signature(&self) -> Result<VerifyingKey> {
+        self.validate_shape()?;
+        let controller = self.assignment.controller_key()?;
+        let signature: [u8; 64] = hex::decode(&self.signature_hex)?
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("guest assignment signature changed length"))?;
+        controller
+            .verify(
+                &self.assignment.signing_bytes()?,
+                &Signature::from_bytes(&signature),
+            )
+            .map_err(|_| {
+                anyhow::anyhow!("guest assignment was not signed by the controller it names")
+            })?;
+        Ok(controller)
+    }
 }
 
 #[cfg(test)]
@@ -160,6 +200,11 @@ mod assignment_tests {
             supervisor_runtime_hash: "f".repeat(64),
             guest_runtime_manifest_hash: "1".repeat(64),
             owner_public_key_hex: "2".repeat(64),
+            controller_public_key_hex: hex::encode(
+                lillux::crypto::SigningKey::from_bytes(&[43; 32])
+                    .verifying_key()
+                    .to_bytes(),
+            ),
             attachment_deadline_ms: 1_800_000_000_000,
         }
     }
@@ -178,7 +223,7 @@ mod assignment_tests {
         );
 
         let mut wrong_epoch = serde_json::to_value(&source).unwrap();
-        wrong_epoch["schema"] = json!(2);
+        wrong_epoch["schema"] = json!(1);
         assert!(
             serde_json::from_value::<GuestOccurrenceAssignmentDocument>(wrong_epoch)
                 .unwrap()
@@ -200,6 +245,45 @@ mod assignment_tests {
         assert!(
             serde_json::from_value::<GuestOccurrenceAssignmentDocument>(missing_owner).is_err()
         );
+        let mut missing_controller = serde_json::to_value(document()).unwrap();
+        missing_controller
+            .as_object_mut()
+            .unwrap()
+            .remove("controller_public_key_hex");
+        assert!(
+            serde_json::from_value::<GuestOccurrenceAssignmentDocument>(missing_controller)
+                .is_err()
+        );
+        let mut weak_controller = document();
+        weak_controller.controller_public_key_hex = "0".repeat(64);
+        assert!(weak_controller.validate_shape().is_err());
+    }
+
+    #[test]
+    fn assignment_signature_verifies_only_under_the_named_controller() {
+        use lillux::crypto::{Signer as _, SigningKey};
+        let controller = SigningKey::from_bytes(&[43; 32]);
+        let source = document();
+        let signed = SignedGuestOccurrenceAssignment {
+            signature_hex: hex::encode(
+                controller.sign(&source.signing_bytes().unwrap()).to_bytes(),
+            ),
+            assignment: source.clone(),
+        };
+        assert_eq!(
+            signed.verify_controller_signature().unwrap(),
+            controller.verifying_key()
+        );
+        let other = SigningKey::from_bytes(&[44; 32]);
+        let mut renamed = signed.clone();
+        renamed.assignment.controller_public_key_hex =
+            hex::encode(other.verifying_key().to_bytes());
+        assert!(renamed.verify_controller_signature().is_err());
+        let foreign = SignedGuestOccurrenceAssignment {
+            signature_hex: hex::encode(other.sign(&source.signing_bytes().unwrap()).to_bytes()),
+            assignment: source,
+        };
+        assert!(foreign.verify_controller_signature().is_err());
     }
 }
 

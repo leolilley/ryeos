@@ -586,8 +586,9 @@ fn verify_signed_import_handoff(
     Ok(signed)
 }
 
-/// Correlation only; the guest verifies the node-root signature and its own
-/// installed runtime identity before trusting the delegated key.
+/// Correlation plus the controller signature: the assignment must verify
+/// under the controller key it names, which the guest uses in turn before
+/// checking its own installed runtime identity and trusting the delegated key.
 fn verify_signed_assignment_handoff(
     bytes: &[u8],
     import: &SignedGuestImportAuthorization,
@@ -600,6 +601,7 @@ fn verify_signed_assignment_handoff(
         canonical_json(&signed)? == bytes,
         "signed guest assignment handoff is noncanonical"
     );
+    signed.verify_controller_signature()?;
     let assignment = &signed.assignment;
     let authorization = &import.authorization;
     ensure!(

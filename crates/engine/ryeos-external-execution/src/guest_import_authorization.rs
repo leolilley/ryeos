@@ -270,18 +270,19 @@ impl ObservedGuestRuntime {
         self.recheck()?;
         verify_guest_import_documents(
             signed_import_bytes,
-            &self.controller_root,
             &self.manifest_hash,
             signed_assignment_bytes,
         )
     }
 }
 
-/// Root-authenticated delegation of the exact per-occurrence owner key.
-/// The root key must be pinned by the qualified guest runtime, not supplied
-/// alongside the signed assignment by the provider or uploaded package.
+/// Controller-authenticated delegation of the exact per-occurrence owner key.
+/// The controller key is the one the signed assignment names; it reaches the
+/// guest through the launch the controller sets, never through the uploaded
+/// package.
 pub struct VerifiedGuestOccurrenceAssignment {
     assignment: GuestOccurrenceAssignmentDocument,
+    controller_key: VerifyingKey,
     owner_key: VerifyingKey,
 }
 
@@ -290,17 +291,24 @@ impl VerifiedGuestOccurrenceAssignment {
         self.assignment.borrowed()
     }
 
+    pub fn controller_key(&self) -> &VerifyingKey {
+        &self.controller_key
+    }
+
     pub fn owner_key(&self) -> &VerifyingKey {
         &self.owner_key
     }
 }
 
+/// Sign `assignment` as `controller`, naming the controller's public key in
+/// the signed document.
 pub fn sign_guest_occurrence_assignment(
-    assignment: GuestOccurrenceAssignmentDocument,
-    controller_root: &SigningKey,
+    mut assignment: GuestOccurrenceAssignmentDocument,
+    controller: &SigningKey,
 ) -> Result<SignedGuestOccurrenceAssignment> {
+    assignment.controller_public_key_hex = hex::encode(controller.verifying_key().to_bytes());
     assignment.validate_shape()?;
-    let signature = controller_root.sign(&assignment.signing_bytes()?);
+    let signature = controller.sign(&assignment.signing_bytes()?);
     Ok(SignedGuestOccurrenceAssignment {
         assignment,
         signature_hex: hex::encode(signature.to_bytes()),
@@ -309,18 +317,8 @@ pub fn sign_guest_occurrence_assignment(
 
 pub fn verify_signed_guest_occurrence_assignment(
     signed: SignedGuestOccurrenceAssignment,
-    trusted_root: &VerifyingKey,
 ) -> Result<VerifiedGuestOccurrenceAssignment> {
-    signed.validate_shape()?;
-    let signature_bytes: [u8; 64] = hex::decode(&signed.signature_hex)?
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("guest assignment signature changed length"))?;
-    trusted_root
-        .verify(
-            &signed.assignment.signing_bytes()?,
-            &Signature::from_bytes(&signature_bytes),
-        )
-        .context("guest assignment was not signed by its installed controller root")?;
+    let controller_key = signed.verify_controller_signature()?;
     let owner_bytes: [u8; 32] = hex::decode(&signed.assignment.owner_public_key_hex)?
         .try_into()
         .map_err(|_| anyhow::anyhow!("guest owner key changed length"))?;
@@ -328,6 +326,7 @@ pub fn verify_signed_guest_occurrence_assignment(
     ensure!(!owner_key.is_weak(), "guest owner key is weak");
     Ok(VerifiedGuestOccurrenceAssignment {
         assignment: signed.assignment,
+        controller_key,
         owner_key,
     })
 }
@@ -400,12 +399,11 @@ fn verify_guest_import_authorization(
 }
 
 /// Parse and join the two different input authorities at the guest importer.
-/// The caller supplies the root key from its independently qualified runtime,
-/// a root-signed assignment through its placement channel, and the separately
-/// delivered signed import. Neither document can define the trusted root.
+/// The caller supplies a controller-signed assignment through its placement
+/// channel and the separately delivered signed import. The uploaded package
+/// can define neither the controller key nor the delegated owner key.
 pub fn verify_guest_import_documents(
     signed_bytes: &[u8],
-    trusted_root: &VerifyingKey,
     installed_guest_runtime_manifest_hash: &str,
     signed_assignment_bytes: &[u8],
 ) -> Result<VerifiedGuestImportAuthorization> {
@@ -425,7 +423,7 @@ pub fn verify_guest_import_documents(
             == signed_assignment_bytes,
         "signed guest occurrence assignment is not canonical"
     );
-    let assignment = verify_signed_guest_occurrence_assignment(signed_assignment, trusted_root)?;
+    let assignment = verify_signed_guest_occurrence_assignment(signed_assignment)?;
     ensure!(
         assignment.assignment().guest_runtime_manifest_hash
             == installed_guest_runtime_manifest_hash,
@@ -441,9 +439,9 @@ pub fn verify_guest_import_documents(
     verify_guest_import_authorization(signed, assignment.owner_key(), &assignment.assignment())
 }
 
-/// The controller signs only an already checked, exact occurrence assignment.
-/// A guest must still verify against its independently provisioned key and
-/// assignment before creating the durable import owner.
+/// The delegated owner signs only an already checked, exact occurrence
+/// assignment. A guest must still verify the controller-signed assignment
+/// that delegates this key before creating the durable import owner.
 pub fn sign_guest_import_authorization(
     authorization: GuestImportAuthorization,
     controller: &SigningKey,
@@ -636,6 +634,7 @@ mod tests {
                 supervisor_runtime_hash: assignment.supervisor_runtime_hash.into(),
                 guest_runtime_manifest_hash: assignment.guest_runtime_manifest_hash.into(),
                 owner_public_key_hex: hex::encode(owner_key.verifying_key().to_bytes()),
+                controller_public_key_hex: hex::encode(root_key.verifying_key().to_bytes()),
                 attachment_deadline_ms: assignment.attachment_deadline_ms,
             },
             &root_key,
@@ -769,6 +768,7 @@ mod tests {
             supervisor_runtime_hash: assignment.supervisor_runtime_hash.into(),
             guest_runtime_manifest_hash: assignment.guest_runtime_manifest_hash.into(),
             owner_public_key_hex: hex::encode(controller.verifying_key().to_bytes()),
+            controller_public_key_hex: hex::encode(root.verifying_key().to_bytes()),
             attachment_deadline_ms: assignment.attachment_deadline_ms,
         };
         let signed_bytes = ryeos_external_execution_contract::canonical_json(&signed).unwrap();
@@ -778,21 +778,15 @@ mod tests {
             ryeos_external_execution_contract::canonical_json(&signed_assignment).unwrap();
         let verified = verify_guest_import_documents(
             &signed_bytes,
-            &root.verifying_key(),
             assignment.guest_runtime_manifest_hash,
             &assignment_bytes,
         )
         .unwrap();
         assert_eq!(verified.authorization().occurrence_id, "occ-1");
         assert!(
-            verify_guest_import_documents(
-                &signed_bytes,
-                &root.verifying_key(),
-                &"9".repeat(64),
-                &assignment_bytes,
-            )
-            .is_err(),
-            "root-signed coordinates cannot substitute for installed runtime measurement"
+            verify_guest_import_documents(&signed_bytes, &"9".repeat(64), &assignment_bytes,)
+                .is_err(),
+            "controller-signed coordinates cannot substitute for installed runtime measurement"
         );
 
         let mut different_assignment = assignment_document.clone();
@@ -802,7 +796,6 @@ mod tests {
         assert!(
             verify_guest_import_documents(
                 &signed_bytes,
-                &root.verifying_key(),
                 assignment.guest_runtime_manifest_hash,
                 &ryeos_external_execution_contract::canonical_json(&differently_signed).unwrap(),
             )
@@ -815,18 +808,16 @@ mod tests {
         assert!(
             verify_guest_import_documents(
                 &signed_bytes,
-                &root.verifying_key(),
                 assignment.guest_runtime_manifest_hash,
                 &ryeos_external_execution_contract::canonical_json(&wrong_owner).unwrap(),
             )
             .is_err()
         );
-        let mut altered_signature = signed_assignment;
+        let mut altered_signature = signed_assignment.clone();
         altered_signature.assignment.occurrence_id = "occ-other".into();
         assert!(
             verify_guest_import_documents(
                 &signed_bytes,
-                &root.verifying_key(),
                 assignment.guest_runtime_manifest_hash,
                 &ryeos_external_execution_contract::canonical_json(&altered_signature).unwrap(),
             )
@@ -837,20 +828,22 @@ mod tests {
         assert!(
             verify_guest_import_documents(
                 &signed_bytes,
-                &root.verifying_key(),
                 assignment.guest_runtime_manifest_hash,
                 &padded,
             )
             .is_err()
         );
+        let mut renamed_controller = signed_assignment;
+        renamed_controller.assignment.controller_public_key_hex =
+            hex::encode(SigningKey::from_bytes(&[42; 32]).verifying_key().to_bytes());
         assert!(
             verify_guest_import_documents(
                 &signed_bytes,
-                &SigningKey::from_bytes(&[42; 32]).verifying_key(),
                 assignment.guest_runtime_manifest_hash,
-                &assignment_bytes,
+                &ryeos_external_execution_contract::canonical_json(&renamed_controller).unwrap(),
             )
-            .is_err()
+            .is_err(),
+            "an assignment must verify under the controller key it names"
         );
     }
 

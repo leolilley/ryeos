@@ -882,8 +882,9 @@ fn verify_signed_import_handoff(
     Ok(signed)
 }
 
-/// Correlation only; the qualified guest verifies the node-root signature
-/// and its own installed runtime identity before trusting the delegated key.
+/// Correlation plus the controller signature: the assignment must verify
+/// under the controller key it names, which the guest uses in turn before
+/// checking its own installed runtime identity and trusting the delegated key.
 fn verify_signed_assignment_handoff(
     bytes: &[u8],
     import: &ryeos_external_execution_contract::guest_import_authorization::SignedGuestImportAuthorization,
@@ -898,6 +899,7 @@ fn verify_signed_assignment_handoff(
         canonical_json(&signed)? == bytes,
         "signed guest assignment handoff is noncanonical"
     );
+    signed.verify_controller_signature()?;
     let assignment = &signed.assignment;
     let authorization = &import.authorization;
     ensure!(
@@ -1885,7 +1887,7 @@ mod offline_fixture_tests {
         use ryeos_external_execution_contract::guest_import_authorization::{
             GUEST_IMPORT_AUTHORIZATION_SCHEMA, GUEST_OCCURRENCE_ASSIGNMENT_SCHEMA,
             GuestImportAuthorization, GuestOccurrenceAssignmentDocument,
-            SignedGuestImportAuthorization, SignedGuestOccurrenceAssignment,
+            SignedGuestImportAuthorization,
         };
         use ryeos_external_execution_contract::staging_package::{
             GUEST_IMPORT_TICKET_SCHEMA, GuestImportTicket,
@@ -2016,23 +2018,27 @@ mod offline_fixture_tests {
         let canonical = canonical_json(&signed).unwrap();
         verify_signed_import_handoff(&canonical, &request).unwrap();
         let authorization = &signed.authorization;
-        let assignment = SignedGuestOccurrenceAssignment {
-            assignment: GuestOccurrenceAssignmentDocument {
-                schema: GUEST_OCCURRENCE_ASSIGNMENT_SCHEMA,
-                placement_thread_id: authorization.placement_thread_id.clone(),
-                admitted_capsule_hash: authorization.admitted_capsule_hash.clone(),
-                base_snapshot_hash: authorization.base_snapshot_hash.clone(),
-                execution_binding_hash: authorization.execution_binding_hash.clone(),
-                allocation_request_digest: authorization.allocation_request_digest.clone(),
-                occurrence_id: authorization.occurrence_id.clone(),
-                activation_request_digest: authorization.activation_request_digest.clone(),
-                supervisor_runtime_hash: authorization.supervisor_runtime_hash.clone(),
-                guest_runtime_manifest_hash: authorization.guest_runtime_manifest_hash.clone(),
-                owner_public_key_hex: hex::encode(owner.verifying_key().to_bytes()),
-                attachment_deadline_ms: authorization.attachment_deadline_ms,
-            },
-            signature_hex: "0".repeat(128),
-        };
+        let node = SigningKey::from_bytes(&[43; 32]);
+        let assignment =
+            ryeos_external_execution::guest_import_authorization::sign_guest_occurrence_assignment(
+                GuestOccurrenceAssignmentDocument {
+                    schema: GUEST_OCCURRENCE_ASSIGNMENT_SCHEMA,
+                    placement_thread_id: authorization.placement_thread_id.clone(),
+                    admitted_capsule_hash: authorization.admitted_capsule_hash.clone(),
+                    base_snapshot_hash: authorization.base_snapshot_hash.clone(),
+                    execution_binding_hash: authorization.execution_binding_hash.clone(),
+                    allocation_request_digest: authorization.allocation_request_digest.clone(),
+                    occurrence_id: authorization.occurrence_id.clone(),
+                    activation_request_digest: authorization.activation_request_digest.clone(),
+                    supervisor_runtime_hash: authorization.supervisor_runtime_hash.clone(),
+                    guest_runtime_manifest_hash: authorization.guest_runtime_manifest_hash.clone(),
+                    owner_public_key_hex: hex::encode(owner.verifying_key().to_bytes()),
+                    controller_public_key_hex: hex::encode(node.verifying_key().to_bytes()),
+                    attachment_deadline_ms: authorization.attachment_deadline_ms,
+                },
+                &node,
+            )
+            .unwrap();
         let assignment_bytes = canonical_json(&assignment).unwrap();
         verify_signed_assignment_handoff(&assignment_bytes, &signed).unwrap();
         let command = guest_owner_run_command(&assignment_bytes).unwrap();
@@ -2089,6 +2095,21 @@ mod offline_fixture_tests {
         assert!(
             verify_signed_assignment_handoff(&canonical_json(&bad_owner).unwrap(), &signed)
                 .is_err()
+        );
+        let mut unsigned = assignment.clone();
+        unsigned.signature_hex = "0".repeat(128);
+        assert!(
+            verify_signed_assignment_handoff(&canonical_json(&unsigned).unwrap(), &signed).is_err()
+        );
+        let mut renamed_controller = assignment.clone();
+        renamed_controller.assignment.controller_public_key_hex =
+            hex::encode(owner.verifying_key().to_bytes());
+        assert!(
+            verify_signed_assignment_handoff(
+                &canonical_json(&renamed_controller).unwrap(),
+                &signed
+            )
+            .is_err()
         );
         let mut changed_assignment = assignment.clone();
         changed_assignment.assignment.occurrence_id = "occ-other".into();

@@ -1085,6 +1085,7 @@ fn prepare(
         supervisor_runtime_hash: supervisor_runtime_hash.clone(),
         guest_runtime_manifest_hash: runtime_manifest_hash.clone(),
         owner_public_key_hex: hex::encode(controller_key.verifying_key().to_bytes()),
+        controller_public_key_hex: hex::encode(root_key.verifying_key().to_bytes()),
         attachment_deadline_ms,
     };
     let signed_assignment = ryeos_external_execution_contract::canonical_json(
