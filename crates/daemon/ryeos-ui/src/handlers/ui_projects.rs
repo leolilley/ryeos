@@ -316,7 +316,7 @@ fn compile_saved_surface_context(
         .transpose()?;
     let request = super::ui_launch_mint::Request {
         ui_binding_contract_revision: crate::UI_BINDING_CONTRACT_REVISION.into(),
-        surface_ref: origin.surface_ref.clone(),
+        root_ref: origin.surface_ref.clone(),
         project_path: canonical.as_ref().map(|path| path.display().to_string()),
         user_principal_id: None,
     };
@@ -868,7 +868,7 @@ pub async fn handle_projects_open(
     );
     let compile_request = super::ui_launch_mint::Request {
         ui_binding_contract_revision: crate::UI_BINDING_CONTRACT_REVISION.into(),
-        surface_ref,
+        root_ref: surface_ref,
         project_path: Some(root.clone()),
         user_principal_id: None,
     };
@@ -1141,7 +1141,7 @@ pub async fn handle_particular_view_set_resume(
     }
     let compile_request = super::ui_launch_mint::Request {
         ui_binding_contract_revision: crate::UI_BINDING_CONTRACT_REVISION.into(),
-        surface_ref: req.surface_ref,
+        root_ref: req.surface_ref,
         project_path: canonical_project
             .as_ref()
             .map(|root| root.display().to_string()),

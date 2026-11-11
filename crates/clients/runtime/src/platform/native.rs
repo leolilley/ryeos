@@ -23,7 +23,7 @@ use sha2::{Digest, Sha256};
 use tokio::time::Instant;
 
 use crate::admission::decode_session;
-use crate::api::{LAUNCH_MINT_PATH, SESSION_CURRENT_PATH, mint_body};
+use crate::api::{LAUNCH_MINT_PATH, SESSION_CURRENT_PATH};
 use crate::codec::{decode_strict, encode_exact};
 use crate::error::RuntimeError;
 use crate::platform::{
@@ -426,8 +426,7 @@ impl NativeAuth {
             .signer
             .as_ref()
             .map(|signer| format!("fp:{}", signer.fingerprint));
-        let body = encode_exact(&mint_body(
-            ryeos_client_base::UI_BINDING_CONTRACT_REVISION,
+        let body = encode_exact(&ryeos_client_base::presentation::launch_mint_body(
             &mint.config_ref,
             mint.project_path.as_deref(),
             user_principal_id.as_deref(),
@@ -805,27 +804,6 @@ mod tests {
         assert!(!seat_history_stream_response(StatusCode::OK, None, None));
     }
 
-    #[test]
-    fn mint_body_is_bound_to_the_verified_operator_principal() {
-        let body = mint_body(
-            ryeos_client_base::UI_BINDING_CONTRACT_REVISION,
-            "config:ryeos/ui/terminal-presentation",
-            Some("/work/project"),
-            Some("fp:operator"),
-        );
-        assert_eq!(body["user_principal_id"], "fp:operator");
-        assert_eq!(body["project_path"], "/work/project");
-        assert_eq!(body["composition"]["kind"], "shared_presentation");
-        assert_eq!(
-            body["composition"]["config_ref"],
-            "config:ryeos/ui/terminal-presentation"
-        );
-        assert!(body["composition"].get("surface_ref").is_none());
-        assert_eq!(
-            body["ui_binding_contract_revision"],
-            ryeos_client_base::UI_BINDING_CONTRACT_REVISION
-        );
-    }
 
     #[test]
     fn credentials_are_bounded_transport_tokens() {

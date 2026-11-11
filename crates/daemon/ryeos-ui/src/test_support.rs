@@ -81,7 +81,7 @@ async fn live_presentation_in_project(
     let minted = crate::handlers::ui_launch_mint::handle(
         crate::handlers::ui_launch_mint::Request {
             ui_binding_contract_revision: crate::UI_BINDING_CONTRACT_REVISION.into(),
-            surface_ref: "config:test/presentation".into(),
+            root_ref: "config:test/presentation".into(),
             project_path: Some(spelling.display().to_string()),
             user_principal_id: Some(principal.clone()),
         },
@@ -142,7 +142,7 @@ pub async fn live_shipped_presentation_in_project(
     let minted = crate::handlers::ui_launch_mint::handle(
         crate::handlers::ui_launch_mint::Request {
             ui_binding_contract_revision: crate::UI_BINDING_CONTRACT_REVISION.into(),
-            surface_ref: "config:ryeos/ui/presentation".into(),
+            root_ref: "config:ryeos/ui/presentation".into(),
             project_path: Some(project_root.display().to_string()),
             user_principal_id: Some(principal.clone()),
         },
@@ -169,7 +169,7 @@ pub async fn live_shipped_presentation(
     let minted = crate::handlers::ui_launch_mint::handle(
         crate::handlers::ui_launch_mint::Request {
             ui_binding_contract_revision: crate::UI_BINDING_CONTRACT_REVISION.into(),
-            surface_ref: "config:ryeos/ui/presentation".into(),
+            root_ref: "config:ryeos/ui/presentation".into(),
             project_path: None,
             user_principal_id: Some(principal.clone()),
         },

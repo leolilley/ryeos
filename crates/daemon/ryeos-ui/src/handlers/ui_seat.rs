@@ -1525,7 +1525,7 @@ pub async fn handle_open(
                             let request = super::ui_launch_mint::Request {
                                 ui_binding_contract_revision: crate::UI_BINDING_CONTRACT_REVISION
                                     .into(),
-                                surface_ref: seed.surface.clone(),
+                                root_ref: seed.surface.clone(),
                                 project_path: attachment
                                     .compiled_binding
                                     .binding

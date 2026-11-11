@@ -58,7 +58,7 @@ pub(crate) fn binding_request_bounds(
 #[serde(deny_unknown_fields)]
 pub struct Request {
     pub ui_binding_contract_revision: String,
-    pub surface_ref: String,
+    pub root_ref: String,
     #[serde(default)]
     pub project_path: Option<String>,
     #[serde(default)]
@@ -218,8 +218,8 @@ pub(crate) fn compile_session_binding(
             .map(lillux::PinnedDirectory::try_clone)
             .transpose()?,
     )?;
-    let root_ref = CanonicalRef::parse(&req.surface_ref)
-        .map_err(|error| HandlerError::BadRequest(format!("invalid surface ref: {error}")))?;
+    let root_ref = CanonicalRef::parse(&req.root_ref)
+        .map_err(|error| HandlerError::BadRequest(format!("invalid root ref: {error}")))?;
     let project_subject = project_authority.map(|_| project_path.as_path());
 
     prepared
@@ -716,20 +716,20 @@ mod tests {
     fn launch_mint_has_no_caller_authored_posture() {
         let req: Request = serde_json::from_value(serde_json::json!({
             "ui_binding_contract_revision": crate::UI_BINDING_CONTRACT_REVISION,
-            "surface_ref": "surface:ryeos/ui/base"
+            "root_ref": "surface:ryeos/ui/base"
         }))
         .unwrap();
 
-        assert_eq!(req.surface_ref, "surface:ryeos/ui/base");
+        assert_eq!(req.root_ref, "surface:ryeos/ui/base");
         for forbidden in [
             serde_json::json!({
                 "ui_binding_contract_revision": crate::UI_BINDING_CONTRACT_REVISION,
-                "surface_ref": "surface:ryeos/ui/base",
+                "root_ref": "surface:ryeos/ui/base",
                 "read_only": true
             }),
             serde_json::json!({
                 "ui_binding_contract_revision": crate::UI_BINDING_CONTRACT_REVISION,
-                "surface_ref": "surface:ryeos/ui/base",
+                "root_ref": "surface:ryeos/ui/base",
                 "mode": "operate"
             }),
         ] {
@@ -738,15 +738,43 @@ mod tests {
     }
 
     #[test]
+    fn every_launcher_body_decodes_as_the_mint_request() {
+        use ryeos_client_base::presentation::launch_mint_body;
+
+        for (root_ref, project_path, user_principal_id) in [
+            ("config:ryeos/ui/terminal-presentation", None, None),
+            ("config:ryeos/ui/presentation", Some("/work/project"), None),
+            (
+                "surface:ryeos/ui/assistant-observe",
+                None,
+                Some("fp:operator"),
+            ),
+        ] {
+            let body = launch_mint_body(root_ref, project_path, user_principal_id);
+            let req: Request = serde_json::from_value(body)
+                .unwrap_or_else(|error| panic!("client mint body for {root_ref} refused: {error}"));
+            assert_eq!(
+                req.ui_binding_contract_revision,
+                crate::UI_BINDING_CONTRACT_REVISION
+            );
+            assert_eq!(req.root_ref, root_ref);
+            assert_eq!(req.project_path.as_deref(), project_path);
+            assert_eq!(req.user_principal_id.as_deref(), user_principal_id);
+            require_current_binding_contract(&req.ui_binding_contract_revision)
+                .expect("launchers speak the daemon's binding contract");
+        }
+    }
+
+    #[test]
     fn launch_mint_requires_the_exact_binding_contract_revision() {
         let missing = serde_json::from_value::<Request>(serde_json::json!({
-            "surface_ref": "surface:ryeos/ui/base"
+            "root_ref": "surface:ryeos/ui/base"
         }));
         assert!(missing.is_err(), "old launchers must fail request decoding");
 
         let current: Request = serde_json::from_value(serde_json::json!({
             "ui_binding_contract_revision": crate::UI_BINDING_CONTRACT_REVISION,
-            "surface_ref": "surface:ryeos/ui/base"
+            "root_ref": "surface:ryeos/ui/base"
         }))
         .unwrap();
         assert_eq!(

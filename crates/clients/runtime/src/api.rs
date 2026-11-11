@@ -169,21 +169,6 @@ fn encode_within(
 // Bodies
 // ---------------------------------------------------------------------------
 
-/// Body of `launch/mint` for a shared presentation.
-pub fn mint_body(
-    binding_contract_revision: &str,
-    config_ref: &str,
-    project_path: Option<&str>,
-    user_principal_id: Option<&str>,
-) -> Value {
-    json!({
-        "ui_binding_contract_revision": binding_contract_revision,
-        "composition": { "kind": "shared_presentation", "config_ref": config_ref },
-        "project_path": project_path,
-        "user_principal_id": user_principal_id,
-    })
-}
-
 /// Body of `seat/history`.
 pub fn history_body(presentation_id: &str, chain_root_id: &str) -> Value {
     json!({ "presentation_id": presentation_id, "chain_root_id": chain_root_id })
