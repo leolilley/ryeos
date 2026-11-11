@@ -112,6 +112,19 @@ impl ProductionPrivateStaging {
         })
     }
 
+    /// Re-anchor every path binding after this process entered the native
+    /// guest's mount namespace, where each mount has a new identity. Each path
+    /// must still reach the identical directory inode; later binding checks
+    /// then compare mounts within the namespace this process now lives in.
+    pub(crate) fn rebind_in_current_mount_namespace(&mut self) -> Result<()> {
+        self.occurrence.rebind_in_current_mount_namespace()?;
+        self.candidate.rebind_in_current_mount_namespace()?;
+        for directory in self.runtime_views.values_mut() {
+            directory.rebind_in_current_mount_namespace()?;
+        }
+        Ok(())
+    }
+
     fn recheck_bindings(&self) -> Result<()> {
         self.occurrence.ensure_path_binding()?;
         self.candidate.ensure_path_binding()?;

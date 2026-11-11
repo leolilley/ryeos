@@ -259,7 +259,7 @@ pub fn run_production_probe(encoded_challenge: &str) -> Result<()> {
         lillux::inherited_pipes::InheritedPipePair::take_inherited_pipes(0, 1, CHUNK, active)
     }?;
     let (input, mut output, interrupt) = pair.split();
-    let root =
+    let mut root =
         PinnedDirectory::open(Path::new("."))?.context("consumer private control cwd absent")?;
     let imported_path = std::env::var_os(CONSUMER_INPUT_ROOT_ENV)
         .context("consumer imported source root absent")?;
@@ -289,7 +289,7 @@ pub fn run_production_probe(encoded_challenge: &str) -> Result<()> {
         .consumer_execution_context
         .as_ref()
         .context("consumer context absent")?;
-    let private =
+    let mut private =
         crate::production_inputs::ProductionPrivateStaging::create(&root, content, context)?;
     let observed = imported.run_native_protocol(
         &record,
@@ -301,6 +301,16 @@ pub fn run_production_probe(encoded_challenge: &str) -> Result<()> {
         active,
         cleanup,
     )?;
+    // Native preparation moved this process into the guest's mount namespace,
+    // where every mount has a new identity. The relay itself used retained
+    // descriptors only; the capture and the observation write below prove
+    // path bindings, so re-anchor the control root and the private staging
+    // here: same paths, identical inodes, mounts compared in this namespace.
+    root.rebind_in_current_mount_namespace()
+        .context("re-anchor consumer control root in the native namespace")?;
+    private
+        .rebind_in_current_mount_namespace()
+        .context("re-anchor consumer private staging in the native namespace")?;
     // The native owner has settled the whole namespace before any capture.
     // This is verifier-private evidence, not Worker C retention/publication.
     let captured = private.capture_candidate_after_settlement(cleanup)?;
