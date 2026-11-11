@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ryeos:signed:2026-10-15T23:47:07Z:204980b480ae9383056140ba70b04cf76416e6f157dc2846cc0c5aa381735ca9:ct006EmkJB/M5Wo9xSIxCyijq/TqY2PSJvT3K1GWLJ16SsNnLFmOkGxYc2pxmK9ffyNGPziITEuRIbf5o1hlDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-11T02:56:41Z:177424f8b1bfed4edb1c012dd2316c66452e87507a5a0d14f2e214f82492de4c:NimVuqWCVkwiysLMdCawLhXh+SZH201GeoQWWc/na7dtHwFruZtu9qOfG1blUFdreYA8tTd64cXoueI1WAssAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Build the exact initial Core bundle from an admitted pinned source generation."""
 import hashlib
 import importlib.util
