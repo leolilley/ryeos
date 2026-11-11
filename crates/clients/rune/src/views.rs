@@ -542,7 +542,7 @@ fn list(key: String, label: &str) -> El {
     col()
         .key(key)
         .w_full()
-        .grow(1.0)
+        .shrink()
         .min_h(0.0)
         .px(16.0)
         .py(12.0)
@@ -768,7 +768,7 @@ fn text_view(instance: &RyeOsViewInstanceKey, title: &str, lines: &[RyeOsTextLin
     let mut body = col()
         .key(format!("text:{instance:?}"))
         .w_full()
-        .grow(1.0)
+        .shrink()
         .min_h(0.0)
         .px(28.0)
         .py(22.0)
@@ -819,7 +819,7 @@ fn document_view(
                 .color(p.yellow),
         );
     }
-    let mut page = col().w_full().grow(1.0).min_h(0.0).label(title.to_owned());
+    let mut page = col().w_full().shrink().min_h(0.0).label(title.to_owned());
     if let Some(status) = status {
         page = page.child(source_status(status));
     }
@@ -827,7 +827,7 @@ fn document_view(
         col()
             .key(format!("document:{instance:?}"))
             .w_full()
-            .grow(1.0)
+            .shrink()
             .min_h(0.0)
             .scroll(ScrollSpec {
                 stick_bottom: false,
@@ -861,7 +861,7 @@ fn table_view(
     let mut body = col()
         .key(format!("table:{instance:?}"))
         .w_full()
-        .grow(1.0)
+        .shrink()
         .min_h(0.0)
         .px(20.0)
         .py(16.0)
@@ -1109,7 +1109,7 @@ fn timeline_view(
     let mut body = col()
         .key(format!("timeline:{instance:?}"))
         .w_full()
-        .grow(1.0)
+        .shrink()
         .min_h(0.0)
         .px(16.0)
         .py(12.0)

@@ -2,8 +2,8 @@
 //! set, status bar, notices and dialogs. Layout and metrics follow the
 //! browser shell's stylesheet.
 
-use rune::{El, col, el, row, text, text_input};
-use ryeos_client_base::ui::event::RyeOsInputAction;
+use rune::{El, Key, KeyEvent, col, el, row, text, text_input};
+use ryeos_client_base::ui::event::{RyeOsInputAction, RyeOsTransportFreshness};
 use ryeos_client_base::ui::view_model::{
     RyeOsDialogVm, RyeOsDockTileVm, RyeOsInputVm, RyeOsLayoutNodeVm, RyeOsNoticeVm,
     RyeOsSplitAxisVm, RyeOsStatusBarVm, RyeOsTileIntentVm, RyeOsTopBarVm, RyeOsViewModel,
@@ -105,8 +105,8 @@ fn system_bar(vm: &RyeOsViewModel) -> El {
     if let Some(ordinal) = session.surface_ordinal {
         context = context.child(
             text(format!("{ordinal:02}"))
-                .font(theme::data(10.0))
-                .color(p.accent_bright),
+                .font(theme::data(10.0).tracking(0.4))
+                .color(p.accent),
         );
     }
     context = context.child(
@@ -121,10 +121,10 @@ fn system_bar(vm: &RyeOsViewModel) -> El {
         .child(
             text(vm.chrome.health_label.to_uppercase())
                 .font(theme::data(10.0).tracking(0.4))
-                .color(p.tone(vm.chrome.health_tone, p.muted)),
+                .color(p.muted),
         )
         .child(
-            text(format!("{:?}", vm.transport.freshness).to_uppercase())
+            text(freshness_label(vm.transport.freshness))
                 .font(theme::data(10.0).tracking(0.4))
                 .color(p.muted),
         );
@@ -138,6 +138,14 @@ fn system_bar(vm: &RyeOsViewModel) -> El {
         .border_sides([0.0, 0.0, 1.0, 0.0], p.line)
         .child(context)
         .child(state)
+}
+
+/// The transport freshness as its wire name, uppercased.
+fn freshness_label(freshness: RyeOsTransportFreshness) -> String {
+    serde_json::to_value(freshness)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_uppercase))
+        .unwrap_or_default()
 }
 
 fn view_set_strip(top_bar: &RyeOsTopBarVm) -> El {
@@ -221,11 +229,13 @@ fn navigation(vm: &RyeOsViewModel) -> El {
                 .pl(15.0)
                 .pr(12.0)
                 .center_y()
-                .gap(8.0)
                 .fill(fill)
                 .border_sides([0.0, 0.0, 0.0, 2.0], rule)
                 .hover(p.plane_selected.alpha(0.5))
-                .child(text("▪").font(theme::ui(13.0)).color(p.yellow))
+                .child(
+                    el().w(20.0)
+                        .child(text("◇").font(theme::ui(13.0)).color(p.yellow)),
+                )
                 .child(text(item.label.clone()).font(theme::ui(13.0)).color(ink))
                 .on_press(move |app: &mut App| {
                     app.ui(RyeOsUiEvent::Activate {
@@ -247,27 +257,45 @@ fn navigation(vm: &RyeOsViewModel) -> El {
                 .px(14.0)
                 .center_y()
                 .border_sides([0.0, 0.0, 1.0, 0.0], p.line)
-                .child(views::header_label("Views", p.muted)),
+                .child(
+                    text("EXPLORER")
+                        .font(theme::data(9.0).tracking(1.26))
+                        .color(p.muted)
+                        .grow(1.0),
+                )
+                .child(
+                    text(format!("{:02}", vm.navigation.items.len()))
+                        .font(theme::data(9.0).tracking(1.26))
+                        .color(p.muted),
+                ),
         )
         .child(items)
 }
 
 fn view_set(vm: &RyeOsViewModel, local: &Local) -> El {
+    let maximized = matches!(
+        vm.view_set.as_ref().and_then(|set| set.root.as_ref()),
+        Some(RyeOsLayoutNodeVm::Tile {
+            maximized: true,
+            ..
+        })
+    );
     let docks = &vm.docks;
-    let mut middle = row().w_full().grow(1.0).min_h(0.0).min_w(0.0).gap(12.0);
-    if let Some(left) = &docks.left {
+    let gap = if maximized { 0.0 } else { 12.0 };
+    let mut middle = row().w_full().grow(1.0).min_h(0.0).min_w(0.0).gap(gap);
+    if !maximized && let Some(left) = &docks.left {
         middle = middle.child(dock(left, true, local));
     }
     middle = middle.child(center(vm.view_set.as_ref(), local));
-    if let Some(right) = &docks.right {
+    if !maximized && let Some(right) = &docks.right {
         middle = middle.child(dock(right, true, local));
     }
-    let mut set = col().grow(1.0).h_full().min_w(0.0).min_h(0.0).gap(12.0);
-    if let Some(top) = &docks.top {
+    let mut set = col().grow(1.0).h_full().min_w(0.0).min_h(0.0).gap(gap);
+    if !maximized && let Some(top) = &docks.top {
         set = set.child(dock(top, false, local));
     }
     set = set.child(middle);
-    if let Some(bottom) = &docks.bottom {
+    if !maximized && let Some(bottom) = &docks.bottom {
         set = set.child(dock(bottom, false, local));
     }
     set
@@ -314,26 +342,9 @@ fn dock(tile: &RyeOsDockTileVm, side: bool, local: &Local) -> El {
     }
 }
 
+/// The layout, or the bare backdrop when the set has none.
 fn center(view_set: Option<&RyeOsViewSetVm>, local: &Local) -> El {
-    let p = Palette::get();
-    let Some(view_set) = view_set.filter(|set| !set.center_is_empty) else {
-        return col()
-            .grow(1.0)
-            .h_full()
-            .min_w(0.0)
-            .center()
-            .gap(12.0)
-            .border(1.0, p.line)
-            .fill(p.plane)
-            .child(text("◇").font(theme::ui(24.0)).color(p.yellow))
-            .child(text("Nothing open").font(theme::ui(13.0)).color(p.text))
-            .child(
-                text("Open a view from the launcher.")
-                    .font(theme::ui(13.0))
-                    .color(p.muted),
-            );
-    };
-    let content = match &view_set.root {
+    let content = match view_set.and_then(|set| set.root.as_ref()) {
         Some(root) => layout(root, local),
         None => el(),
     };
@@ -473,13 +484,13 @@ fn status_bar(model: &RyeOsStatusBarVm) -> El {
     let mut bar = row()
         .w_full()
         .h(STATUS_HEIGHT)
-        .pl(18.0)
+        .px(18.0)
         .gap(14.0)
         .center_y()
         .fill(p.bar)
         .border_sides([1.0, 0.0, 0.0, 0.0], p.line);
     for segment in &model.segments {
-        let label = match &segment.label {
+        let label = match segment.label.as_deref().filter(|label| !label.is_empty()) {
             Some(label) => format!("{label} {}", segment.value),
             None => segment.value.clone(),
         };
@@ -555,14 +566,19 @@ fn dialog_layer(dialog: &RyeOsDialogVm, local: &Local) -> El {
     let p = Palette::get();
     let close = dialog.instance_key.clone();
     let close_button = close.clone();
-    let mut content = col()
-        .w_full()
-        .grow(1.0)
-        .min_h(0.0)
-        .padding(12.0)
-        .gap(10.0)
-        .child(views::body(&dialog.view, &dialog.instance_key));
-    if let Some(input) = &dialog.input {
+    let mut content = col().w_full().shrink().min_h(0.0).padding(12.0).gap(10.0);
+    let filter = dialog.input.as_ref().filter(|input| input.live_filter);
+    if let Some(input) = filter {
+        content = content.child(composer(input, local));
+    }
+    content = content.child(
+        col()
+            .w_full()
+            .shrink()
+            .min_h(0.0)
+            .child(views::body(&dialog.view, &dialog.instance_key)),
+    );
+    if let Some(input) = dialog.input.as_ref().filter(|input| !input.live_filter) {
         content = content.child(composer(input, local));
     }
     let header = row()
@@ -570,15 +586,27 @@ fn dialog_layer(dialog: &RyeOsDialogVm, local: &Local) -> El {
         .h(34.0)
         .px(12.0)
         .center_y()
-        .gap(10.0)
         .border_sides([0.0, 0.0, 1.0, 0.0], p.line)
-        .child(text("■").font(theme::ui(8.0)).color(p.accent_bright))
-        .child(views::header_label(&dialog.title, p.text).grow(1.0))
+        .child(
+            text("■")
+                .font(theme::data(8.0))
+                .color(p.accent_bright)
+                .pr(10.0),
+        )
+        .child(
+            text(dialog.title.to_uppercase())
+                .font(theme::data(10.0).tracking(0.8))
+                .color(p.text)
+                .truncate()
+                .grow(1.0),
+        )
         .child(
             text("×")
                 .font(theme::ui(18.0))
                 .color(p.muted)
-                .key("dialog:close")
+                .px(6.0)
+                .hover(p.plane_raised)
+                .key(format!("dialog:{:?}:close", dialog.instance_key))
                 .role("button")
                 .label("Close")
                 .on_press(move |app: &mut App| {
@@ -589,8 +617,11 @@ fn dialog_layer(dialog: &RyeOsDialogVm, local: &Local) -> El {
         );
     let panel = col()
         .key(format!("dialog:{:?}", dialog.instance_key))
-        .w(720.0)
+        .w_full()
+        .max_w(720.0)
         .max_h(640.0)
+        .shrink()
+        .min_h(0.0)
         .fill(p.plane)
         .border(1.0, p.line_strong)
         .border_sides([1.0, 1.0, 1.0, 1.0], p.line_strong)
@@ -602,6 +633,7 @@ fn dialog_layer(dialog: &RyeOsDialogVm, local: &Local) -> El {
         .items_center()
         .pt(96.0)
         .px(18.0)
+        .pb(18.0)
         .fill(p.bg.alpha(0.72))
         .modal(true, move |app: &mut App| {
             app.ui(RyeOsUiEvent::CloseDialog {
@@ -612,39 +644,92 @@ fn dialog_layer(dialog: &RyeOsDialogVm, local: &Local) -> El {
 }
 
 /// The input composer: route strip, the text field bound to the core's
-/// buffer, and the submit control.
+/// buffer, and the submit control. A live filter is the compact form above
+/// its view: Up and Down move the selection, Enter activates it.
 pub fn composer(input: &RyeOsInputVm, local: &Local) -> El {
     let p = Palette::get();
     let key = crate::input_key(&input.address);
     let edit_key = key.clone();
     let change_address = input.address.clone();
-    let submit_address = input.address.clone();
+    let key_address = input.address.clone();
     let button_address = input.address.clone();
-    let field = text_input(&local.edits.edit(&key), theme::ui(13.0))
+    let live = input.live_filter;
+    let submit_enabled = input.submit_enabled;
+    let focused = input.focused;
+    let field_font = if live {
+        theme::data(11.0)
+    } else {
+        theme::ui(13.0)
+    };
+    let mut field = text_input(&local.edits.edit(&key), field_font)
         .key(format!("composer:{key}"))
         .placeholder(input.placeholder.clone(), p.faint)
         .color(p.text)
         .w_full()
-        .min_h(if input.live_filter { 38.0 } else { 54.0 })
-        .padding(14.0)
         .on_edit(move |app: &mut App| app.edit_mut(&edit_key))
         .on_input_change(move |app: &mut App, _tx| {
             let Some((text, cursor)) = app.edit_state(&crate::input_key(&change_address)) else {
                 return;
             };
+            if !focused {
+                app.ui(RyeOsUiEvent::InputAt {
+                    address: change_address.clone(),
+                    action: RyeOsInputAction::Focus,
+                });
+            }
             app.ui(RyeOsUiEvent::InputAt {
                 address: change_address.clone(),
                 action: RyeOsInputAction::SetText { text, cursor },
             });
         })
-        .on_submit(move |app: &mut App, _tx| {
+        .on_input_key(move |app: &mut App, event: &KeyEvent, _tx| {
+            let action = match &event.key {
+                Key::Up if live => RyeOsInputAction::NavigateSelection { delta: -1 },
+                Key::Down if live => RyeOsInputAction::NavigateSelection { delta: 1 },
+                Key::Enter if live && !event.mods.shift => RyeOsInputAction::ActivateSelection,
+                // Shift+Enter is a newline; Alt+Enter submits as an interrupt.
+                Key::Enter if !event.mods.shift => {
+                    if !submit_enabled {
+                        return true;
+                    }
+                    RyeOsInputAction::Submit {
+                        interrupt: event.mods.alt,
+                    }
+                }
+                _ => return false,
+            };
+            if !focused {
+                app.ui(RyeOsUiEvent::InputAt {
+                    address: key_address.clone(),
+                    action: RyeOsInputAction::Focus,
+                });
+            }
             app.ui(RyeOsUiEvent::InputAt {
-                address: submit_address.clone(),
-                action: RyeOsInputAction::Submit { interrupt: false },
+                address: key_address.clone(),
+                action,
             });
+            true
         });
-    let mut composer = col().w_full().fill(p.plane).border(1.0, p.line_strong);
-    if !input.live_filter {
+    field = if live {
+        field.h(38.0).px(14.0).py(10.0)
+    } else {
+        field.min_h(54.0).padding(14.0)
+    };
+    let mut composer = col();
+    composer = if live {
+        composer
+            .w_full()
+            .fill(p.plane.alpha(0.97))
+            .border_sides([0.0, 0.0, 1.0, 0.0], p.line_strong)
+    } else {
+        composer
+            .fill(p.plane)
+            .border(1.0, p.line_strong)
+            .mt(8.0)
+            .mx(20.0)
+            .mb(18.0)
+    };
+    if !live {
         composer = composer.child(
             row()
                 .w_full()
@@ -660,43 +745,43 @@ pub fn composer(input: &RyeOsInputVm, local: &Local) -> El {
                         .color(p.muted)
                         .truncate()
                         .grow(1.0),
-                ),
+                )
+                .child(text("DRAFT").font(theme::data(9.0)).color(p.faint)),
         );
     }
     composer = composer.child(field);
-    let mut actions = row()
-        .w_full()
-        .min_h(if input.live_filter { 24.0 } else { 34.0 })
-        .pl(14.0)
-        .pr(10.0)
-        .pb(7.0)
-        .center_y()
-        .child(
-            text(input.hint.clone())
-                .font(theme::ui(10.0))
-                .color(p.faint)
-                .grow(1.0),
-        );
-    if !input.live_filter {
-        actions = actions.child(
-            el().key(format!("composer:{key}:submit"))
-                .role("button")
-                .label("Send")
-                .size(27.0, 27.0)
-                .center()
-                .fill(if input.submit_enabled {
-                    p.accent
-                } else {
-                    p.line
-                })
-                .child(text("↵").font(theme::ui(13.0)).color(p.text))
-                .on_press(move |app: &mut App| {
-                    app.ui(RyeOsUiEvent::InputAt {
-                        address: button_address.clone(),
-                        action: RyeOsInputAction::Submit { interrupt: false },
-                    });
-                }),
-        );
+    let mut actions = row().w_full().center_y().child(
+        text(input.hint.clone())
+            .font(theme::ui(10.0))
+            .color(p.faint)
+            .grow(1.0),
+    );
+    actions = if live {
+        actions.min_h(24.0).px(14.0).pb(6.0)
+    } else {
+        actions.min_h(34.0).pl(14.0).pr(10.0).pb(7.0)
+    };
+    if !live {
+        let mut send = el()
+            .key(format!("composer:{key}:submit"))
+            .role("button")
+            .label("Send")
+            .size(27.0, 27.0)
+            .center()
+            .fill(p.accent)
+            .disabled(!submit_enabled)
+            .child(text("↑").font(theme::ui(13.0)).color(p.text));
+        send = if submit_enabled {
+            send.on_press(move |app: &mut App| {
+                app.ui(RyeOsUiEvent::InputAt {
+                    address: button_address.clone(),
+                    action: RyeOsInputAction::Submit { interrupt: false },
+                });
+            })
+        } else {
+            send.opacity(0.5)
+        };
+        actions = actions.child(send);
     }
     composer.child(actions)
 }
