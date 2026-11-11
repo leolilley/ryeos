@@ -426,6 +426,14 @@ pub enum AdmittedDirectCommandClosure {
         /// to the process image. This is behavior-bearing for interpreters and
         /// binaries whose loader resolves adjacent libraries from `$ORIGIN`.
         execution_path: std::path::PathBuf,
+        /// Canonical host file the admitted bytes were captured from, when
+        /// they came from the host. Not authority: disabled isolation may run
+        /// this inode in place of a sealed copy only after re-digesting it to
+        /// `executable_blob_hash` and proving the daemon cannot change it, so
+        /// a multi-call binary's executable self lookup names the real file.
+        /// Its file name is the execution path's file name.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        host_origin: Option<std::path::PathBuf>,
     },
     RealizationMember {
         executable_blob_hash: String,
@@ -492,8 +500,20 @@ impl AdmittedExecutionClosure {
                 if let AdmittedDirectCommandClosure::ContentAddressed {
                     executable_blob_hash,
                     execution_path,
+                    host_origin,
                 } = command
                 {
+                    if let Some(host_origin) = host_origin {
+                        validate_absolute_normalized_path(
+                            "admitted direct command host origin",
+                            host_origin,
+                        )?;
+                        if host_origin.file_name() != execution_path.file_name() {
+                            anyhow::bail!(
+                                "admitted direct command host origin names a different file than its execution path"
+                            );
+                        }
+                    }
                     super::thread_snapshot::validate_canonical_hash(
                         "admitted direct executable blob hash",
                         executable_blob_hash,
@@ -2193,6 +2213,7 @@ impl AdmittedLaunchCapsule {
                 AdmittedDirectCommandClosure::ContentAddressed {
                     executable_blob_hash,
                     execution_path: _,
+                    host_origin: _,
                 }
                 | AdmittedDirectCommandClosure::RealizationMember {
                     executable_blob_hash,
@@ -2610,6 +2631,7 @@ mod tests {
                         std::path::Path::new("/executor"),
                     )
                     .unwrap(),
+                    host_origin: None,
                 }
             }
             DirectExecutableIdentity::NodePolicy => AdmittedDirectCommandClosure::NodePolicy,
@@ -3611,6 +3633,49 @@ mod tests {
             format!("{error:#}").contains("admitted_project_root"),
             "unexpected error: {error:#}"
         );
+    }
+
+    #[test]
+    fn content_addressed_command_requires_its_explicit_host_origin() {
+        let mut value = direct_capsule(DirectExecutableIdentity::CapturedContent {
+            content_hash: "f".repeat(64),
+        })
+        .to_value();
+        value["execution_closure"]["command"]
+            .as_object_mut()
+            .unwrap()
+            .remove("host_origin");
+
+        let error = AdmittedLaunchCapsule::from_current_value(value).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("host_origin"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn content_addressed_host_origin_must_name_the_execution_file() {
+        let mut value = direct_capsule(DirectExecutableIdentity::CapturedContent {
+            content_hash: "f".repeat(64),
+        })
+        .to_value();
+        value["execution_closure"]["command"]["host_origin"] =
+            serde_json::json!("/usr/bin/not-the-executor");
+
+        let error = AdmittedLaunchCapsule::from_current_value(value).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("host origin names a different file"),
+            "unexpected error: {error:#}"
+        );
+
+        let mut value = direct_capsule(DirectExecutableIdentity::CapturedContent {
+            content_hash: "f".repeat(64),
+        })
+        .to_value();
+        value["execution_closure"]["command"]["host_origin"] =
+            serde_json::json!("/usr/bin/executor");
+        AdmittedLaunchCapsule::from_current_value(value)
+            .expect("a host origin naming the execution file is accepted");
     }
 
     #[test]

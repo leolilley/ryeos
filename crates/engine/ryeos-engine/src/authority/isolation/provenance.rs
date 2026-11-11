@@ -108,17 +108,43 @@ pub struct IsolationLaunchProvenance {
     /// mount selection remains committed by plan_digest.
     pub network_runtime_files: BTreeMap<std::path::PathBuf, String>,
     pub plan_digest: Option<String>,
+    /// How a disabled-isolation launch delivered its admitted command's exact
+    /// bytes. Absence means "not applicable": no admitted command was
+    /// delivered by disabled isolation (an enforced launch, which always
+    /// materializes a named read-only copy, or callback/class provenance). It
+    /// is not a back-compatibility default and never means "written by an
+    /// older version". Omitting it keeps enforced provenance byte-identical.
+    /// An attempt fact, like the plan digest, not part of the admission class,
+    /// and never authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_delivery: Option<IsolationCommandDelivery>,
+}
+
+/// The carrier of an admitted command's verified bytes under disabled
+/// isolation. Both carriers execute exactly the admitted digest through a
+/// retained descriptor; neither reopens a path.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum IsolationCommandDelivery {
+    /// A kernel-sealed anonymous copy. Immutable even to the workload, but its
+    /// executable self lookup names an anonymous file.
+    SealedCopy,
+    /// The original host inode, proved unwritable by the daemon's effective
+    /// identity and re-digested through the retained descriptor. Its
+    /// executable self lookup names the real file.
+    VerifiedHostInode,
 }
 
 impl IsolationLaunchProvenance {
     /// Project one concrete launch onto the node-owned isolation class that
     /// can be promised before a target process is compiled. The redacted plan
-    /// digest is deliberately excluded: it is an attempt fact, while every
-    /// other field identifies the retained policy/backend generation and its
-    /// effective capabilities.
+    /// digest and the command delivery are deliberately excluded: they are
+    /// attempt facts, while every other field identifies the retained
+    /// policy/backend generation and its effective capabilities.
     pub fn admission_class(&self) -> Self {
         Self {
             plan_digest: None,
+            command_delivery: None,
             ..self.clone()
         }
     }
@@ -334,6 +360,7 @@ mod tests {
             process_scope_capabilities: BTreeSet::new(),
             network_runtime_files: BTreeMap::new(),
             plan_digest: Some("sha256:attempt".to_string()),
+            command_delivery: None,
         }
     }
 

@@ -1679,6 +1679,7 @@ pub mod test_support {
                         &executable_blob_hash,
                         std::path::Path::new("fixture"),
                     )?,
+                    host_origin: None,
                 },
                 admitted_project_root: None,
             },
@@ -3288,6 +3289,7 @@ mod tests {
                         std::path::Path::new("fixture"),
                     )
                     .unwrap(),
+                    host_origin: None,
                 },
                 admitted_project_root: None,
             },
