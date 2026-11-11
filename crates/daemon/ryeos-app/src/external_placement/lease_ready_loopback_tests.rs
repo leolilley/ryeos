@@ -188,6 +188,10 @@ struct CountingLauncher {
 }
 
 impl ExternalCandidateLauncherClient for CountingLauncher {
+    fn close_protocol_input(&mut self, _frame: &AuthenticatedExecutionFrame) -> Result<()> {
+        anyhow::bail!("counting launcher does not admit protocol input closure")
+    }
+
     fn release(&mut self, _frame: &AuthenticatedExecutionFrame) -> Result<()> {
         self.releases.fetch_add(1, AtomicOrdering::SeqCst);
         Ok(())

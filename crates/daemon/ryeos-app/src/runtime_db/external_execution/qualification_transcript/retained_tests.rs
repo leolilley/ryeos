@@ -404,6 +404,7 @@ impl<'a> Fixture<'a> {
                 workspace_id: workspace_id.clone(),
                 directory_identity: next.workspace_identity.unwrap(),
                 reserved_at_ms: 1,
+                released_at_ms: None,
             },
         );
         self.db
@@ -476,7 +477,6 @@ impl<'a> Fixture<'a> {
                 completion_request_digest: "7".repeat(64),
             },
         );
-        self.apply(&complete);
         let native = NativeQualificationScopeSettlementObservation {
             schema: 1,
             binding_digest: self.binding.digest().unwrap(),
@@ -519,6 +519,17 @@ impl<'a> Fixture<'a> {
                 },
             },
         ));
+        // The guest signs the settlement inside the completion's application
+        // and acknowledges the completion afterwards, so the row is retained
+        // here before the controller's own completion frame reads applied. The
+        // plan waits for that acknowledgement instead of refusing.
+        assert!(
+            self.db
+                .prepare_external_qualification_scope_settlement(&self.binding.placement_thread_id)
+                .unwrap()
+                .is_none()
+        );
+        self.apply(&complete);
     }
 }
 

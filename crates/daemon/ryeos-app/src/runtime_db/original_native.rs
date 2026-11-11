@@ -255,7 +255,7 @@ impl RuntimeDb {
         fence: UnreadableLifetimeFence,
     ) -> std::result::Result<Self, OriginalRuntimeAcquisitionFailure> {
         let mut custody = AcquisitionCustody::BeforeOpen(Some(inputs));
-        let opened = (|| -> Result<(lillux::PinnedDirectory, bool)> {
+        let opened = (|| -> Result<(lillux::PinnedDirectory, bool, Option<ColdQualificationCustodyReport>)> {
             factory.require_original_process()?;
             schema_reference.require_original_closed(
                 &factory,
@@ -286,14 +286,19 @@ impl RuntimeDb {
             let AcquisitionCustody::Live(owner) = &custody else {
                 unreachable!()
             };
-            let reset_required = owner.with_sql(|connection| {
+            let (reset_required, cold_qualification_custody) = owner.with_sql(|connection| {
                 connection.execute_batch("PRAGMA foreign_keys=ON;")?;
                 let epoch = runtime_operator_schema_epoch(connection, path)?;
                 ensure!(
                     epoch <= RUNTIME_OPERATOR_SCHEMA_EPOCH,
                     "original Runtime belongs to a newer operator epoch; destructive reset refused"
                 );
-                ensure_scope_lifetime_resettable_with(connection, epoch, fence)?;
+                let witness = ensure_scope_lifetime_resettable_with(
+                    connection,
+                    epoch,
+                    fence,
+                    QualificationCustodyDisposition::Settle(&root),
+                )?;
                 let reset_required = epoch < RUNTIME_OPERATOR_SCHEMA_EPOCH;
                 if !reset_required {
                     validate_current_runtime_store_with(
@@ -314,13 +319,13 @@ impl RuntimeDb {
                         connection.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
                     ensure!(mode == "wal", "original Runtime journal mode is not WAL");
                 }
-                Ok(reset_required)
+                Ok((reset_required, witness.cold_qualification_custody))
             })?;
             namespace.ensure_protects(&root)?;
             root.ensure_path_binding()?;
-            Ok((retained_root, reset_required))
+            Ok((retained_root, reset_required, cold_qualification_custody))
         })();
-        let (directory, reset_required) = match opened {
+        let (directory, reset_required, cold_qualification_custody) = match opened {
             Ok(value) => value,
             Err(error) => {
                 return Err(OriginalRuntimeAcquisitionFailure::retained(
@@ -350,6 +355,7 @@ impl RuntimeDb {
             _directory_lock: Some(namespace),
             _inspection_copy: None,
             _inspection_sql: None,
+            cold_qualification_custody,
         })
     }
 }

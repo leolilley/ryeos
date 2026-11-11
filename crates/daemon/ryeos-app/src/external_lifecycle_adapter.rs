@@ -705,15 +705,20 @@ impl ExecutableExternalPlacementBackend {
                 .context("external lifecycle remaining timeout exceeds its bound")?
                 .to_string(),
         ));
+        // The adapter stops its own work at the deadline it was told and
+        // answers with what it saw; give that answer a moment to arrive
+        // before the process is ended, or every overrun reads the same.
+        let answer_deadline =
+            lillux::time::MonotonicDeadline::after(deadline.remaining() + ADAPTER_ANSWER_GRACE);
         let response = run_lifecycle_adapter(
             &self.adapter,
             LifecycleAdapterInvocation::Operate,
             &request_handle,
             inherited,
             envs,
-            deadline,
+            answer_deadline,
         )?;
-        let deadline_exceeded = response.deadline_exceeded;
+        let deadline_exceeded = response.deadline_exceeded || deadline.has_elapsed();
         let response = decode_operation_response(&response.bytes, request)?;
         Ok(ExternalLifecycleObservation {
             value: response,
@@ -1709,11 +1714,20 @@ impl ExternalPlacementBackend for ExecutableExternalPlacementBackend {
             remaining_ms > 0,
             "restored verifier expired before adapter contact"
         );
+        // An owner measurement uploads one small verifier inside a contact; a
+        // consumer attempt delivers its whole archive and keeps the profile's
+        // delivery budget, as a Q guest package keeps its startup budget.
+        let budget_seconds = match &request.intent.purpose {
+            ryeos_external_execution_contract::restored_runtime_measurement::RemoteVerificationPurpose::OwnerMeasurement { .. } => {
+                qualification.contact_timeout_seconds()
+            }
+            ryeos_external_execution_contract::restored_runtime_measurement::RemoteVerificationPurpose::ConsumerRuntime { .. } => {
+                qualification.delivery_timeout_seconds()
+            }
+        };
         let deadline = deadline
             .min(lillux::time::MonotonicDeadline::after(
-                lillux::time::Duration::from_secs(u64::from(
-                    qualification.contact_timeout_seconds(),
-                )),
+                lillux::time::Duration::from_secs(u64::from(budget_seconds)),
             ))
             .min(lillux::time::MonotonicDeadline::after(
                 lillux::time::Duration::from_millis(u64::try_from(remaining_ms)?),
@@ -2618,9 +2632,14 @@ impl ExecutableExternalPlacementBackend {
             } => ExternalSupervisorActivationResolution::NotStarted {
                 provider_observation_digest,
             },
-            LifecycleAdapterResponse::SupervisorPending { guest_owner, .. } => {
-                ExternalSupervisorActivationResolution::Pending { guest_owner }
-            }
+            LifecycleAdapterResponse::SupervisorPending {
+                guest_owner,
+                contact_failure,
+                ..
+            } => ExternalSupervisorActivationResolution::Pending {
+                guest_owner,
+                contact_failure,
+            },
             _ => anyhow::bail!("lifecycle adapter returned a non-activation response"),
         };
         Ok(ExternalLifecycleObservation {
@@ -2837,6 +2856,10 @@ fn artifact_bytes(artifact: &ryeos_engine::binary_resolver::CapturedExecutable) 
 /// contact timeout. The first supervisor activation also delivers the guest
 /// package, whose transfer can outlast any contact; it keeps the deadline the
 /// caller derived from the reservation's startup budget.
+/// How long past an operation's deadline the adapter may take to answer with
+/// the typed account of where it stopped. Its own work ends at the deadline.
+const ADAPTER_ANSWER_GRACE: lillux::time::Duration = lillux::time::Duration::from_secs(5);
+
 fn adapter_operation_deadline(
     delivers_guest_package: bool,
     deadline: lillux::time::MonotonicDeadline,

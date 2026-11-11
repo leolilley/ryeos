@@ -29,8 +29,10 @@ pub mod service_refusal {
     pub const BOUNDARY_REFUSED: u8 = 2;
     /// The planned service-window edge was reached.
     pub const WINDOW_EDGE: u8 = 4;
+    /// The incarnation's prepaid native work was spent before its edge.
+    pub const WORK_EXHAUSTED: u8 = 8;
     /// Bits that record a fact refusal rather than the planned edge.
-    pub const FACT: u8 = PRODUCER_ABANDONED | BOUNDARY_REFUSED;
+    pub const FACT: u8 = PRODUCER_ABANDONED | BOUNDARY_REFUSED | WORK_EXHAUSTED;
 }
 
 /// Callback run on the first latch of an incarnation, and once more on the
@@ -41,6 +43,47 @@ pub mod service_refusal {
 /// entry point or take a lock an SQL holder may hold: an atomic store and a
 /// non-blocking wake only.
 pub type ServiceRefusalWake = Box<dyn Fn() + Send + Sync>;
+
+/// Callback run once when the incarnation reaches its first planned margin,
+/// with which margin it was. Same contract as [`ServiceRefusalWake`].
+pub type PlannedMarginWake = Box<dyn Fn(super::PlannedMargin) + Send + Sync>;
+
+/// How often the work-margin watch reads the prepaid work counters.
+const WORK_MARGIN_POLL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Poll `counters` every `interval` until the planned work margin is spent,
+/// the first planned margin has already fired, or service SQL is refused
+/// (`refused`) or the counters are no longer readable, then fire `fire` once.
+/// It runs no SQL and holds nothing between polls.
+fn run_work_margin_watch(
+    counters: impl Fn() -> Option<lillux_sqlite::OriginalNativeBudgetSnapshot>,
+    margin_steps: u64,
+    interval: std::time::Duration,
+    refused: impl Fn() -> bool,
+    fired: &AtomicBool,
+    fire: impl FnOnce(),
+) {
+    loop {
+        if fired.load(Ordering::SeqCst) || refused() {
+            return;
+        }
+        let Some(counters) = counters() else {
+            return;
+        };
+        if super::work_margin_reached(
+            counters.allocator_steps,
+            counters.allocator_steps_limit,
+            counters.cleanup_reserved,
+            margin_steps,
+        ) {
+            if !fired.swap(true, Ordering::SeqCst) {
+                fire();
+            }
+            return;
+        }
+        std::thread::sleep(interval);
+    }
+}
 
 /// Service-refusal latch of one live incarnation, with the fixed BOOTTIME
 /// edge of its service window. Shared by the authority and the window timer;
@@ -206,7 +249,19 @@ impl OriginalNativeAdmissionAuthority for LiveNativeAuthority {
         // verification runs at operation boundaries.
         self.require_unlatched()?;
         self.require_service_edge()?;
-        self.budget.debit_steps(steps, false)
+        // Spent work is a fact of this incarnation: latch it, so the stop
+        // that follows drains without service SQL instead of asking the
+        // exhausted pool to prove its own cleanup. Contention latches nothing.
+        self.budget.debit_steps(steps, false).map_err(|error| {
+            if error
+                .chain()
+                .any(|cause| cause.is::<lillux_sqlite::NativeWorkExhausted>())
+            {
+                self.latch(service_refusal::WORK_EXHAUSTED);
+                return error;
+            }
+            self.latch_refusal(error)
+        })
     }
 
     fn refuse_service(&self) {
@@ -992,30 +1047,60 @@ impl LiveNativeFactory {
         Ok(())
     }
 
-    /// Arm the two planned service-window points on `CLOCK_BOOTTIME`, which
-    /// keeps counting across host suspend. At the signed rollover drain
-    /// margin before the edge, `on_margin` runs: it sets no latch, so the
-    /// daemon begins a normal graceful stop while service SQL is still
+    /// Arm the planned points of this incarnation's service window. At the
+    /// signed rollover drain margin before the `CLOCK_BOOTTIME` edge (which
+    /// keeps counting across host suspend), or when service work spent
+    /// reaches the signed rollover work margin, whichever comes first,
+    /// `on_margin` runs once with which margin it was: it sets no latch, so
+    /// the daemon begins a normal graceful stop while service SQL is still
     /// admitted. At the edge the planned-edge bit latches, which ends service
     /// SQL. A point already past fires at once. `on_margin` has the same
     /// contract as the latch wake: no blocking, no SQL, no shared lock. The
-    /// timer thread retains only the latch.
-    pub fn arm_service_window_timers(&self, on_margin: ServiceRefusalWake) -> Result<()> {
+    /// timer threads retain only the latch and a weak authority reference.
+    pub fn arm_service_window_timers(&self, on_margin: PlannedMarginWake) -> Result<()> {
         let latch = Arc::clone(&self.authority.latch);
-        let margin = std::time::Duration::from_millis(
-            self.authority
-                .reservation
-                .inputs()?
-                .policy
-                .incarnation
-                .rollover_drain_margin_ms,
-        );
+        let incarnation = self.authority.reservation.inputs()?.policy.incarnation;
+        let margin = std::time::Duration::from_millis(incarnation.rollover_drain_margin_ms);
+        let wake = Arc::new(on_margin);
+        let fired = Arc::new(AtomicBool::new(false));
+        // A policy without a work margin (schema 6) plans no work rollover;
+        // only the time margin is watched and spent work latches as before.
+        if let Some(work_margin) = incarnation.rollover_work_margin_steps {
+            let (wake, fired) = (Arc::clone(&wake), Arc::clone(&fired));
+            let authority = Arc::downgrade(&self.authority);
+            let latch = Arc::clone(&latch);
+            std::thread::Builder::new()
+                .name("ryeosd-work-margin".to_owned())
+                .spawn(move || {
+                    run_work_margin_watch(
+                        || {
+                            authority
+                                .upgrade()
+                                .and_then(|authority| authority.budget.snapshot().ok())
+                        },
+                        work_margin,
+                        WORK_MARGIN_POLL,
+                        || latch.bits() != 0,
+                        &fired,
+                        || {
+                            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                wake(super::PlannedMargin::Work)
+                            }));
+                        },
+                    )
+                })
+                .context("start work margin watch")?;
+        }
         std::thread::Builder::new()
             .name("ryeosd-service-window".to_owned())
             .spawn(move || {
                 // A refused clock wait fails closed: the edge latches at once.
-                if latch.edge.sleep_until_before_edge(margin).is_ok() {
-                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(on_margin));
+                if latch.edge.sleep_until_before_edge(margin).is_ok()
+                    && !fired.swap(true, Ordering::SeqCst)
+                {
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        wake(super::PlannedMargin::Time)
+                    }));
                 }
                 let _ = latch
                     .edge
@@ -1099,5 +1184,113 @@ mod service_refusal_latch_tests {
         latch.latch(service_refusal::PRODUCER_ABANDONED);
         assert_eq!(wakes.load(Ordering::SeqCst), 2);
         assert_ne!(latch.bits() & service_refusal::FACT, 0);
+    }
+
+    #[test]
+    fn spent_work_is_a_fact_that_wakes_the_daemon_once() {
+        let clock = lillux::time::RetainedOccupancyClock::capture().unwrap();
+        let limit =
+            lillux::time::OccupancyLimit::new(clock.start().clone(), 3_600_000_000_000).unwrap();
+        let edge = clock
+            .service_edge(&limit, lillux::time::Duration::from_secs(60))
+            .unwrap();
+        let latch = ServiceRefusalLatch::new(edge);
+        let wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = Arc::clone(&wakes);
+        latch
+            .wake
+            .set(Box::new(move || {
+                counted.fetch_add(1, Ordering::SeqCst);
+            }))
+            .map_err(|_| "wake set")
+            .unwrap();
+        latch.latch(service_refusal::WORK_EXHAUSTED);
+        assert_eq!(wakes.load(Ordering::SeqCst), 1);
+        assert_ne!(latch.bits() & service_refusal::FACT, 0);
+        latch.latch(service_refusal::BOUNDARY_REFUSED);
+        assert_eq!(wakes.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[cfg(test)]
+mod work_margin_watch_tests {
+    use super::*;
+    use std::sync::atomic::AtomicU64;
+
+    fn counters(spent: u64) -> lillux_sqlite::OriginalNativeBudgetSnapshot {
+        lillux_sqlite::OriginalNativeBudgetSnapshot {
+            storage_bytes: 0,
+            allocator_steps: spent,
+            allocator_steps_limit: 1_000,
+            cleanup_reserved: 100,
+            cleanup_steps: 0,
+            connections_issued: 0,
+        }
+    }
+
+    #[test]
+    fn the_watch_fires_once_when_spend_reaches_the_margin_and_not_before() {
+        // Service work is 900; with a margin of 200 the point is 700.
+        let spent = Arc::new(AtomicU64::new(0));
+        let fired = Arc::new(AtomicBool::new(false));
+        let fires = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let watch = {
+            let (spent, fired, fires) =
+                (Arc::clone(&spent), Arc::clone(&fired), Arc::clone(&fires));
+            std::thread::spawn(move || {
+                run_work_margin_watch(
+                    || Some(counters(spent.load(Ordering::SeqCst))),
+                    200,
+                    std::time::Duration::from_millis(2),
+                    || false,
+                    &fired,
+                    || {
+                        fires.fetch_add(1, Ordering::SeqCst);
+                    },
+                )
+            })
+        };
+        spent.store(699, Ordering::SeqCst);
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        assert_eq!(fires.load(Ordering::SeqCst), 0);
+        spent.store(700, Ordering::SeqCst);
+        watch.join().unwrap();
+        assert_eq!(fires.load(Ordering::SeqCst), 1);
+        assert!(fired.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn the_watch_stands_down_when_another_margin_fired_or_service_is_refused() {
+        let fires = std::sync::atomic::AtomicUsize::new(0);
+        let note = || {
+            fires.fetch_add(1, Ordering::SeqCst);
+        };
+        let already = AtomicBool::new(true);
+        run_work_margin_watch(
+            || Some(counters(900)),
+            200,
+            std::time::Duration::from_millis(1),
+            || false,
+            &already,
+            note,
+        );
+        let fresh = AtomicBool::new(false);
+        run_work_margin_watch(
+            || Some(counters(900)),
+            200,
+            std::time::Duration::from_millis(1),
+            || true,
+            &fresh,
+            note,
+        );
+        run_work_margin_watch(
+            || None,
+            200,
+            std::time::Duration::from_millis(1),
+            || false,
+            &fresh,
+            note,
+        );
+        assert_eq!(fires.load(Ordering::SeqCst), 0);
     }
 }

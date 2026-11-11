@@ -305,11 +305,12 @@ pub(super) fn validate_current(conn: &Connection) -> Result<()> {
 
 /// Called inside the reservation/contact transaction. A prior read cannot
 /// exclude a subsequently retained termination intent or extend guest life.
+/// Returns the instant the retained occurrence lifetime ends.
 pub(super) fn require_live_occurrence(
     conn: &Connection,
     qualification: &super::runtime_snapshot_qualification::SnapshotQualificationRecord,
     now: i64,
-) -> Result<()> {
+) -> Result<i64> {
     ensure!(
         qualification.occurrence.is_some(),
         "restored verifier occurrence is absent"
@@ -332,7 +333,7 @@ pub(super) fn require_live_occurrence(
         now >= qualification.created_at_ms && now < expires_at,
         "restored verifier occurrence is outside its retained lifetime"
     );
-    Ok(())
+    Ok(expires_at)
 }
 
 /// Transaction-local prerequisite authentication. The caller owns the
@@ -701,11 +702,14 @@ impl RuntimeDb {
                 intent.validate_for(&source.intent, locator, &qualification.intent, occurrence)?;
             }
             let now = lillux::time::timestamp_millis();
-            require_live_occurrence(&tx, &qualification, now)?;
+            let expires_at = require_live_occurrence(&tx, &qualification, now)?;
+            // The attempt's author sized the deadline from the signed profile
+            // budget (one contact for an owner measurement, the delivery budget
+            // for a consumer archive); the occurrence's retained lifetime is the
+            // bound every attempt must fit inside.
             ensure!(
-                intent.attempt_deadline_ms > now
-                    && intent.attempt_deadline_ms.saturating_sub(now) <= 300_000,
-                "restored verifier deadline is outside admission window"
+                intent.attempt_deadline_ms > now && intent.attempt_deadline_ms <= expires_at,
+                "restored verifier deadline is outside the occurrence's retained lifetime"
             );
             tx.execute(
                 "INSERT INTO restored_verifier_attempt

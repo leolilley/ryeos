@@ -906,7 +906,7 @@ fn create_qualification_occurrence_checked(
     }
 }
 
-const MAX_QUARANTINE_REASON_BYTES: usize = 512;
+const MAX_QUARANTINE_REASON_BYTES: usize = 2048;
 
 fn bounded_text(text: &str) -> String {
     let mut end = text.len().min(MAX_QUARANTINE_REASON_BYTES);
@@ -1278,8 +1278,10 @@ pub fn prepare_consumer_verifier_attempt_for_callback(
             nonce_hex: hex::encode(lillux::crypto::generate_random_bytes::<32>()),
             guest_runtime_manifest_hash: source.intent.guest_runtime_manifest_hash.clone(),
         },
+        // The first contact delivers the consumer archive, which outlasts a
+        // plain provider round trip; the profile's delivery budget bounds it.
         attempt_deadline_ms: started_at_ms
-            .checked_add(i64::from(profile.contact_timeout_seconds()) * 1000)
+            .checked_add(i64::from(profile.delivery_timeout_seconds()) * 1000)
             .context("consumer challenge deadline overflow")?,
     };
     intent.operation_id = intent.derived_operation_id()?;
@@ -1325,7 +1327,7 @@ pub fn prepare_consumer_verifier_attempt_for_callback(
         .filter(|remaining| *remaining > 0)
         .context("consumer original preparation deadline expired")?;
     let remaining = lillux::time::Duration::from_millis(u64::try_from(remaining_ms)?).min(
-        lillux::time::Duration::from_secs(u64::from(profile.contact_timeout_seconds()))
+        lillux::time::Duration::from_secs(u64::from(profile.delivery_timeout_seconds()))
             .saturating_sub(preparation_timer.elapsed()),
     );
     ensure!(
@@ -3240,7 +3242,10 @@ mod tests {
         );
         let error = anyhow::anyhow!("{}", "é".repeat(2000));
         let text = super::contact_error_text(&error);
-        assert!(text.len() <= 512 && text.starts_with("contact error: é"));
+        assert!(
+            text.len() <= super::MAX_QUARANTINE_REASON_BYTES
+                && text.starts_with("contact error: é")
+        );
     }
 
     use super::*;
@@ -3626,41 +3631,20 @@ mod tests {
             created_at_ms: now,
             updated_at_ms: now,
         };
-        validate_probe_snapshot_record(
-            &record,
-            &named,
-            proof,
-            &source,
-            "test-backend",
-            &owner,
-        )
-        .unwrap();
+        validate_probe_snapshot_record(&record, &named, proof, &source, "test-backend", &owner)
+            .unwrap();
         record.phase = RuntimeSnapshotPhase::Quarantined;
         assert!(
-            validate_probe_snapshot_record(
-                &record,
-                &named,
-                proof,
-                &source,
-                "test-backend",
-                &owner
-            )
-            .is_err()
+            validate_probe_snapshot_record(&record, &named, proof, &source, "test-backend", &owner)
+                .is_err()
         );
         record.phase = RuntimeSnapshotPhase::Bound;
         record.intent.source = RuntimeSnapshotSource::CapturedProduct {
             product_witness_hash: "f".repeat(64),
         };
         assert!(
-            validate_probe_snapshot_record(
-                &record,
-                &named,
-                proof,
-                &source,
-                "test-backend",
-                &owner
-            )
-            .is_err()
+            validate_probe_snapshot_record(&record, &named, proof, &source, "test-backend", &owner)
+                .is_err()
         );
         record.intent.source = RuntimeSnapshotSource::CapturedProduct {
             product_witness_hash: proof.evidence.product_witness_hash.clone(),
@@ -3697,15 +3681,8 @@ mod tests {
         );
         record.locator.as_mut().unwrap().snapshot_id = "snp-other".into();
         assert!(
-            validate_probe_snapshot_record(
-                &record,
-                &named,
-                proof,
-                &source,
-                "test-backend",
-                &owner
-            )
-            .is_err()
+            validate_probe_snapshot_record(&record, &named, proof, &source, "test-backend", &owner)
+                .is_err()
         );
     }
 

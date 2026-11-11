@@ -74,6 +74,7 @@ WHEN NEW.placement_thread_id!=OLD.placement_thread_id
  OR NEW.updated_at_ms<OLD.updated_at_ms
  OR (NEW.phase IN ('cleanup_intent','workspace_removed','state_removed','closed')
      AND json_extract(NEW.record_json,'$.directory_borrow_intent') IS NOT NULL
+     AND json_type(NEW.record_json,'$.directory_borrow_intent.released_at_ms') IS NULL
      AND json_extract(NEW.record_json,'$.worker_incarnation_digest') IS NULL)
  OR json_remove(NEW.record_json,'$.phase','$.workspace_identity','$.directory_borrow_intent',
       '$.worker_incarnation_digest','$.cleanup_reason','$.cleanup','$.credential_custody','$.controller_canary_intent','$.controller_canary_binding','$.controller_canary_terminal','$.updated_at_ms')
@@ -86,7 +87,18 @@ WHEN NEW.placement_thread_id!=OLD.placement_thread_id
  OR (json_extract(NEW.record_json,'$.directory_borrow_intent') IS NOT json_extract(OLD.record_json,'$.directory_borrow_intent')
      AND NOT (OLD.phase='workspace_ready' AND NEW.phase='workspace_ready'
           AND json_extract(OLD.record_json,'$.directory_borrow_intent') IS NULL
-          AND json_extract(NEW.record_json,'$.directory_borrow_intent') IS NOT NULL))
+          AND json_extract(NEW.record_json,'$.directory_borrow_intent') IS NOT NULL)
+     AND NOT (NEW.phase=OLD.phase
+      AND json_type(OLD.record_json,'$.directory_borrow_intent') IS 'object'
+      AND json_type(OLD.record_json,'$.directory_borrow_intent.released_at_ms') IS NULL
+      AND json_type(NEW.record_json,'$.directory_borrow_intent.released_at_ms') IS 'integer'
+      AND json_extract(NEW.record_json,'$.directory_borrow_intent.released_at_ms')
+          >=json_extract(OLD.record_json,'$.directory_borrow_intent.reserved_at_ms')
+      AND json_remove(NEW.record_json,'$.directory_borrow_intent.released_at_ms','$.updated_at_ms')
+          = json_remove(OLD.record_json,'$.updated_at_ms')
+      AND json_extract(NEW.record_json,'$.worker_incarnation_digest') IS NULL
+      AND NOT EXISTS(SELECT 1 FROM external_qualification_worker_process p
+          WHERE p.placement_thread_id=NEW.placement_thread_id)))
  OR (json_extract(NEW.record_json,'$.worker_incarnation_digest') IS NOT json_extract(OLD.record_json,'$.worker_incarnation_digest')
      AND NOT (OLD.phase='workspace_ready' AND NEW.phase='worker_attached'
           AND json_extract(OLD.record_json,'$.worker_incarnation_digest') IS NULL
@@ -104,12 +116,34 @@ WHEN NEW.placement_thread_id!=OLD.placement_thread_id
       AND json_extract(OLD.record_json,'$.directory_borrow_intent') IS NULL
       AND json_extract(NEW.record_json,'$.directory_borrow_intent') IS NOT NULL
       AND json_remove(NEW.record_json,'$.directory_borrow_intent','$.updated_at_ms')
-          = json_remove(OLD.record_json,'$.directory_borrow_intent','$.updated_at_ms'))))
+          = json_remove(OLD.record_json,'$.directory_borrow_intent','$.updated_at_ms'))
+      OR (NEW.phase=OLD.phase
+      AND json_type(OLD.record_json,'$.directory_borrow_intent') IS 'object'
+      AND json_type(OLD.record_json,'$.directory_borrow_intent.released_at_ms') IS NULL
+      AND json_type(NEW.record_json,'$.directory_borrow_intent.released_at_ms') IS 'integer'
+      AND json_extract(NEW.record_json,'$.directory_borrow_intent.released_at_ms')
+          >=json_extract(OLD.record_json,'$.directory_borrow_intent.reserved_at_ms')
+      AND json_remove(NEW.record_json,'$.directory_borrow_intent.released_at_ms','$.updated_at_ms')
+          = json_remove(OLD.record_json,'$.updated_at_ms')
+      AND json_extract(NEW.record_json,'$.worker_incarnation_digest') IS NULL
+      AND NOT EXISTS(SELECT 1 FROM external_qualification_worker_process p
+          WHERE p.placement_thread_id=NEW.placement_thread_id))))
  OR NOT ((NEW.phase=OLD.phase AND (
       json_extract(NEW.record_json,'$.credential_custody') IS NOT json_extract(OLD.record_json,'$.credential_custody')
       OR NEW.controller_canary_intent_json IS NOT OLD.controller_canary_intent_json
       OR NEW.controller_canary_binding_json IS NOT OLD.controller_canary_binding_json
       OR NEW.controller_canary_terminal_json IS NOT OLD.controller_canary_terminal_json))
+      OR (NEW.phase=OLD.phase
+      AND json_type(OLD.record_json,'$.directory_borrow_intent') IS 'object'
+      AND json_type(OLD.record_json,'$.directory_borrow_intent.released_at_ms') IS NULL
+      AND json_type(NEW.record_json,'$.directory_borrow_intent.released_at_ms') IS 'integer'
+      AND json_extract(NEW.record_json,'$.directory_borrow_intent.released_at_ms')
+          >=json_extract(OLD.record_json,'$.directory_borrow_intent.reserved_at_ms')
+      AND json_remove(NEW.record_json,'$.directory_borrow_intent.released_at_ms','$.updated_at_ms')
+          = json_remove(OLD.record_json,'$.updated_at_ms')
+      AND json_extract(NEW.record_json,'$.worker_incarnation_digest') IS NULL
+      AND NOT EXISTS(SELECT 1 FROM external_qualification_worker_process p
+          WHERE p.placement_thread_id=NEW.placement_thread_id))
       OR (OLD.phase='reserved' AND NEW.phase='workspace_ready')
       OR (OLD.phase='workspace_ready' AND NEW.phase IN ('workspace_ready','worker_attached'))
       OR (OLD.phase IN ('reserved','workspace_ready','worker_attached') AND NEW.phase='cleanup_unproved')
@@ -191,7 +225,8 @@ WHEN json_type(NEW.record_json,'$.credential_custody') IS NULL
         =json_remove(json_extract(OLD.record_json,'$.credential_custody'),'$.released_at_ms')
     AND NOT EXISTS(SELECT 1 FROM external_execution_connector c
       WHERE c.placement_thread_id=OLD.placement_thread_id AND c.state!='closed')
-    AND ((json_extract(OLD.record_json,'$.directory_borrow_intent') IS NULL
+    AND (((json_extract(OLD.record_json,'$.directory_borrow_intent') IS NULL
+           OR json_type(OLD.record_json,'$.directory_borrow_intent.released_at_ms') IS 'integer')
           AND json_extract(OLD.record_json,'$.worker_incarnation_digest') IS NULL
           AND NOT EXISTS(SELECT 1 FROM external_qualification_worker_process p WHERE p.placement_thread_id=OLD.placement_thread_id))
       OR (json_extract(OLD.record_json,'$.worker_incarnation_digest') IS NOT NULL
@@ -259,6 +294,12 @@ pub struct QualificationWorkspaceBorrowIntent {
     pub workspace_id: String,
     pub directory_identity: lillux::PinnedDirectoryIdentity,
     pub reserved_at_ms: i64,
+    /// Set when the borrow was settled without a Worker ever consuming it:
+    /// the start failed between lending the directory and attaching a
+    /// Worker, and the Worker's scope slot was proved empty. Absent while
+    /// the borrow is outstanding or was consumed by an attachment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub released_at_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -779,12 +820,50 @@ pub(super) fn now_after(current: &QualificationLocalStartRecord) -> Result<i64> 
     Ok(lillux::time::timestamp_millis().max(current.updated_at_ms))
 }
 
+pub(super) fn settle_unconsumed_borrow_tx(
+    tx: &Connection,
+    current: &QualificationLocalStartRecord,
+) -> Result<QualificationLocalStartRecord> {
+    let Some(borrow) = current.directory_borrow_intent.as_ref() else {
+        return Ok(current.clone());
+    };
+    if borrow.released_at_ms.is_some() {
+        return Ok(current.clone());
+    }
+    ensure!(
+        current.worker_incarnation_digest.is_none(),
+        "qualification directory borrow was consumed by a Worker attachment"
+    );
+    let worker_rows: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM external_qualification_worker_process WHERE placement_thread_id=?1",
+        [&current.placement_thread_id],
+        |row| row.get(0),
+    )?;
+    ensure!(
+        worker_rows == 0,
+        "qualification directory borrow belongs to a start that names a Worker row"
+    );
+    let now = now_after(current)?;
+    let mut next = current.clone();
+    next.directory_borrow_intent
+        .as_mut()
+        .expect("borrow checked")
+        .released_at_ms = Some(now);
+    next.updated_at_ms = now;
+    transition(tx, current, &next)?;
+    Ok(next)
+}
+
 pub(super) fn require_local_processes_settled(
     conn: &Connection,
     record: &QualificationLocalStartRecord,
 ) -> Result<()> {
     ensure!(
-        record.directory_borrow_intent.is_none() || record.worker_incarnation_digest.is_some(),
+        record
+            .directory_borrow_intent
+            .as_ref()
+            .is_none_or(|borrow| borrow.released_at_ms.is_some())
+            || record.worker_incarnation_digest.is_some(),
         "qualification directory borrow has unproved Worker attachment or death"
     );
     let worker: Option<(String, String)> = conn
@@ -907,7 +986,10 @@ pub(super) fn attach_local_worker_tx(
         read_local_start(tx, placement)?.context("qualification Worker has no Q local start")?;
     ensure!(
         current.phase == QualificationLocalStartPhase::WorkspaceReady
-            && current.directory_borrow_intent.is_some()
+            && current
+                .directory_borrow_intent
+                .as_ref()
+                .is_some_and(|borrow| borrow.released_at_ms.is_none())
             && current.daemon_generation_id == daemon,
         "qualification Worker changed its one-use original directory"
     );
@@ -1077,6 +1159,33 @@ impl RuntimeDb {
             .with_sql(|conn| read_unreleased_custody(conn, current_generation))
     }
 
+    /// Every Q local start a previous daemon generation recorded, by
+    /// placement. Start recovery walks these for the disk state only that
+    /// generation's live owners could have released.
+    pub(crate) fn prior_generation_qualification_local_starts(
+        &self,
+        current_generation: &str,
+    ) -> Result<Vec<QualificationLocalStartRecord>> {
+        self.conn.with_sql(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT placement_thread_id FROM external_qualification_local_start
+                 WHERE json_extract(record_json,'$.daemon_generation_id')!=?1
+                 ORDER BY placement_thread_id",
+            )?;
+            let placements = statement
+                .query_map([current_generation], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let mut records = Vec::with_capacity(placements.len());
+            for placement in placements {
+                records.push(
+                    read_local_start(conn, &placement)?
+                        .context("Q local start disappeared during listing")?,
+                );
+            }
+            Ok(records)
+        })
+    }
+
     /// Read-only final pre-spawn gate. The app caller holds the Q occurrence
     /// contact gate from this check through held attachment; this projection
     /// itself grants neither a descriptor nor process contact.
@@ -1147,6 +1256,26 @@ impl RuntimeDb {
     /// Commit one possible descriptor borrow before cloning the original
     /// workspace directory. A failed clone consumes this attempt and requires
     /// cleanup; it must never be retried with a replacement directory or process.
+    /// Settle a directory borrow no Worker ever consumed. The caller has
+    /// proved that nothing holds the lent descriptor (the Worker's scope slot
+    /// is empty); this records that fact so the start's credential custody
+    /// can be released. A borrow an attached Worker consumed is refused, as
+    /// is a start that still names a Worker row. Replaying a settled borrow
+    /// changes nothing.
+    pub(crate) fn settle_unconsumed_directory_borrow(
+        &self,
+        placement: &str,
+    ) -> Result<QualificationLocalStartRecord> {
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+            let current = read_local_start(&tx, placement)?
+                .context("qualification borrow settlement lost its start")?;
+            let settled = settle_unconsumed_borrow_tx(&tx, &current)?;
+            tx.commit()?;
+            Ok(settled)
+        })
+    }
+
     pub(crate) fn reserve_qualification_workspace_directory_borrow(
         &self,
         placement: &str,
@@ -1170,6 +1299,7 @@ impl RuntimeDb {
                 workspace_id: current.workspace_id.clone(),
                 directory_identity: identity,
                 reserved_at_ms: next.updated_at_ms,
+                released_at_ms: None,
             });
             let prior = canonical(&current)?;
             let next_json = canonical(&next)?;
@@ -1513,10 +1643,10 @@ impl RuntimeDb {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
 
-    fn fixture_record() -> QualificationLocalStartRecord {
+    pub(in crate::runtime_db) fn fixture_record() -> QualificationLocalStartRecord {
         let placement = format!("Q-{}", "1".repeat(64));
         let root = "T-qualification-root";
         let capsule = "2".repeat(64);
@@ -1573,6 +1703,7 @@ mod tests {
             workspace_id: record.workspace_id.clone(),
             directory_identity: record.workspace_identity.unwrap(),
             reserved_at_ms: 1,
+            released_at_ms: None,
         });
         record.validate().unwrap();
         // Even a database with no Worker table cannot turn possible held spawn
@@ -1630,7 +1761,9 @@ mod tests {
     // This fixture serves the real retained readers, unlike fixture_journal's
     // deliberately partial rows for isolated SQL trigger tests. It supplies no
     // admission token, provider contact, process, or successful held attachment.
-    fn fixture_retained_credential_journal(conn: &Connection) -> QualificationLocalStartRecord {
+    pub(in crate::runtime_db::external_execution) fn fixture_retained_credential_journal(
+        conn: &Connection,
+    ) -> QualificationLocalStartRecord {
         use base64::{Engine as _, engine::general_purpose::STANDARD};
         use ryeos_external_execution_contract::{
             restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate,
@@ -2070,12 +2203,34 @@ mod tests {
                 workspace_id: ready.workspace_id.clone(),
                 directory_identity: ready.workspace_identity.unwrap(),
                 reserved_at_ms: 1,
+                released_at_ms: None,
             });
             transition(conn, &ready, &borrowed).unwrap();
             let mut released = borrowed.clone();
             released.credential_custody.as_mut().unwrap().released_at_ms = Some(1);
             assert!(require_local_processes_settled(conn, &borrowed).is_err());
             assert!(transition(conn, &borrowed, &released).is_err());
+            // A borrow no Worker consumed settles once its slot is proved
+            // empty, and the custody can then be released; replaying the
+            // settlement changes nothing.
+            let settled = settle_unconsumed_borrow_tx(conn, &borrowed).unwrap();
+            assert!(
+                settled
+                    .directory_borrow_intent
+                    .as_ref()
+                    .unwrap()
+                    .released_at_ms
+                    .is_some()
+            );
+            assert!(settle_unconsumed_borrow_tx(conn, &settled).unwrap() == settled);
+            require_local_processes_settled(conn, &settled).unwrap();
+            let mut released = settled.clone();
+            released.credential_custody.as_mut().unwrap().released_at_ms = Some(2);
+            transition(conn, &settled, &released).unwrap();
+            // A borrow an attached Worker consumed is never settled this way.
+            let mut consumed = borrowed.clone();
+            consumed.worker_incarnation_digest = Some("d".repeat(64));
+            assert!(settle_unconsumed_borrow_tx(conn, &consumed).is_err());
             Ok(())
         });
     }
@@ -2094,6 +2249,7 @@ mod tests {
                 workspace_id: current.workspace_id.clone(),
                 directory_identity: current.workspace_identity.unwrap(),
                 reserved_at_ms: 1,
+                released_at_ms: None,
             });
             transition(conn, &current, &borrowed).unwrap();
             assert!(transition(conn, &borrowed, &borrowed).is_err());

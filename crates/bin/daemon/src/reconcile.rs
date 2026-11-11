@@ -2310,6 +2310,29 @@ pub async fn reconcile_dedicated_worker_startup(state: &AppState) -> Result<()> 
             "settled local qualification Worker rows left attached by a previous daemon"
         );
     }
+    // The Worker groups above were the connector peers; with them settled, a
+    // connector row the old daemon could not close can be proved peerless and
+    // closed, which is what lets the allocation settle and the credential go.
+    let closed_connectors =
+        ryeos_app::external_connector::close_connectors_left_by_prior_generations(state)?;
+    if closed_connectors != 0 {
+        tracing::warn!(
+            closed_connectors,
+            "closed external connectors a previous daemon left open"
+        );
+    }
+    // A Q connector's configuration mount target lives in the shared
+    // credential home; a daemon that died holding the connector left it
+    // reserved there, and every later Q start on that credential is refused
+    // until it is released.
+    let released_mount_targets =
+        ryeos_app::external_connector::release_mount_targets_left_by_prior_generations(state)?;
+    if released_mount_targets != 0 {
+        tracing::warn!(
+            released_mount_targets,
+            "released connector mount targets a previous daemon left reserved"
+        );
+    }
     let released_qualification_credentials =
         ryeos_app::external_qualification_local::release_settled_qualification_credential_custody(
             state,

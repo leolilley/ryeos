@@ -439,6 +439,15 @@ fn digest_open_regular_file_chunked_exact(
     Ok((format!("{:x}", whole.finalize()), chunks))
 }
 
+/// The portable project-snapshot form of one declared regular-file mode: a
+/// mode with any execute bit is 0o755, every other mode is 0o644. A caller
+/// that compares an observed file against a mode it declared in a delivery
+/// normalizes the declaration with this before comparing it to
+/// [`normalized_portable_regular_mode`].
+pub fn normalized_portable_mode(mode: u32) -> u32 {
+    if mode & 0o111 == 0 { 0o644 } else { 0o755 }
+}
+
 /// Normalize one descriptor-observed regular file to RyeOS's portable
 /// project-snapshot mode contract. OS-specific permission inspection remains
 /// inside Lillux; callers consume only the stable 0o644/0o755 result.
@@ -454,11 +463,7 @@ pub fn normalized_portable_regular_mode(metadata: &std::fs::Metadata) -> Result<
         if !metadata.file_type().is_file() {
             anyhow::bail!("portable mode source is not a regular file");
         }
-        Ok(if metadata.permissions().mode() & 0o111 == 0 {
-            0o644
-        } else {
-            0o755
-        })
+        Ok(normalized_portable_mode(metadata.permissions().mode()))
     }
 }
 
@@ -3857,6 +3862,16 @@ impl PinnedDirectory {
     /// This performs the same no-follow component traversal and exact inode /
     /// mount comparison as the ordinary check, without cloning path buffers or
     /// constructing dynamic refusals. It does not grant ownership or funding.
+    /// Give up this binding's path proof because the current process
+    /// deliberately entered a private root in which the path no longer
+    /// resolves (a sandbox prepared for a guest, as opposed to a private
+    /// source filesystem that keeps the host view). The open descriptor
+    /// remains the sole authority for every later traversal and mutation;
+    /// path proofs become no-ops instead of refusing a path that cannot exist.
+    pub fn release_path_binding(&mut self) {
+        self.path_binding_required = false;
+    }
+
     pub fn ensure_path_binding_fixed(&self) -> std::result::Result<(), &'static str> {
         if !self.path_binding_required {
             return Ok(());
@@ -9155,6 +9170,15 @@ fn restore_quarantined_regular(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn declared_modes_normalize_like_observed_ones() {
+        assert_eq!(super::normalized_portable_mode(0o500), 0o755);
+        assert_eq!(super::normalized_portable_mode(0o400), 0o644);
+        assert_eq!(super::normalized_portable_mode(0o644), 0o644);
+        assert_eq!(super::normalized_portable_mode(0o755), 0o755);
+        assert_eq!(super::normalized_portable_mode(0o010), 0o755);
+    }
+
     use super::*;
 
     #[test]
@@ -11827,6 +11851,21 @@ mod fixed_directory_binding_controls {
         assert_eq!(original.identity().unwrap(), identity);
         assert!(original.ensure_path_binding().is_err());
     }
+    #[test]
+    fn released_binding_keeps_descriptor_authority_without_path_proofs() {
+        let temp = tempfile::tempdir().unwrap();
+        let selected = temp.path().join("selected");
+        std::fs::create_dir(&selected).unwrap();
+        let mut original = super::PinnedDirectory::open(&selected).unwrap().unwrap();
+        let identity = original.identity().unwrap();
+        original.release_path_binding();
+        std::fs::rename(&selected, temp.path().join("retained")).unwrap();
+        std::fs::create_dir(&selected).unwrap();
+        original.ensure_path_binding().unwrap();
+        original.rebind_in_current_mount_namespace().unwrap();
+        assert_eq!(original.identity().unwrap(), identity);
+    }
+
     #[test]
     fn original_binding_rejects_symlink_replacement() {
         let temp = tempfile::tempdir().unwrap();

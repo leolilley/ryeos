@@ -29,6 +29,10 @@ pub trait ExternalCandidateLauncherClient {
     fn release(&mut self, frame: &AuthenticatedExecutionFrame) -> Result<()>;
     fn poll_applied_launch(&mut self) -> Result<Option<lillux::LinuxSandboxAppliedLaunchReceipt>>;
     fn apply_protocol_chunk(&mut self, frame: &AuthenticatedExecutionFrame) -> Result<usize>;
+    /// Close the candidate's protocol stdin after every earlier protocol frame
+    /// is applied. The candidate stays running; its stdout EOF is observed
+    /// separately through `poll_execution_output`.
+    fn close_protocol_input(&mut self, frame: &AuthenticatedExecutionFrame) -> Result<()>;
     fn cancel(&mut self, frame: &AuthenticatedExecutionFrame) -> Result<()>;
     fn complete_qualification(
         &mut self,
@@ -317,6 +321,38 @@ impl<L: ExternalCandidateLauncherClient> SerializedExternalCandidateSupervisor<L
                 let (_, performed) = self
                     .journal
                     .apply_once(token, |frame| self.launcher.release(frame))?;
+                let ack = self.journal.finish(performed)?;
+                self.launcher.acknowledge_finish(ack.frame_digest())?;
+                Ok(SupervisorApplicationOutcome::Applied)
+            }
+            GuestApplicationClaim::AlreadyApplied => {
+                self.launcher.acknowledge_finish(&digest)?;
+                Ok(SupervisorApplicationOutcome::FinishReconciled)
+            }
+            GuestApplicationClaim::AlreadyClaimed => {
+                Ok(SupervisorApplicationOutcome::ClaimedUnknown)
+            }
+            GuestApplicationClaim::Revoked => Ok(SupervisorApplicationOutcome::Revoked),
+        }
+    }
+
+    /// Close the candidate's protocol input exactly once. A partially applied
+    /// protocol frame keeps its claim and refuses the close until it finishes,
+    /// so the close always lands after every applied byte.
+    pub fn dispatch_protocol_input_closed(
+        &mut self,
+        wire: &[u8],
+    ) -> Result<SupervisorApplicationOutcome> {
+        ensure!(
+            self.pending_protocol.is_none(),
+            "protocol input closure cannot overtake pending protocol input"
+        );
+        let digest = lillux::sha256_hex(wire);
+        match self.journal.record_and_claim(wire)? {
+            GuestApplicationClaim::New(token) => {
+                let (_, performed) = self
+                    .journal
+                    .apply_once(token, |frame| self.launcher.close_protocol_input(frame))?;
                 let ack = self.journal.finish(performed)?;
                 self.launcher.acknowledge_finish(ack.frame_digest())?;
                 Ok(SupervisorApplicationOutcome::Applied)
@@ -666,6 +702,10 @@ mod tests {
 
         fn apply_protocol_chunk(&mut self, _frame: &AuthenticatedExecutionFrame) -> Result<usize> {
             anyhow::bail!("test launcher does not admit protocol input")
+        }
+
+        fn close_protocol_input(&mut self, _frame: &AuthenticatedExecutionFrame) -> Result<()> {
+            anyhow::bail!("test launcher does not admit protocol input closure")
         }
 
         fn cancel(&mut self, _frame: &AuthenticatedExecutionFrame) -> Result<()> {

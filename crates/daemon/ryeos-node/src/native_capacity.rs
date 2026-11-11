@@ -37,7 +37,9 @@ pub use account::NativeCapacityAccountBinding;
 pub(crate) use account::load_existing_capacity_binding;
 pub(crate) use account::prepare_initial_capacity_binding;
 pub use account::reanchor::{
-    CapacityReanchorEvidence, ReanchorReport, ReanchorRequest, read_capacity_reanchors,
+    CapacityPolicyAmendmentEvidence, CapacityPolicyAmendmentReport, CapacityPolicyAmendmentRequest,
+    CapacityReanchorEvidence, POLICY_AMENDMENT_EVIDENCE_LOG, ReanchorReport, ReanchorRequest,
+    amend_capacity_policy, read_capacity_policy_amendments, read_capacity_reanchors,
     reanchor_capacity,
 };
 pub use account::reissue::{
@@ -47,17 +49,17 @@ pub use account::reissue::{
 pub use account::{CapacityAccountSummary, inspect_capacity_account};
 pub use factory::{
     LiveNativeFactory, LiveNativeFactoryFailure, LiveNativeProducerPreparationFailure,
-    LiveNativeProducerPublicationFailure, LiveProducerControlCensus, ServiceRefusalLatch,
-    ServiceRefusalWake, service_refusal,
+    LiveNativeProducerPublicationFailure, LiveProducerControlCensus, PlannedMarginWake,
+    ServiceRefusalLatch, ServiceRefusalWake, service_refusal,
 };
 #[cfg(target_os = "linux")]
 pub use reservation::OperatorLockCustody;
-pub use reservation::RolloverClaim;
 pub use reservation::{
     FinalizedLiveNative, LiveNativeCapacityReservation, LiveNativeCapacityReservationFailure,
     SettledLiveNative, quote_operator_lock_handoff, required_cleanup_occupancy,
     required_rollover_drain_margin,
 };
+pub use reservation::{PlannedMargin, RolloverClaim, work_margin_reached};
 
 const MAX_COMPLETION_BYTES: u64 = 256 * 1024;
 

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-28T04:00:46Z:68d744e6b5b10140ee2957571dbfbffdefa8ea520875780a8bb2e4e4a925d8bf:oNdgO6dQM6fvAzzWB9alAGvJJo0Yf5EAbgTAnjKu5d/G9CWGnOr7wFYp8h98AZYZjsTrBymPqY275bmRUXapCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-09T02:44:13Z:74ff6ae4405671aa91d992f421e48cd457306f8d5a15bb67cebc38329748d737:nnTshuVzEkOchXSzfgmcizPmlQPT1AcYr4braZOa+Wlo6dO56Yk0AdYU2Sg6BZdWGIKBeJFISyvGddnhHv20BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - core
@@ -16,7 +16,7 @@ policies:
   # Explicit local capacity issuance; admission/signing and operation proof remain open.
   # The account is root/node-bound and cannot be reminted by policy refresh.
   native_capacity:
-    schema: 6
+    schema: 7
     issuance_nonce: "33c88bbc57daa7c765d0fc460459d25a"
     allowance:
       # Sixteen finite 64-MiB incarnations plus 72-KiB bounded control/redo reserve.
@@ -35,6 +35,9 @@ policies:
       maximum_occupancy_ms: 7200000
       cleanup_occupancy_ms: 120000
       rollover_drain_margin_ms: 90000
+      # Spent work that begins the same planned rollover: when service work
+      # reaches allocator_steps - cleanup_steps - this, the node stops orderly.
+      rollover_work_margin_steps: 2000000
       # Finite syscall-attempt allowance; no cleanup-success guarantee.
       host_release_steps: 64
       # Explicit share of cleanup_steps; never duplicates the paid envelope.

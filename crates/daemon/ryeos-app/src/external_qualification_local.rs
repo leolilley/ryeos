@@ -91,7 +91,8 @@ pub fn release_qualification_worker_credential_custody(
     // A terminal row is itself the death proof: settlement took it from a
     // checked reap and then retired the Worker's scope, so a later live check
     // would find no scope to ask.
-    if let Some(process) = state.state_store.qualification_worker_process(placement)?
+    let worker = state.state_store.qualification_worker_process(placement)?;
+    if let Some(process) = &worker
         && process.phase == QualificationWorkerProcessPhase::Attached
     {
         crate::process::assert_reaped_process_group_absent(&process.process_identity)?;
@@ -99,9 +100,50 @@ pub fn release_qualification_worker_credential_custody(
             .state_store
             .settle_qualification_worker_process(placement)?;
     }
+    // The borrow is settled before the custody; see the helper.
+    settle_unconsumed_directory_borrow_if_unheld(state, placement, &record, worker.as_ref())?;
     state
         .state_store
         .release_qualification_local_credential_custody(placement)
+}
+
+/// Settle a directory borrow no Worker ever consumed: the start failed between
+/// lending the private project directory and attaching a Worker, in this
+/// generation or an earlier one. Nothing can hold the lent descriptor once the
+/// Worker's deterministic scope slot is proved empty; without a qualified
+/// cgroup scope that proof does not exist and the borrow stays. A consumed or
+/// already settled borrow, or a start with a Worker row, is left alone.
+pub(crate) fn settle_unconsumed_directory_borrow_if_unheld(
+    state: &AppState,
+    placement: &str,
+    record: &QualificationLocalStartRecord,
+    worker: Option<&crate::runtime_db::external_execution::QualificationWorkerProcessRecord>,
+) -> Result<()> {
+    if !(record
+        .directory_borrow_intent
+        .as_ref()
+        .is_some_and(|borrow| borrow.released_at_ms.is_none())
+        && record.worker_incarnation_digest.is_none()
+        && worker.is_none())
+    {
+        return Ok(());
+    }
+    ensure!(
+        state
+            .isolation
+            .inspection()
+            .process_scope_readiness
+            .descendant_containment
+            .cgroup_scope,
+        "Q directory borrow was never consumed, and this node has no qualified cgroup scope \
+         to prove that no Worker holds it"
+    );
+    retire_qualification_worker_scope_slot(state, placement)
+        .context("prove the Q Worker scope slot empty before settling its unconsumed borrow")?;
+    state
+        .state_store
+        .settle_unconsumed_directory_borrow(placement)?;
+    Ok(())
 }
 
 /// Restart repair for credential custody a previous daemon left unreleased.
@@ -732,6 +774,24 @@ pub fn ensure_qualification_worker_terminal(
         "Q local Worker terminal row changed its exact original process"
     );
     Ok(())
+}
+
+/// Fail promptly when the Q Worker is no longer the attached, live process:
+/// its settled row means the process ended (or was retired) and no pending
+/// command can complete. The reason carries the supervisor's bounded exit
+/// status and any bridge refusal note, never process output.
+pub fn ensure_qualification_worker_attached(state: &AppState, placement: &str) -> Result<()> {
+    let process = state
+        .state_store
+        .qualification_worker_process(placement)?
+        .context("Q local Worker has no retained process")?;
+    if process.phase == QualificationWorkerProcessPhase::Attached {
+        return Ok(());
+    }
+    match state.persistent_sessions.exclusive_exit_reason(placement) {
+        Some(reason) => bail!("qualification Worker exited before the command completed: {reason}"),
+        None => bail!("qualification Worker exited before the command completed"),
+    }
 }
 
 pub fn mark_qualification_local_cleanup_unproved(

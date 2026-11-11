@@ -1358,6 +1358,11 @@ pub enum LifecycleAdapterResponse {
         /// reads its run stream. Reconciliation never carries one.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         guest_owner: Option<guest_owner_report::GuestOwnerActivationReport>,
+        /// Why first activation came back before the owner reported, when a
+        /// step failed before or while its run stream was read: the step and
+        /// a bounded reason in fixed words. Reconciliation never carries one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        contact_failure: Option<UncertaintyReason>,
     },
     OccurrenceTerminal {
         operation_id: String,
@@ -1742,12 +1747,19 @@ impl LifecycleAdapterResponse {
                 Self::SupervisorPending {
                     activation_request_digest,
                     guest_owner,
+                    contact_failure,
                     ..
                 },
             ) => {
                 ensure!(
                     activation_request_digest == &activation.activation_request_digest,
                     "activation response changed its request identity"
+                );
+                ensure!(
+                    contact_failure
+                        .as_ref()
+                        .is_none_or(|failure| failure.detail.len() <= MAX_UNCERTAINTY_DETAIL_BYTES),
+                    "activation contact failure exceeds its detail bound"
                 );
                 ensure!(
                     guest_owner.is_none()

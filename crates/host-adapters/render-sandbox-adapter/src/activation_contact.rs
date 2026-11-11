@@ -12,13 +12,14 @@
 
 use std::io::Read as _;
 
-use anyhow::{Result, ensure};
+use anyhow::{Context as _, Result, ensure};
 use lillux::network::{NetworkCancellation, NetworkContext};
 use lillux::time::{Duration, MonotonicDeadline};
 use ryeos_external_execution_contract::canonical_json;
 use ryeos_external_execution_contract::guest_owner_report::{
     GuestOwnerActivationReport, GuestOwnerStdout, GuestOwnerTerminal,
 };
+use ryeos_external_execution_contract::{UncertaintyClass, UncertaintyReason};
 use ryeos_http_transport::{
     Deadlines, Header, HttpClient, HttpRequest, HttpResponse, Limits, RequestBodySource, SseLimits,
     SseReader,
@@ -150,6 +151,56 @@ trait OneShotContact {
     fn run(&mut self, command: &str) -> Result<GuestOwnerActivationReport>;
 }
 
+/// The one-shot activation step a failure happened in. It rides on the error
+/// as a context so the reason the controller records can name the step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ActivationStep {
+    UploadSignedImport,
+    UploadGuestPackage,
+    Run,
+}
+
+impl ActivationStep {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::UploadSignedImport => "upload_signed_import",
+            Self::UploadGuestPackage => "upload_guest_package",
+            Self::Run => "run",
+        }
+    }
+}
+
+impl std::fmt::Display for ActivationStep {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::error::Error for ActivationStep {}
+
+/// The bounded, fixed-word reason a failed first contact carries to the
+/// controller: the step, then the classified failure when one was
+/// classified, else only whether the deadline had passed. Provider text
+/// reaches it only through the classification, which bounds and redacts.
+pub(crate) fn contact_failure_reason(
+    error: &anyhow::Error,
+    deadline: MonotonicDeadline,
+) -> UncertaintyReason {
+    let step = error
+        .downcast_ref::<ActivationStep>()
+        .map_or("before_contact", |step| step.as_str());
+    match error.downcast_ref::<crate::contact_failure::ContactFailure>() {
+        Some(classified) => UncertaintyReason::new(
+            classified.0.class,
+            &format!("{step}: {}", classified.0.detail),
+        ),
+        None if deadline.has_elapsed() => {
+            UncertaintyReason::new(UncertaintyClass::Timeout, &format!("{step}: deadline"))
+        }
+        None => UncertaintyReason::new(UncertaintyClass::Transport, &format!("{step}: failed")),
+    }
+}
+
 fn contact_once(
     contact: &mut impl OneShotContact,
     delivery: &ActivationDeliveryPlan,
@@ -161,18 +212,24 @@ fn contact_once(
             && lillux::sha256_hex(signed_import) == delivery.signed_import_sha256,
         "signed import changed before Render upload"
     );
-    contact.upload_bytes(
-        delivery.signed_import_remote_path,
-        signed_import,
-        &delivery.signed_import_sha256,
-    )?;
-    contact.upload_file(
-        delivery.guest_package_remote_path,
-        package,
-        delivery.guest_package_bytes,
-        &delivery.guest_package_sha256,
-    )?;
-    contact.run(&delivery.owner_command)
+    contact
+        .upload_bytes(
+            delivery.signed_import_remote_path,
+            signed_import,
+            &delivery.signed_import_sha256,
+        )
+        .context(ActivationStep::UploadSignedImport)?;
+    contact
+        .upload_file(
+            delivery.guest_package_remote_path,
+            package,
+            delivery.guest_package_bytes,
+            &delivery.guest_package_sha256,
+        )
+        .context(ActivationStep::UploadGuestPackage)?;
+    contact
+        .run(&delivery.owner_command)
+        .context(ActivationStep::Run)
 }
 
 /// This function must only be called from the first claimed activation, never
@@ -425,6 +482,13 @@ pub(super) fn proxy_request(
     let mut deadlines = Deadlines::new(SETUP_TIMEOUT, IDLE_TIMEOUT, deadline);
     if matches!(operation, ProxyOperation::UploadFile { .. }) {
         deadlines = deadlines.with_response_wait(crate::upload_response_wait(body.exact_len()));
+    }
+    if matches!(operation, ProxyOperation::RunStream) {
+        // A run stream carries output only when the program writes. A verifier
+        // that is working, such as the consumer scenario's model turn, is
+        // silent for longer than any idle bound; the contact's absolute
+        // deadline is the one bound that applies while the stream is open.
+        deadlines.idle_timeout = deadline.remaining().max(IDLE_TIMEOUT);
     }
     Ok(HttpRequest {
         method: token.method,
@@ -695,6 +759,43 @@ mod tests {
                 supervisor_exit: None,
             })
         }
+    }
+
+    #[test]
+    fn a_failed_first_contact_names_its_step_in_fixed_words() {
+        let deadline = MonotonicDeadline::after(Duration::from_secs(60));
+        let classified = crate::contact_failure::failure(
+            UncertaintyClass::UploadStatus,
+            "status 503; message: Bearer abc",
+        )
+        .context(ActivationStep::UploadGuestPackage);
+        let reason = contact_failure_reason(&classified, deadline);
+        assert_eq!(reason.class, UncertaintyClass::UploadStatus);
+        assert!(
+            reason
+                .detail
+                .starts_with("upload_guest_package: status 503"),
+            "{}",
+            reason.detail
+        );
+
+        let plain = anyhow::anyhow!("socket closed by https://provider.example/secret-path")
+            .context(ActivationStep::Run);
+        let reason = contact_failure_reason(&plain, deadline);
+        assert_eq!(reason.class, UncertaintyClass::Transport);
+        assert_eq!(reason.detail, "run: failed");
+
+        let elapsed = MonotonicDeadline::after(Duration::ZERO);
+        let late = anyhow::anyhow!("read timed out").context(ActivationStep::UploadGuestPackage);
+        let reason = contact_failure_reason(&late, elapsed);
+        assert_eq!(reason.class, UncertaintyClass::Timeout);
+        assert_eq!(reason.detail, "upload_guest_package: deadline");
+
+        let unstepped = anyhow::anyhow!("signed import changed before Render upload");
+        assert_eq!(
+            contact_failure_reason(&unstepped, deadline).detail,
+            "before_contact: failed"
+        );
     }
 
     #[test]

@@ -54,6 +54,10 @@ pub struct ComposeLimits {
     pub contact_timeout_seconds: u32,
     pub observation_timeout_seconds: u32,
     pub cleanup_timeout_seconds: u32,
+    /// Prepaid native work (SQL VM steps) a placement may spend on the node
+    /// across its life; a fresh placement needs at least this much left in
+    /// the daemon incarnation. Measure a workload before lowering it.
+    pub native_work_steps: u64,
     pub max_workspace_bytes: u64,
     pub max_export_bytes: u64,
     pub max_transfer_bytes: u64,
@@ -69,6 +73,7 @@ impl Default for ComposeLimits {
             contact_timeout_seconds: 30,
             observation_timeout_seconds: 120,
             cleanup_timeout_seconds: 300,
+            native_work_steps: super::DEFAULT_NATIVE_WORK_STEPS,
             max_workspace_bytes: 1024 * 1024 * 1024,
             max_export_bytes: 512 * 1024 * 1024,
             max_transfer_bytes: 1024 * 1024 * 1024,
@@ -287,6 +292,7 @@ pub(super) fn compose_binding_document(inputs: ComposeInputs<'_>) -> Result<Bind
         contact_timeout_seconds: limits.contact_timeout_seconds,
         observation_timeout_seconds: limits.observation_timeout_seconds,
         cleanup_timeout_seconds: limits.cleanup_timeout_seconds,
+        native_work_steps: Some(limits.native_work_steps),
         max_workspace_bytes: limits.max_workspace_bytes,
         max_export_bytes: limits.max_export_bytes,
         max_transfer_bytes: limits.max_transfer_bytes,
@@ -1739,6 +1745,10 @@ pub(crate) mod tests {
             limits.timeout_seconds,
             ComposeLimits::default().timeout_seconds
         );
+        assert_eq!(limits.native_work_steps, 2_000_000);
+        let limits: ComposeLimits =
+            serde_json::from_value(serde_json::json!({"native_work_steps": 12_000_000})).unwrap();
+        assert_eq!(limits.native_work_steps, 12_000_000);
         assert!(
             serde_json::from_value::<ComposeLimits>(serde_json::json!({"max_actve": 3})).is_err()
         );

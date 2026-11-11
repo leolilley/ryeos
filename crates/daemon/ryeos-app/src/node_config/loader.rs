@@ -788,7 +788,7 @@ mod tests {
             ("contact_timeout_seconds", 0),
             ("contact_timeout_seconds", 61),
             ("observation_timeout_seconds", 0),
-            ("observation_timeout_seconds", 301),
+            ("observation_timeout_seconds", 901),
             ("cleanup_timeout_seconds", 0),
             ("cleanup_timeout_seconds", 601),
         ] {

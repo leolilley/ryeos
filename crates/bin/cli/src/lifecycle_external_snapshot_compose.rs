@@ -130,6 +130,11 @@ struct SnapshotQualificationComposeArgs {
     #[arg(long)]
     contact_timeout_seconds: Option<u32>,
 
+    /// Seconds the contact that delivers a consumer verifier archive may
+    /// take, at least the contact budget and at most the lifetime; defaults to 600.
+    #[arg(long)]
+    delivery_timeout_seconds: Option<u32>,
+
     /// Longest lifetime of a qualification attempt in seconds; defaults to 900.
     #[arg(long)]
     maximum_lifetime_seconds: Option<u32>,
@@ -319,6 +324,7 @@ pub fn run_snapshot_qualification_compose(
             snapshot_binding: args.snapshot_binding.clone(),
             verifier: args.verifier.clone(),
             contact_timeout_seconds: args.contact_timeout_seconds,
+            delivery_timeout_seconds: args.delivery_timeout_seconds,
             maximum_lifetime_seconds: args.maximum_lifetime_seconds,
         })?,
         inputs,

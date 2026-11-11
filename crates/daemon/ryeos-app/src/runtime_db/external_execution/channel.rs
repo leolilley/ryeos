@@ -198,8 +198,7 @@ pub(super) fn prepare_qualification_scope_settlement_tx(
         binding.issued_at_ms,
     )?;
     ensure!(
-        completion_application == "applied"
-            && completion.digest() == completion_digest
+        completion.digest() == completion_digest
             && i64::try_from(completion.frame().sequence)? == completion_sequence
             && completion_digest == observation.completion_frame_digest
             && matches!(&completion.frame().payload,
@@ -207,6 +206,14 @@ pub(super) fn prepare_qualification_scope_settlement_tx(
                     if completion_request_digest == &observation.completion_request_digest),
         "Q native settlement changed its applied controller completion"
     );
+    // The guest signs this settlement row inside the completion's application
+    // and acknowledges the completion only afterwards, so the row can arrive
+    // one exchange before the controller's own completion frame reads applied.
+    // Until that acknowledgement lands the settlement is pending evidence, not
+    // a contradiction: nothing is readable yet.
+    if completion_application != "applied" {
+        return Ok(None);
+    }
     let mut applied = signed(ChannelDirection::SupervisorToOwner, "runtime_applied")?;
     ensure!(
         applied.len() == 1,
@@ -511,6 +518,66 @@ impl RuntimeDb {
         })
     }
 
+    /// Author the owner's one protocol input closure for a structured-session
+    /// channel, or return the already retained one. The guest closes the
+    /// candidate's stdin when it applies this frame; a candidate that ends on
+    /// EOF then exits and the guest signs its stdout EOF, which is what lets
+    /// the local connector retire normally. The transcript rules admit the
+    /// frame only while the channel runs before its execution deadline.
+    pub(crate) fn ensure_external_protocol_input_closed(
+        &self,
+        placement: &str,
+        signing_key: &lillux::crypto::SigningKey,
+    ) -> Result<AuthenticatedExecutionFrame> {
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+            let binding = load_binding(&tx, placement)?;
+            ensure!(
+                matches!(
+                    binding.execution_mode,
+                    ryeos_state::external_execution::ExternalExecutionMode::StructuredSession {}
+                        | ryeos_state::external_execution::ExternalExecutionMode::QualificationStructuredSession {}
+                ),
+                "protocol input closure requires a structured-session channel"
+            );
+            NodeJournalOwner.require_owner(&tx, &binding)?;
+            let binding_digest = binding.digest()?;
+            let retained = {
+                let mut statement = tx.prepare(
+                    "SELECT frame_json FROM external_execution_frame
+                 WHERE binding_digest=?1 AND direction='owner_to_supervisor'
+                   AND json_extract(frame_json,'$.frame.payload.kind')='protocol_input_closed'
+                 ORDER BY sequence",
+                )?;
+                statement
+                    .query_map([&binding_digest], |row| row.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            ensure!(
+                retained.len() <= 1,
+                "external channel retained competing protocol input closures"
+            );
+            let frame = if let Some(wire) = retained.into_iter().next() {
+                SignedExecutionFrame::decode_and_verify(
+                    wire.as_bytes(),
+                    &binding,
+                    binding.issued_at_ms,
+                )?
+            } else {
+                journal::author_frame(
+                    &tx,
+                    &NodeJournalOwner,
+                    placement,
+                    ChannelDirection::OwnerToSupervisor,
+                    signing_key,
+                    ExecutionChannelPayload::ProtocolInputClosed,
+                )?
+            };
+            tx.commit()?;
+            Ok(frame)
+        })
+    }
+
     /// Author exactly one completion-bound quiesce request, or return the
     /// already retained request after a retry/restart. A different completion
     /// coordinate can never replace or follow the first one.
@@ -711,6 +778,18 @@ impl RuntimeDb {
                     "runtime_applied_frame_digest": runtime.digest(),
                     "protocol_eof_frame_digest": protocol_eof.digest(),
                 }))?;
+            // The guest admits the completion only once its runtime-applied
+            // frame and its protocol output through the EOF are acknowledged
+            // as applied, in order. Author those acknowledgements here so they
+            // precede the completion in sequence; each is idempotent.
+            ensure_owner_acknowledgement_tx(
+                &tx,
+                placement,
+                runtime.frame().sequence,
+                runtime.digest(),
+                signing_key,
+            )?;
+            ensure_applied_supervisor_acknowledgements_tx(&tx, placement, signing_key)?;
             let mut statement = tx.prepare(
                 "SELECT frame_json FROM external_execution_frame
              WHERE binding_digest=?1 AND direction='owner_to_supervisor'
@@ -1894,6 +1973,7 @@ impl RuntimeDb {
             ) {
                 ensure_applied_export_acknowledgement_tx(&tx, placement, signing_key)?;
             }
+            ensure_applied_supervisor_acknowledgements_tx(&tx, placement, signing_key)?;
             let outbound = journal::pending_transport_frames(
                 &tx,
                 &NodeJournalOwner,
@@ -2599,6 +2679,54 @@ fn retain_external_candidate_import_tx(
             expected.4
         ],
     )?;
+    Ok(())
+}
+
+/// Acknowledge, as applied and in sequence order, every supervisor frame this
+/// node has applied. Ingress acknowledges a frame with the state it has on
+/// arrival, which for Ready (admitted with the Release that follows) and for
+/// protocol output (delivered to the connector peer later) is only retained,
+/// and nothing re-acknowledged them. The guest's transcript validator, which
+/// runs when it settles a qualification, keeps such frames pending and
+/// refuses any later applied frame behind a pending one, so every applied
+/// frame must carry an applied acknowledgement. Acknowledgements themselves
+/// are never acknowledged. Each one is recovered when it already exists.
+fn ensure_applied_supervisor_acknowledgements_tx(
+    tx: &Transaction<'_>,
+    placement: &str,
+    signing_key: &lillux::crypto::SigningKey,
+) -> Result<()> {
+    let binding = load_binding(tx, placement)?;
+    if !matches!(
+        binding.execution_mode,
+        ryeos_state::external_execution::ExternalExecutionMode::StructuredSession {}
+            | ryeos_state::external_execution::ExternalExecutionMode::QualificationStructuredSession {}
+    ) {
+        return Ok(());
+    }
+    let rows = {
+        let mut statement = tx.prepare(
+            "SELECT sequence,frame_digest FROM external_execution_frame
+             WHERE binding_digest=?1 AND direction='supervisor_to_owner'
+               AND application='applied'
+               AND json_extract(frame_json,'$.frame.payload.kind')!='acknowledge'
+             ORDER BY sequence",
+        )?;
+        statement
+            .query_map([binding.digest()?], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for (sequence, digest) in rows {
+        ensure_owner_acknowledgement_tx(
+            tx,
+            placement,
+            u64::try_from(sequence)?,
+            &digest,
+            signing_key,
+        )?;
+    }
     Ok(())
 }
 
@@ -5269,6 +5397,43 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn protocol_input_closure_is_exactly_one_per_channel() {
+        let root = tempfile::tempdir().unwrap();
+        let db =
+            crate::runtime_db::test_native::TestRuntime::open(&root.path().join("runtime.sqlite3"));
+        let (binding, owner, supervisor) = setup(&db);
+        let placement = &binding.placement_thread_id;
+        ready(&db, &binding, &supervisor);
+        db.admit_external_ready_and_author_release(placement, &owner, test_startup_deadline())
+            .unwrap()
+            .unwrap();
+        let first = db
+            .ensure_external_protocol_input_closed(placement, &owner)
+            .unwrap();
+        let replay = db
+            .ensure_external_protocol_input_closed(placement, &owner)
+            .unwrap();
+        assert_eq!(first.canonical(), replay.canonical());
+        assert!(matches!(
+            first.frame().payload,
+            ExecutionChannelPayload::ProtocolInputClosed
+        ));
+        let closures: i64 = db
+            .conn
+            .with_sql(|connection| {
+                Ok(connection.query_row(
+                    "SELECT COUNT(*) FROM external_execution_frame
+                 WHERE binding_digest=?1 AND direction='owner_to_supervisor'
+                   AND json_extract(frame_json,'$.frame.payload.kind')='protocol_input_closed'",
+                    [binding.digest().unwrap()],
+                    |row| row.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(closures, 1);
+    }
+
+    #[test]
     fn failed_release_authoring_rolls_back_readiness_application() {
         let root = tempfile::tempdir().unwrap();
         let db =
@@ -7546,7 +7711,44 @@ pub(super) mod tests {
             )
             .unwrap();
         assert!(applied.acknowledgement.is_none());
-        assert!(applied.outbound.is_empty());
+        // Ready was admitted (applied) after its ingress acknowledgement
+        // reported it retained; the next exchange carries the applied one.
+        assert_eq!(applied.outbound.len(), 1);
+        let ready_applied = SignedExecutionFrame::decode_and_verify(
+            applied.outbound[0].wire(),
+            &binding,
+            binding.issued_at_ms,
+        )
+        .unwrap();
+        assert!(matches!(
+            ready_applied.frame().payload,
+            ExecutionChannelPayload::Acknowledge {
+                peer_frame_sequence: 1,
+                application: ExecutionFrameApplication::Applied,
+                ..
+            }
+        ));
+        // The supervisor's next frame carries its receive frontier past that
+        // acknowledgement, which retires it from transport; the node never
+        // acknowledges an acknowledgement back.
+        let (frontier_wire, frontier_digest) = wire(
+            &binding,
+            &supervisor,
+            ChannelDirection::SupervisorToOwner,
+            4,
+            Some(applied_ack_digest),
+            3,
+            ExecutionChannelPayload::Acknowledge {
+                peer_frame_sequence: 3,
+                peer_frame_digest: ready_applied.digest().to_owned(),
+                application: ExecutionFrameApplication::Retained,
+            },
+        );
+        let advanced = db
+            .exchange_external_supervisor_frame(placement, &frontier_wire, &owner, 16, 1024 * 1024)
+            .unwrap();
+        assert!(advanced.acknowledgement.is_none());
+        assert!(advanced.outbound.is_empty());
         let application: String = db
             .conn
             .with_sql(|connection| {
@@ -7589,11 +7791,11 @@ pub(super) mod tests {
             &binding,
             &supervisor,
             ChannelDirection::SupervisorToOwner,
-            4,
-            Some(applied_ack_digest),
-            3,
+            5,
+            Some(frontier_digest),
+            cancel.frame().sequence,
             ExecutionChannelPayload::Acknowledge {
-                peer_frame_sequence: 3,
+                peer_frame_sequence: cancel.frame().sequence,
                 peer_frame_digest: cancel.digest().to_owned(),
                 application: ExecutionFrameApplication::Retained,
             },
@@ -7614,11 +7816,13 @@ pub(super) mod tests {
             .exchange_external_supervisor_frame(placement, &ready_wire, &owner, 16, 1024 * 1024)
             .unwrap();
         assert!(!stale_retry.incoming_new);
-        // The readiness owner applied Ready before issuing Release. Retrying
-        // that exact input upgrades its earlier Retained receipt to Applied;
-        // it does not replay Release or cancellation after the peer drained it.
+        // The readiness owner applied Ready before issuing Release, and the
+        // exchange after that admission already authored the Applied receipt.
+        // Retrying that exact input returns that same receipt; it does not
+        // replay Release or cancellation after the peer drained it.
         let applied_ready_ack = stale_retry.acknowledgement.unwrap();
-        assert_eq!(applied_ready_ack.frame().sequence, 4);
+        assert_eq!(applied_ready_ack.frame().sequence, 3);
+        assert_eq!(applied_ready_ack.digest(), ready_applied.digest());
         assert!(matches!(
             &applied_ready_ack.frame().payload,
             ExecutionChannelPayload::Acknowledge {
@@ -7628,8 +7832,8 @@ pub(super) mod tests {
             } if peer_frame_digest == &ready_digest
         ));
         assert_ne!(applied_ready_ack.digest(), owner_ack_digest);
-        assert_eq!(stale_retry.outbound.len(), 1);
-        assert_eq!(stale_retry.outbound[0].digest(), applied_ready_ack.digest());
+        // The peer's frontier already retired that receipt from transport.
+        assert!(stale_retry.outbound.is_empty());
         assert!(stale_retry.urgent_revocation.is_none());
         let repeated = db
             .exchange_external_supervisor_frame(placement, &ready_wire, &owner, 16, 1024 * 1024)
@@ -7639,19 +7843,18 @@ pub(super) mod tests {
             repeated.acknowledgement.unwrap().digest(),
             applied_ready_ack.digest()
         );
-        assert_eq!(repeated.outbound.len(), 1);
-        assert_eq!(repeated.outbound[0].digest(), applied_ready_ack.digest());
+        assert!(repeated.outbound.is_empty());
         assert!(repeated.urgent_revocation.is_none());
 
         let (applied_ready_ack_wire, _) = wire(
             &binding,
             &supervisor,
             ChannelDirection::SupervisorToOwner,
-            5,
+            6,
             Some(cancel_ack_digest),
             4,
             ExecutionChannelPayload::Acknowledge {
-                peer_frame_sequence: 4,
+                peer_frame_sequence: 3,
                 peer_frame_digest: applied_ready_ack.digest().to_owned(),
                 application: ExecutionFrameApplication::Retained,
             },
@@ -7938,7 +8141,23 @@ pub(super) mod tests {
         let settled_transport = db
             .exchange_external_supervisor_frame(placement, &cancel_ack, &owner, 16, 1024 * 1024)
             .unwrap();
-        assert!(settled_transport.outbound.is_empty());
+        // The only outbound frame is Ready's applied acknowledgement, owed
+        // since its admission; the cancel itself is settled.
+        assert_eq!(settled_transport.outbound.len(), 1);
+        let ready_applied = SignedExecutionFrame::decode_and_verify(
+            settled_transport.outbound[0].wire(),
+            &binding,
+            binding.issued_at_ms,
+        )
+        .unwrap();
+        assert!(matches!(
+            ready_applied.frame().payload,
+            ExecutionChannelPayload::Acknowledge {
+                peer_frame_sequence: 1,
+                application: ExecutionFrameApplication::Applied,
+                ..
+            }
+        ));
         assert!(settled_transport.urgent_revocation.is_none());
         let release_application: String = db
             .conn

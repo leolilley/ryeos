@@ -50,9 +50,11 @@ pub(super) use qualification_fixture_receiver::JOURNAL_SQL as QUALIFICATION_FIXT
 pub(crate) use qualification_fixture_receiver::verify_qualification_fixture_receiver_custody;
 pub(super) use qualification_guest_scratch::JOURNAL_SQL as QUALIFICATION_GUEST_SCRATCH_SQL;
 pub(crate) use qualification_guest_scratch::{
-    QualificationGuestScratchPhase, QualificationGuestScratchRecord,
+    QualificationGuestScratchPhase, QualificationGuestScratchRecord, ScratchCleanupOwner,
 };
 pub(super) use qualification_local_start::JOURNAL_SQL as QUALIFICATION_LOCAL_START_SQL;
+#[cfg(test)]
+pub(in crate::runtime_db) use qualification_local_start::tests::fixture_record as fixture_local_start_record;
 pub use qualification_local_start::{
     QualificationLocalCredentialCustody, QualificationLocalStartPhase,
     QualificationLocalStartRecord, QualificationWorkspaceBorrowIntent,

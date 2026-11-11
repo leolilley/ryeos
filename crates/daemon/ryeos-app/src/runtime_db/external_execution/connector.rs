@@ -132,6 +132,7 @@ impl ExternalConnectorRecord {
                         | "startup_abandoned"
                         | "controller_shutdown"
                         | "protocol_fault"
+                        | "peer_absent"
                 ),
                 "external connector close reason is unsupported"
             );
@@ -494,6 +495,30 @@ impl RuntimeDb {
         placement: &str,
     ) -> Result<Option<ExternalConnectorRecord>> {
         self.conn.with_sql(|conn| read_connector(conn, placement))
+    }
+
+    /// Every connector row still `prepared` or `connected`, by placement. A
+    /// relay owner is a thread of the daemon that prepared its row, so a row
+    /// that is still open when a daemon starts was left by an ended
+    /// generation whose owner never wrote the closure.
+    pub(crate) fn open_external_connectors(&self) -> Result<Vec<ExternalConnectorRecord>> {
+        self.conn.with_sql(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT placement_thread_id FROM external_execution_connector
+                  WHERE state IN ('prepared','connected') ORDER BY placement_thread_id",
+            )?;
+            let placements = statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let mut open = Vec::with_capacity(placements.len());
+            for placement in placements {
+                open.push(
+                    read_connector(conn, &placement)?
+                        .context("open external connector disappeared during listing")?,
+                );
+            }
+            Ok(open)
+        })
     }
 
     pub(crate) fn prepare_external_connector(
@@ -1210,5 +1235,39 @@ mod tests {
         );
         db.close_external_connector(&placement, "startup_abandoned")
             .unwrap();
+    }
+
+    #[test]
+    fn open_connectors_lists_prepared_and_connected_rows_until_they_close() {
+        let root = tempfile::tempdir().unwrap();
+        let db =
+            crate::runtime_db::test_native::TestRuntime::open(&root.path().join("runtime.sqlite3"));
+        assert!(db.open_external_connectors().unwrap().is_empty());
+        let capability_hash = "a".repeat(64);
+        let (placement, _) = released(&db, "open-connector");
+        let generation = db
+            .external_connector_capability_generation(&placement)
+            .unwrap();
+        db.prepare_external_connector(&placement, &generation, &capability_hash)
+            .unwrap();
+        let open = db.open_external_connectors().unwrap();
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].placement_thread_id, placement);
+        assert_eq!(open[0].phase, ExternalConnectorPhase::Prepared);
+        assert_eq!(open[0].peer_process_identity, None);
+
+        contact_provider(&db, &placement);
+        assert!(
+            db.connect_external_connector(&placement, &generation, &capability_hash, &peer(77, 7))
+                .unwrap()
+        );
+        let open = db.open_external_connectors().unwrap();
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].phase, ExternalConnectorPhase::Connected);
+        assert_eq!(open[0].peer_process_identity, Some(peer(77, 7)));
+
+        db.close_external_connector(&placement, "peer_absent")
+            .unwrap();
+        assert!(db.open_external_connectors().unwrap().is_empty());
     }
 }

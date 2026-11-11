@@ -508,6 +508,7 @@ impl OfflineNativeFactsRecord {
         let lillux_sqlite::OriginalNativeBudgetSnapshot {
             storage_bytes: _,
             allocator_steps,
+            allocator_steps_limit: _,
             cleanup_reserved,
             cleanup_steps,
             connections_issued,

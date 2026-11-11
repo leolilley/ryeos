@@ -957,6 +957,132 @@ fn reject_nonlocal_schema_refs(value: &Value, depth: usize) -> Result<()> {
     Ok(())
 }
 
+/// Why the bridge refused a workload message. It rides on the error as a
+/// context so the refusal can be reported by class without reading any
+/// message content.
+#[derive(Debug, Clone, Copy)]
+enum RefusalClass {
+    UnknownNotification,
+    UnknownServerRequest,
+    SchemaViolation,
+}
+
+impl RefusalClass {
+    fn code(self) -> &'static str {
+        match self {
+            Self::UnknownNotification => "unknown_notification",
+            Self::UnknownServerRequest => "unknown_server_request",
+            Self::SchemaViolation => "schema_violation",
+        }
+    }
+}
+
+impl std::fmt::Display for RefusalClass {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.code())
+    }
+}
+
+impl std::error::Error for RefusalClass {}
+
+const MAX_REFUSED_METHOD_BYTES: usize = 128;
+
+/// The refused message's method name, only when it is a plain protocol
+/// identifier. Anything else is not reported, so a refusal event can never
+/// carry message content.
+fn refused_method_label(message: &Value) -> Option<String> {
+    let method = message.get("method")?.as_str()?;
+    (!method.is_empty()
+        && method.len() <= MAX_REFUSED_METHOD_BYTES
+        && method
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_-./:".contains(&byte)))
+    .then(|| method.to_owned())
+}
+
+/// Bounded, non-secret observation of a refused workload message: a class
+/// and, when it is a plain identifier, the method name. Never a payload.
+fn bridge_refusal_event(class: &str, method: Option<&str>) -> Value {
+    json!({
+        "event_type":"bridge.refused",
+        "payload":{"class":class,"method":method}
+    })
+}
+
+/// Last best-effort delivery of queued observations before the bridge exits
+/// on a fatal refusal, so the daemon retains why the session ended. A missing
+/// or late acknowledgement is not an error: the bridge is already failing.
+fn flush_fatal_observations(
+    channel: &mut lillux::InheritedDuplexChannel,
+    events: &Mutex<EventQueue>,
+    incoming: &std::sync::mpsc::Receiver<std::result::Result<Frame, String>>,
+    next_sequence: &mut u64,
+    previous_digest: &mut Option<String>,
+    pending: &mut Option<PendingObservationBatch>,
+) {
+    const FLUSH_WAIT: Duration = Duration::from_secs(5);
+    let deadline = MonotonicDeadline::after(FLUSH_WAIT);
+    let await_ack = |incoming: &std::sync::mpsc::Receiver<std::result::Result<Frame, String>>,
+                     through: u64,
+                     digest: &str| {
+        while !deadline.has_elapsed() {
+            match incoming.recv_timeout(Duration::from_millis(50)) {
+                Ok(Ok(frame))
+                    if matches!(frame.kind, FrameKind::ObservationAck)
+                        && frame.request_id.is_none()
+                        && frame
+                            .body
+                            .as_ref()
+                            .and_then(|body| body.get("through_sequence"))
+                            .and_then(Value::as_u64)
+                            == Some(through)
+                        && frame
+                            .body
+                            .as_ref()
+                            .and_then(|body| body.get("batch_digest"))
+                            .and_then(Value::as_str)
+                            == Some(digest) =>
+                {
+                    return true;
+                }
+                Ok(Ok(_)) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Ok(Err(_)) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return false,
+            }
+        }
+        false
+    };
+    if let Some(in_flight) = pending.take() {
+        if !await_ack(incoming, in_flight.through_sequence, &in_flight.digest) {
+            return;
+        }
+        let Some(next) = in_flight.through_sequence.checked_add(1) else {
+            return;
+        };
+        *next_sequence = next;
+        *previous_digest = Some(in_flight.digest);
+    }
+    let Ok(mut queue) = events.lock() else { return };
+    let Ok(Some((body, through, digest))) =
+        queue.take_batch(128, *next_sequence, previous_digest.as_deref())
+    else {
+        return;
+    };
+    drop(queue);
+    let sent = write_frame(
+        channel,
+        &Frame {
+            protocol: WIRE_PROTOCOL.to_owned(),
+            version: WIRE_VERSION,
+            kind: FrameKind::ObservationBatch,
+            request_id: None,
+            body: Some(body),
+        },
+    );
+    if sent.is_ok() {
+        let _ = await_ack(incoming, through, &digest);
+    }
+}
+
 fn main() {
     // Panic payloads can include provider messages or configuration. The
     // executable reports only a category and never resumes protocol work.
@@ -1349,8 +1475,21 @@ fn run(lifecycle: &mut BridgeLifecycle) -> Result<()> {
         }
         match app.try_lock() {
             Ok(mut app) => {
-                app.drain_incoming()?;
-                app.expire_server_requests()?;
+                let drained = app
+                    .drain_incoming()
+                    .and_then(|()| app.expire_server_requests());
+                if let Err(error) = drained {
+                    drop(app);
+                    flush_fatal_observations(
+                        &mut channel,
+                        &events,
+                        &session_incoming,
+                        &mut next_observation_sequence,
+                        &mut previous_observation_digest,
+                        &mut pending_observation,
+                    );
+                    return Err(error);
+                }
             }
             Err(std::sync::TryLockError::WouldBlock) => {}
             Err(std::sync::TryLockError::Poisoned(_)) => {
@@ -3050,6 +3189,20 @@ impl StructuredWorkload {
     }
 
     fn route(&mut self, message: Value) -> Result<()> {
+        let method = refused_method_label(&message);
+        let routed = self.route_message(message);
+        if let Err(error) = &routed {
+            let class = error
+                .downcast_ref::<RefusalClass>()
+                .map_or("message_refused", |class| class.code());
+            // Refusing is already the failure being reported; a full event
+            // queue must not replace it.
+            let _ = self.push_event(bridge_refusal_event(class, method.as_deref()));
+        }
+        routed
+    }
+
+    fn route_message(&mut self, message: Value) -> Result<()> {
         let object = message
             .as_object()
             .ok_or_else(|| anyhow!("structured workload emitted a non-object message"))?;
@@ -3074,7 +3227,9 @@ impl StructuredWorkload {
                     .find(|rule| rule.method == method)
                     .cloned()
                     .ok_or_else(|| {
-                        anyhow!("unknown structured-session server request `{method}`")
+                        anyhow::Error::new(RefusalClass::UnknownServerRequest).context(format!(
+                            "unknown structured-session server request `{method}`"
+                        ))
                     })?;
                 self.validate_schema(&rule.schema, message.get("params").unwrap_or(&Value::Null))?;
                 if self.server_requests.len() >= MAX_PENDING_SERVER_REQUESTS {
@@ -3175,7 +3330,11 @@ impl StructuredWorkload {
                     .iter()
                     .find(|rule| rule.method == method)
                     .cloned()
-                    .ok_or_else(|| anyhow!("unknown structured-session notification `{method}`"))?;
+                    .ok_or_else(|| {
+                        anyhow::Error::new(RefusalClass::UnknownNotification).context(format!(
+                            "unknown structured-session notification `{method}`"
+                        ))
+                    })?;
                 self.validate_schema(&rule.schema, message.get("params").unwrap_or(&Value::Null))?;
                 if !rule.durable {
                     return Ok(());
@@ -4030,9 +4189,11 @@ fn validate_schema_from_map(
         .map_err(|error| anyhow!("compile admitted JSON schema `{identity}`: {error}"))?;
     if validator.validate(value).is_err() {
         let instance_digest = ryeos_state::objects::canonical_value_digest(value)?;
-        bail!(
+        // The class rides beneath the message, so the refusal still reads as
+        // what was refused while the class stays reachable by downcast.
+        return Err(anyhow::Error::new(RefusalClass::SchemaViolation).context(format!(
             "structured-session value failed schema `{identity}` (instance digest {instance_digest})"
-        );
+        )));
     }
     Ok(())
 }
@@ -5720,6 +5881,75 @@ server.serve_forever()
         assert!(lifecycle.diagnostics.is_some());
         let observed = lifecycle.shutdown_until(MonotonicDeadline::after(BRIDGE_EXIT_GRACE));
         assert!(observed.settled(), "{observed:?}");
+    }
+
+    #[test]
+    fn refused_workload_notification_leaves_a_bounded_method_only_event() {
+        let root = tempfile::tempdir().unwrap();
+        let mut profile = gating_approval_profile();
+        profile.workload_args = vec![
+            "-c".to_owned(),
+            "printf '%s\\n' '{\"ready\":true}'; IFS= read -r value".to_owned(),
+        ];
+        let (_, controls) = sync_channel(1);
+        let (results, _) = sync_channel(1);
+        let events = Arc::new(Mutex::new(EventQueue::default()));
+        let mut lifecycle = BridgeLifecycle::default();
+        let mut workload = StructuredWorkload::start(
+            &mut lifecycle,
+            "/bin/sh",
+            root.path().to_str().unwrap(),
+            root.path().to_str().unwrap(),
+            profile,
+            "session".to_owned(),
+            HashSet::new(),
+            HashMap::new(),
+            Arc::clone(&events),
+            controls,
+            results,
+            "/bin/sh",
+            None,
+            &BTreeMap::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        let error = workload
+            .route(json!({
+                "method":"turn/moderationMetadata",
+                "params":{"body":"credential-bearing-payload"}
+            }))
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("unknown structured-session notification `turn/moderationMetadata`")
+        );
+        assert!(error.downcast_ref::<RefusalClass>().is_some());
+        let (batch, _, _) = events
+            .lock()
+            .unwrap()
+            .take_batch(128, 1, None)
+            .unwrap()
+            .expect("refusal must be queued for the daemon");
+        let event = &batch["events"][0];
+        assert_eq!(event["event_type"], "bridge.refused");
+        assert_eq!(event["payload"]["class"], "unknown_notification");
+        assert_eq!(event["payload"]["method"], "turn/moderationMetadata");
+        let wire = serde_json::to_string(&batch).unwrap();
+        assert!(!wire.contains("credential-bearing-payload"));
+        assert!(wire.len() < 2_048);
+
+        // A method that is not a plain identifier is never echoed.
+        assert!(
+            refused_method_label(&json!({"method":"bad method with spaces and \"quotes\""}))
+                .is_none()
+        );
+        assert!(refused_method_label(&json!({"method":"x".repeat(129)})).is_none());
+        assert!(
+            lifecycle
+                .shutdown_until(MonotonicDeadline::after(BRIDGE_EXIT_GRACE))
+                .settled()
+        );
     }
 
     #[test]

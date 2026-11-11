@@ -553,7 +553,7 @@ pub(super) mod controls {
             cleanup_steps: 10_000,
         };
         let policy = NodeNativeCapacityPolicy {
-            schema: 6,
+            schema: 7,
             issuance_nonce: "a".repeat(32),
             allowance: NativeCapacityUnits {
                 storage_bytes: 4_194_304,
@@ -567,6 +567,7 @@ pub(super) mod controls {
                 maximum_occupancy_ms: 60_000,
                 cleanup_occupancy_ms: 10_000,
                 rollover_drain_margin_ms: 5_000,
+                rollover_work_margin_steps: Some(1_000),
                 host_release_steps: 64,
                 outside_cleanup_steps: 1024,
             },

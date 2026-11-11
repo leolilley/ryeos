@@ -246,6 +246,18 @@ pub fn check_notifications(
                         .starts_with("Project-local config, hooks, and exec policies are disabled"),
                 "unexpected configuration warning"
             ),
+            // The verifier's own finish request ends the guest after the turn,
+            // and Codex then reports that the thread's environment dropped.
+            // Only that: after completion, for this thread and the one routed
+            // environment. A disconnect during the turn stays a refusal.
+            "thread/environment/disconnected" => ensure!(
+                terminal
+                    && text(params, "threadId")? == scenario.thread_id
+                    && params
+                        .get("environmentId")
+                        .is_none_or(|id| id == "ryeos-external-candidate"),
+                "routed environment disconnected before the turn completed"
+            ),
             "remoteControl/status/changed" => ensure!(
                 params.get("environmentId").is_none_or(Value::is_null)
                     && text(params, "status")? == "disabled",
@@ -759,6 +771,24 @@ mod tests {
         let checked = check_notifications(&s, &events).unwrap();
         assert_eq!(checked.notification_count, 12);
         assert_eq!(checked.thread_id, s.thread_id);
+    }
+
+    #[test]
+    fn environment_disconnect_is_classified_only_after_completion() {
+        let (s, mut events) = fixture();
+        let disconnected = json!({"method":"thread/environment/disconnected",
+            "params":{"threadId":s.thread_id,"environmentId":"ryeos-external-candidate"}});
+        let mut after = events.clone();
+        after.push(disconnected.clone());
+        check_notifications(&s, &after).unwrap();
+        let mut other = events.clone();
+        other.push(json!({"method":"thread/environment/disconnected",
+            "params":{"threadId":s.thread_id,"environmentId":"local"}}));
+        assert!(check_notifications(&s, &other).is_err());
+        let completed = events.pop().unwrap();
+        events.push(disconnected);
+        events.push(completed);
+        assert!(check_notifications(&s, &events).is_err());
     }
 
     #[test]

@@ -67,6 +67,18 @@ impl std::fmt::Display for NativeServiceEdgeReached {
 }
 impl std::error::Error for NativeServiceEdgeReached {}
 
+/// The incarnation's prepaid native work was spent before its service window
+/// ended. A fact about this incarnation, not contention: service SQL ends
+/// and the stop that follows must not depend on service SQL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NativeWorkExhausted;
+impl std::fmt::Display for NativeWorkExhausted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("original native work exhausted; service SQL ended")
+    }
+}
+impl std::error::Error for NativeWorkExhausted {}
+
 /// An earlier refusal that a later refusal supersedes. It rides the later
 /// refusal as a context layer, so the later refusal stays the error's own
 /// cause chain and remains downcastable, while the earlier refusal is kept
@@ -517,6 +529,9 @@ pub struct OriginalNativeBudget {
 pub struct OriginalNativeBudgetSnapshot {
     pub storage_bytes: u64,
     pub allocator_steps: u64,
+    /// The whole prepaid work envelope; service work may spend it less the
+    /// cleanup reserve.
+    pub allocator_steps_limit: u64,
     pub cleanup_reserved: u64,
     pub cleanup_steps: u64,
     pub connections_issued: u32,
@@ -565,6 +580,7 @@ impl OriginalNativeBudget {
         OriginalNativeBudgetSnapshot {
             storage_bytes: self.storage_bytes,
             allocator_steps: self.allocator_steps.load(Ordering::Acquire),
+            allocator_steps_limit: self.allocator_steps_limit,
             cleanup_reserved: self.cleanup_reserved,
             cleanup_steps: self.cleanup_steps.load(Ordering::Acquire),
             connections_issued: self.connections_issued.load(Ordering::Acquire),
@@ -590,13 +606,16 @@ impl OriginalNativeBudget {
             let total = previous
                 .checked_add(steps)
                 .context("original native work overflow")?;
-            ensure!(total <= limit, "original native work exhausted");
+            if total > limit {
+                return Err(anyhow::Error::new(NativeWorkExhausted));
+            }
             match counter.compare_exchange(previous, total, Ordering::AcqRel, Ordering::Acquire) {
                 Ok(_) => return Ok(()),
                 Err(observed) => previous = observed,
             }
         }
-        Err(anyhow!("original native counter busy; no effect admitted"))
+        Err(anyhow::Error::new(NativeCheckContended)
+            .context("original native counter busy; no effect admitted"))
     }
     pub fn debit_connection_ticket(&self) -> Result<u32> {
         require_current_native_process()?;
@@ -8691,7 +8710,13 @@ mod original_native_counter_controls {
         assert_eq!(budget.snapshot().allocator_steps, THREADS * DEBITS);
         let error = budget.debit_steps(1, false).unwrap_err();
         assert!(error.to_string().contains("exhausted"), "{error:#}");
+        // Spent work is typed and classified as a fact, so the authority can
+        // latch it; the cleanup reserve stays spendable for the drain.
+        assert!(error.downcast_ref::<NativeWorkExhausted>().is_some());
+        assert!(native_refusal_is_fact(&error));
         assert_eq!(budget.snapshot().allocator_steps, THREADS * DEBITS);
+        assert_eq!(budget.snapshot().allocator_steps_limit, limit);
+        budget.debit_steps(1, true).unwrap();
     }
 
     /// One budget facade over a fresh resident region. The storage stays

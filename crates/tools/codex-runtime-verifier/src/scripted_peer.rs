@@ -390,13 +390,20 @@ impl ScriptedPeer {
                 }
                 if let Some(stream) = self
                     .listener
-                    .try_accept_until(self.deadline, &interrupted)?
+                    .try_accept_until(self.deadline, &interrupted)
+                    .with_context(|| {
+                        format!(
+                            "while waiting for scripted contact {} of {REQUEST_COUNT}",
+                            number + 1
+                        )
+                    })?
                 {
                     break stream;
                 }
                 lillux::time::sleep(lillux::time::Duration::from_millis(1));
             };
-            let request = read_request(&mut stream, self.address, &self.controller_canary)?;
+            let request = read_request(&mut stream, self.address, &self.controller_canary)
+                .with_context(|| format!("scripted contact {} of {REQUEST_COUNT}", number + 1))?;
             requests.push(request);
             let body = response_sse(
                 number,
@@ -548,19 +555,36 @@ fn parse_headers(header: &[u8], address: SocketAddr, controller_canary: &str) ->
         } else {
             // Deny unknown headers instead of logging only the JSON body:
             // a custom header could otherwise carry a credential or canary
-            // unseen by the secondary request checker.
+            // unseen by the secondary request checker. The approved names are
+            // the transport headers and the identifiers and metadata Codex
+            // sends to a Responses endpoint (0.147.0: originator, session and
+            // thread ids, a client request id, and its x-codex-* feature,
+            // window and turn-metadata headers); none carries a credential.
+            let approved = [
+                "accept",
+                "accept-encoding",
+                "connection",
+                "content-type",
+                "user-agent",
+                "originator",
+                "session-id",
+                "thread-id",
+                "x-client-request-id",
+                "x-codex-beta-features",
+                "x-codex-window-id",
+                "x-codex-turn-metadata",
+            ]
+            .iter()
+            .any(|allowed| name.eq_ignore_ascii_case(allowed));
             ensure!(
-                [
-                    "accept",
-                    "accept-encoding",
-                    "connection",
-                    "content-type",
-                    "user-agent",
-                ]
-                .iter()
-                .any(|allowed| name.eq_ignore_ascii_case(allowed))
-                    && value.len() <= 1024,
-                "scripted request has an unapproved header"
+                approved,
+                "scripted request has an unapproved header {}",
+                name.to_ascii_lowercase()
+            );
+            ensure!(
+                value.len() <= 4096,
+                "scripted request header {} exceeds its bound",
+                name.to_ascii_lowercase()
             );
         }
     }
@@ -606,6 +630,17 @@ mod tests {
         let clean =
             b"POST /responses HTTP/1.1\r\nHost: 127.0.0.1:1234\r\nContent-Length: 2\r\n\r\n";
         assert_eq!(parse_headers(clean, address, canary).unwrap(), 2);
+        // The header set Codex 0.147.0 sends to a credential-free provider.
+        let codex = b"POST /responses HTTP/1.1\r\nHost: 127.0.0.1:1234\r\nContent-Length: 2\r\nx-codex-beta-features: a,b\r\nx-codex-window-id: w\r\nx-codex-turn-metadata: {\"git\":null}\r\nx-client-request-id: r\r\nsession-id: s\r\nthread-id: t\r\naccept: text/event-stream\r\ncontent-type: application/json\r\noriginator: codex_cli_rs\r\nuser-agent: codex_cli_rs/0.147.0\r\n\r\n";
+        assert_eq!(parse_headers(codex, address, canary).unwrap(), 2);
+        let refused = parse_headers(
+            b"POST /responses HTTP/1.1\r\nHost: 127.0.0.1:1234\r\nContent-Length: 2\r\nX-Other: v\r\n\r\n",
+            address,
+            canary,
+        )
+        .err()
+        .expect("unapproved");
+        assert!(format!("{refused:#}").contains("unapproved header x-other"));
         for invalid in [
             "POST /wrong HTTP/1.1\r\nHost: 127.0.0.1:1234\r\nContent-Length: 2\r\n\r\n",
             "POST /responses HTTP/1.1\r\nHost: 127.0.0.1:1234\r\nContent-Length: 2\r\nAuthorization: Bearer secret\r\n\r\n",

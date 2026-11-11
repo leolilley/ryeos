@@ -376,6 +376,7 @@ fn qualification_binding_document(
         contact_timeout_seconds: limits.contact_timeout_seconds,
         observation_timeout_seconds: limits.observation_timeout_seconds,
         cleanup_timeout_seconds: limits.cleanup_timeout_seconds,
+        native_work_steps: Some(limits.native_work_steps),
         max_workspace_bytes: limits.max_workspace_bytes,
         max_export_bytes: limits.max_export_bytes,
         max_transfer_bytes: limits.max_transfer_bytes,

@@ -356,6 +356,7 @@ fn operate() -> Result<()> {
                 operation_id: common.operation_id.clone(),
                 activation_request_digest: activation.activation_request_digest.clone(),
                 guest_owner: None,
+                contact_failure: None,
             }
         }
         LifecycleAdapterRequest::ReconcileSupervisorActivation { .. } => {
@@ -377,6 +378,7 @@ fn reconcile_activation_response(
             operation_id: common.operation_id.clone(),
             activation_request_digest: activation.activation_request_digest.clone(),
             guest_owner: None,
+            contact_failure: None,
         }),
         _ => None,
     }

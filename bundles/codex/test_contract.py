@@ -1134,6 +1134,70 @@ class CodexContractTests(unittest.TestCase):
         self.assertEqual(selectors[".tmp/**"]["class"], "rebuildable_cache")
         self.assertEqual(selectors["tmp/**"]["class"], "rebuildable_cache")
 
+    def test_every_pinned_server_notification_is_classified_by_every_profile(self) -> None:
+        # The bridge ends a session on any notification its profile neither
+        # handles nor ignores, so each notification the pinned app-server can
+        # send is classified on purpose: handled, ignored under its schema, or
+        # refused because the profile's own configuration rules it out.
+        server = json.loads(
+            (BUNDLE / "schema/app-server-0.147.0/ServerNotification.json").read_text())
+        pinned = {variant["properties"]["method"]["enum"][0] for variant in server["oneOf"]}
+        # Raw response events are experimental, sent because initialization
+        # opts into the experimental API; they are not in the stable union.
+        pinned |= {"rawResponseItem/completed", "rawResponse/completed"}
+        ruled_out = {
+            # Apps, MCP, hooks and goals are disabled; approvals are reviewed by
+            # the user, never auto-reviewed; realtime, archive, deletion, file
+            # watches, fuzzy search, client processes and Windows sandboxes
+            # are client features the bridge never requests.
+            "app/list/updated", "command/exec/outputDelta",
+            "externalAgentConfig/import/completed", "externalAgentConfig/import/progress",
+            "fs/changed", "fuzzyFileSearch/sessionCompleted", "fuzzyFileSearch/sessionUpdated",
+            "hook/completed", "hook/started",
+            "item/autoApprovalReview/completed", "item/autoApprovalReview/started",
+            "item/mcpToolCall/progress", "mcpServer/oauthLogin/completed",
+            "mcpServer/startupStatus/updated", "process/exited", "process/outputDelta",
+            "thread/archived", "thread/deleted", "thread/unarchived",
+            "thread/realtime/closed", "thread/realtime/error", "thread/realtime/itemAdded",
+            "thread/realtime/outputAudio/delta", "thread/realtime/sdp",
+            "thread/realtime/started", "thread/realtime/transcript/delta",
+            "thread/realtime/transcript/done",
+            "windows/worldWritableWarning", "windowsSandbox/setupCompleted",
+        }
+        goals_disabled = {"external-authoring"}
+        # Without the experimental API opt-in no raw response event is sent.
+        experimental_closed = {"structured-session"}
+        classified_verbatim = {
+            "thread/environment/connected", "thread/environment/disconnected",
+            "thread/compacted", "guardianWarning", "turn/moderationMetadata",
+            "model/safetyBuffering/updated", "item/commandExecution/terminalInteraction",
+            "thread/goal/updated",
+        }
+        for name in ("external-authoring", "authoring", "structured-session"):
+            with self.subTest(profile=name):
+                profile = json.loads((SOURCE / f"{name}.profile.json").read_text())
+                refused = ruled_out | ({"thread/goal/updated"} if name in goals_disabled else set())
+                if name in experimental_closed:
+                    refused |= {"rawResponseItem/completed", "rawResponse/completed"}
+                handled = {rule["method"]: rule["schema"] for rule in profile["notifications"]}
+                ignored = profile["ignored_notifications"]
+                self.assertFalse(set(handled) & set(ignored))
+                self.assertFalse((set(handled) | set(ignored)) & refused)
+                self.assertEqual(set(handled) | set(ignored) | refused, pinned)
+                # Schemas classified here are the pinned schemas verbatim; a
+                # deliberately narrowed schema has its own test.
+                for method in classified_verbatim & (set(handled) | set(ignored)):
+                    schema = handled.get(method) or ignored[method]
+                    self.assertEqual(
+                        (SOURCE / schema).read_bytes(),
+                        (BUNDLE / "schema/app-server-0.147.0/v2" / Path(schema).name).read_bytes(),
+                        schema)
+        external = json.loads((SOURCE / "external-authoring.profile.json").read_text())
+        self.assertIn("turn/moderationMetadata", external["ignored_notifications"])
+        rules = {rule["method"]: rule for rule in external["notifications"]}
+        for method in ("thread/environment/connected", "thread/environment/disconnected"):
+            self.assertTrue(rules[method]["durable"])
+
     def test_external_profile_retains_bounded_actual_notification_family(self) -> None:
         profile = json.loads((SOURCE / "external-authoring.profile.json").read_text())
         # This is an explicit projection family, not a claim that ignored

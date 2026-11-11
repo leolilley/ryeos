@@ -19328,6 +19328,15 @@ impl StateStore {
         }
     }
 
+    /// Connector rows still `prepared` or `connected`. Relay owners are
+    /// threads of the daemon that prepared them, so during start recovery
+    /// every row listed here was left open by an ended daemon generation.
+    pub(crate) fn open_external_connectors(
+        &self,
+    ) -> Result<Vec<runtime_db::external_execution::connector::ExternalConnectorRecord>> {
+        self.lock()?.runtime_db.open_external_connectors()
+    }
+
     pub(crate) fn external_connector_retired(&self, placement: &str) -> Result<bool> {
         Ok(self
             .lock()?
@@ -19337,6 +19346,30 @@ impl StateStore {
                 record.phase
                     == runtime_db::external_execution::connector::ExternalConnectorPhase::Closed
             }))
+    }
+
+    /// How the placement's one local connector stands: absent, still open, or
+    /// closed with the relay's recorded reason. `completed` means the guest's
+    /// protocol EOF was delivered to the live peer; every other reason is an
+    /// abnormal end.
+    pub fn external_connector_settlement(
+        &self,
+        placement: &str,
+    ) -> Result<ExternalConnectorSettlement> {
+        Ok(
+            match self.lock()?.runtime_db.external_connector(placement)? {
+                None => ExternalConnectorSettlement::Absent,
+                Some(record)
+                    if record.phase
+                        == runtime_db::external_execution::connector::ExternalConnectorPhase::Closed =>
+                {
+                    ExternalConnectorSettlement::Closed {
+                        reason: record.close_reason,
+                    }
+                }
+                Some(_) => ExternalConnectorSettlement::Open,
+            },
+        )
     }
 
     /// Local qualification Worker rows that a previous daemon generation left
@@ -19355,10 +19388,159 @@ impl StateStore {
             .collect())
     }
 
+    /// Settle a Q directory borrow no Worker ever consumed; the caller has
+    /// proved the Worker's scope slot empty.
+    pub(crate) fn settle_unconsumed_directory_borrow(
+        &self,
+        placement: &str,
+    ) -> Result<runtime_db::external_execution::QualificationLocalStartRecord> {
+        self.lock()?
+            .runtime_db
+            .settle_unconsumed_directory_borrow(placement)
+    }
+
     pub(crate) fn prior_generation_qualification_credential_custody(&self) -> Result<Vec<String>> {
         self.lock()?
             .runtime_db
             .unreleased_qualification_credential_custody(runtime_db::daemon_generation_id())
+    }
+
+    /// Q local starts a previous daemon generation recorded.
+    pub(crate) fn prior_generation_qualification_local_starts(
+        &self,
+    ) -> Result<Vec<runtime_db::external_execution::QualificationLocalStartRecord>> {
+        self.lock()?
+            .runtime_db
+            .prior_generation_qualification_local_starts(runtime_db::daemon_generation_id())
+    }
+
+    // Prior-generation Q settlement. The rows below were created by a daemon
+    // generation that is dead, so no process holds their descriptors; the
+    // `qualification_cold_settlement` pass removes their directories by
+    // recorded coordinate under the node-private parents and drives the
+    // ordinary transitions without process-local custody. Every wrapper
+    // refuses a row of this generation: its original custody owns it.
+
+    fn require_prior_generation(daemon_generation_id: &str) -> Result<()> {
+        anyhow::ensure!(
+            daemon_generation_id != runtime_db::daemon_generation_id(),
+            "Q row belongs to this daemon generation; its original custody drives its cleanup"
+        );
+        Ok(())
+    }
+
+    /// The node-private parents of every Q directory, for the
+    /// prior-generation pass and nothing else.
+    pub(crate) fn qualification_custody_parents(
+        &self,
+    ) -> Result<runtime_db::qualification_cold_custody::QualificationCustodyParents> {
+        runtime_db::qualification_cold_custody::QualificationCustodyParents::open(
+            self.state_authority.runtime_directory(),
+        )
+    }
+
+    pub(crate) fn prior_generation_open_qualification_guest_scratch(
+        &self,
+    ) -> Result<Vec<runtime_db::external_execution::QualificationGuestScratchRecord>> {
+        self.lock()?
+            .runtime_db
+            .prior_generation_open_qualification_guest_scratch(runtime_db::daemon_generation_id())
+    }
+
+    pub(crate) fn begin_qualification_guest_scratch_cleanup_prior_generation(
+        &self,
+        expected: &runtime_db::external_execution::QualificationGuestScratchRecord,
+    ) -> Result<runtime_db::external_execution::QualificationGuestScratchRecord> {
+        Self::require_prior_generation(&expected.daemon_generation_id)?;
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .begin_qualification_guest_scratch_cleanup_with(
+                expected,
+                runtime_db::external_execution::ScratchCleanupOwner::PriorGeneration,
+            )
+    }
+
+    pub(crate) fn record_qualification_guest_scratch_removed_prior_generation(
+        &self,
+        expected: &runtime_db::external_execution::QualificationGuestScratchRecord,
+    ) -> Result<runtime_db::external_execution::QualificationGuestScratchRecord> {
+        Self::require_prior_generation(&expected.daemon_generation_id)?;
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .record_qualification_guest_scratch_removed_with(
+                expected,
+                runtime_db::external_execution::ScratchCleanupOwner::PriorGeneration,
+            )
+    }
+
+    pub(crate) fn close_qualification_guest_scratch_prior_generation(
+        &self,
+        expected: &runtime_db::external_execution::QualificationGuestScratchRecord,
+    ) -> Result<runtime_db::external_execution::QualificationGuestScratchRecord> {
+        Self::require_prior_generation(&expected.daemon_generation_id)?;
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .close_qualification_guest_scratch_with(
+                expected,
+                runtime_db::external_execution::ScratchCleanupOwner::PriorGeneration,
+            )
+    }
+
+    pub(crate) fn begin_qualification_local_cleanup_prior_generation(
+        &self,
+        expected: &runtime_db::external_execution::QualificationLocalStartRecord,
+    ) -> Result<runtime_db::external_execution::QualificationLocalStartRecord> {
+        Self::require_prior_generation(&expected.daemon_generation_id)?;
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .begin_qualification_local_cleanup(expected)
+    }
+
+    pub(crate) fn authorize_qualification_workspace_removal_prior_generation(
+        &self,
+        expected: &runtime_db::external_execution::QualificationLocalStartRecord,
+    ) -> Result<()> {
+        Self::require_prior_generation(&expected.daemon_generation_id)?;
+        self.lock()?
+            .runtime_db
+            .authorize_qualification_workspace_removal(expected)
+    }
+
+    pub(crate) fn record_qualification_workspace_removed_prior_generation(
+        &self,
+        expected: &runtime_db::external_execution::QualificationLocalStartRecord,
+    ) -> Result<runtime_db::external_execution::QualificationLocalStartRecord> {
+        Self::require_prior_generation(&expected.daemon_generation_id)?;
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .record_qualification_workspace_removed(expected)
+    }
+
+    pub(crate) fn record_qualification_state_root_removed_prior_generation(
+        &self,
+        expected: &runtime_db::external_execution::QualificationLocalStartRecord,
+    ) -> Result<runtime_db::external_execution::QualificationLocalStartRecord> {
+        Self::require_prior_generation(&expected.daemon_generation_id)?;
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .record_qualification_state_root_removed(expected)
+    }
+
+    pub(crate) fn close_qualification_local_start_prior_generation(
+        &self,
+        expected: &runtime_db::external_execution::QualificationLocalStartRecord,
+    ) -> Result<runtime_db::external_execution::QualificationLocalStartRecord> {
+        Self::require_prior_generation(&expected.daemon_generation_id)?;
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .close_qualification_local_start(expected)
     }
 
     pub(crate) fn qualification_worker_process(
@@ -19384,6 +19566,16 @@ impl StateStore {
         self.lock()?
             .runtime_db
             .qualification_guest_scratch(placement)
+    }
+
+    pub(crate) fn settled_unclosed_qualification_guest_scratch_placements(
+        &self,
+    ) -> Result<Vec<String>> {
+        self.lock()?
+            .runtime_db
+            .settled_unclosed_qualification_guest_scratch_placements(
+                runtime_db::daemon_generation_id(),
+            )
     }
 
     pub(crate) fn completed_qualification_guest_scratch_transport(
@@ -20620,6 +20812,19 @@ impl StateStore {
         self.lock()?
             .runtime_db
             .author_external_owner_revocation(placement, signing_key)
+    }
+
+    /// The owner's one protocol input closure for a structured-session
+    /// channel, authored once and returned on every later call.
+    pub(crate) fn ensure_external_protocol_input_closed(
+        &self,
+        placement: &str,
+        signing_key: &lillux::crypto::SigningKey,
+    ) -> Result<ryeos_state::external_execution::AuthenticatedExecutionFrame> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .ensure_external_protocol_input_closed(placement, signing_key)
     }
 
     pub(crate) fn ensure_external_candidate_quiesce(
@@ -36008,3 +36213,12 @@ mod qualification_transcript_publication_tests;
 #[cfg(test)]
 #[path = "state_store/seat_cut_tests.rs"]
 mod seat_cut_tests;
+
+/// The durable standing of a placement's local connector, read by the Q
+/// runner between the Worker's turn and its retirement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExternalConnectorSettlement {
+    Absent,
+    Open,
+    Closed { reason: Option<String> },
+}

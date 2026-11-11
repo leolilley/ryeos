@@ -347,6 +347,10 @@ pub struct NativeExternalCandidate {
     terminal: bool,
     input: Option<std::fs::File>,
     protocol: CandidateProtocolInput,
+    /// The owner ended its protocol input: the candidate's stdin is closed and
+    /// later protocol frames are refused. This is not terminal; the candidate
+    /// keeps running until its own exit or a later owner command.
+    protocol_input_closed: bool,
     direct_input: Option<DirectCommandInput>,
     /// Lillux's once-reaped observation remains local to the native owner. A
     /// cleanup proof alone is never promoted into an actual target exit.
@@ -967,6 +971,7 @@ impl NativeExternalCandidate {
                 terminal: false,
                 input: Some(pipes.stdin),
                 protocol: CandidateProtocolInput::default(),
+                protocol_input_closed: false,
                 direct_input,
                 native_termination: None,
                 target_exit: None,
@@ -1044,6 +1049,10 @@ impl NativeExternalCandidate {
             "external direct command has no structured-session input authority"
         );
         ensure!(
+            !self.protocol_input_closed,
+            "candidate protocol input was closed by the owner"
+        );
+        ensure!(
             self.released
                 && !self.terminal
                 && self.application_fence.is_clear()
@@ -1055,6 +1064,46 @@ impl NativeExternalCandidate {
             frame.digest(),
             frame.protocol_bytes()?,
         )
+    }
+
+    /// Close the candidate's protocol stdin for good. Admitted only while the
+    /// candidate runs with no partially applied protocol frame, so the close
+    /// lands after every applied byte. The candidate is not terminal: it may
+    /// keep running, and its stdout EOF remains a separate observation. The
+    /// fence makes this one-shot like every other applied owner frame.
+    pub fn close_protocol_input(&mut self, frame: &AuthenticatedExecutionFrame) -> Result<()> {
+        self.require_owner(frame)?;
+        ensure!(
+            matches!(
+                frame.frame().payload,
+                ExecutionChannelPayload::ProtocolInputClosed
+            ),
+            "not a protocol input closure"
+        );
+        ensure!(
+            matches!(
+                self.binding.execution_mode,
+                ExternalExecutionMode::StructuredSession {}
+                    | ExternalExecutionMode::QualificationStructuredSession {}
+            ),
+            "external direct command has no structured-session input authority"
+        );
+        ensure!(
+            !self.protocol_input_closed,
+            "candidate protocol input is already closed"
+        );
+        ensure!(
+            self.released
+                && !self.terminal
+                && self.protocol.pending.is_none()
+                && self.application_fence.is_clear()
+                && !self.execution_expired(),
+            "candidate is not executable, has partial protocol input or awaits durable finish"
+        );
+        self.protocol_input_closed = true;
+        // Dropping the sole parent-side writer is the candidate's stdin EOF.
+        self.input = None;
+        self.application_fence.begin(frame.digest())
     }
 
     /// At most one nonblocking write. Partial progress remains the same claimed

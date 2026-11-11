@@ -15,6 +15,54 @@ use std::fmt;
 use crate::routing_observation::{MAX_EVENT_BYTES, MAX_EVENTS, MAX_TOTAL_BYTES};
 
 #[must_use = "retain the app-server owner until stop proves exact-child and reader settlement"]
+/// How much of the app-server's stderr the observation keeps for the account
+/// a failed child gives of itself; the enclosing refusal is bounded further.
+const APP_SERVER_STDERR_TAIL_BYTES: usize = 700;
+
+/// The refusal for a terminal turn that is not the started turn completed:
+/// which identity differed, and the status and error the turn reported, each
+/// cut to a printable bound. Codex's own account of its turn, kept so a
+/// failed scenario names its failure; never provider bytes.
+pub(crate) fn terminal_turn_refusal(
+    notification: &serde_json::Value,
+    thread_id: &str,
+    turn_id: &str,
+) -> anyhow::Error {
+    fn bounded(value: &serde_json::Value) -> String {
+        let text = match value {
+            serde_json::Value::Null => "none".to_owned(),
+            serde_json::Value::String(text) => text.clone(),
+            other => other.to_string(),
+        };
+        text.chars()
+            .map(|c| {
+                if c == ' ' || c.is_ascii_graphic() {
+                    c
+                } else {
+                    '?'
+                }
+            })
+            .take(160)
+            .collect()
+    }
+    let params = &notification["params"];
+    anyhow::anyhow!(
+        "scripted terminal turn differs from started identity or status: thread {}, turn {}, status {}, error {}",
+        if params["threadId"] == thread_id {
+            "same"
+        } else {
+            "other"
+        },
+        if params["turn"]["id"] == turn_id {
+            "same"
+        } else {
+            "other"
+        },
+        bounded(&params["turn"]["status"]),
+        bounded(&params["turn"]["error"]),
+    )
+}
+
 pub struct AppServerObservation {
     child: SubordinateProcess,
     diagnostics: SubordinateDiagnosticDrain,
@@ -339,7 +387,7 @@ impl AppServerObservation {
             let diagnostics = child
                 .take_error()
                 .map_err(anyhow::Error::msg)?
-                .start_discarding()?;
+                .start_retaining_tail(APP_SERVER_STDERR_TAIL_BYTES)?;
             Ok((input, output, diagnostics))
         })();
         match streams {
@@ -670,12 +718,16 @@ impl<T: AppServerTransport> AppServerProtocol<T> {
                 let notification = &self.notifications[checked];
                 checked += 1;
                 if notification["method"] == "turn/completed" {
-                    ensure!(
-                        notification["params"]["threadId"] == thread.thread_id
-                            && notification["params"]["turn"]["id"] == turn_id
-                            && notification["params"]["turn"]["status"] == "completed",
-                        "scripted terminal turn differs from started identity or status"
-                    );
+                    if !(notification["params"]["threadId"] == thread.thread_id
+                        && notification["params"]["turn"]["id"] == turn_id
+                        && notification["params"]["turn"]["status"] == "completed")
+                    {
+                        return Err(terminal_turn_refusal(
+                            notification,
+                            &thread.thread_id,
+                            turn_id,
+                        ));
+                    }
                     self.scripted_phase = ScriptedPhase::TurnCompleted;
                     return Ok(());
                 }
@@ -702,6 +754,23 @@ impl AppServerObservation {
     /// outcome remains explicit and cannot be used as successful turn proof.
     /// Failure retains `self` so the caller can retry or invoke its enclosing
     /// scope owner; it does not authorize dropping process authority.
+    /// The retained tail of the child's stderr, printable and on one line.
+    /// Diagnostics only: never evidence, never a provider body.
+    pub fn diagnostic_tail(&self) -> String {
+        String::from_utf8_lossy(&self.diagnostics.retained_tail())
+            .chars()
+            .map(|c| {
+                if c == '\n' {
+                    '|'
+                } else if c == ' ' || c.is_ascii_graphic() {
+                    c
+                } else {
+                    '?'
+                }
+            })
+            .collect()
+    }
+
     pub fn stop_until(
         &mut self,
         graceful_deadline: MonotonicDeadline,

@@ -218,6 +218,11 @@ impl ExternalQualificationLocalWorker {
                 .cap_execution_deadline(lillux::time::MonotonicDeadline::after(
                     lillux::time::Duration::from_millis(u64::try_from(remaining_ms)?),
                 ));
+        // The pool notices an ended Worker on its own one-second tick, so the
+        // attachment check that follows it needs no finer cadence than that.
+        const ATTACHMENT_CHECK_INTERVAL: lillux::time::Duration =
+            lillux::time::Duration::from_secs(1);
+        let mut attachment_checked = lillux::time::MonotonicTimer::start();
         loop {
             ensure!(
                 !deadline.has_elapsed(),
@@ -243,11 +248,80 @@ impl ExternalQualificationLocalWorker {
             ) {
                 return Ok(outcome);
             }
+            // The turn is still pending, so a Worker that has ended can never
+            // finish it: fail now rather than at the unrelated deadline.
+            if attachment_checked.elapsed() >= ATTACHMENT_CHECK_INTERVAL {
+                ryeos_app::external_qualification_local::ensure_qualification_worker_attached(
+                    state,
+                    self.ready.placement(),
+                )?;
+                attachment_checked = lillux::time::MonotonicTimer::start();
+            }
             lillux::time::sleep(
                 deadline
                     .remaining()
                     .min(lillux::time::Duration::from_millis(20)),
             );
+        }
+    }
+
+    /// After the turn, end the Worker's session protocol from the owner side
+    /// and wait for the connector to retire normally. The owner's input
+    /// closure makes the guest close the candidate's stdin; a candidate that
+    /// ends on EOF exits, the guest signs its stdout EOF and the relay
+    /// delivers it to the live connector peer, which is the only way the
+    /// connector closes `completed`. Retiring the Worker first kills that peer
+    /// and records a disconnect, which native completion must refuse.
+    pub(crate) fn close_protocol_input_and_await_connector_completion(
+        &self,
+        state: &ryeos_app::state::AppState,
+    ) -> Result<()> {
+        use ryeos_app::state_store::ExternalConnectorSettlement;
+        ryeos_app::external_placement::request_external_protocol_input_close(
+            state,
+            self.ready.placement(),
+        )?;
+        let now = lillux::time::timestamp_millis();
+        let remaining_ms = self
+            .ready
+            .binding()
+            .execution_deadline_ms
+            .checked_sub(now)
+            .filter(|remaining| *remaining > 0)
+            .context("Q connector retirement wait passed its retained channel deadline")?;
+        let deadline =
+            self.ready
+                .root()
+                .cap_execution_deadline(lillux::time::MonotonicDeadline::after(
+                    lillux::time::Duration::from_millis(u64::try_from(remaining_ms)?),
+                ));
+        loop {
+            ensure!(
+                !deadline.has_elapsed(),
+                "Q connector did not retire before the channel deadline after the owner closed its input"
+            );
+            self.ready.ensure_relay_running()?;
+            match state
+                .state_store
+                .external_connector_settlement(self.ready.placement())?
+            {
+                ExternalConnectorSettlement::Closed { reason } => {
+                    ensure!(
+                        reason.as_deref() == Some("completed"),
+                        "Q connector closed `{}` before the guest protocol EOF",
+                        reason.as_deref().unwrap_or("unknown")
+                    );
+                    return Ok(());
+                }
+                ExternalConnectorSettlement::Absent => {
+                    anyhow::bail!("Q connector vanished after the Worker turn")
+                }
+                ExternalConnectorSettlement::Open => lillux::time::sleep(
+                    deadline
+                        .remaining()
+                        .min(lillux::time::Duration::from_millis(50)),
+                ),
+            }
         }
     }
 
@@ -361,6 +435,7 @@ impl ExternalQualificationLocalWorker {
         let turn = (|| -> Result<()> {
             self.execute_one_signed_request(state, coordinate, selected)?;
             self.wait_for_signed_turn_completion(state, selected)?;
+            self.close_protocol_input_and_await_connector_completion(state)?;
             Ok(())
         })();
         // A failed send no longer needs guest traffic. Stop all relay
@@ -371,7 +446,11 @@ impl ExternalQualificationLocalWorker {
             Err(error) => match self.ready.stop_relay() {
                 Ok(()) => Err(error),
                 Err(relay_error) => {
-                    Err(error.context(format!("Q relay shutdown also failed: {relay_error:#}")))
+                    Err(super::external_qualification_start::with_secondary_failure(
+                        error,
+                        "Q relay shutdown also failed",
+                        &relay_error,
+                    ))
                 }
             },
             Ok(()) => Ok(()),
@@ -381,9 +460,13 @@ impl ExternalQualificationLocalWorker {
             (Ok(()), Ok(())) => Ok(()),
             (Err(turn_error), Ok(())) => Err(turn_error),
             (Ok(()), Err(retirement_error)) => Err(retirement_error),
-            (Err(turn_error), Err(retirement_error)) => Err(turn_error.context(format!(
-                "Q Worker retirement also remained unproved: {retirement_error:#}"
-            ))),
+            (Err(turn_error), Err(retirement_error)) => {
+                Err(super::external_qualification_start::with_secondary_failure(
+                    turn_error,
+                    "Q Worker retirement also remained unproved",
+                    &retirement_error,
+                ))
+            }
         }
     }
 }
@@ -408,53 +491,75 @@ pub(crate) fn run_external_qualification_to_normal_terminal(
     let binding_digest = worker.ready().binding().digest()?;
     worker.run_signed_turn_and_retire(state, coordinate, &selected)?;
 
-    // The signed frame is durably queued for the existing channel transport;
-    // its return is not evidence that the guest processed the command.
-    ryeos_app::external_placement::request_external_qualification_native_completion(
-        state, &placement,
-    )?;
-    let native = loop {
-        if let Some(native) =
-            ryeos_app::external_placement::apply_external_qualification_native_settlement(
-                state, &placement,
-            )?
-        {
-            break native;
-        }
-        worker.ready().ensure_relay_running()?;
-        // Completion must be authored before its execution deadline. The
-        // signed native death observation may arrive later, during the
-        // binding's post-execution observation window.
-        lillux::time::sleep(
-            remaining_qualification_native_observation_window(worker.ready().binding())?
-                .min(lillux::time::Duration::from_millis(50)),
+    let settled = (|| -> Result<()> {
+        // The signed frame is durably queued for the existing channel transport;
+        // its return is not evidence that the guest processed the command.
+        ryeos_app::external_placement::request_external_qualification_native_completion(
+            state, &placement,
+        )?;
+        let native = loop {
+            if let Some(native) =
+                ryeos_app::external_placement::apply_external_qualification_native_settlement(
+                    state, &placement,
+                )?
+            {
+                break native;
+            }
+            worker.ready().ensure_relay_running()?;
+            // Completion must be authored before its execution deadline. The
+            // signed native death observation may arrive later, during the
+            // binding's post-execution observation window.
+            lillux::time::sleep(
+                remaining_qualification_native_observation_window(worker.ready().binding())?
+                    .min(lillux::time::Duration::from_millis(50)),
+            );
+        };
+        ensure!(
+            native.placement_thread_id == placement && native.binding_digest == binding_digest,
+            "Q native settlement changed its exact channel"
         );
-    };
-    ensure!(
-        native.placement_thread_id == placement && native.binding_digest == binding_digest,
-        "Q native settlement changed its exact channel"
-    );
 
-    // Publish once only after the original native frame is Applied and its
-    // optional capture has verified controller custody. This reuses historical
-    // evidence ownership; it cannot repeat the turn or mint contact permission.
-    worker.retain_terminal_transcript(state, coordinate)?;
+        // Publish once only after the original native frame is Applied and its
+        // optional capture has verified controller custody. This reuses historical
+        // evidence ownership; it cannot repeat the turn or mint contact permission.
+        worker.retain_terminal_transcript(state, coordinate)?;
+        Ok(())
+    })();
 
     // Join the last bounded file contact before physical local cleanup or
     // provider termination can acquire the same placement contact gate.
-    worker.ready.stop_relay()?;
+    let relay = worker.ready.stop_relay();
 
     // Private root removal is local cleanup, independent of the expired
-    // guest protocol deadline. It retains original descriptors and has its
-    // own exact directory removal authority.
+    // guest protocol deadline and of the native outcome: the Worker is
+    // terminal, its connector closed and its credential released, so the
+    // roots are proven-safe to retire now. Leaving them open on a native
+    // refusal would keep every periodic cleanup pass refusing the scratch
+    // until the next daemon start. The removal retains original descriptors
+    // and has its own exact directory removal authority.
     let local = ryeos_app::external_qualification_local::cleanup_qualification_local_worker(
         state, &placement,
-    )?;
-    ensure!(
-        local.phase
-            == ryeos_app::runtime_db::external_execution::QualificationLocalStartPhase::Closed,
-        "Q original local private roots remain unclosed"
-    );
+    )
+    .and_then(|local| {
+        ensure!(
+            local.phase
+                == ryeos_app::runtime_db::external_execution::QualificationLocalStartPhase::Closed,
+            "Q original local private roots remain unclosed"
+        );
+        Ok(())
+    });
+    match (settled.and(relay), local) {
+        (Ok(()), Ok(())) => {}
+        (Err(error), Ok(())) => return Err(error),
+        (Ok(()), Err(local)) => return Err(local),
+        (Err(error), Err(local)) => {
+            return Err(super::external_qualification_start::with_secondary_failure(
+                error,
+                "Q local private roots also remain retained",
+                &local,
+            ));
+        }
+    }
 
     // The first provider call commits its intent before contact. A Pending
     // response remains recoverable under that exact intent after this owner

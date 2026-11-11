@@ -10,7 +10,7 @@
 //! bytes to the durable external-execution channel.
 
 use lillux::time::Duration;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -34,7 +34,10 @@ use crate::external_placement::{
     ExternalProtocolOutput, InstalledExternalCandidateConnector, author_external_protocol_input,
     claim_external_protocol_output,
 };
-use crate::runtime_db::external_execution::connector::ExternalConnectorPreparation;
+use crate::process::IdentityLiveness;
+use crate::runtime_db::external_execution::connector::{
+    ExternalConnectorPhase, ExternalConnectorPreparation,
+};
 use crate::state::AppState;
 use crate::temp_dir_guard::TempDirGuard;
 use crate::vault::external_connector::{
@@ -354,6 +357,196 @@ fn create_listener() -> Result<(
 
 /// Prepare the one local connector only after the remote occurrence has
 /// authenticated, reached Ready, and received its exact Release.
+/// Close every connector row an ended daemon generation left open. A relay
+/// owner is a thread of the daemon that prepared the row, so after a restart
+/// no open row has an owner. The old owner writes the closure itself unless
+/// its daemon could no longer write service SQL (a native-capacity latch);
+/// then the row stays `connected`, and because an allocation cannot settle
+/// while a connector is open, every cleanup pass for that placement is
+/// refused and its Q credential custody stays held. Each row is judged by
+/// [`dispose_open_connector`]; a retained row is reported. Runs after the
+/// dead generation's Worker groups were settled, which is what ends the
+/// peers. Returns how many rows were closed.
+pub fn close_connectors_left_by_prior_generations(state: &AppState) -> Result<usize> {
+    let mut closed = 0usize;
+    for record in state.state_store.open_external_connectors()? {
+        let placement = record.placement_thread_id.clone();
+        let liveness = record
+            .peer_process_identity
+            .as_ref()
+            .map(crate::process::exact_process_liveness);
+        let reason = match dispose_open_connector(record.phase, liveness) {
+            OpenConnectorDisposition::Close(reason) => reason,
+            OpenConnectorDisposition::Retain(why) => {
+                tracing::error!(
+                    placement = %placement,
+                    "external connector left open by a previous daemon stays open: {why}"
+                );
+                continue;
+            }
+        };
+        state
+            .state_store
+            .close_external_connector(&placement, reason)
+            .with_context(|| format!("close external connector left open for {placement}"))?;
+        tracing::warn!(
+            placement = %placement,
+            reason,
+            "closed external connector left open by a previous daemon"
+        );
+        closed = closed.saturating_add(1);
+    }
+    Ok(closed)
+}
+
+/// Release the configuration mount targets that connectors of ended daemon
+/// generations left reserved. A Q connector reserves its target inside the
+/// credential home, which every Q start on that credential shares; the live
+/// relay owner releases it on retirement, and a daemon that died holding the
+/// connector never does, so the next Q start on the credential is refused
+/// with the destination occupied. For every Q local start of a previous
+/// generation whose connector is no longer open, the target named by its
+/// binding is released when it still has a reservation's exact shape (an
+/// empty, owner-read-only regular file); anything else at that name is left
+/// alone and reported. Returns how many targets were released.
+pub fn release_mount_targets_left_by_prior_generations(state: &AppState) -> Result<usize> {
+    let mut released = 0usize;
+    for start in state
+        .state_store
+        .prior_generation_qualification_local_starts()?
+    {
+        let placement = start.placement_thread_id.clone();
+        let Some(custody) = start.credential_custody.as_ref() else {
+            continue;
+        };
+        if !state.state_store.external_connector_retired(&placement)? {
+            // Its peer is still alive; the connector still owns the target.
+            continue;
+        }
+        let Some(allocation) = state.state_store.external_allocation(&placement)? else {
+            continue;
+        };
+        let Some(binding) = state
+            .state_store
+            .retained_external_binding(&allocation.reservation.binding_hash)?
+        else {
+            continue;
+        };
+        let contract = binding.backend_contract();
+        let destination = match contract.workload.session_artifacts() {
+            Ok(artifacts) => artifacts.provider_configuration_destination.to_owned(),
+            Err(_) => continue,
+        };
+        let home_path = crate::private_artifact_home::home_path(
+            &state.config.runtime_state_dir(),
+            &custody.home_id,
+        )?;
+        let Some(home) = lillux::PinnedDirectory::open(&home_path)? else {
+            continue;
+        };
+        home.require_owner_private_directory()?;
+        match release_stale_mount_target(&home, OsStr::new(&destination))? {
+            MountTargetRelease::Released => {
+                tracing::warn!(
+                    placement = %placement,
+                    destination = %destination,
+                    "released a connector mount target a previous daemon left reserved"
+                );
+                released = released.saturating_add(1);
+            }
+            MountTargetRelease::Absent => {}
+            MountTargetRelease::Retained(why) => tracing::error!(
+                placement = %placement,
+                destination = %destination,
+                "a connector mount target of a previous daemon stays: {why}"
+            ),
+        }
+    }
+    Ok(released)
+}
+
+/// What became of one reserved mount-target name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MountTargetRelease {
+    /// The reservation placeholder was there and is removed.
+    Released,
+    /// Nothing is at that name.
+    Absent,
+    /// Something other than a reservation placeholder is at that name; it
+    /// is not touched, and the text says why.
+    Retained(&'static str),
+}
+
+/// Remove the reservation placeholder at `destination` in `home` if, and
+/// only if, it has exactly the shape a reservation creates: a regular file,
+/// empty, mode 0400. A configuration file, a link or a directory at that
+/// name is never removed.
+pub(crate) fn release_stale_mount_target(
+    home: &lillux::PinnedDirectory,
+    destination: &OsStr,
+) -> Result<MountTargetRelease> {
+    let Some(entry) = home.entry_no_follow(destination)? else {
+        return Ok(MountTargetRelease::Absent);
+    };
+    if entry.entry_type != lillux::PinnedEntryType::Regular {
+        return Ok(MountTargetRelease::Retained("it is not a regular file"));
+    }
+    let Some(file) = home.open_pinned_regular(destination, false)? else {
+        return Ok(MountTargetRelease::Absent);
+    };
+    if file.observation()?.size() != 0 {
+        return Ok(MountTargetRelease::Retained("it holds content"));
+    }
+    if entry.mode & 0o777 != 0o400 {
+        return Ok(MountTargetRelease::Retained(
+            "its mode is not a reservation's owner-read-only",
+        ));
+    }
+    home.remove_pinned_regular_if_same(&file)?;
+    Ok(MountTargetRelease::Released)
+}
+
+/// What start recovery does with one connector row it found open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OpenConnectorDisposition {
+    /// Close it with this reason.
+    Close(&'static str),
+    /// Leave it open; the text says why.
+    Retain(&'static str),
+}
+
+/// Judge one open connector row from its phase and, for a connected row,
+/// the liveness of its exact peer. A `prepared` row never had a peer and is
+/// abandoned. A `connected` row is closed as `peer_absent` once its peer is
+/// proved dead or stale; a peer still alive, one this host cannot prove, or
+/// a connected row with no peer identity keeps the row, exactly as an
+/// unproved Worker group keeps its row. A closed row is not open.
+pub(crate) fn dispose_open_connector(
+    phase: ExternalConnectorPhase,
+    peer_liveness: Option<IdentityLiveness>,
+) -> OpenConnectorDisposition {
+    match (phase, peer_liveness) {
+        (ExternalConnectorPhase::Prepared, _) => {
+            OpenConnectorDisposition::Close("startup_abandoned")
+        }
+        (ExternalConnectorPhase::Connected, Some(IdentityLiveness::DeadOrStale)) => {
+            OpenConnectorDisposition::Close("peer_absent")
+        }
+        (ExternalConnectorPhase::Connected, Some(IdentityLiveness::Alive)) => {
+            OpenConnectorDisposition::Retain("its peer process is still alive")
+        }
+        (ExternalConnectorPhase::Connected, Some(IdentityLiveness::Unavailable)) => {
+            OpenConnectorDisposition::Retain("its peer liveness is unproved on this host")
+        }
+        (ExternalConnectorPhase::Connected, None) => {
+            OpenConnectorDisposition::Retain("its peer identity is absent")
+        }
+        (ExternalConnectorPhase::Closed, _) => {
+            OpenConnectorDisposition::Retain("it is already closed")
+        }
+    }
+}
+
 pub fn prepare_external_candidate_connector(
     state: &AppState,
     placement: &str,
@@ -711,11 +904,13 @@ fn run_connector_owner(
         );
     }
     // Protocol and decoder errors can contain peer-controlled/private bytes.
-    // Publish only the closed category and the authoritative occurrence.
-    if error.is_some() {
+    // Publish only the closed category and the authoritative occurrence; a
+    // disconnect also names its I/O kind, a closed vocabulary of the kernel's.
+    if let Some(error) = &error {
         tracing::warn!(
             placement = %placement,
             reason,
+            disconnect_kind = ?disconnect_kind(error),
             "external connector relay terminated"
         );
     }
@@ -1049,6 +1244,20 @@ fn relay_connector_input(
             .checked_add(1)
             .context("external connector input sequence overflow")?;
         let Some(bytes) = frame.protocol_bytes()? else {
+            // The peer's stdin ended. Carry that to the guest so the
+            // candidate's stdin closes too; the output relay keeps running
+            // until the guest's own EOF, which is the connector's normal end.
+            if let Err(error) =
+                crate::external_placement::request_external_protocol_input_close(state, placement)
+            {
+                let _ = write_shared_frame(
+                    writer,
+                    &ExternalConnectorServerFrame::Fault {
+                        code: ExternalConnectorFault::InputUncertain,
+                    },
+                );
+                return Err(error).context("retain external connector input closure");
+            }
             return Ok(());
         };
         let remote = match author_external_protocol_input(state, placement, &bytes) {
@@ -1094,19 +1303,25 @@ fn write_server_frame(
     )
 }
 
-fn is_disconnect(error: &anyhow::Error) -> bool {
+/// The I/O kind of the first disconnect-class cause, when there is one.
+fn disconnect_kind(error: &anyhow::Error) -> Option<std::io::ErrorKind> {
     error
         .chain()
         .filter_map(|cause| cause.downcast_ref::<std::io::Error>())
-        .any(|error| {
+        .map(std::io::Error::kind)
+        .find(|kind| {
             matches!(
-                error.kind(),
+                kind,
                 std::io::ErrorKind::BrokenPipe
                     | std::io::ErrorKind::ConnectionAborted
                     | std::io::ErrorKind::ConnectionReset
                     | std::io::ErrorKind::UnexpectedEof
             )
         })
+}
+
+fn is_disconnect(error: &anyhow::Error) -> bool {
+    disconnect_kind(error).is_some()
 }
 
 #[cfg(test)]
@@ -1395,6 +1610,83 @@ mod tests {
         .unwrap();
         let error = run_output_and_settle_input(&server, input, || Ok(())).unwrap_err();
         assert!(error.to_string().contains("input owner panicked"));
+    }
+
+    #[test]
+    fn a_stale_mount_target_is_released_only_in_its_reservation_shape() {
+        let root = tempfile::tempdir().unwrap();
+        let home = lillux::PinnedDirectory::open(root.path()).unwrap().unwrap();
+        home.tighten_owner_private_directory().unwrap();
+        let destination = OsStr::new("environments.toml");
+        assert_eq!(
+            release_stale_mount_target(&home, destination).unwrap(),
+            MountTargetRelease::Absent
+        );
+        // A reservation whose owner died without closing it.
+        let reservation = home.reserve_empty_mount_target(destination).unwrap();
+        std::mem::forget(reservation);
+        assert!(root.path().join("environments.toml").exists());
+        assert_eq!(
+            release_stale_mount_target(&home, destination).unwrap(),
+            MountTargetRelease::Released
+        );
+        assert!(!root.path().join("environments.toml").exists());
+        assert_eq!(
+            release_stale_mount_target(&home, destination).unwrap(),
+            MountTargetRelease::Absent
+        );
+        // A real configuration file at that name is never touched.
+        std::fs::write(root.path().join("environments.toml"), b"default = \"x\"\n").unwrap();
+        assert!(matches!(
+            release_stale_mount_target(&home, destination).unwrap(),
+            MountTargetRelease::Retained(_)
+        ));
+        assert!(root.path().join("environments.toml").exists());
+        // An empty file with a writable mode is not a reservation either.
+        std::fs::remove_file(root.path().join("environments.toml")).unwrap();
+        std::fs::write(root.path().join("environments.toml"), b"").unwrap();
+        assert!(matches!(
+            release_stale_mount_target(&home, destination).unwrap(),
+            MountTargetRelease::Retained(_)
+        ));
+        // A directory at that name is not touched.
+        std::fs::remove_file(root.path().join("environments.toml")).unwrap();
+        std::fs::create_dir(root.path().join("environments.toml")).unwrap();
+        assert!(matches!(
+            release_stale_mount_target(&home, destination).unwrap(),
+            MountTargetRelease::Retained(_)
+        ));
+    }
+
+    #[test]
+    fn an_open_connector_closes_only_when_its_peer_is_proved_gone() {
+        use ExternalConnectorPhase::{Closed, Connected, Prepared};
+        use OpenConnectorDisposition::{Close, Retain};
+        assert_eq!(
+            dispose_open_connector(Prepared, None),
+            Close("startup_abandoned")
+        );
+        assert_eq!(
+            dispose_open_connector(Prepared, Some(IdentityLiveness::Alive)),
+            Close("startup_abandoned")
+        );
+        assert_eq!(
+            dispose_open_connector(Connected, Some(IdentityLiveness::DeadOrStale)),
+            Close("peer_absent")
+        );
+        assert!(matches!(
+            dispose_open_connector(Connected, Some(IdentityLiveness::Alive)),
+            Retain(_)
+        ));
+        assert!(matches!(
+            dispose_open_connector(Connected, Some(IdentityLiveness::Unavailable)),
+            Retain(_)
+        ));
+        assert!(matches!(dispose_open_connector(Connected, None), Retain(_)));
+        assert!(matches!(
+            dispose_open_connector(Closed, Some(IdentityLiveness::DeadOrStale)),
+            Retain(_)
+        ));
     }
 
     #[test]

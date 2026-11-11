@@ -762,7 +762,7 @@ fn operate() -> Result<()> {
             // rides along as testimony for the controller to record; a
             // contact that failed before the run stream carries none.
             // Reconciliation never calls this one-shot sequence again.
-            let guest_owner = activation_contact::first_activation_contact(
+            let (guest_owner, contact_failure) = match activation_contact::first_activation_contact(
                 &network,
                 &provider_spec,
                 &settings,
@@ -772,12 +772,18 @@ fn operate() -> Result<()> {
                 &input.package,
                 deadline,
                 &cancellation,
-            )
-            .ok();
+            ) {
+                Ok(report) => (Some(report), None),
+                Err(error) => (
+                    None,
+                    Some(activation_contact::contact_failure_reason(&error, deadline)),
+                ),
+            };
             LifecycleAdapterResponse::SupervisorPending {
                 operation_id: common.operation_id.clone(),
                 activation_request_digest: activation.activation_request_digest.clone(),
                 guest_owner,
+                contact_failure,
             }
         }
         LifecycleAdapterRequest::ReconcileSupervisorActivation {
@@ -786,6 +792,7 @@ fn operate() -> Result<()> {
             operation_id: common.operation_id.clone(),
             activation_request_digest: activation.activation_request_digest.clone(),
             guest_owner: None,
+            contact_failure: None,
         },
         LifecycleAdapterRequest::Terminate {
             common,

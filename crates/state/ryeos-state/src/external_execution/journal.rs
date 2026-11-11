@@ -87,7 +87,7 @@ WHEN NEW.binding_digest != OLD.binding_digest OR NEW.direction != OLD.direction
  OR NOT ((OLD.application='pending' AND NEW.application='claimed')
      OR (OLD.application='pending' AND NEW.application='revoked'
          AND OLD.direction='owner_to_supervisor'
-         AND COALESCE(json_extract(OLD.frame_json,'$.frame.payload.kind') IN ('release','protocol_bytes'),0))
+         AND COALESCE(json_extract(OLD.frame_json,'$.frame.payload.kind') IN ('release','protocol_bytes','protocol_input_closed'),0))
      OR (OLD.application='claimed' AND NEW.application='applied'))
 BEGIN SELECT RAISE(ABORT, 'external frame cannot be rewritten or reapplied'); END;
 "#;
@@ -200,7 +200,9 @@ fn is_execution_input(direction: ChannelDirection, payload: &ExecutionChannelPay
     direction == ChannelDirection::OwnerToSupervisor
         && matches!(
             payload,
-            ExecutionChannelPayload::Release | ExecutionChannelPayload::ProtocolBytes { .. }
+            ExecutionChannelPayload::Release
+                | ExecutionChannelPayload::ProtocolBytes { .. }
+                | ExecutionChannelPayload::ProtocolInputClosed
         )
 }
 
@@ -294,7 +296,7 @@ pub fn record_revocation(
             "UPDATE external_execution_frame SET application='revoked'
             WHERE binding_digest=?1 AND application='pending'
             AND direction='owner_to_supervisor'
-            AND json_extract(frame_json,'$.frame.payload.kind') IN ('release','protocol_bytes')",
+            AND json_extract(frame_json,'$.frame.payload.kind') IN ('release','protocol_bytes','protocol_input_closed')",
             [binding.digest()?],
         )?;
     }
@@ -458,7 +460,7 @@ pub fn append_frame(
             "UPDATE external_execution_frame SET application='revoked'
             WHERE binding_digest=?1 AND application='pending'
             AND direction='owner_to_supervisor'
-            AND json_extract(frame_json,'$.frame.payload.kind') IN ('release','protocol_bytes')",
+            AND json_extract(frame_json,'$.frame.payload.kind') IN ('release','protocol_bytes','protocol_input_closed')",
             [&frame.binding_digest],
         )?;
     }
@@ -472,7 +474,7 @@ pub fn append_frame(
             tx.execute("UPDATE external_execution_frame SET application='revoked'
                 WHERE binding_digest=?1 AND application='pending'
                 AND direction='owner_to_supervisor'
-                AND json_extract(frame_json,'$.frame.payload.kind') IN ('release','protocol_bytes')",
+                AND json_extract(frame_json,'$.frame.payload.kind') IN ('release','protocol_bytes','protocol_input_closed')",
                 [&frame.binding_digest])?;
         }
         ExecutionChannelPayload::Quiesce {
@@ -4265,7 +4267,7 @@ mod tests {
                 },
             );
             append(conn, &binding, &ack).unwrap();
-            let (input, _) = wire(
+            let (input, input_digest) = wire(
                 &binding,
                 &owner,
                 ChannelDirection::OwnerToSupervisor,
@@ -4277,6 +4279,18 @@ mod tests {
                 },
             );
             append(conn, &binding, &input).unwrap();
+            // The owner's input closure is executable input too: the same
+            // gate holds it back, and pending it is revocable like bytes.
+            let (closure, _) = wire(
+                &binding,
+                &owner,
+                ChannelDirection::OwnerToSupervisor,
+                3,
+                Some(input_digest),
+                1,
+                ExecutionChannelPayload::ProtocolInputClosed,
+            );
+            append(conn, &binding, &closure).unwrap();
             conn.execute("UPDATE test_owner SET permits_input_transport=0", [])
                 .unwrap();
             assert!(

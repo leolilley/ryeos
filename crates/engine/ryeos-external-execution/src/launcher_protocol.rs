@@ -373,6 +373,13 @@ impl LiveInheritedExternalCandidateSupervisor {
         self.supervisor.dispatch_protocol_chunk(wire)
     }
 
+    pub fn dispatch_protocol_input_closed(
+        &mut self,
+        wire: &[u8],
+    ) -> Result<SupervisorApplicationOutcome> {
+        self.supervisor.dispatch_protocol_input_closed(wire)
+    }
+
     pub fn dispatch_cancel(&mut self, wire: &[u8]) -> Result<SupervisorApplicationOutcome> {
         self.supervisor.dispatch_cancel(wire)
     }
@@ -423,6 +430,9 @@ impl LiveInheritedExternalCandidateSupervisor {
             }
             ExecutionChannelPayload::ProtocolBytes { .. } => {
                 ExternalOwnerFrameOutcome::Application(self.dispatch_protocol_chunk(wire)?)
+            }
+            ExecutionChannelPayload::ProtocolInputClosed => {
+                ExternalOwnerFrameOutcome::Application(self.dispatch_protocol_input_closed(wire)?)
             }
             ExecutionChannelPayload::Cancel => {
                 ExternalOwnerFrameOutcome::Application(self.dispatch_cancel(wire)?)
@@ -1056,6 +1066,14 @@ impl ExternalCandidateLauncherClient for InheritedExternalCandidateLauncherClien
     fn apply_protocol_chunk(&mut self, frame: &AuthenticatedExecutionFrame) -> Result<usize> {
         self.apply(frame)?
             .context("launcher protocol action omitted written byte count")
+    }
+
+    fn close_protocol_input(&mut self, frame: &AuthenticatedExecutionFrame) -> Result<()> {
+        ensure!(
+            self.apply(frame)?.is_none(),
+            "launcher input closure returned protocol progress"
+        );
+        Ok(())
     }
 
     fn cancel(&mut self, frame: &AuthenticatedExecutionFrame) -> Result<()> {
@@ -1754,6 +1772,9 @@ pub fn serve_native_candidate_launcher(
                         }
                         ExecutionChannelPayload::ProtocolBytes { .. } => {
                             candidate.apply_protocol_chunk(&decoded).map(Some)
+                        }
+                        ExecutionChannelPayload::ProtocolInputClosed => {
+                            candidate.close_protocol_input(&decoded).map(|_| None)
                         }
                         ExecutionChannelPayload::Cancel => {
                             output.cancelled();

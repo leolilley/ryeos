@@ -604,11 +604,14 @@ pub(crate) enum ExternalSupervisorActivationResolution {
     NotStarted {
         provider_observation_digest: String,
     },
-    /// First activation may carry the adapter's report of the guest owner.
+    /// First activation may carry the adapter's report of the guest owner,
+    /// or, when a step failed before the owner reported, the step and a
+    /// bounded reason.
     Pending {
         guest_owner: Option<
             ryeos_external_execution_contract::guest_owner_report::GuestOwnerActivationReport,
         >,
+        contact_failure: Option<ryeos_external_execution_contract::UncertaintyReason>,
     },
 }
 
@@ -3566,6 +3569,61 @@ pub fn author_external_channel_command(
     })
 }
 
+/// Tell the guest the owner has no more session protocol input, so it closes
+/// the candidate's stdin. For a candidate that ends on EOF this is what ends
+/// the session normally: the candidate exits, the guest signs its stdout EOF,
+/// the relay delivers that EOF to the live connector peer and the connector
+/// closes `completed`. Authored once per channel; a repeat returns the
+/// retained frame. This is neither cancellation nor completion and makes no
+/// claim about the candidate.
+pub fn request_external_protocol_input_close(
+    state: &AppState,
+    placement: &str,
+) -> Result<ExternalChannelOutboundFrame> {
+    use crate::runtime_db::external_execution::ExternalAllocationOwner;
+    state
+        .controller_lifetime
+        .ensure_protects_app_root(&state.config.app_root)?;
+    let allocation = state
+        .state_store
+        .external_allocation(placement)?
+        .context("protocol input closure has no retained allocation")?;
+    let author = || {
+        let access = ExternalChannelAuthorityAccess::new(
+            &allocation.reservation.channel_authority_generation,
+        )?;
+        let authority = access.decode(
+            state
+                .vault
+                .external_channel_authority(&access)
+                .context("read protected channel signer")?,
+        )?;
+        let binding = state.state_store.external_execution_channel(placement)?;
+        ensure!(
+            binding.owner_public_key == authority.owner_public_key()
+                && binding.execution_binding_hash == allocation.reservation.binding_hash,
+            "protocol input closure changed protected channel authority"
+        );
+        let frame = state
+            .state_store
+            .ensure_external_protocol_input_closed(placement, authority.owner_signing_key())?;
+        Ok(ExternalChannelOutboundFrame {
+            sequence: frame.frame().sequence,
+            frame_digest: frame.digest().to_owned(),
+            canonical_wire: frame.canonical().as_bytes().to_vec(),
+        })
+    };
+    match &allocation.reservation.owner {
+        // A Q occurrence serializes every controller write with its other
+        // occurrence contacts, exactly as its completion request does.
+        ExternalAllocationOwner::QualificationCandidate(owner) => {
+            let operation_id = owner.qualification_operation_id.clone();
+            crate::hosted_operation::with_qualification_occurrence_contact(&operation_id, author)
+        }
+        _ => author(),
+    }
+}
+
 /// Request the Q guest's native scope stop only after the retained local
 /// Worker process and connector have settled. This is a controller operation
 /// under the same restored-occurrence exclusion as provider termination; the
@@ -5889,6 +5947,13 @@ impl<'a> ExternalPlacementOwner<'a> {
             .state
             .external_placement_backends
             .contact_gate(placement)?;
+        if fresh {
+            crate::native_headroom::admit_fresh_placement_headroom(
+                self.state,
+                "external direct placement",
+                crate::native_headroom::NativeWorkNeed::of_contract(&contract),
+            )?;
+        }
         let record = if fresh {
             self.state.state_store.reserve_external_direct_allocation(
                 &reservation,
@@ -6219,6 +6284,11 @@ impl<'a> ExternalPlacementOwner<'a> {
                     .context("external placement startup deadline overflow")?,
             }
         };
+        crate::native_headroom::admit_fresh_placement_headroom(
+            self.state,
+            "external session placement",
+            crate::native_headroom::NativeWorkNeed::of_contract(&contract),
+        )?;
         let record = match &lease_charge {
             Some(charge) => self.state.state_store.reserve_external_lease_allocation(
                 &reservation,
@@ -6687,6 +6757,11 @@ pub fn prepare_external_qualification_start_for_invocation<'a>(
         .context("external qualification reservation lost its accepted Worker content")?
         .definitions
         .bundle_generation_identity;
+    crate::native_headroom::admit_fresh_placement_headroom(
+        state,
+        "external qualification start",
+        crate::native_headroom::NativeWorkNeed::of_contract(&contract),
+    )?;
     state.engine.with_checked_bundle_generation(|generation| {
         ensure!(
             generation.request_engine_generation_identity() == expected_generation,
@@ -7682,6 +7757,32 @@ pub fn recover_external_candidate_cleanups(
             Ok(ExternalCandidateCleanupProgress::Pending) => report.pending += 1,
             Err(error) => report.failures.push((placement, format!("{error:#}"))),
         }
+    }
+    // A Q start that failed while its allocation was still unsettled could
+    // not prove its guest-input scratch cleanup then. Now that the retained
+    // owner above may have settled it, prove the cleanup through the original
+    // custody; scratches whose allocation is still unsettled wait.
+    for placement in state
+        .state_store
+        .settled_unclosed_qualification_guest_scratch_placements()?
+    {
+        if let Err(error) =
+            crate::external_qualification_guest_scratch::cleanup_original_qualification_guest_scratch(
+                state, &placement,
+            )
+        {
+            report.failures.push((placement, format!("{error:#}")));
+        }
+    }
+    // Rows a dead daemon generation left open: no running daemon holds their
+    // descriptors, so they are settled by recorded coordinate instead.
+    match crate::qualification_cold_settlement::settle_prior_generation_qualification_custody(state)
+    {
+        Ok(settled) => report.failures.extend(settled.failures),
+        Err(error) => report.failures.push((
+            "prior-generation Q custody".to_owned(),
+            format!("{error:#}"),
+        )),
     }
     Ok(report)
 }
@@ -8747,7 +8848,10 @@ impl ExternalPlacementReconciliation {
         if !owns_contact
             && !matches!(
                 resolution,
-                ExternalSupervisorActivationResolution::Pending { guest_owner: None }
+                ExternalSupervisorActivationResolution::Pending {
+                    guest_owner: None,
+                    ..
+                }
             )
         {
             require_lifecycle_capability(
@@ -8756,6 +8860,7 @@ impl ExternalPlacementReconciliation {
             )?;
         }
         let mut guest_owner = None;
+        let mut contact_failure = None;
         if let Some((activation_state, provider_observation_digest)) = match resolution {
             ExternalSupervisorActivationResolution::Started {
                 provider_observation_digest,
@@ -8765,8 +8870,10 @@ impl ExternalPlacementReconciliation {
             } => Some(("not_started", provider_observation_digest)),
             ExternalSupervisorActivationResolution::Pending {
                 guest_owner: report,
+                contact_failure: failure,
             } => {
                 guest_owner = report;
+                contact_failure = failure;
                 None
             }
         } {
@@ -8787,6 +8894,17 @@ impl ExternalPlacementReconciliation {
                 },
             )?;
         } else {
+            if let Some(failure) = &contact_failure {
+                // The adapter's own account of the step that failed before
+                // the guest owner reported: fixed words, logged, never acted on.
+                tracing::warn!(
+                    placement,
+                    class = failure.class.as_str(),
+                    detail = %failure.detail,
+                    deadline_exceeded,
+                    "external activation first contact failed before the guest owner reported"
+                );
+            }
             if let Some(report) = &guest_owner {
                 let outcome = serde_json::to_value(report)
                     .ok()
@@ -11222,6 +11340,7 @@ mod tests {
                 return Ok(ExternalLifecycleObservation {
                     value: ExternalSupervisorActivationResolution::Pending {
                         guest_owner: Some(report),
+                        contact_failure: None,
                     },
                     deadline_exceeded: false,
                 });
@@ -11247,9 +11366,10 @@ mod tests {
                     "not_started" => ExternalSupervisorActivationResolution::NotStarted {
                         provider_observation_digest: "4".repeat(64),
                     },
-                    "pending" => {
-                        ExternalSupervisorActivationResolution::Pending { guest_owner: None }
-                    }
+                    "pending" => ExternalSupervisorActivationResolution::Pending {
+                        guest_owner: None,
+                        contact_failure: None,
+                    },
                     _ => bail!("fixture selected an unknown activation resolution"),
                 },
                 deadline_exceeded: false,

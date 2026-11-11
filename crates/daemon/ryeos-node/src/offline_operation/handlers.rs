@@ -276,6 +276,7 @@ pub struct QualificationComposeArguments {
     pub snapshot_binding: String,
     pub verifier: String,
     pub contact_timeout_seconds: Option<u32>,
+    pub delivery_timeout_seconds: Option<u32>,
     pub maximum_lifetime_seconds: Option<u32>,
 }
 
@@ -478,6 +479,36 @@ pub(super) fn policy_apply(ctx: &HandlerContext<'_>) -> Result<Value> {
         "the policy generation this would publish has digest {}, not the {expected} the request pinned; nothing was changed",
         update.generation().digest()
     );
+    // The capacity issuance pins the `native_capacity` policy it was granted
+    // under, so that section cannot change by publication alone: the
+    // operator amends the issuance to the new policy first, under the same
+    // lock, so the republished generation and the account agree when the
+    // completion is resealed below. A rerun converges on the same amendment.
+    let capacity_amendment = if arguments.section
+        == ryeos_node_runtime::node_policy::sections::native_capacity::SECTION_NAME
+    {
+        let body = update
+            .generation()
+            .policies()
+            .get(&arguments.section)
+            .context("the prepared policy generation lacks its native_capacity member")?;
+        let policy: ryeos_node_runtime::node_policy::sections::native_capacity::NodeNativeCapacityPolicy =
+            serde_json::from_value(body.clone())
+                .context("parse the prepared native_capacity policy")?;
+        let operator_key = operator_key(ctx)?;
+        Some(crate::native_capacity::amend_capacity_policy(
+            crate::native_capacity::CapacityPolicyAmendmentRequest {
+                app_root: ctx.app_root,
+                state_lock: ctx.state_lock,
+                operator_key: &operator_key,
+                policy: &policy,
+                reason: &format!("node policy generation {expected}"),
+                command: &ctx.command_label(),
+            },
+        )?)
+    } else {
+        None
+    };
     ryeos_node_runtime::node_policy::generation::publish_policy_update(
         ctx.app_root,
         &update,
@@ -496,6 +527,7 @@ pub(super) fn policy_apply(ctx: &HandlerContext<'_>) -> Result<Value> {
         "section": arguments.section,
         "signer_fingerprint": ctx.node.fingerprint(),
         "policy_generation": expected,
+        "capacity_amendment": capacity_amendment,
     }))
 }
 
@@ -686,6 +718,9 @@ pub(super) fn snapshot_qualification_compose(ctx: &HandlerContext<'_>) -> Result
             contact_timeout_seconds: arguments
                 .contact_timeout_seconds
                 .unwrap_or(defaults.contact_timeout_seconds),
+            delivery_timeout_seconds: arguments
+                .delivery_timeout_seconds
+                .unwrap_or(defaults.delivery_timeout_seconds),
             maximum_lifetime_seconds: arguments
                 .maximum_lifetime_seconds
                 .unwrap_or(defaults.maximum_lifetime_seconds),

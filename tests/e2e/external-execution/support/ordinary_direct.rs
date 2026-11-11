@@ -192,6 +192,7 @@ pub fn install_before_start(
             "controller_tls_root_certificates_der_base64":endpoint.tls_roots_der_base64,
             "max_active":1, "timeout_seconds":120, "contact_timeout_seconds":60,
             "observation_timeout_seconds":180, "cleanup_timeout_seconds":120,
+            "native_work_steps":2_000_000,
             "max_workspace_bytes":67_108_864, "max_export_bytes":0,
             // This test signs debug-built guest executables. Keep the budget
             // explicit and bounded while covering their measured closure.
