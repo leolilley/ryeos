@@ -638,8 +638,7 @@ mod tests {
             address,
             canary,
         )
-        .err()
-        .expect("unapproved");
+        .expect_err("unapproved");
         assert!(format!("{refused:#}").contains("unapproved header x-other"));
         for invalid in [
             "POST /wrong HTTP/1.1\r\nHost: 127.0.0.1:1234\r\nContent-Length: 2\r\n\r\n",

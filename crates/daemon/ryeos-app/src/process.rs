@@ -788,10 +788,11 @@ pub fn kill_by_action(identity: &ExecutionProcessIdentity, action: ShutdownActio
             }
         }
         let success = scope.terminate_and_wait(scope.control_timeout()).is_ok();
-        if success && let Some(group) = wrapper_group_wait(Duration::ZERO) {
-            if !group.success {
-                return group;
-            }
+        if success
+            && let Some(group) = wrapper_group_wait(Duration::ZERO)
+            && !group.success
+        {
+            return group;
         }
         return KillResult {
             success,
@@ -1831,8 +1832,7 @@ mod tests {
         // not reaped, and the next owner must not clear its attachment.
         assert_eq!(execution_group_liveness(&identity), IdentityLiveness::Alive);
         let error = assert_reaped_process_group_absent(&identity)
-            .err()
-            .expect("a running launcher group is not settled");
+            .expect_err("a running launcher group is not settled");
         assert!(error.to_string().contains("launcher group"), "{error:#}");
         // Cleanup ends the init's tree and then the pinned launcher group.
         let (killed, _status) = run_kill_with_reaper(
@@ -1855,8 +1855,7 @@ mod tests {
             group_basis: lillux::GroupBasis::Contained,
         };
         let error = execution_process_identity_from_lillux(contained.clone(), None)
-            .err()
-            .expect("no group signal may be built from a contained identity");
+            .expect_err("no group signal may be built from a contained identity");
         assert!(
             error.to_string().contains("containment-membership"),
             "{error:#}"

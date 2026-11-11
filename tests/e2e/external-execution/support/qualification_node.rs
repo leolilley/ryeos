@@ -466,7 +466,7 @@ pub fn start_bundle_node(
         .unwrap();
     std::fs::create_dir_all(state.config.runtime_root().trusted_keys_dir()).unwrap();
     std::fs::create_dir_all(state.config.runtime_uds_path().parent().unwrap()).unwrap();
-    let listener = tokio::net::UnixListener::bind(&state.config.runtime_uds_path()).unwrap();
+    let listener = tokio::net::UnixListener::bind(state.config.runtime_uds_path()).unwrap();
     let isolation_policy = composed_isolation_policy();
     install_bundle_engine(
         state,

@@ -215,7 +215,7 @@ pub fn copy_project_snapshot_closure(
         blob_count: u64::try_from(closure.blob_hashes.len())?,
         total_bytes,
     };
-    let observed = inspect_project_snapshot_transfer(&root, snapshot_hash)?;
+    let observed = inspect_project_snapshot_transfer(root, snapshot_hash)?;
     anyhow::ensure!(
         observed == expected,
         "prepared base snapshot transfer changed during verification"

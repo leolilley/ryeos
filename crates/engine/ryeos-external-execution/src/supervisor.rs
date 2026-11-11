@@ -1124,7 +1124,7 @@ mod tests {
             &authority,
             &"f".repeat(64),
             binding.clone(),
-            ryeos_state::external_execution::guest_window::GuestChannelWindow::starting_now_for_single_clock_harness(&binding).unwrap(),
+            ryeos_state::external_execution::guest_window::GuestChannelWindow::starting_now_for_single_clock_harness(binding).unwrap(),
             state.host().factory(),
             state.host().destination(),
             &ryeos_state::external_execution::native_journal::testing::census(state.host()))

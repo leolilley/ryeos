@@ -1266,10 +1266,9 @@ fn sql_without_comments(sql: &str) -> String {
         }
         let after_comment = if rest.starts_with("--") {
             Some(rest.find('\n').map_or("", |at| &rest[at..]))
-        } else if rest.starts_with("/*") {
-            Some(rest[2..].find("*/").map_or("", |at| &rest[at + 4..]))
         } else {
-            None
+            rest.strip_prefix("/*")
+                .map(|body| body.find("*/").map_or("", |at| &body[at + 2..]))
         };
         let Some(after_comment) = after_comment else {
             out.push(first);

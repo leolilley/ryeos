@@ -32,8 +32,12 @@ fn realization_mount_authority(
 /// descriptor, or a large-object store lock that is closed in every fork
 /// child and released only when this value drops.
 pub(crate) enum RetainedLease {
-    Generation(fs::File),
-    LargeObject(lillux::locks::ForkClosedLockFile),
+    Generation {
+        _descriptor: fs::File,
+    },
+    LargeObject {
+        _lock: lillux::locks::ForkClosedLockFile,
+    },
 }
 
 /// Descriptor-pinned materializations and their exact cache-generation
@@ -683,7 +687,9 @@ impl ExternalMaterializationCache {
             root: generation,
             source_path,
             source,
-            leases: vec![RetainedLease::Generation(lease_lifeline)],
+            leases: vec![RetainedLease::Generation {
+                _descriptor: lease_lifeline,
+            }],
         })
     }
 
@@ -807,10 +813,12 @@ impl ExternalMaterializationCache {
             }
         };
         let mut retained_leases = Vec::with_capacity(large_sources.len() + 1);
-        retained_leases.push(RetainedLease::Generation(generation_lease_lifeline));
+        retained_leases.push(RetainedLease::Generation {
+            _descriptor: generation_lease_lifeline,
+        });
         for leased in large_sources.into_values() {
             let (_, _, lease) = leased.into_parts();
-            retained_leases.push(RetainedLease::LargeObject(lease));
+            retained_leases.push(RetainedLease::LargeObject { _lock: lease });
         }
         drop(lock);
         Ok(MaterializedExternalGeneration {

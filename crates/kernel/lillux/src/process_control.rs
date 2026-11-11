@@ -1569,8 +1569,7 @@ mod contained_identity_tests {
                 .is_none()
         );
         let error = super::quiesce_exact_process_group(&identity, std::time::Duration::ZERO)
-            .err()
-            .expect("a contained identity names no group to freeze");
+            .expect_err("a contained identity names no group to freeze");
         assert!(error.contains("names no process group"), "{error}");
         let error = super::ExactProcessRoot::open(&identity).err().unwrap();
         assert!(error.contains("names no process group"), "{error}");

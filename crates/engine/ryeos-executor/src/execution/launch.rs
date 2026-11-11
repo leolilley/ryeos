@@ -6659,7 +6659,7 @@ async fn run_claimed_thread_row_inner(
     enforce_effective_trust(
         &state.engine.kinds,
         &state.node_policy,
-        &resolution,
+        resolution,
         &resolved.item_ref,
         kind,
     )?;

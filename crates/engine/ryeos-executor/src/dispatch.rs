@@ -3127,14 +3127,13 @@ pub async fn dispatch_service(
             if request.validate_only {
                 let description = verified.resolved.metadata.description.clone();
                 let input_schema = verified.resolved.metadata.extra.get("schema").cloned();
-                let endpoint = Some(admitted.endpoint);
                 let required_caps = admitted.required_caps;
 
                 return Ok(json!({
                     "validated": true,
                     "item_ref": item_ref,
                     "kind": canonical.kind,
-                    "executor_ref": endpoint.unwrap_or_default(),
+                    "executor_ref": admitted.endpoint,
                     "trust_class": format!("{:?}", verified.trust_class),
                     "description": description,
                     "schema": input_schema,

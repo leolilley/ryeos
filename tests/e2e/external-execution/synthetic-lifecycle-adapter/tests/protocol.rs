@@ -1509,7 +1509,7 @@ fn run_signed_worker_admission_on(
         std::fs::create_dir_all(state.config.runtime_uds_path().parent().unwrap()).unwrap();
         let _daemon_socket = {
             let _enter = runtime_host.enter();
-            tokio::net::UnixListener::bind(&state.config.runtime_uds_path())
+            tokio::net::UnixListener::bind(state.config.runtime_uds_path())
                 .unwrap_or_else(|error| panic!("bind daemon socket: {error}"))
         };
         state.isolation = ryeos_node_runtime::engine_init::load_test_daemon_execution_isolation(
@@ -3884,7 +3884,7 @@ async fn run_production_tls_candidate(
         .unwrap();
     std::fs::create_dir_all(state.config.runtime_root().trusted_keys_dir()).unwrap();
     std::fs::create_dir_all(state.config.runtime_uds_path().parent().unwrap()).unwrap();
-    let uds_listener = tokio::net::UnixListener::bind(&state.config.runtime_uds_path()).unwrap();
+    let uds_listener = tokio::net::UnixListener::bind(state.config.runtime_uds_path()).unwrap();
     let (candidate_authoring_bundle, authored_profile) = write_candidate_authoring_bundle(
         fixture_repository_source_root(),
         root.path(),

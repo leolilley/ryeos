@@ -309,7 +309,7 @@ impl Guest {
             authority,
             &"f".repeat(64),
             binding.clone(),
-            ryeos_state::external_execution::guest_window::GuestChannelWindow::starting_now_for_single_clock_harness(&binding).unwrap(),
+            ryeos_state::external_execution::guest_window::GuestChannelWindow::starting_now_for_single_clock_harness(binding).unwrap(),
             host.factory(),
             host.destination(),
             &ryeos_state::external_execution::native_journal::testing::census(host))

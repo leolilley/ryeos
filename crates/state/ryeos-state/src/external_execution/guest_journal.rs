@@ -3714,7 +3714,7 @@ mod tests {
             store_identity,
             bootstrap_digest,
             binding,
-            crate::external_execution::guest_window::GuestChannelWindow::starting_now_for_single_clock_harness(&binding).unwrap(),
+            crate::external_execution::guest_window::GuestChannelWindow::starting_now_for_single_clock_harness(binding).unwrap(),
             host.factory(),
             host.destination(),
             &census(host))

@@ -1004,7 +1004,7 @@ fn prepare(
         bootstrap.post_execution_timeout_seconds = limits.post_execution_timeout_seconds;
         bootstrap.candidate_export_max_bytes = limits.candidate_export_max_bytes;
         bootstrap.channel_max_bytes = limits.channel_max_bytes;
-        bootstrap.native_journal = limits.native_journal.clone();
+        bootstrap.native_journal = limits.native_journal;
         bootstrap.report_capabilities = limits.report_capabilities;
     }
     bootstrap.validate()?;
