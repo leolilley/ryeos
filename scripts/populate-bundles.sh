@@ -553,20 +553,21 @@ for p in "${pkgs[@]}"; do
   esac
 done
 
-build_args=()
-for p in "${host_pkgs[@]}"; do build_args+=(-p "$p"); done
-feature_args=()
-selected_features=()
+# Features are selected per package and each featured package is built in its
+# own Cargo invocation with unqualified feature names. One multi-package build
+# with package-qualified features (`-p ryeosd -p ryeos-cli --features
+# ryeosd/scheduling,...`) produced a ryeosd compiled with none of them.
+declare -A package_features=()
+add_package_feature() { # package, feature
+  package_features[$1]="${package_features[$1]:+${package_features[$1]},}$2"
+}
 if [[ "$BUILD_PROFILE" == latency-profiling ]]; then
   for p in "${host_pkgs[@]}"; do
     case "$p" in
-      ryeosd) selected_features+=("ryeosd/latency-profiling") ;;
-      ryeos-directive-runtime)
-        selected_features+=("ryeos-directive-runtime/latency-profiling")
-        ;;
+      ryeosd|ryeos-directive-runtime) add_package_feature "$p" latency-profiling ;;
     esac
   done
-  if (( ${#selected_features[@]} == 0 )); then
+  if (( ${#package_features[@]} == 0 )); then
     ryeos_term_fail "latency profiling requires ryeosd and/or ryeos-directive-runtime in --crates"
     exit 2
   fi
@@ -576,14 +577,25 @@ for p in "${host_pkgs[@]}"; do
     ryeos_term_fail "cannot select native composition for $BUNDLE_SET/$p"
     exit 2
   }
-  if [[ -n "$composition_feature" ]]; then
-    selected_features+=("$composition_feature")
+  IFS=, read -r -a qualified <<<"$composition_feature"
+  for feature in "${qualified[@]}"; do
+    [[ -n "$feature" ]] || continue
+    [[ "$feature" == "$p/"* ]] || {
+      ryeos_term_fail "composition feature $feature does not belong to package $p"
+      exit 2
+    }
+    add_package_feature "$p" "${feature#"$p/"}"
+  done
+done
+plain_build_args=()
+featured_pkgs=()
+for p in "${host_pkgs[@]}"; do
+  if [[ -n "${package_features[$p]:-}" ]]; then
+    featured_pkgs+=("$p")
+  else
+    plain_build_args+=(-p "$p")
   fi
 done
-if (( ${#selected_features[@]} > 0 )); then
-  feature_list="$(IFS=,; printf '%s' "${selected_features[*]}")"
-  feature_args=(--features "$feature_list")
-fi
 jobs_args=()
 [[ -n "$JOBS" ]] && jobs_args=(-j "$JOBS")
 
@@ -592,7 +604,13 @@ if (( ${#host_pkgs[@]} > 0 )); then
   ryeos_term_update "building selected release binaries" "${host_pkgs[*]}"
   ryeos_term_suspend
   ryeos_term_info "host release build: node, CLI, runtimes, tools, and clients"
-  "$CARGO" build --release --locked "${jobs_args[@]}" "${build_args[@]}" "${feature_args[@]}"
+  if (( ${#plain_build_args[@]} > 0 )); then
+    "$CARGO" build --release --locked "${jobs_args[@]}" "${plain_build_args[@]}"
+  fi
+  for p in "${featured_pkgs[@]}"; do
+    ryeos_term_info "host release build: $p with features ${package_features[$p]}"
+    "$CARGO" build --release --locked "${jobs_args[@]}" -p "$p" --features "${package_features[$p]}"
+  done
   ryeos_term_resume "selected release build complete"
 else
   ryeos_term_update "retaining release binaries" "no host packages selected"

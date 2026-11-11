@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-11T02:56:40Z:258345dc7905a4e6f193102ade146e70a145ffa6ecc063d05c972f35e485ce80:pw8QHVBOSk2akI4TBlnnwuBKy4XUMFS3KKYpLFrL3mMpiPShCh8kt1aaKsln2luKUbjG3G1//tRR726y87yVDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-11T04:16:48Z:19ca28c8a720c58f138af560c6beb3c01f17a431f1bfeca91b990ff6203bf479:wxkA0TdYk/T9SoUZGQNRMLvIHO0E7bJhrSM+ub38hpiIO2b7nUAi8D+Xy2dT/VpwwbrvPZfESlztxtdaD3CSDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Core profile: the substrate alone.
 schema: 1
 exact_bundles:
@@ -321,6 +321,7 @@ policies:
       - ".git/"
       - ".hg/"
       - ".svn/"
+      - ".tmp/"
       - ".venv/"
       - "/.ai/config/remotes/"
       - "/.ai/state/"

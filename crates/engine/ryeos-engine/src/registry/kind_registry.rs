@@ -2221,6 +2221,7 @@ fn parse_kind_schema_content(display: &str, content: &str) -> Result<KindSchema,
         serde_yaml::from_str(&clean_content).map_err(|e| EngineError::SchemaLoaderError {
             reason: format!("cannot parse YAML {display}: {e}"),
         })?;
+    refuse_unknown_kind_schema_keys(display, &data)?;
 
     let location = data
         .get("location")
@@ -2450,6 +2451,55 @@ fn parse_kind_schema_content(display: &str, content: &str) -> Result<KindSchema,
         inventory_policy,
         launch_trust,
     })
+}
+
+/// Every top-level key a kind schema may carry. A key outside this list is
+/// refused rather than ignored, so a daemon that predates a kind-schema field
+/// cannot load a schema whose meaning depends on it (for example a
+/// `launch_trust` floor) as if the field were absent.
+const KIND_SCHEMA_KEYS: &[&str] = &[
+    "category",
+    "version",
+    "location",
+    "formats",
+    "metadata",
+    "resolution",
+    "effective_trust",
+    "content",
+    "execution",
+    "composed_value_contract",
+    "composer",
+    "composer_config",
+    "runtime",
+    "inventory_kinds",
+    "inventory_schema_keys",
+    "inventory_policy",
+    "launch_trust",
+];
+
+fn refuse_unknown_kind_schema_keys(
+    display: &str,
+    data: &serde_yaml::Value,
+) -> Result<(), EngineError> {
+    let mapping = data
+        .as_mapping()
+        .ok_or_else(|| EngineError::SchemaLoaderError {
+            reason: format!("{display}: a kind schema must be a mapping"),
+        })?;
+    for key in mapping.keys() {
+        let known = key
+            .as_str()
+            .is_some_and(|key| KIND_SCHEMA_KEYS.contains(&key));
+        if !known {
+            return Err(EngineError::SchemaLoaderError {
+                reason: format!(
+                    "{display}: unknown top-level key `{}`",
+                    key.as_str().unwrap_or("<non-string key>")
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn parse_kind_content_schema(
@@ -4771,6 +4821,22 @@ formats:
         let error = KindRegistry::load_base(&[tmp], &ts).unwrap_err();
         assert!(
             error.to_string().contains("must declare `launch_trust`"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn unknown_top_level_key_is_refused() {
+        let tmp = tempdir();
+        let sk = test_signing_key();
+        let ts = test_trust_store(&sk);
+        let extra = format!("{SCHEMA_WITH_RESOLUTION}launch_floor: strict\n");
+        sign_and_write_schema(&tmp, "directive", &extra, &sk);
+        let error = KindRegistry::load_base(&[tmp], &ts).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("unknown top-level key `launch_floor`"),
             "{error}"
         );
     }

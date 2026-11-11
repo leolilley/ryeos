@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-11T02:56:40Z:832c6b45594b62827c3e2f61ebeb67987970e7969f40ee6cdaf9e4127a3a4089:StVNm1D95WgRCkDWCQXTk1x3p1OHhg1Mt6QGPY4aMlKhN/I8UC1Wb9mIfBiLsIV4WAvTTREiMuO1bmZQr1/6Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-11T04:16:48Z:f9fbe43607fa3742aa61a314a0b7bf4e7e8d90d7026c7b3a683bcde3827ffe98:NFhls0UXBD5TtZNIjd3xJlYmaGZCX4Au4Yz8gHTGbfwEgJF+15t4PO/pKnLyXJJkXbriZIijQFfulqq7f7k9AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - bundle-source
@@ -289,6 +289,7 @@ policies:
       - ".git/"
       - ".hg/"
       - ".svn/"
+      - ".tmp/"
       - ".venv/"
       - "/.ai/config/remotes/"
       - "/.ai/state/"

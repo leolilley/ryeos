@@ -44,6 +44,10 @@ pub trait HostServiceController: Send + Sync {
     /// so no pid read from elsewhere is promoted into signal authority. Only
     /// for a process a graceful request could not end.
     fn force_down(&self) -> Result<()>;
+    /// Want the service down and return only once the supervisor reports its
+    /// process gone, or refuse when `timeout` passes first. A down request
+    /// alone returns while the process may still be exiting.
+    fn wait_down(&self, timeout: std::time::Duration) -> Result<()>;
     /// Opaque native boot disposition retained by a client's upgrade journal.
     fn capture_upgrade_state(&self) -> Result<serde_json::Value>;
     fn restore_upgrade_state(&self, state: &serde_json::Value) -> Result<()>;

@@ -1047,6 +1047,16 @@ impl InstalledService {
         self.supervisor.request_down()
     }
 
+    /// Want the service down and wait until the supervisor reports its
+    /// process gone. Down intent is recorded first, as for `request_down`.
+    pub fn wait_down(&self, timeout: std::time::Duration) -> Result<()> {
+        let _gate = self.gate()?;
+        self.check_binding()?;
+        self.supervisor.check_available()?;
+        self.set_desired(DesiredState::Down)?;
+        self.supervisor.wait_down(timeout)
+    }
+
     /// The supervisor ends its exact service process after a graceful stop
     /// could not. Durable down intent first, so nothing relaunches it.
     pub fn force_down(&self) -> Result<()> {

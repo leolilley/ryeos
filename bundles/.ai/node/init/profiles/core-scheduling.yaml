@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-11T02:56:40Z:ebc42e4ad310a1903e4a5dbec04c0ab7782aaa26ab241cbe4c7f330c1d5d339f:otoeQ+455R/HGZqNJjpAXMkLqT5/nA4ajKJMDfRLdh6xD3dzKjrc/KnkJz/v3kSZAMnZwCr/I5anXesPCsiRCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-11T04:16:48Z:fdb6d33307433de359b0b90c4dff7eed815bedd10e865c23a58f92c0fca5cff6:+TcQ3FdLB0/JNbmt8mRxzHdVTwlfjJXa9CFoSN01QYniK0JbVTLl4zvOOmL17t47bK5qF6278XvlBmEokwvoBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Core plus scheduling.
 schema: 1
 exact_bundles:
@@ -324,6 +324,7 @@ policies:
       - ".git/"
       - ".hg/"
       - ".svn/"
+      - ".tmp/"
       - ".venv/"
       - "/.ai/config/remotes/"
       - "/.ai/state/"
