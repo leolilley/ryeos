@@ -111,6 +111,12 @@ pub fn replace_bootstrap_config(
 }
 
 impl Config {
+    /// The callback-only sibling of the control socket; see
+    /// [`runtime_uds_path_for`].
+    pub fn runtime_uds_path(&self) -> PathBuf {
+        runtime_uds_path_for(&self.uds_path)
+    }
+
     pub fn runtime_root(&self) -> RuntimeRoot {
         RuntimeRoot::new(self.app_root.clone())
     }
@@ -334,6 +340,23 @@ impl Config {
     }
 }
 
+/// The callback-only sibling of a control socket. Sandboxed callback tools and
+/// runtimes are handed this endpoint; it routes `runtime.*` alone, so a tool
+/// holding it cannot read the node lifecycle facts the control socket answers
+/// without a bearer. It is derived, never configured: it always sits beside the
+/// control socket as `<stem>-runtime.<ext>`.
+pub fn runtime_uds_path_for(uds_path: &Path) -> PathBuf {
+    let name = uds_path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "ryeosd.sock".to_string());
+    let derived = match name.rsplit_once('.') {
+        Some((stem, extension)) if !stem.is_empty() => format!("{stem}-runtime.{extension}"),
+        _ => format!("{name}-runtime"),
+    };
+    uds_path.with_file_name(derived)
+}
+
 /// The control socket belongs to this node's runtime state, not a login
 /// session. Distinct app roots are already distinct node namespaces; an
 /// operator supplies an explicit shorter path when the platform's local-IPC
@@ -348,6 +371,25 @@ mod tests {
     use std::sync::Mutex;
 
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn runtime_socket_sits_beside_the_control_socket() {
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg = Config::load(&ConfigSources {
+            app_root: Some(tmp.path().join("state")),
+            uds_path: Some(tmp.path().join("sock/ryeosd.sock")),
+            ..ConfigSources::default()
+        })
+        .unwrap();
+        assert_eq!(
+            cfg.runtime_uds_path(),
+            tmp.path().join("sock/ryeosd-runtime.sock")
+        );
+        cfg.uds_path = tmp.path().join("sock/bare");
+        assert_eq!(cfg.runtime_uds_path(), tmp.path().join("sock/bare-runtime"));
+        assert_ne!(cfg.runtime_uds_path(), cfg.uds_path);
+    }
 
     #[test]
     fn load_is_side_effect_free_for_runtime_paths() {

@@ -1083,7 +1083,7 @@ mod tests {
         assert!(!match_floor(&floor, &emulated).admitted);
         let mut failed = view(&["time"], &[]);
         add_pid_namespace_containment(&mut failed, &Probe::not_probed("user namespaces refused"));
-        assert!(failed.provided.get(PID_NAMESPACE_TERMINATION).is_none());
+        assert!(!failed.provided.contains_key(PID_NAMESPACE_TERMINATION));
         assert_eq!(
             failed.missing[PID_NAMESPACE_TERMINATION],
             "user namespaces refused"

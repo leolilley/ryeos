@@ -57,10 +57,9 @@ try {
       .map((byte) => byte.toString(16).padStart(2, "0")).join("");
     const fixture = (generation) => ({
       schema_version: "ryeos.ui.envelope.v1", generation, effects: [],
-      scene_model: { schema_version: "ryeos.ui.scene.v1", generation, camera: { position: [0, 0, 10], target: [0, 0, 0], fov_degrees: 45 }, objects: [], actions: [], energy: 0, screen_offset: [0, 0], break_amount: 1 },
       view_model: {
         schema_version: "ryeos.ui.vm.v2", generation, now_ms: 0n,
-        session: { session_id: "test", project_path: null, root_ref: "config:test/presentation", title: "Test presentation", surface_ordinal: null, surfaces: [], ambient: { show_background: false, opacity: null, mode: "ambient", atlas: null }, user_principal_id: null, posture: "observation_only" },
+        session: { session_id: "test", project_path: null, root_ref: "config:test/presentation", title: "Test presentation", surface_ordinal: null, surfaces: [], user_principal_id: null, posture: "observation_only" },
         navigation: { items: [] },
         chrome: { title: "RyeOS", subtitle: "", health_label: "ready", health_tone: "good" },
         presentation: {
@@ -70,10 +69,10 @@ try {
             top_bar: { visible: true, tabs: [], focused_title: "", layout_symbol: "" },
             status_bar: { visible: true, segments: [], key_hint: "", energy: 0, attention: null },
           },
-          metrics: { tile_count: 0n, scene_object_count: 0n, item_count: 0n, thread_count: 0n, project_count: 0n, service_count: 0n, schedule_count: 0n, active_thread_count: 0n, activity_level: 0 }, frame: { corners: { visible: false, tone: "neutral" } }, motion: [],
+          metrics: { tile_count: 0n, thread_count: 0n, project_count: 0n, service_count: 0n, schedule_count: 0n, active_thread_count: 0n, activity_level: 0 }, frame: { corners: { visible: false, tone: "neutral" } }, motion: [],
         },
         view_set: null,
-        docks: { top: null, bottom: null, left: null, right: null }, backdrop: null,
+        docks: { top: null, bottom: null, left: null, right: null },
         dialogs: [], notices: [], transport: { freshness: "current", last_observed_at_ms: null, channels: [] },
       },
     });

@@ -397,7 +397,8 @@ fn select_variant(
     guarantees: NodeGuarantees<'_>,
 ) -> anyhow::Result<QualificationVariant> {
     state.engine.with_checked_bundle_generation(|generation| {
-        let authored = resolve_consumer_definition_in_generation(generation, variants_ref, "config")?;
+        let authored =
+            resolve_consumer_definition_in_generation(generation, variants_ref, "config")?;
         let set = QualificationVariants::from_value(
             authored
                 .composed
@@ -800,8 +801,12 @@ product_qualification_policy:
             .context("a node holding no variant's guarantees selected one")?;
         ensure!(
             none.to_string().contains("no qualification variant")
-                && none.to_string().contains("config:test/consumer-qualification")
-                && none.to_string().contains("does not know how to prove test:held"),
+                && none
+                    .to_string()
+                    .contains("config:test/consumer-qualification")
+                && none
+                    .to_string()
+                    .contains("does not know how to prove test:held"),
             "refusal does not name the candidate and its unmet guarantee: {none:#}"
         );
         let mut held = lillux::process_control::HostCapabilities::default();
@@ -876,16 +881,21 @@ product_qualification_policy:
         }
         // Node policy accepting trusted sessions on a node that does not
         // enforce isolation; a qualified mechanism alone is not enforcement.
-        let view = inspection(true, false, false).reported_guarantees(false, &GuaranteeHost::default());
+        let view =
+            inspection(true, false, false).reported_guarantees(false, &GuaranteeHost::default());
         ensure!(
-            relationship(&view) == Ok("runtime_to_external_authoring_worker_trusted_lane".to_owned()),
+            relationship(&view)
+                == Ok("runtime_to_external_authoring_worker_trusted_lane".to_owned()),
             "trusted node: {:?}",
             relationship(&view)
         );
         // Neither: enforced without containment, or nothing at all.
         for (enforced, trusted) in [(true, false), (false, false)] {
-            let view = inspection(trusted, false, false).reported_guarantees(enforced, &GuaranteeHost::default());
-            let refusal = relationship(&view).err().context("a node holding neither selected a variant")?;
+            let view = inspection(trusted, false, false)
+                .reported_guarantees(enforced, &GuaranteeHost::default());
+            let refusal = relationship(&view)
+                .err()
+                .context("a node holding neither selected a variant")?;
             ensure!(
                 refusal.contains("no qualification variant")
                     && refusal.contains("config:codex/consumer-qualification-policy-trusted-lane"),
@@ -893,8 +903,12 @@ product_qualification_policy:
             );
         }
         // Enforced isolation never lets a trusted-session acceptance stand in.
-        let view = inspection(true, false, false).reported_guarantees(true, &GuaranteeHost::default());
-        ensure!(relationship(&view).is_err(), "enforced uncontained node selected a variant");
+        let view =
+            inspection(true, false, false).reported_guarantees(true, &GuaranteeHost::default());
+        ensure!(
+            relationship(&view).is_err(),
+            "enforced uncontained node selected a variant"
+        );
         Ok(())
     }
 }

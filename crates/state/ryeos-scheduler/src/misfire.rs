@@ -173,26 +173,23 @@ pub async fn evaluate_misfires_before<Ctx: SchedulerContext>(
         }
 
         MisfirePolicy::CatchUpBounded(max) => {
-            // Take oldest `max` fires (already in chronological order)
-            let to_fire: Vec<i64> = missed.iter().take(max).copied().collect();
-            let skipped_count = missed.len().saturating_sub(max);
+            let (to_fire, to_skip) = split_bounded(&missed, max);
             tracing::warn!(
                 schedule_id = %spec.schedule_id,
                 missed = missed.len(),
                 catching_up = to_fire.len(),
-                skipped = skipped_count,
+                skipped = to_skip.len(),
                 policy = "catch_up_bounded",
                 max,
                 "misfires detected — catching up bounded"
             );
-            // Skip the fires beyond the bound (newest ones)
-            for &scheduled_at in &missed[max..] {
+            for &scheduled_at in to_skip {
                 let fid = super::types::fire_id(&spec.schedule_id, scheduled_at);
                 record_skip(ctx, &fid, spec, scheduled_at, "misfire_skipped_bounded").await?;
             }
             to_fire
-                .into_iter()
-                .map(|scheduled_at| PendingFire {
+                .iter()
+                .map(|&scheduled_at| PendingFire {
                     fire_id: super::types::fire_id(&spec.schedule_id, scheduled_at),
                     scheduled_at,
                     reason: "misfire_catch_up",
@@ -232,6 +229,13 @@ pub async fn evaluate_misfires_before<Ctx: SchedulerContext>(
         }
     };
     Ok(pending)
+}
+
+/// Split chronologically ordered missed fires under `catch_up_bounded:max`:
+/// the oldest `max` fire, everything newer is skipped. Fewer than `max`
+/// missed fires means every one fires and nothing is skipped.
+fn split_bounded(missed: &[i64], max: usize) -> (&[i64], &[i64]) {
+    missed.split_at(max.min(missed.len()))
 }
 
 async fn record_skip<Ctx: SchedulerContext>(
@@ -339,6 +343,25 @@ mod tests {
             ),
             admitted_capsule_hash: Some("44".repeat(32)),
         }
+    }
+
+    #[test]
+    fn split_bounded_fires_the_oldest_and_never_panics() {
+        let missed: Vec<i64> = (1..=5).collect();
+        let cases: [(usize, &[i64], &[i64]); 5] = [
+            (5, &[1, 2, 3, 4, 5], &[]),
+            (4, &[1, 2, 3, 4], &[5]),
+            (1, &[1], &[2, 3, 4, 5]),
+            (10, &[1, 2, 3, 4, 5], &[]),
+            (0, &[], &[1, 2, 3, 4, 5]),
+        ];
+        for (max, fire, skip) in cases {
+            let (to_fire, to_skip) = split_bounded(&missed, max);
+            assert_eq!(to_fire, fire, "max={max}");
+            assert_eq!(to_skip, skip, "max={max}");
+        }
+        let (to_fire, to_skip) = split_bounded(&[], 5);
+        assert!(to_fire.is_empty() && to_skip.is_empty());
     }
 
     #[test]

@@ -363,7 +363,7 @@ async fn import_filesystem(
         .write_barrier
         .acquire_with_timeout(crate::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
         .map_err(|error| {
-            anyhow::anyhow!("cannot acquire external-content write permit: {error}")
+            anyhow::anyhow!("cannot acquire external-content write permit: {error:#}")
         })?;
     let mut stage = authority
         .require_recovery()?
@@ -525,7 +525,7 @@ pub fn import_managed_activation_component(
         .write_barrier
         .acquire_with_timeout(crate::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
         .map_err(|error| {
-            anyhow::anyhow!("cannot acquire managed external-content write permit: {error}")
+            anyhow::anyhow!("cannot acquire managed external-content write permit: {error:#}")
         })?;
     let mut stage = authority
         .require_recovery()?
@@ -886,7 +886,7 @@ async fn bind_authorized(
             .write_barrier
             .acquire_with_timeout(crate::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
             .map_err(|error| {
-                anyhow::anyhow!("cannot acquire external-content epoch write permit: {error}")
+                anyhow::anyhow!("cannot acquire external-content epoch write permit: {error:#}")
             })?;
         let epoch_guard = authority.acquire_exclusive_guard(true)?;
         state
@@ -931,7 +931,7 @@ async fn bind_authorized(
         .write_barrier
         .acquire_with_timeout(crate::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
         .map_err(|error| {
-            anyhow::anyhow!("cannot acquire external-content binding write permit: {error}")
+            anyhow::anyhow!("cannot acquire external-content binding write permit: {error:#}")
         })?;
     let mut stage = recovery.open_durable_cas_upload_admitted(
         &guard,
@@ -1118,7 +1118,7 @@ async fn bind_authorized(
         )
     })?;
     if let Err(error) = stage.finish_admitted(&guard, &binding_hash) {
-        tracing::warn!(%error, staging_id = %request.staging_id, "binding head published while import receipt remained retryable");
+        tracing::warn!(error = %format!("{error:#}"), staging_id = %request.staging_id, "binding head published while import receipt remained retryable");
     }
     Ok(BindResponse {
         binding_subject_id,
@@ -1164,7 +1164,7 @@ pub async fn scrub(state: Arc<AppState>, context: HandlerContext) -> anyhow::Res
         .write_barrier
         .acquire_with_timeout(crate::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
         .map_err(|error| {
-            anyhow::anyhow!("cannot acquire external-content write permit: {error}")
+            anyhow::anyhow!("cannot acquire external-content write permit: {error:#}")
         })?;
     let cas = authority.cas_store()?;
     let store = authority.large_object_store()?;
@@ -1376,7 +1376,7 @@ fn release_under_guard(
         )
     })?;
     if let Err(error) = stage.finish_admitted(guard) {
-        tracing::warn!(%error, %binding_subject_id, "released binding head published while temporary root remained recoverable");
+        tracing::warn!(error = %format!("{error:#}"), %binding_subject_id, "released binding head published while temporary root remained recoverable");
     }
     Ok(ReleaseResponse {
         binding_subject_id: released.binding_subject_id,

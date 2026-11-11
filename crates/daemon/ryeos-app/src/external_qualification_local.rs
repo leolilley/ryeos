@@ -835,6 +835,7 @@ pub fn qualification_worker_scope_name(placement: &str) -> String {
 /// - no Worker row means the allocation never attached (crash or failed
 ///   attach): the slot is re-planned by its deterministic name and discarded
 ///   if empty. A populated slot is refused, never killed here.
+///
 /// A node without a qualified cgroup scope has no slot to retire.
 pub fn retire_qualification_worker_scope_slot(state: &AppState, placement: &str) -> Result<()> {
     match state.state_store.qualification_worker_process(placement)? {

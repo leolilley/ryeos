@@ -1,19 +1,22 @@
-<!-- ryeos:signed:2026-09-18T23:27:55Z:48248db95e9d54a3b7a1640b5379e62bd31e85dbdd4bebb52a0669443e1fe0e2:dnZYX8XNpTMqxbCPzAjDFkNHJGD+/XnLlmWW1mKjlq49RwkeQq/R8OzPu8+J/g+dyfAnrIFSwfpWzS7mgcmGCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-06T01:00:58Z:74e9b59596578b107f47da7064bf72d9e716c59017df862844baa3c0a15d494f:NNMjv+ySlKuIVoYE9UnNrOBV1CkaSf8E6OebVk/DdW2+PW+Qag3pd/ulBXyqbmBQFyqhVl9VgtmTmWtgBuoJCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/future
 name: self-hosted-implementation-campaigns
 title: Self-Hosted Implementation Campaigns
 description: Scheduled design for RyeOS-owned workers implementing the next RyeOS generation under a strict host/candidate trust boundary
 entry_type: design
-version: "0.4.0"
+version: "0.4.1"
 ```
 
 # Self-hosted implementation campaigns
 
 ## Status
 
-Scheduled next consumer of the landed generic hosted-worker and portable
-placement substrate. Release qualification of the current worker execution,
+A proposed consumer of the generic hosted-worker and portable-placement
+substrate. Earlier planning selected it as the next consumer; current selection
+belongs to the active implementation plan under the
+[platform direction and delivery](platform-direction-and-delivery.md).
+Release qualification of the selected worker execution,
 private candidate workspace, recovery, and explicit publication path remains
 the immediate gate. This document does not describe an unbounded autonomous
 loop or grant deployment authority.
@@ -312,8 +315,10 @@ coherent candidate. Local inference uses its own recorded or qualified-sealed
 execution contract, effects, model/runtime identity, and accounting. It does
 not become correctness authority merely because it is local or reproducible.
 
-The first suitable implementation goal is completion and qualification of the
-serious remote tinygrad path itself. During that bootstrap, the hosted coding
+Earlier planning selected completion and qualification of the serious remote
+tinygrad path as a suitable first implementation goal. That remains a candidate
+workload, not a prerequisite for ordinary application development or a permanent
+requirement on the first campaign. During that bootstrap, the hosted coding
 workload may still use a frontier subscription while RyeOS owns the candidate,
 commands, evidence, recovery, bounds, and publication boundary. After the
 operator installs the accepted generation, later campaigns can use the admitted
@@ -367,6 +372,12 @@ evidence, and make the publication decision without consulting a worker's
 private conversation sideways.
 
 ## Implementation progression
+
+This is the historical local-inference campaign sequence. A newly selected
+campaign must state its own useful goal and finite execution arrangement.
+Same-node campaign acceptance does not depend on remote handoff; qualify that
+extension before relying on it. The platform milestone does not require this
+entire campaign sequence.
 
 1. Release-qualify one same-node hosted worker with ordinary edit, build, and
    focused test tools in a pinned CoW project.
@@ -429,7 +440,9 @@ private conversation sideways.
 
 ## Trigger to implement
 
-This trigger is active. Begin only after the current hosted-worker release
-qualification is green. The first accepted campaign remains a bounded
-single-turn implementation of the local-inference gap; broaden campaign
+Select this work when an actual implementation task needs a RyeOS-owned
+worker and the selected hosted-worker path is release-qualified. Begin with a
+bounded single turn and explicit candidate disposition. The local-inference
+gap is a previously selected proving task; a current plan may choose another
+real consumer without changing the host/candidate trust cut. Broaden campaign
 control only from retained evidence that one turn is insufficient.

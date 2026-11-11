@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-09T02:44:13Z:0ea83db1ed240f21bc25f677cec1fabde733ad3cfe07f3fea6160bb6d8beaa96:aw3XE+UEkp93nHoAJwbHZKYz6gVVDc/G3qtC6F8gaQYQLIR2DRwkJYmG6FEtzAe6vL2jONC1a32rSDbj9GjeBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-11T02:56:40Z:6d220d2884d7ef41cd7bba878d83bbf7e997f2337d8011ecbf3d1fef0469fd1f:B136U3fWAALH7gAB9HbZITV0uHeMAwkPLFzBIgH8h5ihxlagbbD/NIazJpayjUxMLqspdHYOD5ywbzi5rCX0Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - bundle-release
@@ -367,6 +367,11 @@ policies:
         verified_artifact_file_bytes: 268435456
         verified_artifact_total_bytes: 1073741824
         verified_artifact_files: 4096
+  # Trust classes the operator admits for launch roots beyond each kind's
+  # default, per kind (only what the kind schema lets an operator admit).
+  launch_trust:
+    schema: 1
+    admit: {}
   ingest_ignore:
     schema: 2
     patterns:

@@ -78,6 +78,11 @@ pub struct NodeConfig {
 }
 
 impl NodeConfig {
+    /// The callback-only socket the daemon binds beside `uds_path`.
+    pub fn runtime_uds_path(&self) -> PathBuf {
+        ryeos_node_runtime::config::runtime_uds_path_for(&self.uds_path)
+    }
+
     pub fn default_local() -> Result<Self> {
         let config = ryeos_node_runtime::config::Config::load(
             &ryeos_node_runtime::config::ConfigSources::default(),
@@ -161,7 +166,7 @@ impl LocalLifecycleEnv {
             Ok(None) => None,
             Err(err) => {
                 tracing::debug!(
-                    error = %err,
+                    error = %format!("{err:#}"),
                     "daemon.json present but unreadable; treating as no hint"
                 );
                 None

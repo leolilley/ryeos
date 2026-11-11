@@ -5,15 +5,15 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use crate::AI_DIR;
 use crate::protocol_vocabulary::{
-    is_compatible_lifecycle_detached, is_compatible_shape_mode, validate_env_name, CallbackChannel,
-    EnvInjectionSource,
+    CallbackChannel, EnvInjectionSource, is_compatible_lifecycle_detached,
+    is_compatible_shape_mode, validate_env_name,
 };
-use crate::protocols::descriptor::ProtocolDescriptor;
 use crate::protocols::SUPPORTED_PROTOCOL_ABI_VERSION;
+use crate::protocols::descriptor::ProtocolDescriptor;
 use crate::resolution::TrustClass;
 use crate::trust::TrustStore;
-use crate::AI_DIR;
 
 /// A protocol descriptor that has been loaded, verified, and validated.
 #[derive(Debug, Clone)]
@@ -425,10 +425,9 @@ fn validate_protocol_descriptor(
     }
 
     if let Some(class) = &desc.captured_compatible_callback {
-        let evidence_bounded = desc
-            .execution_evidence
-            .as_ref()
-            .is_some_and(|projector| projector.validate().is_ok() && projector.limits.max_calls == 1);
+        let evidence_bounded = desc.execution_evidence.as_ref().is_some_and(|projector| {
+            projector.validate().is_ok() && projector.limits.max_calls == 1
+        });
         if desc.qualification_callback
             != Some(crate::protocols::QualificationCallbackAuthority::RemoteConsumer)
             || desc.callback_channel != CallbackChannel::Http

@@ -800,7 +800,8 @@ fn prove_unguarded(
         .policy_ref
         .as_deref()
         .context("selected product relationship has no qualification policy")?;
-    let policy_source = resolve_current_bundle_qualification_policy_for_local_run(state, policy_ref)?;
+    let policy_source =
+        resolve_current_bundle_qualification_policy_for_local_run(state, policy_ref)?;
     if let Some(consumer_context) = &policy_source.policy.consumer_execution_context {
         consumer_context.validate_relationship_consumer(&relationship.consumer)?;
     }

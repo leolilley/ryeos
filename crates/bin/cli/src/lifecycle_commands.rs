@@ -2524,6 +2524,36 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
                 }));
             }
         }
+        // The callback-only socket sandboxed tools are handed; a node cannot
+        // start unless this one binds too.
+        let runtime_uds_path = config.runtime_uds_path();
+        if !lillux::local_ipc::local_endpoint_path_addressable(&runtime_uds_path) {
+            status = FAIL;
+            detail.insert("uds_runtime".into(), serde_json::json!({
+                "path": runtime_uds_path,
+                "error": "path exceeds the local socket length limit",
+                "note": "configure a shorter uds_path; the callback socket is the control socket's name plus `-runtime`",
+            }));
+        } else {
+            match std::os::unix::net::UnixListener::bind(&runtime_uds_path) {
+                Ok(l) => {
+                    drop(l);
+                    let _ = std::fs::remove_file(&runtime_uds_path);
+                    detail.insert(
+                        "uds_runtime".into(),
+                        serde_json::json!({ "path": runtime_uds_path, "status": "bindable" }),
+                    );
+                }
+                Err(e) => {
+                    status = FAIL;
+                    detail.insert("uds_runtime".into(), serde_json::json!({
+                        "path": runtime_uds_path,
+                        "error": format!("{e}"),
+                        "note": "with no daemon running this is usually a stale socket file — remove it",
+                    }));
+                }
+            }
+        }
         checks.push(check("sockets", status, serde_json::Value::Object(detail)));
     }
 

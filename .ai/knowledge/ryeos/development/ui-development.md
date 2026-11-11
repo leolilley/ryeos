@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-10-19T22:29:39Z:4c4167248107e59a4afd74a7e83f73f1899df7cbd5c018423713cf3abb1ee8a4:XaA1NQEbvTTvPBTEtb02m1p0lnCshNyHnSu6wYM7Q/8QKWrhByMsRiWvCIK/MlZ/LdddNKQoMhTa9tgJtn7sCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-08T06:40:08Z:baa410f009fbe20ffece98f6246d9a0d88f02d5f900903bc95ed7628cbb38ef9:jYZzHybIiBMv3hukVBH05mHckzGQ+o64fO9STBE2zfkk05AF5aLoC5GklVBxGPzWgUUgbsf/gYHXBLXpKl1bBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "ui-development"
@@ -11,7 +11,7 @@ version: "3.0.0"
 # Browser UI Development Workflow
 
 Read `ui-design-system.md` first. Preserve the Gruvbox palette, tiled view sets,
-launcher, optional slots, authored ambient character and shared Rust-owned UI
+launcher, optional slots and shared Rust-owned UI
 semantics. Do not turn RyeOS into a generic sidebar application.
 
 ## Ownership
@@ -477,7 +477,7 @@ The browser is a renderer, not a second application model:
 - `crates/daemon/ryeos-ui/src/assets.rs` serves only that registered closure.
 
 The installed closure is exactly `index.html`, `ryeos_ui.js`, `ryeos_ui.css`,
-`ryeos_three.js`, `ryeos_web.js` and `ryeos_web_bg.wasm`. There is no alternate
+`ryeos_web.js` and `ryeos_web_bg.wasm`. There is no alternate
 browser renderer, compatibility bootstrap or runtime fallback.
 
 Svelte owns component lifecycle and presentation. Rust remains the sole owner
@@ -568,7 +568,7 @@ npm run build:renderer
 
 The build writes a private generation to `target/ui-browser-stage`; it does not
 publish `pkg/`. The stage validator rejects extra chunks, source maps, bare
-imports, external URLs and any lazy chunk other than `ryeos_three.js`.
+imports, external URLs and any lazy chunk.
 
 `scripts/dev-ui-assets.sh` serves an already assembled generation with manual
 refresh; it is not the source hot-reload workflow above. Use staged/installed
@@ -590,7 +590,7 @@ wasm-bindgen enum, optional and `u64`/BigInt behavior. The mounted-root browser
 test additionally requires the exact Playwright browser revision from the
 declared development environment; never substitute a host browser silently.
 
-## Ambient scene
+## Operational projections
 
 Operational projections preserve each domain owner's visibility rules. A seat
 cookie or compiled UI admission is not permission to read every principal's
@@ -598,7 +598,7 @@ records. Schedule lists and dimension summaries use the existing scheduler's
 execution-authority owner filter with the authenticated caller principal, not
 the node identity, source signer or selected project. They report their owner
 and coverage explicitly; empty caller-owned results never mean the node has no
-schedules. Scene labels must retain that scope. Do not add a competing scheduler
+schedules. Labels must retain that scope. Do not add a competing scheduler
 read owner or a new production dependency just to name an App-owned DB type.
 
 Generic execution tables activate exact `selection.thread_id` inspection.
@@ -608,28 +608,10 @@ revocation rejects future seat/dispatch admission; a surviving Surface binding
 cannot replace that root. Already-admitted execution owners retain their normal
 lifecycle, rather than being cancelled by presentation revocation.
 
-`scene_model.rs` emits semantic scene objects. `AmbientLayer.svelte` retains one
-`ryeos_ambient_scene.js` controller and updates it from accepted envelopes.
-Three.js is the exact local `0.128.0` build chunk; there is no CDN import.
-Visibility comes from the authored surface projection, never a browser-side
-view-name exception. Animation state does not become RyeOS semantic state.
+## Field views
 
-## Scene, atlas and field views
-
-Map and Atlas are ordinary views placed by the shared Rust-owned layout tree.
-A compact execution map may occupy a supporting tile while the same view can be
-promoted into the central region; Atlas usually benefits from a larger region
-with selection or evidence in adjacent tiles. These are authored
-arrangements, not fixed browser positions.
-
-`SceneView.svelte` receives only the projected scene and owning tile identity.
-It must not accept a browser-authored map/atlas kind, rendering mode or visual
-style. A scene containing the typed atlas projection renders its projected
-atlas controls and interactions; another scene renders its generic semantic
-objects. Rust remains authoritative for which model exists and where it is
-placed.
-
-Field is likewise a normal typed view. Svelte owns its toolbar, event rail,
+Field is a normal typed view placed by the shared Rust-owned layout tree.
+Placement is authored arrangement, not a fixed browser position. Svelte owns its toolbar, event rail,
 details, accessibility tree and preview composition. The retained canvas
 controller owns only bounded drawing, hit testing and pointer mechanics. Never
 restore a hidden DOM renderer, compatibility mount function or browser-side

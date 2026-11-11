@@ -642,7 +642,7 @@ where
         if let Err(error) = lillux::remove_dir_all_durable(&staging) {
             tracing::warn!(
                 path = %staging.display(),
-                error = %error,
+                error = %format!("{error:#}"),
                 "bundle replacement committed but previous generation cleanup failed"
             );
         }

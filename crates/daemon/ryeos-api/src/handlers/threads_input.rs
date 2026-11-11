@@ -484,7 +484,7 @@ pub async fn handle(
                 .map_err(|error| HandlerError::BadRequest(format!("item_ref: {error}")))?;
             let thread_id = ryeos_app::thread_lifecycle::new_thread_id();
             ryeos_app::execution_policy::authorize_standard_local_live_execution(&ctx.scopes)
-                .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
+                .map_err(|error| HandlerError::Forbidden(format!("{error:#}")))?;
             let mut project_ctx =
                 ryeos_executor::execution::project_source::resolve_project_context(
                     &state,
@@ -503,14 +503,14 @@ pub async fn handle(
                     ctx.scopes.clone(),
                     &state.isolation,
                 )
-                .map_err(|error| HandlerError::Internal(error.to_string()))?;
+                .map_err(|error| HandlerError::Internal(format!("{error:#}")))?;
             let launch_provenance =
                 ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
                     project_ctx.effective_path.clone(),
                     project_ctx.request_engine.clone(),
                     resolved_authority.project.clone(),
                 )
-                .map_err(|error| HandlerError::Internal(error.to_string()))?;
+                .map_err(|error| HandlerError::Internal(format!("{error:#}")))?;
             let launch_options = admit_fresh_launch(FreshLaunchAdmission {
                 item_ref: &parsed_ref,
                 ref_bindings: &ref_bindings,
@@ -554,7 +554,7 @@ pub async fn handle(
         let detail = state
             .state_store
             .get_thread(&thread_id)
-            .map_err(|e| HandlerError::Internal(e.to_string()))?
+            .map_err(|e| HandlerError::Internal(format!("{e:#}")))?
             .ok_or(HandlerError::NotFound)?;
         ctx.require_owner(detail.requested_by.as_deref())?;
 
@@ -695,7 +695,7 @@ pub async fn handle(
     let prior_resume = state
         .state_store
         .get_launch_metadata(&previous.thread_id)
-        .map_err(|error| HandlerError::Internal(error.to_string()))?
+        .map_err(|error| HandlerError::Internal(format!("{error:#}")))?
         .and_then(|metadata| metadata.resume_context)
         .ok_or_else(|| {
             HandlerError::Internal(format!(
@@ -787,7 +787,7 @@ pub async fn handle(
             prepared.launch_metadata(),
             initial_audit_events,
         )
-        .map_err(|e| HandlerError::Internal(e.to_string()))?;
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
 
     use ryeos_app::thread_lifecycle::OperatorContinuation;
     match outcome {
@@ -829,7 +829,7 @@ pub async fn handle(
                 let launch_metadata = state
                     .state_store
                     .get_launch_metadata(&successor_id)
-                    .map_err(|error| HandlerError::Internal(error.to_string()))?
+                    .map_err(|error| HandlerError::Internal(format!("{error:#}")))?
                     .ok_or_else(|| {
                         HandlerError::Internal(format!(
                             "operator successor {successor_id} has no persisted launch metadata"

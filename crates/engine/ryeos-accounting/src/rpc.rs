@@ -107,10 +107,12 @@ impl ProviderAttemptPrepareParams {
         if self.attempt_number == 0 || self.turn == 0 {
             return Err("turn and attempt_number are 1-based".to_string());
         }
-        self.request.validate().map_err(|error| error.to_string())?;
+        self.request
+            .validate()
+            .map_err(|error| format!("{error:#}"))?;
         self.transport
             .validate()
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| format!("{error:#}"))?;
         Ok(())
     }
 }
@@ -383,7 +385,7 @@ impl ProviderAttemptSettleParams {
     pub fn validate(&self) -> Result<(), String> {
         self.coordinate
             .validate()
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| format!("{error:#}"))?;
         self.spend.validate()?;
         self.tokens.validate()?;
         if self.answer.is_some() && self.retry.is_some() {
@@ -393,7 +395,7 @@ impl ProviderAttemptSettleParams {
             retry.validate()?;
         }
         self.answer.as_ref().map_or(Ok(()), |answer| {
-            answer.validate().map_err(|error| error.to_string())
+            answer.validate().map_err(|error| format!("{error:#}"))
         })
     }
 }
@@ -478,7 +480,7 @@ impl ProviderAttemptLocalStreamStartParams {
         }
         self.coordinate
             .validate()
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| format!("{error:#}"))?;
         if !matches!(
             self.coordinate.transport,
             ryeos_provider_contract::TransportCoordinate::AdmittedLocalWorker { .. }

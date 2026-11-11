@@ -63,7 +63,7 @@ pub async fn deliver(
     state: Arc<AppState>,
 ) -> Result<Value, HandlerError> {
     req.validate()
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let authenticated_target_principal = authenticated_target_node(&ctx, &req.target_site_id)?;
     if req.parent_site_id != state.threads.site_id() {
         return Err(HandlerError::Forbidden(
@@ -148,12 +148,12 @@ async fn deliver_locked(
         ));
     }
     let terminal_attestation = ryeos_state::objects::Attestation::from_value(&terminal_value)
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     terminal_attestation
         .verify_with_key(&target_key)
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let terminal = RemoteFollowTerminalEvidence::from_attestation(&terminal_attestation)
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     if terminal.operation_id != req.operation_id
         || terminal.reservation_attestation_hash != req.reservation_attestation_hash
         || terminal.child_chain_root_id != req.child_chain_root_id
@@ -167,12 +167,12 @@ async fn deliver_locked(
     }
 
     let reservation_attestation = ryeos_state::objects::Attestation::from_value(&reservation_value)
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     reservation_attestation
         .verify_with_key(state.identity.verifying_key())
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let reservation = RemoteFollowReservationEvidence::from_attestation(&reservation_attestation)
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     if reservation.parent_site_id != req.parent_site_id
         || reservation.parent_node_signer_fingerprint != state.identity.fingerprint()
         || reservation.child_chain_root_id != req.child_chain_root_id
@@ -206,7 +206,7 @@ async fn deliver_locked(
         reservation_entry,
         closure_options.limits(),
     )
-    .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let operation = RemoteFollowDeliveryJobOperation::new(
         RemoteFollowDeliveryJobRole::Parent,
         req.operation_id.clone(),
@@ -250,7 +250,7 @@ async fn deliver_locked(
         .map_err(internal)?;
         response
             .validate_against(&req)
-            .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+            .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
         return serde_json::to_value(response).map_err(internal);
     }
     let attempt_id = format!("remote-follow-parent-attempt:{}", uuid::Uuid::new_v4());
@@ -279,7 +279,7 @@ async fn deliver_locked(
             &req.target_chain_head_hash,
             &source_head.target_hash,
         )
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
         drop(guard);
 
         let fact_payload = serde_json::json!({
@@ -629,7 +629,7 @@ pub async fn recover_durable_remote_follow_deliveries(state: &AppState) -> Resul
                         ryeos_state::SyncJobAttemptState::Failed,
                         ryeos_state::SyncJobState::Retryable,
                         "delivery_retryable",
-                        Some(bounded_error(&error.to_string())),
+                        Some(bounded_error(&format!("{error:#}"))),
                         Some(serde_json::to_value(request)?),
                     )?;
                 }

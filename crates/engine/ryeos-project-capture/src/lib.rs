@@ -169,8 +169,7 @@ pub fn copy_project_snapshot_closure(
     snapshot_hash: &str,
 ) -> Result<ProjectSnapshotTransferMeasurement> {
     let target = lillux::CasStore::from_pinned_root(root.try_clone()?);
-    let mut entries =
-        Vec::with_capacity(closure.object_hashes.len() + closure.blob_hashes.len());
+    let mut entries = Vec::with_capacity(closure.object_hashes.len() + closure.blob_hashes.len());
     let mut total_bytes = 0_u64;
     for hash in &closure.object_hashes {
         let value = source
@@ -216,7 +215,7 @@ pub fn copy_project_snapshot_closure(
         blob_count: u64::try_from(closure.blob_hashes.len())?,
         total_bytes,
     };
-    let observed = inspect_project_snapshot_transfer(&root, snapshot_hash)?;
+    let observed = inspect_project_snapshot_transfer(root, snapshot_hash)?;
     anyhow::ensure!(
         observed == expected,
         "prepared base snapshot transfer changed during verification"

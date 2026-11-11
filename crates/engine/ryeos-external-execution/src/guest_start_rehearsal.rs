@@ -1004,7 +1004,7 @@ fn prepare(
         bootstrap.post_execution_timeout_seconds = limits.post_execution_timeout_seconds;
         bootstrap.candidate_export_max_bytes = limits.candidate_export_max_bytes;
         bootstrap.channel_max_bytes = limits.channel_max_bytes;
-        bootstrap.native_journal = limits.native_journal.clone();
+        bootstrap.native_journal = limits.native_journal;
         bootstrap.report_capabilities = limits.report_capabilities;
     }
     bootstrap.validate()?;
@@ -1254,8 +1254,18 @@ pub fn export_guest_start_rehearsal(
             )?;
         }
         write_file(&export, PLAN_NAME, &serde_json::to_vec(plan)?, 0o600)?;
-        write_file(&export, "assignment.b64", plan.assignment_b64.as_bytes(), 0o644)?;
-        write_file(&export, "expected-mailbox", plan.mailbox_root.as_bytes(), 0o644)?;
+        write_file(
+            &export,
+            "assignment.b64",
+            plan.assignment_b64.as_bytes(),
+            0o644,
+        )?;
+        write_file(
+            &export,
+            "expected-mailbox",
+            plan.mailbox_root.as_bytes(),
+            0o644,
+        )?;
         copy_file(
             &export,
             EXPORT_HOST_NAME,
@@ -1416,8 +1426,7 @@ pub fn run_rehearsal_host_if_requested() {
 /// account, with the export copied in beside `/ryeos`. Returns the script's
 /// exit code, after printing its output.
 fn replay_export(export: &Path) -> Result<i32> {
-    let directory =
-        lillux::PinnedDirectory::open(export)?.context("rehearsal export is absent")?;
+    let directory = lillux::PinnedDirectory::open(export)?.context("rehearsal export is absent")?;
     let tar_file = directory
         .open_pinned_regular(OsStr::new("guest-runtime.tar"), false)?
         .context("rehearsal export has no runtime tar")?;
@@ -1433,8 +1442,9 @@ fn replay_export(export: &Path) -> Result<i32> {
             profile = Some(serde_json::from_slice::<GuestOwnerRuntimeProfile>(&bytes)?);
         }
     }
-    let lillux::GuestRuntimeAccount::Unix { uid, gid } =
-        profile.context("exported runtime has no owner profile")?.account;
+    let lillux::GuestRuntimeAccount::Unix { uid, gid } = profile
+        .context("exported runtime has no owner profile")?
+        .account;
     let mut files = Vec::new();
     for entry in std::fs::read_dir(export)? {
         let name = entry?
@@ -1444,7 +1454,11 @@ fn replay_export(export: &Path) -> Result<i32> {
         let file = directory
             .open_pinned_regular(OsStr::new(&name), false)?
             .with_context(|| format!("export file {name:?} vanished"))?;
-        let mode = if name == "run.sh" || name == "rehearsal-host" { 0o755 } else { 0o644 };
+        let mode = if name == "run.sh" || name == "rehearsal-host" {
+            0o755
+        } else {
+            0o644
+        };
         files.push((name, file, mode));
     }
     let package_bytes = files
@@ -1492,8 +1506,7 @@ fn replay_export(export: &Path) -> Result<i32> {
 /// `/ryeos` layout an activation leaves (an export's `run.sh` lays it out):
 /// there is no enclosure, because the machine is the enclosure.
 fn on_host(export: &Path) -> Result<GuestStartRehearsalOutcome> {
-    let directory =
-        lillux::PinnedDirectory::open(export)?.context("rehearsal export is absent")?;
+    let directory = lillux::PinnedDirectory::open(export)?.context("rehearsal export is absent")?;
     let plan_file = directory
         .open_pinned_regular(OsStr::new(PLAN_NAME), false)?
         .context("rehearsal export has no plan")?;

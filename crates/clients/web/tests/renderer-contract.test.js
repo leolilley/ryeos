@@ -8,7 +8,6 @@ const packageRoot = new URL("pkg/", root);
 const manifestUrl = new URL("../../daemon/ryeos-ui/web-assets.json", root);
 const expected = [
   "index.html",
-  "ryeos_three.js",
   "ryeos_ui.css",
   "ryeos_ui.js",
   "ryeos_web.js",
@@ -43,17 +42,11 @@ test("compiled entry contains no predecessor renderer vocabulary", async () => {
   }
 });
 
-test("scene and field views retain the shared projection boundary", async () => {
-  const scene = await readFile(new URL("browser/views/SceneView.svelte", root), "utf8");
+test("the field view retains the shared projection boundary", async () => {
   const renderer = await readFile(new URL("browser/views/ViewRenderer.svelte", root), "utf8");
   const field = await readFile(new URL("browser/views/FieldView.svelte", root), "utf8");
 
-  assert.match(renderer, /<SceneView scene=\{model\.scene\} \/>/);
-  assert.doesNotMatch(renderer, /SceneView[^\n]*(kind|mode|style)=/);
-  assert.match(scene, /interface Props \{ scene: RyeOsSceneModel \}/);
-  assert.doesNotMatch(scene, /namespace_atlas|paper_3d|flat_2d|AmbientOptions/);
-  assert.doesNotMatch(scene, /set_atlas_|\?\? "project"/);
-  assert.match(scene, /scene\.camera\.fov_degrees/);
+  assert.match(renderer, /<FieldView field=\{model\.field\} \{instanceKey\} \/>/);
   assert.match(field, /new FieldCanvasController\(canvas, \{/);
   assert.doesNotMatch(field, /canCompareEntity/);
   assert.doesNotMatch(field, /mountField|replaceChildren|innerHTML/);

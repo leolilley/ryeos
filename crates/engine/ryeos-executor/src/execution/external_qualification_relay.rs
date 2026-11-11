@@ -281,7 +281,7 @@ impl ExternalQualificationRelayPump {
 impl Drop for ExternalQualificationRelayPump {
     fn drop(&mut self) {
         if let Err(error) = self.stop_and_join() {
-            tracing::error!(%error, "Q relay stopped with an error before cleanup handoff");
+            tracing::error!(error = %format!("{error:#}"), "Q relay stopped with an error before cleanup handoff");
         }
     }
 }

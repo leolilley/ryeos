@@ -431,7 +431,7 @@ pub fn normalize_hook_dispatch_result(
         let failure = (!error.is_null()).then(|| HookDispatchFailure {
             kind: HookDispatchFailureKind::Child,
             message: hook_child_failure(format!(
-                "subprocess failed (outcome_code={}): {error}",
+                "subprocess failed (outcome_code={}): {error:#}",
                 outcome_code.as_deref().unwrap_or("unknown")
             )),
         });

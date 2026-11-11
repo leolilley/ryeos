@@ -928,7 +928,7 @@ fn uncertainty_text(
 
 /// The logged reason for a contact that failed with an error.
 fn contact_error_text(error: &anyhow::Error) -> String {
-    bounded_text(&format!("contact error: {error}"))
+    bounded_text(&format!("contact error: {error:#}"))
 }
 
 fn quarantine_qualification(

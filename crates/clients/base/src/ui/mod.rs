@@ -1,8 +1,8 @@
 //! RyeOS UI core.
 //!
 //! RyeOS is the WASM-led browser UI model. Rust owns RyeOS product state,
-//! reducers, semantic view models, scene models, and platform effects. Browser
-//! JavaScript owns adapters for fetch/EventSource/DOM/Three.js and returns
+//! reducers, semantic view models, and platform effects. Browser
+//! JavaScript owns adapters for fetch/EventSource/DOM and returns
 //! events/effect results to this core.
 
 pub mod admission_operation;
@@ -32,7 +32,6 @@ pub mod presentation_initialization;
 pub mod presentation_state;
 pub mod reducer;
 mod reproof;
-pub mod scene_model;
 pub mod seat;
 pub mod seat_digest;
 pub mod source_key;
@@ -79,7 +78,6 @@ pub use model::{
     RyeOsTransportState,
 };
 pub use reproof::AuthenticatedReproofGuard;
-pub use scene_model::RyeOsSceneModel;
 pub use seat::{InputRoute, InvokeTemplate, SeatEvent, SeatEventKind, SeatFold, SeatLog};
 pub use seat_digest::{SeatPayloadDigestError, seat_payload_digest};
 pub use source_key::{RyeOsSourceChannel, RyeOsSourceInstanceKey};

@@ -3160,13 +3160,15 @@ mod owner_report_sink_tests {
             allocation_request_digest: "a".repeat(64),
             bootstrap_digest: "b".repeat(64),
         };
-        let exit =
-            GuestSupervisorExit::from_raw_tail(GuestSupervisorStatus::Code(126), b"cause\n");
+        let exit = GuestSupervisorExit::from_raw_tail(GuestSupervisorStatus::Code(126), b"cause\n");
         sink.publish(exit.clone()).unwrap();
         let path = directory.path().join("owner-report.json");
         let metadata = std::fs::metadata(&path).unwrap();
         assert_eq!(metadata.permissions().mode() & 0o7777, 0o600);
-        assert_eq!(metadata.uid(), std::fs::metadata(directory.path()).unwrap().uid());
+        assert_eq!(
+            metadata.uid(),
+            std::fs::metadata(directory.path()).unwrap().uid()
+        );
         assert_eq!(
             GuestOwnerReportFile::decode_for(
                 &std::fs::read(&path).unwrap(),

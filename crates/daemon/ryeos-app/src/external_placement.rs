@@ -4250,7 +4250,7 @@ pub fn inspect_external_session_controller_transport(
 const OWNER_REPORT_POLL_EVERY_MISSES: u32 = 4;
 
 fn owner_report_check_due(misses: u32) -> bool {
-    misses % OWNER_REPORT_POLL_EVERY_MISSES == 0
+    misses.is_multiple_of(OWNER_REPORT_POLL_EVERY_MISSES)
 }
 
 /// The supervisor exit a mailbox file reports, when it is exactly this
@@ -5908,7 +5908,7 @@ impl<'a> ExternalPlacementOwner<'a> {
                 prior.reservation.startup_deadline_ms,
             )
         } else {
-            controller_clock::require_for_new_windows(&*self.state)?;
+            controller_clock::require_for_new_windows(self.state)?;
             let now = lillux::time::timestamp_millis();
             (
                 now,
@@ -6253,7 +6253,7 @@ impl<'a> ExternalPlacementOwner<'a> {
             );
             expected
         } else {
-            controller_clock::require_for_new_windows(&*self.state)?;
+            controller_clock::require_for_new_windows(self.state)?;
             let now = lillux::time::timestamp_millis();
             let contact_deadline_ms = now
                 .checked_add(i64::from(contract.contact_timeout_seconds) * 1_000)
@@ -12839,8 +12839,7 @@ mod tests {
             ExternalPlacementBackendRegistry::from_backends(vec![without.clone()]).unwrap();
         let error = registry
             .qualify(&contract, &credential, &admitted)
-            .err()
-            .expect("an adapter without the relay capability must be refused");
+            .expect_err("an adapter without the relay capability must be refused");
         assert!(
             error.to_string().contains("ControllerFileRelay"),
             "{error:#}"
@@ -12863,8 +12862,7 @@ mod tests {
         contract.settings = serde_json::json!({"owner_id": "other"});
         let error = registry
             .qualify(&contract, &credential, &admitted)
-            .err()
-            .expect("a mismatched relay scope must be refused");
+            .expect_err("a mismatched relay scope must be refused");
         assert!(
             error.to_string().contains("relay scope setting differs"),
             "{error:#}"
@@ -15172,6 +15170,7 @@ mod tests {
             owner_report_exit_for("T", &good, occurrence, &allocation, &bootstrap),
             Some(exit)
         );
+        let wrong_identity = "c".repeat(64);
         // Wrong identity, malformed and non-canonical files are all ignored.
         for (bytes, occ, alloc, boot) in [
             (
@@ -15183,14 +15182,14 @@ mod tests {
             (
                 good.clone(),
                 occurrence,
-                "c".repeat(64).leak() as &str,
+                wrong_identity.as_str(),
                 bootstrap.as_str(),
             ),
             (
                 good.clone(),
                 occurrence,
                 allocation.as_str(),
-                "c".repeat(64).leak() as &str,
+                wrong_identity.as_str(),
             ),
             (
                 b"{\"exit\":".to_vec(),

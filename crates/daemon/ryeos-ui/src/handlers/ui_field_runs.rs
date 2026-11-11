@@ -96,7 +96,7 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
     })?;
     let limit = request.limit.clamp(1, MAX_LIMIT);
     let facets = normalize_facet_filters(request.facets)
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let project_root = caller.project_query_identity()?;
     let filter = ThreadListFilter {
         // A mutable SQL scope cannot be a negative authorization proof: it
@@ -578,7 +578,7 @@ fn add_run_definition_versions(
         }];
         let family_id = format!("definition-family:{definition_ref}");
         let definition_id = format!("definition:{definition_ref}@{digest}");
-        let label = super::ui_graph_topology::label_for_bare_id(
+        let label = super::signed_item_topology::label_for_bare_id(
             definition_ref
                 .split_once(':')
                 .map_or(definition_ref.as_str(), |(_, bare)| bare),
@@ -679,7 +679,7 @@ fn add_run_definition_versions(
             Err(error) => {
                 builder.warn(
                     "external_realization_invalid",
-                    format!("run `{thread_id}` carries an invalid realization set: {error}"),
+                    format!("run `{thread_id}` carries an invalid realization set: {error:#}"),
                 );
             }
         }
@@ -730,7 +730,7 @@ fn add_run_source_closure(
         Err(error) => {
             builder.warn(
                 "source_closure_invalid",
-                format!("admitted source binding is invalid: {error}"),
+                format!("admitted source binding is invalid: {error:#}"),
             );
             return Ok(());
         }
@@ -808,7 +808,7 @@ fn add_run_source_closure(
     builder.add_entity(FieldFactEntity {
         id: source_id.clone(),
         kind: "admitted_source_closure".to_owned(),
-        label: super::ui_graph_topology::label_for_bare_id(
+        label: super::signed_item_topology::label_for_bare_id(
             binding
                 .owner
                 .canonical_ref
@@ -869,7 +869,7 @@ fn add_run_root_source(
     builder.add_entity(FieldFactEntity {
         id: source_id.clone(),
         kind: "source_version".to_string(),
-        label: super::ui_graph_topology::label_for_bare_id(
+        label: super::signed_item_topology::label_for_bare_id(
             source
                 .resolved_ref
                 .split_once(':')

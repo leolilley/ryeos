@@ -16,10 +16,6 @@ authority decisions.
 - Playwright: `1.63.0`, resolved by the exact lockfile.
 - Playwright Chromium: revision `1243` (Chrome for Testing
   `153.0.8010.12`); headless shell revision `1243`; ffmpeg revision `1011`.
-- Three.js: `0.128.0`; packaged `pkg/ryeos_three.js` SHA-256
-  `af527c374b56b8688737a42d7fcea7cb8aaeb57a4e3c6da98b4dffd55bcc3514`.
-- Retained Three.js license SHA-256:
-  `7dddf7c5b8fd10ee654db8857d75d104b5557889aa5a91fc4ca545ea7c07062f`.
 - Rust-generated fixture SHA-256:
   `e538e3e434737e4beb24f00ced666550939430ea5d852f816a33257f49098e2d`.
 - Packaged `pkg/` asset-tree digest: SHA-256
@@ -28,8 +24,7 @@ authority decisions.
   under `pkg/`, with paths relative to this package directory.
 
 The fixture is produced by the checked-in
-`ryeos-client-base` `view_set_visual_fixture` example. The renderer receives
-a fixed ambient random source through its browser-service adapter and the
+`ryeos-client-base` `view_set_visual_fixture` example. The
 browser context enforces reduced motion. No semantic fixture is handwritten in
 JavaScript.
 
@@ -47,7 +42,7 @@ runs using the exact inputs above:
 | `work-390.png` | `5402bd5b50df26fc29dd972b217114eb8e6e970f0706ba11e0a2ff8e547a96f2` |
 
 The qualification also checks native focus, exact binding-wire payloads,
-semantic HTML, authored code/scene projections, narrow layout reachability,
+semantic HTML, authored code projections, narrow layout reachability,
 non-overlapping input composition and reduced-motion behavior.
 
 ## Qualification boundary

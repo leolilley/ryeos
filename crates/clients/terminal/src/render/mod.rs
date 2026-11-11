@@ -9,9 +9,9 @@
 //! only color authority (tone → palette; draw sites never invent
 //! colors); `text` is width-aware string shaping; `primitives` are raw
 //! surface ops; `chrome` is bars/frames/docks; `widgets/*` is one file
-//! per widget primitive (incl. the generic `scene` renderer);
+//! per widget primitive;
 //! `dialog`/`input` are compositions. This file orchestrates: layout
-//! traversal, the empty-center backdrop, view dispatch.
+//! traversal, view dispatch.
 
 mod chrome;
 mod dialog;
@@ -92,31 +92,9 @@ fn build_surface(vm: &RyeOsViewModel, width: usize, height: usize) -> TextSurfac
     } else {
         chrome::draw_docks(&mut surface, body, vm)
     };
-    let draw_backdrop_underlay = vm.view_set.as_ref().is_some_and(|set| set.root.is_some())
-        && vm.session.ambient.show_background
-        && vm
-            .session
-            .ambient
-            .opacity
-            .is_some_and(|opacity| opacity > 0.0 && opacity < 1.0);
     if let Some(root) = vm.view_set.as_ref().and_then(|set| set.root.as_ref()) {
-        if draw_backdrop_underlay && let Some(backdrop) = &vm.backdrop {
-            widgets::scene::draw_scene(&mut surface, center, backdrop);
-        }
         let border = theme::border_for(&vm.presentation.chrome.border);
-        draw_layout_node(
-            &mut surface,
-            center,
-            root,
-            border,
-            vm.now_ms,
-            draw_backdrop_underlay,
-        );
-    } else if let Some(backdrop) = &vm.backdrop {
-        // Empty center: the backdrop is content — the ONE generic scene
-        // renderer draws it (particles twinkle by generation). No
-        // per-art code, no background enum.
-        widgets::scene::draw_scene(&mut surface, center, backdrop);
+        draw_layout_node(&mut surface, center, root, border, vm.now_ms);
     }
 
     if let Some(active_dialog) = vm.dialogs.first() {
@@ -133,7 +111,6 @@ fn draw_layout_node(
     node: &RyeOsLayoutNodeVm,
     border: Option<Border>,
     now_ms: u64,
-    preserve_background: bool,
 ) {
     if rect.w == 0 || rect.h == 0 {
         return;
@@ -200,7 +177,6 @@ fn draw_layout_node(
                     input.as_ref(),
                     border,
                     now_ms,
-                    preserve_background && *background_transparent,
                 );
             }
         }
@@ -211,23 +187,9 @@ fn draw_layout_node(
             second,
         } => {
             let (first_rect, second_rect) = split_rect(rect, *axis, *ratio);
-            draw_layout_node(
-                surface,
-                first_rect,
-                first,
-                border,
-                now_ms,
-                preserve_background,
-            );
+            draw_layout_node(surface, first_rect, first, border, now_ms);
             if let Some(second_rect) = second_rect {
-                draw_layout_node(
-                    surface,
-                    second_rect,
-                    second,
-                    border,
-                    now_ms,
-                    preserve_background,
-                );
+                draw_layout_node(surface, second_rect, second, border, now_ms);
             }
         }
     }
@@ -323,12 +285,6 @@ fn draw_view(surface: &mut TextSurface, mut rect: Rect, view: &RyeOsViewVm, now_
         widgets::rows::draw_rows(surface, rect, columns, rows, now_ms);
         return;
     }
-    // Scenes (map/atlas) draw through the ONE generic scene renderer —
-    // the same renderer the backdrop uses. No widget-specific scene code.
-    if let RyeOsViewVm::Map { scene } | RyeOsViewVm::Atlas { scene } = view {
-        widgets::scene::draw_scene(surface, rect, scene);
-        return;
-    }
     if let RyeOsViewVm::Sections { sections, .. } = view {
         widgets::sections::draw_sections(surface, rect, sections, now_ms);
         return;
@@ -379,9 +335,6 @@ fn draw_view(surface: &mut TextSurface, mut rect: Rect, view: &RyeOsViewVm, now_
         RyeOsViewVm::Document { .. } => unreachable!("document views return above"),
         RyeOsViewVm::Rows { .. } => unreachable!("rows views return above"),
         RyeOsViewVm::Timeline { .. } => unreachable!("timeline views return above"),
-        RyeOsViewVm::Map { .. } | RyeOsViewVm::Atlas { .. } => {
-            unreachable!("scene views return above")
-        }
         RyeOsViewVm::Sections { .. } => unreachable!("sections views return above"),
         RyeOsViewVm::Table { .. } => unreachable!("table views return above"),
         RyeOsViewVm::Placeholder { title, message } => {
@@ -592,19 +545,19 @@ mod tests {
         assert!(surface_text(&hint).contains(" RyeOS "));
     }
 
-    /// An admitted Surface declares the backdrop; a separate Shared Config
+    /// An admitted Surface with an empty center; a separate Shared Config
     /// owns the bottom input. Neither tab geometry nor focus grants a binding.
     fn empty_center_core() -> RyeOsCore {
         let session = BrowserSession {
-            session_id: "S-backdrop".to_string(),
+            session_id: "S-empty-center".to_string(),
             ui_binding_contract_revision: ryeos_client_base::UI_BINDING_CONTRACT_REVISION.into(),
             root_attachment_id: "shared-attachment".into(),
             binding_attachments: vec![ryeos_client_base::ui::UiBindingAttachment {
-                binding_attachment_id: "backdrop-attachment".into(),
+                binding_attachment_id: "centre-attachment".into(),
                 binding_generation: 1,
-                binding_digest: "backdrop-binding".into(),
+                binding_digest: "surface-binding".into(),
                 root_ref: "surface:ryeos/ryeos/base".to_string(),
-                root_generation: "backdrop-generation".into(),
+                root_generation: "surface-generation".into(),
                 project_path: None,
                 subject: ryeos_client_base::ui::UiBindingSubject::Projectless,
                 posture: Default::default(),
@@ -616,27 +569,16 @@ max_seat_append_bytes:64*1024,
                 presentation: ryeos_client_base::presentation::UiCompositionPresentation::from_effective_surface(json!({
                 "name": "ryeos-base",
                 "version": "1.0.0",
-                "backdrop": "view:test/backdrop",
-                "views": {
-                    "view:test/backdrop": {
-                        "widget": "scene",
-                        "body": { "objects": [
-                            { "kind": "particle", "position": [0.0, 6.0], "scale": 0.9, "color": "#d65d0e", "tone": "accent" },
-                            { "kind": "particle", "position": [-9.0, -3.5], "scale": 0.6, "color": "#8ec07c", "tone": "good" },
-                            { "kind": "particle", "position": [10.0, 3.4], "scale": 0.5, "color": "#a89984", "tone": "neutral" },
-                            { "kind": "text", "position": [0.0, -8.2], "label": "RYE OS", "color": "#d65d0e", "tone": "accent" }
-                        ] }
-                    }
-                }
+                "views": {}
                 })).unwrap(),
             }],
             ..Default::default()
         };
         let mut session = session;
         let surface_binding = ryeos_client_base::ui::binding::UiBindingAttachmentCoordinate {
-            binding_attachment_id: "backdrop-attachment".into(),
+            binding_attachment_id: "centre-attachment".into(),
             binding_generation: 1,
-            binding_digest: "backdrop-binding".into(),
+            binding_digest: "surface-binding".into(),
         };
         let shared = serde_json::from_value(json!({
             "binding_attachment_id":"shared-attachment", "binding_generation":2,
@@ -734,19 +676,11 @@ max_seat_append_bytes:64*1024,
     }
 
     #[test]
-    fn empty_center_draws_backdrop_scene_and_bottom_input() {
+    fn empty_center_draws_bottom_input() {
         let vm = build_view_model(&empty_center_core());
-        // The backdrop scene resolved on an empty center.
         assert!(vm.view_set.as_ref().unwrap().center_is_empty);
-        assert!(vm.backdrop.is_some());
 
         let rendered = surface_text(&build_surface(&vm, 96, 28));
-        // The backdrop scene draws its text objects + particles.
-        assert!(rendered.contains("RYE OS"), "backdrop brand text renders");
-        assert!(
-            rendered.contains('·') || rendered.contains('•') || rendered.contains('●'),
-            "backdrop particles render as dots"
-        );
         // The real bottom input slot renders in this state (the bug fix) as
         // a minimal bordered box — no prompt sigil, route strip, or hint;
         // the border + cursor are the whole signal. The bottom rows carry
@@ -771,29 +705,5 @@ max_seat_append_bytes:64*1024,
         let bottom = vm.docks.bottom.expect("shared bottom input present");
         let input = bottom.input.expect("bottom slot declares input");
         assert_eq!(input.placeholder, "Ask or run a command");
-    }
-
-    #[test]
-    fn backdrop_twinkle_differs_across_generations() {
-        // End-to-end animation proof: stepping `generation` repaints the
-        // backdrop with different particle cells. The breathe is primarily
-        // a colour blend, so cells compare as (glyph, fg) pairs — text
-        // alone may coincide between adjacent frames.
-        let styled = |surface: &ryeos_client_base::text_surface::TextSurface| {
-            let mut cells = Vec::new();
-            for y in 0..surface.height {
-                for x in 0..surface.width {
-                    let cell = surface.get(x, y);
-                    cells.push((cell.rune, cell.fg));
-                }
-            }
-            cells
-        };
-        let mut core = empty_center_core();
-        core.runtime.now_ms = 0;
-        let a = styled(&build_surface(&build_view_model(&core), 96, 28));
-        core.runtime.now_ms = ryeos_client_base::ui::scene_model::SCENE_FRAME_MS;
-        let b = styled(&build_surface(&build_view_model(&core), 96, 28));
-        assert_ne!(a, b, "the backdrop renders differently across generations");
     }
 }

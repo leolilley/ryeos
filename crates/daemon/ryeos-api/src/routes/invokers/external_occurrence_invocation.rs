@@ -79,7 +79,7 @@ impl CompiledRouteInvocation for CompiledExternalOccurrenceVerifier {
             tracing::warn!(
                 route_id = %ctx.route_id,
                 placement = %request.placement_thread_id,
-                error = %error,
+                error = %format!("{error:#}"),
                 "external occurrence verification failed"
             );
             RouteDispatchError::Unauthorized
@@ -134,7 +134,7 @@ impl CompiledRouteInvocation for CompiledExternalChannelVerifier {
             tracing::warn!(
                 route_id = %ctx.route_id,
                 placement = %request.placement_thread_id,
-                error = %error,
+                error = %format!("{error:#}"),
                 "external channel verification failed"
             );
             RouteDispatchError::Unauthorized

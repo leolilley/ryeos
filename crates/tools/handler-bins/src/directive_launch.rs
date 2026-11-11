@@ -105,7 +105,7 @@ fn prepare_inner(
             .map_err(|error| {
                 wire_error(
                     "directive_effective_header_invalid",
-                    error.to_string(),
+                    format!("{error:#}"),
                     LaunchPrepareErrorClass::Configuration,
                     None,
                 )
@@ -155,7 +155,7 @@ fn prepare_inner(
     .map_err(|error| {
         wire_error(
             "external_effect_authority_invalid",
-            error.to_string(),
+            format!("{error:#}"),
             LaunchPrepareErrorClass::Configuration,
             Some(MODEL_BINDING),
         )

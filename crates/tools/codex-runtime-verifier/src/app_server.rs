@@ -14,7 +14,6 @@ use std::fmt;
 
 use crate::routing_observation::{MAX_EVENT_BYTES, MAX_EVENTS, MAX_TOTAL_BYTES};
 
-#[must_use = "retain the app-server owner until stop proves exact-child and reader settlement"]
 /// How much of the app-server's stderr the observation keeps for the account
 /// a failed child gives of itself; the enclosing refusal is bounded further.
 const APP_SERVER_STDERR_TAIL_BYTES: usize = 700;
@@ -63,6 +62,7 @@ pub(crate) fn terminal_turn_refusal(
     )
 }
 
+#[must_use = "retain the app-server owner until stop proves exact-child and reader settlement"]
 pub struct AppServerObservation {
     child: SubordinateProcess,
     diagnostics: SubordinateDiagnosticDrain,

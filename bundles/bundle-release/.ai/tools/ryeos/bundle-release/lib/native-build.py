@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ryeos:signed:2026-10-15T23:47:07Z:815be5ec5404ac5e665a1ea9e60a830e54c2e0c06b9b230c07a6720da62ed14e:t95ozJebzK8uIzv8xQ773JGKsOgX4pyS1kG0eHbU6Q2KqoBbeIwRGE3jsOLBLYNyddkc8DWrFj/zkaEX+tu+BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-11T02:56:41Z:197fe172afa3983d10d8403dc2ba8a33107f320cd5136f8e4e365742114a2e70:OEJ6bEOPBOiHefACpCgFsrlQBpxWXoHxkeyb1cCAndIpFxQh+4IIx9Cp+yRaEA/ar8Eg9Ogtyk3IQikSPGdQDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Build one exact non-core bundle selected by the ownership contract."""
 import hashlib, importlib.util, json, os, pathlib, re, resource, shutil, stat, subprocess, sys, tempfile
 sys.dont_write_bytecode = True

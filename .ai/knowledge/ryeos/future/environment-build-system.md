@@ -1,15 +1,21 @@
-<!-- ryeos:signed:2026-09-18T23:27:55Z:e52282c96d774a206476d1514b587dce2ff12ce5d303a2fd062d379481c7b800:O3SpqTXFAkESbIOFwlTkXWgGkWTZUIy8LukPHd0zmxMoEgI8tYAywzgvqzv38a7b9p+yN+58HYn24izqXxszDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-06T01:00:58Z:ba215e72c69e76d359461ce4aea2f0f1381f681973e87b7f53e5b02633ce126a:mitlkxugi97VArL8h1tgyVaeG1Cww4ot7Fn7BXJVsQLhonLK6g/2OrttVBgOCQCmnMgQ1Qu3oH/DqkRlxs9ADQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/future
 name: environment-build-system
 title: RyeOS Environment Build System
 description: A RyeOS-native model for producing, verifying, publishing, and consuming portable execution environments from exact admitted content.
 entry_type: design
-version: "0.3.0"
+version: "0.3.1"
 status: discussion
 ```
 
 # RyeOS environment build system
+
+The [platform direction](platform-direction-and-delivery.md) treats simple
+environment consumption and reuse as part of the ordinary authoring experience.
+The native-toolchain producer stages below order that producer campaign only.
+An existing admitted interpreter/environment can support a useful client and
+application path before the full native producer programme is qualified.
 
 Discussion recorded: 2026-09-07. This is a future design note, not an
 implementation authorization or a claim that the complete system described

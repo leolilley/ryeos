@@ -3094,7 +3094,10 @@ fn policy_required_guarantees_are_declared_data_and_absent_when_unset() {
     .unwrap();
     let value = serde_json::to_value(&declared).unwrap();
     assert_eq!(value["requires_guarantees"][0], "isolation:enforced");
-    assert_eq!(ProductQualificationPolicy::from_value(&value).unwrap(), declared);
+    assert_eq!(
+        ProductQualificationPolicy::from_value(&value).unwrap(),
+        declared
+    );
     let mut malformed = value;
     malformed["requires_guarantees"] = json!([""]);
     assert!(ProductQualificationPolicy::from_value(&malformed).is_err());

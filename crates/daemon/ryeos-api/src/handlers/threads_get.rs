@@ -28,7 +28,7 @@ pub async fn handle(
     let thread = state
         .threads
         .get_thread_view(&req.thread_id)
-        .map_err(|e| HandlerError::Internal(e.to_string()))?;
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
 
     match thread {
         Some(view) => {
@@ -37,7 +37,7 @@ pub async fn handle(
             let facets = state
                 .state_store
                 .get_facets(&req.thread_id)
-                .map_err(|e| HandlerError::Internal(e.to_string()))?;
+                .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
             let facets_map: std::collections::HashMap<&str, &str> = facets
                 .iter()
                 .map(|(k, v)| (k.as_str(), v.as_str()))
@@ -45,11 +45,11 @@ pub async fn handle(
             let result = state
                 .threads
                 .get_thread_result(&req.thread_id)
-                .map_err(|e| HandlerError::Internal(e.to_string()))?;
+                .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
             let artifacts = state
                 .threads
                 .list_thread_artifacts(&req.thread_id)
-                .map_err(|e| HandlerError::Internal(e.to_string()))?;
+                .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
 
             serde_json::to_value(serde_json::json!({
                 "thread": view,

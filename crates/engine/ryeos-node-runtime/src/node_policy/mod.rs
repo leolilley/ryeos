@@ -72,6 +72,7 @@ impl NodePolicyTable {
             Box::new(sections::hosted::HostedNodePolicySection),
             Box::new(sections::ingest_ignore::IngestIgnorePolicySection),
             Box::new(sections::isolation::IsolationPolicySection),
+            Box::new(sections::launch_trust::NodeLaunchTrustPolicySection),
             Box::new(sections::maintenance::NodeMaintenancePolicySection),
             Box::new(sections::native_capacity::NodeNativeCapacityPolicySection),
             Box::new(sections::object_closure::NodeObjectClosurePolicySection),
@@ -171,6 +172,12 @@ impl NodePolicySnapshot {
             generation_digest: "test-only-node-policy-snapshot".to_owned(),
         }
     }
+}
+
+/// The shipped `launch_trust` policy record, admitting nothing beyond each
+/// kind's default. Exact test snapshots include it wherever a launch is judged.
+pub fn default_launch_trust_record() -> Arc<dyn ErasedNodePolicy> {
+    Arc::new(sections::launch_trust::NodeLaunchTrustPolicy::admitting_nothing())
 }
 
 /// Compile one already validated raw generation through every registered

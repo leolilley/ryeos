@@ -167,10 +167,16 @@ impl SessionCompiledUiBinding {
         validate_navigation(effective_surface)?;
         ryeos_client_base::surface::view_sets::validate_effective_view_sets(effective_surface)
             .map_err(anyhow::Error::msg)?;
-        let views = effective_surface
-            .get("views")
-            .and_then(Value::as_object)
-            .context("effective surface has no embedded views mapping")?;
+        // A surface that declares no views carries no embedded mapping; it
+        // compiles to a binding with no view sources. A present mapping must
+        // be an object.
+        let no_views = serde_json::Map::new();
+        let views = match effective_surface.get("views") {
+            None => &no_views,
+            Some(views) => views
+                .as_object()
+                .context("effective surface views mapping is not an object")?,
+        };
         let source_ceiling = capability_lane(effective_surface, "sources")?;
         let affordance_ceiling = capability_lane(effective_surface, "affordances")?;
 
@@ -618,7 +624,7 @@ fn compile_surface_route(
         Err(error) => {
             attenuated.push(AttenuatedUiBinding {
                 coordinate: "surface_route".to_string(),
-                reason: format!("surface route bindings are invalid: {error}"),
+                reason: format!("surface route bindings are invalid: {error:#}"),
             });
             return None;
         }
@@ -643,7 +649,7 @@ fn compile_surface_route(
             if let Err(error) = validate_route_target_contract(&target, &bindings, &parameters) {
                 attenuated.push(AttenuatedUiBinding {
                     coordinate,
-                    reason: format!("surface route target contract is invalid: {error}"),
+                    reason: format!("surface route target contract is invalid: {error:#}"),
                 });
                 return None;
             }
@@ -663,7 +669,7 @@ fn compile_surface_route(
         Err(error) => {
             attenuated.push(AttenuatedUiBinding {
                 coordinate,
-                reason: format!("target resolution failed: {error}"),
+                reason: format!("target resolution failed: {error:#}"),
             });
             None
         }

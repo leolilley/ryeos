@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ryeos:signed:2026-11-04T01:40:37Z:bc2b95d6bda2c4adade7d759f5531eabfcdec8054387871a6e8dd4f43174465b:Er36ULWkBZST9eHR354qovgTKShBI9vjIVLpYF1OprMiaSOLVQEknmiHXyub7cusKZ9l4AlHJk6eh/dEculWBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-11T02:56:41Z:908ade3dcd3e4fd7c4141d4354671d0d9c4c4fd2d0da6eccdfa6e1fc0475d9a4:Y4Wrh8IfF9vgj/h33yscCL7AcQIJ/ixn0hHH9jcX0EWiwyL3bQoFADkWOh2A7nbZlUNLfckAxsFibHT88GNdAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Data contracts for the explicit authoring worker/environment composition."""
 
 import copy

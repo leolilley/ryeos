@@ -267,11 +267,11 @@ impl SubordinateProcess {
         request
             .executable
             .require_executable()
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| format!("{error:#}"))?;
         let executable = request
             .executable
             .into_inherited_descriptor_path()
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| format!("{error:#}"))?;
         let mut command = Command::new(executable.path());
         request.inherited_fds.push(executable);
         // The scrub hook precedes the descriptor-selected cwd hook.
@@ -279,7 +279,7 @@ impl SubordinateProcess {
         request
             .cwd
             .configure_command_cwd(&mut command)
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| format!("{error:#}"))?;
         Self::spawn_configured(
             command,
             custody,

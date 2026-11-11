@@ -964,7 +964,7 @@ async fn abort_known_scoped_locators(
         match serde_json::from_value::<ScopedAttemptLocator>(value.clone()) {
             Ok(locator) => {
                 if let Err(error) = locator.validate() {
-                    outcomes.push(format!("invalid locator: {error}"));
+                    outcomes.push(format!("invalid locator: {error:#}"));
                 } else if seen.insert(locator.attempt_id.clone()) {
                     let result =
                         abort_exact_scoped_child(client, thread_id, &locator.attempt_id).await;

@@ -442,7 +442,7 @@ pub(crate) struct ReleaseReport {
 /// removal still exists, or a counterpart is not yet fenced. Any other error
 /// is a real failure.
 fn release_not_yet_possible(error: &anyhow::Error) -> bool {
-    let message = error.to_string();
+    let message = format!("{error:#}");
     message.starts_with("cannot release ")
         && (message.ends_with("its head or pending transition still exists")
             || message.contains(" is not fenced"))
@@ -463,7 +463,7 @@ fn run_release_pass(releaser: &impl ChainReleaser) -> Result<ReleaseReport> {
             match releaser.release(&owner) {
                 Ok(()) => released += 1,
                 Err(error) if release_not_yet_possible(&error) => {
-                    tracing::warn!(%owner, pass, %error, "retired chain release deferred");
+                    tracing::warn!(%owner, pass, error = %format!("{error:#}"), "retired chain release deferred");
                     deferred.push(owner);
                 }
                 Err(error) => {
@@ -650,7 +650,7 @@ pub async fn run_maintenance_gc(state: &AppState, params: &GcParams) -> Result<G
         let cas_guard = match state_authority.acquire_exclusive_guard(!params_clone.dry_run) {
             Ok(guard) => guard,
             Err(error) => {
-                let _ = guard_ready_tx.send(Err(error.to_string()));
+                let _ = guard_ready_tx.send(Err(format!("{error:#}")));
                 return Err(error).context("acquire exclusive CAS mutation guard for GC");
             }
         };

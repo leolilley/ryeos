@@ -148,7 +148,7 @@ pub(super) fn initialization_record_with_anchor(
     let Some(anchor) = state
         .state_store
         .capture_thread_event_read_anchor(chain_root_id, thread_id)
-        .map_err(|error| invalid(error.to_string()))?
+        .map_err(|error| invalid(format!("{error:#}")))?
     else {
         return Ok((None, None));
     };
@@ -158,7 +158,7 @@ pub(super) fn initialization_record_with_anchor(
         let page = state
             .state_store
             .read_thread_event_page(&anchor, progress.as_ref(), PAGE_EVENTS, PAGE_BYTES)
-            .map_err(|error| invalid(error.to_string()))?;
+            .map_err(|error| invalid(format!("{error:#}")))?;
         if page.events.is_empty() && page.progress.is_some() {
             return Err(invalid(
                 "authenticated initialization history made no progress",
@@ -192,14 +192,14 @@ pub(super) fn control_predecessor(
     let anchor = state
         .state_store
         .capture_thread_event_read_anchor(chain_root_id, thread_id)
-        .map_err(|error| invalid(error.to_string()))?
+        .map_err(|error| invalid(format!("{error:#}")))?
         .ok_or_else(|| invalid("control history has no signed thread anchor"))?;
     let mut progress = None;
     loop {
         let page = state
             .state_store
             .read_thread_event_page(&anchor, progress.as_ref(), PAGE_EVENTS, PAGE_BYTES)
-            .map_err(|error| invalid(error.to_string()))?;
+            .map_err(|error| invalid(format!("{error:#}")))?;
         if page.events.is_empty() && page.progress.is_some() {
             return Err(invalid("authenticated control history made no progress"));
         }
@@ -244,7 +244,7 @@ pub(super) fn retained_control(
     let anchor = state
         .state_store
         .capture_thread_event_read_anchor(chain_root_id, thread_id)
-        .map_err(|error| invalid(error.to_string()))?
+        .map_err(|error| invalid(format!("{error:#}")))?
         .ok_or_else(|| invalid("control history has no signed thread anchor"))?;
     let mut progress = None;
     let mut found = None;
@@ -252,7 +252,7 @@ pub(super) fn retained_control(
         let page = state
             .state_store
             .read_thread_event_page(&anchor, progress.as_ref(), PAGE_EVENTS, PAGE_BYTES)
-            .map_err(|error| invalid(error.to_string()))?;
+            .map_err(|error| invalid(format!("{error:#}")))?;
         if page.events.is_empty() && page.progress.is_some() {
             return Err(invalid("authenticated control lookup made no progress"));
         }
@@ -304,7 +304,7 @@ pub(super) fn receipt_and_interval(
     let anchor = state
         .state_store
         .capture_thread_event_read_anchor(chain_root_id, thread_id)
-        .map_err(|error| invalid(error.to_string()))?
+        .map_err(|error| invalid(format!("{error:#}")))?
         .ok_or_else(|| invalid("authenticated seat history has no thread anchor"))?;
     receipt_and_interval_at_anchor(
         state,
@@ -354,7 +354,7 @@ pub(super) fn receipt_and_interval_at_anchor(
         let page = state
             .state_store
             .read_thread_event_page(anchor, progress.as_ref(), PAGE_EVENTS, PAGE_BYTES)
-            .map_err(|error| invalid(error.to_string()))?;
+            .map_err(|error| invalid(format!("{error:#}")))?;
         if page.events.is_empty() && page.progress.is_some() {
             return Err(invalid("authenticated seat history made no progress"));
         }

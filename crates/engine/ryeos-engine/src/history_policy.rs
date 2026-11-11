@@ -304,9 +304,10 @@ pub fn resolve_launch_policy_from_resolution(
             ),
         });
     }
-    // Resolution strips the signature envelope before exposing raw_content.
-    // Its digest therefore binds to the signed body hash for signed items and
-    // to the whole source hash for unsigned items.
+    // Resolution strips only the signature line before exposing raw_content,
+    // and a signature covers every byte of its file except that line, shebang
+    // included. raw_content's digest therefore equals the signed hash for a
+    // signed item, and the whole source hash for an unsigned one.
     let expected_verified_digest = verified_item
         .resolved
         .signature_header
@@ -710,6 +711,7 @@ mod tests {
             inventory_kinds: Vec::new(),
             inventory_schema_keys: Vec::new(),
             inventory_policy: Default::default(),
+            launch_trust: None,
         }
     }
 
@@ -997,6 +999,93 @@ mod tests {
         )
         .unwrap();
         assert_eq!(resolved.history.retention, ThreadHistoryRetention::Durable);
+    }
+
+    fn shebang_resolution(
+        item: &VerifiedItem,
+        raw_content: String,
+    ) -> crate::resolution::ResolutionOutput {
+        use crate::resolution::{
+            KindComposedView, ResolutionOutput, ResolutionStepName, ResolvedAncestor,
+        };
+        let raw_content_digest = lillux::signature::content_hash(&raw_content);
+        ResolutionOutput {
+            root: ResolvedAncestor {
+                requested_id: item.resolved.canonical_ref.to_string(),
+                resolved_ref: item.resolved.canonical_ref.to_string(),
+                source_path: item.resolved.source_path.clone(),
+                source_space: item.resolved.source_space,
+                source_root: item.resolved.source_root.clone(),
+                trust_class: ResolutionTrustClass::TrustedBundle,
+                signer_fingerprint: item.signer.as_ref().map(|signer| signer.0.clone()),
+                alias_resolution: None,
+                added_by: ResolutionStepName::PipelineInit,
+                raw_content,
+                source_content_digest: item.resolved.content_hash.clone(),
+                raw_content_digest,
+            },
+            ancestors: Vec::new(),
+            references_edges: Vec::new(),
+            referenced_items: Vec::new(),
+            step_outputs: HashMap::new(),
+            effective_trust_class: ResolutionTrustClass::TrustedBundle,
+            composed: KindComposedView::identity(json!({})),
+        }
+    }
+
+    /// A `.py` item whose signature line sits below its shebang. The
+    /// signature covers the whole file except that line, so the signed hash
+    /// is the digest of the raw content the runtime parses, shebang included.
+    fn shebang_item(signed_content: &str) -> VerifiedItem {
+        let mut item = verified_item(TrustClass::Trusted);
+        item.resolved.source_format.extension = ".py".to_string();
+        item.resolved.source_format.signature.after_shebang = true;
+        item.resolved
+            .signature_header
+            .as_mut()
+            .unwrap()
+            .content_hash = lillux::signature::content_hash(signed_content);
+        item
+    }
+
+    const SIGNED_SHEBANG_SOURCE: &str = "#!/usr/bin/env python3\nprint('hello')\n";
+
+    fn adapter_error(item: &VerifiedItem, raw_content: &str) -> Option<String> {
+        resolve_launch_policy_from_resolution(
+            item,
+            &shebang_resolution(item, raw_content.to_string()),
+            &KindRegistry::empty(),
+            &ResolvedNodeThreadHistoryPolicy::test_policy(),
+        )
+        .err()
+        .map(|error| error.to_string())
+    }
+
+    #[test]
+    fn resolution_adapter_accepts_a_signed_file_with_a_shebang() {
+        let item = shebang_item(SIGNED_SHEBANG_SOURCE);
+        if let Some(error) = adapter_error(&item, SIGNED_SHEBANG_SOURCE) {
+            assert!(
+                !error.contains("content changed after verification"),
+                "a signed file with a shebang was treated as changed: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolution_adapter_rejects_a_changed_body_below_a_shebang() {
+        let item = shebang_item(SIGNED_SHEBANG_SOURCE);
+        let error = adapter_error(&item, "#!/usr/bin/env python3\nprint('tampered')\n")
+            .expect("a changed body must be refused");
+        assert!(error.contains("content changed after verification"));
+    }
+
+    #[test]
+    fn resolution_adapter_rejects_a_changed_shebang() {
+        let item = shebang_item(SIGNED_SHEBANG_SOURCE);
+        let error = adapter_error(&item, "#!/bin/sh\nprint('hello')\n")
+            .expect("a changed shebang must be refused");
+        assert!(error.contains("content changed after verification"));
     }
 
     #[test]

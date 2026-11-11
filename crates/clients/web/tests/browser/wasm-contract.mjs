@@ -16,7 +16,7 @@ const rootBinding = {
   binding_digest: "11".repeat(32),
 };
 const session = {
-  ui_binding_contract_revision: "ryeos.ui.binding.v10",
+  ui_binding_contract_revision: "ryeos.ui.binding.v11",
   session_id: "wasm-contract",
   user_principal_id: null,
   root_attachment_id: rootBinding.binding_attachment_id,

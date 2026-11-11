@@ -1173,7 +1173,7 @@ fn prepare_owned_workspace_after_thread_birth(
                                 launch_owner,
                                 &identity,
                             )
-                            .map_err(|error| error.to_string())
+                            .map_err(|error| format!("{error:#}"))
                     }
                     #[cfg(not(target_os = "linux"))]
                     {
@@ -1809,7 +1809,7 @@ fn post_execution_foldback(
     let permit = state
         .write_barrier
         .acquire_with_timeout(ryeos_app::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
-        .map_err(|error| anyhow::anyhow!("acquire CAS write permit for fold-back: {error}"))?;
+        .map_err(|error| anyhow::anyhow!("acquire CAS write permit for fold-back: {error:#}"))?;
 
     // Fold back changes
     let (operational_shadow_paths, output_context) =
@@ -2133,7 +2133,7 @@ fn finalize_completion(
     match finalized {
         Ok(thread) => Ok(thread),
         Err(err) => {
-            tracing::error!(error = %err, "invalid completion during finalization");
+            tracing::error!(error = %format!("{err:#}"), "invalid completion during finalization");
             Err(ExecutionCleanupFailure {
                 operation: "finalize completion",
                 operation_error: err,
@@ -3325,12 +3325,12 @@ fn build_protocol_launch_env(
         });
 
     let isolation_daemon_socket_path =
-        callback_ipc_requested.then(|| state.config.uds_path.clone());
+        callback_ipc_requested.then(|| state.config.runtime_uds_path());
     let callback_socket_path = if callback_socket_requested {
         Some(
             state
                 .config
-                .uds_path
+                .runtime_uds_path()
                 .to_str()
                 .ok_or_else(|| anyhow::anyhow!("callback socket path is not valid UTF-8"))?
                 .to_owned(),
@@ -9099,6 +9099,7 @@ async fn run_existing_recovered_thread(
         .map_err(|error| guard.fail_before_spawn(error))?;
     super::admitted_trust::validate_direct_current_trust(
         &engine,
+        &state.node_policy,
         &current_trust_store,
         primary_resolution,
         prepared_plan.execution_plan(),

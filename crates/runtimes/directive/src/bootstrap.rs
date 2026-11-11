@@ -271,7 +271,7 @@ fn sanitized_context_item_contributions(value: &serde_json::Value) -> Option<ser
 /// runtime cannot discover a second semantic interpretation after spawn.
 pub(super) fn parse_effective_header(view: &KindComposedView) -> Result<DirectiveHeader> {
     ryeos_directive_definition::parse_effective_header(&view.composed)
-        .map_err(|error| anyhow!("parse effective directive header: {error}"))
+        .map_err(|error| anyhow!("parse effective directive header: {error:#}"))
 }
 
 /// Project the daemon-baked inventory of `kind:tool` items shipped in

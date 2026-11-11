@@ -26,7 +26,7 @@ pub async fn handle(
     let keys = state
         .vault
         .list_keys(&ctx.fingerprint)
-        .map_err(|e| HandlerError::Internal(e.to_string()))?;
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
 
     Ok(serde_json::json!({
         "secrets": keys,

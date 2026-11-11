@@ -21,7 +21,7 @@ pub(crate) fn require_for_new_windows(state: &AppState) -> Result<()> {
         .node_policy
         .require::<NodeExecutionAdmissionPolicy>()?
         .external_wall_clock_requirement;
-    require_with(requirement.as_ref(), || lillux::time::wall_clock_trust())
+    require_with(requirement.as_ref(), lillux::time::wall_clock_trust)
 }
 
 /// The requirement judged against a trust reading, sampled only when a

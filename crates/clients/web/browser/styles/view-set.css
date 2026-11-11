@@ -43,8 +43,6 @@
 .content-heading h1 { margin: 14px 0 10px; max-width: 720px; font-size: clamp(28px, 3vw, 46px); font-weight: 400; letter-spacing: -.04em; }
 .content-heading p { max-width: 620px; color: var(--text); line-height: 1.6; }
 .heading-meta { margin-top: 17px; }
-.view-supplement-scene { flex: 0 1 42%; min-height: 150px; border-bottom: 1px solid var(--line); }
-.view-supplement-scene .scene-view, .view-supplement-scene .scene-view svg { min-height: 150px; }
 .view-supplement-excerpt { flex: 0 1 auto; max-height: 38%; overflow: auto; border-top: 1px solid var(--line); font-family: var(--font-data); }
 .view-supplement-excerpt > header, .view-supplement-footer > strong { display: block; padding: 8px 12px; color: var(--muted); font: 9px var(--font-data); letter-spacing: .08em; text-transform: uppercase; }
 .view-supplement-code > div { display: grid; grid-template-columns: 42px minmax(0, 1fr); min-height: 20px; padding: 2px 12px; color: var(--muted); font-size: 10px; line-height: 1.55; }

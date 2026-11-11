@@ -187,14 +187,14 @@ async fn pull_results_staged(
     // exact stored policy; a destination cannot reinterpret the tree using
     // its current ignore configuration.
     let snapshot = ProjectSnapshot::from_value(&snapshot_val)
-        .map_err(|error| PullResultsError::InvalidRemoteSnapshot(error.to_string()))?;
+        .map_err(|error| PullResultsError::InvalidRemoteSnapshot(format!("{error:#}")))?;
     let pushed_snapshot_value = local_cas.get_object(pushed_snapshot_hash)?.ok_or_else(|| {
         PullResultsError::InvalidRemoteSnapshot(format!(
             "locally pushed snapshot {pushed_snapshot_hash} is absent"
         ))
     })?;
     let pushed_snapshot = ProjectSnapshot::from_value(&pushed_snapshot_value)
-        .map_err(|error| PullResultsError::InvalidRemoteSnapshot(error.to_string()))?;
+        .map_err(|error| PullResultsError::InvalidRemoteSnapshot(format!("{error:#}")))?;
     if snapshot.effective_policy_hash != pushed_snapshot.effective_policy_hash {
         return Err(PullResultsError::InvalidRemoteSnapshot(format!(
             "result snapshot changed project policy from {} to {} without an authorized policy transition",
@@ -245,13 +245,13 @@ async fn pull_results_staged(
     let tree_val = resolve_root("project tree", &snapshot.project_tree_hash)?;
     let policy_val = resolve_root("project policy", &snapshot.effective_policy_hash)?;
     let remote_tree = ProjectTree::from_value(&tree_val)
-        .map_err(|error| PullResultsError::InvalidRemoteSnapshot(error.to_string()))?;
+        .map_err(|error| PullResultsError::InvalidRemoteSnapshot(format!("{error:#}")))?;
     let policy = ProjectSnapshotPolicy::from_value(&policy_val)
-        .map_err(|error| PullResultsError::InvalidRemoteSnapshot(error.to_string()))?;
+        .map_err(|error| PullResultsError::InvalidRemoteSnapshot(format!("{error:#}")))?;
     ryeos_state::project_sync::validate_project_tree_paths(&remote_tree, &policy)
-        .map_err(|error| PullResultsError::InvalidRemoteSnapshot(error.to_string()))?;
+        .map_err(|error| PullResultsError::InvalidRemoteSnapshot(format!("{error:#}")))?;
     ryeos_state::project_sync::validate_captured_policy_source(local_cas, &remote_tree, &policy)
-        .map_err(|error| PullResultsError::InvalidRemoteSnapshot(error.to_string()))?;
+        .map_err(|error| PullResultsError::InvalidRemoteSnapshot(format!("{error:#}")))?;
 
     let limits = ryeos_state::object_closure::ObjectClosureLimits::for_project_snapshot_transport();
     let mut project_files = Vec::with_capacity(remote_tree.files.len());
@@ -279,7 +279,7 @@ async fn pull_results_staged(
             }
         };
         let file = ProjectFile::from_value(&value)
-            .map_err(|error| PullResultsError::InvalidRemoteSnapshot(error.to_string()))?;
+            .map_err(|error| PullResultsError::InvalidRemoteSnapshot(format!("{error:#}")))?;
         project_files.push(file);
     }
     for file in &project_files {

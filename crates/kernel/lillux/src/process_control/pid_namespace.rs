@@ -992,12 +992,10 @@ mod tests {
             ProbeOutcome::Allowed => {}
             // A host that forbids unprivileged user namespaces cannot run
             // the probe; the mechanism is then simply not qualified there.
-            ProbeOutcome::Refused { errno, reason }
-                if matches!(
-                    errno,
-                    libc::EPERM | libc::EINVAL | libc::ENOSPC | libc::EACCES
-                ) =>
-            {
+            ProbeOutcome::Refused {
+                errno: libc::EPERM | libc::EINVAL | libc::ENOSPC | libc::EACCES,
+                reason,
+            } => {
                 eprintln!("skipped: private namespaces refused here: {reason}");
             }
             other => panic!("PID namespace containment probe failed: {other:?}"),

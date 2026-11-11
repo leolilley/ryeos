@@ -689,7 +689,7 @@ fn create_and_retain_merge_generation(
             .acquire_with_timeout(ryeos_app::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
             .map_err(|error| {
                 AttemptFailure::retryable(anyhow::anyhow!(
-                    "cannot acquire reconciliation write permit: {error}"
+                    "cannot acquire reconciliation write permit: {error:#}"
                 ))
             })?;
         let stored = authority
@@ -854,7 +854,9 @@ async fn publish_local_head(
     let _permit = state
         .write_barrier
         .acquire_with_timeout(ryeos_app::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
-        .map_err(|error| anyhow::anyhow!("cannot acquire reconciliation write permit: {error}"))?;
+        .map_err(|error| {
+            anyhow::anyhow!("cannot acquire reconciliation write permit: {error:#}")
+        })?;
     let signer = ryeos_app::state_store::NodeIdentitySigner::from_identity(&state.identity);
     let current = state
         .state_store
@@ -886,7 +888,7 @@ async fn publish_local_head(
             .with_state_db(|db| db.read_project_head(principal_key, &project_hash))?;
         if current.as_deref() == Some(merge_hash) {
             tracing::warn!(
-                %error,
+                error = %format!("{error:#}"),
                 reconciled_head = %merge_hash,
                 "local project HEAD publication reported an error after the exact target became visible"
             );

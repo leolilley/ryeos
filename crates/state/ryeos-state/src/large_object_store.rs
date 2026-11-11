@@ -439,12 +439,12 @@ impl LargeObjectStore {
         let staging_key = staging_key_for_source(expected_source)?;
         let staging_name = OsString::from(format!("ingest-{staging_key}"));
         let lock = open_registered_lock(|| {
-            Ok(self.locks.open_regular_create(
+            self.locks.open_regular_create(
                 OsStr::new(&format!("ingest-{staging_key}")),
                 true,
                 false,
                 0o600,
-            )?)
+            )
         })?;
         flock_exclusive_blocking(&lock)?;
 
@@ -585,9 +585,8 @@ impl LargeObjectStore {
         self.validate_expectation(expect)?;
         let name = format!("upload-{file_sha256}");
         let lock = open_registered_lock(|| {
-            Ok(self
-                .locks
-                .open_regular_create(OsStr::new(&name), true, false, 0o600)?)
+            self.locks
+                .open_regular_create(OsStr::new(&name), true, false, 0o600)
         })?;
         flock_exclusive_blocking(&lock)?;
 
@@ -894,9 +893,8 @@ impl LargeObjectStore {
         let Some(first) = self.objects.open_regular(name, false)? else {
             return Ok(None);
         };
-        let lease = open_registered_lock(|| {
-            Ok(self.leases.open_regular_create(name, true, false, 0o600)?)
-        })?;
+        let lease =
+            open_registered_lock(|| self.leases.open_regular_create(name, true, false, 0o600))?;
         flock_shared_blocking(&lease)?;
         let _ = lease.set_modified(std::time::SystemTime::now());
         // The lease was acquired after opening; re-open and require the same
@@ -1009,7 +1007,7 @@ impl LargeObjectStore {
                 break;
             }
             let lease = match open_registered_lock_if_present(|| {
-                Ok(self.leases.open_regular(OsStr::new(&name), false)?)
+                self.leases.open_regular(OsStr::new(&name), false)
             })? {
                 Some(lease) => lease,
                 None if dry_run => {
@@ -1018,9 +1016,8 @@ impl LargeObjectStore {
                     continue;
                 }
                 None => open_registered_lock(|| {
-                    Ok(self
-                        .leases
-                        .open_regular_create(OsStr::new(&name), true, false, 0o600)?)
+                    self.leases
+                        .open_regular_create(OsStr::new(&name), true, false, 0o600)
                 })?,
             };
             if !flock_exclusive_nonblocking(&lease)? {
@@ -1052,7 +1049,7 @@ impl LargeObjectStore {
     pub fn object_is_leased(&self, file_sha256: &str) -> anyhow::Result<bool> {
         require_store_hash(file_sha256)?;
         let Some(lease) = open_registered_lock_if_present(|| {
-            Ok(self.leases.open_regular(OsStr::new(file_sha256), false)?)
+            self.leases.open_regular(OsStr::new(file_sha256), false)
         })?
         else {
             return Ok(false);
@@ -1079,7 +1076,7 @@ impl LargeObjectStore {
                 anyhow::bail!("large-object staging namespace contains a non-regular entry");
             }
             let lock = match open_registered_lock_if_present(|| {
-                Ok(self.locks.open_regular(&entry.name, false)?)
+                self.locks.open_regular(&entry.name, false)
             })? {
                 Some(lock) => lock,
                 None if dry_run => {
@@ -1090,9 +1087,8 @@ impl LargeObjectStore {
                     continue;
                 }
                 None => open_registered_lock(|| {
-                    Ok(self
-                        .locks
-                        .open_regular_create(&entry.name, true, false, 0o600)?)
+                    self.locks
+                        .open_regular_create(&entry.name, true, false, 0o600)
                 })?,
             };
             if !flock_exclusive_nonblocking(&lock)? {
@@ -1143,9 +1139,8 @@ impl LargeObjectStore {
         require_store_hash(file_sha256)?;
         let mut findings = Vec::new();
         let lease = open_registered_lock(|| {
-            Ok(self
-                .leases
-                .open_regular_create(OsStr::new(file_sha256), true, false, 0o600)?)
+            self.leases
+                .open_regular_create(OsStr::new(file_sha256), true, false, 0o600)
         })?;
         flock_shared_blocking(&lease)?;
         let Some(mut object) = self.objects.open_regular(OsStr::new(file_sha256), false)? else {
@@ -1165,7 +1160,7 @@ impl LargeObjectStore {
             Err(error) => {
                 findings.push(LargeObjectIntegrityFinding::MalformedSidecar {
                     file_sha256: file_sha256.to_string(),
-                    error: error.to_string(),
+                    error: format!("{error:#}"),
                 });
                 None
             }

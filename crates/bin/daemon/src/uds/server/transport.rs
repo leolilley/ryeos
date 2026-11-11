@@ -18,6 +18,7 @@ pub(super) async fn handle_connection(
     mut stream: UnixStream,
     state: DynamicServerState,
     frame_bytes: Arc<Semaphore>,
+    surface: super::SocketSurface,
 ) -> Result<()> {
     loop {
         // A persistent callback client keeps this stream open between requests.
@@ -71,8 +72,13 @@ pub(super) async fn handle_connection(
         let request_owner = tokio::spawn(tracing::Instrument::instrument(
             async move {
                 let _frame_permit = frame_permit;
-                let response =
-                    super::routing::dispatch_dynamic(request, &request_state, peer.as_ref()).await;
+                let response = super::routing::dispatch_dynamic(
+                    request,
+                    &request_state,
+                    peer.as_ref(),
+                    surface,
+                )
+                .await;
                 drop(_frame_permit);
                 response
             },

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-11T06:42:46Z:489bed9e409dc8afd1fcc743f3852bf41b10ee37f4c495b4e3519c2c894e7744:9+eYyU9YDgIdqcVae6LMDzLAox18O1FOec2eAdwU6L8AOyHt3KOqjECnrfDGazNfRk4dsXrmtPTC03UFHMLOCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-04T09:38:33Z:3fe4ac8974e7cddbd19e922ecb28b645f10c13d4f393728283eb3625658e069d:ukNJ//KJXRymgvYNiq8zy9y7y+DrgLl7nErr0AKYrOBNiJaIXJpFexTsyrmVLTa8vnOCCjKJfHr8tFwK8uE6Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, isolation, security, subprocess, node-policy]
@@ -416,11 +416,13 @@ The narrow readable placeholders mean:
 
 - `{node_public_identity}` exposes only the exact regular, non-symlink
   `<app-root>/.ai/node/identity/public-identity.json`, never the private key.
-- `{daemon_socket}` exposes only the daemon-pinned, non-symlink Unix socket
-  when a typed launch fact requests callback IPC. RyeOS does not infer this
+- `{daemon_socket}` exposes only the daemon-pinned, non-symlink callback-only
+  Unix socket (it serves `runtime.*` only, never the control socket) when a typed launch fact requests callback IPC. RyeOS does not infer this
   authority from an environment-variable name. The requested path must equal
   the socket pinned at daemon startup, and the exact placeholder mount is
-  required; a surrounding directory is not substituted for it.
+  required; a surrounding directory is not substituted for it. A readable policy entry that equals or contains the daemon control
+  socket (for example its parent directory) is refused at launch by name, so
+  no entry can hand a sandbox the control socket.
 - `{bundle_roots}` expands to bundle roots verified for this execution.
 - `{node_trusted_keys}` conditionally exposes the node owner's trusted-key
   directory. The placeholder name matches the existing launch-envelope root.

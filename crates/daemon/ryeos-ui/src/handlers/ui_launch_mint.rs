@@ -110,7 +110,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     let user_principal_id = match req.user_principal_id.clone() {
         Some(principal) => {
             ryeos_app::principal::principal_storage_key(&principal)
-                .map_err(|err| HandlerError::BadRequest(err.to_string()))?;
+                .map_err(|err| HandlerError::BadRequest(format!("{err:#}")))?;
             if principal != ctx.fingerprint {
                 return Err(HandlerError::Forbidden(
                     "user_principal_id must match verified caller".into(),

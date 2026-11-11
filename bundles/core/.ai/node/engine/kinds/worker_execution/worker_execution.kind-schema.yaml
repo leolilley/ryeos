@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-08T03:28:04Z:0a1387738e52369514e4b098fb2c1d94b096b05903b86ade13a138356b2468e8:qzUD6/A4mA/EFTNLcV+fqetUdo/PgymAK4cvWsZkd4vXFm0cPqOEOmRO9wJ7+J9Om0vB32BL2Yn5AFrfq1zyCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-11T02:56:41Z:2fb6833976d8b70a851eb73f1fbbda892e250081e3bae0069472ce1a40ef495a:bAGHBzx6qBwk/31hFc+m0OkyePliv5VqDCC9FW8eFzNKUQNnlDw7a18c6qhNdgSzo8lwpYk5XKF4VGOl0C9OCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/worker_execution"
 inventory_policy:
   admission:
@@ -9,6 +9,12 @@ location:
 resolution: []
 effective_trust:
   include_references: false
+# Which spaces and trust classes may supply a launch root of this kind.
+# Only signed bundles supply this kind; a project or node file is ignored.
+launch_trust:
+  allowed_spaces: [bundle]
+  allowed_trust: [trusted_bundle]
+  operator_may_admit: []
 execution:
   delegate:
     via: runtime_registry

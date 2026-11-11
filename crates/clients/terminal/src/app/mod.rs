@@ -15,7 +15,6 @@ use std::sync::Arc;
 
 use crossterm::event::{Event, EventStream, KeyEventKind};
 use futures_util::StreamExt;
-use ryeos_client_base::ui::scene_model::SCENE_FRAME_MS;
 use ryeos_client_base::ui::{BrowserViewport, RyeOsCore, RyeOsEffectResult, RyeOsEvent};
 
 use crate::render::RyeOsTerminalRenderer;
@@ -294,8 +293,8 @@ pub async fn run(
         core.notice(message, ryeos_client_base::ui::view_model::RyeOsTone::Warn);
     }
 
-    // First frame before any daemon round trip: chrome, docks, and the
-    // backdrop paint immediately; bound views fill in as sources land.
+    // First frame before any daemon round trip: chrome and docks
+    // paint immediately; bound views fill in as sources land.
     {
         let vm = core.envelope(Vec::new()).view_model;
         if let Err(error) = renderer.render(&mut stdout, &vm, width, height) {
@@ -401,16 +400,11 @@ pub async fn run(
     let mut session_task = hints::spawn_session_listener(client.clone(), session_tx.clone());
 
     let mut events = Some(EventStream::new());
-    // Adaptive frame clock: the backdrop's breathe/sweep animation reads
-    // fluid at the scene cadence, so the tick quickens while the center is
-    // empty (the diff renderer repaints only the handful of changed
-    // cells). With tiles up nothing animates per-tick, so 4fps keeps the
-    // debounce and seat sync cadence without burning cycles.
-    const TICK_BACKDROP_MS: u64 = SCENE_FRAME_MS;
-    const TICK_TILES_MS: u64 = 250;
+    // Fixed 4fps frame clock: it keeps the hint-flush debounce, field
+    // playback and seat sync cadence without burning cycles.
+    const TICK_MS: u64 = 250;
     const HINT_FLUSH_MS: u64 = 500;
-    let mut tick_ms = TICK_TILES_MS;
-    let mut tick = frame_clock(tick_ms);
+    let mut tick = frame_clock(TICK_MS);
     // A live-filter edit defers its list refetch to the tick (debounce), so
     // typing a filter never blocks on a per-keystroke daemon round-trip.
     let mut feed_dirty = false;
@@ -505,16 +499,6 @@ pub async fn run(
                 break;
             }
             dirty = false;
-        }
-
-        let want_tick_ms = if core.wants_fast_ticks() {
-            TICK_BACKDROP_MS
-        } else {
-            TICK_TILES_MS
-        };
-        if want_tick_ms != tick_ms {
-            tick_ms = want_tick_ms;
-            tick = frame_clock(tick_ms);
         }
 
         // Reconcile the SSE tail with the route facet. The timeline source is
@@ -954,11 +938,6 @@ pub async fn run(
                     let effects = core.refresh_focused_feeds();
                     spawn_effects(&client, effects, &effect_tx);
                 }
-                // Step the scene clock exactly once per on-time tick (see
-                // `advance_scene_frame`): the fast tick period equals the
-                // scene cadence, so re-flooring wall time here would alias
-                // into held frames and double steps.
-                core.advance_scene_frame(tick_now);
                 let effects = core.dispatch(RyeOsEvent::Tick { now_ms: tick_now });
                 spawn_effects(&client, effects, &effect_tx);
                 queue_seat_sync(

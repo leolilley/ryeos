@@ -240,7 +240,7 @@ fn validate_forward_policy_authority(
     policy
         .validate()
         .map_err(|error| RemoteForwardError::ExecutionPolicyInvalid {
-            message: error.to_string(),
+            message: format!("{error:#}"),
         })?;
     if policy.target != ExecutionTarget::Here {
         return Err(RemoteForwardError::ExecutionPolicyInvalid {
@@ -338,7 +338,7 @@ fn bind_destination_execution_policy(
     bound
         .validate()
         .map_err(|error| RemoteForwardError::ExecutionPolicyInvalid {
-            message: format!("pushed snapshot binding is invalid: {error}"),
+            message: format!("pushed snapshot binding is invalid: {error:#}"),
         })?;
     Ok(bound)
 }

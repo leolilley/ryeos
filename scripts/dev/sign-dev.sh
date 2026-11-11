@@ -43,15 +43,16 @@ sign_file() {
 
   local body_tmp signed_body_tmp hash_tmp tmp hash sig timestamp
   body_tmp="$(mktemp)"; signed_body_tmp="$(mktemp)"; hash_tmp="$(mktemp)"; tmp="$file.tmp.$$"
-  # Body = file minus existing signature line(s); hash over the body; sign the
-  # hex-hash string with the raw ed25519 key.
+  # Body = file minus existing signature line(s). The hash covers the whole
+  # body, shebang included; after_shebang only places the signature line below
+  # the shebang. Sign the hex-hash string with the raw ed25519 key.
   sed "/$strip_re/d" "$file" > "$body_tmp"
   if [[ "$after_shebang" == true ]] && head -n 1 "$body_tmp" | grep -q '^#!'; then
     tail -n +2 "$body_tmp" > "$signed_body_tmp"
   else
     cp "$body_tmp" "$signed_body_tmp"
   fi
-  hash="$(sha256sum "$signed_body_tmp" | cut -d' ' -f1)"
+  hash="$(sha256sum "$body_tmp" | cut -d' ' -f1)"
   printf '%s' "$hash" > "$hash_tmp"
   sig="$(openssl pkeyutl -sign -inkey "$KEY" -rawin -in "$hash_tmp" 2>/dev/null | base64_one_line)"
   timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"

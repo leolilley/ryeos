@@ -76,7 +76,7 @@ pub async fn run_publisher(
                 continue;
             }
             Ok(Err(error)) => {
-                tracing::error!(%error, "accounting outbox claim failed");
+                tracing::error!(error = %format!("{error:#}"), "accounting outbox claim failed");
                 if pause_or_stop(ERROR_BACKOFF, &mut stop).await {
                     return;
                 }
@@ -100,7 +100,7 @@ pub async fn run_publisher(
         match published {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {
-                tracing::warn!(%error, "accounting outbox publication failed; will retry");
+                tracing::warn!(error = %format!("{error:#}"), "accounting outbox publication failed; will retry");
                 if pause_or_stop(ERROR_BACKOFF, &mut stop).await {
                     return;
                 }

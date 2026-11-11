@@ -2,7 +2,6 @@ use serde::{Deserialize, Serialize};
 
 use super::effect::{RyeOsEffectResult, RyeOsUiError};
 use super::model::{BrowserSession, BrowserViewport, RyeOsDockEdge};
-use crate::atlas::{AtlasItemKind, AtlasLensVm, AtlasProjectionVm};
 use crate::ids::RyeOsViewInstanceKey;
 use crate::view_set::{FieldCursorState, FocusDirection, ViewSpec};
 
@@ -65,9 +64,6 @@ pub enum RyeOsUiIntent {
         projection_guard: String,
     },
     OpenView {
-        view: ViewSpec,
-    },
-    OpenNewView {
         view: ViewSpec,
     },
     /// Open one admitted View as a fresh tab at the captured insertion owner.
@@ -197,14 +193,12 @@ pub enum RyeOsUiIntent {
     },
     ToggleTopStatusBar,
     ToggleBottomStatusBar,
-    ToggleBackdropBreak,
     ToggleDock {
         edge: RyeOsDockEdge,
     },
     ResizeFocused {
         direction: FocusDirection,
     },
-    SelectDimension,
     InspectItem {
         canonical_ref: String,
     },
@@ -219,12 +213,6 @@ pub enum RyeOsUiIntent {
         root: String,
         path: String,
     },
-    CopyText {
-        text: String,
-    },
-    OpenExternal {
-        url: String,
-    },
     /// Steer the route's head thread via `service:commands/submit`
     /// (`cancel` / `interrupt` / `continue` / `kill`). The reducer reads the
     /// head thread at dispatch time. This is the same authority the CLI's
@@ -233,14 +221,8 @@ pub enum RyeOsUiIntent {
     SubmitThreadCommand {
         command: super::dto::ThreadControlCommand,
     },
-    /// Aim the input route at a thread — the feed re-projects to its braid.
-    /// Activating a forked-subthread feed entry "enters" that subthread.
-    AimThread {
-        thread_id: String,
-    },
     /// Step INTO a child execution from a feed entry — the debugger step-in
-    /// across the dispatch edge. Unlike `AimThread` (a bare route retarget),
-    /// this pushes a return frame so Backspace walks back to the parent braid,
+    /// across the dispatch edge. This pushes a return frame so Backspace walks back to the parent braid,
     /// and sets BOTH route coordinates: a spawned child is a fresh root, so its
     /// `chain_root_id` equals its own thread id. The lens stays the braid
     /// timeline and re-projects onto the child via the route facet — no view
@@ -322,39 +304,6 @@ pub enum RyeOsUiEvent {
         tile_id: String,
         field: RyeOsFilterField,
         value: String,
-    },
-    SetFilesRoot {
-        tile_id: String,
-        root: String,
-    },
-    SetFilesPath {
-        tile_id: String,
-        path: String,
-    },
-    SetAtlasLayerVisible {
-        /// Target tile; `None` (default) targets the ambient backdrop atlas.
-        #[serde(default)]
-        tile_id: Option<String>,
-        kind: AtlasItemKind,
-        visible: bool,
-    },
-    SetAtlasLens {
-        #[serde(default)]
-        tile_id: Option<String>,
-        lens: AtlasLensVm,
-    },
-    SetAtlasProjection {
-        #[serde(default)]
-        tile_id: Option<String>,
-        projection: AtlasProjectionVm,
-        #[serde(default)]
-        root: Option<String>,
-    },
-    SetAtlasFileSpacePath {
-        #[serde(default)]
-        tile_id: Option<String>,
-        root: String,
-        path: String,
     },
     SetFieldSelection {
         instance_key: RyeOsViewInstanceKey,
@@ -514,12 +463,6 @@ pub enum RyeOsUiEvent {
     ToggleViewSection {
         instance_key: RyeOsViewInstanceKey,
         section_id: String,
-    },
-    /// Fold (`collapsed: true`) or unfold a turn-section of a feed lens.
-    SetFold {
-        tile_id: String,
-        section: usize,
-        collapsed: bool,
     },
     /// Fold a section in an exactly addressed tile or dock view instance.
     SetViewFold {

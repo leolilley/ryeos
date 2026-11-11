@@ -1,14 +1,21 @@
-<!-- ryeos:signed:2026-10-18T01:26:29Z:6c4852a5108d4875dc300d59d786ba95b58406d0810a288d0037713c724f0839:MOLGdNaV+3A7tB/JE5xP//rvE0O1Y9YkRjF753Dw2J/l9cBpfp4L6LXS3I48fXKy/6X75qjDkGVSbVgFwzYTAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-18T10:07:11Z:f256c625ae2c6dc3cfd20d91e7a17f4639cd58c3d624d16f52430b381802ce1a:W/p3Q1kgowNFKiaNOk+hehUawaNResx3fkqDVgNz8wt9/iUO/eyRO9leN1nbJRmtIgsDQzm4ZQBO11O6ZndMDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/future
 name: data-driven-runtime-verification
 title: Data-Driven Runtime Verification
 description: Future separation of declarative verification policy, reusable evidence transport, and runtime-specific protocol interpreters
 entry_type: design
-version: "0.4.0"
+version: "0.2.1"
 ```
 
 # Data-Driven Runtime Verification
+
+Within the [platform direction](platform-direction-and-delivery.md), a focused
+semantic verifier may use any supported admitted runtime, including Python.
+The second-scenario gate below concerns extracting shared verification semantics;
+it does not gate interpreted authoring or use of an existing qualification Tool
+contract. Launch, settlement and other independently owned evidence remain
+mandatory wherever the selected claim requires them.
 
 RyeOS already has a generic product qualification framework. Pinned GNU Python
 qualification uses that framework with specialized signed Tool content; it does
@@ -21,37 +28,11 @@ designs without depending on a temporary plan's continued presence.
 
 ## Status and scope
 
-Broader deferred design, originally recorded on 2026-09-25. This note captures the longer-term
+Deferred design, recorded on 2026-09-25. This note captures the longer-term
 direction discussed while implementing the independent Codex runtime
 qualification. It does not change the active qualification contract, enable a
 qualification claim, or require the current Codex verifier to become a
 universal verifier.
-
-The 2026-09-29 source migration implements a bounded subset. The explicitly
-named Codex checker accepts a required signed v2 profile selecting the producer
-scenario, exact recipe, finite command and candidate filename/content. Protocol
-steps and mandatory checks remain compiled; supported fixture bytes vary through
-one checker. Runtime membership preflight compares complete independently
-admitted owners instead of a second fixed helper inventory; its source coverage
-does not complete the outstanding production evidence joins.
-
-Development profiles select compiler versions/provenance and the supported
-static-link member/byte expectations through new profile-bound claims and
-migrated consumers. Cargo-vendor lock intent and static-link producer contract
-intent use existing strict signed project-source configuration. Shared qualification admits complete
-subject-plus-dependency selections. Local evidence and installed acceptance
-remain separate; this is not a universal verifier implementation.
-See [the Codex contract](../development/scoped-codex-qualification-boundary.md)
-and [the common qualification guide](../development/remote-development-and-qualification.md)
-for the actual authoring surface and evidence limits.
-
-This source migration proceeds independently while the existing Render proof
-continues. It does not establish live qualification of the migrated artifacts,
-enable the disabled strong Codex claims, or prove another runtime's protocol
-compatibility. The universal adapter/interpreter ideas below remain deferred
-until a real second consumer supplies their requirements. Provider-profile
-generalization separately requires an accepted baseline and a real second
-operational profile/provider.
 
 The active qualification is intentionally Codex-specific. Its signed policy
 selects a verifier and scenario; Codex app-server code interprets the runtime

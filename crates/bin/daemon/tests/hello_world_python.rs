@@ -75,9 +75,10 @@ fn synth_project_with_hello() -> PathBuf {
 
     // Tool kind schema's .py format declares `after_shebang: true` for
     // its signature envelope — meaning the signature line lives AFTER
-    // the shebang. We don't sign at all here (Unsigned trust class is
-    // accepted by the engine for items the chain doesn't gate on), so
-    // the shebang is the very first line.
+    // the shebang. This test calls the engine's build_plan/execute_plan
+    // directly, below the daemon's launch trust gate, so the tool is left
+    // unsigned; through the daemon an unsigned tool is refused before it
+    // runs.
     //
     // The ryeos-tool header below matches the kind schema's `metadata.rules`:
     //   executor_id → routes to the python script runtime, which itself

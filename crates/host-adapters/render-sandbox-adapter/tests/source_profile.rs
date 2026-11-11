@@ -19,9 +19,7 @@ fn render_source_declaration_commits_exact_profile_and_bounded_capability_ceilin
         declaration.provider_spec.sha256,
         lillux::sha256_hex(profile)
     );
-    let settings = include_bytes!(
-        "../fixtures/settings.schema.json"
-    );
+    let settings = include_bytes!("../fixtures/settings.schema.json");
     assert_eq!(
         declaration.settings_schema_digest,
         lillux::sha256_hex(settings)

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-16T08:38:06Z:75cc212a4ca86375736fcd6535dd83ca754b1c5206b61bd01a7ad21177a06955:sgjpSmrSdtz6M1vBGeQMLmQICfOx40SSkcPUyOvaBW5N6J8gnHezMbwSYJA5ROrdf9Vzv8nx6D9MjLdESb4JAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-08T06:41:16Z:147ef50ece4380b2d835585956a60410f7c091b0ef166390e734c9ec57346231:bLgZ28UTtFAefo/HWywkh8Vv8a0SCWd39fVObwDzIdHNyd3lL4M7vUxXlHWXW/0N71SfflfHNaHt2dlisKo0Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/ryeos-ui"
 name: "frame-v1"
@@ -30,7 +30,6 @@ mode flag.
 | `key_value` | field/value detail | `[(key, value)]` |
 | `text` | text body | string/detail fallback |
 | `timeline` | append-ordered events | `{primary, meta?, tone?, role?, pair_key?, raw}` per event |
-| `scene` | ambient/spatial projection | semantic scene objects |
 | `field` | multi-source entity/relation evidence field | `ryeos.ui.field.facts.v1` documents |
 
 Engine chrome (not content-targetable in v1): notice, dock/tile chrome.
@@ -40,7 +39,7 @@ block below), and a view's `completion` source drives the suggestion rows.
 ## View binding schema (`view:` items)
 
 ```yaml
-widget: rows | table | sections | key_value | text | timeline | scene | field
+widget: rows | table | sections | key_value | text | timeline | field
 sources:
   default:                    # channel name; multi-source views use additional named channels
     ref: <service ref>        # substrate services; never session-gated wrappers
@@ -211,34 +210,15 @@ which runtime event kind means cognition, tool start, or tool result.
 - Unknown or absent roles degrade to line records.
 - Pair roles with no resolvable `pair_key` degrade to line records.
 
-## Backdrop (the empty-center background is a scene)
+## Backdrop
 
 There is no "home" mode. The center is the tiling algorithm over the tile
-list: an **empty center** (zero tiles) shows the backdrop; tiles fill it
+list: an **empty center** (zero tiles) renders the empty state; tiles fill it
 otherwise; closing the last tile returns to an empty center. No mode, no
 destination — `center_is_empty` is a derived query.
 
-The backdrop is **content, not a renderer enum.** A surface declares:
-
-```yaml
-backdrop: view:ryeos/backdrop/<name>   # a normal view, widget: scene
-```
-
-The `view:ryeos/backdrop/<name>` view is a `widget: scene` view; the
-renderer draws its `RyeOsSceneModel` through the **one generic scene
-renderer** (the same renderer that draws the atlas and any future scene).
-Each scene object — `particle` (a dot sized by `scale`), `text` (its
-`label`), structural kinds — is orthographically projected into the
-center rect, glyphed by kind/scale, coloured by `tone`. New backgrounds
-(shard, starfield, atlas, …) are new **scene content**, never new renderer
-cases or an `ambient:` enum. The slots (incl. the bottom `view:ryeos/input`
-prompt) render in every state, below the backdrop.
-
-Animation falls out of the frame clock: `RyeOsSceneModel` carries
-`generation`, the loop ticks (250ms) advancing it, and the generic
-renderer steps generation-keyed motion (v1: the backdrop particles
-*twinkle* — a per-object size/brightness pulse). The motion is generic
-(the renderer steps by `generation`); the scene only declares particles.
+Backdrop removed 2026-11-08; an empty centre renders the empty state. The
+ambient-scene intent is kept in the project's future notes for the GPU renderer.
 
 ## Laws
 

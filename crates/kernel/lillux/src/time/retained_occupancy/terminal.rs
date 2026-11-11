@@ -233,6 +233,12 @@ mod controls {
 
     #[test]
     fn shared_clock_descriptor_keeps_whole_original_clock_retryable() {
+        if !crate::exec::fork_creation_custody_tests::run_isolated_in(
+            module_path!(),
+            "shared_clock_descriptor_keeps_whole_original_clock_retryable",
+        ) {
+            return;
+        }
         let _serial = crate::exec::registered_pair::serialize_clock_close_tests();
         let clock = RetainedOccupancyClock::capture().unwrap();
         let limit = OccupancyLimit::new(clock.start().clone(), 30_000_000_000).unwrap();
@@ -259,6 +265,12 @@ mod controls {
 
     #[test]
     fn expired_or_foreign_limit_never_consumes_clock_descriptors() {
+        if !crate::exec::fork_creation_custody_tests::run_isolated_in(
+            module_path!(),
+            "expired_or_foreign_limit_never_consumes_clock_descriptors",
+        ) {
+            return;
+        }
         let _serial = crate::exec::registered_pair::serialize_clock_close_tests();
         let clock = RetainedOccupancyClock::capture().unwrap();
         let limit = OccupancyLimit::new(clock.start().clone(), 30_000_000_000).unwrap();

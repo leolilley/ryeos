@@ -120,12 +120,48 @@ fn validate_config_contributor(
     )
 }
 
+/// Judge an admitted root again under the current launch trust: the kind's
+/// list (or the runtime's own launch list) widened by current node policy.
+/// An operator admission withdrawn since launch stops the work resuming.
+fn validate_current_launch_trust(
+    engine: &ryeos_engine::engine::Engine,
+    node_policy: &ryeos_node_runtime::node_policy::NodePolicySnapshot,
+    declared: Option<&[TrustClass]>,
+    primary: &ResolutionOutput,
+) -> Result<()> {
+    let root = &primary.root;
+    let kind = ryeos_engine::canonical_ref::CanonicalRef::parse(&root.resolved_ref)
+        .context("decode admitted root ref")?
+        .kind;
+    super::launch_trust_gate::enforce_launch_trust(
+        &engine.kinds,
+        node_policy,
+        super::launch_trust_gate::LaunchTrustSubject {
+            item_ref: &root.resolved_ref,
+            kind: &kind,
+            space: root.source_space,
+            class: root.trust_class,
+            position: super::launch_trust_gate::LaunchTrustPosition::Root,
+        },
+        declared,
+    )
+    .map_err(anyhow::Error::new)
+}
+
 pub(crate) fn validate_managed_current_trust(
     engine: &ryeos_engine::engine::Engine,
+    node_policy: &ryeos_node_runtime::node_policy::NodePolicySnapshot,
     project_trust: &TrustStore,
     primary: &ResolutionOutput,
     prepared: &PreparedRuntimeLaunch,
+    runtime_primary_allowed_trust: &[TrustClass],
 ) -> Result<()> {
+    validate_current_launch_trust(
+        engine,
+        node_policy,
+        Some(runtime_primary_allowed_trust),
+        primary,
+    )?;
     let policy = CurrentTrust::from_current_policy(engine, project_trust);
     validate_primary_resolution(&policy, primary)?;
     for (name, binding) in &prepared.binding_records {
@@ -165,11 +201,19 @@ pub(crate) use ryeos_app::admitted_program_trust::validate_hook_plan_current_tru
 use ryeos_app::admitted_program_trust::validate_hook_plan_trust;
 pub(crate) fn validate_direct_current_trust(
     engine: &ryeos_engine::engine::Engine,
+    node_policy: &ryeos_node_runtime::node_policy::NodePolicySnapshot,
     project_trust: &TrustStore,
     primary: &ResolutionOutput,
     plan: &ryeos_engine::contracts::ExecutionPlan,
     capsule: &ryeos_state::objects::AdmittedLaunchCapsule,
 ) -> Result<()> {
+    validate_current_launch_trust(engine, node_policy, None, primary)?;
+    super::launch_trust_gate::enforce_executor_chain(
+        &engine.kinds,
+        node_policy,
+        &plan.executor_authorities,
+    )
+    .map_err(anyhow::Error::new)?;
     let policy = CurrentTrust::from_current_policy(engine, project_trust);
     validate_primary_resolution(&policy, primary)?;
     validate_direct_plan_closure(primary, plan, capsule)?;

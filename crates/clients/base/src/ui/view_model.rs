@@ -6,11 +6,9 @@ use super::content::ViewBinding;
 use super::event::RyeOsUiIntent;
 use super::event::{RyeOsTransportChannel, RyeOsTransportFreshness};
 use super::model::{RyeOsCore, RyeOsDockEdge};
-use super::scene_model::{RyeOsSceneModel, bind_scene_actions, build_scene_model};
 use super::seat::InvokeTemplate;
 use crate::ids::{RyeOsViewInstanceKey, TileId};
 use crate::layout::{LayoutTree, SplitAxis};
-use crate::surface::AmbientAtlasStyleSpec;
 use crate::view_set::{TileState, ViewLocalState, ViewSpec};
 
 mod dialogs;
@@ -22,10 +20,7 @@ pub use execution::RyeOsTimelineEntryVm;
 use execution::status_tone;
 pub(crate) use execution::timeline_summary_entry;
 use execution::{facet_backed_response, focused_timeline_entry, retry_intent_for_focused_row};
-pub use navigation::{
-    RyeOsAmbientAtlasStyleVm, RyeOsAmbientAtlasVm, RyeOsAmbientModeVm, RyeOsAmbientVm,
-    RyeOsNavigationItemVm, RyeOsNavigationVm, RyeOsSessionVm,
-};
+pub use navigation::{RyeOsNavigationItemVm, RyeOsNavigationVm, RyeOsSessionVm};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RyeOsViewModel {
@@ -45,7 +40,6 @@ pub struct RyeOsViewModel {
     pub presentation: RyeOsPresentationVm,
     pub view_set: Option<RyeOsViewSetVm>,
     pub docks: RyeOsDockPlaneVm,
-    pub backdrop: Option<RyeOsSceneModel>,
     pub dialogs: Vec<RyeOsDialogVm>,
     pub notices: Vec<RyeOsNoticeVm>,
     pub transport: RyeOsTransportVm,
@@ -103,8 +97,6 @@ pub struct RyeOsPresentationVm {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RyeOsPresentationMetricsVm {
     pub tile_count: usize,
-    pub scene_object_count: usize,
-    pub item_count: usize,
     pub thread_count: usize,
     pub project_count: usize,
     pub service_count: usize,
@@ -211,8 +203,8 @@ pub struct RyeOsViewSetVm {
     /// mounted but only the selected member's content is projected.
     pub root: Option<RyeOsLayoutNodeVm>,
     pub focused_tile: String,
-    /// True when the center has no tiles. Drives backdrop-vs-tiles: when
-    /// empty, the renderer draws `backdrop`; otherwise the layout tree.
+    /// True when the center has no tiles: the renderer draws its empty state
+    /// instead of the layout tree.
     pub center_is_empty: bool,
     pub tile_count: usize,
     /// Labels of the levels on the step-in return stack, root-first (the
@@ -370,9 +362,8 @@ fn view_heading(
     )
 }
 
-/// Static authored material alongside a view's projected records. Scene
-/// compilation reuses the existing scene owner. Nothing here grants actions
-/// or claims a live task state; observations still belong to named sources.
+/// Static authored material alongside a view's projected records. Nothing
+/// here grants actions or claims a live task state; observations still belong to named sources.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RyeOsViewSupplementVm {
@@ -388,8 +379,6 @@ pub struct RyeOsViewSupplementVm {
     pub excerpt_title: String,
     #[serde(default)]
     pub excerpt: Vec<RyeOsRowDetailVm>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scene: Option<RyeOsSceneModel>,
 }
 
 fn view_supplement(
@@ -399,19 +388,12 @@ fn view_supplement(
 ) -> Option<RyeOsViewSupplementVm> {
     let body = &core.binding_for_instance(instance, view_ref)?.body;
     let value = body.get("supplement")?;
-    let mut result: RyeOsViewSupplementVm =
+    Some(
         serde_json::from_value(value.clone()).unwrap_or_else(|error| RyeOsViewSupplementVm {
             footer: format!("Invalid authored supplement: {error}"),
             ..Default::default()
-        });
-    // A scene uses exactly the same content grammar as an existing scene view.
-    if let Some(scene) = body.get("scene") {
-        result.scene = Some(super::scene_model::scene_from_body(
-            scene,
-            core.scene_frame(),
-        ));
-    }
-    Some(result)
+        }),
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -591,12 +573,6 @@ pub enum RyeOsViewVm {
         /// vectors mean either collapsed or not expandable.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         entry_details: Vec<Vec<RyeOsRowDetailVm>>,
-    },
-    Map {
-        scene: RyeOsSceneModel,
-    },
-    Atlas {
-        scene: RyeOsSceneModel,
     },
     /// A foldable multi-section list — the magit-style status surface: one
     /// widget over many datasets, each section a titled, collapsible group of
@@ -822,7 +798,6 @@ pub fn build_view_model(core: &RyeOsCore) -> RyeOsViewModel {
         chrome,
         view_set,
         docks: dock_plane_vm(core),
-        backdrop: backdrop_scene(core),
         dialogs: mounted_dialogs(core),
         notices: core.notices_vm(),
         transport: transport_vm(core),
@@ -994,12 +969,6 @@ fn presentation_metrics_vm(
     core: &RyeOsCore,
     view_set: Option<&RyeOsViewSetVm>,
 ) -> RyeOsPresentationMetricsVm {
-    let item_count = core
-        .data
-        .items
-        .as_ref()
-        .map(|items| items.items.len())
-        .unwrap_or_default();
     let thread_count = core
         .data
         .threads
@@ -1036,9 +1005,6 @@ fn presentation_metrics_vm(
         .as_ref()
         .map(|dimension| dimension.threads.active_count)
         .unwrap_or_default();
-    let scene_object_count = build_scene_model(core, &core.ui.atlas, None, None)
-        .objects
-        .len();
     let activity_level = presentation_activity_level(
         view_set.map_or(0, |set| set.tile_count),
         core.ui.motion.len(),
@@ -1049,8 +1015,6 @@ fn presentation_metrics_vm(
 
     RyeOsPresentationMetricsVm {
         tile_count: view_set.map_or(0, |set| set.tile_count),
-        scene_object_count,
-        item_count,
         thread_count,
         project_count,
         service_count,
@@ -1082,9 +1046,9 @@ fn status_bar_vm(_chrome: &RyeOsChromeVm, core: &RyeOsCore) -> RyeOsStatusBarVm 
         .and_then(|instance| core.retained_lens_frames.get(&instance))
         .is_none_or(|frames| frames.is_empty())
     {
-        "ctrl+k open · alt+s shards · alt+t/b bars · ctrl+←/→ tab · ctrl+↑/↓ move".to_string()
+        "ctrl+k open · alt+t/b bars · ctrl+←/→ tab · ctrl+↑/↓ move".to_string()
     } else {
-        "⌫ back · alt+← back · ctrl+k open · alt+s shards · alt+t/b bars · ctrl+←/→ tab · ctrl+↑/↓ move"
+        "⌫ back · alt+← back · ctrl+k open · alt+t/b bars · ctrl+←/→ tab · ctrl+↑/↓ move"
             .to_string()
     };
     // This is quiet interaction chrome, not a second diagnostics dashboard.
@@ -1115,8 +1079,6 @@ fn view_set_vm(core: &RyeOsCore) -> Option<RyeOsViewSetVm> {
             .map(|layout| layout_node_vm(&layout, core)),
         focused_tile: tile_id_text(view_set.focused_tile),
         center_is_empty,
-        // The backdrop scene resolves for empty centers, and for populated
-        // centers that opt into a translucent ambient underlay.
         tile_count: view_set.tile_ids().len(),
         lens_trail: core
             .focused_view_instance_key()
@@ -1148,47 +1110,6 @@ fn view_set_vm(core: &RyeOsCore) -> Option<RyeOsViewSetVm> {
             .cloned()
             .flatten(),
     })
-}
-
-/// Resolve the backdrop scene from the surface's `backdrop` view ref.
-/// Absent `backdrop` → no scene (the background fill stands).
-fn backdrop_scene(core: &RyeOsCore) -> Option<RyeOsSceneModel> {
-    let attachment_id = core
-        .active_surface()
-        .map(|surface| surface.binding().binding_attachment_id.as_str())
-        .unwrap_or(core.root_attachment_id.as_str());
-    let backdrop_ref = core
-        .binding_attachment(attachment_id)
-        .and_then(|attachment| attachment.presentation.definition.surface())
-        .and_then(|surface| surface.backdrop.as_deref())?;
-    // The backdrop is content: read the embedded backdrop VIEW's body and
-    // build its scene generically. The surface names which view; the view
-    // declares the objects. Swap the ref → swap the background, no Rust.
-    let binding = core
-        .binding_attachments
-        .get(attachment_id)?
-        .views
-        .get(backdrop_ref)?;
-    if binding.widget != "scene" {
-        return None;
-    }
-    let mut scene = super::scene_model::scene_from_body(&binding.body, core.scene_frame());
-    scene.break_amount = core.ui.backdrop_break_amount.clamp(0.0, 1.0);
-    // The backdrop breathes with the node: live threads lift the scene's
-    // energy, so the empty center visibly quickens while cognition runs
-    // and settles back to calm when the node idles.
-    let active_threads = core
-        .data
-        .dimension
-        .as_ref()
-        .map(|dimension| dimension.threads.active_count)
-        .unwrap_or_default();
-    // Keep project-local background activity from making the crystal race in
-    // busy view sets. Active threads should lift the scene slightly; transient
-    // activity pulses carry the stronger "something just happened" signal.
-    let active_component = ((active_threads.max(0) as f32) * 0.06).clamp(0.0, 0.24);
-    scene.energy = active_component.max(core.runtime.activity_pulse.clamp(0.0, 1.0));
-    Some(scene)
 }
 
 fn dock_plane_vm(core: &RyeOsCore) -> RyeOsDockPlaneVm {
@@ -1251,10 +1172,8 @@ fn dock_tile_vm(
         view: bound_view_vm_keyed(
             core,
             instance_key,
-            None,
             dock_selected_state(core, instance_key),
             view_ref,
-            &core.ui.atlas,
         ),
         input: instance_input_vm(core, instance_key, view_ref),
     })
@@ -1324,11 +1243,9 @@ pub(super) fn bound_view_vm(core: &RyeOsCore, tile_id: TileId, view_ref: &str) -
         };
     };
     let instance_key = tile.instance_key.clone();
-    let scoped_dataset_key = tile_id.0.to_string();
     bound_view_vm_keyed(
         core,
         &instance_key,
-        Some(&scoped_dataset_key),
         RowLocalState {
             cursor: selected_cursor(core, tile_id),
             collapsed: selected_collapsed(core, tile_id),
@@ -1337,17 +1254,14 @@ pub(super) fn bound_view_vm(core: &RyeOsCore, tile_id: TileId, view_ref: &str) -
             changed_rows,
         },
         view_ref,
-        core.tile_atlas_state(tile_id),
     )
 }
 
 fn bound_view_vm_keyed(
     core: &RyeOsCore,
     instance_key: &RyeOsViewInstanceKey,
-    scoped_dataset_key: Option<&str>,
     local: RowLocalState<'_>,
     view_ref: &str,
-    atlas: &crate::atlas::AtlasUiStateVm,
 ) -> RyeOsViewVm {
     let RowLocalState {
         cursor,
@@ -1385,41 +1299,13 @@ fn bound_view_vm_keyed(
     let source_key = primary_source.map(|(channel, _)| {
         super::source_key::RyeOsSourceInstanceKey::named(instance_key.clone(), channel).encode()
     });
-    // Engine scene widgets render from shared topology/item data + this
-    // tile's atlas arrangement, not from a per-tile source response — so
-    // they dispatch before the source-required arms below.
+    // Widgets that do not read a per-tile source response dispatch before
+    // the source-required arms below.
     match binding.widget.as_str() {
         "field" => {
             return RyeOsViewVm::Field {
                 field: Box::new(project_field_vm(core, instance_key, view_ref, binding)),
             };
-        }
-        "atlas" => {
-            // This tile's own scoped dataset when it has one (keyed by tile
-            // id == source_key); otherwise None falls back to the shared data.
-            let mut scene = super::scene_model::build_scene_model_for_instance(
-                core,
-                atlas,
-                scoped_dataset_key.and_then(|key| core.data.tile_items.get(key)),
-                scoped_dataset_key.and_then(|key| core.data.tile_file_space.get(key)),
-                Some(instance_key),
-            );
-            let tile_id = instance_key.surface_tile_id().map(|id| id.0.to_string());
-            bind_scene_actions(&mut scene, tile_id);
-            return RyeOsViewVm::Atlas { scene };
-        }
-        "graph" => {
-            // Graph renders shared topology; no per-tile content scope yet.
-            let mut scene = super::scene_model::build_scene_model_for_instance(
-                core,
-                atlas,
-                None,
-                None,
-                Some(instance_key),
-            );
-            let tile_id = instance_key.surface_tile_id().map(|id| id.0.to_string());
-            bind_scene_actions(&mut scene, tile_id);
-            return RyeOsViewVm::Map { scene };
         }
         "sections" => {
             // A sections view reads one typed source channel per section, not
@@ -2154,10 +2040,8 @@ pub(crate) fn view_vm_for_instance(
         _ => Some(bound_view_vm_keyed(
             core,
             instance_key,
-            None,
             dock_selected_state(core, instance_key),
             mount.view_ref(),
-            &core.ui.atlas,
         )),
     }
 }
@@ -2803,8 +2687,8 @@ fn text_position(binding: &super::content::ViewBinding) -> RyeOsTextPositionVm {
 }
 
 fn view_vm(core: &RyeOsCore, tile_id: TileId, tile: &TileState) -> RyeOsViewVm {
-    // Every tile is a bound view; the scene widgets (graph/atlas) dispatch
-    // by `widget` inside `bound_view_vm`.
+    // Every tile is a bound view; widgets dispatch by `widget` inside
+    // `bound_view_vm`.
     bound_view_vm(core, tile_id, &tile.view.view_ref)
 }
 
@@ -2857,7 +2741,6 @@ fn session_vm(core: &RyeOsCore) -> RyeOsSessionVm {
                 }),
             })
             .collect(),
-        ambient: ambient_vm(core),
         user_principal_id: browser.and_then(|session| session.user_principal_id.clone()),
         posture: surface
             .map(|attachment| attachment.posture)
@@ -2865,46 +2748,8 @@ fn session_vm(core: &RyeOsCore) -> RyeOsSessionVm {
     }
 }
 
-fn ambient_vm(core: &RyeOsCore) -> RyeOsAmbientVm {
-    let Some(surface) = core
-        .binding_attachment(&core.root_attachment_id)
-        .and_then(|attachment| attachment.presentation.definition.surface().cloned())
-    else {
-        return RyeOsAmbientVm {
-            show_background: true,
-            opacity: None,
-            mode: RyeOsAmbientModeVm::Ambient,
-            atlas: None,
-        };
-    };
-    let Some(ambient) = surface.ambient else {
-        return RyeOsAmbientVm {
-            show_background: true,
-            opacity: None,
-            mode: RyeOsAmbientModeVm::Ambient,
-            atlas: None,
-        };
-    };
-    let atlas_style = ambient.namespace_atlas_style();
-    RyeOsAmbientVm {
-        show_background: ambient.show_background.unwrap_or(true),
-        opacity: ambient.opacity,
-        mode: if atlas_style.is_some() {
-            RyeOsAmbientModeVm::NamespaceAtlas
-        } else {
-            RyeOsAmbientModeVm::Ambient
-        },
-        atlas: atlas_style.map(|style| RyeOsAmbientAtlasVm {
-            style: match style {
-                AmbientAtlasStyleSpec::Flat2d => RyeOsAmbientAtlasStyleVm::Flat2d,
-                AmbientAtlasStyleSpec::Paper3d => RyeOsAmbientAtlasStyleVm::Paper3d,
-            },
-        }),
-    }
-}
-
-/// Launchable views: every view embedded in the effective surface,
-/// graph/atlas included (they are ordinary `view:` items now). Nothing
+/// Launchable views: every view embedded in the effective surface
+/// (they are ordinary `view:` items). Nothing
 /// here names a product concept — labels and hints come from the items.
 /// The `@facet:` references in a view's declarations that the current
 /// seat fold cannot resolve. Defaulting refs (`@facet:x|…`) never gate —
@@ -3394,14 +3239,6 @@ fn context_command_items(
     focused: Option<&RyeOsViewInstanceKey>,
 ) -> Vec<RyeOsCommandChoice> {
     let mut items = Vec::new();
-    items.push(RyeOsCommandChoice {
-        label: "Toggle backdrop break".to_string(),
-        hint: "toggle the current backdrop scene between together and apart".to_string(),
-        intent: RyeOsUiIntent::ToggleBackdropBreak,
-        secondary_intent: None,
-        enabled: true,
-    });
-
     // A recoverable failed terminal offers retry: re-submit its own stimulus as
     // a continuation, retargeted at the selected failed thread, pre-filled for
     // review (not one-click). Surfaced two ways so it works everywhere — as the
@@ -4022,7 +3859,6 @@ fn intent_for_focused_row_at(
 /// The row under the point in the exact focused mount, if the point is on a row. The
 /// rows widget indexes by the flat cursor; sections carry the selection on the
 /// row VM itself (the point may instead be on a collapsed header → no row).
-/// Scene widgets (graph/atlas) have no rows.
 fn focused_selected_row(
     core: &RyeOsCore,
     focused: Option<&RyeOsViewInstanceKey>,
@@ -4264,7 +4100,6 @@ mod tests {
         let view = bound_view_vm_keyed(
             &core,
             &instance_key,
-            None,
             RowLocalState {
                 cursor: None,
                 collapsed: None,
@@ -4273,7 +4108,6 @@ mod tests {
                 changed_rows: None,
             },
             view_ref,
-            &core.ui.atlas,
         );
         match view {
             RyeOsViewVm::Placeholder { message, .. } => {
@@ -4430,7 +4264,6 @@ mod tests {
         let view = bound_view_vm_keyed(
             &core,
             &instance,
-            None,
             RowLocalState {
                 cursor: None,
                 collapsed: None,
@@ -4439,7 +4272,6 @@ mod tests {
                 changed_rows: None,
             },
             view_ref,
-            &core.ui.atlas,
         );
         let RyeOsViewVm::RequiredSubject {
             input,
@@ -4483,39 +4315,6 @@ mod tests {
                 text: "hello world".to_string(),
                 tone: RyeOsTone::Accent,
             }]
-        );
-    }
-
-    #[test]
-    fn empty_center_resolves_backdrop_scene_from_surface_ref() {
-        let session = session_with_surface(json!({
-            "name": "ryeos-base",
-            "version": "1.0.0",
-            "backdrop": "view:test/backdrop",
-            // The backdrop is content: its scene objects live in the
-            // embedded view's body, not in Rust.
-            "views": {
-                "view:test/backdrop": {
-                    "widget": "scene",
-                    "body": { "objects": [
-                        { "kind": "particle", "position": [1.0, 2.0], "scale": 0.9, "color": "#d65d0e", "tone": "accent" },
-                        { "kind": "text", "position": [0.0, -8.0], "label": "RYE OS", "color": "#d65d0e", "tone": "accent" }
-                    ] }
-                }
-            }
-        }));
-        let core = test_support_core(session);
-        let vm = build_view_model(&core);
-
-        assert!(vm.view_set.as_ref().unwrap().center_is_empty);
-        let backdrop = vm.backdrop.expect("backdrop scene on empty center");
-        // The scene resolves from the view body — objects incl. text labels.
-        assert!(!backdrop.objects.is_empty());
-        assert!(
-            backdrop
-                .objects
-                .iter()
-                .any(|o| o.label.as_deref() == Some("RYE OS"))
         );
     }
 
@@ -4581,15 +4380,6 @@ mod tests {
             }
             other => panic!("expected rows status dock, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn no_backdrop_ref_means_no_backdrop_scene() {
-        let session = session_with_surface(json!({ "name": "ryeos-base", "views": {} }));
-        let core = test_support_core(session);
-        let vm = build_view_model(&core);
-        assert!(vm.view_set.as_ref().unwrap().center_is_empty);
-        assert!(vm.backdrop.is_none());
     }
 
     fn session_with_views(views: serde_json::Value, tiles: serde_json::Value) -> RyeOsCore {
@@ -4715,7 +4505,6 @@ mod tests {
             assert_eq!(home[key], json!([]), "neutral {key}");
         }
         assert!(home.get("input").is_none());
-        assert_eq!(home["backdrop"], "view:ryeos/backdrop/prism-shards");
         let observe: serde_json::Value = serde_yaml::from_str(
             &std::fs::read_to_string(surfaces.join("base-observe.yaml")).unwrap(),
         )
@@ -4844,13 +4633,12 @@ mod tests {
     }
 
     #[test]
-    fn authored_supplement_reuses_scene_content_without_creating_actions() {
+    fn authored_supplement_projects_static_material_without_creating_actions() {
         let core = session_with_views(
             json!({"view:test/detail": {
                 "widget":"rows", "body":{
                     "heading":{"title":"A task", "metadata":["Sample"]},
-                    "supplement":{"frame_label":"Detail", "excerpt":[{"field":"1","value":"<script>not markup</script>"}]},
-                    "scene":{"objects":[{"position":[0,0,0],"to":[10,10,0]}]}
+                    "supplement":{"frame_label":"Detail", "excerpt":[{"field":"1","value":"<script>not markup</script>"}]}
                 }
             }}),
             json!(["view:test/detail"]),
@@ -4863,32 +4651,29 @@ mod tests {
         assert_eq!(heading.title, "A task");
         let supplement = view_supplement(&core, &instance, "view:test/detail").unwrap();
         assert_eq!(supplement.excerpt[0].value, "<script>not markup</script>");
-        let scene = supplement.scene.unwrap();
-        assert_eq!(scene.objects[0].end, Some([10.0, 10.0, 0.0]));
-        assert!(scene.objects[0].intent.is_none());
     }
 
     #[test]
     fn tile_title_prefers_authored_name_over_ref_tail() {
         let core = session_with_views(
-            json!({ "view:ryeos/graph/topology": { "widget": "graph", "name": "Topology" } }),
-            json!(["view:ryeos/graph/topology"]),
+            json!({ "view:ryeos/programs/list": { "widget": "rows", "name": "Programs" } }),
+            json!(["view:ryeos/programs/list"]),
         );
-        // Authored name wins over the ref tail ("topology").
-        assert_eq!(focused_tile_title(&core), "Topology");
+        // Authored name wins over the ref tail ("list").
+        assert_eq!(focused_tile_title(&core), "Programs");
     }
 
     #[test]
     fn tile_title_reports_untitled_when_authored_name_absent_or_blank() {
         let absent = session_with_views(
-            json!({ "view:ryeos/graph/topology": { "widget": "graph" } }),
-            json!(["view:ryeos/graph/topology"]),
+            json!({ "view:ryeos/programs/list": { "widget": "rows" } }),
+            json!(["view:ryeos/programs/list"]),
         );
         assert_eq!(focused_tile_title(&absent), "Untitled view");
 
         let blank = session_with_views(
-            json!({ "view:ryeos/graph/topology": { "widget": "graph", "name": "  " } }),
-            json!(["view:ryeos/graph/topology"]),
+            json!({ "view:ryeos/programs/list": { "widget": "rows", "name": "  " } }),
+            json!(["view:ryeos/programs/list"]),
         );
         assert_eq!(focused_tile_title(&blank), "Untitled view");
     }
@@ -4897,31 +4682,31 @@ mod tests {
     fn ordinary_mounted_views_use_authored_labels_without_reference_prettification() {
         let core = session_with_views(
             json!({
-                "view:ryeos/atlas": { "widget": "atlas", "name": "atlas-slug", "title": "Atlas", "description": "the namespace atlas" },
+                "view:ryeos/programs/list": { "widget": "rows", "name": "programs-slug", "title": "Programs", "description": "the program list" },
                 "view:ryeos/x/raw": { "widget": "rows" }
             }),
-            json!(["view:ryeos/atlas", "view:ryeos/x/raw"]),
+            json!(["view:ryeos/programs/list", "view:ryeos/x/raw"]),
         );
         let tiles: Vec<_> = core.active_view_set().unwrap().tiles.values().collect();
         assert_eq!(tiles.len(), 2);
-        let atlas = tiles
+        let named = tiles
             .iter()
-            .find(|tile| tile.view.view_ref == "view:ryeos/atlas")
+            .find(|tile| tile.view.view_ref == "view:ryeos/programs/list")
             .unwrap();
         let unnamed = tiles
             .iter()
             .find(|tile| tile.view.view_ref == "view:ryeos/x/raw")
             .unwrap();
-        assert_ne!(atlas.instance_key, unnamed.instance_key);
+        assert_ne!(named.instance_key, unnamed.instance_key);
         assert_eq!(
-            view_title(&core, &atlas.instance_key, &atlas.view.view_ref),
-            "Atlas"
+            view_title(&core, &named.instance_key, &named.view.view_ref),
+            "Programs"
         );
         assert_eq!(
             view_title(&core, &unnamed.instance_key, &unnamed.view.view_ref),
             "Untitled view"
         );
-        assert_eq!(tile_title(&core, atlas), "Atlas");
+        assert_eq!(tile_title(&core, named), "Programs");
         assert_eq!(tile_title(&core, unnamed), "Untitled view");
     }
 

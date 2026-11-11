@@ -997,7 +997,7 @@ pub async fn handle_projects_open(
     };
     // Recent metadata cannot undo an already committed admission.
     if let Err(error) = store.touch_recent_project(&project.local_id) {
-        tracing::warn!(%error, local_id = %project.local_id, "Surface admitted but recent project history was not updated");
+        tracing::warn!(error = %format!("{error:#}"), local_id = %project.local_id, "Surface admitted but recent project history was not updated");
     }
     admitted_result
         .ok_or_else(|| HandlerError::Internal("Surface publication result missing".into()).into())

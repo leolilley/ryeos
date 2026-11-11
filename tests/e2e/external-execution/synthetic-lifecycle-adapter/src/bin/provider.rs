@@ -22,6 +22,10 @@ struct Environments {
 struct CommandEnvironment {
     id: String,
     program: String,
+    /// The production configuration adapter states how long the workload waits
+    /// for the connector's first reply; this provider launches the connector
+    /// directly and has no handshake to bound, so it only requires the field.
+    initialize_timeout_sec: u64,
     env: BTreeMap<String, String>,
 }
 
@@ -57,6 +61,10 @@ impl RemoteConnector {
         ensure!(
             environment.id == configuration.default,
             "provider configuration default differs from its only environment"
+        );
+        ensure!(
+            environment.initialize_timeout_sec > 0,
+            "provider configuration gives the connector no time to reply"
         );
         let mut request = lillux::SubordinateProcessRequest {
             cmd: String::new(),

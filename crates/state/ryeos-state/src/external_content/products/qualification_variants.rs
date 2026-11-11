@@ -116,7 +116,11 @@ pub fn unmet_guarantees(
 ) -> Vec<(String, String)> {
     requires
         .iter()
-        .filter_map(|entry| node.meets(entry).err().map(|reason| (entry.label(), reason)))
+        .filter_map(|entry| {
+            node.meets(entry)
+                .err()
+                .map(|reason| (entry.label(), reason))
+        })
         .collect()
 }
 
@@ -267,23 +271,47 @@ mod tests {
             ("isolation:enforced", ProofSource::Measured),
             ("termination:pid_namespace", ProofSource::Measured),
         ]);
-        assert_eq!(set(None).select(NodeGuarantees::new(&node, &[])).unwrap().policy_ref, CONTAINED);
+        assert_eq!(
+            set(None)
+                .select(NodeGuarantees::new(&node, &[]))
+                .unwrap()
+                .policy_ref,
+            CONTAINED
+        );
     }
 
     #[test]
     fn a_trusted_node_selects_the_trusted_variant() {
         let node = node(&[("sessions:trusted_process_group", ProofSource::Trusted)]);
-        assert_eq!(set(None).select(NodeGuarantees::new(&node, &[])).unwrap().policy_ref, TRUSTED);
+        assert_eq!(
+            set(None)
+                .select(NodeGuarantees::new(&node, &[]))
+                .unwrap()
+                .policy_ref,
+            TRUSTED
+        );
     }
 
     #[test]
     fn a_node_holding_neither_is_refused_with_each_unmet_guarantee() {
         // Enforced but uncontained, and not trusted: no variant is met.
         let node = node(&[("isolation:enforced", ProofSource::Measured)]);
-        let error = set(None).select(NodeGuarantees::new(&node, &[])).unwrap_err().to_string();
-        assert!(error.contains(CONTAINED) && error.contains(TRUSTED), "{error}");
-        assert!(error.contains("any_of(termination:scope, termination:pid_namespace)"), "{error}");
-        assert!(error.contains("sessions:trusted_process_group is not held"), "{error}");
+        let error = set(None)
+            .select(NodeGuarantees::new(&node, &[]))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains(CONTAINED) && error.contains(TRUSTED),
+            "{error}"
+        );
+        assert!(
+            error.contains("any_of(termination:scope, termination:pid_namespace)"),
+            "{error}"
+        );
+        assert!(
+            error.contains("sessions:trusted_process_group is not held"),
+            "{error}"
+        );
         assert!(!error.contains("isolation:enforced is not held"), "{error}");
     }
 
@@ -293,7 +321,10 @@ mod tests {
             ("isolation:enforced", ProofSource::ProviderAttested),
             ("termination:scope", ProofSource::Measured),
         ]);
-        let error = set(None).select(NodeGuarantees::new(&node, &[])).unwrap_err().to_string();
+        let error = set(None)
+            .select(NodeGuarantees::new(&node, &[]))
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("provider_attested-proven"), "{error}");
     }
 
@@ -304,7 +335,11 @@ mod tests {
             ("termination:pid_namespace", ProofSource::ProviderAttested),
         ]);
         let variants = set(None);
-        assert!(variants.select(NodeGuarantees::new(&attested, &[])).is_err());
+        assert!(
+            variants
+                .select(NodeGuarantees::new(&attested, &[]))
+                .is_err()
+        );
         // A floor naming a different capability, or accepting only measured,
         // does not widen it.
         let other: Vec<CapabilityRequirement> = serde_json::from_value(json!([
@@ -312,7 +347,11 @@ mod tests {
             {"name": "termination:pid_namespace", "accept": ["measured"]},
         ]))
         .unwrap();
-        assert!(variants.select(NodeGuarantees::new(&attested, &other)).is_err());
+        assert!(
+            variants
+                .select(NodeGuarantees::new(&attested, &other))
+                .is_err()
+        );
         let floor: Vec<CapabilityRequirement> = serde_json::from_value(json!([
             {"name": "termination:pid_namespace", "accept": ["measured", "provider_attested"]},
         ]))
@@ -333,9 +372,15 @@ mod tests {
             ("termination:scope", ProofSource::Measured),
             ("sessions:trusted_process_group", ProofSource::Trusted),
         ]);
-        let error = set(None).select(NodeGuarantees::new(&both, &[])).unwrap_err().to_string();
+        let error = set(None)
+            .select(NodeGuarantees::new(&both, &[]))
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("more than one"), "{error}");
-        assert!(error.contains(CONTAINED) && error.contains(TRUSTED), "{error}");
+        assert!(
+            error.contains(CONTAINED) && error.contains(TRUSTED),
+            "{error}"
+        );
     }
 
     #[test]
@@ -365,7 +410,10 @@ mod tests {
             }],
         });
         assert!(QualificationVariants::from_value(&value).is_err());
-        value["variants"][0].as_object_mut().unwrap().remove("isolation_lane");
+        value["variants"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("isolation_lane");
         assert!(QualificationVariants::from_value(&value).is_ok());
     }
 
@@ -379,6 +427,9 @@ mod tests {
         let error = require_policy_guarantees(&requires, NodeGuarantees::new(&node(&[]), &[]), "p")
             .unwrap_err()
             .to_string();
-        assert!(error.contains("policy p") && error.contains("isolation:enforced is not held"), "{error}");
+        assert!(
+            error.contains("policy p") && error.contains("isolation:enforced is not held"),
+            "{error}"
+        );
     }
 }

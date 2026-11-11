@@ -783,10 +783,10 @@ pub(crate) fn parse_verifier_stdout(
                             return Err(diagnostics
                                 .refusal("restored verifier emitted an empty stdout event"));
                         }
-                        if !stdout
+                        if stdout
                             .len()
                             .checked_add(output.data.len())
-                            .is_some_and(|count| count <= maximum_output + 1)
+                            .is_none_or(|count| count > maximum_output + 1)
                         {
                             return Err(
                                 diagnostics.refusal("restored verifier output exceeds its bound")

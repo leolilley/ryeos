@@ -3189,10 +3189,57 @@ pub struct NativeLaunchResult {
     pub result_project_snapshot_hash: Option<String>,
 }
 
-/// Spawn-gate: refuse to spawn an effective item whose composed trust class
-/// is `Unsigned`. The rejection remains a typed dispatch-policy error all the
-/// way to the HTTP boundary; it must never collapse into an opaque 500.
+/// Spawn gate for a resolved launch: the root and every ancestor must come
+/// from a space and carry a trust class their kind admits under current node
+/// policy, and the folded class may never be unsigned. Refusals stay typed
+/// launch-policy errors all the way to the HTTP boundary.
 pub(crate) fn enforce_effective_trust(
+    kinds: &ryeos_engine::kind_registry::KindRegistry,
+    node_policy: &ryeos_node_runtime::node_policy::NodePolicySnapshot,
+    resolution: &ryeos_engine::resolution::ResolutionOutput,
+    item_ref: &str,
+    kind: &str,
+) -> std::result::Result<(), DispatchError> {
+    use super::launch_trust_gate::{LaunchTrustPosition, LaunchTrustSubject, enforce_launch_trust};
+    enforce_launch_trust(
+        kinds,
+        node_policy,
+        LaunchTrustSubject {
+            item_ref,
+            kind,
+            space: resolution.root.source_space,
+            class: resolution.root.trust_class,
+            position: LaunchTrustPosition::Root,
+        },
+        None,
+    )?;
+    for ancestor in &resolution.ancestors {
+        let ancestor_kind =
+            ryeos_engine::canonical_ref::CanonicalRef::parse(&ancestor.resolved_ref)
+                .map_err(|error| {
+                    DispatchError::InvalidRef(ancestor.resolved_ref.clone(), error.to_string())
+                })?
+                .kind;
+        enforce_launch_trust(
+            kinds,
+            node_policy,
+            LaunchTrustSubject {
+                item_ref: &ancestor.resolved_ref,
+                kind: &ancestor_kind,
+                space: ancestor.source_space,
+                class: ancestor.trust_class,
+                position: LaunchTrustPosition::Ancestor(&ancestor.resolved_ref),
+            },
+            None,
+        )?;
+    }
+    refuse_unsigned_effective_trust(resolution.effective_trust_class, item_ref, kind)
+}
+
+/// Refuse an unsigned folded trust class. This is the whole check only where
+/// nothing is launched (read-only projections); every launch path uses
+/// [`enforce_effective_trust`].
+pub(crate) fn refuse_unsigned_effective_trust(
     trust_class: ryeos_engine::resolution::TrustClass,
     item_ref: &str,
     kind: &str,
@@ -3203,16 +3250,13 @@ pub(crate) fn enforce_effective_trust(
     Ok(())
 }
 
-/// Construct the single typed policy rejection used when either the composed
-/// resolution pipeline or a direct verified-root gate proves unsigned launch
-/// authority. Keeping this shape centralized prevents method and envelope
-/// dispatch from drifting at the HTTP boundary.
+/// The typed refusal for an unsigned root, ancestor or folded reference.
 pub(crate) fn effective_trust_unsigned_error(item_ref: &str, kind: &str) -> DispatchError {
     DispatchError::LaunchPolicyForbidden {
         code: "effective_trust_unsigned".to_owned(),
         message: format!(
-            "refusing to spawn `{item_ref}` ({kind}): effective_trust_class is Unsigned — \
-             root or one of its ancestors lacks a valid signature from a trusted signer"
+            "refusing to launch `{item_ref}` ({kind}): its root, an ancestor or a referenced item \
+             is unsigned; unsigned work is never admitted"
         ),
         binding: None,
     }
@@ -4184,7 +4228,9 @@ async fn prepare_managed_launch_authority(
         )));
     }
     enforce_effective_trust(
-        resolution.effective_trust_class,
+        &params.state.engine.kinds,
+        &params.state.node_policy,
+        &resolution,
         &params.resolved.item_ref,
         &params.resolved.resolved_item.kind,
     )?;
@@ -4679,6 +4725,7 @@ async fn prepare_managed_launch_authority(
                 trust_store: &request_snapshot.trust_store,
                 principal: &params.resolved.plan_context.requested_by,
                 subject_resolution_authority: &subject_resolution_authority,
+                node_policy: Some(&params.state.node_policy),
                 resolution_cache: Some(super::launch_preparation::PreparedResolutionCacheContext {
                     cache: &params.state.resolution_cache,
                     materialization: &binding_materialization,
@@ -4724,9 +4771,11 @@ async fn prepare_managed_launch_authority(
     };
     super::admitted_trust::validate_managed_current_trust(
         engine,
+        &params.state.node_policy,
         current_trust_store,
         &resolution,
         &prepared_launch,
+        &selected_runtime.yaml.launch_contract.primary_allowed_trust,
     )
     .map_err(BuildAndLaunchError::Internal)?;
     let evidence_publication = super::persistent_session::prepare_or_verify_evidence_attachments(
@@ -6601,15 +6650,19 @@ async fn run_claimed_thread_row_inner(
         "native launch execution policy resolved"
     );
 
-    // Active trust enforcement: hard-fail before spawn if the daemon
-    // resolved an `Unsigned` effective item for ANY kind. The trust posture is
-    // the *weakest* of root + every ancestor (`effective_trust`) — a
-    // single unsigned link in an extends chain taints the whole
-    // executor. There is no per-kind opt-out; the launcher always
-    // refuses to spawn an unsigned effective item.
+    // Active trust enforcement before spawn: the root and every ancestor must
+    // be admitted for their kind under current node policy, and an unsigned
+    // link anywhere in the fold refuses the launch. There is no per-kind
+    // opt-out for unsigned work.
     let effective_trust_class = resolution.effective_trust_class;
     let kind = resolved.resolved_item.kind.as_str();
-    enforce_effective_trust(effective_trust_class, &resolved.item_ref, kind)?;
+    enforce_effective_trust(
+        &state.engine.kinds,
+        &state.node_policy,
+        resolution,
+        &resolved.item_ref,
+        kind,
+    )?;
 
     // The launching kind schema (e.g. `directive`, `graph`) drives
     // inventory build below; it does NOT carry the subprocess
@@ -7070,7 +7123,7 @@ async fn run_claimed_thread_row_inner(
             hard_limits: hard_limits.clone(),
         },
         EnvelopeCallback {
-            socket_path: state.config.uds_path.clone(),
+            socket_path: state.config.runtime_uds_path(),
             token: cap.token.clone(),
         },
         effective_program,
@@ -13413,8 +13466,12 @@ mod tests {
 
     #[test]
     fn enforce_trust_blocks_unsigned() {
-        let err = enforce_effective_trust(TrustClass::Unsigned, "directive:my/agent", "directive")
-            .unwrap_err();
+        let err = refuse_unsigned_effective_trust(
+            TrustClass::Unsigned,
+            "directive:my/agent",
+            "directive",
+        )
+        .unwrap_err();
         assert_eq!(err.code(), "effective_trust_unsigned");
         assert_eq!(err.http_status(), axum::http::StatusCode::FORBIDDEN);
         assert!(matches!(
@@ -13422,8 +13479,8 @@ mod tests {
             DispatchError::LaunchPolicyForbidden { binding: None, .. }
         ));
         let msg = format!("{err}");
-        assert!(msg.contains("refusing to spawn"));
-        assert!(msg.contains("Unsigned"));
+        assert!(msg.contains("refusing to launch"));
+        assert!(msg.contains("unsigned"));
         assert!(msg.contains("directive:my/agent"));
     }
 
@@ -13434,7 +13491,7 @@ mod tests {
             TrustClass::TrustedProject,
             TrustClass::UntrustedProject,
         ] {
-            enforce_effective_trust(cls, "directive:x", "directive")
+            refuse_unsigned_effective_trust(cls, "directive:x", "directive")
                 .unwrap_or_else(|e| panic!("{cls:?} should pass, got: {e}"));
         }
     }

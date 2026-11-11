@@ -414,7 +414,7 @@ pub fn accept_testimony_for_owner(
         .write_barrier
         .acquire_with_timeout(crate::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
         .map_err(|error| {
-            anyhow::anyhow!("cannot acquire remote qualification acceptance permit: {error}")
+            anyhow::anyhow!("cannot acquire remote qualification acceptance permit: {error:#}")
         })?;
     let (loaded, reused_existing) =
         ryeos_state::immutable_testimony::publish_immutable_attestation(

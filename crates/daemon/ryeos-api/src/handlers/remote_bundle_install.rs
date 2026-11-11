@@ -278,7 +278,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
                 tracing::warn!(
                     bundle = %req.bundle_name,
                     engine_cache_generation = new_gen,
-                    error = %error,
+                    error = %format!("{error:#}"),
                     "remote bundle activation failed after target became visible: bumped engine cache generation"
                 );
             }
@@ -493,7 +493,7 @@ fn scavenge_stale_remote_fetches(bundles_root: &Path) -> Result<()> {
             Err(error) => {
                 tracing::warn!(
                     path = %path.display(),
-                    error = %error,
+                    error = %format!("{error:#}"),
                     "refusing to scavenge remote transfer with invalid heartbeat"
                 );
                 continue;
@@ -518,7 +518,7 @@ fn scavenge_stale_remote_fetches(bundles_root: &Path) -> Result<()> {
             Err(error) => {
                 tracing::warn!(
                     path = %path.display(),
-                    error = %error,
+                    error = %format!("{error:#}"),
                     "failed to remove abandoned remote bundle transfer generation"
                 );
             }

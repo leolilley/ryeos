@@ -1029,8 +1029,8 @@ mod tests {
             format!("{prefix}\"a\\u0007b\"}}"),
             format!("{prefix}\"a\",\"x\":1}}"),
             format!("{prefix}\"{}\"}}", "y".repeat(5000)),
-            format!(r#"{{"guest_owner":"refused","detail":"a","step":"stage"}}"#),
-            format!(r#"{{"guest_owner":"refused","step":"unknown","detail":"a"}}"#),
+            r#"{"guest_owner":"refused","detail":"a","step":"stage"}"#.to_string(),
+            r#"{"guest_owner":"refused","step":"unknown","detail":"a"}"#.to_string(),
             format!("{prefix}\"a\"}} "),
         ] {
             assert!(GuestOwnerReport::parse_line(&line).is_err(), "{line}");
@@ -1243,7 +1243,7 @@ mod tests {
     #[test]
     fn owner_report_file_binds_its_occurrence_and_is_canonical() {
         let id = ("sbx-a", "a".repeat(64), "b".repeat(64));
-        let file = GuestOwnerReportFile::new(&id.0, &id.1, &id.2, exit(126, "launcher refused"));
+        let file = GuestOwnerReportFile::new(id.0, &id.1, &id.2, exit(126, "launcher refused"));
         let bytes = file.canonical_bytes().unwrap();
         // The relay readers accept only the sorted-key canonical form, which
         // the struct's field order is not: the file must not be the plain
@@ -1257,23 +1257,23 @@ mod tests {
         assert!(bytes.starts_with(b"{\"allocation_request_digest\":"));
         let field_order = serde_json::to_vec(&file).unwrap();
         assert_ne!(field_order, bytes);
-        assert!(GuestOwnerReportFile::decode_for(&field_order, &id.0, &id.1, &id.2).is_err());
+        assert!(GuestOwnerReportFile::decode_for(&field_order, id.0, &id.1, &id.2).is_err());
         assert_eq!(
-            GuestOwnerReportFile::decode_for(&bytes, &id.0, &id.1, &id.2).unwrap(),
+            GuestOwnerReportFile::decode_for(&bytes, id.0, &id.1, &id.2).unwrap(),
             exit(126, "launcher refused")
         );
         assert!(GuestOwnerReportFile::decode_for(&bytes, "sbx-b", &id.1, &id.2).is_err());
-        assert!(GuestOwnerReportFile::decode_for(&bytes, &id.0, &"c".repeat(64), &id.2).is_err());
-        assert!(GuestOwnerReportFile::decode_for(&bytes, &id.0, &id.1, &"c".repeat(64)).is_err());
+        assert!(GuestOwnerReportFile::decode_for(&bytes, id.0, &"c".repeat(64), &id.2).is_err());
+        assert!(GuestOwnerReportFile::decode_for(&bytes, id.0, &id.1, &"c".repeat(64)).is_err());
         let spaced = String::from_utf8(bytes.clone())
             .unwrap()
             .replace(",\"exit", ", \"exit");
-        assert!(GuestOwnerReportFile::decode_for(spaced.as_bytes(), &id.0, &id.1, &id.2).is_err());
+        assert!(GuestOwnerReportFile::decode_for(spaced.as_bytes(), id.0, &id.1, &id.2).is_err());
         let extra = String::from_utf8(bytes)
             .unwrap()
             .replacen('{', "{\"x\":1,", 1);
-        assert!(GuestOwnerReportFile::decode_for(extra.as_bytes(), &id.0, &id.1, &id.2).is_err());
-        assert!(GuestOwnerReportFile::decode_for(b"{", &id.0, &id.1, &id.2).is_err());
+        assert!(GuestOwnerReportFile::decode_for(extra.as_bytes(), id.0, &id.1, &id.2).is_err());
+        assert!(GuestOwnerReportFile::decode_for(b"{", id.0, &id.1, &id.2).is_err());
     }
 
     #[test]

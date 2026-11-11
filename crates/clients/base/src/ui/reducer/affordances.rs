@@ -772,26 +772,6 @@ impl RyeOsCore {
             })
             .collect()
     }
-
-    /// Resolve the atlas arrangement a `SetAtlas*` event targets: `Some(tile)`
-    /// → that tile's per-tile arrangement, created from the default on first
-    /// touch; `None` → the ambient backdrop atlas.
-    pub(crate) fn atlas_target_mut(
-        &mut self,
-        tile_id: &Option<String>,
-    ) -> &mut crate::atlas::AtlasUiStateVm {
-        match tile_id {
-            Some(id) => self.ui.tile_atlas.entry(id.clone()).or_default(),
-            None => &mut self.ui.atlas,
-        }
-    }
-
-    pub(crate) fn atlas_target(&self, tile_id: &Option<String>) -> &crate::atlas::AtlasUiStateVm {
-        match tile_id {
-            Some(id) => self.ui.tile_atlas.get(id).unwrap_or(&self.ui.atlas),
-            None => &self.ui.atlas,
-        }
-    }
 }
 
 #[cfg(test)]

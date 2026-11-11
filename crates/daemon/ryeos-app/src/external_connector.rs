@@ -1622,9 +1622,10 @@ mod tests {
             release_stale_mount_target(&home, destination).unwrap(),
             MountTargetRelease::Absent
         );
-        // A reservation whose owner died without closing it.
+        // A reservation whose owner died without closing it: drop releases the
+        // handles and leaves the namespace reservation in place.
         let reservation = home.reserve_empty_mount_target(destination).unwrap();
-        std::mem::forget(reservation);
+        drop(reservation);
         assert!(root.path().join("environments.toml").exists());
         assert_eq!(
             release_stale_mount_target(&home, destination).unwrap(),

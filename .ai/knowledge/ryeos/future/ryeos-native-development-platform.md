@@ -1,15 +1,20 @@
-<!-- ryeos:signed:2026-09-18T23:27:55Z:f17f67a3f132779d8f6dc24cc8b9c596158f79b24e2b9702f853d2e653689bff:YTdx2qimkspIpIe6/eBtdeqBycIzjXLDCVnji/HmSjtlSqOurP66ycOpDsxTyTIW3A+aXI6lM7JJu+tqPXasAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-06T01:00:58Z:fa1b03fdda53be84bea47945e8aba739c9adf42a73a5c1c76931797c8b547445:iEIu1hbiBRdCo6G2rH9U8pOHcL0I+oQZLLpl3cPZ1ilHv+yQ6jyOiMFOcGemBPSXmY4CrOtLcc7TAS1jP5TbBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/future
 name: ryeos-native-development-platform
 title: RyeOS-Native Development Platform
 description: Long-term owner for RyeOS-native project hosting, checks, review, release execution, and GitHub projection
 entry_type: design
-version: "1.2.0"
+version: "1.2.1"
 status: deferred_end_state
 ```
 
 # RyeOS-native development platform
+
+This is the development/release application branch of the [platform direction](platform-direction-and-delivery.md).
+Its native publication sequence is local to that branch. Ordinary interpreted
+authoring and supported clients can become useful before source hosting, full
+release automation or replacement of external CI.
 
 ## Status
 
@@ -149,7 +154,7 @@ authority.
 
 ## Near-term implementation boundary
 
-The first useful slice is not a general GitHub replacement. It is native bundle
+The first useful slice of this development/release branch is native bundle
 publication:
 
 1. Build an exact clean candidate from a retained or locally admitted result.

@@ -28,9 +28,13 @@ const STARTUP_RETRY_AFTER_MS: u64 = 1_000;
 /// Best-effort cleanup for all ordinary return/error paths after listener
 /// binding. Crash/SIGKILL is handled by stale-socket discovery on next boot.
 pub struct DiscoveryCleanup {
-    uds_path: PathBuf,
-    uds_identity: SocketIdentity,
+    sockets: Vec<OwnedSocket>,
     daemon_json_path: PathBuf,
+}
+
+struct OwnedSocket {
+    path: PathBuf,
+    identity: SocketIdentity,
 }
 
 #[derive(Clone, Copy)]
@@ -39,44 +43,61 @@ struct SocketIdentity {
     inode: u64,
 }
 
-impl DiscoveryCleanup {
-    pub fn new(uds_path: PathBuf, daemon_json_path: PathBuf) -> Result<Self> {
+impl OwnedSocket {
+    fn inspect(path: PathBuf) -> Result<Self> {
         use std::os::unix::fs::{FileTypeExt, MetadataExt};
 
-        let metadata = std::fs::symlink_metadata(&uds_path)
-            .with_context(|| format!("inspect bound daemon socket {}", uds_path.display()))?;
+        let metadata = std::fs::symlink_metadata(&path)
+            .with_context(|| format!("inspect bound daemon socket {}", path.display()))?;
         if !metadata.file_type().is_socket() {
             anyhow::bail!(
                 "bound daemon control path is not a socket: {}",
-                uds_path.display()
+                path.display()
             );
         }
         Ok(Self {
-            uds_path,
-            uds_identity: SocketIdentity {
+            path,
+            identity: SocketIdentity {
                 device: metadata.dev(),
                 inode: metadata.ino(),
             },
+        })
+    }
+
+    fn remove_if_still_owned(&self) {
+        use std::os::unix::fs::MetadataExt;
+
+        let Ok(metadata) = std::fs::symlink_metadata(&self.path) else {
+            return;
+        };
+        if metadata.dev() == self.identity.device && metadata.ino() == self.identity.inode {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+impl DiscoveryCleanup {
+    pub fn new(uds_path: PathBuf, daemon_json_path: PathBuf) -> Result<Self> {
+        Ok(Self {
+            sockets: vec![OwnedSocket::inspect(uds_path)?],
             daemon_json_path,
         })
     }
 
-    fn remove_owned_socket(&self) {
-        use std::os::unix::fs::MetadataExt;
-
-        let Ok(metadata) = std::fs::symlink_metadata(&self.uds_path) else {
-            return;
-        };
-        if metadata.dev() == self.uds_identity.device && metadata.ino() == self.uds_identity.inode {
-            let _ = std::fs::remove_file(&self.uds_path);
-        }
+    /// Also remove the callback-only socket on every ordinary exit path, by
+    /// the same inode-identity rule as the control socket.
+    pub fn with_runtime_socket(mut self, runtime_uds_path: PathBuf) -> Result<Self> {
+        self.sockets.push(OwnedSocket::inspect(runtime_uds_path)?);
+        Ok(self)
     }
 }
 
 impl Drop for DiscoveryCleanup {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.daemon_json_path);
-        self.remove_owned_socket();
+        for socket in &self.sockets {
+            socket.remove_if_still_owned();
+        }
     }
 }
 
@@ -915,7 +936,7 @@ fn require_non_increasing(name: &str, previous: Option<u64>, next: Option<u64>) 
 impl ryeos_state::ProjectionRecoveryObserver for StartupCoordinator {
     fn update(&self, progress: ryeos_state::ProjectionRecoveryProgress) {
         if let Err(error) = self.projection_recovery_progress(progress) {
-            tracing::warn!(%error, "failed to publish projection recovery progress");
+            tracing::warn!(error = %format!("{error:#}"), "failed to publish projection recovery progress");
         }
     }
 
@@ -936,7 +957,7 @@ pub async fn progress_ticker(coordinator: StartupCoordinator) {
         }
         let refresh_result = coordinator.refresh();
         if let Err(error) = refresh_result {
-            tracing::warn!(%error, "failed to refresh startup lifecycle progress");
+            tracing::warn!(error = %format!("{error:#}"), "failed to refresh startup lifecycle progress");
             return;
         }
     }
@@ -961,6 +982,24 @@ mod tests {
         assert!(uds_path.exists());
         drop(replacement);
         drop(original);
+    }
+
+    #[test]
+    fn discovery_cleanup_removes_both_sockets_on_stop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let control = tmp.path().join("ryeosd.sock");
+        let runtime = tmp.path().join("ryeosd-runtime.sock");
+        let _control = std::os::unix::net::UnixListener::bind(&control).unwrap();
+        let _runtime = std::os::unix::net::UnixListener::bind(&runtime).unwrap();
+        let cleanup = DiscoveryCleanup::new(control.clone(), tmp.path().join("daemon.json"))
+            .unwrap()
+            .with_runtime_socket(runtime.clone())
+            .unwrap();
+
+        drop(cleanup);
+
+        assert!(!control.exists());
+        assert!(!runtime.exists());
     }
 
     fn next_progress(previous: &StartupSnapshot) -> StartupSnapshot {

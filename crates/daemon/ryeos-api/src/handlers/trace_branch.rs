@@ -80,7 +80,7 @@ fn durable_event_by_ref(
             after_chain_seq: Some(expected.chain_seq - 1),
             limit: 1,
         })
-        .map_err(|e| HandlerError::Internal(e.to_string()))?;
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
     let Some(event) = result.events.into_iter().next() else {
         return Err(HandlerError::BadRequest(format!(
             "event ref not found at chain_seq {}",
@@ -112,7 +112,7 @@ pub async fn handle(
     let parent_thread = state
         .state_store
         .get_thread(&req.parent_event_ref.thread_id)
-        .map_err(|e| HandlerError::Internal(e.to_string()))?
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?
         .ok_or(HandlerError::NotFound)?;
     ctx.require_owner(parent_thread.requested_by.as_deref())?;
     if parent_thread.chain_root_id != req.parent_event_ref.chain_root_id {
@@ -133,7 +133,7 @@ pub async fn handle(
     if let Some(existing) = state
         .state_store
         .get_thread(&child_thread_id)
-        .map_err(|e| HandlerError::Internal(e.to_string()))?
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?
     {
         if existing.chain_root_id == req.parent_event_ref.chain_root_id {
             return Err(HandlerError::Conflict(format!(
@@ -148,7 +148,7 @@ pub async fn handle(
     let parent_generation = state
         .state_store
         .authoritative_project_generation(&parent_thread.thread_id)
-        .map_err(|e| HandlerError::Internal(e.to_string()))?
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?
         .ok_or_else(|| HandlerError::Internal("parent authoritative history is missing".into()))?;
     let project_authority = parent_thread.project_authority.clone().ok_or_else(|| {
         HandlerError::Internal("parent thread has no sealed project authority".into())
@@ -187,12 +187,12 @@ pub async fn handle(
     let branch_events = state
         .state_store
         .create_trace_branch(&branch_thread, branch_payload)
-        .map_err(|e| HandlerError::Internal(e.to_string()))?;
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
     state.event_streams.publish_ordered(&branch_events);
     let detail = state
         .threads
         .get_thread(&branch_thread.thread_id)
-        .map_err(|e| HandlerError::Internal(e.to_string()))?
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?
         .ok_or_else(|| HandlerError::Internal("created branch thread missing".to_string()))?;
 
     Ok(json!({

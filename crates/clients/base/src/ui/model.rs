@@ -3,15 +3,10 @@ use sha2::{Digest, Sha256};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::dto::{
-    RyeOsDimensionDto, RyeOsFileSpaceDto, RyeOsFilesDto, RyeOsItemsDto, RyeOsProjectsDto,
-    RyeOsThreadsDto, RyeOsTopologyDto,
-};
+use super::dto::{RyeOsDimensionDto, RyeOsFilesDto, RyeOsProjectsDto, RyeOsThreadsDto};
 use super::effect::{RyeOsEffect, RyeOsEffectKind, RyeOsUiError};
 use super::event::{RyeOsTransportChannel, RyeOsTransportFreshness};
-use super::scene_model::RyeOsSceneModel;
 use super::view_model::{RyeOsMotionEventVm, RyeOsNoticeVm, RyeOsTone, RyeOsViewModel};
-use crate::atlas::AtlasUiStateVm;
 use crate::ids::RyeOsViewInstanceKey;
 use crate::surface::{SurfaceSpec, SurfaceStyleSpec};
 use crate::view_set::{FieldCursorScopeState, ViewLocalState, ViewSet};
@@ -62,7 +57,6 @@ pub struct RyeOsEnvelope {
     pub schema_version: String,
     pub generation: u64,
     pub view_model: RyeOsViewModel,
-    pub scene_model: RyeOsSceneModel,
     pub effects: Vec<RyeOsEffect>,
 }
 
@@ -438,17 +432,6 @@ pub enum RyeOsDockEdge {
 pub struct RyeOsUiState {
     pub filters: RyeOsFilters,
     pub files: RyeOsFilesState,
-    /// Ambient/backdrop atlas state — the empty-center `namespace_atlas`
-    /// background. Surface-level, not a tile. Per-tile Atlas tiles keep
-    /// their own arrangement in [`Self::tile_atlas`].
-    #[serde(default)]
-    pub atlas: AtlasUiStateVm,
-    /// Per-tile atlas arrangements, keyed by tile id (string). Atlas/graph
-    /// were never meant to show one fixed thing — a surface can host
-    /// several independent atlas tiles, each with its own layers, lens,
-    /// and projection. A tile with no entry falls back to [`Self::atlas`].
-    #[serde(default)]
-    pub tile_atlas: BTreeMap<String, AtlasUiStateVm>,
     pub motion: Vec<RyeOsMotionEventVm>,
     pub loading: BTreeMap<String, bool>,
     pub notices: Vec<RyeOsNotice>,
@@ -462,10 +445,6 @@ pub struct RyeOsUiState {
     pub top_status_visible: bool,
     #[serde(default = "default_true")]
     pub bottom_status_visible: bool,
-    #[serde(default)]
-    pub backdrop_break_amount: f32,
-    #[serde(default)]
-    pub backdrop_break_target: f32,
 }
 
 impl Default for RyeOsUiState {
@@ -473,8 +452,6 @@ impl Default for RyeOsUiState {
         Self {
             filters: RyeOsFilters::default(),
             files: RyeOsFilesState::default(),
-            atlas: AtlasUiStateVm::default(),
-            tile_atlas: BTreeMap::new(),
             motion: Vec::new(),
             loading: BTreeMap::new(),
             notices: Vec::new(),
@@ -485,8 +462,6 @@ impl Default for RyeOsUiState {
             // works if we decide on content later.
             top_status_visible: false,
             bottom_status_visible: true,
-            backdrop_break_amount: 0.0,
-            backdrop_break_target: 0.0,
         }
     }
 }
@@ -499,18 +474,10 @@ fn default_true() -> bool {
 pub struct RyeOsDataState {
     pub session: Option<BrowserSession>,
     pub dimension: Option<RyeOsDimensionDto>,
-    pub topology: Option<RyeOsTopologyDto>,
     pub projects: Option<RyeOsProjectsDto>,
     pub threads: Option<RyeOsThreadsDto>,
-    pub items: Option<RyeOsItemsDto>,
-    pub tile_items: HashMap<String, RyeOsItemsDto>,
     pub files: Option<RyeOsFilesDto>,
-    pub file_space: Option<RyeOsFileSpaceDto>,
     pub tile_files: HashMap<String, RyeOsFilesDto>,
-    /// Per-tile file-space, keyed by tile id, for atlas tiles whose
-    /// `body.scope` declares a file-space root/path. Absent tile → the
-    /// shared `file_space` (ambient / scopeless tiles).
-    pub tile_file_space: HashMap<String, RyeOsFileSpaceDto>,
     /// Bound-view source responses, keyed by the canonical source-instance
     /// identity (mounted view host plus channel). The values remain open JSON
     /// projected through view bindings.
@@ -600,13 +567,6 @@ pub struct RyeOsRuntimeState {
     pub activity_pulse: f32,
     #[serde(default)]
     pub attention_until_ms: u64,
-    /// Scene animation frame counter, driven by `advance_scene_frame`.
-    /// While `scene_frame_anchor_ms` is 0 the clock is undriven and
-    /// `RyeOsCore::scene_frame` falls back to wall-clock quantization.
-    #[serde(default)]
-    pub scene_frame: u64,
-    #[serde(default)]
-    pub scene_frame_anchor_ms: u64,
     /// Renderer-neutral continuity state. Channels are recorded separately so
     /// a lossy hint reconnect cannot masquerade as durable-tail freshness.
     #[serde(default)]
@@ -621,8 +581,6 @@ impl Default for RyeOsRuntimeState {
             last_tick_ms: 0,
             activity_pulse: 0.0,
             attention_until_ms: 0,
-            scene_frame: 0,
-            scene_frame_anchor_ms: 0,
             transport: RyeOsTransportState::default(),
         }
     }
@@ -1349,27 +1307,6 @@ impl RyeOsCore {
             .is_some_and(|path| !path.is_empty())
     }
 
-    pub(crate) fn atlas_target_has_project_bound(&self, tile_id: Option<&str>) -> bool {
-        if self.active_view_set().is_none() {
-            return false;
-        }
-
-        let Some(tile_id) = tile_id else {
-            return self.has_project_bound();
-        };
-        tile_id
-            .parse::<u64>()
-            .ok()
-            .map(crate::ids::TileId::new)
-            .and_then(|id| {
-                self.active_view_set()
-                    .expect("real Surface tab checked")
-                    .tiles
-                    .get(&id)
-            })
-            .is_some_and(|tile| self.instance_has_project_bound(&tile.instance_key))
-    }
-
     pub(crate) fn surface_navigation(&self) -> Vec<crate::surface::SurfaceNavigationSpec> {
         self.data
             .session
@@ -1704,13 +1641,6 @@ impl RyeOsCore {
         self.runtime.activity_pulse = (self.runtime.activity_pulse + amount).min(1.0);
     }
 
-    pub fn wants_fast_ticks(&self) -> bool {
-        self.active_view_set()
-            .is_none_or(|set| set.center_is_empty())
-            || (self.surface_uses_backdrop_underlay() && self.view_set_has_transparent_view())
-            || self.runtime.activity_pulse > 0.02
-    }
-
     /// Hint arrival: refetch every bound tile or visible slot whose binding
     /// declares `refresh.on_hint: <kind>` or includes it in an array. Content
     /// decides its own liveness.
@@ -1977,9 +1907,7 @@ impl RyeOsCore {
     pub(crate) fn invalidate_view_sources(&mut self, instance_key: &RyeOsViewInstanceKey) {
         if let Some(tile) = instance_key.surface_tile_id() {
             let key = tile.0.to_string();
-            self.data.tile_items.remove(&key);
             self.data.tile_files.remove(&key);
-            self.data.tile_file_space.remove(&key);
         }
         let belongs = |encoded: &str| {
             super::source_key::RyeOsSourceInstanceKey::decode(encoded)
@@ -2089,6 +2017,7 @@ impl RyeOsCore {
 
     /// Fetch a presentation-role source for one exact mounted view. Roles are
     /// signed view metadata; this lookup never chooses an executable target.
+    #[cfg(test)]
     pub(crate) fn fetch_view_source_role(
         &mut self,
         instance_key: RyeOsViewInstanceKey,
@@ -2164,31 +2093,6 @@ impl RyeOsCore {
             dynamic_params,
             false,
         )
-    }
-
-    pub(crate) fn fetch_atlas_source_role(
-        &mut self,
-        tile_id: Option<&str>,
-        role: &str,
-        dynamic_params: serde_json::Value,
-    ) -> Option<RyeOsEffect> {
-        self.active_view_set()?;
-
-        let Some(tile_id) = tile_id else {
-            return self.fetch_surface_source_role(role, dynamic_params);
-        };
-        let tile = tile_id
-            .parse::<u64>()
-            .ok()
-            .map(crate::ids::TileId::new)
-            .and_then(|id| {
-                self.active_view_set()
-                    .expect("real Surface tab checked")
-                    .tiles
-                    .get(&id)
-                    .cloned()
-            })?;
-        self.fetch_view_source_role(tile.instance_key, &tile.view.view_ref, role, dynamic_params)
     }
 
     /// Release one trailing hint reconciliation after the prior request for
@@ -2281,104 +2185,8 @@ impl RyeOsCore {
             .is_some_and(|binding| binding.input.is_some())
     }
 
-    fn surface_uses_backdrop_underlay(&self) -> bool {
-        self.data
-            .session
-            .as_ref()
-            .and_then(|_| self.binding_attachment(&self.root_attachment_id))
-            .and_then(|attachment| attachment.presentation.surface_value().ok().flatten())
-            .and_then(|value| serde_json::from_value::<SurfaceSpec>(value.clone()).ok())
-            .is_some_and(|surface| {
-                surface.backdrop.is_some()
-                    && surface.ambient.is_some_and(|ambient| {
-                        ambient.show_background.unwrap_or(true)
-                            && ambient
-                                .opacity
-                                .is_some_and(|opacity| opacity > 0.0 && opacity < 1.0)
-                    })
-            })
-    }
-
-    fn view_set_has_transparent_view(&self) -> bool {
-        if self.active_view_set().is_none() {
-            return false;
-        }
-
-        self.active_view_set()
-            .expect("real Surface tab checked")
-            .tiles
-            .values()
-            .any(|tile| {
-                self.binding_for_instance(&tile.instance_key, &tile.view.view_ref)
-                    .and_then(|binding| binding.presentation.background)
-                    .is_some_and(|background| {
-                        matches!(
-                            background,
-                            super::content::ViewBackgroundPresentation::Transparent
-                        )
-                    })
-            })
-    }
-
     pub fn bump_generation(&mut self) {
         self.generation = self.generation.saturating_add(1);
-    }
-
-    /// The scene animation frame. Scene motion samples this — never
-    /// `generation`, which counts events — so animation speed is uniform
-    /// regardless of event traffic or the client's tick rate.
-    ///
-    /// Driven clients (the terminal loop calls `advance_scene_frame`
-    /// each tick) read the stepped counter; undriven clients (web paints
-    /// far above the scene cadence) fall back to wall-clock quantization,
-    /// where oversampling keeps the steps uniform.
-    pub fn scene_frame(&self) -> u64 {
-        if self.runtime.scene_frame_anchor_ms != 0 {
-            return self.runtime.scene_frame;
-        }
-        self.runtime.now_ms / super::scene_model::SCENE_FRAME_MS
-    }
-
-    /// Advance the scene clock for one painted frame. A client whose tick
-    /// period EQUALS the scene cadence cannot re-floor the wall clock each
-    /// frame (`now_ms / SCENE_FRAME_MS` sampled every SCENE_FRAME_MS
-    /// aliases against the bucket boundaries: a held frame, then a double
-    /// step, whenever the tick phase drifts near an edge). Instead the
-    /// counter steps by the rounded elapsed frames, clamped to at least
-    /// one — exactly one step per on-time tick, catch-up on a stall or a
-    /// slow tick mode — so wall time still governs the average rate while
-    /// every painted frame moves.
-    pub fn advance_scene_frame(&mut self, now_ms: u64) {
-        let frame_ms = super::scene_model::SCENE_FRAME_MS;
-        if self.runtime.scene_frame_anchor_ms == 0 {
-            // First driven frame: adopt the wall-clock frame so the
-            // counter continues exactly where the fallback left off.
-            self.runtime.scene_frame = now_ms / frame_ms;
-            self.runtime.scene_frame_anchor_ms = now_ms;
-        } else {
-            let elapsed = now_ms.saturating_sub(self.runtime.scene_frame_anchor_ms);
-            // Whole frames only — the sub-frame remainder stays in the
-            // anchor, so a cadence that isn't a multiple of the frame
-            // (the 250ms slow tick) still averages the wall-clock rate.
-            // `.max(1)` keeps every painted tick moving; it advances the
-            // anchor ahead of the wall clock, which later ticks repay
-            // with fewer steps, so the average still holds.
-            let steps = (elapsed / frame_ms).max(1);
-            self.runtime.scene_frame = self.runtime.scene_frame.wrapping_add(steps);
-            self.runtime.scene_frame_anchor_ms = self
-                .runtime
-                .scene_frame_anchor_ms
-                .saturating_add(steps * frame_ms);
-        }
-    }
-
-    /// Atlas arrangement for a specific tile, falling back to the ambient
-    /// backdrop state when the tile has no per-tile entry yet.
-    pub(crate) fn tile_atlas_state(&self, tile_id: crate::ids::TileId) -> &AtlasUiStateVm {
-        self.ui
-            .tile_atlas
-            .get(&tile_id.0.to_string())
-            .unwrap_or(&self.ui.atlas)
     }
 
     pub fn notice(&mut self, message: impl Into<String>, tone: RyeOsTone) {
@@ -2540,7 +2348,6 @@ impl RyeOsCore {
             schema_version: "ryeos.ui.envelope.v1".to_string(),
             generation: self.generation,
             view_model: super::view_model::build_view_model(self),
-            scene_model: super::scene_model::build_scene_model(self, &self.ui.atlas, None, None),
             effects,
         }
     }

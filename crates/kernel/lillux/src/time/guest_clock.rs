@@ -97,8 +97,8 @@ fn wall_clock_trust_platform() -> WallClockTrust {
     WallClockTrust::from_kernel(
         state,
         i64::from(value.status),
-        i64::from(value.maxerror),
-        i64::from(value.esterror),
+        value.maxerror,
+        value.esterror,
     )
 }
 

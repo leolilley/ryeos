@@ -422,7 +422,8 @@ pub fn prepare_after_reservation(
         .policy_ref
         .as_deref()
         .context("selected product relationship has no qualification policy")?;
-    let policy_source = super::resolve_current_bundle_qualification_policy_for_local_run(state, policy_ref)?;
+    let policy_source =
+        super::resolve_current_bundle_qualification_policy_for_local_run(state, policy_ref)?;
     require_current_consumer_invocation(
         state,
         &context.fingerprint,

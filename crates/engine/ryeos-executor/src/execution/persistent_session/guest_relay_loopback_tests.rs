@@ -259,7 +259,9 @@ struct ControllerClockOffset(#[allow(dead_code)] std::sync::MutexGuard<'static, 
 impl ControllerClockOffset {
     fn install(offset_ms: i64) -> Self {
         static HOLD: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let hold = HOLD.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let hold = HOLD
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         lillux::time::set_wall_clock_test_offset_ms(offset_ms);
         Self(hold)
     }

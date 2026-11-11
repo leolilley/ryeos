@@ -151,7 +151,7 @@ async fn recover_inflight_fires<Ctx: SchedulerContext>(ctx: &Ctx) -> Result<Vec<
                                     tracing::warn!(
                                         fire_id = %fire.fire_id,
                                         thread_id = %thread_id,
-                                        error = %e,
+                                        error = %format!("{e:#}"),
                                         "recovered: failed to inspect completed thread result"
                                     );
                                     None

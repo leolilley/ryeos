@@ -387,11 +387,34 @@ struct PinnedProcess {
 }
 
 pub fn remove_stale_socket(path: &Path) -> Result<()> {
+    remove_stale_sockets(&[path])
+}
+
+/// Prove every path is absent or a refused (stale) socket before unlinking any
+/// of them, so a live or foreign occupant of a later path cannot leave an
+/// earlier path already removed.
+pub fn remove_stale_sockets(paths: &[&Path]) -> Result<()> {
+    let mut stale = Vec::new();
+    for path in paths {
+        if let Some(inode) = probe_stale_socket(path)? {
+            stale.push((*path, inode));
+        }
+    }
+    for (path, inode) in stale {
+        unlink_probed_socket(path, inode)?;
+    }
+    Ok(())
+}
+
+/// Device and inode of a socket proven stale by a refused connect.
+type ProbedSocket = (u64, u64);
+
+fn probe_stale_socket(path: &Path) -> Result<Option<ProbedSocket>> {
     use std::os::unix::fs::{FileTypeExt, MetadataExt};
 
     let metadata = match std::fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
             return Err(error).with_context(|| format!("inspect daemon socket {}", path.display()));
         }
@@ -409,28 +432,9 @@ pub fn remove_stale_socket(path: &Path) -> Result<()> {
             path.display()
         ),
         Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
-            // Re-check the directory entry after the liveness probe. A process
-            // may have replaced the refused inode while we were connecting;
-            // unlinking that replacement would orphan its live listener.
-            let current = match std::fs::symlink_metadata(path) {
-                Ok(current) => current,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-                Err(error) => {
-                    return Err(error)
-                        .with_context(|| format!("reinspect daemon socket {}", path.display()));
-                }
-            };
-            if current.dev() != metadata.dev() || current.ino() != metadata.ino() {
-                bail!(
-                    "daemon control socket changed during stale probe at {}; refusing replacement",
-                    path.display()
-                );
-            }
-            std::fs::remove_file(path)
-                .with_context(|| format!("failed to remove stale socket {}", path.display()))?;
-            Ok(())
+            Ok(Some((metadata.dev(), metadata.ino())))
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error).with_context(|| {
             format!(
                 "daemon socket ownership is uncertain at {}; refusing replacement",
@@ -438,6 +442,30 @@ pub fn remove_stale_socket(path: &Path) -> Result<()> {
             )
         }),
     }
+}
+
+fn unlink_probed_socket(path: &Path, probed: ProbedSocket) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    // Re-check the directory entry after the liveness probe. A process may
+    // have replaced the refused inode while we were connecting; unlinking that
+    // replacement would orphan its live listener.
+    let current = match std::fs::symlink_metadata(path) {
+        Ok(current) => current,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("reinspect daemon socket {}", path.display()));
+        }
+    };
+    if (current.dev(), current.ino()) != probed {
+        bail!(
+            "daemon control socket changed during stale probe at {}; refusing replacement",
+            path.display()
+        );
+    }
+    std::fs::remove_file(path)
+        .with_context(|| format!("failed to remove stale socket {}", path.display()))
 }
 
 /// Check if a process group is alive.
@@ -760,10 +788,11 @@ pub fn kill_by_action(identity: &ExecutionProcessIdentity, action: ShutdownActio
             }
         }
         let success = scope.terminate_and_wait(scope.control_timeout()).is_ok();
-        if success && let Some(group) = wrapper_group_wait(Duration::ZERO) {
-            if !group.success {
-                return group;
-            }
+        if success
+            && let Some(group) = wrapper_group_wait(Duration::ZERO)
+            && !group.success
+        {
+            return group;
         }
         return KillResult {
             success,
@@ -1803,8 +1832,7 @@ mod tests {
         // not reaped, and the next owner must not clear its attachment.
         assert_eq!(execution_group_liveness(&identity), IdentityLiveness::Alive);
         let error = assert_reaped_process_group_absent(&identity)
-            .err()
-            .expect("a running launcher group is not settled");
+            .expect_err("a running launcher group is not settled");
         assert!(error.to_string().contains("launcher group"), "{error:#}");
         // Cleanup ends the init's tree and then the pinned launcher group.
         let (killed, _status) = run_kill_with_reaper(
@@ -1827,8 +1855,7 @@ mod tests {
             group_basis: lillux::GroupBasis::Contained,
         };
         let error = execution_process_identity_from_lillux(contained.clone(), None)
-            .err()
-            .expect("no group signal may be built from a contained identity");
+            .expect_err("no group signal may be built from a contained identity");
         assert!(
             error.to_string().contains("containment-membership"),
             "{error:#}"
@@ -2112,6 +2139,22 @@ mod tests {
 
         remove_stale_socket(&path).unwrap();
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn stale_socket_cleanup_removes_nothing_when_a_later_path_is_live() {
+        let tmp = TempDir::new().unwrap();
+        let stale = tmp.path().join("ryeosd.sock");
+        let live = tmp.path().join("ryeosd-runtime.sock");
+        drop(std::os::unix::net::UnixListener::bind(&stale).unwrap());
+        let _listener = std::os::unix::net::UnixListener::bind(&live).unwrap();
+
+        remove_stale_sockets(&[&stale, &live]).unwrap_err();
+        assert!(
+            stale.exists(),
+            "the stale path is kept when any path is live"
+        );
+        assert!(live.exists());
     }
 
     #[test]

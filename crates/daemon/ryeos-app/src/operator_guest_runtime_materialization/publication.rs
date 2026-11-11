@@ -176,7 +176,7 @@ pub fn publish_prepared_guest_owner_runtime(
         .write_barrier
         .acquire_with_timeout(crate::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
         .map_err(|error| {
-            anyhow::anyhow!("cannot acquire materialization publication permit: {error}")
+            anyhow::anyhow!("cannot acquire materialization publication permit: {error:#}")
         })?;
     state.engine.with_checked_bundle_generation(|generation| {
         publish_checked_generation(

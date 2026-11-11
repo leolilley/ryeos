@@ -15,7 +15,10 @@ use std::collections::BTreeMap;
 /// Each Worker variant settles its session by a different mechanism, so the
 /// settlement the checker root must reach is per variant.
 const ACCEPTED_WORKERS: [(&str, &str); 2] = [
-    ("worker:codex/external-hosted-authoring", "containment_empty"),
+    (
+        "worker:codex/external-hosted-authoring",
+        "containment_empty",
+    ),
     (
         "worker:codex/external-hosted-authoring-trusted-lane",
         "trusted_process_group_absent",

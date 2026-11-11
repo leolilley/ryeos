@@ -81,17 +81,15 @@ pub async fn run_augmentations(
 /// the dispatch layer to surface to the HTTP caller.
 impl From<LaunchAugmentationError> for DispatchError {
     fn from(e: LaunchAugmentationError) -> Self {
-        match &e {
+        let message = e.to_string();
+        match e {
+            // A trust refusal keeps its own typed launch-policy error.
+            LaunchAugmentationError::EffectiveTrustRejected(refusal) => *refusal,
             LaunchAugmentationError::BadRef { .. }
             | LaunchAugmentationError::ProjectionInvariant { .. }
-            | LaunchAugmentationError::ParseRef(_) => {
-                DispatchError::InvalidRef("launch_augmentation".to_string(), e.to_string())
-            }
-            LaunchAugmentationError::ResolutionFailed { .. } => {
-                DispatchError::InvalidRef("launch_augmentation".to_string(), e.to_string())
-            }
-            LaunchAugmentationError::EffectiveTrustRejected(_) => {
-                DispatchError::InvalidRef("launch_augmentation".to_string(), e.to_string())
+            | LaunchAugmentationError::ParseRef(_)
+            | LaunchAugmentationError::ResolutionFailed { .. } => {
+                DispatchError::InvalidRef("launch_augmentation".to_string(), message)
             }
             LaunchAugmentationError::ChildBootstrap { .. }
             | LaunchAugmentationError::ChildFailed { .. }
@@ -99,10 +97,10 @@ impl From<LaunchAugmentationError> for DispatchError {
             | LaunchAugmentationError::RuntimeRegistry(_)
             | LaunchAugmentationError::Shared(_) => DispatchError::SubprocessRunFailed {
                 item_ref: "launch_augmentation".to_string(),
-                detail: e.to_string(),
+                detail: message,
             },
             LaunchAugmentationError::Threads(_) | LaunchAugmentationError::Serde(_) => {
-                DispatchError::Internal(anyhow::anyhow!("{e}"))
+                DispatchError::Internal(anyhow::anyhow!("{message}"))
             }
         }
     }
@@ -127,7 +125,7 @@ pub enum LaunchAugmentationError {
     },
 
     #[error("effective trust rejected: {0}")]
-    EffectiveTrustRejected(String),
+    EffectiveTrustRejected(Box<DispatchError>),
 
     #[error("parse canonical ref: {0}")]
     ParseRef(String),

@@ -196,7 +196,7 @@ impl RuntimeHandler for RuntimeConfigHandler {
                 input.execution_project_file.validate().map_err(|error| {
                     EngineError::InvalidRuntimeConfig {
                         path: "config.args.execution_project_file".to_owned(),
-                        reason: error.to_string(),
+                        reason: format!("{error:#}"),
                     }
                 })?;
             }

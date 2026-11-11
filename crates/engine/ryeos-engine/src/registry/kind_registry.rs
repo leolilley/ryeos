@@ -25,6 +25,7 @@ use crate::error::EngineError;
 use crate::resolution::decl::ResolutionStepDecl;
 use crate::trust::TrustStore;
 
+pub mod launch_trust;
 mod loading;
 
 /// Apply extraction rules to a parser-produced `Value`, populating an
@@ -1334,7 +1335,7 @@ impl ExecutionSchema {
         limits
             .validate()
             .map_err(|error| EngineError::SchemaLoaderError {
-                reason: error.to_string(),
+                reason: format!("{error:#}"),
             })?;
         Ok(Some(limits))
     }
@@ -1351,7 +1352,7 @@ impl ExecutionSchema {
         let invalid = |reason: String| EngineError::SchemaLoaderError { reason };
         declaration
             .validate()
-            .map_err(|error| invalid(error.to_string()))?;
+            .map_err(|error| invalid(format!("{error:#}")))?;
         let mut value = composed;
         for segment in &declaration.path {
             let object = value.as_object().ok_or_else(|| {
@@ -1367,7 +1368,7 @@ impl ExecutionSchema {
                 .map_err(|error| invalid(format!("invalid signed execution endpoint: {error}")))?;
         endpoint
             .validate()
-            .map_err(|error| invalid(error.to_string()))?;
+            .map_err(|error| invalid(format!("{error:#}")))?;
         Ok(endpoint)
     }
 
@@ -1437,7 +1438,7 @@ impl ExecutionSchema {
         let (target, current) = if declaration.request_format.is_some() {
             crate::contracts::project_current_target_data(value).map_err(|error| {
                 EngineError::SchemaLoaderError {
-                    reason: format!("invalid signed current target: {error}"),
+                    reason: format!("invalid signed current target: {error:#}"),
                 }
             })?
         } else {
@@ -1454,7 +1455,7 @@ impl ExecutionSchema {
         target
             .validate_against_limits(declaration.limits)
             .map_err(|error| EngineError::SchemaLoaderError {
-                reason: format!("invalid signed execution target: {error}"),
+                reason: format!("invalid signed execution target: {error:#}"),
             })?;
         Ok((Some(target), current))
     }
@@ -1680,6 +1681,20 @@ pub struct KindSchema {
     /// these declarations generically; kind-specific capability and metadata
     /// names live only in the signed kind schema.
     pub inventory_policy: InventoryPolicy,
+    /// Which spaces and trust classes may supply a launch root of this kind.
+    /// Required on every root-executable kind; absent on kinds that are
+    /// never launched as a root.
+    pub launch_trust: Option<launch_trust::LaunchTrustPolicy>,
+}
+
+impl KindSchema {
+    /// Whether an item of this kind may be the root of an execution.
+    pub fn is_root_executable(&self) -> bool {
+        self.execution
+            .as_ref()
+            .and_then(|execution| execution.thread_profile.as_ref())
+            .is_some_and(|profile| profile.root_executable)
+    }
 }
 
 /// Path-free retained evidence for the exact signed kind document that
@@ -2381,6 +2396,29 @@ fn parse_kind_schema_content(display: &str, content: &str) -> Result<KindSchema,
         _ => InventoryPolicy::default(),
     };
     validate_inventory_policy(&inventory_policy, display)?;
+    let launch_trust = match data.get("launch_trust") {
+        Some(value) if !value.is_null() => {
+            let policy = serde_yaml::from_value::<launch_trust::LaunchTrustPolicy>(value.clone())
+                .map_err(|error| EngineError::SchemaLoaderError {
+                reason: format!("{display}: invalid `launch_trust`: {error}"),
+            })?;
+            policy.validate(display)?;
+            Some(policy)
+        }
+        _ => None,
+    };
+    let root_executable = execution
+        .as_ref()
+        .and_then(|execution| execution.thread_profile.as_ref())
+        .is_some_and(|profile| profile.root_executable);
+    if root_executable && launch_trust.is_none() {
+        return Err(EngineError::SchemaLoaderError {
+            reason: format!(
+                "{display}: a root-executable kind must declare `launch_trust` \
+                 (allowed_spaces, allowed_trust, operator_may_admit)"
+            ),
+        });
+    }
 
     if execution
         .as_ref()
@@ -2410,6 +2448,7 @@ fn parse_kind_schema_content(display: &str, content: &str) -> Result<KindSchema,
         inventory_kinds,
         inventory_schema_keys,
         inventory_policy,
+        launch_trust,
     })
 }
 
@@ -3334,7 +3373,7 @@ fn parse_execution_schema(
                 .limits
                 .validate()
                 .map_err(|error| EngineError::SchemaLoaderError {
-                    reason: format!("{display}: invalid execution.target limits: {error}"),
+                    reason: format!("{display}: invalid execution.target limits: {error:#}"),
                 })?;
             Some(declaration)
         }
@@ -3350,7 +3389,7 @@ fn parse_execution_schema(
             declaration
                 .validate()
                 .map_err(|error| EngineError::SchemaLoaderError {
-                    reason: format!("{display}: {error}"),
+                    reason: format!("{display}: {error:#}"),
                 })?;
             Some(declaration)
         }
@@ -4164,6 +4203,9 @@ location:
 resolution:
   - step: resolve_extends_chain
   - step: resolve_references
+launch_trust:
+  allowed_spaces: [bundle, project]
+  allowed_trust: [trusted_bundle, trusted_project]
 execution:
   thread_profile:
     name: directive_run
@@ -4702,6 +4744,52 @@ formats:
     }
 
     #[test]
+    fn root_executable_kind_declares_its_launch_trust() {
+        let tmp = tempdir();
+        let sk = test_signing_key();
+        let ts = test_trust_store(&sk);
+        sign_and_write_schema(&tmp, "directive", SCHEMA_WITH_RESOLUTION, &sk);
+        let reg = KindRegistry::load_base(&[tmp], &ts).unwrap();
+        let schema = reg.get("directive").unwrap();
+        assert!(schema.is_root_executable());
+        let launch_trust = schema.launch_trust.as_ref().unwrap();
+        assert!(launch_trust.admits_space(crate::contracts::ItemSpace::Project));
+        assert!(!launch_trust.admits_space(crate::contracts::ItemSpace::Node));
+    }
+
+    #[test]
+    fn root_executable_kind_without_launch_trust_is_refused() {
+        let tmp = tempdir();
+        let sk = test_signing_key();
+        let ts = test_trust_store(&sk);
+        let without = SCHEMA_WITH_RESOLUTION.replace(
+            "launch_trust:\n  allowed_spaces: [bundle, project]\n  allowed_trust: [trusted_bundle, trusted_project]\n",
+            "",
+        );
+        assert!(!without.contains("launch_trust"));
+        sign_and_write_schema(&tmp, "directive", &without, &sk);
+        let error = KindRegistry::load_base(&[tmp], &ts).unwrap_err();
+        assert!(
+            error.to_string().contains("must declare `launch_trust`"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn launch_trust_admitting_unsigned_is_refused() {
+        let tmp = tempdir();
+        let sk = test_signing_key();
+        let ts = test_trust_store(&sk);
+        let unsigned = SCHEMA_WITH_RESOLUTION.replace(
+            "allowed_trust: [trusted_bundle, trusted_project]",
+            "allowed_trust: [trusted_bundle, unsigned]",
+        );
+        sign_and_write_schema(&tmp, "directive", &unsigned, &sk);
+        let error = KindRegistry::load_base(&[tmp], &ts).unwrap_err();
+        assert!(error.to_string().contains("launch_trust"), "{error}");
+    }
+
+    #[test]
     fn execution_history_policy_path_is_typed_and_kind_declared() {
         let tmp = tempdir();
         let sk = test_signing_key();
@@ -4986,6 +5074,9 @@ composed_value_contract:
     #[test]
     fn old_string_thread_profile_rejected() {
         let yaml = "\
+launch_trust:
+  allowed_spaces: [bundle, project]
+  allowed_trust: [trusted_bundle, trusted_project]
 execution:
   thread_profile: directive_run
   delegate:
@@ -5004,6 +5095,9 @@ execution:
         // to `true` so conversation-shaped kinds (directive) keep operator
         // follow-up; only machine-only kinds (graph) opt out.
         let yaml = "\
+launch_trust:
+  allowed_spaces: [bundle, project]
+  allowed_trust: [trusted_bundle, trusted_project]
 execution:
   thread_profile:
     name: directive_run
@@ -5131,10 +5225,16 @@ execution:
     #[test]
     fn pushed_head_declaration_follows_only_the_signed_kind_path() {
         let execution = parse_exec("execution:\n  pushed_head_declaration:\n    path: [project_lane]\n  delegate:\n    via: runtime_registry\n").unwrap().unwrap();
-        assert!(!execution.project_pushed_head_declaration(&serde_json::json!({})).unwrap());
+        assert!(
+            !execution
+                .project_pushed_head_declaration(&serde_json::json!({}))
+                .unwrap()
+        );
         assert!(
             execution
-                .project_pushed_head_declaration(&serde_json::json!({"project_lane": "pinned_snapshot"}))
+                .project_pushed_head_declaration(
+                    &serde_json::json!({"project_lane": "pinned_snapshot"})
+                )
                 .unwrap()
         );
         assert!(
@@ -5152,7 +5252,9 @@ execution:
             .unwrap();
         assert!(
             !unprojected
-                .project_pushed_head_declaration(&serde_json::json!({"project_lane": "pinned_snapshot"}))
+                .project_pushed_head_declaration(
+                    &serde_json::json!({"project_lane": "pinned_snapshot"})
+                )
                 .unwrap()
         );
         assert!(parse_exec("execution:\n  pushed_head_declaration:\n    path: []\n  delegate: {via: runtime_registry}\n").is_err());
@@ -5340,6 +5442,9 @@ execution:
         // the dispatcher used a silent fallback when only `thread_profile`
         // was declared; that path is removed.
         let yaml = "\
+launch_trust:
+  allowed_spaces: [bundle, project]
+  allowed_trust: [trusted_bundle, trusted_project]
 execution:
   thread_profile:
     name: directive_run
@@ -5363,6 +5468,9 @@ execution:
     #[test]
     fn execution_block_without_terminator_or_aliases_or_thread_profile_rejected_at_load() {
         let yaml = "\
+launch_trust:
+  allowed_spaces: [bundle, project]
+  allowed_trust: [trusted_bundle, trusted_project]
 execution:
   aliases: {}
   thread_profile:
@@ -5386,6 +5494,9 @@ execution:
     #[test]
     fn execution_schema_parses_delegate_runtime_registry() {
         let yaml = "\
+launch_trust:
+  allowed_spaces: [bundle, project]
+  allowed_trust: [trusted_bundle, trusted_project]
 execution:
   thread_profile:
     name: directive_run
@@ -5407,6 +5518,9 @@ execution:
     #[test]
     fn execution_schema_parses_delegate_with_serves_kind() {
         let yaml = "\
+launch_trust:
+  allowed_spaces: [bundle, project]
+  allowed_trust: [trusted_bundle, trusted_project]
 execution:
   thread_profile:
     name: graph_run
@@ -5517,6 +5631,9 @@ execution:
     #[test]
     fn methods_parsed_from_schema() {
         let yaml = "\
+launch_trust:
+  allowed_spaces: [bundle, project]
+  allowed_trust: [trusted_bundle, trusted_project]
 execution:
   thread_profile:
     name: knowledge_run
@@ -5679,6 +5796,9 @@ execution:
         // A kind with non-empty methods but no terminator/delegate/aliases
         // is executable.
         let yaml = "\
+launch_trust:
+  allowed_spaces: [bundle, project]
+  allowed_trust: [trusted_bundle, trusted_project]
 execution:
   thread_profile:
     name: knowledge_run

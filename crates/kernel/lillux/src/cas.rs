@@ -1943,7 +1943,7 @@ pub fn run(action: CasAction) -> serde_json::Value {
             let membership = store.has(&hash);
             match membership {
                 Ok(exists) => serde_json::json!({ "exists": exists, "hash": hash }),
-                Err(error) => serde_json::json!({ "error": error.to_string(), "hash": hash }),
+                Err(error) => serde_json::json!({ "error": format!("{error:#}"), "hash": hash }),
             }
         }
     }
@@ -1958,7 +1958,7 @@ fn cli_store(root: &str, blob: bool) -> serde_json::Value {
     if blob {
         match store.store_blob(&data) {
             Ok(hash) => serde_json::json!({ "hash": hash }),
-            Err(e) => serde_json::json!({ "error": e.to_string() }),
+            Err(e) => serde_json::json!({ "error": format!("{e:#}") }),
         }
     } else {
         let value: serde_json::Value = match serde_json::from_slice(&data) {
@@ -1967,7 +1967,7 @@ fn cli_store(root: &str, blob: bool) -> serde_json::Value {
         };
         match store.store_object(&value) {
             Ok(hash) => serde_json::json!({ "hash": hash }),
-            Err(e) => serde_json::json!({ "error": e.to_string() }),
+            Err(e) => serde_json::json!({ "error": format!("{e:#}") }),
         }
     }
 }

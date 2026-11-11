@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-09T02:44:13Z:38a2a3995629bcd081f2a8b6b919ee88eb7fc52c972656a6362cc990ab389126:YgwWaMAqwwW1oNCBsH9lPlD53Yi9rQpdWkowMQG58uekfK9Dpc3i23xHK9USLo93SBY4OKA1EwTb/fpuX99mDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-11T02:56:40Z:ebfb3f687269c06ade966b99f1cc01634f79e96f66f011533fada467bb0f2958:Hec0IA/IHJ1TFz0kufBiJBLCotgnsotgRgXf3z2wlJzmV+hK1iu34yU/4+kZuZLXCQcVsIockTz4UvlGOsVaAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Core plus the graph workflow bundles.
 schema: 1
 exact_bundles:
@@ -310,6 +310,11 @@ policies:
         verified_artifact_file_bytes: 268435456
         verified_artifact_total_bytes: 1073741824
         verified_artifact_files: 4096
+  # Trust classes the operator admits for launch roots beyond each kind's
+  # default, per kind (only what the kind schema lets an operator admit).
+  launch_trust:
+    schema: 1
+    admit: {}
   ingest_ignore:
     schema: 2
     patterns:

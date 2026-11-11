@@ -2,6 +2,7 @@
 
 use ryeos_api::registry::ServiceDescriptor;
 
+pub mod signed_item_topology;
 pub mod ui_dimension;
 pub mod ui_field;
 pub mod ui_field_comparison;
@@ -11,7 +12,6 @@ pub mod ui_field_project;
 pub mod ui_field_runs;
 pub mod ui_files;
 pub mod ui_gc;
-pub mod ui_graph_topology;
 pub mod ui_invocations_dispatch;
 pub mod ui_items;
 pub mod ui_launch;
@@ -35,7 +35,6 @@ pub const ALL: &[ServiceDescriptor] = &[
     ui_session_attachments::OPEN_SURFACE_DESCRIPTOR,
     ui_session_attachments::DETACH_DESCRIPTOR,
     ui_invocations_dispatch::DESCRIPTOR,
-    ui_graph_topology::DESCRIPTOR,
     ui_field_comparison::DESCRIPTOR,
     ui_field_definition::DESCRIPTOR,
     ui_field_execution::DESCRIPTOR,

@@ -363,7 +363,7 @@ fn reconcile_accounting(state: &AppState) -> Result<()> {
         if is_terminal(&thread_id)? {
             let confirmation = ledger.confirm_terminal_publication(&thread_id, &generation);
             if let Err(error) = confirmation {
-                tracing::warn!(thread_id, %error, "terminal publication repair failed");
+                tracing::warn!(thread_id, error = %format!("{error:#}"), "terminal publication repair failed");
             }
         }
     }
@@ -385,7 +385,7 @@ fn reconcile_accounting(state: &AppState) -> Result<()> {
                     .unwrap_or(0),
             );
             if let Err(error) = fence_result {
-                tracing::error!(thread_id, attempt_id, %error, "accounting fence failed");
+                tracing::error!(thread_id, attempt_id, error = %format!("{error:#}"), "accounting fence failed");
             }
         }
     }
@@ -1027,7 +1027,7 @@ fn finalize_recovered_stop(
         summary_json: None,
     }) {
         Err(error) => {
-            tracing::warn!(thread_id, error = %error, "failed to finalize recovered stop request");
+            tracing::warn!(thread_id, error = %format!("{error:#}"), "failed to finalize recovered stop request");
         }
         Ok(_) => {
             *reconciled += 1;
@@ -1057,7 +1057,7 @@ fn dead_identity_safe_to_clear(
         Err(error) => {
             tracing::warn!(
                 thread_id,
-                error = %error,
+                error = %format!("{error:#}"),
                 "cannot compare process-identity boot; quarantining"
             );
             false
@@ -1544,7 +1544,7 @@ async fn reconcile_active_threads_inner(
                     Err(error) => {
                         tracing::warn!(
                             thread_id = %thread.thread_id,
-                            error = %error,
+                            error = %format!("{error:#}"),
                             "failed to clear durable stop identity"
                         );
                         continue;
@@ -1669,7 +1669,7 @@ async fn reconcile_active_threads_inner(
                 Err(error) => {
                     tracing::warn!(
                         thread_id = %thread.thread_id,
-                        error = %error,
+                        error = %format!("{error:#}"),
                         "failed to clear terminated process identity before reconcile"
                     );
                     continue;
@@ -2026,7 +2026,7 @@ async fn reconcile_active_threads_inner(
             Err(err) => {
                 tracing::error!(
                     thread_id = %thread.thread_id,
-                    error = %err,
+                    error = %format!("{err:#}"),
                     "failed to read resume_attempts; finalizing as failed instead of resuming"
                 );
                 finalize_dead(
@@ -2035,7 +2035,10 @@ async fn reconcile_active_threads_inner(
                     &thread.thread_id,
                     pgid,
                     &thread.status,
-                    Some(("resume_counter_io_error", json!({"error": err.to_string()}))),
+                    Some((
+                        "resume_counter_io_error",
+                        json!({"error": format!("{err:#}")}),
+                    )),
                     &mut reconciled,
                 )?;
                 continue;
@@ -2121,7 +2124,7 @@ async fn reconcile_active_threads_inner(
                 if let Err(err) = state.state_store.bump_resume_attempts(&thread.thread_id) {
                     tracing::warn!(
                         thread_id = %thread.thread_id,
-                        error = %err,
+                        error = %format!("{err:#}"),
                         "failed to persist resume_attempts; finalizing instead of resuming"
                     );
                     finalize_dead(
@@ -2130,7 +2133,10 @@ async fn reconcile_active_threads_inner(
                         &thread.thread_id,
                         pgid,
                         &thread.status,
-                        Some(("resume_counter_io_error", json!({"error": err.to_string()}))),
+                        Some((
+                            "resume_counter_io_error",
+                            json!({"error": format!("{err:#}")}),
+                        )),
                         &mut reconciled,
                     )?;
                     continue;
@@ -3377,7 +3383,7 @@ fn reconcile_execution_workspaces(
             if let Some(thread_id) = workspace.thread_id.as_ref() {
                 blocked_freezes.insert(thread_id.clone());
             }
-            tracing::warn!(workspace_id = %workspace.workspace_id, %error,
+            tracing::warn!(workspace_id = %workspace.workspace_id, error = %format!("{error:#}"),
                 "workspace contact remains unresolved; preserving its exact journal");
             continue;
         }
@@ -3385,7 +3391,7 @@ fn reconcile_execution_workspaces(
             if let Err(error) = cleanup_dead_execution_workspace(state, &workspace) {
                 tracing::warn!(
                     workspace_id = %workspace.workspace_id,
-                    %error,
+                    error = %format!("{error:#}"),
                     "verified workspace destroy could not finish idempotent root/row cleanup"
                 );
             }
@@ -3427,7 +3433,7 @@ fn reconcile_execution_workspaces(
                     if let Some(thread_id) = workspace.thread_id.as_ref() {
                         blocked_freezes.insert(thread_id.clone());
                     }
-                    tracing::error!(workspace_id = %workspace.workspace_id, %error,
+                    tracing::error!(workspace_id = %workspace.workspace_id, error = %format!("{error:#}"),
                         "interrupted workspace freeze has contradictory generation authority; preserving quarantine");
                     continue;
                 }
@@ -3496,7 +3502,7 @@ fn reconcile_execution_workspaces(
                         }
                         tracing::error!(
                             workspace_id = %workspace.workspace_id,
-                            %error,
+                            error = %format!("{error:#}"),
                             "interrupted callback freeze could not be recovered; preserving backend mutation state"
                         );
                     }
@@ -3574,7 +3580,7 @@ fn reconcile_execution_workspaces(
         if let Err(error) = cleanup_dead_execution_workspace(state, &workspace) {
             tracing::warn!(
                 workspace_id = %workspace.workspace_id,
-                %error,
+                error = %format!("{error:#}"),
                 "dead execution workspace could not be owner-verified and removed; retaining quarantine"
             );
         }

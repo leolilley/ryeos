@@ -480,7 +480,7 @@ impl Drop for PreparedProjectDeploy<'_> {
     fn drop(&mut self) {
         if !self.resolved {
             if let Err(error) = self.session.retain_for_recovery() {
-                tracing::error!(%error, "unresolved project schedule session could not retain recovery");
+                tracing::error!(error = %format!("{error:#}"), "unresolved project schedule session could not retain recovery");
             }
             self.resolved = true;
         }

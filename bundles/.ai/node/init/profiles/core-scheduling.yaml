@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-09T02:44:13Z:eff051baa03f668a5787ad2354a3af558d61ff8712761adf63ab3304d46ed36d:dztFdFkNaNINaMnNYz2x7LgdkeP2RyC/mKKsvszn24SpoMCTm/MhWmtOJb65IQ/zYEo7JziY+gtbs3v7dSt+Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-11T02:56:40Z:ebc42e4ad310a1903e4a5dbec04c0ab7782aaa26ab241cbe4c7f330c1d5d339f:otoeQ+455R/HGZqNJjpAXMkLqT5/nA4ajKJMDfRLdh6xD3dzKjrc/KnkJz/v3kSZAMnZwCr/I5anXesPCsiRCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Core plus scheduling.
 schema: 1
 exact_bundles:
@@ -310,6 +310,11 @@ policies:
         verified_artifact_file_bytes: 268435456
         verified_artifact_total_bytes: 1073741824
         verified_artifact_files: 4096
+  # Trust classes the operator admits for launch roots beyond each kind's
+  # default, per kind (only what the kind schema lets an operator admit).
+  launch_trust:
+    schema: 1
+    admit: {}
   ingest_ignore:
     schema: 2
     patterns:

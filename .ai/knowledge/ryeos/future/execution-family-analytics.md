@@ -1,7 +1,7 @@
-<!-- ryeos:signed:2026-08-12T07:28:15Z:4679ad0c8308a2c386a4389835707670a9515cdd0a47c4ef9bb9d33705a6904a:vOnLzK6B7Ui1uPGJPerB1dkaASZ+tFp0EBqYPbQdq+jDzNF3nfrIyEln5DKcIYXjEM50SiFbTOjHwLCunlwDBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-06T01:00:58Z:6d9938063d3261ff63ea35edf1f174046fdd05270e35e0c22c54c6869499f129:+CP3SQOvTYTBkkK8duH/hUzH6iJh+eYnpVuwueTMQE7+wDwD40TLC4UZCIdG51iGDgI29xUC3ydoySG9qpH4BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [future, analytics, execution-family, effective-definition, cost]
-version: "0.3.0"
+version: "0.3.1"
 status: deferred
 description: >
   Behavioral diff over the effective-definition digest seed and
@@ -68,9 +68,10 @@ concerns, one denominator.
   distinction, but generic analytics never infer replay from record existence
   or from equal result bytes.
 - Provider-turn evidence and outer graph-dispatch evidence are separate rows;
-  an aggregate must not collapse them into one replay claim. First-class
-  provider publication rows in the execution field remain a prerequisite of
-  the next operator acceptance slice, not landed analytics substrate today.
+  an aggregate must not collapse them into one replay claim. Provider publication
+  records and their current projection belong to [provider-call effect records](provider-call-effect-records.md).
+  Recheck that owner's source and live-acceptance status for a selected analytics
+  slice; the older missing-row checkpoint is not a continuing platform premise.
 
 ## Triggers to revisit
 
