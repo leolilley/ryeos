@@ -216,10 +216,15 @@ pub fn check_requests(
         .lines()
         .filter(|line| line.starts_with("Process exited with code "))
         .collect::<Vec<_>>();
+    // The command prints the denial on stdout with no newline and the shell
+    // reports the failed redirect on stderr; Codex merges the two streams in
+    // arrival order, so the denial can stand alone on a line or abut the shell
+    // diagnostic. Exit 73 is only reachable through the denial branch; require
+    // the denial exactly once wherever the merge placed it.
     ensure!(
         exit_lines == ["Process exited with code 73"]
             && !header.contains("Process running with session ID")
-            && body.lines().any(|line| line == secret_read_denial),
+            && body.matches(secret_read_denial).count() == 1,
         "guest controller-canary read was not explicitly denied"
     );
     Ok(())
@@ -568,6 +573,30 @@ mod tests {
             )
             .is_err()
         );
+        // Stream merge order is arrival order: the denial may abut the shell's
+        // own diagnostic on either side; twice, or absent, still refuses.
+        for (body, accepted) in [
+            ("zsh:1: no such file or directory: /c/canary\ncontroller-canary-read-denied", true),
+            ("controller-canary-read-deniedzsh:1: no such file or directory: /c/canary\n", true),
+            ("controller-canary-read-denied\ncontroller-canary-read-denied\n", false),
+            ("zsh:1: no such file or directory: /c/canary\n", false),
+        ] {
+            let mut merged = requests.clone();
+            merged[4]["input"][0]["output"] =
+                format!("Process exited with code 73\nOutput:\n{body}").into();
+            assert_eq!(
+                check_requests(
+                    &merged,
+                    &CandidateFixture::test_fixture(),
+                    canary,
+                    canary,
+                    "controller-canary-read-denied"
+                )
+                .is_ok(),
+                accepted,
+                "{body:?}"
+            );
+        }
         let mut success = requests;
         success[4]["input"][0]["output"] =
             "Process exited with code 0\nOutput:\ncontroller-canary-read-denied\n".into();

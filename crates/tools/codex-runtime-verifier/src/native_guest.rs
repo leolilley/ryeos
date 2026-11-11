@@ -238,6 +238,46 @@ pub fn run_probe_entrypoint() -> std::process::ExitCode {
 /// owns this private cwd plus finish delivery. No daemon callback, provider
 /// credentials, Worker identity or qualification claims are manufactured.
 pub fn run_production_probe(encoded_challenge: &str) -> Result<()> {
+    let outcome = run_production_probe_attempt(encoded_challenge);
+    if let Err(error) = &outcome {
+        leave_failure_reason(error);
+    }
+    outcome
+}
+
+/// Name of the create-only failure reason in the private control root.
+pub(crate) const GUEST_FAILURE_NAME: &str = "guest-failure";
+pub(crate) const MAX_GUEST_FAILURE_BYTES: usize = 1024;
+
+/// Printable, bounded form of a failure for the enclosing observer. Refusal
+/// texts in this crate are fixed wording plus local paths; anything else is
+/// flattened to spaces so no control bytes travel into a retained account.
+pub(crate) fn bounded_failure_reason(text: &str) -> String {
+    text.chars()
+        .map(|ch| if ch.is_ascii_graphic() || ch == ' ' { ch } else { ' ' })
+        .take(MAX_GUEST_FAILURE_BYTES)
+        .collect()
+}
+
+/// This process's stderr belongs to Codex, which only logs it, so a failure
+/// here is otherwise invisible to the observer waiting on the observation.
+/// Leave the reason beside where the observation would have been: the control
+/// root is this process's cwd and private to the enclosing verifier. Reopened
+/// by path so the write holds in whichever mount namespace the failure
+/// happened. Best effort: the observer's deadline still bounds a silent loss.
+fn leave_failure_reason(error: &anyhow::Error) {
+    let reason = bounded_failure_reason(&format!("{error:#}"));
+    if let Ok(Some(root)) = PinnedDirectory::open(Path::new(".")) {
+        let _ = root.atomic_create_pinned_regular(
+            OsStr::new(GUEST_FAILURE_NAME),
+            reason.as_bytes(),
+            0o400,
+            crate::VERIFIER_TEMP_PURPOSE,
+        );
+    }
+}
+
+fn run_production_probe_attempt(encoded_challenge: &str) -> Result<()> {
     use crate::consumer_record::{CONSUMER_INPUT_ROOT_ENV, ConsumerInputRecord};
     use ryeos_external_execution_contract::restored_runtime_measurement::{
         CONSUMER_INPUT_RECORD_NAME, ConsumerRuntimeChallenge, MAX_CONSUMER_INPUT_RECORD_BYTES,
@@ -898,6 +938,15 @@ pub(crate) fn run_prepared_protocol(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failure_reason_is_printable_and_bounded() {
+        let reason = bounded_failure_reason("relay guest protocol: \u{1b}[31mbad\n\tpath ./x\u{0}");
+        assert_eq!(reason, "relay guest protocol:  [31mbad  path ./x ");
+        let long = bounded_failure_reason(&"é".repeat(5000));
+        assert_eq!(long.len(), MAX_GUEST_FAILURE_BYTES);
+        assert!(long.bytes().all(|byte| byte == b' '));
+    }
 
     #[test]
     fn capture_signal_is_explicit_and_invalid_content_is_not_completion() {
