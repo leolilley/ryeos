@@ -56,6 +56,10 @@ pub async fn export_qualification_testimony(
         let request = request.clone();
         let ctx = ctx.clone();
         tokio::task::spawn_blocking(move || {
+            // The origin re-verifies its qualification before signing, and a
+            // verifier on the pinned project lane needs its retained snapshot.
+            let project_context_resolver =
+                crate::handlers::qualification_project_context::resolver(state.as_ref());
             let operator = NodeIdentity::load(&state.config.operator_signing_key_path)
                 .context("load configured operator identity for testimony export")?;
             match &request.content {
@@ -66,6 +70,7 @@ pub async fn export_qualification_testimony(
                     &request.qualification_hash,
                     &request.acceptance_policy_ref,
                     &lillux::time::iso8601_now(),
+                    project_context_resolver.as_ref(),
                 ),
                 Some(selection) => export_content_testimony_blocking(
                     &state,

@@ -5197,6 +5197,7 @@ pub(crate) fn verify_current_product_qualification_for_export(
     state: &AppState,
     context: &HandlerContext,
     witness: &VerifiedQualificationWitness,
+    project_context_resolver: &dyn QualificationProjectContextResolver,
 ) -> anyhow::Result<VerifiedQualificationWitness> {
     let evidence = &witness.evidence;
     let consumer_context = evidence
@@ -5275,7 +5276,7 @@ pub(crate) fn verify_current_product_qualification_for_export(
         &proof,
         &product,
         true,
-        None,
+        Some(project_context_resolver),
     )?;
     Ok(proof)
 }

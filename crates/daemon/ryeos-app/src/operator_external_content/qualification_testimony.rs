@@ -119,6 +119,7 @@ pub fn export_testimony_blocking(
     qualification_hash: &str,
     acceptance_policy_ref: &str,
     now: &str,
+    project_context_resolver: &dyn super::product_qualification::QualificationProjectContextResolver,
 ) -> anyhow::Result<TestimonyExport> {
     require_unguarded_resolution("remote qualification testimony export")?;
     ensure!(
@@ -153,7 +154,12 @@ pub fn export_testimony_blocking(
             context.fingerprint == owner_principal,
             "product qualification testimony export requires the configured operator"
         );
-        verify_current_product_qualification_for_export(state, context, &witness)?
+        verify_current_product_qualification_for_export(
+            state,
+            context,
+            &witness,
+            project_context_resolver,
+        )?
     } else {
         let binding = ExternalRuntimeQualificationBinding {
             attestation_hash: qualification_hash.to_owned(),
