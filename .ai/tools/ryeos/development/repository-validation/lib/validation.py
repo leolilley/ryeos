@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-21T02:32:22Z:0162eb18c6231fdb90d4a1be761e257bb53b5f238ef206757a2f1ea0e9f1b6ba:hPIUfsnIoLo8qqNO5HnspB/pMHVgD7uCG6Q9Ql2E00jD9NBvrlmO9WGmvZDRqdgmWYMxRl7qQEKTm2M05F2OCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-11T09:41:52Z:d05d5f1745bbf7c16d46c6771b31486c4dfb8c70883784183f821d112577e127:eQ3FkZzYmY5m2niVLVur2BbB2UWOkw0OdiY/5ZqLFyaC9e9WPbLaBgLam7p6evnM96e1pCbY40zPQpJD3sPrBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Read-only repository validation shared by signed Tools and external CI.
 
 The resolved project Config owns rules and input selection. This module owns

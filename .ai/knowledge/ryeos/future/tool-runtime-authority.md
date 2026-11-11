@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-16T03:44:58Z:aa85f8377ac1a5dee44ba46052327aa2e2057835d79720d059767a221eee5e25:wiV9LNHI4+FgNVJ8KTRw5tjqTcB6slEDNUY0HSyOzogX5Mx4zl2eAt3RhTnvyHdpVfR2Ws1ltlUvkesWo2C9CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-11T09:41:52Z:693b800b030e8392457e917c362c681f0e60a624cbe9318ecfa13d976f4ec5d4:bkx1HYVkiYqMKT2T42OJ8yRJFgmO+UbBc+sLNEoSw6VevR4Z5OijPwq32obN+nbJDzufrhB/Mamlx+3l9v+nCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # Future: Tool Runtime Authority Model
 
 ## Status
