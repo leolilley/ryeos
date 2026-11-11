@@ -109,7 +109,7 @@ impl ConsumerObservationFailure {
         if let Some(launch) = self.launch.take() {
             match launch.settle(cleanup) {
                 Ok(error) => {
-                    self.error = self.error.context(format!("owner startup failed: {error}"))
+                    self.error = self.error.context(format!("owner startup failed: {error:#}"))
                 }
                 Err(launch) => self.launch = Some(launch),
             }

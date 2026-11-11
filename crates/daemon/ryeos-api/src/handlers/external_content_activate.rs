@@ -635,7 +635,7 @@ fn completed_activation_receipt_is_reusable(
         .write_barrier
         .acquire_with_timeout(ryeos_app::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
         .map_err(|error| {
-            anyhow::anyhow!("cannot verify completed activation under write barrier: {error}")
+            anyhow::anyhow!("cannot verify completed activation under write barrier: {error:#}")
         })?;
     let cas = state_authority.cas_store()?;
     let head = authority
@@ -1217,7 +1217,7 @@ async fn cleanup_terminal_staging(directories: ActivationDirectories, job_id: &s
     match tokio::task::spawn_blocking(move || cleanup_staging(directories)).await {
         Ok(Ok(())) => {}
         Ok(Err(error)) => {
-            tracing::warn!(%error, %job_id, "terminal managed activation retained bounded staging")
+            tracing::warn!(error = %format!("{error:#}"), %job_id, "terminal managed activation retained bounded staging")
         }
         Err(error) => {
             tracing::warn!(%error, %job_id, "terminal managed activation cleanup task panicked")
@@ -2386,7 +2386,7 @@ pub async fn recover_durable_activations(state: &AppState) -> Result<usize> {
                             },
                         )
                     })?;
-                    tracing::error!(job_id = %job.job_id, %error, "invalid managed activation operation terminalized");
+                    tracing::error!(job_id = %job.job_id, error = %format!("{error:#}"), "invalid managed activation operation terminalized");
                     cleanup_retained_terminal_staging(state, &job.job_id, &job.operation).await;
                     continue;
                 }
@@ -2410,7 +2410,7 @@ pub async fn recover_durable_activations(state: &AppState) -> Result<usize> {
                         },
                     )
                 })?;
-                tracing::error!(job_id = %job.job_id, %error, "mismatched managed activation operation terminalized before recovery contact");
+                tracing::error!(job_id = %job.job_id, error = %format!("{error:#}"), "mismatched managed activation operation terminalized before recovery contact");
                 continue;
             }
             let activation = match ryeos_app::managed_external_content::resolve_activation(
@@ -2449,7 +2449,7 @@ pub async fn recover_durable_activations(state: &AppState) -> Result<usize> {
                     }
                 }
                 Err(error) => {
-                    tracing::warn!(job_id = %job.job_id, %error, "managed activation recovery submission did not complete")
+                    tracing::warn!(job_id = %job.job_id, error = %format!("{error:#}"), "managed activation recovery submission did not complete")
                 }
             }
         }
@@ -2553,7 +2553,7 @@ async fn cleanup_retained_terminal_staging(state: &AppState, job_id: &str, opera
     let operation_digest = match retained_activation_operation_digest(job_id, operation) {
         Ok(digest) => digest,
         Err(error) => {
-            tracing::warn!(%error, %job_id, "terminal managed activation operation cannot authorize staging cleanup");
+            tracing::warn!(error = %format!("{error:#}"), %job_id, "terminal managed activation operation cannot authorize staging cleanup");
             return;
         }
     };
@@ -2565,7 +2565,7 @@ async fn cleanup_retained_terminal_staging(state: &AppState, job_id: &str, opera
     {
         Ok(Ok(directories)) => directories,
         Ok(Err(error)) => {
-            tracing::warn!(%error, %job_id, "terminal managed activation staging could not be opened for cleanup");
+            tracing::warn!(error = %format!("{error:#}"), %job_id, "terminal managed activation staging could not be opened for cleanup");
             return;
         }
         Err(error) => {

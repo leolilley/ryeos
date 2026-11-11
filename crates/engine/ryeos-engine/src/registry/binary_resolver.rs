@@ -397,24 +397,24 @@ pub fn capture_bundle_payload_for_target(
         .file_name()
         .ok_or_else(|| EngineError::Internal("verified guest payload has no file name".into()))?;
     let parent = lillux::PinnedDirectory::open(bin_dir)
-        .map_err(|error| EngineError::Internal(format!("pin guest payload directory: {error}")))?
+        .map_err(|error| EngineError::Internal(format!("pin guest payload directory: {error:#}")))?
         .ok_or_else(|| EngineError::BinNotFound {
             bin: binary_ref.to_owned(),
             searched: bin_dir.display().to_string(),
         })?;
     let file = parent
         .open_pinned_regular(name, false)
-        .map_err(|error| EngineError::Internal(format!("pin guest payload: {error}")))?
+        .map_err(|error| EngineError::Internal(format!("pin guest payload: {error:#}")))?
         .ok_or_else(|| EngineError::BinNotFound {
             bin: binary_ref.to_owned(),
             searched: identity.absolute_path.display().to_string(),
         })?;
     let observation = file
         .observation()
-        .map_err(|error| EngineError::Internal(format!("observe guest payload: {error}")))?;
+        .map_err(|error| EngineError::Internal(format!("observe guest payload: {error:#}")))?;
     let bytes = file
         .read_stable_bounded(&observation, maximum_bytes)
-        .map_err(|error| EngineError::Internal(format!("read guest payload: {error}")))?;
+        .map_err(|error| EngineError::Internal(format!("read guest payload: {error:#}")))?;
     let observed = lillux::sha256_hex(&bytes);
     if observed != identity.content_hash {
         return Err(EngineError::BinHashMismatch {
@@ -589,7 +589,7 @@ pub fn resolve_runtime_binary_command_ref_with_selection(
         )
         .map_err(|error| EngineError::BinManifestInvalid {
             bin: binary_ref.to_owned(),
-            reason: error.to_string(),
+            reason: format!("{error:#}"),
         })?;
     Ok((identity, proof))
 }
@@ -969,7 +969,7 @@ fn resolve_bundle_binary_ref_for_target(
     let manifest_value =
         load_executor_cas_object_bounded(&cas, &manifest_hash, MAX_EXECUTOR_MANIFEST_OBJECT_BYTES)
             .map_err(|e| {
-                EngineError::Internal(format!("CAS read error for manifest {manifest_hash}: {e}"))
+                EngineError::Internal(format!("CAS read error for manifest {manifest_hash}: {e:#}"))
             })?
             .ok_or_else(|| EngineError::BinManifestMissing {
                 bundle_root: bundle_root.display().to_string(),
@@ -999,7 +999,7 @@ fn resolve_bundle_binary_ref_for_target(
     )
     .map_err(|e| {
         EngineError::Internal(format!(
-            "CAS read error for item_source {item_source_hash}: {e}"
+            "CAS read error for item_source {item_source_hash}: {e:#}"
         ))
     })?
     .ok_or_else(|| {
@@ -1033,7 +1033,7 @@ fn resolve_bundle_binary_ref_for_target(
     }
     .map_err(|error| EngineError::BinManifestInvalid {
         bin: bin_name.clone(),
-        reason: format!("read content blob {content_blob_hash}: {error}"),
+        reason: format!("read content blob {content_blob_hash}: {error:#}"),
     })?
     .ok_or_else(|| EngineError::BinManifestInvalid {
         bin: bin_name.clone(),
@@ -1053,7 +1053,7 @@ fn resolve_bundle_binary_ref_for_target(
         None => std::fs::read(&bin_path).map_err(anyhow::Error::from),
     }
     .map_err(|e| {
-        EngineError::Internal(format!("failed to read binary {}: {e}", bin_path.display()))
+        EngineError::Internal(format!("failed to read binary {}: {e:#}", bin_path.display()))
     })?;
     let mut hasher = Sha256::new();
     hasher.update(&bin_bytes);
@@ -1345,7 +1345,7 @@ fn verify_bundle_executor_manifest_items(
         bundle_executor_error(
             bundle_root,
             format!(
-                "read executor manifest object {}: {error}",
+                "read executor manifest object {}: {error:#}",
                 verified_manifest_ref.manifest_hash
             ),
         )
@@ -1387,7 +1387,7 @@ fn verify_bundle_executor_manifest_items(
         .map_err(|error| {
             bundle_executor_error(
                 bundle_root,
-                format!("read ItemSource {item_source_hash} for {item_ref}: {error}"),
+                format!("read ItemSource {item_source_hash} for {item_ref}: {error:#}"),
             )
         })?
         .ok_or_else(|| {
@@ -1430,7 +1430,7 @@ fn verify_bundle_executor_manifest_items(
             .map_err(|error| {
                 bundle_executor_error(
                     bundle_root,
-                    format!("read content blob {blob_hash} for {item_ref}: {error}"),
+                    format!("read content blob {blob_hash} for {item_ref}: {error:#}"),
                 )
             })?
             .ok_or_else(|| {
@@ -1570,7 +1570,7 @@ fn read_executor_manifest_ref(path: &Path, bundle_root: &Path) -> Result<String,
         bundle_executor_error(
             bundle_root,
             format!(
-                "read bounded executor manifest ref {}: {error}",
+                "read bounded executor manifest ref {}: {error:#}",
                 path.display()
             ),
         )
@@ -1878,7 +1878,7 @@ fn verify_item_source_sidecar(
     let signed_bytes = lillux::read_regular_file_bounded_no_follow(&sidecar_path, 1024 * 1024)
         .map_err(|error| EngineError::BinSidecarInvalid {
             bin: bin_name.to_string(),
-            reason: format!("read {}: {error}", sidecar_path.display()),
+            reason: format!("read {}: {error:#}", sidecar_path.display()),
         })?;
     let fingerprint = verify_item_source_sidecar_bytes(
         bin_name,

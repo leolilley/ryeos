@@ -2148,7 +2148,7 @@ fn extract_remote_wait_result(response: Value) -> Result<Value> {
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow::anyhow!("remote wait thread evidence omitted thread_id"))?;
     ryeos_executor::executor::validate_service_invocation_id(thread_id)
-        .map_err(|error| anyhow::anyhow!("remote wait service evidence: {error}"))?;
+        .map_err(|error| anyhow::anyhow!("remote wait service evidence: {error:#}"))?;
     Ok(result)
 }
 
@@ -3910,7 +3910,7 @@ impl RemoteSignedRef {
             anyhow::bail!("invalid signed ref target hash: {}", self.target_hash);
         }
         ryeos_state::parse_canonical_timestamp(&self.updated_at)
-            .map_err(|error| anyhow::anyhow!("invalid signed ref updated_at: {error}"))?;
+            .map_err(|error| anyhow::anyhow!("invalid signed ref updated_at: {error:#}"))?;
         if !is_canonical_hash(&self.signer) {
             anyhow::bail!("invalid signed ref signer fingerprint: {}", self.signer);
         }

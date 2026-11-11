@@ -333,12 +333,12 @@ pub fn command_execution_policy(
         ExecutionPolicy::projectless(response)
     };
     if controls.retain_child_results {
-        policy = policy.retain_child_results().map_err(|e| e.to_string())?;
+        policy = policy.retain_child_results().map_err(|e| format!("{e:#}"))?;
     }
     if controls.exclude_operator_vault {
         policy = policy.exclude_operator_vault();
     }
-    policy.validate().map_err(|e| e.to_string())?;
+    policy.validate().map_err(|e| format!("{e:#}"))?;
     Ok(policy)
 }
 
@@ -490,7 +490,7 @@ pub fn strip_declared_control_flags(
                             format!("--{name} must be a typed product-selection list: {error}")
                         })?;
                     let canonical = ryeos_state::external_content::products::composition::canonicalize_product_selection_inputs(parsed)
-                        .map_err(|error| format!("--{name}: {error}"))?;
+                        .map_err(|error| format!("--{name}: {error:#}"))?;
                     controls.product_selections =
                         Some(serde_json::to_value(canonical).map_err(|error| error.to_string())?);
                 }

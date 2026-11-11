@@ -402,7 +402,7 @@ fn preflight_verify_bundle_in_context_inner(
         let mut files: Vec<PathBuf> = Vec::new();
         if let Err(e) = collect_files_recursive(&kind_dir, &mut files) {
             failures.push(format!(
-                "{}: scan failed: {e}",
+                "{}: scan failed: {e:#}",
                 kind_dir
                     .strip_prefix(&ai_dir)
                     .unwrap_or(&kind_dir)
@@ -1125,7 +1125,7 @@ fn collect_node_config_failures(ai_dir: &Path, trust_store: &TrustStore) -> Vec<
 
     let mut files = Vec::new();
     if let Err(e) = collect_node_config_files_recursive(&node_dir, &mut files) {
-        failures.push(format!("node: node config scan failed: {e}"));
+        failures.push(format!("node: node config scan failed: {e:#}"));
         return failures;
     }
 

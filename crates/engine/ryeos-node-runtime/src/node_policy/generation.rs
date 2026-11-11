@@ -667,7 +667,7 @@ pub fn publish_policy_update(
                         })
                 });
             if let Err(error) = cleanup {
-                tracing::warn!(%error, "node policy generation committed with retired staging cleanup pending");
+                tracing::warn!(error = %format!("{error:#}"), "node policy generation committed with retired staging cleanup pending");
             }
         } else {
             match node_root.rename_child_directory_noreplace(&staging_name, target_name, &staging) {

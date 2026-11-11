@@ -109,7 +109,7 @@ pub async fn handle(
                 ))
             })?;
             let ref_str = config::local_project_identity(&canonical)
-                .map_err(|error| HandlerError::BadRequest(error.to_string()))?
+                .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?
                 .to_owned();
             (Some(canonical), ref_str)
         }
@@ -241,7 +241,7 @@ fn destination_execution_policy(
 
     requested
         .validate()
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     if requested.target != ExecutionTarget::Here {
         return Err(HandlerError::BadRequest(
             "remote execute receives a destination-local policy; target must be `here`".to_string(),

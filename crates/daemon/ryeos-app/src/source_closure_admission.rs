@@ -514,7 +514,7 @@ pub fn admit_source_closure_in_publication(
     let _permit = state
         .write_barrier
         .acquire_with_timeout(crate::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
-        .map_err(|error| anyhow::anyhow!("cannot acquire CAS write permit: {error}"))?;
+        .map_err(|error| anyhow::anyhow!("cannot acquire CAS write permit: {error:#}"))?;
     let cas = authority.cas_store()?;
     let staged = publication
         .as_mut()

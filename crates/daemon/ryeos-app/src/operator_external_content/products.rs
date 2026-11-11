@@ -354,7 +354,7 @@ fn capture_guarded(
     let _permit = state
         .write_barrier
         .acquire_with_timeout(crate::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
-        .map_err(|error| anyhow::anyhow!("cannot acquire product publication permit: {error}"))?;
+        .map_err(|error| anyhow::anyhow!("cannot acquire product publication permit: {error:#}"))?;
     let published =
         publish_product_witness(authority, &coordinate, &attestation, limits, &signer, guard)?;
     // Publication owns the witness/manifest closure. Settle only this capture's
@@ -381,7 +381,7 @@ fn capture_guarded(
         Ok(())
     })();
     if let Err(error) = settled {
-        tracing::warn!(%error, staging_id = %import.staging_id,
+        tracing::warn!(error = %format!("{error:#}"), staging_id = %import.staging_id,
             witness_hash = %published.witness.attestation_hash,
             "product witness published; import stage cleanup remains pending");
     }
@@ -583,7 +583,7 @@ fn import_workspace_output_product(
         .write_barrier
         .acquire_with_timeout(crate::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
         .map_err(|error| {
-            anyhow::anyhow!("cannot acquire workspace-output publication permit: {error}")
+            anyhow::anyhow!("cannot acquire workspace-output publication permit: {error:#}")
         })?;
     let mut stage = authority
         .require_recovery()?

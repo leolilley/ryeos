@@ -96,7 +96,7 @@ pub async fn handle(
     let manifest: BundleManifestSource = serde_yaml::from_str(&raw)
         .map_err(|e| HandlerError::BadRequest(format!("parse {}: {e}", manifest_path.display())))?;
     validate_smoke_decls(&manifest.smoke)
-        .map_err(|e| HandlerError::BadRequest(format!("invalid smoke declaration: {e}")))?;
+        .map_err(|e| HandlerError::BadRequest(format!("invalid smoke declaration: {e:#}")))?;
 
     if manifest.smoke.is_empty() {
         return Ok(json!({

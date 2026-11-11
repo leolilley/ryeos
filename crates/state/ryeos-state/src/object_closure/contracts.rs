@@ -536,7 +536,7 @@ fn links_effective_source_binding(value: &Value) -> Result<ContractLinks, String
 
 fn links_source_closure_manifest(value: &Value) -> Result<ContractLinks, String> {
     let manifest = crate::objects::SourceClosureManifest::from_value(value)
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| format!("{error:#}"))?;
     let mut links = ContractLinks::leaf();
     links.blob_hashes = manifest.blob_hashes();
     Ok(links)
@@ -551,7 +551,7 @@ fn links_dispatch_effect_record(value: &Value) -> Result<ContractLinks, String> 
             .ok_or_else(|| "dispatch_effect_record missing answer".to_owned())?,
     )
     .map_err(|error| format!("invalid dispatch effect answer: {error}"))?;
-    answer.validate().map_err(|error| error.to_string())?;
+    answer.validate().map_err(|error| format!("{error:#}"))?;
     if let ryeos_effect_contract::DispatchEffectAnswer::Retained {
         retained_result, ..
     } = answer
@@ -584,7 +584,7 @@ fn links_dispatch_effect_record(value: &Value) -> Result<ContractLinks, String> 
 
 fn links_admitted_execution_realization(value: &Value) -> Result<ContractLinks, String> {
     let realization = crate::objects::AdmittedExecutionRealization::from_current_value(value)
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| format!("{error:#}"))?;
     let mut links = ContractLinks::leaf();
     super::push_typed_hash(
         &realization.substrate_identity_hash,
@@ -604,7 +604,7 @@ fn links_admitted_execution_realization(value: &Value) -> Result<ContractLinks, 
 
 fn links_observed_execution_realization(value: &Value) -> Result<ContractLinks, String> {
     let realization = crate::objects::ObservedExecutionRealization::from_current_value(value)
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| format!("{error:#}"))?;
     let mut links = ContractLinks::leaf();
     super::push_typed_hash(
         &realization.admitted_realization_hash,
@@ -685,17 +685,17 @@ fn links_attestation(value: &Value) -> Result<ContractLinks, String> {
         &mut links.object_edges,
     )?;
     let attestation = crate::objects::Attestation::from_value(value)
-        .map_err(|error| format!("invalid attestation links: {error}"))?;
+        .map_err(|error| format!("invalid attestation links: {error:#}"))?;
     if attestation.claim
         == crate::external_content::products::qualification::PRODUCT_QUALIFICATION_CLAIM
         && attestation.policy
             == crate::external_content::products::qualification::PRODUCT_QUALIFICATION_ATTESTATION_POLICY
     {
         let evidence = crate::external_content::products::qualification::ProductQualificationEvidence::from_attestation(&attestation)
-            .map_err(|error| format!("invalid product qualification evidence links: {error}"))?;
+            .map_err(|error| format!("invalid product qualification evidence links: {error:#}"))?;
         for hash in evidence
             .owning_attestation_hashes()
-            .map_err(|error| format!("invalid product qualification proof links: {error}"))?
+            .map_err(|error| format!("invalid product qualification proof links: {error:#}"))?
         {
             super::push_typed_hash(
                 &hash,
@@ -732,7 +732,7 @@ fn links_attestation(value: &Value) -> Result<ContractLinks, String> {
     {
         let evidence = crate::external_content::qualification_evidence::ContentQualificationEvidence
             ::from_attestation(&attestation)
-            .map_err(|error| format!("invalid content qualification evidence links: {error}"))?;
+            .map_err(|error| format!("invalid content qualification evidence links: {error:#}"))?;
         push_qualification_purpose_edges(
             &serde_json::to_value(&evidence.purpose).map_err(|error| error.to_string())?,
             &mut links,
@@ -809,7 +809,7 @@ fn push_qualification_purpose_edges(
             .ok_or_else(|| "qualification purpose has no explicit subject".to_string())?,
     )
     .map_err(|error| format!("invalid qualification subject: {error}"))?;
-    subject.validate().map_err(|error| error.to_string())?;
+    subject.validate().map_err(|error| format!("{error:#}"))?;
     match subject {
         QualificationSubject::CapturedProduct {
             product_witness_hash,
@@ -871,7 +871,7 @@ fn push_qualification_purpose_edges(
             return Err("retained remote verifier inventory exceeds its bound".into());
         }
         for source in sources.values() {
-            source.validate().map_err(|error| error.to_string())?;
+            source.validate().map_err(|error| format!("{error:#}"))?;
             links.blob_hashes.extend(
                 source
                     .signed_items
@@ -910,7 +910,7 @@ fn push_qualification_purpose_edges(
 
 fn links_placement_runtime_seed(value: &Value) -> Result<ContractLinks, String> {
     let seed = crate::objects::PlacementRuntimeSeed::from_current_value(value.clone())
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| format!("{error:#}"))?;
     let mut links = ContractLinks::leaf();
     super::push_typed_hash(
         &seed.target_launch_capsule_hash,
@@ -924,7 +924,7 @@ fn links_placement_runtime_seed(value: &Value) -> Result<ContractLinks, String> 
 
 fn links_placement_transfer_manifest(value: &Value) -> Result<ContractLinks, String> {
     let manifest = crate::objects::PlacementTransferManifest::from_current_value(value.clone())
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| format!("{error:#}"))?;
     let mut links = ContractLinks::leaf();
     for (hash, expected) in [
         (
@@ -951,7 +951,7 @@ fn links_placement_transfer_manifest(value: &Value) -> Result<ContractLinks, Str
 
 fn links_external_content_activation(value: &Value) -> Result<ContractLinks, String> {
     let receipt = crate::objects::ExternalContentActivationReceipt::from_value(value)
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| format!("{error:#}"))?;
     let mut links = ContractLinks::leaf();
     for component in receipt.components {
         super::push_typed_hash(
@@ -1408,7 +1408,7 @@ fn links_thread_event(value: &Value) -> Result<ContractLinks, String> {
         .map_err(|error| format!("invalid remote continuation authority: {error}"))?;
         remote
             .validate()
-            .map_err(|error| format!("invalid remote continuation authority: {error}"))?;
+            .map_err(|error| format!("invalid remote continuation authority: {error:#}"))?;
         for (hash, expected) in [
             (
                 &remote.preflight_attestation_hash,
@@ -1519,7 +1519,7 @@ fn links_external_content_manifest(value: &Value) -> Result<ContractLinks, Strin
 
 fn links_guest_runtime_materialization_source(value: &Value) -> Result<ContractLinks, String> {
     let source = crate::objects::GuestRuntimeMaterializationSourceEvidence::from_value(value)
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| format!("{error:#}"))?;
     let mut links = ContractLinks::leaf();
     for item in &source.signed_recipe_items {
         links.blob_hashes.push(item.signed_blob_hash.clone());
@@ -1547,7 +1547,7 @@ fn links_guest_runtime_materialization_source(value: &Value) -> Result<ContractL
 
 fn links_guest_runtime_materialization_subject(value: &Value) -> Result<ContractLinks, String> {
     let subject = crate::objects::GuestRuntimeMaterializationSubject::from_value(value)
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| format!("{error:#}"))?;
     let mut links = ContractLinks::leaf();
     super::push_typed_hash(
         &subject.runtime_manifest_hash,
@@ -1571,7 +1571,7 @@ fn validate_retired_chain_manifest(value: &Value) -> anyhow::Result<()> {
 
 fn links_retired_chain_manifest(value: &Value) -> Result<ContractLinks, String> {
     let manifest = crate::objects::RetiredChainManifest::from_value(value)
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| format!("{error:#}"))?;
     let mut links = ContractLinks::leaf();
     super::push_typed_hash(
         &manifest.snapshot_hash,
@@ -1605,7 +1605,7 @@ fn validate_retired_chain_closure_page(value: &Value) -> anyhow::Result<()> {
 
 fn links_retired_chain_closure_page(value: &Value) -> Result<ContractLinks, String> {
     let page = crate::objects::RetiredChainClosurePage::from_value(value)
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| format!("{error:#}"))?;
     let mut links = ContractLinks::leaf();
     if let Some(hash) = page.next_page_hash {
         super::push_typed_hash(
@@ -1634,7 +1634,7 @@ fn links_retired_chain_closure_page(value: &Value) -> Result<ContractLinks, Stri
 
 fn links_retained_lifecycle_artifacts(value: &Value) -> Result<ContractLinks, String> {
     let source = crate::objects::RetainedLifecycleArtifacts::from_value(value)
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| format!("{error:#}"))?;
     let mut links = ContractLinks::leaf();
     links
         .blob_hashes

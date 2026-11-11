@@ -69,7 +69,7 @@ pub async fn handle(
     let fingerprint = lillux::sha256_hex(&key_bytes);
     let configured_operator =
         ryeos_node_runtime::identity::NodeIdentity::load(&state.config.operator_signing_key_path)
-            .map_err(|error| HandlerError::Internal(format!("load configured operator: {error}")))?;
+            .map_err(|error| HandlerError::Internal(format!("load configured operator: {error:#}")))?;
     if fingerprint == configured_operator.fingerprint() {
         return Err(HandlerError::Forbidden(
             "configured-operator authorization and class changes are offline-only".to_string(),
@@ -163,7 +163,7 @@ pub async fn handle(
                     .to_string(),
             )
         } else {
-            HandlerError::Internal(e.to_string())
+            HandlerError::Internal(format!("{e:#}"))
         }
     })?;
 

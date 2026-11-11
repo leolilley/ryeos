@@ -85,7 +85,7 @@ pub(crate) fn authorize_exact_thread_subjects(
         .state_store
         .authoritative_thread_subjects(thread_ids)
         .map_err(|error| {
-            tracing::error!(error = %error, "exact thread authority read failed");
+            tracing::error!(error = %format!("{error:#}"), "exact thread authority read failed");
             HandlerError::Internal("exact thread authority read failed".to_string())
         })?;
     if subjects.iter().any(Option::is_none) {
@@ -206,7 +206,7 @@ pub(crate) fn authorize_execution_tree_subjects(
         .state_store
         .verify_execution_tree_edges(&edges)
         .map_err(|error| {
-            tracing::error!(error = %error, "signed execution tree edge proof failed");
+            tracing::error!(error = %format!("{error:#}"), "signed execution tree edge proof failed");
             HandlerError::NotFound
         })?;
     // The decorated facet map is a rebuildable projection of facet events,

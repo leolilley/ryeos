@@ -1228,10 +1228,10 @@ fn map_runner_error(item_ref: String, error: anyhow::Error) -> DispatchError {
                 }
             }
             error @ ryeos_app::vault::VaultReadError::AuthorityViolation(_) => {
-                DispatchError::Internal(anyhow::anyhow!("vault read refused: {error}"))
+                DispatchError::Internal(anyhow::anyhow!("vault read refused: {error:#}"))
             }
             ryeos_app::vault::VaultReadError::Internal(error) => {
-                DispatchError::Internal(anyhow::anyhow!("vault read failed: {error}"))
+                DispatchError::Internal(anyhow::anyhow!("vault read failed: {error:#}"))
             }
         };
     }

@@ -39,7 +39,7 @@ pub async fn handle(
     let root = state
         .state_store
         .get_thread(&req.chain_root_id)
-        .map_err(|e| HandlerError::Internal(e.to_string()))?;
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
 
     let status = match root {
         Some(detail) => {
@@ -55,7 +55,7 @@ pub async fn handle(
     let totals = state
         .state_store
         .chain_usage_totals(&req.chain_root_id)
-        .map_err(|e| HandlerError::Internal(e.to_string()))?;
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
 
     let result = state
         .events
@@ -65,7 +65,7 @@ pub async fn handle(
             after_chain_seq: req.after_chain_seq,
             limit: req.limit,
         })
-        .map_err(|e| HandlerError::Internal(e.to_string()))?;
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
 
     Ok(serde_json::json!({
         "events": result.events,

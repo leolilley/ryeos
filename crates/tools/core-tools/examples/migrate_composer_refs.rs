@@ -49,7 +49,7 @@ fn main() {
             .join(kind)
             .join(format!("{kind}.kind-schema.yaml"));
         let raw =
-            fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+            fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e:#}", path.display()));
         let body = strip_signature_lines(&raw);
 
         let mut new_body = body.clone();

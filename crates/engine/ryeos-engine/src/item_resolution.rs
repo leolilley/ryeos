@@ -430,7 +430,7 @@ fn resolve_item_full_inner(
                     Err(error) => Err(EngineError::ItemResolutionUnavailable {
                         canonical_ref: ref_.to_string(),
                         path: path.to_path_buf(),
-                        source: std::io::Error::other(error.to_string()),
+                        source: std::io::Error::other(format!("{error:#}")),
                     }),
                 },
             }

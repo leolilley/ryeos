@@ -978,7 +978,7 @@ fn build_engine_for_roots_with_isolation(
         Some(store) => store.clone(),
         None => TrustStore::load(None, &node_config_root).map_err(|err| {
             tracing::error!(error = %err, "failed to load node trust store");
-            anyhow::anyhow!("failed to load node trust store: {err}")
+            anyhow::anyhow!("failed to load node trust store: {err:#}")
         })?,
     };
     tracing::info!(count = node_trust_store.len(), "loaded node trust store");

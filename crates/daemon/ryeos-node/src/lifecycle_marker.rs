@@ -604,7 +604,7 @@ pub fn record_exit(
         ))
     });
     if let Err(e) = result {
-        tracing::warn!(error = %e, "failed to write daemon lifecycle marker");
+        tracing::warn!(error = %format!("{e:#}"), "failed to write daemon lifecycle marker");
     }
 }
 
@@ -752,7 +752,7 @@ pub fn complete_finalizing_exit(
     match result {
         Ok(()) => true,
         Err(e) => {
-            tracing::warn!(error = %e, "provisional daemon lifecycle marker was not completed");
+            tracing::warn!(error = %format!("{e:#}"), "provisional daemon lifecycle marker was not completed");
             false
         }
     }

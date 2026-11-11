@@ -203,7 +203,7 @@ pub(super) fn ensure(
             revalidate_current_admission(generation, state, &session.session_id, membership)?;
             ensure_current(state, session, membership, detail).map_err(Into::into)
         })
-        .map_err(|error| HandlerError::Conflict(error.to_string()))
+        .map_err(|error| HandlerError::Conflict(format!("{error:#}")))
 }
 
 /// Re-resolve every immutable initial closure under one checked generation.
@@ -317,7 +317,7 @@ fn ensure_current(
             }],
             &anchor,
         )
-        .map_err(|error| HandlerError::Internal(error.to_string()))?;
+        .map_err(|error| HandlerError::Internal(format!("{error:#}")))?;
     let written = match written {
         CutAppendResult::Committed(records) => records,
         CutAppendResult::Conflict => {
@@ -384,7 +384,7 @@ pub(crate) fn require(
     let detail = super::require_presentation_seat(state, session, presentation_id, None, None)?;
     super::composition::read_history(state, &detail, &membership.initialization)
         .map_err(|error| HandlerError::Conflict(format!(
-            "presentation initialization is not authenticated; retry its original Prepare: {error}"
+            "presentation initialization is not authenticated; retry its original Prepare: {error:#}"
         )))?;
     Ok(())
 }

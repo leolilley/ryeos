@@ -454,7 +454,7 @@ fn recorded_service_terminal_projection(
         Err(error) => {
             let live_error = match ryeos_app::handler_error::extract_handler_error(error) {
                 Some(ryeos_app::handler_error::HandlerError::Structured { body, .. }) => body,
-                _ => serde_json::json!({ "error": error.to_string() }),
+                _ => serde_json::json!({ "error": format!("{error:#}") }),
             };
             match ryeos_app::thread_lifecycle::retained_thread_error(&live_error, result_policy) {
                 Ok(value) => (None, Some(value), None),
@@ -552,7 +552,7 @@ fn finalize_recorded_service_exact(
                     false,
                 )
             }
-            Err(error) => (format!("terminal write failed: {error}"), false),
+            Err(error) => (format!("terminal write failed: {error:#}"), false),
         };
         match confirm_recorded_service_terminal(state, chain_root_id, params) {
             Ok(()) => {
@@ -802,7 +802,7 @@ pub async fn execute_service_verified(
 
     // 4. Availability check
     let avail = availability_for_endpoint(state.service_descriptors, &endpoint)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+        .map_err(|e| anyhow::anyhow!("{e:#}"))?;
     match (mode, avail) {
         (ExecutionMode::Standalone, ServiceAvailability::DaemonOnly) => {
             bail!("{service_ref} is DaemonOnly; start the daemon and call /execute");
@@ -1131,7 +1131,7 @@ pub async fn execute_service_verified(
                         Err(_) => "failure",
                     },
                     error_message: match &dispatch_result {
-                        Err(error) => Some(error.to_string()),
+                        Err(error) => Some(format!("{error:#}")),
                         Ok(_) => None,
                     },
                     uid: standalone_audit::current_uid(),
@@ -1141,7 +1141,7 @@ pub async fn execute_service_verified(
                 };
                 if let Err(error) = standalone_audit::write_audit_record(&audit_path, &record) {
                     tracing::warn!(
-                        error = %error,
+                        error = %format!("{error:#}"),
                         path = %audit_path.display(),
                         "failed to write standalone audit record"
                     );

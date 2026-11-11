@@ -43,12 +43,12 @@ pub(crate) fn load_owned_command(
     let record = state
         .state_store
         .get_command(command_id)
-        .map_err(|e| HandlerError::Internal(e.to_string()))?
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?
         .ok_or(HandlerError::NotFound)?;
     let thread = state
         .state_store
         .get_thread(&record.thread_id)
-        .map_err(|e| HandlerError::Internal(e.to_string()))?
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?
         .ok_or(HandlerError::NotFound)?;
     ctx.require_owner(thread.requested_by.as_deref())?;
     Ok(record)

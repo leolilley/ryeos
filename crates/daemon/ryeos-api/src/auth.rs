@@ -281,10 +281,10 @@ pub(crate) fn verify_request(
         &state.config.authorized_keys_dir,
         &state.identity,
     )
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| format!("{e:#}"))?;
     if auth_key.principal_class == AuthorizedKeyPrincipalClass::RemoteNode {
         let configured_operator = NodeIdentity::load(&state.config.operator_signing_key_path)
-            .map_err(|error| format!("load configured operator identity: {error}"))?;
+            .map_err(|error| format!("load configured operator identity: {error:#}"))?;
         if configured_operator.fingerprint() == fingerprint {
             return Err(
                 "configured operator key cannot authenticate through a remote_node grant"
@@ -354,7 +354,7 @@ pub(crate) fn verify_request(
                     }
                 };
             ryeos_node_runtime::identity::validate_canonical_site_id(forwarding_site_id)
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| format!("{error:#}"))?;
             if auth_key.configured_origin_site_id.as_deref() != Some(forwarding_site_id) {
                 return Err(
                     "source-node forwarding site does not match the remote_operator grant"
@@ -370,7 +370,7 @@ pub(crate) fn verify_request(
                 &state.config.authorized_keys_dir,
                 &state.identity,
             )
-            .map_err(|error| format!("untrusted forwarding node: {error}"))?;
+            .map_err(|error| format!("untrusted forwarding node: {error:#}"))?;
             if forwarding_key.principal_class != AuthorizedKeyPrincipalClass::RemoteNode {
                 return Err(
                     "forwarding proof must be signed by an admitted remote_node".to_string()

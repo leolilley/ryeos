@@ -632,7 +632,7 @@ pub fn validate_canonical_unsuffixed_ref(label: &str, value: &str) -> anyhow::Re
         bail!("{label} ref is not a bounded unsuffixed canonical ref");
     }
     crate::objects::thread_snapshot::validate_canonical_item_ref(value)
-        .map_err(|error| anyhow::anyhow!("{label} ref is not canonical: {error}"))
+        .map_err(|error| anyhow::anyhow!("{label} ref is not canonical: {error:#}"))
 }
 
 #[cfg(test)]

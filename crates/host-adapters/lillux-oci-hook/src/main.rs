@@ -419,10 +419,10 @@ fn prestart(state: lillux::OciHookState) -> Result<()> {
             }
             record.preparation = Some(progress.clone());
             setup.record = record.clone();
-            write_setup_transaction(&host_state, &setup).map_err(|error| error.to_string())?;
+            write_setup_transaction(&host_state, &setup).map_err(|error| format!("{error:#}"))?;
             write_record(&host_state, &container_name, &record)
-                .map_err(|error| error.to_string())?;
-            write_record(&host_state, &lease_name, &record).map_err(|error| error.to_string())
+                .map_err(|error| format!("{error:#}"))?;
+            write_record(&host_state, &lease_name, &record).map_err(|error| format!("{error:#}"))
         },
     )
     .map_err(anyhow::Error::msg)?;

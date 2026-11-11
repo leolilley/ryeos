@@ -281,7 +281,7 @@ impl CompiledDispatchInvoker {
         ryeos_state::external_content::products::composition::validate_product_selection_inputs(
             &config.product_selections,
         )
-        .map_err(|error| RouteDispatchError::BadRequest(error.to_string()))?;
+        .map_err(|error| RouteDispatchError::BadRequest(format!("{error:#}")))?;
         if !config.product_selections.is_empty()
             && (!matches!(self.authority, DispatchAuthority::CallerPrincipal)
                 || ctx.principal.is_none())
@@ -312,7 +312,7 @@ impl CompiledDispatchInvoker {
         }
 
         ryeos_app::execution_policy::authorize_standard_local_live_execution(&principal_scopes)
-            .map_err(|error| RouteDispatchError::Forbidden(error.to_string()))?;
+            .map_err(|error| RouteDispatchError::Forbidden(format!("{error:#}")))?;
         let site_id = ctx.state.threads.site_id().to_string();
         let origin_site_id = authenticated_origin_site_id.unwrap_or_else(|| site_id.clone());
         let project_ctx = ryeos_executor::execution::project_source::resolve_project_context(
@@ -350,7 +350,7 @@ impl CompiledDispatchInvoker {
                 principal_scopes.clone(),
                 &ctx.state.isolation,
             )
-            .map_err(|error| RouteDispatchError::BadRequest(error.to_string()))?;
+            .map_err(|error| RouteDispatchError::BadRequest(format!("{error:#}")))?;
         if let Some(confinement) = confinement {
             // Callbacks (snapshot create, item authoring, child spawn) take
             // their project root and write ceiling from this sealed record,
@@ -368,7 +368,7 @@ impl CompiledDispatchInvoker {
                 .map_err(|error| {
                     RouteDispatchError::Internal(format!(
                         "dispatch invoker for '{}': fixed-principal project authority grants no \
-                         live write root: {error}",
+                         live write root: {error:#}",
                         self.item_ref
                     ))
                 })?;
@@ -384,7 +384,7 @@ impl CompiledDispatchInvoker {
             project_ctx.request_engine.clone(),
             resolved_authority.project,
         )
-        .map_err(|error| RouteDispatchError::BadRequest(error.to_string()))?;
+        .map_err(|error| RouteDispatchError::BadRequest(format!("{error:#}")))?;
         let provenance = match (confinement, ctx.workspace_lifeline.clone()) {
             (Some(_), Some(lifeline)) => {
                 if !lifeline.owns_effective_path(provenance.effective_path()) {

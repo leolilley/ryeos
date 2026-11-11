@@ -356,7 +356,7 @@ fn parse_remotes_report(
                 ));
             }
             cfg.validate()
-                .map_err(|e| serde_yaml::Error::custom(e.to_string()))?;
+                .map_err(|e| serde_yaml::Error::custom(format!("{e:#}")))?;
             Ok(cfg)
         }) {
             Ok(cfg) => {

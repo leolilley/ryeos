@@ -29,7 +29,7 @@ pub async fn handle(
     let parent = state
         .state_store
         .get_thread(&req.thread_id)
-        .map_err(|e| HandlerError::Internal(e.to_string()))?;
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
 
     match parent {
         Some(detail) => {
@@ -41,7 +41,7 @@ pub async fn handle(
     let children = state
         .threads
         .list_children(&req.thread_id)
-        .map_err(|e| HandlerError::Internal(e.to_string()))?;
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
     Ok(serde_json::json!({ "children": children }))
 }
 

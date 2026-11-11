@@ -185,7 +185,7 @@ fn import_inner(
         .write_barrier
         .acquire_with_timeout(crate::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
         .map_err(|error| {
-            anyhow::anyhow!("cannot acquire external-content write permit: {error}")
+            anyhow::anyhow!("cannot acquire external-content write permit: {error:#}")
         })?;
     let mut stage = authority
         .require_recovery()?

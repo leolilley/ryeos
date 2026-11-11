@@ -915,7 +915,7 @@ fn require_non_increasing(name: &str, previous: Option<u64>, next: Option<u64>) 
 impl ryeos_state::ProjectionRecoveryObserver for StartupCoordinator {
     fn update(&self, progress: ryeos_state::ProjectionRecoveryProgress) {
         if let Err(error) = self.projection_recovery_progress(progress) {
-            tracing::warn!(%error, "failed to publish projection recovery progress");
+            tracing::warn!(error = %format!("{error:#}"), "failed to publish projection recovery progress");
         }
     }
 
@@ -936,7 +936,7 @@ pub async fn progress_ticker(coordinator: StartupCoordinator) {
         }
         let refresh_result = coordinator.refresh();
         if let Err(error) = refresh_result {
-            tracing::warn!(%error, "failed to refresh startup lifecycle progress");
+            tracing::warn!(error = %format!("{error:#}"), "failed to refresh startup lifecycle progress");
             return;
         }
     }

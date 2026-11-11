@@ -88,7 +88,7 @@ impl ProjectSnapshot {
             }
         }
         parse_canonical_timestamp(&wire.created_at)
-            .map_err(|error| anyhow::anyhow!("invalid project_snapshot created_at: {error}"))?;
+            .map_err(|error| anyhow::anyhow!("invalid project_snapshot created_at: {error:#}"))?;
         super::validate_trimmed_control_free("project_snapshot source", &wire.source, false)?;
         if let Some(message) = &message {
             super::validate_trimmed_control_free("project_snapshot message", message, false)?;

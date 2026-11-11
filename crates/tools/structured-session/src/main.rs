@@ -1607,7 +1607,7 @@ fn run(lifecycle: &mut BridgeLifecycle) -> Result<()> {
                             workload.command_progress = None;
                             result
                                 .map(WorkloadCommandOutput::Final)
-                                .map_err(|error| error.to_string())
+                                .map_err(|error| format!("{error:#}"))
                         });
                     let _ = sender.send((request_id, outcome));
                 })
