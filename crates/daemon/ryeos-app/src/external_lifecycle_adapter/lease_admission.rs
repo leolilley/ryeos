@@ -227,18 +227,10 @@ mod tests {
     #[test]
     fn request_is_the_adapters_exact_canonical_shape() {
         let bytes = canonical_request("test-adapter", SPEC, &inputs()).unwrap();
-        // The adapter re-serializes the request in its own field order, with
-        // each requirement entry in Lillux's field order, and must get these
-        // exact bytes back.
+        // The adapter re-serializes the request as RyeOS canonical JSON (keys
+        // sorted at every level) and must get these exact bytes back.
         let expected = format!(
-            "{{\"schema\":3,\"adapter_id\":\"test-adapter\",\
-             \"provider_spec_sha256\":\"{SPEC}\",\"workload\":\"codex.authoring.remote\",\
-             \"requires_before_spend\":[{{\"name\":\"lease.network_policy\",\
-             \"accept\":[\"provider_attested\"]}},\"time\"],\
-             \"requires_from_guest\":[{{\"name\":\"guest.exec_route_closed\",\
-             \"accept\":[\"provider_attested\"]}}],\
-             \"guest_network_allow\":[\"controller.example.com\"],\
-             \"maximum_lifetime_seconds\":14400,\"activation_deadline_seconds\":300}}"
+            "{{\"activation_deadline_seconds\":300,\"adapter_id\":\"test-adapter\",\"guest_network_allow\":[\"controller.example.com\"],\"maximum_lifetime_seconds\":14400,\"provider_spec_sha256\":\"{SPEC}\",\"requires_before_spend\":[{{\"accept\":[\"provider_attested\"],\"name\":\"lease.network_policy\"}},\"time\"],\"requires_from_guest\":[{{\"accept\":[\"provider_attested\"],\"name\":\"guest.exec_route_closed\"}}],\"schema\":3,\"workload\":\"codex.authoring.remote\"}}"
         );
         assert_eq!(String::from_utf8(bytes.clone()).unwrap(), expected);
         assert_eq!(

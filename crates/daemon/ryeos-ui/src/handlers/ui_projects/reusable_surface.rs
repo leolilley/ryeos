@@ -131,7 +131,10 @@ pub(crate) async fn prepare_reusable_surface(
         )?;
         tabs.push(PreparedReusableTab { candidate, project });
     }
-    let record_digest = format!("{:x}", Sha256::digest(serde_json::to_vec(&record)?));
+    let record_digest = format!(
+        "{:x}",
+        Sha256::digest(lillux::canonical_json_bytes_bounded(&record, usize::MAX)?)
+    );
     let receipt = crate::browser_session::SavedSurfaceRequestIdentity {
         provenance: ryeos_client_base::ui::binding::UiSurfaceCompositionProvenance::Library {
             saved_id: record.id.clone(),

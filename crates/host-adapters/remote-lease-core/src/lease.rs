@@ -1799,8 +1799,8 @@ mod tests {
     }
 
     /// Canonical bytes of one first Ready request, as the controller must
-    /// compose them: fields in declared order, the admitted request embedded
-    /// whole, and `resume` null.
+    /// compose them: RyeOS canonical JSON (keys sorted at every level), the
+    /// admitted request embedded whole, and `resume` null.
     const LEASE_READY_REQUEST_FIXTURE: &[u8] =
         include_bytes!("../fixtures/lease-ready-request.json");
 
@@ -1860,19 +1860,14 @@ mod tests {
             lillux::sha256_hex(&canonical_json(&parsed.admission).unwrap())
         );
 
+        // Canonical key order: the envelope opens with the adapter and the
+        // admitted request, and closes with a null `resume` before `schema`.
         let text = std::str::from_utf8(LEASE_READY_REQUEST_FIXTURE).unwrap();
-        assert!(text.ends_with(",\"resume\":null}"), "{text}");
-        let field_at = |field: &str| text.find(&format!("\"{field}\":")).unwrap();
-        let order = [
-            "schema",
-            "adapter_id",
-            "admission",
-            "admission_request_sha256",
-            "expectation",
-            "resume",
-        ]
-        .map(field_at);
-        assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{text}");
+        assert!(
+            text.starts_with("{\"adapter_id\":\"remote-lease-test\",\"admission\":{"),
+            "{text}"
+        );
+        assert!(text.ends_with(",\"resume\":null,\"schema\":3}"), "{text}");
 
         // A maximal admission inside the envelope the fixture shows still
         // fits the Ready bound.
