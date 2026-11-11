@@ -150,7 +150,7 @@ fn core() -> Result<RyeOsCore, String> {
                 "dialogs": [{ "id": "launch", "title": "Launch", "view": "view:fixture/launch" }],
                 "docks": {
                     "left": { "content": "view:ryeos/project/files", "open": true, "size": 260 },
-                    "bottom": { "content": "view:ryeos/input", "open": true, "size": 150 }
+                    "bottom": { "content": "view:ryeos/input", "open": true, "size": 180 }
                 },
                 "capabilities": { "sources": [], "affordances": [] } }
         }}, "views": {

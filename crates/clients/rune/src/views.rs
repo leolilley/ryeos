@@ -106,7 +106,9 @@ pub fn frame(spec: FrameSpec<'_>, local: &crate::Local) -> El {
         .min_w(0.0)
         .min_h(0.0)
         .fill(p.plane.alpha(if spec.transparent { 0.78 } else { 0.94 }))
-        .border(1.0, if spec.focused { p.accent } else { p.line });
+        .border(1.0, if spec.focused { p.accent } else { p.line })
+        // Content taller than its slot stays inside the frame.
+        .clip_rounded(0.0);
     if !spec.chrome_hidden {
         frame = frame.child(frame_header(&spec, local));
     }
@@ -456,7 +458,6 @@ pub fn actions_menu(key: &str, intents: &[RyeOsTileIntentVm]) -> El {
 
 /// The body of one mounted view instance.
 pub fn body(view: &RyeOsViewVm, instance: &RyeOsViewInstanceKey, local: &crate::Local) -> El {
-    let p = Palette::get();
     match view {
         RyeOsViewVm::Placeholder { title, message } => empty_state(title, message),
         RyeOsViewVm::RequiredSubject { title, input, .. } => empty_state(
@@ -532,7 +533,6 @@ pub fn body(view: &RyeOsViewVm, instance: &RyeOsViewInstanceKey, local: &crate::
         ),
         RyeOsViewVm::Field { field } => crate::field::view(field, instance, local),
     }
-    .fill(p.plane)
 }
 
 /// A scrolling list body with the list views' inset.
@@ -976,6 +976,7 @@ fn table_record(instance: &RyeOsViewInstanceKey, item: &RyeOsTableRowVm) -> El {
             &item.id,
             item.expanded,
             "row".to_owned(),
+            TABLE_ACTION_WIDTH,
         ));
     }
     line = line.child(action);
@@ -1050,12 +1051,22 @@ fn tree_prefix(
 }
 
 /// The expand/collapse control at the right edge of a record.
-fn disclosure(instance: &RyeOsViewInstanceKey, item_id: &str, expanded: bool, what: String) -> El {
+/// The rows and timeline disclosure column.
+const DISCLOSURE_WIDTH: f32 = 34.0;
+
+/// An expand/collapse control `width` points wide, ruled off on its left.
+fn disclosure(
+    instance: &RyeOsViewInstanceKey,
+    item_id: &str,
+    expanded: bool,
+    what: String,
+    width: f32,
+) -> El {
     let p = Palette::get();
     let expand_key = instance.clone();
     let item_id = item_id.to_owned();
     col()
-        .w(34.0)
+        .w(width)
         .h_full()
         .min_h(34.0)
         .center()
@@ -1181,6 +1192,7 @@ fn timeline_view(
                 id,
                 expanded,
                 "timeline entry".to_owned(),
+                DISCLOSURE_WIDTH,
             ));
         }
         let mut record = col()
@@ -1313,6 +1325,8 @@ fn empty_state(title: &str, message: &str) -> El {
             text(message.to_owned())
                 .font(theme::ui(13.0))
                 .color(p.muted)
+                .wrap()
+                .min_w(0.0)
                 .max_w(360.0),
         )
 }
