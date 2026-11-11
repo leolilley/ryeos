@@ -66,7 +66,6 @@ fn measure(challenge: &RestoredOwnerChallenge, root: &lillux::PinnedDirectory) -
         challenge_digest: challenge.digest()?,
         manifest_hash: identity.manifest_hash,
         owner_executable_sha256: identity.owner_executable_sha256,
-        controller_public_root: identity.controller_public_root,
     };
     let bytes = ryeos_external_execution_contract::canonical_json(&result)?;
     ensure!(
@@ -100,7 +99,6 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
-    use lillux::crypto::SigningKey;
     use ryeos_external_execution::guest_import_authorization::GuestOwnerRuntimeProfile;
     use ryeos_external_execution::guest_runtime_product::produce_guest_owner_runtime;
     use ryeos_external_execution_contract::runtime_snapshot::{
@@ -114,11 +112,6 @@ mod tests {
         let parent = lillux::PinnedDirectory::open(directory.path())
             .unwrap()
             .unwrap();
-        let key = SigningKey::from_bytes(&[43; 32]).verifying_key();
-        let controller_root = format!(
-            "ed25519:{}",
-            base64::engine::general_purpose::STANDARD.encode(key.to_bytes())
-        );
         let mut products = Vec::new();
         for (name, owner_bytes, timeout) in [
             ("first", b"first-owner-fixture".as_slice(), 600),
@@ -139,7 +132,6 @@ mod tests {
                 &source.inherited_descriptor_authority().unwrap(),
                 owner_bytes.len() as u64,
                 &owner_hash,
-                &key,
                 &GuestOwnerRuntimeProfile {
                     schema: 2,
                     account: lillux::GuestRuntimeAccount::Unix {
@@ -178,7 +170,6 @@ mod tests {
                 },
                 guest_runtime_manifest_hash: product.manifest_hash().into(),
                 owner_executable_sha256: owner_hash.clone(),
-                controller_public_root: controller_root.clone(),
                 upload_sha256: "7".repeat(64),
                 upload_bytes: 1024,
                 attempt_deadline_ms: 42,

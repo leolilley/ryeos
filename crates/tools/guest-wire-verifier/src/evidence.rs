@@ -20,7 +20,7 @@ use std::collections::BTreeMap;
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 
-pub const EVIDENCE_SCHEMA: &str = "ryeos.guest_wire_evidence.v1";
+pub const EVIDENCE_SCHEMA: &str = "ryeos.guest_wire_evidence.v2";
 pub const MAX_EVIDENCE_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -28,7 +28,6 @@ pub const MAX_EVIDENCE_BYTES: usize = 64 * 1024;
 pub struct SubjectEvidence {
     pub owner_executable_sha256: String,
     pub manifest_hash: String,
-    pub controller_public_root: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -141,6 +140,10 @@ impl GuestWireEvidence {
             "guest evidence names a different subject than the origin measured"
         );
         ensure!(
+            self.probe.manifest_hash == self.subject.manifest_hash,
+            "guest probe ran a different runtime than the measured subject"
+        );
+        ensure!(
             self.schema_pins.guest_inputs == expected.guest_inputs_schema
                 && self.schema_pins.launcher_spec == expected.launcher_spec_schema
                 && self.projection.schema == expected.guest_inputs_schema
@@ -192,7 +195,6 @@ pub(crate) mod tests {
             subject: SubjectEvidence {
                 owner_executable_sha256: "2".repeat(64),
                 manifest_hash: "3".repeat(64),
-                controller_public_root: "ed25519:root".into(),
             },
             member_digests: BTreeMap::from([
                 ("launcher".to_owned(), "4".repeat(64)),
@@ -211,7 +213,7 @@ pub(crate) mod tests {
             euid: 0,
             subject: expected.subject,
             probe: ProbeEvidence {
-                manifest_hash: "6".repeat(64),
+                manifest_hash: "3".repeat(64),
                 public_key: "ed25519:probe".into(),
             },
             projection: SchemaDigest {
@@ -266,8 +268,8 @@ pub(crate) mod tests {
                 Box::new(|e| e.subject.manifest_hash = "0".repeat(64)),
             ),
             (
-                "subject root",
-                Box::new(|e| e.subject.controller_public_root = "x".into()),
+                "probe runtime",
+                Box::new(|e| e.probe.manifest_hash = "6".repeat(64)),
             ),
             (
                 "projection pin",

@@ -2044,8 +2044,6 @@ impl ExternalPlacementBackend for ExecutableExternalPlacementBackend {
             source: LifecycleRuntimeProbeSource {
                 manifest_hash: source.manifest_hash.clone(),
                 owner_executable_sha256: source.owner_executable_sha256.clone(),
-                controller_root_blob_sha256: source.controller_root_blob_sha256.clone(),
-                controller_public_root: source.controller_public_root.clone(),
             },
             probe_evidence: proof.probe_evidence.clone(),
         };

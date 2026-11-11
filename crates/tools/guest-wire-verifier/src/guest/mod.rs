@@ -1,19 +1,20 @@
 //! Guest role: runs inside a restored sandbox as the administrator. It
-//! re-measures the subject, produces an equivalent owner product under an
-//! ephemeral key, overlays it in a private mount namespace, serves a loopback
-//! controller, runs the owner exactly as shipped, and reports what happened.
+//! re-measures the subject, binds it read-only in a private mount namespace,
+//! serves a loopback controller whose ephemeral key signs the occurrence
+//! assignment, runs the subject's owner exactly as shipped, and reports what
+//! happened. The product carries no controller key, so the subject itself is
+//! what runs.
 
 pub mod controller;
 pub mod fixture;
 
 use std::collections::BTreeMap;
-use std::ffi::OsStr;
 use std::path::Path;
 
 use anyhow::{Context as _, Result, bail, ensure};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ryeos_external_execution::guest_import_authorization::ObservedGuestRuntime;
-use ryeos_external_execution::guest_runtime_product::{OWNER_NAME, produce_guest_owner_runtime};
+use ryeos_external_execution::guest_runtime_product::OWNER_NAME;
 use ryeos_external_execution_contract::restored_runtime_measurement::{
     CONSUMER_INPUT_RECORD_NAME, ConsumerRuntimeChallenge, MAX_CONSUMER_INPUT_RECORD_BYTES,
     MAX_RESTORED_OWNER_CHALLENGE_BYTES, RemoteVerificationPurpose,
@@ -144,7 +145,6 @@ pub fn run_probe(
         expected_subject: SubjectEvidence {
             owner_executable_sha256: record.prerequisite.owner_executable_sha256.clone(),
             manifest_hash: record.prerequisite.manifest_hash.clone(),
-            controller_public_root: record.prerequisite.controller_public_root.clone(),
         },
         member_digests,
         supervisor,
@@ -165,7 +165,6 @@ pub fn execute(request: &ProbeRequest) -> Result<Vec<u8>> {
     let subject = SubjectEvidence {
         owner_executable_sha256: identity.owner_executable_sha256.clone(),
         manifest_hash: identity.manifest_hash.clone(),
-        controller_public_root: identity.controller_public_root.clone(),
     };
     ensure!(
         subject == request.expected_subject,
@@ -184,35 +183,9 @@ pub fn execute(request: &ProbeRequest) -> Result<Vec<u8>> {
     let root_key = lillux::crypto::generate_signing_key();
     let controller_key = lillux::crypto::generate_signing_key();
 
-    // 3. Same owner bytes and profile, ephemeral controller root.
-    let bin = runtime_root
-        .open_child_directory(OsStr::new("bin"))?
-        .context("subject has no bin directory")?;
-    let owner_file = bin
-        .open_pinned_regular(OsStr::new(OWNER_NAME), false)?
-        .context("subject has no owner executable")?;
-    let owner_bytes = owner_file.observation()?.size();
-    let owner_authority = owner_file.inherited_descriptor_authority()?;
-    let parent = work.create_child(OsStr::new("runtime-parent"), 0o700)?;
+    // 3. The subject runs as shipped; only the assignment's controller key
+    // is ephemeral.
     let profile = subject_runtime.profile().clone();
-    let product = produce_guest_owner_runtime(
-        &parent,
-        OsStr::new("probe-runtime"),
-        &owner_authority,
-        owner_bytes,
-        &subject.owner_executable_sha256,
-        &root_key.verifying_key(),
-        &profile,
-    )?;
-    let probe_identity =
-        ObservedGuestRuntime::observe(product.root())?.measure_exact_owner_product()?;
-    ensure!(
-        probe_identity.owner_executable_sha256 == subject.owner_executable_sha256
-            && probe_identity.controller_public_root
-                == encode_public_root(&root_key.verifying_key())
-            && probe_identity.manifest_hash == product.manifest_hash(),
-        "probe product differs from the subject owner or its ephemeral root"
-    );
 
     // 4. Loopback controller identity and the controller-side fixtures.
     let pki = EphemeralPki::generate()?;
@@ -221,7 +194,7 @@ pub fn execute(request: &ProbeRequest) -> Result<Vec<u8>> {
         work: &work,
         root_key: &root_key,
         controller_key: &controller_key,
-        probe_manifest_hash: product.manifest_hash(),
+        probe_manifest_hash: &subject.manifest_hash,
         supervisor,
         launcher,
         tls_root_der: pki.root_der(),
@@ -244,7 +217,7 @@ pub fn execute(request: &ProbeRequest) -> Result<Vec<u8>> {
     };
     lillux::sandbox::enter_root_overlay_namespace(&[
         lillux::sandbox::RootOverlay::Bind {
-            source: product.root(),
+            source: &runtime_root,
             target: Path::new(RUNTIME_ROOT),
             read_only: true,
         },
@@ -348,13 +321,14 @@ pub fn execute(request: &ProbeRequest) -> Result<Vec<u8>> {
             owner_result.stderr.trim()
         );
     }
+    let probe_manifest_hash = subject.manifest_hash.clone();
     let evidence = GuestWireEvidence {
         schema: EVIDENCE_SCHEMA.into(),
         challenge_digest: request.challenge_digest.clone(),
         euid,
         subject,
         probe: ProbeEvidence {
-            manifest_hash: product.manifest_hash().to_owned(),
+            manifest_hash: probe_manifest_hash,
             public_key: encode_public_root(&root_key.verifying_key()),
         },
         projection: SchemaDigest {

@@ -1,8 +1,7 @@
 //! Controller-owned staging of one retained guest-owner product for provider installation.
 //!
 //! This operation does not contact a provider or qualify a snapshot. It keeps
-//! the product witness, controller root and exact re-observed bytes together
-//! while producing a fresh private tree for a later descriptor-bound transfer.
+//! the product witness and exact re-observed bytes together while producing a fresh private tree for a later descriptor-bound transfer.
 
 use std::ffi::OsStr;
 
@@ -184,7 +183,6 @@ pub fn stage_current_guest_owner_runtime_materialization(
         source.maximum_owner_bytes,
         maximum_bytes,
         &current.identity,
-        state.identity.verifying_key(),
         private_parent,
         child_name,
     )?;
@@ -207,7 +205,6 @@ fn produce_retained_guest_owner_tree(
     maximum_owner_bytes: u64,
     maximum_staged_bytes: u64,
     expected: &GuestOwnerRuntimeManifestIdentity,
-    controller_key: &lillux::crypto::VerifyingKey,
     private_parent: &lillux::PinnedDirectory,
     child_name: &OsStr,
 ) -> Result<GuestOwnerRuntimeProduct> {
@@ -230,7 +227,6 @@ fn produce_retained_guest_owner_tree(
     ensure!(
         (owner.len() as u64)
             .checked_add(profile_bytes.len() as u64)
-            .and_then(|total| total.checked_add(64))
             .is_some_and(|total| total <= maximum_staged_bytes),
         "materialization tree exceeds snapshot staging ceiling"
     );
@@ -242,7 +238,6 @@ fn produce_retained_guest_owner_tree(
         &sealed,
         owner.len() as u64,
         owner_hash,
-        controller_key,
         &profile,
     )?;
     let root = product.root().try_clone()?;
@@ -302,8 +297,7 @@ pub fn stage_current_guest_owner_runtime_product(
         &witness.evidence.manifest_hash,
         limits.max_object_bytes,
     )?;
-    let identity =
-        derive_guest_owner_runtime_manifest_identity(&manifest, state.identity.verifying_key())?;
+    let identity = derive_guest_owner_runtime_manifest_identity(&manifest)?;
     ensure!(
         identity.manifest_hash == witness.evidence.manifest_hash,
         "guest runtime product manifest contradicts its retained witness"
@@ -372,7 +366,6 @@ impl ryeos_app::guest_runtime_upload::GuestRuntimeUploadSource
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lillux::crypto::SigningKey;
     use ryeos_external_execution::guest_import_authorization::GuestOwnerRuntimeProfile;
     use std::os::unix::fs::PermissionsExt as _;
 
@@ -403,7 +396,6 @@ mod tests {
             .inherited_descriptor_authority()
             .unwrap();
         let output = lillux::PinnedDirectory::open(&output).unwrap().unwrap();
-        let root_key = SigningKey::from_bytes(&[43; 32]).verifying_key();
         let profile = GuestOwnerRuntimeProfile {
             schema: 2,
             account: lillux::GuestRuntimeAccount::Unix {
@@ -420,16 +412,13 @@ mod tests {
             &owner,
             owner_bytes.len() as u64,
             &lillux::sha256_hex(owner_bytes),
-            &root_key,
             &profile,
         )
         .unwrap();
         let manifest = ryeos_state::observe_external_content_tree_exact(product.root()).unwrap();
-        let identity = derive_guest_owner_runtime_manifest_identity(
-            &serde_json::to_value(manifest).unwrap(),
-            &root_key,
-        )
-        .unwrap();
+        let identity =
+            derive_guest_owner_runtime_manifest_identity(&serde_json::to_value(manifest).unwrap())
+                .unwrap();
         let cas = lillux::CasStore::new(fixture.path().join("cas"));
         let owner_hash = cas.store_blob(owner_bytes).unwrap();
         let profile_bytes = ryeos_external_execution_contract::canonical_json(&profile).unwrap();
@@ -441,7 +430,6 @@ mod tests {
             32 * 1024 * 1024,
             1024 * 1024,
             &identity,
-            &root_key,
             &output,
             OsStr::new("retained"),
         )
@@ -456,7 +444,6 @@ mod tests {
                 32 * 1024 * 1024,
                 1024 * 1024,
                 &identity,
-                &root_key,
                 &output,
                 OsStr::new("unavailable"),
             )
@@ -491,7 +478,6 @@ mod tests {
             [
                 "bin/",
                 "bin/ryeos-external-guest-occurrence-owner",
-                "controller-root.hex",
                 "guest-owner-profile.json",
             ]
         );

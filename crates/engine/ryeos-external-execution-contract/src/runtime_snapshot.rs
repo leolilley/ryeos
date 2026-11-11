@@ -5,13 +5,12 @@
 //! independent qualification rooted in the retained source testimony.
 
 use anyhow::{Result, ensure};
-use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 use crate::canonical_json;
 
-pub const RUNTIME_SNAPSHOT_INTENT_SCHEMA: u32 = 4;
+pub const RUNTIME_SNAPSHOT_INTENT_SCHEMA: u32 = 5;
 pub const RUNTIME_SNAPSHOT_RESULT_SCHEMA: u32 = 2;
 pub const RUNTIME_SNAPSHOT_ADAPTER_PROTOCOL: &str = "ryeos.runtime-snapshot-adapter.v5";
 pub const RUNTIME_SNAPSHOT_READINESS_PROTOCOL: &str = "ryeos.runtime-snapshot-readiness.v1";
@@ -166,7 +165,6 @@ pub struct RuntimeSnapshotIntent {
     pub source: RuntimeSnapshotSource,
     pub guest_runtime_manifest_hash: String,
     pub owner_executable_sha256: String,
-    pub controller_public_root: String,
     pub upload_sha256: String,
     pub upload_bytes: u64,
     pub attempt_deadline_ms: i64,
@@ -221,18 +219,6 @@ impl RuntimeSnapshotIntent {
         require_bounded_text(&self.provider_id, 128, "provider")?;
         require_bounded_text(&self.source_occurrence_id, 256, "source occurrence")?;
         require_bounded_text(&self.provider_group_id, 256, "provider group")?;
-        let encoded = self
-            .controller_public_root
-            .strip_prefix("ed25519:")
-            .ok_or_else(|| {
-                anyhow::anyhow!("runtime snapshot controller root has no Ed25519 envelope")
-            })?;
-        let decoded = base64::engine::general_purpose::STANDARD.decode(encoded)?;
-        ensure!(
-            decoded.len() == 32
-                && base64::engine::general_purpose::STANDARD.encode(&decoded) == encoded,
-            "runtime snapshot controller root is not canonical 32-byte base64"
-        );
         ensure!(
             (1..=MAX_RUNTIME_SNAPSHOT_UPLOAD_BYTES).contains(&self.upload_bytes)
                 && self.attempt_deadline_ms > 0,
@@ -250,7 +236,7 @@ impl RuntimeSnapshotIntent {
     /// attempt opportunity by choosing another operation ID.
     pub fn derived_operation_id(&self) -> Result<String> {
         let coordinates = (
-            "ryeos.runtime-snapshot-operation.v4",
+            "ryeos.runtime-snapshot-operation.v5",
             &self.owner_principal,
             &self.provider_id,
             &self.source_occurrence_id,
@@ -267,7 +253,6 @@ impl RuntimeSnapshotIntent {
             &self.source,
             &self.guest_runtime_manifest_hash,
             &self.owner_executable_sha256,
-            &self.controller_public_root,
             &self.upload_sha256,
             self.upload_bytes,
         );
@@ -1068,10 +1053,6 @@ mod tests {
             },
             guest_runtime_manifest_hash: "7".repeat(64),
             owner_executable_sha256: "8".repeat(64),
-            controller_public_root: format!(
-                "ed25519:{}",
-                base64::engine::general_purpose::STANDARD.encode([3u8; 32])
-            ),
             upload_sha256: "9".repeat(64),
             upload_bytes: 1024,
             attempt_deadline_ms: 1_000,
@@ -1110,7 +1091,6 @@ mod tests {
         assert_ne!(changed_timeout.operation_id, materialized.operation_id);
         for field in [
             "guest_runtime_manifest_hash",
-            "controller_public_root",
             "upload_sha256",
             "adapter_artifact_hash",
             "provider_spec_digest",
@@ -1120,12 +1100,7 @@ mod tests {
             "provider_group_id",
         ] {
             let mut changed = serde_json::to_value(&baseline).unwrap();
-            changed[field] = serde_json::json!(if field == "controller_public_root" {
-                format!(
-                    "ed25519:{}",
-                    base64::engine::general_purpose::STANDARD.encode([4u8; 32])
-                )
-            } else if field == "source_occurrence_id" {
+            changed[field] = serde_json::json!(if field == "source_occurrence_id" {
                 "sbox-fixture-2".to_owned()
             } else if field == "provider_group_id" {
                 "sbg-fixture-2".to_owned()

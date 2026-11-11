@@ -9,7 +9,6 @@ use std::path::Path;
 use std::process::{Command, Output};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use lillux::crypto::SigningKey;
 use ryeos_external_execution::guest_import_authorization::GuestOwnerRuntimeProfile;
 use ryeos_external_execution::guest_runtime_product::produce_guest_owner_runtime;
 use ryeos_external_execution_contract::restored_runtime_measurement::{
@@ -72,11 +71,6 @@ fn same_checker_cli_measures_two_products_and_refuses_substitution() {
     let parent = lillux::PinnedDirectory::open(directory.path())
         .unwrap()
         .unwrap();
-    let key = SigningKey::from_bytes(&[43; 32]).verifying_key();
-    let controller_root = format!(
-        "ed25519:{}",
-        base64::engine::general_purpose::STANDARD.encode(key.to_bytes())
-    );
     let mut observed = Vec::new();
     let mut expectations = Vec::new();
     for (index, (name, owner_bytes, timeout)) in [
@@ -101,7 +95,6 @@ fn same_checker_cli_measures_two_products_and_refuses_substitution() {
             &source.inherited_descriptor_authority().unwrap(),
             owner_bytes.len() as u64,
             &owner_hash,
-            &key,
             &GuestOwnerRuntimeProfile {
                 schema: 2,
                 account: lillux::GuestRuntimeAccount::Unix {
@@ -135,7 +128,6 @@ fn same_checker_cli_measures_two_products_and_refuses_substitution() {
             },
             guest_runtime_manifest_hash: product.manifest_hash().into(),
             owner_executable_sha256: owner_hash,
-            controller_public_root: controller_root.clone(),
             upload_sha256: "7".repeat(64),
             upload_bytes: 1024,
             attempt_deadline_ms: 42,

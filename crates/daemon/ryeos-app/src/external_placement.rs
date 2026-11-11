@@ -2579,7 +2579,6 @@ fn verify_retained_runtime_proof(
     )?;
     let source = ryeos_external_execution::guest_runtime_product::derive_guest_owner_runtime_manifest_identity(
         &manifest,
-        state.identity.verifying_key(),
     )?;
     ensure!(
         source.manifest_hash == *manifest_hash
@@ -12638,8 +12637,6 @@ mod tests {
             ryeos_external_execution::guest_runtime_product::GuestOwnerRuntimeManifestIdentity {
                 manifest_hash: contract.guest_runtime_manifest_hash.clone(),
                 owner_executable_sha256: "7".repeat(64),
-                controller_root_blob_sha256: "8".repeat(64),
-                controller_public_root: format!("ed25519:{}", "A".repeat(44)),
             };
         assert!(
             ExternalPlacementBackendRegistry::default()

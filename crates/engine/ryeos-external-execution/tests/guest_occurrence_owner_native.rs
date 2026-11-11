@@ -437,14 +437,6 @@ fn run(
     let guest_runtime_path = fixture_path.join("guest-runtime");
     std::fs::create_dir(&guest_runtime_path)?;
     std::fs::write(
-        guest_runtime_path.join("controller-root.hex"),
-        hex::encode(
-            lillux::crypto::SigningKey::from_bytes(&[43; 32])
-                .verifying_key()
-                .to_bytes(),
-        ),
-    )?;
-    std::fs::write(
         guest_runtime_path.join("guest-owner-profile.json"),
         ryeos_external_execution_contract::canonical_json(
             &ryeos_external_execution::guest_import_authorization::GuestOwnerRuntimeProfile {

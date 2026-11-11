@@ -1,8 +1,10 @@
 //! Exact controller-to-guest admission before one-shot package import.
 //!
-//! The trusted root must come from the qualified installed guest runtime.
-//! A separate root-signed assignment delegates the per-occurrence owner key;
-//! neither that key nor the assignment may be inferred from the upload.
+//! The controller-signed assignment arrives through the launch the controller
+//! sets and names the controller key it verifies under. It delegates the
+//! per-occurrence owner key; neither that key nor the assignment may be
+//! inferred from the upload. The installed runtime contributes its measured
+//! manifest identity, not a trust root.
 
 use anyhow::{Context as _, Result, ensure};
 use lillux::crypto::{Signature, Signer as _, SigningKey, Verifier as _, VerifyingKey};
@@ -18,7 +20,6 @@ use crate::guest_runtime_product::{
     GuestOwnerRuntimeManifestIdentity, derive_guest_owner_runtime_manifest_identity,
 };
 
-const CONTROLLER_ROOT_FILE: &str = "controller-root.hex";
 const OWNER_PROFILE_FILE: &str = "guest-owner-profile.json";
 const MAX_OWNER_PROFILE_BYTES: u64 = 4 * 1024;
 
@@ -130,7 +131,6 @@ pub struct ObservedGuestRuntime {
     root: lillux::PinnedDirectory,
     root_identity: lillux::PinnedDirectoryIdentity,
     manifest_hash: String,
-    controller_root: VerifyingKey,
     profile: GuestOwnerRuntimeProfile,
 }
 
@@ -139,27 +139,6 @@ impl ObservedGuestRuntime {
         let root_identity = root.identity()?;
         let manifest = ryeos_state::observe_external_content_tree_exact(root)?;
         let manifest_hash = ryeos_state::external_content_manifest_digest(&manifest)?;
-        let root_file = root
-            .open_pinned_regular(OsStr::new(CONTROLLER_ROOT_FILE), false)?
-            .context("installed guest runtime has no controller root")?;
-        ensure!(
-            matches!(root_file.permission_mode()?, 0o444 | 0o644),
-            "installed controller root has unexpected file mode"
-        );
-        let observation = root_file.observation()?;
-        ensure!(
-            observation.size() == 64,
-            "installed controller root has wrong length"
-        );
-        let bytes = root_file.read_stable_bounded(&observation, 64)?;
-        let root_bytes: [u8; 32] = hex::decode(&bytes)?
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("installed controller root changed length"))?;
-        let controller_root = VerifyingKey::from_bytes(&root_bytes)?;
-        ensure!(
-            !controller_root.is_weak(),
-            "installed controller root is weak"
-        );
         let profile_file = root
             .open_pinned_regular(OsStr::new(OWNER_PROFILE_FILE), false)?
             .context("installed guest runtime has no owner profile")?;
@@ -188,7 +167,6 @@ impl ObservedGuestRuntime {
             root: root.try_clone()?,
             root_identity,
             manifest_hash,
-            controller_root,
             profile,
         })
     }
@@ -197,7 +175,7 @@ impl ObservedGuestRuntime {
         &self.manifest_hash
     }
 
-    /// Strict four-entry owner-product measurement for a restored snapshot.
+    /// Strict three-entry owner-product measurement for a restored snapshot.
     /// This is intentionally separate from generic installed-runtime
     /// observation and grants no provider or snapshot identity by itself.
     pub fn measure_exact_owner_product(&self) -> Result<GuestOwnerRuntimeManifestIdentity> {
@@ -210,10 +188,8 @@ impl ObservedGuestRuntime {
             ryeos_state::external_content_manifest_digest(&manifest)? == self.manifest_hash,
             "installed runtime changed before owner-product measurement"
         );
-        let identity = derive_guest_owner_runtime_manifest_identity(
-            &serde_json::to_value(&manifest)?,
-            &self.controller_root,
-        )?;
+        let identity =
+            derive_guest_owner_runtime_manifest_identity(&serde_json::to_value(&manifest)?)?;
         ensure!(
             identity.manifest_hash == self.manifest_hash,
             "owner-product measurement changed manifest identity"
@@ -236,9 +212,7 @@ impl ObservedGuestRuntime {
         );
         let current = Self::observe(&self.root)?;
         ensure!(
-            current.manifest_hash == self.manifest_hash
-                && current.controller_root == self.controller_root
-                && current.profile == self.profile,
+            current.manifest_hash == self.manifest_hash && current.profile == self.profile,
             "installed guest runtime drifted before operation"
         );
         self.root.ensure_path_binding()?;
@@ -253,7 +227,7 @@ impl ObservedGuestRuntime {
     }
 
     /// A mutable occurrence journal or source may not become an ambient
-    /// entry beneath the exact runtime tree used as the controller-root anchor.
+    /// entry beneath the exact measured runtime tree.
     pub fn require_disjoint_directory_tree(&self, other: &lillux::PinnedDirectory) -> Result<()> {
         self.root.require_disjoint_directory_tree(other)?;
         Ok(())
@@ -573,11 +547,9 @@ mod tests {
     }
 
     #[test]
-    fn installed_runtime_observation_rechecks_root_and_all_content_before_import() {
+    fn installed_runtime_observation_rechecks_all_content_before_import() {
         let directory = tempfile::tempdir().unwrap();
         let root_key = SigningKey::from_bytes(&[43; 32]);
-        let root_file = directory.path().join(CONTROLLER_ROOT_FILE);
-        std::fs::write(&root_file, hex::encode(root_key.verifying_key().to_bytes())).unwrap();
         let profile_file = directory.path().join(OWNER_PROFILE_FILE);
         std::fs::write(
             &profile_file,
@@ -663,19 +635,12 @@ mod tests {
                 .contains("drifted")
         );
         std::fs::remove_file(directory.path().join("ambient-entry")).unwrap();
-        std::fs::write(
-            &root_file,
-            hex::encode(SigningKey::from_bytes(&[44; 32]).verifying_key().to_bytes()),
-        )
-        .unwrap();
-        assert!(
-            observed
-                .verify_import_documents(&import_bytes, &assignment_bytes)
-                .is_err()
-        );
-        std::fs::set_permissions(&root_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        observed
+            .verify_import_documents(&import_bytes, &assignment_bytes)
+            .unwrap();
+        std::fs::set_permissions(&profile_file, std::fs::Permissions::from_mode(0o600)).unwrap();
         assert!(ObservedGuestRuntime::observe(&runtime).is_err());
-        std::fs::set_permissions(&root_file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::set_permissions(&profile_file, std::fs::Permissions::from_mode(0o644)).unwrap();
         std::fs::write(&profile_file, br#"{"schema":1,"owner_timeout_seconds":6000,"private_source_max_bytes":33554432,"private_source_max_inodes":1024}"#).unwrap();
         assert!(ObservedGuestRuntime::observe(&runtime).is_err());
     }

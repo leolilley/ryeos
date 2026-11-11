@@ -1205,7 +1205,6 @@ mod tests {
             b"owner",
             0o755,
         );
-        append_file(&mut builder, "controller-root.hex", &[b'a'; 64], 0o644);
         append_file(&mut builder, "guest-owner-profile.json", b"{}", 0o644);
         builder.into_inner().unwrap()
     }
@@ -1247,10 +1246,6 @@ mod tests {
             },
             guest_runtime_manifest_hash: "7".repeat(64),
             owner_executable_sha256: "8".repeat(64),
-            controller_public_root: format!(
-                "ed25519:{}",
-                base64::engine::general_purpose::STANDARD.encode([9u8; 32])
-            ),
             upload_sha256: lillux::sha256_hex(archive),
             upload_bytes: archive.len() as u64,
             attempt_deadline_ms: lillux::time::timestamp_millis() + 600_000,
@@ -1554,7 +1549,6 @@ mod tests {
             challenge_digest: challenge.digest().unwrap(),
             manifest_hash: staged.source.guest_runtime_manifest_hash.clone(),
             owner_executable_sha256: staged.source.owner_executable_sha256.clone(),
-            controller_public_root: staged.source.controller_public_root.clone(),
         };
         let stdout = format!(
             "{}\n",
@@ -1598,7 +1592,6 @@ mod tests {
             challenge_digest: challenge.digest().unwrap(),
             manifest_hash: "0".repeat(64),
             owner_executable_sha256: staged.source.owner_executable_sha256.clone(),
-            controller_public_root: staged.source.controller_public_root.clone(),
         };
         let stdout = format!(
             "{}\n",

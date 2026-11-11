@@ -1,4 +1,3 @@
-use base64::Engine as _;
 use ryeos_external_execution::lifecycle_adapter::{
     LifecycleAdapterInvocation, run_lifecycle_adapter,
 };
@@ -28,13 +27,6 @@ fn invocation(
     let adapter = adapter();
     let observation = adapter.regular_file_observation()?;
     let artifact_hash = adapter.digest_regular_file_stable_exact(&observation)?;
-    let root = lillux::crypto::SigningKey::from_bytes(&[3; 32])
-        .verifying_key()
-        .to_bytes();
-    let public_root = format!(
-        "ed25519:{}",
-        base64::engine::general_purpose::STANDARD.encode(root)
-    );
     let settings = canonical_json(&serde_json::json!({
         "schema": 2,
         "owner_id": "owner",
@@ -70,18 +62,15 @@ fn invocation(
         source: LifecycleRuntimeProbeSource {
             manifest_hash: "2".repeat(64),
             owner_executable_sha256: "5".repeat(64),
-            controller_root_blob_sha256: lillux::sha256_hex(hex::encode(root).as_bytes()),
-            controller_public_root: public_root.clone(),
         },
         probe_evidence: serde_json::json!({
-            "schema": 6,
+            "schema": 7,
             "runtime_source": if probe_materialized {
                 serde_json::to_value(&materialized_source)?
             } else {
                 serde_json::to_value(&captured_source)?
             },
             "guest_runtime_manifest_hash": "2".repeat(64),
-            "controller_public_root": public_root,
             "owner_id": "owner",
             "account": "account",
             "snapshot_id": "snp-exact",
@@ -104,10 +93,6 @@ fn invocation(
             "binding_hash": "4".repeat(64),
             "restored_tree_manifest_hash": "2".repeat(64),
             "installed_owner_hash": "5".repeat(64),
-            "installed_controller_public_root": format!(
-                "ed25519:{}",
-                base64::engine::general_purpose::STANDARD.encode(root)
-            ),
             "signed_import_mode": 0o600,
             "guest_package_mode": 0o600,
             "qualification_termination_operation_id": "f".repeat(64),

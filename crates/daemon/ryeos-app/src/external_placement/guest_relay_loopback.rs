@@ -637,8 +637,8 @@ fn executable_authority(
 
 /// Install the loopback backend, its node-config binding and a reserved
 /// session for a capsule whose program runs `setup.requirement` over
-/// `setup.product`. The guest owner runtime is produced under this node's
-/// identity as controller root and its manifest held in the node's CAS.
+/// `setup.product`. The guest owner runtime names no controller; its manifest
+/// is held in the node's CAS.
 pub fn compose_guest_relay_loopback_session(
     state: &mut AppState,
     setup: &GuestRelayLoopbackSetup<'_>,
@@ -707,7 +707,8 @@ pub fn compose_guest_relay_loopback_session(
     )
     .context("assemble the loopback guest inputs")?;
 
-    // The owner runtime trusts this node as controller root.
+    // The owner runtime names no controller; this node's key reaches the
+    // guest only inside the occurrence assignment it signs.
     let owner = copy_executable(work, "owner", setup.owner_executable)?;
     let (owner_authority, owner_sha256, owner_bytes) = executable_authority(&owner)?;
     let runtime = ryeos_external_execution::guest_runtime_product::produce_guest_owner_runtime(
@@ -716,7 +717,6 @@ pub fn compose_guest_relay_loopback_session(
         &owner_authority,
         owner_bytes,
         &owner_sha256,
-        state.identity.verifying_key(),
         &setup.profile,
     )?;
     let runtime_manifest = ryeos_state::observe_external_content_tree_exact(runtime.root())?;

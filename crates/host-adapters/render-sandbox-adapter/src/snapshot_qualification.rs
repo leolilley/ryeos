@@ -9,7 +9,6 @@
 //! own witnessed operations and cannot be asserted as probe hashes.
 
 use anyhow::{Context as _, Result, ensure};
-use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use std::io::Cursor;
 
@@ -852,28 +851,12 @@ pub(crate) fn interpret_authenticated_request(
                     .unwrap_or_default(),
         "runtime probe request differs from exact Render adapter or source"
     );
-    let root_b64 = request
-        .source
-        .controller_public_root
-        .strip_prefix("ed25519:")
-        .ok_or_else(|| anyhow::anyhow!("runtime probe source has no controller public root"))?;
-    let root_bytes = base64::engine::general_purpose::STANDARD.decode(root_b64)?;
-    let root_bytes: [u8; 32] = root_bytes
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("runtime probe controller root has wrong length"))?;
-    ensure!(
-        base64::engine::general_purpose::STANDARD.encode(root_bytes) == root_b64
-            && lillux::sha256_hex(hex::encode(root_bytes).as_bytes())
-                == request.source.controller_root_blob_sha256,
-        "runtime probe controller root differs from authenticated product"
-    );
     let probe = RenderSnapshotProbe::from_probe_evidence(&request.probe_evidence)?;
     probe.validate_for(
         settings,
         &SnapshotExpectation {
             runtime_source: &request.runtime_source,
             guest_runtime_manifest_hash: &request.source.manifest_hash,
-            controller_public_root: &request.source.controller_public_root,
             account: &request.account,
             binding_hash: &request.binding_hash,
             installed_owner_hash: &request.source.owner_executable_sha256,
@@ -893,7 +876,6 @@ pub(crate) struct RenderSnapshotProbe {
     pub schema: u32,
     pub runtime_source: RuntimeSnapshotSource,
     pub guest_runtime_manifest_hash: String,
-    pub controller_public_root: String,
     pub owner_id: String,
     pub account: String,
     pub snapshot_id: String,
@@ -914,7 +896,6 @@ pub(crate) struct RenderSnapshotProbe {
     pub binding_hash: String,
     pub restored_tree_manifest_hash: String,
     pub installed_owner_hash: String,
-    pub installed_controller_public_root: String,
     pub signed_import_mode: u32,
     pub guest_package_mode: u32,
 }
@@ -922,7 +903,6 @@ pub(crate) struct RenderSnapshotProbe {
 pub(crate) struct SnapshotExpectation<'a> {
     pub runtime_source: &'a RuntimeSnapshotSource,
     pub guest_runtime_manifest_hash: &'a str,
-    pub controller_public_root: &'a str,
     pub account: &'a str,
     pub binding_hash: &'a str,
     pub installed_owner_hash: &'a str,
@@ -944,7 +924,7 @@ impl RenderSnapshotProbe {
         settings: &Settings,
         expected: &SnapshotExpectation<'_>,
     ) -> Result<()> {
-        ensure!(self.schema == 6, "unsupported Render snapshot probe schema");
+        ensure!(self.schema == 7, "unsupported Render snapshot probe schema");
         for hash in [
             &self.guest_runtime_manifest_hash,
             &self.binding_hash,
@@ -961,26 +941,9 @@ impl RenderSnapshotProbe {
             );
         }
         self.runtime_source.validate()?;
-        let root = self
-            .controller_public_root
-            .strip_prefix("ed25519:")
-            .ok_or_else(|| {
-                anyhow::anyhow!("Render snapshot probe has no controller public root")
-            })?;
-        let decoded = base64::engine::general_purpose::STANDARD.decode(root)?;
-        let root_bytes: [u8; 32] = decoded
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("Render snapshot controller root has the wrong length"))?;
-        let root_key = lillux::crypto::VerifyingKey::from_bytes(&root_bytes)?;
-        ensure!(
-            !root_key.is_weak()
-                && base64::engine::general_purpose::STANDARD.encode(root_key.to_bytes()) == root,
-            "Render snapshot controller root is weak or noncanonical"
-        );
         ensure!(
             self.runtime_source == *expected.runtime_source
                 && self.guest_runtime_manifest_hash == expected.guest_runtime_manifest_hash
-                && self.controller_public_root == expected.controller_public_root
                 && self.owner_id == settings.owner_id
                 && self.account == expected.account
                 && self.snapshot_id == settings.snapshot_id
@@ -997,7 +960,6 @@ impl RenderSnapshotProbe {
                 && self.region == settings.region
                 && self.binding_hash == expected.binding_hash
                 && self.installed_owner_hash == expected.installed_owner_hash
-                && self.installed_controller_public_root == expected.controller_public_root
                 && self.restored_tree_manifest_hash == expected.guest_runtime_manifest_hash
                 // Render's observed upload is owner-writable 0600. The
                 // one-shot owner accepts that exact mode beneath its private
@@ -1040,7 +1002,6 @@ mod tests {
             },
             guest_runtime_manifest_hash: "7".repeat(64),
             owner_executable_sha256: "8".repeat(64),
-            controller_public_root: public_root(),
             upload_sha256: "9".repeat(64),
             upload_bytes: 1024,
             attempt_deadline_ms: 42,
@@ -1084,7 +1045,6 @@ mod tests {
             challenge_digest: challenge.digest().unwrap(),
             manifest_hash: intent.guest_runtime_manifest_hash.clone(),
             owner_executable_sha256: intent.owner_executable_sha256.clone(),
-            controller_public_root: intent.controller_public_root.clone(),
         };
         let output = format!(
             "{}\n",
@@ -1578,22 +1538,13 @@ mod tests {
         assert!(preflight_verifier_upload_and_routes(&changed, &upload, &spec, &settings).is_err());
     }
 
-    fn public_root() -> String {
-        let signing = lillux::crypto::SigningKey::from_bytes(&[3; 32]);
-        format!(
-            "ed25519:{}",
-            base64::engine::general_purpose::STANDARD.encode(signing.verifying_key().to_bytes())
-        )
-    }
-
     fn probe() -> RenderSnapshotProbe {
         RenderSnapshotProbe {
-            schema: 6,
+            schema: 7,
             runtime_source: RuntimeSnapshotSource::CapturedProduct {
                 product_witness_hash: "1".repeat(64),
             },
             guest_runtime_manifest_hash: "2".repeat(64),
-            controller_public_root: public_root(),
             owner_id: "owner".into(),
             account: "account".into(),
             snapshot_id: "snp-exact".into(),
@@ -1618,7 +1569,6 @@ mod tests {
             binding_hash: "4".repeat(64),
             restored_tree_manifest_hash: "2".repeat(64),
             installed_owner_hash: "5".repeat(64),
-            installed_controller_public_root: public_root(),
             signed_import_mode: 0o600,
             guest_package_mode: 0o600,
         }
@@ -1640,7 +1590,6 @@ mod tests {
         let expected = SnapshotExpectation {
             runtime_source: &expected_source,
             guest_runtime_manifest_hash: &"2".repeat(64),
-            controller_public_root: &public_root(),
             account: "account",
             binding_hash: &"4".repeat(64),
             installed_owner_hash: &"5".repeat(64),
@@ -1666,7 +1615,7 @@ mod tests {
         observed.snapshot_kind = "runtime".into();
         assert!(observed.validate_for(&settings, &expected).is_err());
         observed = probe();
-        observed.installed_controller_public_root = "ed25519:other".into();
+        observed.installed_owner_hash = "6".repeat(64);
         assert!(observed.validate_for(&settings, &expected).is_err());
         observed = probe();
         observed.signed_import_mode = 0o400;
@@ -1729,10 +1678,6 @@ mod tests {
 
     #[test]
     fn offline_probe_interpretation_joins_protected_source_and_settings() {
-        let public_root = public_root();
-        let root_bytes = base64::engine::general_purpose::STANDARD
-            .decode(public_root.strip_prefix("ed25519:").unwrap())
-            .unwrap();
         let settings = Settings {
             schema: 2,
             owner_id: "owner".into(),
@@ -1756,8 +1701,6 @@ mod tests {
             source: ryeos_external_execution_contract::LifecycleRuntimeProbeSource {
                 manifest_hash: "2".repeat(64),
                 owner_executable_sha256: "5".repeat(64),
-                controller_root_blob_sha256: lillux::sha256_hex(hex::encode(root_bytes).as_bytes()),
-                controller_public_root: public_root,
             },
             probe_evidence: serde_json::to_value(probe()).unwrap(),
         };
@@ -1767,7 +1710,7 @@ mod tests {
         changed.source.owner_executable_sha256 = "d".repeat(64);
         assert!(interpret_authenticated_request(&changed, &settings).is_err());
         changed = request.clone();
-        changed.source.controller_root_blob_sha256 = "e".repeat(64);
+        changed.source.manifest_hash = "e".repeat(64);
         assert!(interpret_authenticated_request(&changed, &settings).is_err());
         let mut changed_settings = settings;
         changed_settings.snapshot_id = "snp-other".into();

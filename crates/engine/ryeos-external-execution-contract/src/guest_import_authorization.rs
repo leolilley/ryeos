@@ -59,8 +59,8 @@ pub struct GuestOccurrenceAssignmentDocument {
     pub activation_request_digest: String,
     pub supervisor_runtime_hash: String,
     pub guest_runtime_manifest_hash: String,
-    /// Per-occurrence channel owner delegated by an independently trusted
-    /// controller root. Never take this key from the uploaded package.
+    /// Per-occurrence channel owner delegated by the signing controller.
+    /// Never take this key from the uploaded package.
     pub owner_public_key_hex: String,
     /// Ed25519 public key of the controller that signs this assignment.
     pub controller_public_key_hex: String,

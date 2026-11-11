@@ -1073,7 +1073,6 @@ pub struct RestoredOwnerMeasurement {
     pub challenge_digest: String,
     pub manifest_hash: String,
     pub owner_executable_sha256: String,
-    pub controller_public_root: String,
 }
 
 impl RestoredOwnerMeasurement {
@@ -1090,8 +1089,7 @@ impl RestoredOwnerMeasurement {
                 && self.challenge_digest == challenge.digest()?
                 && challenge.operation_id == intent.operation_id
                 && self.manifest_hash == intent.guest_runtime_manifest_hash
-                && self.owner_executable_sha256 == intent.owner_executable_sha256
-                && self.controller_public_root == intent.controller_public_root,
+                && self.owner_executable_sha256 == intent.owner_executable_sha256,
             "restored owner measurement differs from exact retained product"
         );
         require_hash(&self.challenge_digest, "challenge")?;
@@ -1224,7 +1222,6 @@ mod tests {
     }
 
     use super::*;
-    use base64::Engine as _;
 
     #[test]
     fn verifier_attempt_identity_cannot_be_reminted_by_nonce_or_deadline() {
@@ -1452,10 +1449,6 @@ mod tests {
             },
             guest_runtime_manifest_hash: "7".repeat(64),
             owner_executable_sha256: "8".repeat(64),
-            controller_public_root: format!(
-                "ed25519:{}",
-                base64::engine::general_purpose::STANDARD.encode([3u8; 32])
-            ),
             upload_sha256: "9".repeat(64),
             upload_bytes: 1024,
             attempt_deadline_ms: 42,
@@ -1475,7 +1468,6 @@ mod tests {
             challenge_digest: challenge.digest().unwrap(),
             manifest_hash: intent.guest_runtime_manifest_hash.clone(),
             owner_executable_sha256: intent.owner_executable_sha256.clone(),
-            controller_public_root: intent.controller_public_root.clone(),
         };
         measured.validate_for(&challenge, &intent).unwrap();
         let locator = RuntimeSnapshotLocator {

@@ -636,7 +636,6 @@ mod tests {
             source: source.source.clone(),
             guest_runtime_manifest_hash: source.guest_runtime_manifest_hash.clone(),
             owner_executable_sha256: "b".repeat(64),
-            controller_public_root: format!("ed25519:{}", base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [3u8; 32])),
             upload_sha256: "d".repeat(64),
             upload_bytes: 1024,
             attempt_deadline_ms: lillux::time::timestamp_millis() + 60_000,

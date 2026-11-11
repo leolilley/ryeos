@@ -3,17 +3,19 @@
 //! The installed guest occurrence owner executable is started exactly as a
 //! sandbox host starts it: as the administrator of a `/ryeos` tree whose
 //! roots are administrator-private and whose uploads are `0600`, with the
-//! controller's real package producer, signed import and root-signed
+//! controller's real package producer, signed import and controller-signed
 //! assignment. Locally there is no administrator, so the run happens inside a
 //! Lillux root enclosure where the caller is root over a constructed root
 //! and the profile's account is mapped. The run ends when the supervisor
 //! publishes its relay attach request, or when the owner refuses.
 //!
-//! The documents can never be accepted by a real activation: every run
-//! generates a fresh controller root and owner key that exist only in this
-//! process's memory, the assignment names the manifest of a runtime tree
-//! that carries that fresh root (a manifest no installed runtime has), and
-//! the occurrence and placement identities are rehearsal-only.
+//! The runtime tree is the shipped product itself, which names no controller.
+//! Every run generates a fresh controller key and owner key that exist only in
+//! this process's memory; the assignment names that fresh controller key, and
+//! the occurrence and placement identities are rehearsal-only. The documents
+//! reach an owner only through a launch the rehearsal itself sets, the same
+//! authority any controller holds over the sandboxes it launches, and no
+//! controller ever records their occurrence.
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
@@ -876,7 +878,8 @@ fn prepare(
     let root_key = lillux::crypto::generate_signing_key();
     let controller_key = lillux::crypto::generate_signing_key();
 
-    // Same owner bytes and profile under the fresh rehearsal root.
+    // Same owner bytes and profile as the shipped product; a fresh rehearsal
+    // controller key signs the assignment.
     let owner_source = open_source(request.owner_executable, "owner executable")?;
     let owner = copy_file(work, OWNER_NAME, &owner_source, 0o755)?;
     let owner_bytes = owner.observation()?.size();
@@ -887,7 +890,6 @@ fn prepare(
         &owner.inherited_descriptor_authority()?,
         owner_bytes,
         &owner_sha256,
-        &root_key.verifying_key(),
         &request.profile,
     )?;
     let runtime_manifest_hash = runtime.manifest_hash().to_owned();
@@ -1614,16 +1616,14 @@ fn lay_out(
         0o755,
     )?;
     bin.set_mode(0o755)?;
-    for name in ["controller-root.hex", "guest-owner-profile.json"] {
-        copy_file(
-            &installed,
-            name,
-            &runtime
-                .open_pinned_regular(OsStr::new(name), false)?
-                .with_context(|| format!("rehearsal runtime has no {name}"))?,
-            0o644,
-        )?;
-    }
+    copy_file(
+        &installed,
+        "guest-owner-profile.json",
+        &runtime
+            .open_pinned_regular(OsStr::new("guest-owner-profile.json"), false)?
+            .context("rehearsal runtime has no guest-owner-profile.json")?,
+        0o644,
+    )?;
     // A host delivers the namespace and runtime roots administrator-private.
     installed.set_mode(0o750)?;
     ensure!(

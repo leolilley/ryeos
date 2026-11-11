@@ -279,7 +279,6 @@ pub(crate) fn test_upload(manifest_scratch: &std::path::Path) -> GuestOwnerSnaps
         .inherited_descriptor_authority()
         .unwrap();
     let output = lillux::PinnedDirectory::open(&output).unwrap().unwrap();
-    let root_key = lillux::crypto::SigningKey::from_bytes(&[43; 32]).verifying_key();
     let profile = GuestOwnerRuntimeProfile {
         schema: 2,
         account: lillux::GuestRuntimeAccount::Unix {
@@ -296,7 +295,6 @@ pub(crate) fn test_upload(manifest_scratch: &std::path::Path) -> GuestOwnerSnaps
         &owner,
         owner_bytes.len() as u64,
         &lillux::sha256_hex(owner_bytes),
-        &root_key,
         &profile,
     )
     .unwrap();

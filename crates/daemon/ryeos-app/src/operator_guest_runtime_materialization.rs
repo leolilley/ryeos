@@ -69,7 +69,6 @@ pub struct GuestOwnerMaterializationSource {
     pub profile_digest: String,
     pub operator_authority: AdmittedOperatorAuthority,
     pub node_site_id: String,
-    pub controller_public_root: String,
     pub runtime_manifest_hash: String,
 }
 
@@ -80,8 +79,8 @@ impl GuestOwnerMaterializationSource {
     /// request is a contradiction to resolve, never an overwrite.
     pub fn coordinate_digest(&self) -> Result<String> {
         ensure!(
-            self.schema == 1
-                && self.materializer_protocol == "ryeos.guest-owner-materialization.v1",
+            self.schema == 2
+                && self.materializer_protocol == "ryeos.guest-owner-materialization.v2",
             "unsupported guest owner materialization source"
         );
         self.operator_authority.validate()?;
@@ -94,20 +93,6 @@ impl GuestOwnerMaterializationSource {
                 "local materialization owner has a foreign origin"
             );
         }
-        let encoded_root = self
-            .controller_public_root
-            .strip_prefix("ed25519:")
-            .context("materialization controller root is not Ed25519")?;
-        let decoded_root = base64::engine::general_purpose::STANDARD.decode(encoded_root)?;
-        let root_bytes: [u8; 32] = decoded_root
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("materialization controller root changed length"))?;
-        let verifying_key = lillux::crypto::VerifyingKey::from_bytes(&root_bytes)?;
-        ensure!(
-            !verifying_key.is_weak()
-                && base64::engine::general_purpose::STANDARD.encode(root_bytes) == encoded_root,
-            "materialization controller root is not canonical or strong"
-        );
         for (label, value) in [
             ("binding digest", &self.materialization_binding_digest),
             ("recipe content", &self.recipe_content_digest),
@@ -171,7 +156,7 @@ impl GuestOwnerMaterializationSource {
             "materialization recipe is not a canonical Config ref"
         );
         ryeos_state::objects::canonical_value_digest(&serde_json::json!({
-            "domain": "ryeos.guest-owner-materialization-coordinate.v1",
+            "domain": "ryeos.guest-owner-materialization-coordinate.v2",
             "materializer_protocol": self.materializer_protocol,
             "materialization_binding_id": self.materialization_binding_id,
             "materialization_binding_digest": self.materialization_binding_digest,
@@ -193,7 +178,6 @@ impl GuestOwnerMaterializationSource {
             "profile_digest": self.profile_digest,
             "operator_authority": self.operator_authority,
             "node_site_id": self.node_site_id,
-            "controller_public_root": self.controller_public_root,
         }))
     }
 }
@@ -658,15 +642,12 @@ pub fn prepare_current_guest_owner_runtime(
             payload.authority(),
             payload.bytes,
             &payload.identity.content_hash,
-            state.identity.verifying_key(),
             &recipe.profile,
         )?;
         let observed = ObservedGuestRuntime::observe(product.root())?;
         let manifest = ryeos_state::observe_external_content_tree_exact(product.root())?;
-        let identity = derive_guest_owner_runtime_manifest_identity(
-            &serde_json::to_value(&manifest)?,
-            state.identity.verifying_key(),
-        )?;
+        let identity =
+            derive_guest_owner_runtime_manifest_identity(&serde_json::to_value(&manifest)?)?;
         ensure!(
             identity.manifest_hash == product.manifest_hash()
                 && identity.manifest_hash == observed.manifest_hash()
@@ -674,8 +655,8 @@ pub fn prepare_current_guest_owner_runtime(
             "materialized guest owner differs from its admitted source"
         );
         let source = GuestOwnerMaterializationSource {
-            schema: 1,
-            materializer_protocol: "ryeos.guest-owner-materialization.v1".into(),
+            schema: 2,
+            materializer_protocol: "ryeos.guest-owner-materialization.v2".into(),
             materialization_binding_id: binding.id().to_owned(),
             materialization_binding_digest: binding.digest().to_owned(),
             recipe_ref: root.resolved_ref.clone(),
@@ -703,7 +684,6 @@ pub fn prepare_current_guest_owner_runtime(
             profile_digest,
             operator_authority,
             node_site_id: state.identity.site_id(),
-            controller_public_root: identity.controller_public_root.clone(),
             runtime_manifest_hash: identity.manifest_hash.clone(),
         };
         source.coordinate_digest()?;
@@ -793,8 +773,8 @@ mod tests {
 
     fn fixture_source() -> GuestOwnerMaterializationSource {
         GuestOwnerMaterializationSource {
-            schema: 1,
-            materializer_protocol: "ryeos.guest-owner-materialization.v1".into(),
+            schema: 2,
+            materializer_protocol: "ryeos.guest-owner-materialization.v2".into(),
             materialization_binding_id: "owner".into(),
             materialization_binding_digest: hash('a'),
             recipe_ref: "config:codex/guest-owner-materialization".into(),
@@ -822,14 +802,6 @@ mod tests {
                 scopes: vec!["ryeos.execute.service.guest-runtime/materialize".into()],
             },
             node_site_id: "site:controller".into(),
-            controller_public_root: format!(
-                "ed25519:{}",
-                base64::engine::general_purpose::STANDARD.encode(
-                    SigningKey::from_bytes(&[7u8; 32])
-                        .verifying_key()
-                        .to_bytes()
-                )
-            ),
             runtime_manifest_hash: hash('6'),
         }
     }
@@ -1033,12 +1005,6 @@ mod tests {
         assert_eq!(verified.evidence, evidence);
         let profile = br#"{"kind":"guest-owner-profile"}"#;
         source.profile_digest = lillux::sha256_hex(profile);
-        let controller_root = hex::encode(
-            SigningKey::from_bytes(&[7u8; 32])
-                .verifying_key()
-                .to_bytes(),
-        );
-        let root_hash = lillux::sha256_hex(controller_root.as_bytes());
         let output = ryeos_state::objects::external_content_manifest::ExternalContentManifestObject {
             schema: ryeos_state::objects::external_content_manifest::EXTERNAL_CONTENT_TREE_SCHEMA.to_owned(),
             kind: ryeos_state::objects::external_content_manifest::EXTERNAL_CONTENT_MANIFEST_KIND.to_owned(),
@@ -1052,16 +1018,12 @@ mod tests {
                     mode: Some(0o755), blob_hash: Some(source.owner_executable_sha256.clone()), size: Some(payload.len() as u64), target: None,
                 },
                 ryeos_state::objects::external_content_manifest::ExternalContentManifestEntry {
-                    path: "controller-root.hex".to_owned(), kind: ryeos_state::objects::external_content_manifest::ExternalContentManifestEntryKind::File,
-                    mode: Some(0o644), blob_hash: Some(root_hash.clone()), size: Some(64), target: None,
-                },
-                ryeos_state::objects::external_content_manifest::ExternalContentManifestEntry {
                     path: "guest-owner-profile.json".to_owned(), kind: ryeos_state::objects::external_content_manifest::ExternalContentManifestEntryKind::File,
                     mode: Some(0o644), blob_hash: Some(source.profile_digest.clone()), size: Some(profile.len() as u64), target: None,
                 },
             ],
-            entry_count: 4,
-            total_bytes: payload.len() as u64 + 64 + profile.len() as u64,
+            entry_count: 3,
+            total_bytes: payload.len() as u64 + profile.len() as u64,
         };
         output.validate().unwrap();
         source.runtime_manifest_hash = cas
@@ -1069,10 +1031,6 @@ mod tests {
             .unwrap();
         assert!(retained::verify_output_closure(&cas, &source, &verified).is_err());
         assert_eq!(cas.store_blob(profile).unwrap(), source.profile_digest);
-        assert_eq!(
-            cas.store_blob(controller_root.as_bytes()).unwrap(),
-            root_hash
-        );
         let output_identity = retained::verify_output_closure(&cas, &source, &verified).unwrap();
         assert_eq!(output_identity.manifest_hash, source.runtime_manifest_hash);
         let subject = ryeos_state::objects::GuestRuntimeMaterializationSubject {

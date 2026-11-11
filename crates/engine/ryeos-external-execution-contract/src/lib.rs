@@ -1166,15 +1166,13 @@ pub struct LifecycleRuntimeProbeRequest {
     pub probe_evidence: Value,
 }
 
-/// These values come from the authenticated runtime manifest and controller
-/// public key, never from the provider's probe JSON.
+/// These values come from the authenticated runtime manifest, never from the
+/// provider's probe JSON.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LifecycleRuntimeProbeSource {
     pub manifest_hash: String,
     pub owner_executable_sha256: String,
-    pub controller_root_blob_sha256: String,
-    pub controller_public_root: String,
 }
 
 /// A signed adapter's positive offline interpretation of exactly one sealed
@@ -1456,18 +1454,9 @@ impl LifecycleRuntimeProbeSource {
                 "runtime probe owner executable",
                 &self.owner_executable_sha256,
             ),
-            (
-                "runtime probe controller-root file",
-                &self.controller_root_blob_sha256,
-            ),
         ] {
             digest(value, label)?;
         }
-        ensure!(
-            self.controller_public_root.starts_with("ed25519:")
-                && self.controller_public_root.len() <= 128,
-            "runtime probe controller public root is invalid"
-        );
         Ok(())
     }
 }
@@ -2164,8 +2153,6 @@ mod tests {
             source: LifecycleRuntimeProbeSource {
                 manifest_hash: "f".repeat(64),
                 owner_executable_sha256: "1".repeat(64),
-                controller_root_blob_sha256: "2".repeat(64),
-                controller_public_root: "ed25519:controller-root".into(),
             },
             probe_evidence: serde_json::json!({"schema": 1}),
         };

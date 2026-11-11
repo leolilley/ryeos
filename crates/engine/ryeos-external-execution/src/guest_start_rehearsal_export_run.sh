@@ -30,7 +30,7 @@ tar -C /ryeos/guest-runtime -xpf guest-runtime.tar
 # The tar carries these owners and modes; restate them for any tar.
 chown -R root:root /ryeos/guest-runtime
 chmod 0755 /ryeos/guest-runtime/bin /ryeos/guest-runtime/bin/ryeos-external-guest-occurrence-owner
-chmod 0644 /ryeos/guest-runtime/controller-root.hex /ryeos/guest-runtime/guest-owner-profile.json
+chmod 0644 /ryeos/guest-runtime/guest-owner-profile.json
 chown root:root /ryeos /ryeos/activation
 chmod 0750 /ryeos /ryeos/guest-runtime /ryeos/activation
 for name in signed-import.json guest-package; do

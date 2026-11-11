@@ -963,7 +963,6 @@ fn prepare_runtime_qualification_inputs(
         .unwrap();
     runtime_qualification_placement::write_owner_runtime_tree(
         guest_tree.path(),
-        state.identity.verifying_key(),
         b"synthetic guest owner executable",
     );
     let guest_manifest =

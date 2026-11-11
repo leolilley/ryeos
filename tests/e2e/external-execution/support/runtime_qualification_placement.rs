@@ -11,7 +11,7 @@ use super::runtime_qualification::{
     qualify_activated_runtime, qualify_published_guest_runtime,
 };
 
-/// The ordinary-content form a guest owner runtime product takes: the four
+/// The ordinary-content form a guest owner runtime product takes: the three
 /// owner members, observed as one ordinary tree manifest.
 pub const OWNER_GUEST_PRODUCT: GuestProductStorage = GuestProductStorage {
     storage: "content",
@@ -19,15 +19,11 @@ pub const OWNER_GUEST_PRODUCT: GuestProductStorage = GuestProductStorage {
     maximum_total_bytes: 2_097_152,
 };
 
-/// Lay out the four-member guest owner runtime a placement binding names as its
-/// `guest_runtime_manifest_hash`: the owner executable, the controller's public
-/// root and the owner profile. `owner_bytes` stands in for the executable; the
+/// Lay out the three-member guest owner runtime a placement binding names as
+/// its `guest_runtime_manifest_hash`: the `bin` directory, the owner executable
+/// and the owner profile. `owner_bytes` stands in for the executable; the
 /// synthetic adapter never runs it.
-pub fn write_owner_runtime_tree(
-    root: &Path,
-    controller_root: &lillux::crypto::VerifyingKey,
-    owner_bytes: &[u8],
-) {
+pub fn write_owner_runtime_tree(root: &Path, owner_bytes: &[u8]) {
     use std::os::unix::fs::PermissionsExt as _;
 
     std::fs::create_dir_all(root.join("bin")).unwrap();
@@ -40,16 +36,6 @@ pub fn write_owner_runtime_tree(
         "bin/ryeos-external-guest-occurrence-owner",
         owner_bytes,
         0o755,
-    );
-    write(
-        "controller-root.hex",
-        controller_root
-            .to_bytes()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>()
-            .as_bytes(),
-        0o644,
     );
     let profile = ryeos_external_execution::guest_import_authorization::GuestOwnerRuntimeProfile {
         schema: 2,

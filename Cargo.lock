@@ -3354,10 +3354,8 @@ name = "ryeos-external-guest-runtime-producer"
 version = "0.5.102"
 dependencies = [
  "anyhow",
- "base64 0.22.1",
  "lillux",
  "ryeos-external-execution",
- "serde",
  "serde_json",
  "tempfile",
 ]

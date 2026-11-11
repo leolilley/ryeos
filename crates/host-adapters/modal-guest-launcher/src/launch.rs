@@ -36,7 +36,6 @@ const OWNER_NAME: &str = "ryeos-external-guest-occurrence-owner";
 const MAX_RUNTIME_ARCHIVE_BYTES: u64 = 64 * 1024 * 1024 + 64 * 1024;
 const MAX_OWNER_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_PROFILE_BYTES: u64 = 4 * 1024;
-const CONTROLLER_ROOT_BYTES: u64 = 64;
 const MAX_PACKAGE_BYTES: u64 = 4 * 1024 * 1024 * 1024 + 64 * 1024;
 
 const TEMP_PURPOSE: lillux::TempPurpose = lillux::TempPurpose::new("launch");
@@ -80,37 +79,26 @@ struct Member {
     directory: bool,
     mode: u32,
     max_bytes: u64,
-    exact_bytes: Option<u64>,
 }
 
-const RUNTIME_MEMBERS: [Member; 4] = [
+const RUNTIME_MEMBERS: [Member; 3] = [
     Member {
         path: b"bin/",
         directory: true,
         mode: 0o755,
         max_bytes: 0,
-        exact_bytes: None,
     },
     Member {
         path: b"bin/ryeos-external-guest-occurrence-owner",
         directory: false,
         mode: 0o755,
         max_bytes: MAX_OWNER_BYTES,
-        exact_bytes: None,
-    },
-    Member {
-        path: b"controller-root.hex",
-        directory: false,
-        mode: 0o644,
-        max_bytes: CONTROLLER_ROOT_BYTES,
-        exact_bytes: Some(CONTROLLER_ROOT_BYTES),
     },
     Member {
         path: b"guest-owner-profile.json",
         directory: false,
         mode: 0o644,
         max_bytes: MAX_PROFILE_BYTES,
-        exact_bytes: None,
     },
 ];
 
@@ -198,8 +186,7 @@ fn install_runtime(archive: &[u8], root: &lillux::PinnedDirectory) -> Result<()>
                 && header.mode()? == member.mode
                 && header.uid()? == 0
                 && header.gid()? == 0
-                && size <= member.max_bytes
-                && member.exact_bytes.is_none_or(|exact| exact == size),
+                && size <= member.max_bytes,
             "runtime archive member {name} differs from the exact runtime tree"
         );
         if member.directory {
@@ -319,7 +306,6 @@ mod tests {
     use std::cell::RefCell;
     use std::io::Read as _;
 
-    use lillux::crypto::SigningKey;
     use ryeos_external_execution::guest_runtime_product::{
         produce_guest_owner_runtime, seal_guest_owner_snapshot_upload,
     };
@@ -361,14 +347,12 @@ mod tests {
             private_source_max_inodes: 1024,
             owner_timeout_seconds: 600,
         };
-        let controller = SigningKey::from_bytes(&[29; 32]).verifying_key();
         let product = produce_guest_owner_runtime(
             &project,
             OsStr::new("runtime"),
             &authority,
             13,
             &lillux::sha256_hex(b"owner-fixture"),
-            &controller,
             &profile,
         )
         .unwrap();

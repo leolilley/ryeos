@@ -801,7 +801,6 @@ fn retained_snapshot_creation(
             && creation.intent_digest == intent.digest()?
             && creation.source == intent.source
             && creation.guest_runtime_manifest_hash == intent.guest_runtime_manifest_hash
-            && creation.controller_public_root == intent.controller_public_root
             && creation.owner_executable_sha256 == intent.owner_executable_sha256
             && creation.source_sandbox_id == intent.source_sandbox_id
             && creation.sandbox_group_id == intent.sandbox_group_id
@@ -854,7 +853,6 @@ fn creation_intent_for(
         operation_id: intent.operation_id.clone(),
         source: intent.source.clone(),
         guest_runtime_manifest_hash: intent.guest_runtime_manifest_hash.clone(),
-        controller_public_root: intent.controller_public_root.clone(),
         owner_executable_sha256: intent.owner_executable_sha256.clone(),
         owner_id: settings.owner_id.clone(),
         sandbox_group_id: settings.sandbox_group_id.clone(),
@@ -974,7 +972,6 @@ pub(crate) struct SnapshotCreationIntent {
     pub operation_id: String,
     pub source: ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotSource,
     pub guest_runtime_manifest_hash: String,
-    pub controller_public_root: String,
     pub owner_executable_sha256: String,
     pub owner_id: String,
     pub sandbox_group_id: String,
@@ -1022,23 +1019,6 @@ impl SnapshotCreationIntent {
                     .bytes()
                     .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'),
             "snapshot creation source is invalid"
-        );
-        let root = self
-            .controller_public_root
-            .strip_prefix("ed25519:")
-            .ok_or_else(|| anyhow::anyhow!("snapshot source has no controller public root"))?;
-        let decoded = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, root)?;
-        let bytes: [u8; 32] = decoded
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("snapshot controller root has wrong length"))?;
-        let key = lillux::crypto::VerifyingKey::from_bytes(&bytes)?;
-        ensure!(
-            !key.is_weak()
-                && base64::Engine::encode(
-                    &base64::engine::general_purpose::STANDARD,
-                    key.to_bytes()
-                ) == root,
-            "snapshot controller root is weak or noncanonical"
         );
         Ok(())
     }
@@ -1122,7 +1102,6 @@ pub(crate) struct BoundSnapshotCreation {
     pub intent_digest: String,
     pub source: ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotSource,
     pub guest_runtime_manifest_hash: String,
-    pub controller_public_root: String,
     pub owner_executable_sha256: String,
     pub source_sandbox_id: String,
     pub sandbox_group_id: String,
@@ -1205,7 +1184,6 @@ pub(crate) fn bind_snapshot_create_response(
         intent_digest: intent.digest()?,
         source: intent.source.clone(),
         guest_runtime_manifest_hash: intent.guest_runtime_manifest_hash.clone(),
-        controller_public_root: intent.controller_public_root.clone(),
         owner_executable_sha256: intent.owner_executable_sha256.clone(),
         source_sandbox_id: intent.source_sandbox_id.clone(),
         sandbox_group_id: intent.sandbox_group_id.clone(),
@@ -1230,7 +1208,6 @@ pub(crate) fn observe_snapshot_available(
             && creation.intent_digest == intent.digest()?
             && creation.source == intent.source
             && creation.guest_runtime_manifest_hash == intent.guest_runtime_manifest_hash
-            && creation.controller_public_root == intent.controller_public_root
             && creation.owner_executable_sha256 == intent.owner_executable_sha256
             && creation.source_sandbox_id == intent.source_sandbox_id
             && creation.sandbox_group_id == intent.sandbox_group_id
@@ -1301,7 +1278,6 @@ mod tests {
     }
 
     fn intent() -> SnapshotCreationIntent {
-        let key = lillux::crypto::SigningKey::from_bytes(&[43; 32]).verifying_key();
         SnapshotCreationIntent {
             schema: 2,
             operation_id: "snapshot-op-1".into(),
@@ -1309,10 +1285,6 @@ mod tests {
                 product_witness_hash: "1".repeat(64),
             },
             guest_runtime_manifest_hash: "2".repeat(64),
-            controller_public_root: format!(
-                "ed25519:{}",
-                base64::engine::general_purpose::STANDARD.encode(key.to_bytes())
-            ),
             owner_executable_sha256: "3".repeat(64),
             owner_id: "owner".into(),
             sandbox_group_id: "sbg-exact".into(),
@@ -1353,7 +1325,6 @@ mod tests {
                 source: source.source.clone(),
                 guest_runtime_manifest_hash: source.guest_runtime_manifest_hash.clone(),
                 owner_executable_sha256: source.owner_executable_sha256.clone(),
-                controller_public_root: source.controller_public_root.clone(),
                 upload_sha256: "6".repeat(64),
                 upload_bytes: 1024,
                 attempt_deadline_ms: 1_800_000_000_000,
@@ -1379,10 +1350,6 @@ mod tests {
         settings.validate_for(&request).unwrap();
         let prepared = creation_intent(&request, &settings);
         prepared.validate().unwrap();
-        assert_eq!(
-            prepared.controller_public_root,
-            source.controller_public_root
-        );
         let profile = SnapshotProductionSpec::parse(include_bytes!(
             "../fixtures/snapshot-production-spec.json"
         ))
@@ -1496,7 +1463,6 @@ mod tests {
             },
             guest_runtime_manifest_hash: "6".repeat(64),
             owner_executable_sha256: "7".repeat(64),
-            controller_public_root: format!("ed25519:{}", base64::engine::general_purpose::STANDARD.encode([3u8; 32])),
             upload_sha256: "8".repeat(64),
             upload_bytes: 1024,
             attempt_deadline_ms: 1_800_000_000_000,
