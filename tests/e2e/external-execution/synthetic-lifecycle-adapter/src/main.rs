@@ -303,9 +303,24 @@ struct FailureRecord {
     message: String,
 }
 
+/// The provider state root this invocation opened, so a failure can be left
+/// where the tests retain it: the daemon deliberately never surfaces adapter
+/// diagnostics, and this adapter holds no real credentials.
+static OPENED_STATE_ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
 fn main() {
     if let Err(error) = run() {
-        eprintln!("ryeos-synthetic-external-lifecycle-adapter: {error:#}");
+        let message = format!("{error:#}");
+        eprintln!("ryeos-synthetic-external-lifecycle-adapter: {message}");
+        if let Some(root) = OPENED_STATE_ROOT.get() {
+            let operation = std::env::args().nth(1).unwrap_or_default();
+            let name = format!(
+                "adapter-failure-{}-{}.txt",
+                operation.replace(|ch: char| !ch.is_ascii_alphanumeric() && ch != '-', "_"),
+                std::process::id()
+            );
+            let _ = std::fs::write(root.join(name), message.as_bytes());
+        }
         std::process::exit(126);
     }
 }
@@ -1542,6 +1557,7 @@ fn require_allocation(
 }
 
 fn open_state_root(settings: &SyntheticSettings) -> Result<lillux::PinnedDirectory> {
+    let _ = OPENED_STATE_ROOT.set(settings.state_root.clone());
     let root = lillux::PinnedDirectory::open(&settings.state_root)?
         .context("synthetic lifecycle state root is absent")?;
     root.require_owner_private_directory()?;
