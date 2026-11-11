@@ -33,6 +33,7 @@ const SURFACE: &str = "22222222-2222-4222-8222-222222222222";
 const FILES: &str = include_str!("../../../../bundles/ryeos-ui/.ai/views/ryeos/project/files.yaml");
 const THREADS: &str =
     include_str!("../../../../bundles/ryeos-ui/.ai/views/ryeos/threads/history.yaml");
+const LAUNCHER: &str = include_str!("../../../../bundles/ryeos-ui/.ai/views/ryeos/ui/launcher.yaml");
 const TIMELINE: &str =
     include_str!("../../../../bundles/ryeos-ui/.ai/views/ryeos/chain/timeline.yaml");
 
@@ -146,15 +147,15 @@ fn core() -> Result<RyeOsCore, String> {
         "subject": { "kind": "unregistered_project" }, "posture": "observation_only",
         "binding_request_bounds": { "max_request_bytes": 4096, "max_input_bytes": 1024, "max_seat_append_bytes": 65536 },
         "presentation": { "definition": { "kind": "shared_presentation", "config": {
-            "category": "ui", "shared_presentation": { "schema": 1, "title": "Fixture", "launcher": "launch",
-                "dialogs": [{ "id": "launch", "title": "Launch", "view": "view:fixture/launch" }],
+            "category": "ui", "shared_presentation": { "schema": 1, "title": "Fixture", "launcher": "launcher",
+                "dialogs": [{ "id": "launcher", "title": "Launch", "view": "view:ryeos/ui/launcher" }],
                 "docks": {
                     "left": { "content": "view:ryeos/project/files", "open": true, "size": 260 },
                     "bottom": { "content": "view:ryeos/input", "open": true, "size": 180 }
                 },
                 "capabilities": { "sources": [], "affordances": [] } }
         }}, "views": {
-            "view:fixture/launch": { "widget": "text" },
+            "view:ryeos/ui/launcher": view(LAUNCHER)?,
             "view:ryeos/project/files": view(FILES)?,
             "view:ryeos/input": { "widget": "text",
                 "input": { "id": "line", "placeholder": "Ask or run a command", "submit": "route" } }
@@ -252,6 +253,16 @@ fn core() -> Result<RyeOsCore, String> {
         event: RyeOsUiEvent::FocusInput,
     });
     answered += answer(&mut core, effects);
+    // RYEOS_FIXTURE_SCENE picks what is open when the frame is drawn.
+    let scene = std::env::var("RYEOS_FIXTURE_SCENE").unwrap_or_default();
+    match scene.as_str() {
+        "" => {}
+        "launcher" => {
+            let effects = core.dispatch(RyeOsEvent::Ui { event: RyeOsUiEvent::OpenLauncher });
+            answered += answer(&mut core, effects);
+        }
+        other => return Err(format!("unknown fixture scene {other}")),
+    }
     eprintln!("fixture: answered {answered} source fetches");
     Ok(core)
 }
