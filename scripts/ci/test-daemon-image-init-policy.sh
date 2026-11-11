@@ -736,7 +736,8 @@ for target in core core-scheduling core-workflow core-knowledge standard central
     }
 done
 composition_workflow="$root/.github/workflows/qualify-composition-images.yml"
-smoke_step="$(sed -n '/^      - name: First-boot init smoke$/,$p' "$composition_workflow")"
+# The init smoke step only: it ends where the next workflow step begins.
+smoke_step="$(sed -n '/^      - name: First-boot init smoke$/,/^      - name: /p' "$composition_workflow")"
 [[ -n "$smoke_step" ]] || {
     echo "composition workflow must carry a First-boot init smoke step" >&2
     exit 1
