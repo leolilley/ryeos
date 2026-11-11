@@ -6220,6 +6220,12 @@ impl<'a> ExternalPlacementOwner<'a> {
             "program":program,
             "backend_contract":contract,
         }))?;
+        // Headroom before the contact clock starts, as in the qualification start.
+        crate::native_headroom::admit_fresh_placement_headroom(
+            self.state,
+            "external session placement",
+            crate::native_headroom::NativeWorkNeed::of_contract(&contract),
+        )?;
         let reservation = if let Some(existing) = existing {
             existing
                 .reservation
@@ -6284,11 +6290,6 @@ impl<'a> ExternalPlacementOwner<'a> {
                     .context("external placement startup deadline overflow")?,
             }
         };
-        crate::native_headroom::admit_fresh_placement_headroom(
-            self.state,
-            "external session placement",
-            crate::native_headroom::NativeWorkNeed::of_contract(&contract),
-        )?;
         let record = match &lease_charge {
             Some(charge) => self.state.state_store.reserve_external_lease_allocation(
                 &reservation,
@@ -6700,37 +6701,9 @@ pub fn prepare_external_qualification_start_for_invocation<'a>(
         "channel_bootstrap_capability_hash": channel_authority.bootstrap_capability_hash(),
         "admitted_adapter_request_base64": &admitted_adapter_request_base64,
     }))?;
-    let startup_budget_ms = qualification_startup_budget_ms(&contract)?;
-    controller_clock::require_for_new_windows(state)?;
-    let now = lillux::time::timestamp_millis();
-    let reservation = ExternalAllocationReservation {
-        schema: EXTERNAL_ALLOCATION_RESERVATION_SCHEMA,
-        placement_thread_id: placement.clone(),
-        admitted_capsule_hash: coordinate.accepted_capsule_hash.clone(),
-        owner,
-        base_snapshot_hash: snapshot_hash,
-        binding_hash: binding.digest().to_owned(),
-        capacity_owner: binding.capacity_owner().to_owned(),
-        channel_authority_generation: authority_generation,
-        channel_owner_public_key: channel_authority.owner_public_key(),
-        channel_bootstrap_capability_hash: channel_authority.bootstrap_capability_hash(),
-        admitted_adapter_request_base64,
-        request_digest,
-        max_active: contract.max_active,
-        timeout_seconds: contract.timeout_seconds,
-        contact_deadline_ms: now
-            .checked_add(i64::from(contract.contact_timeout_seconds) * 1_000)
-            .context("external qualification contact deadline overflow")?,
-        startup_started_at_ms: now,
-        startup_deadline_ms: now
-            .checked_add(i64::try_from(startup_budget_ms)?)
-            .context("external qualification startup deadline overflow")?,
-    };
-    let program =
-        AdmittedExternalExecutionProgram::QualificationStructuredSession(root.program().clone());
-    validate_external_placement_program(&program, &reservation, &contract)?;
-    reservation.validate()?;
-    let deadline = root.cap_execution_deadline(reservation.startup_deadline()?);
+    // Authenticate and admit headroom before the contact clock starts: the provider's
+    // contact window (at most 60 s) must not be spent on this node's own admission work,
+    // which a loaded host can stretch past the window (attempt 77, 2026-11-11).
     let admission = {
         let authority = state.state_store.pinned_state_authority()?;
         let guard = authority.acquire_shared_guard()?;
@@ -6762,6 +6735,37 @@ pub fn prepare_external_qualification_start_for_invocation<'a>(
         "external qualification start",
         crate::native_headroom::NativeWorkNeed::of_contract(&contract),
     )?;
+    let startup_budget_ms = qualification_startup_budget_ms(&contract)?;
+    controller_clock::require_for_new_windows(state)?;
+    let now = lillux::time::timestamp_millis();
+    let reservation = ExternalAllocationReservation {
+        schema: EXTERNAL_ALLOCATION_RESERVATION_SCHEMA,
+        placement_thread_id: placement.clone(),
+        admitted_capsule_hash: coordinate.accepted_capsule_hash.clone(),
+        owner,
+        base_snapshot_hash: snapshot_hash,
+        binding_hash: binding.digest().to_owned(),
+        capacity_owner: binding.capacity_owner().to_owned(),
+        channel_authority_generation: authority_generation,
+        channel_owner_public_key: channel_authority.owner_public_key(),
+        channel_bootstrap_capability_hash: channel_authority.bootstrap_capability_hash(),
+        admitted_adapter_request_base64,
+        request_digest,
+        max_active: contract.max_active,
+        timeout_seconds: contract.timeout_seconds,
+        contact_deadline_ms: now
+            .checked_add(i64::from(contract.contact_timeout_seconds) * 1_000)
+            .context("external qualification contact deadline overflow")?,
+        startup_started_at_ms: now,
+        startup_deadline_ms: now
+            .checked_add(i64::try_from(startup_budget_ms)?)
+            .context("external qualification startup deadline overflow")?,
+    };
+    let program =
+        AdmittedExternalExecutionProgram::QualificationStructuredSession(root.program().clone());
+    validate_external_placement_program(&program, &reservation, &contract)?;
+    reservation.validate()?;
+    let deadline = root.cap_execution_deadline(reservation.startup_deadline()?);
     state.engine.with_checked_bundle_generation(|generation| {
         ensure!(
             generation.request_engine_generation_identity() == expected_generation,
