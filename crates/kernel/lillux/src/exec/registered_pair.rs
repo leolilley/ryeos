@@ -91,6 +91,12 @@ mod controls {
 
     #[test]
     fn shared_or_busy_before_effects_retains_both_live_descriptors() {
+        if !crate::exec::fork_creation_custody_tests::run_isolated_in(
+            module_path!(),
+            "shared_or_busy_before_effects_retains_both_live_descriptors",
+        ) {
+            return;
+        }
         let _serial = serialize_clock_close_tests();
         let (mut first, mut second) = pair();
         let alias = second.clone();
