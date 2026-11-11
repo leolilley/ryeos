@@ -2628,9 +2628,10 @@ impl DaemonSelectedComposition {
         // Retry the actual retained transition, not bootstrap or a replacement
         // service. Every effect still checks its original clock/account. An
         // expired/refused cleanup grant cannot be refreshed by this supervisor.
-        // Each retry's refusal is logged once per distinct cause: the custody
-        // exit reports which owners stayed retained, and this says why.
-        let mut last_refusal: Option<String> = None;
+        // The first refusal is logged, then at most one every few seconds:
+        // the custody exit reports which owners stayed retained, and this
+        // says why without logging every 100 ms retry.
+        let mut last_logged: Option<Instant> = None;
         while self.has_unresolved_custody() {
             if self.native_finalizer_attempts.exhausted() {
                 return Err(self.unresolved_native_custody());
@@ -2651,12 +2652,11 @@ impl DaemonSelectedComposition {
             if !retry_authorized {
                 return Err(self.unresolved_native_custody());
             }
-            if let Err(error) = self.advance_native_shutdown_on_settlement_stack() {
-                let refusal = format!("{error:#}");
-                if last_refusal.as_deref() != Some(refusal.as_str()) {
-                    tracing::warn!(error = %refusal, "native settlement retry refused; custody remains pending");
-                    last_refusal = Some(refusal);
-                }
+            if let Err(error) = self.advance_native_shutdown_on_settlement_stack()
+                && last_logged.is_none_or(|at| at.elapsed() >= Duration::from_secs(5))
+            {
+                tracing::warn!(error = %format!("{error:#}"), "native settlement retry refused; custody remains pending");
+                last_logged = Some(Instant::now());
             }
             if self.has_unresolved_custody() {
                 if self.native_finalizer_attempts.exhausted() {
