@@ -8830,15 +8830,17 @@ where
             }
             continue;
         }
+        // Pruning reads only the path, so an ignored entry is never opened:
+        // an ignored symlink or special file is skipped, not refused.
+        if prune(&relative, false)? {
+            continue;
+        }
         let file = open_regular_at(&frame.directory, &name_c, &display)?.ok_or_else(|| {
             anyhow::anyhow!(
                 "secure project walk encountered a symlink, special file, or disappearing entry: {}",
                 display.display()
             )
         })?;
-        if prune(&relative, false)? {
-            continue;
-        }
         visit(&relative, file)?;
     }
     Ok(())

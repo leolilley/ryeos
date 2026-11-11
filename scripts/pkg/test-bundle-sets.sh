@@ -400,10 +400,15 @@ daemon_scope_output="$(
 daemon_scope_status=$?
 set -e
 [[ "$daemon_scope_status" -eq 2 ]]
-grep -Fq -- 'build --release --locked -p ryeosd -p ryeos-cli -p ryeos-core-tools' \
+# Packages without features build together; each featured package builds alone
+# with unqualified features (a multi-package build with package-qualified
+# features compiled ryeosd with none of them).
+grep -Fxq -- 'build --release --locked -p ryeos-core-tools' <<<"$daemon_scope_output"
+grep -Fxq -- 'build --release --locked -p ryeosd --features model-provider-setup,scheduling' \
   <<<"$daemon_scope_output"
-grep -Fq -- '--features ryeosd/model-provider-setup,ryeosd/scheduling,ryeos-cli/model-provider-setup,ryeos-cli/scheduling' \
+grep -Fxq -- 'build --release --locked -p ryeos-cli --features model-provider-setup,scheduling' \
   <<<"$daemon_scope_output"
+assert_rejected grep -Fq -- 'ryeosd/' <<<"$daemon_scope_output"
 assert_rejected grep -Fq -- '-p ryeos-session-exec' <<<"$daemon_scope_output"
 assert_rejected grep -Fq -- '-p ryeos-structured-session' <<<"$daemon_scope_output"
 grep -Fq -- \
